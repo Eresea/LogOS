@@ -21,4 +21,4 @@ UEFI firmware
 
 ## Current point
 
-Only UEFI firmware, kernel entry, and debug-console logging exist. Every stage added later must state its dependencies, failure mode, and recovery path.
+UEFI boot services have been exited. The kernel retains framebuffer metadata and the final memory-map descriptor count, then halts with debug-console logging. Next: own physical-memory management. Every stage added later must state its dependencies, failure mode, and recovery path.

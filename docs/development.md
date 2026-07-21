@@ -17,4 +17,4 @@ cargo clippy -- -D warnings
 .\scripts\run.ps1
 ```
 
-The terminal prints `LogOS: kernel entered` and `LogOS: framebuffer terminal online`. QEMU shows the `LOGOS` banner and a direct framebuffer shell with `help`, `clear`, `version`, and `exit`.
+The terminal prints `LogOS: kernel entered`, `LogOS: leaving UEFI boot services`, and `LogOS: boot services exited`. QEMU shows the `LOGOS` boot screen, then the kernel halts after the firmware handoff.

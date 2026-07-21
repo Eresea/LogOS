@@ -4,10 +4,10 @@
 mod debug;
 
 use uefi::{
-    ResultExt, boot,
+    boot,
+    mem::memory_map::MemoryMap,
     prelude::*,
     proto::console::gop::{BltOp, BltPixel, GraphicsOutput},
-    proto::console::text::{Input, Key, ScanCode},
 };
 
 const BACKGROUND: BltPixel = BltPixel::new(12, 18, 30);
@@ -16,70 +16,52 @@ const ACCENT: BltPixel = BltPixel::new(61, 220, 151);
 #[entry]
 fn main() -> Status {
     debug::write_line(b"LogOS: kernel entered");
+    let boot_info = match draw_boot_screen() {
+        Ok(info) => info,
+        Err(_) => return Status::DEVICE_ERROR,
+    };
+    debug::write_line(b"LogOS: leaving UEFI boot services");
 
-    if shell().is_ok() {
-        debug::write_line(b"LogOS: shell exited");
-    } else {
-        debug::write_line(b"LogOS: shell unavailable");
-    }
-
-    Status::SUCCESS
+    let memory_map = unsafe { boot::exit_boot_services(None) };
+    kernel_main(boot_info, memory_map.len())
 }
 
-fn shell() -> uefi::Result {
+struct BootInfo {
+    framebuffer: *mut u8,
+    framebuffer_size: usize,
+    resolution: (usize, usize),
+    stride: usize,
+}
+
+fn draw_boot_screen() -> uefi::Result<BootInfo> {
     let graphics_handle = boot::get_handle_for_protocol::<GraphicsOutput>()?;
     let mut gop = boot::open_protocol_exclusive::<GraphicsOutput>(graphics_handle)?;
-    let (width, height) = gop.current_mode_info().resolution();
+    let mode = gop.current_mode_info();
+    let (width, height) = mode.resolution();
     let mut terminal = Terminal::new(&mut gop, width, height);
     terminal.reset()?;
-    terminal.write(b"LOGOS SHELL\nTYPE HELP OR EXIT\n")?;
-    debug::write_line(b"LogOS: framebuffer terminal online");
-
-    let input_handle = boot::get_handle_for_protocol::<Input>()?;
-    let mut input = boot::open_protocol_exclusive::<Input>(input_handle)?;
-    input.reset(false)?;
-
-    loop {
-        terminal.write(b"> ")?;
-        let mut command = [0; 16];
-        let mut length = 0;
-
-        loop {
-            match read_key(&mut input)? {
-                Key::Printable(key) if key == '\r' => break,
-                Key::Printable(key) if key == '\x08' && length > 0 => {
-                    length -= 1;
-                    terminal.backspace()?;
-                }
-                Key::Printable(key) if key.is_ascii() && length < command.len() => {
-                    let byte = u16::from(key) as u8;
-                    if glyph(byte.to_ascii_uppercase()).is_some() {
-                        command[length] = byte;
-                        length += 1;
-                        terminal.write_byte(byte)?;
-                    }
-                }
-                Key::Special(scan_code) if scan_code == ScanCode::ESCAPE => return Ok(()),
-                _ => {}
-            }
-        }
-
-        terminal.newline();
-        match &command[..length] {
-            b"" => {}
-            b"help" => terminal.write(b"COMMANDS HELP CLEAR VERSION EXIT\n")?,
-            b"clear" => terminal.reset()?,
-            b"version" => terminal.write(b"LOGOS 0 1 0\n")?,
-            b"exit" => return Ok(()),
-            _ => terminal.write(b"UNKNOWN COMMAND\n")?,
-        }
-    }
+    terminal.write(b"KERNEL\n")?;
+    let mut framebuffer = gop.frame_buffer();
+    Ok(BootInfo {
+        framebuffer: framebuffer.as_mut_ptr(),
+        framebuffer_size: framebuffer.size(),
+        resolution: (width, height),
+        stride: mode.stride(),
+    })
 }
 
-fn read_key(input: &mut Input) -> uefi::Result<Key> {
-    let mut events = [input.wait_for_key_event().ok_or(Status::NOT_READY)?];
-    boot::wait_for_event(&mut events).discard_errdata()?;
-    input.read_key()?.ok_or(Status::NOT_READY.into())
+fn kernel_main(boot_info: BootInfo, memory_regions: usize) -> ! {
+    let _ = (
+        boot_info.framebuffer,
+        boot_info.framebuffer_size,
+        boot_info.resolution,
+        boot_info.stride,
+        memory_regions,
+    );
+    debug::write_line(b"LogOS: boot services exited");
+    loop {
+        unsafe { core::arch::asm!("hlt") };
+    }
 }
 
 struct Terminal<'a> {
@@ -121,24 +103,11 @@ impl<'a> Terminal<'a> {
         Ok(())
     }
 
-    fn write_byte(&mut self, byte: u8) -> uefi::Result {
-        self.draw_glyph(byte.to_ascii_uppercase(), ACCENT)
-    }
-
     fn newline(&mut self) {
         self.cursor = (Self::ORIGIN.0, self.cursor.1 + 8 * Self::SCALE);
         if self.cursor.1 + 7 * Self::SCALE > self.height {
             self.cursor = Self::ORIGIN;
         }
-    }
-
-    fn backspace(&mut self) -> uefi::Result {
-        let step = 6 * Self::SCALE;
-        if self.cursor.0 >= Self::ORIGIN.0 + step {
-            self.cursor.0 -= step;
-            self.fill(BACKGROUND, self.cursor, (5 * Self::SCALE, 7 * Self::SCALE))?;
-        }
-        Ok(())
     }
 
     fn draw_glyph(&mut self, byte: u8, color: BltPixel) -> uefi::Result {
