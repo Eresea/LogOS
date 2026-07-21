@@ -17,4 +17,4 @@ cargo clippy -- -D warnings
 .\scripts\run.ps1
 ```
 
-The terminal prints `LogOS: kernel entered`, `LogOS: framebuffer online`, and `LogOS: shell ready`. QEMU shows the `LOGOS` banner, then a basic shell with `help`, `clear`, `version`, and `exit`.
+The terminal prints `LogOS: kernel entered` and `LogOS: framebuffer terminal online`. QEMU shows the `LOGOS` banner and a direct framebuffer shell with `help`, `clear`, `version`, and `exit`.
