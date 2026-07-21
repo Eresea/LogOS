@@ -1,18 +1,17 @@
 # LogOS
 
-Phase 0.1: a Rust UEFI kernel that logs its entry to QEMU's debug console.
+An experimental Rust-native operating system: a capability-based kernel with a future WebAssembly application platform.
 
-Install the Rust target, QEMU, and OVMF once:
+Current milestone: UEFI boot, Rust kernel entry, and QEMU debug-console logging.
 
 ```powershell
 rustup target add x86_64-unknown-uefi
 $env:OVMF_CODE = 'C:\path\to\OVMF_CODE.fd'
-```
-
-Boot it:
-
-```powershell
 .\scripts\run.ps1
 ```
 
 Expected output: `LogOS: kernel entered`.
+
+- [Architecture](docs/architecture.md)
+- [Development](docs/development.md)
+- [Agent guide](AGENTS.md)
