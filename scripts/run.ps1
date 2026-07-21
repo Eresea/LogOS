@@ -14,5 +14,5 @@ if (-not (Test-Path $ovmf)) { throw "Set OVMF_CODE to an EDK2/OVMF firmware file
 cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --target x86_64-unknown-uefi $(if ($Release) { "--release" })
 New-Item -ItemType Directory -Force "$esp\EFI\BOOT" | Out-Null
 Copy-Item $efi "$esp\EFI\BOOT\BOOTX64.EFI" -Force
-Write-Host "Booting LogOS; debug output follows (Ctrl+C to stop QEMU)."
-& $qemuPath -machine q35 -m 256M -drive "if=pflash,format=raw,readonly=on,file=$ovmf" -drive "format=raw,file=fat:rw:$((Resolve-Path $esp).Path)" -display none -debugcon stdio -global isa-debugcon.iobase=0xe9
+Write-Host "Booting LogOS; QEMU displays the framebuffer and this terminal receives debug output (Ctrl+C to stop QEMU)."
+& $qemuPath -machine q35 -m 256M -drive "if=pflash,format=raw,readonly=on,file=$ovmf" -drive "format=raw,file=fat:rw:$((Resolve-Path $esp).Path)" -debugcon stdio -global isa-debugcon.iobase=0xe9

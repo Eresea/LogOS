@@ -17,4 +17,4 @@ cargo clippy -- -D warnings
 .\scripts\run.ps1
 ```
 
-The expected boot output is `LogOS: kernel entered`.
+The terminal prints `LogOS: kernel entered` and `LogOS: framebuffer online`; QEMU shows the framebuffer banner.

@@ -2,7 +2,7 @@
 
 ## Current state
 
-LogOS is a Rust UEFI executable that enters the kernel and writes to QEMU's debug console.
+LogOS is a Rust UEFI executable that enters the kernel, writes to QEMU's debug console, and draws a framebuffer banner through UEFI GOP.
 
 ## Execution model
 
