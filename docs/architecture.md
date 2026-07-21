@@ -2,7 +2,11 @@
 
 ## Current state
 
-LogOS is a Rust UEFI executable that enters the kernel, writes to QEMU's debug console, and draws a framebuffer banner through UEFI GOP.
+LogOS exits UEFI boot services into a Rust kernel. It retains the final UEFI memory map and boot framebuffer metadata, then initializes a physical-page allocator from the largest conventional-memory range.
+
+## Physical memory
+
+The bootstrap allocator returns 4 KiB physical pages from one conventional-memory range. It does not yet free pages or span ranges; both require a kernel-owned metadata allocator.
 
 ## Execution model
 

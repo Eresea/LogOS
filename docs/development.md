@@ -17,4 +17,4 @@ cargo clippy -- -D warnings
 .\scripts\run.ps1
 ```
 
-The terminal prints `LogOS: kernel entered`, `LogOS: leaving UEFI boot services`, and `LogOS: boot services exited`. QEMU shows the `LOGOS` boot screen, then the kernel halts after the firmware handoff.
+The terminal prints `LogOS: kernel entered`, `LogOS: leaving UEFI boot services`, `LogOS: boot services exited`, and `LogOS: physical memory ready`. That final marker verifies the physical-page allocator in QEMU.

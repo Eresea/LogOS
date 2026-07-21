@@ -21,4 +21,4 @@ UEFI firmware
 
 ## Current point
 
-UEFI boot services have been exited. The kernel retains framebuffer metadata and the final memory-map descriptor count, then halts with debug-console logging. Next: own physical-memory management. Every stage added later must state its dependencies, failure mode, and recovery path.
+UEFI boot services have been exited. The kernel retains framebuffer metadata and initializes a physical-page allocator from the final memory map, then halts with debug-console logging. Next: kernel-owned virtual-memory mapping. Every stage added later must state its dependencies, failure mode, and recovery path.

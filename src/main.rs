@@ -2,6 +2,7 @@
 #![no_std]
 
 mod debug;
+mod memory;
 
 use uefi::{
     boot,
@@ -23,7 +24,7 @@ fn main() -> Status {
     debug::write_line(b"LogOS: leaving UEFI boot services");
 
     let memory_map = unsafe { boot::exit_boot_services(None) };
-    kernel_main(boot_info, memory_map.len())
+    kernel_main(boot_info, memory_map)
 }
 
 struct BootInfo {
@@ -50,15 +51,21 @@ fn draw_boot_screen() -> uefi::Result<BootInfo> {
     })
 }
 
-fn kernel_main(boot_info: BootInfo, memory_regions: usize) -> ! {
+fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
+    let memory_regions = memory_map.len();
+    let mut memory =
+        memory::PhysicalMemory::from_memory_map(&memory_map).expect("no usable memory");
+    let first_page = memory.allocate_page().expect("no free pages");
     let _ = (
         boot_info.framebuffer,
         boot_info.framebuffer_size,
         boot_info.resolution,
         boot_info.stride,
         memory_regions,
+        first_page,
     );
     debug::write_line(b"LogOS: boot services exited");
+    debug::write_line(b"LogOS: physical memory ready");
     loop {
         unsafe { core::arch::asm!("hlt") };
     }
