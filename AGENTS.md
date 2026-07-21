@@ -11,6 +11,7 @@ LogOS is an experimental Rust UEFI kernel. The current milestone is fast, observ
 - Run `cargo fmt --check` and `cargo clippy -- -D warnings` after Rust changes.
 - Boot with `scripts/run.ps1` when touching boot, UEFI, or hardware-facing code.
 - Document a new subsystem in `docs/architecture.md` before expanding it across files.
+- Treat `docs/boot-sequence.md` and `docs/security.md` as architectural constraints, not implementation prompts.
 
 ## Boundaries
 

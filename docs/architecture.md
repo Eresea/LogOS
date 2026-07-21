@@ -4,13 +4,14 @@
 
 LogOS is a Rust UEFI executable that enters the kernel and writes to QEMU's debug console.
 
-## Direction
+## Execution model
 
-- Native Rust kernel and drivers.
-- Capability-based IPC between kernel-managed services.
-- WASM for applications, plugins, automation, and AI-generated modules.
-- Replaceable services with typed APIs; no direct application-to-application control.
+- The kernel, drivers, scheduler, memory manager, IPC, filesystem, networking, and compositor are native Rust.
+- System services expose typed, capability-checked APIs.
+- Applications, plugins, automation, and AI agents run as isolated WASM modules.
+- WASM modules communicate through kernel-managed IPC, explicit shared memory, and delegated capabilities—not direct pointers.
+- WASM hot-loading and hot-swapping are first-class goals; native kernel components are not a dynamic-plugin surface.
 
 ## Kernel boundary
 
-Keep the kernel focused on hardware resources, scheduling, memory, IPC, and capabilities. Graphics, networking, package management, AI runtime, and desktop services sit above it.
+Keep the kernel focused on hardware resources, scheduling, memory, IPC, and capabilities. Higher-level functionality is replaceable services. See [boot sequence](boot-sequence.md) and [security](security.md).

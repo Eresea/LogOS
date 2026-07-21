@@ -13,5 +13,8 @@ $env:OVMF_CODE = 'C:\path\to\OVMF_CODE.fd'
 Expected output: `LogOS: kernel entered`.
 
 - [Architecture](docs/architecture.md)
+- [Boot sequence](docs/boot-sequence.md)
+- [Security](docs/security.md)
+- [Roadmap](docs/roadmap.md)
 - [Development](docs/development.md)
 - [Agent guide](AGENTS.md)
