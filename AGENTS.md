@@ -12,6 +12,7 @@ LogOS is an experimental Rust UEFI kernel. The current milestone is fast, observ
 - Boot with `scripts/run.ps1` when touching boot, UEFI, or hardware-facing code.
 - Document a new subsystem in `docs/architecture.md` before expanding it across files.
 - Treat `docs/boot-sequence.md` and `docs/security.md` as architectural constraints, not implementation prompts.
+- Commit each independently bootable or documentation-only change separately; do not bundle unrelated work.
 
 ## Boundaries
 
