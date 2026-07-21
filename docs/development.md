@@ -17,4 +17,4 @@ cargo clippy -- -D warnings
 .\scripts\run.ps1
 ```
 
-The terminal prints `LogOS: kernel entered` and `LogOS: framebuffer online`; QEMU shows a `LOGOS` framebuffer banner.
+The terminal prints `LogOS: kernel entered` and `LogOS: framebuffer online`; QEMU shows a `LOGOS` framebuffer banner. Press a key in QEMU to print it to the terminal.

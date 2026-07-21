@@ -4,9 +4,10 @@
 mod debug;
 
 use uefi::{
-    boot,
+    ResultExt, boot,
     prelude::*,
     proto::console::gop::{BltOp, BltPixel, GraphicsOutput},
+    proto::console::text::{Input, Key},
 };
 
 #[entry]
@@ -19,7 +20,31 @@ fn main() -> Status {
         debug::write_line(b"LogOS: framebuffer unavailable");
     }
 
+    debug::write_line(b"LogOS: press any key");
+    if wait_for_key().is_err() {
+        debug::write_line(b"LogOS: keyboard unavailable");
+    }
+
     Status::SUCCESS
+}
+
+fn wait_for_key() -> uefi::Result {
+    let handle = boot::get_handle_for_protocol::<Input>()?;
+    let mut input = boot::open_protocol_exclusive::<Input>(handle)?;
+    input.reset(false)?;
+
+    let mut events = [input.wait_for_key_event().ok_or(Status::NOT_READY)?];
+    boot::wait_for_event(&mut events).discard_errdata()?;
+
+    match input.read_key()?.ok_or(Status::NOT_READY)? {
+        Key::Printable(key) if key.is_ascii() => {
+            debug::write(b"LogOS: key ");
+            debug::write_line(&[u16::from(key) as u8]);
+        }
+        Key::Printable(_) => debug::write_line(b"LogOS: non-ASCII key"),
+        Key::Special(_) => debug::write_line(b"LogOS: special key"),
+    }
+    Ok(())
 }
 
 fn draw_banner() -> uefi::Result {
