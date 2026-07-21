@@ -8,6 +8,10 @@ LogOS exits UEFI boot services into a Rust kernel. It retains the final UEFI mem
 
 The bootstrap allocator returns 4 KiB physical pages from one conventional-memory range. It does not yet free pages or span ranges; both require a kernel-owned metadata allocator.
 
+## Virtual memory
+
+LogOS copies the active UEFI top-level page table, adds one kernel-owned high virtual mapping, then reloads CR3. This preserves the firmware mappings needed during bring-up while proving the kernel can own new mappings.
+
 ## Execution model
 
 - The kernel, drivers, scheduler, memory manager, IPC, filesystem, networking, and compositor are native Rust.

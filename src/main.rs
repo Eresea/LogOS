@@ -3,6 +3,7 @@
 
 mod debug;
 mod memory;
+mod virtual_memory;
 
 use uefi::{
     boot,
@@ -56,6 +57,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     let mut memory =
         memory::PhysicalMemory::from_memory_map(&memory_map).expect("no usable memory");
     let first_page = memory.allocate_page().expect("no free pages");
+    let mapped_page = virtual_memory::install(&mut memory).expect("virtual mapping failed");
     let _ = (
         boot_info.framebuffer,
         boot_info.framebuffer_size,
@@ -63,9 +65,13 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
         boot_info.stride,
         memory_regions,
         first_page,
+        mapped_page,
     );
     debug::write_line(b"LogOS: boot services exited");
     debug::write_line(b"LogOS: physical memory ready");
+    if unsafe { virtual_memory::verify(mapped_page) } {
+        debug::write_line(b"LogOS: virtual memory ready");
+    }
     loop {
         unsafe { core::arch::asm!("hlt") };
     }
