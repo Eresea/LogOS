@@ -17,4 +17,4 @@ cargo clippy -- -D warnings
 .\scripts\run.ps1
 ```
 
-The terminal prints `LogOS: kernel entered`, `LogOS: leaving UEFI boot services`, `LogOS: boot services exited`, `LogOS: physical memory ready`, `LogOS: virtual memory ready`, and `LogOS: timer interrupt ready`. That final marker verifies the IDT and PIT IRQ0 in QEMU.
+The terminal prints `LogOS: kernel entered`, `LogOS: leaving UEFI boot services`, `LogOS: boot services exited`, `LogOS: physical memory ready`, `LogOS: virtual memory ready`, `LogOS: timer interrupt ready`, then task A/B messages and `LogOS: scheduler ready`. That final marker verifies round-robin cooperative scheduling in QEMU.

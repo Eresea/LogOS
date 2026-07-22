@@ -4,6 +4,7 @@
 mod debug;
 mod interrupts;
 mod memory;
+mod scheduler;
 mod virtual_memory;
 
 use uefi::{
@@ -77,9 +78,31 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     interrupts::enable();
     interrupts::wait_for_tick();
     debug::write_line(b"LogOS: timer interrupt ready");
+    let mut scheduler = scheduler::Scheduler::new();
+    assert!(scheduler.spawn(scheduler::Task::new(task_a)));
+    assert!(scheduler.spawn(scheduler::Task::new(task_b)));
+    while scheduler.run_next() {
+        interrupts::wait_for_tick();
+    }
+    debug::write_line(b"LogOS: scheduler ready");
     loop {
         unsafe { core::arch::asm!("hlt") };
     }
+}
+
+fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {
+    if task.runs() == 1 {
+        debug::write_line(b"LogOS: task A yielded");
+        scheduler::TaskState::Ready
+    } else {
+        debug::write_line(b"LogOS: task A complete");
+        scheduler::TaskState::Complete
+    }
+}
+
+fn task_b(_: &mut scheduler::Task) -> scheduler::TaskState {
+    debug::write_line(b"LogOS: task B complete");
+    scheduler::TaskState::Complete
 }
 
 struct Terminal<'a> {
