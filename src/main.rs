@@ -110,8 +110,8 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
         .register(&capabilities, service_capability, services::Service::VirtioBalloon)
         .expect("service registration failed");
     assert_eq!(services.resolve(services::Service::VirtioBalloon), Some(virtio_handle));
-    let virtio_service =
-        virtio::VirtioService::bind(virtio, virtio_handle).expect("VirtIO bind failed");
+    let virtio_service = virtio::VirtioService::bind(virtio, virtio_handle, &mut memory)
+        .expect("VirtIO bind failed");
     debug::write_line(b"LogOS: VirtIO driver ready");
     let mut channel = ipc::Channel::new();
     assert!(channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping));

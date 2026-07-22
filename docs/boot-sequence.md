@@ -21,4 +21,4 @@ UEFI firmware
 
 ## Current point
 
-UEFI boot services have been exited. The kernel initializes physical memory, verifies one kernel-owned virtual mapping, receives PIT IRQ0 through its IDT, runs two cooperative tasks in round-robin order, verifies capability revocation, discovers PCI devices, and routes a capability-gated `Ping` through the service registry to a VirtIO device service before halting with debug-console logging. Next: service tasks or VirtIO queue setup. Every stage added later must state its dependencies, failure mode, and recovery path.
+UEFI boot services have been exited. The kernel initializes physical memory, verifies one kernel-owned virtual mapping, receives PIT IRQ0 through its IDT, runs two cooperative tasks in round-robin order, verifies capability revocation, discovers PCI devices, and routes a capability-gated `Ping` through the service registry to a VirtIO service with initialized queue 0 before halting with debug-console logging. Next: submit a VirtIO request. Every stage added later must state its dependencies, failure mode, and recovery path.

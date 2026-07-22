@@ -30,7 +30,7 @@ The kernel scans PCI configuration space and retains a small list of discovered 
 
 ## VirtIO
 
-The VirtIO balloon service binds a legacy PCI function through its I/O BAR, resets its status register, and answers routed `Ping` messages with `Pong`. It does not allocate queues until it needs data transfer.
+The VirtIO balloon service binds a legacy PCI function through its I/O BAR, allocates and programs queue 0 from physical memory, and answers routed `Ping` messages with `Pong`. It does not submit balloon requests yet.
 
 ## IPC
 
