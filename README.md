@@ -9,6 +9,7 @@ rustup target add x86_64-unknown-uefi
 $env:OVMF_CODE = 'C:\path\to\OVMF_CODE.fd'
 .\scripts\run.ps1
 .\scripts\verify.ps1
+.\scripts\check.ps1
 ```
 
 Expected output: `LogOS: VirtIO request ready`.
