@@ -12,7 +12,7 @@ $env:OVMF_CODE = 'C:\path\to\OVMF_CODE.fd'
 .\scripts\check.ps1
 ```
 
-Expected output: `LogOS: VirtIO request ready`.
+Expected output: `LogOS: startup self check passed`.
 
 - [Architecture](docs/architecture.md)
 - [Boot sequence](docs/boot-sequence.md)

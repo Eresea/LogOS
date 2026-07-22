@@ -1,5 +1,6 @@
 use core::{
     arch::asm,
+    cell::Cell,
     sync::atomic::{Ordering, compiler_fence},
 };
 
@@ -7,6 +8,7 @@ use crate::{
     ipc::{Envelope, Message},
     memory::PhysicalMemory,
     pci::PciDevice,
+    scheduler::{Runnable, TaskState},
     services::ServiceHandle,
 };
 
@@ -30,6 +32,31 @@ pub struct VirtioService {
     notify_port: u16,
     queue: u64,
     queue_size: usize,
+}
+
+pub struct ServiceTask<'a> {
+    service: &'a VirtioService,
+    channel: &'a mut crate::ipc::Channel,
+    reply: &'a Cell<Option<Message>>,
+}
+
+impl<'a> ServiceTask<'a> {
+    pub fn new(
+        service: &'a VirtioService,
+        channel: &'a mut crate::ipc::Channel,
+        reply: &'a Cell<Option<Message>>,
+    ) -> Self {
+        Self { service, channel, reply }
+    }
+}
+
+impl Runnable for ServiceTask<'_> {
+    fn run(&mut self) -> TaskState {
+        if let Some(envelope) = self.channel.receive() {
+            self.reply.set(self.service.handle(envelope));
+        }
+        TaskState::Ready
+    }
 }
 
 impl VirtioService {

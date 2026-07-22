@@ -18,7 +18,7 @@ The kernel owns the IDT and unmasks PIT IRQ0 and PS/2 IRQ1. CPU exceptions halt 
 
 ## Scheduling
 
-The bootstrap scheduler runs two fixed cooperative task slots in round-robin order. A task yields by returning `Ready`; it is removed when it returns `Complete`.
+The bootstrap scheduler runs two fixed cooperative task slots in round-robin order. A task yields by returning `Ready`; it is removed when it returns `Complete`. The VirtIO service is a persistent task that consumes its IPC queue whenever the console loop yields to the scheduler.
 
 ## Capabilities
 
@@ -34,7 +34,7 @@ The VirtIO balloon service binds a legacy PCI function through its I/O BAR, allo
 
 ## IPC
 
-The kernel provides a capability-gated typed message channel. It currently carries a fixed queue of `Ping` messages; services will define further message types as they are added.
+The kernel provides a capability-gated typed message channel. It currently carries a fixed queue of `Ping` messages; the persistent VirtIO task consumes them and records `Pong` replies.
 
 ## Service registry
 

@@ -99,9 +99,9 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     health.check(b"interrupts", keyboard_interrupts);
     let mut scheduler = scheduler::Scheduler::new();
     health.check(b"scheduler", scheduler::self_check());
-    if !scheduler.spawn(scheduler::Task::new(task_a))
-        || !scheduler.spawn(scheduler::Task::new(task_b))
-    {
+    let mut task_a = scheduler::Task::new(task_a);
+    let mut task_b = scheduler::Task::new(task_b);
+    if !scheduler.spawn(&mut task_a) || !scheduler.spawn(&mut task_b) {
         health.fail(b"scheduler");
     }
     while scheduler.run_next() {
@@ -147,10 +147,13 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     if !channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping) {
         health.fail(b"ipc");
     }
-    let Some(message) = channel.receive() else {
-        health.fail(b"ipc");
-    };
-    health.check(b"ipc", virtio_service.handle(message) == Some(ipc::Message::Pong));
+    let reply = core::cell::Cell::new(None);
+    let mut service_task = virtio::ServiceTask::new(&virtio_service, &mut channel, &reply);
+    let mut service_scheduler = scheduler::Scheduler::new();
+    if !service_scheduler.spawn(&mut service_task) || !service_scheduler.run_next() {
+        health.fail(b"scheduler");
+    }
+    health.check(b"ipc", reply.get() == Some(ipc::Message::Pong));
     health.check(b"virtio", virtio_service.inflate_one_page(&mut memory));
     let Some(mut console) = console::Shell::new(
         boot_info.framebuffer,
@@ -163,7 +166,9 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     health.check(b"console", console.start());
     health.check(b"keyboard", keyboard::self_check());
     health.finish();
-    console.run()
+    console.run(|| {
+        let _ = service_scheduler.run_next();
+    })
 }
 
 fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {

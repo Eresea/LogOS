@@ -37,8 +37,9 @@ impl Shell {
         true
     }
 
-    pub fn run(mut self) -> ! {
+    pub fn run(mut self, mut schedule: impl FnMut()) -> ! {
         loop {
+            schedule();
             if let Some(key) = keyboard::poll() {
                 self.key(key);
             } else {
