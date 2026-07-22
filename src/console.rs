@@ -43,6 +43,10 @@ impl<'a> Endpoint<'a> {
         self.channel.send(self.capabilities, self.capability, self.destination, Message::Ping)
     }
 
+    fn inflate(self) -> bool {
+        self.channel.send(self.capabilities, self.capability, self.destination, Message::Inflate)
+    }
+
     fn reply(self) -> Option<Message> {
         self.reply.take()
     }
@@ -76,7 +80,7 @@ impl<'a> Shell<'a> {
 
     pub fn start(&mut self) -> bool {
         self.console.reset();
-        self.console.write(b"LOGOS KERNEL CONSOLE\nTYPE HELP PING OR EXIT\n");
+        self.console.write(b"LOGOS KERNEL CONSOLE\nTYPE HELP PING INFLATE OR EXIT\n");
         self.prompt();
         true
     }
@@ -84,10 +88,18 @@ impl<'a> Shell<'a> {
     pub fn run(mut self, mut schedule: impl FnMut()) -> ! {
         loop {
             schedule();
-            if self.endpoint.reply() == Some(Message::Pong) {
-                self.console.newline();
-                self.console.write(b"PONG RECEIVED\n");
-                self.prompt();
+            match self.endpoint.reply() {
+                Some(Message::Pong) => {
+                    self.console.newline();
+                    self.console.write(b"PONG RECEIVED\n");
+                    self.prompt();
+                }
+                Some(Message::Complete) => {
+                    self.console.newline();
+                    self.console.write(b"PAGE ADDED\n");
+                    self.prompt();
+                }
+                _ => {}
             }
             if let Some(key) = keyboard::poll() {
                 self.key(key);
@@ -120,9 +132,10 @@ impl<'a> Shell<'a> {
     fn submit(&mut self) {
         self.console.newline();
         match &self.command[..self.length] {
-            b"help" => self.console.write(b"COMMANDS HELP CLEAR VERSION PING EXIT\n"),
+            b"help" => self.console.write(b"COMMANDS HELP CLEAR VERSION PING INFLATE EXIT\n"),
             b"clear" => self.console.reset(),
             b"ping" if self.endpoint.ping() => self.console.write(b"PING SENT\n"),
+            b"inflate" if self.endpoint.inflate() => self.console.write(b"INFLATE SENT\n"),
             b"version" => self.console.write(b"LOGOS 0 1 0\n"),
             b"exit" => self.exit(),
             _ => self.console.write(b"UNKNOWN COMMAND\n"),

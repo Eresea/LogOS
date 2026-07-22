@@ -37,6 +37,7 @@ pub struct VirtioService {
 pub struct ServiceTask<'a> {
     service: &'a VirtioService,
     channel: &'a crate::ipc::Channel,
+    memory: &'a mut PhysicalMemory,
     reply: &'a Cell<Option<Message>>,
 }
 
@@ -44,16 +45,24 @@ impl<'a> ServiceTask<'a> {
     pub fn new(
         service: &'a VirtioService,
         channel: &'a crate::ipc::Channel,
+        memory: &'a mut PhysicalMemory,
         reply: &'a Cell<Option<Message>>,
     ) -> Self {
-        Self { service, channel, reply }
+        Self { service, channel, memory, reply }
     }
 }
 
 impl Runnable for ServiceTask<'_> {
     fn run(&mut self) -> TaskState {
         if let Some(envelope) = self.channel.receive() {
-            self.reply.set(self.service.handle(envelope));
+            let reply = match envelope.message {
+                Message::Ping => self.service.handle(envelope),
+                Message::Inflate if self.service.accepts(envelope) => {
+                    self.service.inflate_one_page(self.memory).then_some(Message::Complete)
+                }
+                _ => None,
+            };
+            self.reply.set(reply);
         }
         TaskState::Ready
     }
@@ -96,14 +105,17 @@ impl VirtioService {
     }
 
     pub fn handle(&self, envelope: Envelope) -> Option<Message> {
-        if envelope.destination != self.handle || unsafe { inb(self.status_port) } & DRIVER_OK == 0
-        {
+        if !self.accepts(envelope) {
             return None;
         }
         match envelope.message {
             Message::Ping => Some(Message::Pong),
-            Message::Pong => None,
+            Message::Pong | Message::Inflate | Message::Complete => None,
         }
+    }
+
+    fn accepts(&self, envelope: Envelope) -> bool {
+        envelope.destination == self.handle && unsafe { inb(self.status_port) } & DRIVER_OK != 0
     }
 
     pub fn inflate_one_page(&self, memory: &mut PhysicalMemory) -> bool {

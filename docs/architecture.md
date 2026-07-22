@@ -30,7 +30,7 @@ The kernel scans PCI configuration space and retains a small list of discovered 
 
 ## VirtIO
 
-The VirtIO balloon service binds a legacy PCI function through its I/O BAR, allocates and programs queue 0 from physical memory, submits one inflate request, and answers routed `Ping` messages with `Pong`.
+The VirtIO balloon service binds a legacy PCI function through its I/O BAR, allocates and programs queue 0 from physical memory, and, as a persistent task, answers routed `Ping` messages with `Pong` or submits an `Inflate` request with a completion reply.
 
 ## IPC
 
@@ -46,7 +46,7 @@ Each initialized kernel subsystem must report a startup self-check. A failed che
 
 ## Kernel console
 
-The kernel renders its console directly to the boot framebuffer and consumes PS/2 IRQ1 scancodes after firmware services end. It provides `help`, `clear`, `version`, `ping`, and `exit`; `ping` sends a capability-gated IPC request to VirtIO and displays its `Pong` reply. A full terminal service remains a future userspace concern.
+The kernel renders its console directly to the boot framebuffer and consumes PS/2 IRQ1 scancodes after firmware services end. It provides `help`, `clear`, `version`, `ping`, `inflate`, and `exit`; `ping` and `inflate` send capability-gated IPC requests to VirtIO and display their replies. A full terminal service remains a future userspace concern.
 
 ## Execution model
 

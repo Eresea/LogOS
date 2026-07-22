@@ -148,7 +148,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
         health.fail(b"ipc");
     }
     let reply = core::cell::Cell::new(None);
-    let mut service_task = virtio::ServiceTask::new(&virtio_service, &channel, &reply);
+    let mut service_task = virtio::ServiceTask::new(&virtio_service, &channel, &mut memory, &reply);
     let mut service_scheduler = scheduler::Scheduler::new();
     if !service_scheduler.spawn(&mut service_task) || !service_scheduler.run_next() {
         health.fail(b"scheduler");
@@ -162,7 +162,13 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
             && reply.get() == Some(ipc::Message::Pong),
     );
     reply.set(None);
-    health.check(b"virtio", virtio_service.inflate_one_page(&mut memory));
+    reply.set(None);
+    health.check(
+        b"virtio",
+        channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Inflate)
+            && service_scheduler.run_next()
+            && reply.get() == Some(ipc::Message::Complete),
+    );
     let Some(mut console) = console::Shell::new(
         boot_info.framebuffer,
         boot_info.resolution.0,
@@ -277,6 +283,7 @@ pub(crate) fn glyph(byte: u8) -> Option<&'static [u8; 7]> {
     const C: [u8; 7] = [0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111, 0];
     const D: [u8; 7] = [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110, 0];
     const E: [u8; 7] = [0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111, 0];
+    const F: [u8; 7] = [0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000, 0];
     const G: [u8; 7] = [0b01110, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110, 0];
     const H: [u8; 7] = [0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001, 0];
     const I: [u8; 7] = [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111, 0];
@@ -305,6 +312,7 @@ pub(crate) fn glyph(byte: u8) -> Option<&'static [u8; 7]> {
         b'C' => Some(&C),
         b'D' => Some(&D),
         b'E' => Some(&E),
+        b'F' => Some(&F),
         b'G' => Some(&G),
         b'H' => Some(&H),
         b'I' => Some(&I),

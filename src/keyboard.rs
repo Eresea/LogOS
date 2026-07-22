@@ -121,6 +121,7 @@ fn decode(scancode: u8) -> Option<u8> {
         0x1e => Some(b'a'),
         0x1f => Some(b's'),
         0x23 => Some(b'h'),
+        0x21 => Some(b'f'),
         0x26 => Some(b'l'),
         0x2d => Some(b'x'),
         0x2e => Some(b'c'),
