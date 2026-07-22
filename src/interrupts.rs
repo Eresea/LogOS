@@ -4,6 +4,7 @@ use core::{
 };
 
 const TIMER_VECTOR: usize = 32;
+const EXCEPTIONS: usize = 32;
 const PIT_HZ: u16 = 100;
 const PIT_DIVISOR: u16 = (1_193_182u32 / PIT_HZ as u32) as u16;
 
@@ -12,6 +13,7 @@ static mut IDT: [IdtEntry; 256] = [IdtEntry::MISSING; 256];
 
 unsafe extern "C" {
     fn default_interrupt();
+    fn fatal_interrupt();
     fn timer_interrupt();
 }
 
@@ -26,6 +28,9 @@ pub fn install() {
         let selector = code_selector();
         for vector in 0..256 {
             (*idt)[vector] = IdtEntry::new(default_interrupt as *const () as usize, selector);
+        }
+        for vector in 0..EXCEPTIONS {
+            (*idt)[vector] = IdtEntry::new(fatal_interrupt as *const () as usize, selector);
         }
         (*idt)[TIMER_VECTOR] = IdtEntry::new(timer_interrupt as *const () as usize, selector);
         load_idt(idt);
@@ -132,6 +137,12 @@ global_asm!(
     ".global default_interrupt",
     "default_interrupt:",
     "iretq",
+    ".global fatal_interrupt",
+    "fatal_interrupt:",
+    "cli",
+    "1:",
+    "hlt",
+    "jmp 1b",
     ".global timer_interrupt",
     "timer_interrupt:",
     "push rax",
