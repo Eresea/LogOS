@@ -46,7 +46,7 @@ Each initialized kernel subsystem must report a startup self-check. A failed che
 
 ## Kernel console
 
-The kernel renders its console directly to the boot framebuffer and consumes PS/2 IRQ1 scancodes after firmware services end. It provides `help`, `clear`, `version`, `ping`, and `exit`; `ping` sends a capability-gated IPC request to VirtIO. A full terminal service remains a future userspace concern.
+The kernel renders its console directly to the boot framebuffer and consumes PS/2 IRQ1 scancodes after firmware services end. It provides `help`, `clear`, `version`, `ping`, and `exit`; `ping` sends a capability-gated IPC request to VirtIO and displays its `Pong` reply. A full terminal service remains a future userspace concern.
 
 ## Execution model
 

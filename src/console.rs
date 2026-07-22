@@ -5,6 +5,7 @@ use crate::{
     keyboard,
     services::ServiceHandle,
 };
+use core::cell::Cell;
 
 const BACKGROUND: [u8; 3] = [12, 18, 30];
 const ACCENT: [u8; 3] = [61, 220, 151];
@@ -24,6 +25,7 @@ pub struct Endpoint<'a> {
     capabilities: &'a CapabilityManager,
     capability: Capability,
     destination: ServiceHandle,
+    reply: &'a Cell<Option<Message>>,
 }
 
 impl<'a> Endpoint<'a> {
@@ -32,12 +34,17 @@ impl<'a> Endpoint<'a> {
         capabilities: &'a CapabilityManager,
         capability: Capability,
         destination: ServiceHandle,
+        reply: &'a Cell<Option<Message>>,
     ) -> Self {
-        Self { channel, capabilities, capability, destination }
+        Self { channel, capabilities, capability, destination, reply }
     }
 
     fn ping(self) -> bool {
         self.channel.send(self.capabilities, self.capability, self.destination, Message::Ping)
+    }
+
+    fn reply(self) -> Option<Message> {
+        self.reply.take()
     }
 }
 
@@ -77,6 +84,11 @@ impl<'a> Shell<'a> {
     pub fn run(mut self, mut schedule: impl FnMut()) -> ! {
         loop {
             schedule();
+            if self.endpoint.reply() == Some(Message::Pong) {
+                self.console.newline();
+                self.console.write(b"PONG RECEIVED\n");
+                self.prompt();
+            }
             if let Some(key) = keyboard::poll() {
                 self.key(key);
             } else {

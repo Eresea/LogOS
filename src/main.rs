@@ -161,13 +161,14 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
             && service_scheduler.run_next()
             && reply.get() == Some(ipc::Message::Pong),
     );
+    reply.set(None);
     health.check(b"virtio", virtio_service.inflate_one_page(&mut memory));
     let Some(mut console) = console::Shell::new(
         boot_info.framebuffer,
         boot_info.resolution.0,
         boot_info.resolution.1,
         boot_info.stride,
-        console::Endpoint::new(&channel, &capabilities, service_capability, virtio_handle),
+        console::Endpoint::new(&channel, &capabilities, service_capability, virtio_handle, &reply),
     ) else {
         health.fail(b"console");
     };
