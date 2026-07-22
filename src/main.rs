@@ -4,6 +4,7 @@
 mod capabilities;
 mod debug;
 mod interrupts;
+mod ipc;
 mod memory;
 mod pci;
 mod scheduler;
@@ -103,6 +104,12 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     let virtio = devices.find(0x1af4, 0x1002).expect("missing VirtIO balloon");
     assert!(virtio::reset_legacy(virtio));
     debug::write_line(b"LogOS: VirtIO driver ready");
+    let service_capability =
+        capabilities.grant(capabilities::CapabilityKind::Service).expect("no capability slots");
+    let mut channel = ipc::Channel::new();
+    assert!(channel.send(&capabilities, service_capability, ipc::Message::Ping));
+    assert_eq!(channel.receive(), Some(ipc::Message::Ping));
+    debug::write_line(b"LogOS: IPC ready");
     loop {
         unsafe { core::arch::asm!("hlt") };
     }

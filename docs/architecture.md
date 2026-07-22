@@ -32,6 +32,10 @@ The kernel scans PCI configuration space and retains a small list of discovered 
 
 The bootstrap driver binds a legacy VirtIO PCI function through its I/O BAR and resets its status register. It establishes the driver boundary without allocating queues or exposing a device service.
 
+## IPC
+
+The kernel provides a capability-gated typed message channel. It currently carries a fixed queue of `Ping` messages; services will define further message types as they are added.
+
 ## Execution model
 
 - The kernel, drivers, scheduler, memory manager, IPC, filesystem, networking, and compositor are native Rust.
