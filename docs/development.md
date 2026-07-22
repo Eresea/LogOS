@@ -17,4 +17,4 @@ cargo clippy -- -D warnings
 .\scripts\run.ps1
 ```
 
-The terminal prints the boot, memory, timer, scheduler, and capability markers, followed by `LogOS: PCI discovery ready`. That final marker verifies PCI configuration-space discovery in QEMU.
+The terminal prints the boot, memory, timer, scheduler, capability, and PCI markers, followed by `LogOS: VirtIO driver ready`. QEMU injects a legacy VirtIO balloon device; the marker verifies its PCI BAR and status-register reset.

@@ -25,6 +25,14 @@ impl PciDevices {
         self.devices[0]
     }
 
+    pub fn find(&self, vendor_id: u16, device_id: u16) -> Option<PciDevice> {
+        self.devices[..self.len]
+            .iter()
+            .flatten()
+            .copied()
+            .find(|device| device.vendor_id == vendor_id && device.device_id == device_id)
+    }
+
     fn push(&mut self, device: PciDevice) {
         if self.len < DEVICES {
             // ponytail: retain eight devices; add dynamic storage when drivers need more.
@@ -45,6 +53,10 @@ impl PciDevice {
 
     pub const fn device_id(self) -> u16 {
         self.device_id
+    }
+
+    pub fn bar(self, index: u8) -> u32 {
+        config_read(self.bus, self.device, self.function, 0x10 + index * 4)
     }
 }
 

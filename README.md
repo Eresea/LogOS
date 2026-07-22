@@ -2,7 +2,7 @@
 
 An experimental Rust-native operating system: a capability-based kernel with a future WebAssembly application platform.
 
-Current milestone: UEFI boot, kernel capabilities, and PCI device discovery.
+Current milestone: UEFI boot, PCI discovery, and a bound VirtIO device.
 
 ```powershell
 rustup target add x86_64-unknown-uefi
@@ -10,7 +10,7 @@ $env:OVMF_CODE = 'C:\path\to\OVMF_CODE.fd'
 .\scripts\run.ps1
 ```
 
-Expected output: `LogOS: PCI discovery ready`.
+Expected output: `LogOS: VirtIO driver ready`.
 
 - [Architecture](docs/architecture.md)
 - [Boot sequence](docs/boot-sequence.md)

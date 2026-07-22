@@ -28,6 +28,10 @@ The kernel grants opaque, generation-tagged capability handles from a fixed tabl
 
 The kernel scans PCI configuration space and retains a small list of discovered vendor/device identities. Drivers remain separate and bind only when explicitly added.
 
+## VirtIO
+
+The bootstrap driver binds a legacy VirtIO PCI function through its I/O BAR and resets its status register. It establishes the driver boundary without allocating queues or exposing a device service.
+
 ## Execution model
 
 - The kernel, drivers, scheduler, memory manager, IPC, filesystem, networking, and compositor are native Rust.

@@ -7,6 +7,7 @@ mod interrupts;
 mod memory;
 mod pci;
 mod scheduler;
+mod virtio;
 mod virtual_memory;
 
 use uefi::{
@@ -99,6 +100,9 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     let first_device = devices.first().expect("missing PCI device");
     let _ = (first_device.location(), first_device.vendor_id(), first_device.device_id());
     debug::write_line(b"LogOS: PCI discovery ready");
+    let virtio = devices.find(0x1af4, 0x1002).expect("missing VirtIO balloon");
+    assert!(virtio::reset_legacy(virtio));
+    debug::write_line(b"LogOS: VirtIO driver ready");
     loop {
         unsafe { core::arch::asm!("hlt") };
     }
