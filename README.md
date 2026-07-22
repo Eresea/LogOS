@@ -2,7 +2,7 @@
 
 An experimental Rust-native operating system: a capability-based kernel with a future WebAssembly application platform.
 
-Current milestone: UEFI boot, cooperative scheduling, and kernel capabilities.
+Current milestone: UEFI boot, kernel capabilities, and PCI device discovery.
 
 ```powershell
 rustup target add x86_64-unknown-uefi
@@ -10,7 +10,7 @@ $env:OVMF_CODE = 'C:\path\to\OVMF_CODE.fd'
 .\scripts\run.ps1
 ```
 
-Expected output: `LogOS: capability manager ready`.
+Expected output: `LogOS: PCI discovery ready`.
 
 - [Architecture](docs/architecture.md)
 - [Boot sequence](docs/boot-sequence.md)

@@ -5,6 +5,7 @@ mod capabilities;
 mod debug;
 mod interrupts;
 mod memory;
+mod pci;
 mod scheduler;
 mod virtual_memory;
 
@@ -93,6 +94,11 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     assert!(capabilities.revoke(debug_capability));
     assert!(!capabilities.allows(debug_capability, capabilities::CapabilityKind::Debug));
     debug::write_line(b"LogOS: capability manager ready");
+    let devices = pci::scan();
+    assert!(devices.len() > 0);
+    let first_device = devices.first().expect("missing PCI device");
+    let _ = (first_device.location(), first_device.vendor_id(), first_device.device_id());
+    debug::write_line(b"LogOS: PCI discovery ready");
     loop {
         unsafe { core::arch::asm!("hlt") };
     }

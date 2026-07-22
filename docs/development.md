@@ -17,4 +17,4 @@ cargo clippy -- -D warnings
 .\scripts\run.ps1
 ```
 
-The terminal prints the boot, memory, timer, and scheduler markers, followed by `LogOS: capability manager ready`. That final marker verifies capability grant, revocation, and stale-handle rejection in QEMU.
+The terminal prints the boot, memory, timer, scheduler, and capability markers, followed by `LogOS: PCI discovery ready`. That final marker verifies PCI configuration-space discovery in QEMU.
