@@ -58,6 +58,10 @@ impl PciDevice {
     pub fn bar(self, index: u8) -> u32 {
         config_read(self.bus, self.device, self.function, 0x10 + index * 4)
     }
+
+    pub fn interrupt_line(self) -> u8 {
+        config_read(self.bus, self.device, self.function, 0x3c) as u8
+    }
 }
 
 pub fn scan() -> PciDevices {

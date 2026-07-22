@@ -14,7 +14,7 @@ LogOS copies the active UEFI top-level page table, adds one kernel-owned high vi
 
 ## Interrupts
 
-The kernel owns the IDT and unmasks PIT IRQ0 and PS/2 IRQ1. CPU exceptions halt safely; the timer increments a tick counter and the keyboard handler queues scancodes; all other hardware IRQs remain masked until their drivers exist.
+The kernel owns the IDT and unmasks PIT IRQ0 and PS/2 IRQ1. CPU exceptions halt safely; the timer increments a tick counter and the keyboard handler queues scancodes. Q35 PCI interrupts are routed through its IOAPIC; the VirtIO completion IRQ acknowledges the device and wakes its blocked task. This assumes QEMU's standard Q35 IOAPIC and local-APIC addresses.
 
 ## Scheduling
 

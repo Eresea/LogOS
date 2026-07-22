@@ -5,6 +5,7 @@ use core::{
 
 const TIMER_VECTOR: usize = 32;
 const KEYBOARD_VECTOR: usize = 33;
+const VIRTIO_VECTOR: usize = 48;
 const EXCEPTIONS: usize = 32;
 const PIT_HZ: u16 = 100;
 const PIT_DIVISOR: u16 = (1_193_182u32 / PIT_HZ as u32) as u16;
@@ -17,11 +18,18 @@ unsafe extern "C" {
     fn fatal_interrupt();
     fn timer_interrupt();
     fn keyboard_irq();
+    fn virtio_irq();
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn timer_tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn virtio_interrupt() {
+    crate::virtio::interrupt();
+    unsafe { core::ptr::write_volatile((0xfee0_0000usize + 0xb0) as *mut u32, 0) };
 }
 
 pub fn install() -> bool {
@@ -36,11 +44,23 @@ pub fn install() -> bool {
         }
         (*idt)[TIMER_VECTOR] = IdtEntry::new(timer_interrupt as *const () as usize, selector);
         (*idt)[KEYBOARD_VECTOR] = IdtEntry::new(keyboard_irq as *const () as usize, selector);
+        (*idt)[VIRTIO_VECTOR] = IdtEntry::new(virtio_irq as *const () as usize, selector);
         load_idt(idt);
         configure_pic();
         configure_pit();
     }
     crate::keyboard::enable_interrupts()
+}
+
+pub fn route_virtio(gsi: u8) -> bool {
+    if gsi >= 24 {
+        return false;
+    }
+    unsafe {
+        ioapic_write(0x10 + gsi * 2, VIRTIO_VECTOR as u32);
+        ioapic_write(0x11 + gsi * 2, 0);
+    }
+    true
 }
 
 pub fn enable() {
@@ -50,6 +70,12 @@ pub fn enable() {
 pub fn wait_for_tick() {
     let tick = TICKS.load(Ordering::Acquire);
     while TICKS.load(Ordering::Acquire) == tick {
+        unsafe { asm!("hlt") };
+    }
+}
+
+pub fn wait_for_virtio() {
+    while !crate::virtio::completion_pending() {
         unsafe { asm!("hlt") };
     }
 }
@@ -137,6 +163,14 @@ unsafe fn outb(port: u16, value: u8) {
     unsafe { asm!("out dx, al", in("dx") port, in("al") value) };
 }
 
+unsafe fn ioapic_write(register: u8, value: u32) {
+    let select = 0xfec0_0000 as *mut u32;
+    unsafe {
+        select.write_volatile(register as u32);
+        select.add(4).write_volatile(value);
+    }
+}
+
 global_asm!(
     ".global default_interrupt",
     "default_interrupt:",
@@ -183,6 +217,26 @@ global_asm!(
     "add rsp, 40",
     "mov al, 0x20",
     "out 0x20, al",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdx",
+    "pop rcx",
+    "pop rax",
+    "iretq",
+    ".global virtio_irq",
+    "virtio_irq:",
+    "push rax",
+    "push rcx",
+    "push rdx",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "sub rsp, 40",
+    "call virtio_interrupt",
+    "add rsp, 40",
     "pop r11",
     "pop r10",
     "pop r9",

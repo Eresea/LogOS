@@ -1,6 +1,6 @@
 use core::{
     arch::asm,
-    sync::atomic::{Ordering, compiler_fence},
+    sync::atomic::{AtomicBool, AtomicU16, Ordering, compiler_fence},
 };
 
 use crate::{
@@ -16,6 +16,8 @@ const ACKNOWLEDGE: u8 = 1;
 const DRIVER: u8 = 2;
 const DRIVER_OK: u8 = 4;
 const PAGE_SIZE: usize = 4096;
+static ISR_PORT: AtomicU16 = AtomicU16::new(0);
+static COMPLETE: AtomicBool = AtomicBool::new(false);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -41,6 +43,7 @@ pub struct ServiceTask<'a> {
     capabilities: &'a CapabilityManager,
     capability: Capability,
     memory: &'a mut PhysicalMemory,
+    pending: Option<ServiceHandle>,
 }
 
 impl<'a> ServiceTask<'a> {
@@ -52,17 +55,34 @@ impl<'a> ServiceTask<'a> {
         capability: Capability,
         memory: &'a mut PhysicalMemory,
     ) -> Self {
-        Self { service, requests, responses, capabilities, capability, memory }
+        Self { service, requests, responses, capabilities, capability, memory, pending: None }
     }
 }
 
 impl Runnable for ServiceTask<'_> {
     fn run(&mut self) -> TaskState {
+        if let Some(destination) = self.pending {
+            if !take_completion() {
+                return TaskState::Blocked;
+            }
+            self.pending = None;
+            let _ = self.responses.send(
+                self.capabilities,
+                self.capability,
+                destination,
+                Message::Complete,
+            );
+            return TaskState::Ready;
+        }
         if let Some(envelope) = self.requests.receive() {
             let reply = match envelope.message {
                 Message::Ping => self.service.handle(envelope),
                 Message::Inflate if self.service.accepts(envelope) => {
-                    self.service.inflate_one_page(self.memory).then_some(Message::Complete)
+                    if self.service.submit_inflate_one_page(self.memory) {
+                        self.pending = Some(envelope.destination);
+                        return TaskState::Blocked;
+                    }
+                    None
                 }
                 _ => None,
             };
@@ -112,7 +132,13 @@ impl VirtioService {
             outb(service.status_port, ACKNOWLEDGE | DRIVER | DRIVER_OK);
         }
         let service = Self { queue, queue_size, ..service };
-        (unsafe { inb(service.status_port) } & DRIVER_OK != 0).then_some(service)
+        if unsafe { inb(service.status_port) } & DRIVER_OK == 0
+            || !crate::interrupts::route_virtio(device.interrupt_line())
+        {
+            return None;
+        }
+        ISR_PORT.store(base + 0x13, Ordering::Release);
+        Some(service)
     }
 
     pub fn handle(&self, envelope: Envelope) -> Option<Message> {
@@ -129,7 +155,7 @@ impl VirtioService {
         envelope.destination == self.handle && unsafe { inb(self.status_port) } & DRIVER_OK != 0
     }
 
-    pub fn inflate_one_page(&self, memory: &mut PhysicalMemory) -> bool {
+    pub fn submit_inflate_one_page(&self, memory: &mut PhysicalMemory) -> bool {
         let page = match memory.allocate_page() {
             Some(page) => page,
             None => return false,
@@ -139,7 +165,6 @@ impl VirtioService {
             Err(_) => return false,
         };
         let avail = self.queue + (self.queue_size * core::mem::size_of::<Descriptor>()) as u64;
-        let used = align_up(avail + 6 + (self.queue_size * 2) as u64, PAGE_SIZE as u64);
         unsafe {
             (page as *mut u32).write_volatile(pfn);
             (self.queue as *mut Descriptor).write_volatile(Descriptor {
@@ -149,24 +174,27 @@ impl VirtioService {
                 next: 0,
             });
             ((avail + 4) as *mut u16).write_volatile(0);
-            let used_index = (used + 2) as *const u16;
-            let before = used_index.read_volatile();
             compiler_fence(Ordering::Release);
             ((avail + 2) as *mut u16).write_volatile(1);
             outw(self.notify_port, 0);
-            for _ in 0..10 {
-                if used_index.read_volatile() != before {
-                    return true;
-                }
-                crate::interrupts::wait_for_tick();
-            }
         }
-        false
+        true
     }
 }
 
-fn align_up(value: u64, alignment: u64) -> u64 {
-    (value + alignment - 1) & !(alignment - 1)
+pub fn interrupt() {
+    let port = ISR_PORT.load(Ordering::Acquire);
+    if port != 0 && unsafe { inb(port) } & 1 != 0 {
+        COMPLETE.store(true, Ordering::Release);
+    }
+}
+
+pub fn completion_pending() -> bool {
+    COMPLETE.load(Ordering::Acquire)
+}
+
+fn take_completion() -> bool {
+    COMPLETE.swap(false, Ordering::AcqRel)
 }
 
 fn allocate_queue(memory: &mut PhysicalMemory, queue_size: usize) -> Option<u64> {

@@ -174,6 +174,11 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
         b"virtio",
         channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Inflate)
             && service_scheduler.run_next()
+            && {
+                interrupts::wait_for_virtio();
+                service_scheduler.wake(0)
+            }
+            && service_scheduler.run_next()
             && responses.receive().is_some_and(|reply| reply.message == ipc::Message::Complete),
     );
     let Some(mut console) = console::Shell::new(
@@ -195,6 +200,9 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     health.check(b"keyboard", keyboard::self_check());
     health.finish();
     console.run(|| {
+        if virtio::completion_pending() {
+            let _ = service_scheduler.wake(0);
+        }
         let _ = service_scheduler.run_next();
     })
 }
