@@ -93,10 +93,10 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
         mapped_page,
     );
     health.check(b"virtual memory", unsafe { virtual_memory::verify(mapped_page) });
-    interrupts::install();
+    let keyboard_interrupts = interrupts::install();
     interrupts::enable();
     interrupts::wait_for_tick();
-    health.check(b"interrupts", true);
+    health.check(b"interrupts", keyboard_interrupts);
     let mut scheduler = scheduler::Scheduler::new();
     health.check(b"scheduler", scheduler::self_check());
     if !scheduler.spawn(scheduler::Task::new(task_a))

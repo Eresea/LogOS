@@ -4,6 +4,7 @@ use core::{
 };
 
 const TIMER_VECTOR: usize = 32;
+const KEYBOARD_VECTOR: usize = 33;
 const EXCEPTIONS: usize = 32;
 const PIT_HZ: u16 = 100;
 const PIT_DIVISOR: u16 = (1_193_182u32 / PIT_HZ as u32) as u16;
@@ -15,6 +16,7 @@ unsafe extern "C" {
     fn default_interrupt();
     fn fatal_interrupt();
     fn timer_interrupt();
+    fn keyboard_irq();
 }
 
 #[unsafe(no_mangle)]
@@ -22,7 +24,7 @@ extern "C" fn timer_tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn install() {
+pub fn install() -> bool {
     unsafe {
         let idt = core::ptr::addr_of_mut!(IDT);
         let selector = code_selector();
@@ -33,10 +35,12 @@ pub fn install() {
             (*idt)[vector] = IdtEntry::new(fatal_interrupt as *const () as usize, selector);
         }
         (*idt)[TIMER_VECTOR] = IdtEntry::new(timer_interrupt as *const () as usize, selector);
+        (*idt)[KEYBOARD_VECTOR] = IdtEntry::new(keyboard_irq as *const () as usize, selector);
         load_idt(idt);
         configure_pic();
         configure_pit();
     }
+    crate::keyboard::enable_interrupts()
 }
 
 pub fn enable() {
@@ -116,7 +120,7 @@ unsafe fn configure_pic() {
         outb(0xa1, 0x02);
         outb(0x21, 0x01);
         outb(0xa1, 0x01);
-        outb(0x21, 0xfe);
+        outb(0x21, 0xfc);
         outb(0xa1, 0xff);
     }
 }
@@ -154,6 +158,28 @@ global_asm!(
     "push r11",
     "sub rsp, 40",
     "call timer_tick",
+    "add rsp, 40",
+    "mov al, 0x20",
+    "out 0x20, al",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdx",
+    "pop rcx",
+    "pop rax",
+    "iretq",
+    ".global keyboard_irq",
+    "keyboard_irq:",
+    "push rax",
+    "push rcx",
+    "push rdx",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "sub rsp, 40",
+    "call keyboard_interrupt",
     "add rsp, 40",
     "mov al, 0x20",
     "out 0x20, al",
