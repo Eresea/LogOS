@@ -19,7 +19,7 @@ cargo clippy -- -D warnings
 .\scripts\check.ps1
 ```
 
-The terminal prints the boot, memory, timer, scheduler, capability, PCI, VirtIO, IPC, and registry markers, followed by `LogOS: VirtIO request ready`. That final marker verifies a balloon request reaches the VirtIO used ring.
+The terminal prints a pass/fail self-check for every initialized subsystem, followed by `LogOS: startup self check passed`. That final marker verifies the balloon request reaches the VirtIO used ring.
 
 `verify.ps1` runs QEMU headlessly and fails if that marker is not reached within 15 seconds.
 

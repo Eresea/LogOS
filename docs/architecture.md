@@ -40,6 +40,10 @@ The kernel provides a capability-gated typed message channel. It currently carri
 
 The kernel registers typed services behind opaque handles. Registration requires a service capability, and IPC envelopes use the resolved handle rather than a direct pointer.
 
+## Startup health
+
+Each initialized kernel subsystem must report a startup self-check. A failed check emits its module name and halts; the boot verifier accepts only the final `startup self check passed` marker.
+
 ## Execution model
 
 - The kernel, drivers, scheduler, memory manager, IPC, filesystem, networking, and compositor are native Rust.

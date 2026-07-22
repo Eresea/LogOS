@@ -3,6 +3,7 @@
 
 mod capabilities;
 mod debug;
+mod health;
 mod interrupts;
 mod ipc;
 mod memory;
@@ -60,11 +61,26 @@ fn draw_boot_screen() -> uefi::Result<BootInfo> {
 }
 
 fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
+    let health = health::Startup::new();
+    health.check(b"debug", true);
+    health.check(
+        b"framebuffer",
+        !boot_info.framebuffer.is_null()
+            && boot_info.framebuffer_size > 0
+            && boot_info.resolution.0 > 0
+            && boot_info.resolution.1 > 0,
+    );
     let memory_regions = memory_map.len();
-    let mut memory =
-        memory::PhysicalMemory::from_memory_map(&memory_map).expect("no usable memory");
-    let first_page = memory.allocate_page().expect("no free pages");
-    let mapped_page = virtual_memory::install(&mut memory).expect("virtual mapping failed");
+    let Some(mut memory) = memory::PhysicalMemory::from_memory_map(&memory_map) else {
+        health.fail(b"memory");
+    };
+    let Some(first_page) = memory.allocate_page() else {
+        health.fail(b"memory");
+    };
+    health.check(b"memory", first_page & 0xfff == 0);
+    let Some(mapped_page) = virtual_memory::install(&mut memory) else {
+        health.fail(b"virtual memory");
+    };
     let _ = (
         boot_info.framebuffer,
         boot_info.framebuffer_size,
@@ -74,54 +90,67 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
         first_page,
         mapped_page,
     );
-    debug::write_line(b"LogOS: boot services exited");
-    debug::write_line(b"LogOS: physical memory ready");
-    if unsafe { virtual_memory::verify(mapped_page) } {
-        debug::write_line(b"LogOS: virtual memory ready");
-    }
+    health.check(b"virtual memory", unsafe { virtual_memory::verify(mapped_page) });
     interrupts::install();
     interrupts::enable();
     interrupts::wait_for_tick();
-    debug::write_line(b"LogOS: timer interrupt ready");
+    health.check(b"interrupts", true);
     let mut scheduler = scheduler::Scheduler::new();
-    assert!(scheduler.spawn(scheduler::Task::new(task_a)));
-    assert!(scheduler.spawn(scheduler::Task::new(task_b)));
+    health.check(b"scheduler", scheduler::self_check());
+    if !scheduler.spawn(scheduler::Task::new(task_a))
+        || !scheduler.spawn(scheduler::Task::new(task_b))
+    {
+        health.fail(b"scheduler");
+    }
     while scheduler.run_next() {
         interrupts::wait_for_tick();
     }
-    debug::write_line(b"LogOS: scheduler ready");
     let mut capabilities = capabilities::CapabilityManager::new();
-    let debug_capability =
-        capabilities.grant(capabilities::CapabilityKind::Debug).expect("no capability slots");
-    assert!(capabilities.allows(debug_capability, capabilities::CapabilityKind::Debug));
-    assert!(capabilities.revoke(debug_capability));
-    assert!(!capabilities.allows(debug_capability, capabilities::CapabilityKind::Debug));
-    debug::write_line(b"LogOS: capability manager ready");
+    let Some(debug_capability) = capabilities.grant(capabilities::CapabilityKind::Debug) else {
+        health.fail(b"capabilities");
+    };
+    health.check(
+        b"capabilities",
+        capabilities.allows(debug_capability, capabilities::CapabilityKind::Debug)
+            && capabilities.revoke(debug_capability)
+            && !capabilities.allows(debug_capability, capabilities::CapabilityKind::Debug),
+    );
     let devices = pci::scan();
-    assert!(devices.len() > 0);
-    let first_device = devices.first().expect("missing PCI device");
+    let Some(first_device) = devices.first() else {
+        health.fail(b"pci");
+    };
+    health.check(b"pci", devices.len() > 0);
     let _ = (first_device.location(), first_device.vendor_id(), first_device.device_id());
-    debug::write_line(b"LogOS: PCI discovery ready");
-    let virtio = devices.find(0x1af4, 0x1002).expect("missing VirtIO balloon");
-    let service_capability =
-        capabilities.grant(capabilities::CapabilityKind::Service).expect("no capability slots");
+    let Some(virtio) = devices.find(0x1af4, 0x1002) else {
+        health.fail(b"virtio");
+    };
+    let Some(service_capability) = capabilities.grant(capabilities::CapabilityKind::Service) else {
+        health.fail(b"capabilities");
+    };
     let mut services = services::Registry::new();
-    let virtio_handle = services
-        .register(&capabilities, service_capability, services::Service::VirtioBalloon)
-        .expect("service registration failed");
-    assert_eq!(services.resolve(services::Service::VirtioBalloon), Some(virtio_handle));
-    let virtio_service = virtio::VirtioService::bind(virtio, virtio_handle, &mut memory)
-        .expect("VirtIO bind failed");
-    debug::write_line(b"LogOS: VirtIO driver ready");
+    let Some(virtio_handle) =
+        services.register(&capabilities, service_capability, services::Service::VirtioBalloon)
+    else {
+        health.fail(b"services");
+    };
+    health.check(
+        b"services",
+        services.resolve(services::Service::VirtioBalloon) == Some(virtio_handle),
+    );
+    let Some(virtio_service) = virtio::VirtioService::bind(virtio, virtio_handle, &mut memory)
+    else {
+        health.fail(b"virtio");
+    };
     let mut channel = ipc::Channel::new();
-    assert!(channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping));
-    let message = channel.receive().expect("missing IPC message");
-    assert_eq!(virtio_service.handle(message), Some(ipc::Message::Pong));
-    assert!(virtio_service.inflate_one_page(&mut memory));
-    debug::write_line(b"LogOS: IPC ready");
-    debug::write_line(b"LogOS: service registry ready");
-    debug::write_line(b"LogOS: VirtIO service ready");
-    debug::write_line(b"LogOS: VirtIO request ready");
+    if !channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping) {
+        health.fail(b"ipc");
+    }
+    let Some(message) = channel.receive() else {
+        health.fail(b"ipc");
+    };
+    health.check(b"ipc", virtio_service.handle(message) == Some(ipc::Message::Pong));
+    health.check(b"virtio", virtio_service.inflate_one_page(&mut memory));
+    health.finish();
     loop {
         unsafe { core::arch::asm!("hlt") };
     }

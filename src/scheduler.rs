@@ -55,3 +55,17 @@ impl Scheduler {
         false
     }
 }
+
+pub fn self_check() -> bool {
+    fn complete(_: &mut Task) -> TaskState {
+        TaskState::Complete
+    }
+
+    let mut scheduler = Scheduler::new();
+    scheduler.spawn(Task::new(complete))
+        && scheduler.spawn(Task::new(complete))
+        && !scheduler.spawn(Task::new(complete))
+        && scheduler.run_next()
+        && scheduler.run_next()
+        && !scheduler.run_next()
+}
