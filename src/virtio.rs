@@ -1,10 +1,10 @@
 use core::{
     arch::asm,
-    cell::Cell,
     sync::atomic::{Ordering, compiler_fence},
 };
 
 use crate::{
+    capabilities::{Capability, CapabilityManager},
     ipc::{Envelope, Message},
     memory::PhysicalMemory,
     pci::PciDevice,
@@ -36,25 +36,29 @@ pub struct VirtioService {
 
 pub struct ServiceTask<'a> {
     service: &'a VirtioService,
-    channel: &'a crate::ipc::Channel,
+    requests: &'a crate::ipc::Channel,
+    responses: &'a crate::ipc::Channel,
+    capabilities: &'a CapabilityManager,
+    capability: Capability,
     memory: &'a mut PhysicalMemory,
-    reply: &'a Cell<Option<Message>>,
 }
 
 impl<'a> ServiceTask<'a> {
     pub fn new(
         service: &'a VirtioService,
-        channel: &'a crate::ipc::Channel,
+        requests: &'a crate::ipc::Channel,
+        responses: &'a crate::ipc::Channel,
+        capabilities: &'a CapabilityManager,
+        capability: Capability,
         memory: &'a mut PhysicalMemory,
-        reply: &'a Cell<Option<Message>>,
     ) -> Self {
-        Self { service, channel, memory, reply }
+        Self { service, requests, responses, capabilities, capability, memory }
     }
 }
 
 impl Runnable for ServiceTask<'_> {
     fn run(&mut self) -> TaskState {
-        if let Some(envelope) = self.channel.receive() {
+        if let Some(envelope) = self.requests.receive() {
             let reply = match envelope.message {
                 Message::Ping => self.service.handle(envelope),
                 Message::Inflate if self.service.accepts(envelope) => {
@@ -62,7 +66,14 @@ impl Runnable for ServiceTask<'_> {
                 }
                 _ => None,
             };
-            self.reply.set(reply);
+            if let Some(reply) = reply {
+                let _ = self.responses.send(
+                    self.capabilities,
+                    self.capability,
+                    envelope.destination,
+                    reply,
+                );
+            }
         }
         TaskState::Ready
     }

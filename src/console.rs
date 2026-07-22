@@ -5,7 +5,6 @@ use crate::{
     keyboard,
     services::ServiceHandle,
 };
-use core::cell::Cell;
 
 const BACKGROUND: [u8; 3] = [12, 18, 30];
 const ACCENT: [u8; 3] = [61, 220, 151];
@@ -22,21 +21,21 @@ pub struct Shell<'a> {
 #[derive(Clone, Copy)]
 pub struct Endpoint<'a> {
     channel: &'a Channel,
+    responses: &'a Channel,
     capabilities: &'a CapabilityManager,
     capability: Capability,
     destination: ServiceHandle,
-    reply: &'a Cell<Option<Message>>,
 }
 
 impl<'a> Endpoint<'a> {
     pub const fn new(
         channel: &'a Channel,
+        responses: &'a Channel,
         capabilities: &'a CapabilityManager,
         capability: Capability,
         destination: ServiceHandle,
-        reply: &'a Cell<Option<Message>>,
     ) -> Self {
-        Self { channel, capabilities, capability, destination, reply }
+        Self { channel, responses, capabilities, capability, destination }
     }
 
     fn ping(self) -> bool {
@@ -48,7 +47,7 @@ impl<'a> Endpoint<'a> {
     }
 
     fn reply(self) -> Option<Message> {
-        self.reply.take()
+        self.responses.receive().map(|reply| reply.message)
     }
 }
 

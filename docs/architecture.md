@@ -34,7 +34,7 @@ The VirtIO balloon service binds a legacy PCI function through its I/O BAR, allo
 
 ## IPC
 
-The kernel provides a capability-gated typed message channel. It currently carries a fixed queue of `Ping` messages; the persistent VirtIO task consumes them and records `Pong` replies. Its queue is shared only by cooperative kernel tasks, so it has no lock or interrupt-safe producer yet.
+The kernel provides capability-gated typed request and response channels. The persistent VirtIO task consumes requests and queues `Pong` or completion replies. Queues are shared only by cooperative kernel tasks, so they have no lock or interrupt-safe producer yet.
 
 ## Service registry
 

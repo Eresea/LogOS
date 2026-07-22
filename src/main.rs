@@ -144,37 +144,50 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
         health.fail(b"virtio");
     };
     let channel = ipc::Channel::new();
+    let responses = ipc::Channel::new();
     if !channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping) {
         health.fail(b"ipc");
     }
-    let reply = core::cell::Cell::new(None);
-    let mut service_task = virtio::ServiceTask::new(&virtio_service, &channel, &mut memory, &reply);
+    let mut service_task = virtio::ServiceTask::new(
+        &virtio_service,
+        &channel,
+        &responses,
+        &capabilities,
+        service_capability,
+        &mut memory,
+    );
     let mut service_scheduler = scheduler::Scheduler::new();
     if !service_scheduler.spawn(&mut service_task) || !service_scheduler.run_next() {
         health.fail(b"scheduler");
     }
-    health.check(b"ipc", reply.get() == Some(ipc::Message::Pong));
-    reply.set(None);
+    health.check(
+        b"ipc",
+        responses.receive().is_some_and(|reply| reply.message == ipc::Message::Pong),
+    );
     health.check(
         b"service task",
         channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping)
             && service_scheduler.run_next()
-            && reply.get() == Some(ipc::Message::Pong),
+            && responses.receive().is_some_and(|reply| reply.message == ipc::Message::Pong),
     );
-    reply.set(None);
-    reply.set(None);
     health.check(
         b"virtio",
         channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Inflate)
             && service_scheduler.run_next()
-            && reply.get() == Some(ipc::Message::Complete),
+            && responses.receive().is_some_and(|reply| reply.message == ipc::Message::Complete),
     );
     let Some(mut console) = console::Shell::new(
         boot_info.framebuffer,
         boot_info.resolution.0,
         boot_info.resolution.1,
         boot_info.stride,
-        console::Endpoint::new(&channel, &capabilities, service_capability, virtio_handle, &reply),
+        console::Endpoint::new(
+            &channel,
+            &responses,
+            &capabilities,
+            service_capability,
+            virtio_handle,
+        ),
     ) else {
         health.fail(b"console");
     };
