@@ -1,3 +1,5 @@
+use core::cell::UnsafeCell;
+
 use crate::capabilities::{Capability, CapabilityKind, CapabilityManager};
 use crate::services::ServiceHandle;
 
@@ -15,41 +17,45 @@ pub struct Envelope {
     pub message: Message,
 }
 
-pub struct Channel {
+struct Queue {
     messages: [Option<Envelope>; MESSAGES],
     head: usize,
     len: usize,
 }
 
+pub struct Channel(UnsafeCell<Queue>);
+
 impl Channel {
     pub const fn new() -> Self {
-        Self { messages: [None; MESSAGES], head: 0, len: 0 }
+        Self(UnsafeCell::new(Queue { messages: [None; MESSAGES], head: 0, len: 0 }))
     }
 
     pub fn send(
-        &mut self,
+        &self,
         capabilities: &CapabilityManager,
         capability: Capability,
         destination: ServiceHandle,
         message: Message,
     ) -> bool {
-        if !capabilities.allows(capability, CapabilityKind::Service) || self.len == MESSAGES {
+        let queue = unsafe { &mut *self.0.get() };
+        if !capabilities.allows(capability, CapabilityKind::Service) || queue.len == MESSAGES {
             return false;
         }
-        // ponytail: fixed queue; add blocking/wakeup semantics when services run concurrently.
-        let tail = (self.head + self.len) % MESSAGES;
-        self.messages[tail] = Some(Envelope { destination, message });
-        self.len += 1;
+        // ponytail: cooperative-only; add synchronization when IRQs or cores send messages.
+        let tail = (queue.head + queue.len) % MESSAGES;
+        queue.messages[tail] = Some(Envelope { destination, message });
+        queue.len += 1;
         true
     }
 
-    pub fn receive(&mut self) -> Option<Envelope> {
-        if self.len == 0 {
+    pub fn receive(&self) -> Option<Envelope> {
+        let queue = unsafe { &mut *self.0.get() };
+        if queue.len == 0 {
             return None;
         }
-        let message = self.messages[self.head].take();
-        self.head = (self.head + 1) % MESSAGES;
-        self.len -= 1;
+        let message = queue.messages[queue.head].take();
+        queue.head = (queue.head + 1) % MESSAGES;
+        queue.len -= 1;
         message
     }
 }

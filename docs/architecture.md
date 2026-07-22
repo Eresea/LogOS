@@ -34,7 +34,7 @@ The VirtIO balloon service binds a legacy PCI function through its I/O BAR, allo
 
 ## IPC
 
-The kernel provides a capability-gated typed message channel. It currently carries a fixed queue of `Ping` messages; the persistent VirtIO task consumes them and records `Pong` replies.
+The kernel provides a capability-gated typed message channel. It currently carries a fixed queue of `Ping` messages; the persistent VirtIO task consumes them and records `Pong` replies. Its queue is shared only by cooperative kernel tasks, so it has no lock or interrupt-safe producer yet.
 
 ## Service registry
 
@@ -46,7 +46,7 @@ Each initialized kernel subsystem must report a startup self-check. A failed che
 
 ## Kernel console
 
-The kernel renders its console directly to the boot framebuffer and consumes PS/2 IRQ1 scancodes after firmware services end. It provides `help`, `clear`, `version`, and `exit`; a full terminal service remains a future userspace concern.
+The kernel renders its console directly to the boot framebuffer and consumes PS/2 IRQ1 scancodes after firmware services end. It provides `help`, `clear`, `version`, `ping`, and `exit`; `ping` sends a capability-gated IPC request to VirtIO. A full terminal service remains a future userspace concern.
 
 ## Execution model
 

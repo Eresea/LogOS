@@ -1,14 +1,44 @@
-use crate::{glyph, keyboard};
+use crate::{
+    capabilities::{Capability, CapabilityManager},
+    glyph,
+    ipc::{Channel, Message},
+    keyboard,
+    services::ServiceHandle,
+};
 
 const BACKGROUND: [u8; 3] = [12, 18, 30];
 const ACCENT: [u8; 3] = [61, 220, 151];
 const ORIGIN: (usize, usize) = (32, 136);
 const SCALE: usize = 3;
 
-pub struct Shell {
+pub struct Shell<'a> {
     console: Console,
     command: [u8; 16],
     length: usize,
+    endpoint: Endpoint<'a>,
+}
+
+#[derive(Clone, Copy)]
+pub struct Endpoint<'a> {
+    channel: &'a Channel,
+    capabilities: &'a CapabilityManager,
+    capability: Capability,
+    destination: ServiceHandle,
+}
+
+impl<'a> Endpoint<'a> {
+    pub const fn new(
+        channel: &'a Channel,
+        capabilities: &'a CapabilityManager,
+        capability: Capability,
+        destination: ServiceHandle,
+    ) -> Self {
+        Self { channel, capabilities, capability, destination }
+    }
+
+    fn ping(self) -> bool {
+        self.channel.send(self.capabilities, self.capability, self.destination, Message::Ping)
+    }
 }
 
 struct Console {
@@ -19,20 +49,27 @@ struct Console {
     cursor: (usize, usize),
 }
 
-impl Shell {
-    pub fn new(framebuffer: *mut u8, width: usize, height: usize, stride: usize) -> Option<Self> {
+impl<'a> Shell<'a> {
+    pub fn new(
+        framebuffer: *mut u8,
+        width: usize,
+        height: usize,
+        stride: usize,
+        endpoint: Endpoint<'a>,
+    ) -> Option<Self> {
         (!framebuffer.is_null() && width > 0 && height > ORIGIN.1 && stride >= width).then_some(
             Self {
                 console: Console { framebuffer, width, height, stride, cursor: ORIGIN },
                 command: [0; 16],
                 length: 0,
+                endpoint,
             },
         )
     }
 
     pub fn start(&mut self) -> bool {
         self.console.reset();
-        self.console.write(b"LOGOS KERNEL CONSOLE\nTYPE HELP OR EXIT\n");
+        self.console.write(b"LOGOS KERNEL CONSOLE\nTYPE HELP PING OR EXIT\n");
         self.prompt();
         true
     }
@@ -71,8 +108,9 @@ impl Shell {
     fn submit(&mut self) {
         self.console.newline();
         match &self.command[..self.length] {
-            b"help" => self.console.write(b"COMMANDS HELP CLEAR VERSION EXIT\n"),
+            b"help" => self.console.write(b"COMMANDS HELP CLEAR VERSION PING EXIT\n"),
             b"clear" => self.console.reset(),
+            b"ping" if self.endpoint.ping() => self.console.write(b"PING SENT\n"),
             b"version" => self.console.write(b"LOGOS 0 1 0\n"),
             b"exit" => self.exit(),
             _ => self.console.write(b"UNKNOWN COMMAND\n"),

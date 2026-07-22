@@ -36,14 +36,14 @@ pub struct VirtioService {
 
 pub struct ServiceTask<'a> {
     service: &'a VirtioService,
-    channel: &'a mut crate::ipc::Channel,
+    channel: &'a crate::ipc::Channel,
     reply: &'a Cell<Option<Message>>,
 }
 
 impl<'a> ServiceTask<'a> {
     pub fn new(
         service: &'a VirtioService,
-        channel: &'a mut crate::ipc::Channel,
+        channel: &'a crate::ipc::Channel,
         reply: &'a Cell<Option<Message>>,
     ) -> Self {
         Self { service, channel, reply }

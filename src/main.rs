@@ -143,23 +143,31 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     else {
         health.fail(b"virtio");
     };
-    let mut channel = ipc::Channel::new();
+    let channel = ipc::Channel::new();
     if !channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping) {
         health.fail(b"ipc");
     }
     let reply = core::cell::Cell::new(None);
-    let mut service_task = virtio::ServiceTask::new(&virtio_service, &mut channel, &reply);
+    let mut service_task = virtio::ServiceTask::new(&virtio_service, &channel, &reply);
     let mut service_scheduler = scheduler::Scheduler::new();
     if !service_scheduler.spawn(&mut service_task) || !service_scheduler.run_next() {
         health.fail(b"scheduler");
     }
     health.check(b"ipc", reply.get() == Some(ipc::Message::Pong));
+    reply.set(None);
+    health.check(
+        b"service task",
+        channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping)
+            && service_scheduler.run_next()
+            && reply.get() == Some(ipc::Message::Pong),
+    );
     health.check(b"virtio", virtio_service.inflate_one_page(&mut memory));
     let Some(mut console) = console::Shell::new(
         boot_info.framebuffer,
         boot_info.resolution.0,
         boot_info.resolution.1,
         boot_info.stride,
+        console::Endpoint::new(&channel, &capabilities, service_capability, virtio_handle),
     ) else {
         health.fail(b"console");
     };
