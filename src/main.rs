@@ -1,6 +1,7 @@
 #![no_main]
 #![no_std]
 
+mod capabilities;
 mod debug;
 mod interrupts;
 mod memory;
@@ -85,6 +86,13 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
         interrupts::wait_for_tick();
     }
     debug::write_line(b"LogOS: scheduler ready");
+    let mut capabilities = capabilities::CapabilityManager::new();
+    let debug_capability =
+        capabilities.grant(capabilities::CapabilityKind::Debug).expect("no capability slots");
+    assert!(capabilities.allows(debug_capability, capabilities::CapabilityKind::Debug));
+    assert!(capabilities.revoke(debug_capability));
+    assert!(!capabilities.allows(debug_capability, capabilities::CapabilityKind::Debug));
+    debug::write_line(b"LogOS: capability manager ready");
     loop {
         unsafe { core::arch::asm!("hlt") };
     }

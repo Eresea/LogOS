@@ -20,6 +20,10 @@ The kernel owns the IDT and unmasks only PIT IRQ0 at 100 Hz. The timer handler i
 
 The bootstrap scheduler runs two fixed cooperative task slots in round-robin order. A task yields by returning `Ready`; it is removed when it returns `Complete`.
 
+## Capabilities
+
+The kernel grants opaque, generation-tagged capability handles from a fixed table. Checks require a matching kind and generation; revocation invalidates existing handles.
+
 ## Execution model
 
 - The kernel, drivers, scheduler, memory manager, IPC, filesystem, networking, and compositor are native Rust.
