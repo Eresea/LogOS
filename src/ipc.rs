@@ -6,6 +6,7 @@ const MESSAGES: usize = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Message {
     Ping,
+    Pong,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

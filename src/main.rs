@@ -103,23 +103,23 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     let _ = (first_device.location(), first_device.vendor_id(), first_device.device_id());
     debug::write_line(b"LogOS: PCI discovery ready");
     let virtio = devices.find(0x1af4, 0x1002).expect("missing VirtIO balloon");
-    assert!(virtio::reset_legacy(virtio));
-    debug::write_line(b"LogOS: VirtIO driver ready");
     let service_capability =
         capabilities.grant(capabilities::CapabilityKind::Service).expect("no capability slots");
     let mut services = services::Registry::new();
-    let diagnostics = services
-        .register(&capabilities, service_capability, services::Service::Diagnostics)
+    let virtio_handle = services
+        .register(&capabilities, service_capability, services::Service::VirtioBalloon)
         .expect("service registration failed");
-    assert_eq!(services.resolve(services::Service::Diagnostics), Some(diagnostics));
+    assert_eq!(services.resolve(services::Service::VirtioBalloon), Some(virtio_handle));
+    let virtio_service =
+        virtio::VirtioService::bind(virtio, virtio_handle).expect("VirtIO bind failed");
+    debug::write_line(b"LogOS: VirtIO driver ready");
     let mut channel = ipc::Channel::new();
-    assert!(channel.send(&capabilities, service_capability, diagnostics, ipc::Message::Ping));
-    assert_eq!(
-        channel.receive(),
-        Some(ipc::Envelope { destination: diagnostics, message: ipc::Message::Ping })
-    );
+    assert!(channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping));
+    let message = channel.receive().expect("missing IPC message");
+    assert_eq!(virtio_service.handle(message), Some(ipc::Message::Pong));
     debug::write_line(b"LogOS: IPC ready");
     debug::write_line(b"LogOS: service registry ready");
+    debug::write_line(b"LogOS: VirtIO service ready");
     loop {
         unsafe { core::arch::asm!("hlt") };
     }

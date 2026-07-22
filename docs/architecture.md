@@ -30,7 +30,7 @@ The kernel scans PCI configuration space and retains a small list of discovered 
 
 ## VirtIO
 
-The bootstrap driver binds a legacy VirtIO PCI function through its I/O BAR and resets its status register. It establishes the driver boundary without allocating queues or exposing a device service.
+The VirtIO balloon service binds a legacy PCI function through its I/O BAR, resets its status register, and answers routed `Ping` messages with `Pong`. It does not allocate queues until it needs data transfer.
 
 ## IPC
 

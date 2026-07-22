@@ -1,16 +1,35 @@
 use core::arch::asm;
 
-use crate::pci::PciDevice;
+use crate::{
+    ipc::{Envelope, Message},
+    pci::PciDevice,
+    services::ServiceHandle,
+};
 
-pub fn reset_legacy(device: PciDevice) -> bool {
-    let bar = device.bar(0);
-    if bar & 1 == 0 {
-        return false;
+pub struct VirtioService {
+    handle: ServiceHandle,
+    status_port: u16,
+}
+
+impl VirtioService {
+    pub fn bind(device: PciDevice, handle: ServiceHandle) -> Option<Self> {
+        let bar = device.bar(0);
+        if bar & 1 == 0 {
+            return None;
+        }
+        let service = Self { handle, status_port: (bar & !3) as u16 + 0x12 };
+        unsafe { outb(service.status_port, 0) };
+        (unsafe { inb(service.status_port) } == 0).then_some(service)
     }
-    let base = (bar & !3) as u16;
-    unsafe {
-        outb(base + 0x12, 0);
-        inb(base + 0x12) == 0
+
+    pub fn handle(&self, envelope: Envelope) -> Option<Message> {
+        if envelope.destination != self.handle || unsafe { inb(self.status_port) } != 0 {
+            return None;
+        }
+        match envelope.message {
+            Message::Ping => Some(Message::Pong),
+            Message::Pong => None,
+        }
     }
 }
 

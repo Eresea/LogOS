@@ -4,7 +4,7 @@ const SERVICES: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Service {
-    Diagnostics,
+    VirtioBalloon,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
