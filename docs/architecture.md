@@ -12,6 +12,10 @@ The bootstrap allocator returns 4 KiB physical pages from one conventional-memor
 
 LogOS copies the active UEFI top-level page table, adds one kernel-owned high virtual mapping, then reloads CR3. This preserves the firmware mappings needed during bring-up while proving the kernel can own new mappings.
 
+## Interrupts
+
+The kernel owns the IDT and unmasks only PIT IRQ0 at 100 Hz. The timer handler increments a tick counter; all other hardware IRQs remain masked until their drivers exist.
+
 ## Execution model
 
 - The kernel, drivers, scheduler, memory manager, IPC, filesystem, networking, and compositor are native Rust.

@@ -2,6 +2,7 @@
 #![no_std]
 
 mod debug;
+mod interrupts;
 mod memory;
 mod virtual_memory;
 
@@ -72,6 +73,10 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     if unsafe { virtual_memory::verify(mapped_page) } {
         debug::write_line(b"LogOS: virtual memory ready");
     }
+    interrupts::install();
+    interrupts::enable();
+    interrupts::wait_for_tick();
+    debug::write_line(b"LogOS: timer interrupt ready");
     loop {
         unsafe { core::arch::asm!("hlt") };
     }

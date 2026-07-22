@@ -21,4 +21,4 @@ UEFI firmware
 
 ## Current point
 
-UEFI boot services have been exited. The kernel initializes physical memory, copies the active top-level page table, and verifies one kernel-owned virtual mapping before halting with debug-console logging. Next: interrupt descriptor table and timer. Every stage added later must state its dependencies, failure mode, and recovery path.
+UEFI boot services have been exited. The kernel initializes physical memory, verifies one kernel-owned virtual mapping, then receives PIT IRQ0 through its IDT before halting with debug-console logging. Next: cooperative scheduler. Every stage added later must state its dependencies, failure mode, and recovery path.

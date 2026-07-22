@@ -17,4 +17,4 @@ cargo clippy -- -D warnings
 .\scripts\run.ps1
 ```
 
-The terminal prints `LogOS: kernel entered`, `LogOS: leaving UEFI boot services`, `LogOS: boot services exited`, `LogOS: physical memory ready`, and `LogOS: virtual memory ready`. That final marker verifies the kernel-owned mapping and CR3 reload in QEMU.
+The terminal prints `LogOS: kernel entered`, `LogOS: leaving UEFI boot services`, `LogOS: boot services exited`, `LogOS: physical memory ready`, `LogOS: virtual memory ready`, and `LogOS: timer interrupt ready`. That final marker verifies the IDT and PIT IRQ0 in QEMU.

@@ -2,7 +2,7 @@
 
 An experimental Rust-native operating system: a capability-based kernel with a future WebAssembly application platform.
 
-Current milestone: UEFI boot, physical-page allocation, and a kernel-owned virtual mapping.
+Current milestone: UEFI boot, kernel-owned memory, and a PIT timer interrupt.
 
 ```powershell
 rustup target add x86_64-unknown-uefi
@@ -10,7 +10,7 @@ $env:OVMF_CODE = 'C:\path\to\OVMF_CODE.fd'
 .\scripts\run.ps1
 ```
 
-Expected output: `LogOS: virtual memory ready`.
+Expected output: `LogOS: timer interrupt ready`.
 
 - [Architecture](docs/architecture.md)
 - [Boot sequence](docs/boot-sequence.md)
