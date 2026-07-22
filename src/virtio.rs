@@ -1,4 +1,7 @@
-use core::arch::asm;
+use core::{
+    arch::asm,
+    sync::atomic::{Ordering, compiler_fence},
+};
 
 use crate::{
     ipc::{Envelope, Message},
@@ -12,9 +15,21 @@ const DRIVER: u8 = 2;
 const DRIVER_OK: u8 = 4;
 const PAGE_SIZE: usize = 4096;
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Descriptor {
+    address: u64,
+    length: u32,
+    flags: u16,
+    next: u16,
+}
+
 pub struct VirtioService {
     handle: ServiceHandle,
     status_port: u16,
+    notify_port: u16,
+    queue: u64,
+    queue_size: usize,
 }
 
 impl VirtioService {
@@ -27,7 +42,13 @@ impl VirtioService {
         if bar & 1 == 0 {
             return None;
         }
-        let service = Self { handle, status_port: (bar & !3) as u16 + 0x12 };
+        let service = Self {
+            handle,
+            status_port: (bar & !3) as u16 + 0x12,
+            notify_port: (bar & !3) as u16 + 0x10,
+            queue: 0,
+            queue_size: 0,
+        };
         let base = service.status_port - 0x12;
         unsafe {
             outb(service.status_port, 0);
@@ -43,6 +64,7 @@ impl VirtioService {
             outl(base + 0x08, pfn);
             outb(service.status_port, ACKNOWLEDGE | DRIVER | DRIVER_OK);
         }
+        let service = Self { queue, queue_size, ..service };
         (unsafe { inb(service.status_port) } & DRIVER_OK != 0).then_some(service)
     }
 
@@ -56,6 +78,45 @@ impl VirtioService {
             Message::Pong => None,
         }
     }
+
+    pub fn inflate_one_page(&self, memory: &mut PhysicalMemory) -> bool {
+        let page = match memory.allocate_page() {
+            Some(page) => page,
+            None => return false,
+        };
+        let pfn = match u32::try_from(page >> 12) {
+            Ok(pfn) => pfn,
+            Err(_) => return false,
+        };
+        let avail = self.queue + (self.queue_size * core::mem::size_of::<Descriptor>()) as u64;
+        let used = align_up(avail + 6 + (self.queue_size * 2) as u64, PAGE_SIZE as u64);
+        unsafe {
+            (page as *mut u32).write_volatile(pfn);
+            (self.queue as *mut Descriptor).write_volatile(Descriptor {
+                address: page,
+                length: core::mem::size_of::<u32>() as u32,
+                flags: 0,
+                next: 0,
+            });
+            ((avail + 4) as *mut u16).write_volatile(0);
+            let used_index = (used + 2) as *const u16;
+            let before = used_index.read_volatile();
+            compiler_fence(Ordering::Release);
+            ((avail + 2) as *mut u16).write_volatile(1);
+            outw(self.notify_port, 0);
+            for _ in 0..10 {
+                if used_index.read_volatile() != before {
+                    return true;
+                }
+                crate::interrupts::wait_for_tick();
+            }
+        }
+        false
+    }
+}
+
+fn align_up(value: u64, alignment: u64) -> u64 {
+    (value + alignment - 1) & !(alignment - 1)
 }
 
 fn allocate_queue(memory: &mut PhysicalMemory, queue_size: usize) -> Option<u64> {

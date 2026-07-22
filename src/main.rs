@@ -117,9 +117,11 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     assert!(channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping));
     let message = channel.receive().expect("missing IPC message");
     assert_eq!(virtio_service.handle(message), Some(ipc::Message::Pong));
+    assert!(virtio_service.inflate_one_page(&mut memory));
     debug::write_line(b"LogOS: IPC ready");
     debug::write_line(b"LogOS: service registry ready");
     debug::write_line(b"LogOS: VirtIO service ready");
+    debug::write_line(b"LogOS: VirtIO request ready");
     loop {
         unsafe { core::arch::asm!("hlt") };
     }

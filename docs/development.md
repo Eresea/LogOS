@@ -17,4 +17,4 @@ cargo clippy -- -D warnings
 .\scripts\run.ps1
 ```
 
-The terminal prints the boot, memory, timer, scheduler, capability, PCI, VirtIO, IPC, and registry markers, followed by `LogOS: VirtIO service ready`. That final marker verifies queue-0 allocation, PFN programming, driver-ready status, and a routed `Ping → Pong`.
+The terminal prints the boot, memory, timer, scheduler, capability, PCI, VirtIO, IPC, and registry markers, followed by `LogOS: VirtIO request ready`. That final marker verifies a balloon request reaches the VirtIO used ring.
