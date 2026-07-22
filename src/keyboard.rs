@@ -26,7 +26,7 @@ pub fn poll() -> Option<u8> {
 }
 
 pub fn self_check() -> bool {
-    (unsafe { inb(0x64) } & 0xc0) == 0
+    (unsafe { inb(0x64) } & 0xc0) == 0 && decode(0x22) == Some(b'g')
 }
 
 pub fn enable_interrupts() -> bool {
@@ -122,6 +122,7 @@ fn decode(scancode: u8) -> Option<u8> {
         0x1f => Some(b's'),
         0x23 => Some(b'h'),
         0x21 => Some(b'f'),
+        0x22 => Some(b'g'),
         0x26 => Some(b'l'),
         0x2d => Some(b'x'),
         0x2e => Some(b'c'),
