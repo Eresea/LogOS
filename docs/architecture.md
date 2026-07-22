@@ -18,7 +18,7 @@ The kernel owns the IDT and unmasks PIT IRQ0 and PS/2 IRQ1. CPU exceptions halt 
 
 ## Scheduling
 
-The bootstrap scheduler runs two fixed cooperative task slots in round-robin order. A task yields by returning `Ready`; it is removed when it returns `Complete`. The VirtIO service is a persistent task that consumes its IPC queue whenever the console loop yields to the scheduler.
+The bootstrap scheduler runs two fixed cooperative task slots in round-robin order. A task yields by returning `Ready`, sleeps by returning `Blocked`, and is removed when it returns `Complete`. An interrupt or event explicitly wakes a blocked task. The VirtIO service is a persistent task that consumes its IPC queue whenever the console loop yields to the scheduler.
 
 ## Capabilities
 

@@ -2,6 +2,7 @@ const TASKS: usize = 2;
 
 pub enum TaskState {
     Ready,
+    Blocked,
     Complete,
 }
 
@@ -32,8 +33,13 @@ impl Runnable for Task {
 }
 
 pub struct Scheduler<'a> {
-    tasks: [Option<&'a mut dyn Runnable>; TASKS],
+    tasks: [Option<Entry<'a>>; TASKS],
     next: usize,
+}
+
+struct Entry<'a> {
+    task: &'a mut dyn Runnable,
+    blocked: bool,
 }
 
 impl<'a> Scheduler<'a> {
@@ -44,7 +50,7 @@ impl<'a> Scheduler<'a> {
     pub fn spawn(&mut self, task: &'a mut dyn Runnable) -> bool {
         for slot in &mut self.tasks {
             if slot.is_none() {
-                *slot = Some(task);
+                *slot = Some(Entry { task, blocked: false });
                 return true;
             }
         }
@@ -55,23 +61,47 @@ impl<'a> Scheduler<'a> {
         for _ in 0..TASKS {
             let index = self.next;
             self.next = (self.next + 1) % TASKS;
-            if let Some(task) = self.tasks[index].take() {
-                if matches!(task.run(), TaskState::Ready) {
-                    self.tasks[index] = Some(task);
+            if let Some(mut entry) = self.tasks[index].take() {
+                if entry.blocked {
+                    self.tasks[index] = Some(entry);
+                    continue;
+                }
+                match entry.task.run() {
+                    TaskState::Ready => self.tasks[index] = Some(entry),
+                    TaskState::Blocked => {
+                        entry.blocked = true;
+                        self.tasks[index] = Some(entry);
+                    }
+                    TaskState::Complete => {}
                 }
                 return true;
             }
         }
         false
     }
+
+    pub fn wake(&mut self, index: usize) -> bool {
+        let Some(Some(entry)) = self.tasks.get_mut(index) else {
+            return false;
+        };
+        if !entry.blocked {
+            return false;
+        }
+        entry.blocked = false;
+        true
+    }
 }
 
 pub fn self_check() -> bool {
+    fn block(task: &mut Task) -> TaskState {
+        if task.runs() == 1 { TaskState::Blocked } else { TaskState::Complete }
+    }
+
     fn complete(_: &mut Task) -> TaskState {
         TaskState::Complete
     }
 
-    let mut first = Task::new(complete);
+    let mut first = Task::new(block);
     let mut second = Task::new(complete);
     let mut third = Task::new(complete);
     let mut scheduler = Scheduler::new();
@@ -79,6 +109,9 @@ pub fn self_check() -> bool {
         && scheduler.spawn(&mut second)
         && !scheduler.spawn(&mut third)
         && scheduler.run_next()
+        && scheduler.run_next()
+        && !scheduler.run_next()
+        && scheduler.wake(0)
         && scheduler.run_next()
         && !scheduler.run_next()
 }
