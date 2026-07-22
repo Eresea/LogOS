@@ -44,6 +44,10 @@ The kernel registers typed services behind opaque handles. Registration requires
 
 Each initialized kernel subsystem must report a startup self-check. A failed check emits its module name and halts; the boot verifier accepts only the final `startup self check passed` marker.
 
+## Kernel console
+
+The kernel renders its console directly to the boot framebuffer and polls PS/2 scancodes after firmware services end. It provides `help`, `clear`, `version`, and `exit`; a full terminal service remains a future userspace concern.
+
 ## Execution model
 
 - The kernel, drivers, scheduler, memory manager, IPC, filesystem, networking, and compositor are native Rust.

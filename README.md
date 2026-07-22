@@ -2,7 +2,7 @@
 
 An experimental Rust-native operating system: a capability-based kernel with a future WebAssembly application platform.
 
-Current milestone: UEFI boot, service registry, and a completed VirtIO request.
+Current milestone: UEFI boot, completed VirtIO request, and a kernel console.
 
 ```powershell
 rustup target add x86_64-unknown-uefi

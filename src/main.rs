@@ -2,10 +2,12 @@
 #![no_std]
 
 mod capabilities;
+mod console;
 mod debug;
 mod health;
 mod interrupts;
 mod ipc;
+mod keyboard;
 mod memory;
 mod pci;
 mod scheduler;
@@ -150,10 +152,18 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     };
     health.check(b"ipc", virtio_service.handle(message) == Some(ipc::Message::Pong));
     health.check(b"virtio", virtio_service.inflate_one_page(&mut memory));
+    let Some(mut console) = console::Shell::new(
+        boot_info.framebuffer,
+        boot_info.resolution.0,
+        boot_info.resolution.1,
+        boot_info.stride,
+    ) else {
+        health.fail(b"console");
+    };
+    health.check(b"console", console.start());
+    health.check(b"keyboard", keyboard::self_check());
     health.finish();
-    loop {
-        unsafe { core::arch::asm!("hlt") };
-    }
+    console.run()
 }
 
 fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {
@@ -247,7 +257,7 @@ impl<'a> Terminal<'a> {
     }
 }
 
-fn glyph(byte: u8) -> Option<&'static [u8; 7]> {
+pub(crate) fn glyph(byte: u8) -> Option<&'static [u8; 7]> {
     const A: [u8; 7] = [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0];
     const B: [u8; 7] = [0b11110, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110, 0];
     const C: [u8; 7] = [0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111, 0];
