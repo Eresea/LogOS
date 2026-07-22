@@ -17,4 +17,4 @@ cargo clippy -- -D warnings
 .\scripts\run.ps1
 ```
 
-The terminal prints the boot, memory, timer, scheduler, capability, PCI, and VirtIO markers, followed by `LogOS: IPC ready`. That final marker verifies a capability-gated typed message round trip.
+The terminal prints the boot, memory, timer, scheduler, capability, PCI, VirtIO, and IPC markers, followed by `LogOS: service registry ready`. That final marker verifies capability-gated service registration, lookup, and addressed IPC.

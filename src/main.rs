@@ -8,6 +8,7 @@ mod ipc;
 mod memory;
 mod pci;
 mod scheduler;
+mod services;
 mod virtio;
 mod virtual_memory;
 
@@ -106,10 +107,19 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     debug::write_line(b"LogOS: VirtIO driver ready");
     let service_capability =
         capabilities.grant(capabilities::CapabilityKind::Service).expect("no capability slots");
+    let mut services = services::Registry::new();
+    let diagnostics = services
+        .register(&capabilities, service_capability, services::Service::Diagnostics)
+        .expect("service registration failed");
+    assert_eq!(services.resolve(services::Service::Diagnostics), Some(diagnostics));
     let mut channel = ipc::Channel::new();
-    assert!(channel.send(&capabilities, service_capability, ipc::Message::Ping));
-    assert_eq!(channel.receive(), Some(ipc::Message::Ping));
+    assert!(channel.send(&capabilities, service_capability, diagnostics, ipc::Message::Ping));
+    assert_eq!(
+        channel.receive(),
+        Some(ipc::Envelope { destination: diagnostics, message: ipc::Message::Ping })
+    );
     debug::write_line(b"LogOS: IPC ready");
+    debug::write_line(b"LogOS: service registry ready");
     loop {
         unsafe { core::arch::asm!("hlt") };
     }

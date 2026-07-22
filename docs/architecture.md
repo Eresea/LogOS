@@ -36,6 +36,10 @@ The bootstrap driver binds a legacy VirtIO PCI function through its I/O BAR and 
 
 The kernel provides a capability-gated typed message channel. It currently carries a fixed queue of `Ping` messages; services will define further message types as they are added.
 
+## Service registry
+
+The kernel registers typed services behind opaque handles. Registration requires a service capability, and IPC envelopes use the resolved handle rather than a direct pointer.
+
 ## Execution model
 
 - The kernel, drivers, scheduler, memory manager, IPC, filesystem, networking, and compositor are native Rust.
