@@ -1,13 +1,21 @@
 use core::{
     arch::asm,
-    sync::atomic::{AtomicU8, Ordering},
+    cell::UnsafeCell,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
-static SCANCODE: AtomicU8 = AtomicU8::new(0);
+const SCANCODES: usize = 16;
+
+struct ScancodeBuffer(UnsafeCell<[u8; SCANCODES]>);
+
+unsafe impl Sync for ScancodeBuffer {}
+
+static SCANCODES_BUFFER: ScancodeBuffer = ScancodeBuffer(UnsafeCell::new([0; SCANCODES]));
+static HEAD: AtomicUsize = AtomicUsize::new(0);
+static TAIL: AtomicUsize = AtomicUsize::new(0);
 
 pub fn poll() -> Option<u8> {
-    let scancode = SCANCODE.swap(0, Ordering::Acquire);
-    if scancode != 0 {
+    if let Some(scancode) = pop() {
         return decode(scancode);
     }
     if unsafe { inb(0x64) } & 1 == 0 {
@@ -44,9 +52,28 @@ pub fn enable_interrupts() -> bool {
 #[unsafe(no_mangle)]
 extern "C" fn keyboard_interrupt() {
     if unsafe { inb(0x64) } & 1 != 0 {
-        // ponytail: one pending scancode; replace with a ring buffer when input bursts matter.
-        SCANCODE.store(unsafe { inb(0x60) }, Ordering::Release);
+        push(unsafe { inb(0x60) });
     }
+}
+
+fn push(scancode: u8) {
+    let head = HEAD.load(Ordering::Relaxed);
+    let next = (head + 1) % SCANCODES;
+    if next == TAIL.load(Ordering::Acquire) {
+        return;
+    }
+    unsafe { (*SCANCODES_BUFFER.0.get())[head] = scancode };
+    HEAD.store(next, Ordering::Release);
+}
+
+fn pop() -> Option<u8> {
+    let tail = TAIL.load(Ordering::Relaxed);
+    if tail == HEAD.load(Ordering::Acquire) {
+        return None;
+    }
+    let scancode = unsafe { (*SCANCODES_BUFFER.0.get())[tail] };
+    TAIL.store((tail + 1) % SCANCODES, Ordering::Release);
+    Some(scancode)
 }
 
 fn wait_read() -> bool {

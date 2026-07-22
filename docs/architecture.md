@@ -14,7 +14,7 @@ LogOS copies the active UEFI top-level page table, adds one kernel-owned high vi
 
 ## Interrupts
 
-The kernel owns the IDT and unmasks PIT IRQ0 and PS/2 IRQ1. CPU exceptions halt safely; the timer increments a tick counter and the keyboard handler captures one scancode; all other hardware IRQs remain masked until their drivers exist.
+The kernel owns the IDT and unmasks PIT IRQ0 and PS/2 IRQ1. CPU exceptions halt safely; the timer increments a tick counter and the keyboard handler queues scancodes; all other hardware IRQs remain masked until their drivers exist.
 
 ## Scheduling
 
