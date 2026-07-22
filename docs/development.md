@@ -15,6 +15,9 @@ Install QEMU and make `qemu-system-x86_64` available on `PATH`.
 cargo fmt --check
 cargo clippy -- -D warnings
 .\scripts\run.ps1
+.\scripts\verify.ps1
 ```
 
 The terminal prints the boot, memory, timer, scheduler, capability, PCI, VirtIO, IPC, and registry markers, followed by `LogOS: VirtIO request ready`. That final marker verifies a balloon request reaches the VirtIO used ring.
+
+`verify.ps1` runs QEMU headlessly and fails if that marker is not reached within 15 seconds.
