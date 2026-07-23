@@ -66,24 +66,45 @@ fn draw_boot_screen() -> uefi::Result<BootInfo> {
 fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     let health = health::Startup::new();
     trace::record(trace::Event::Boot);
-    health.check(b"debug", true);
-    health.check(
-        b"framebuffer",
-        !boot_info.framebuffer.is_null()
-            && boot_info.framebuffer_size > 0
-            && boot_info.resolution.0 > 0
-            && boot_info.resolution.1 > 0,
-    );
+    let framebuffer_ok = !boot_info.framebuffer.is_null()
+        && boot_info.framebuffer_size > 0
+        && boot_info.resolution.0 > 0
+        && boot_info.resolution.1 > 0;
+    health.check(b"framebuffer", framebuffer_ok);
+    let Some(mut startup) = console::Startup::new(
+        boot_info.framebuffer,
+        boot_info.resolution.0,
+        boot_info.resolution.1,
+        boot_info.stride,
+    ) else {
+        health.fail(b"console");
+    };
+    startup.start();
+    macro_rules! check {
+        ($module:expr, $passed:expr $(,)?) => {{
+            let passed = $passed;
+            startup.check($module, passed);
+            health.check($module, passed);
+        }};
+    }
+    macro_rules! fail {
+        ($module:expr) => {{
+            startup.check($module, false);
+            health.fail($module);
+        }};
+    }
+    check!(b"debug", true);
+    check!(b"framebuffer", framebuffer_ok);
     let memory_regions = memory_map.len();
     let Some(mut memory) = memory::PhysicalMemory::from_memory_map(&memory_map) else {
-        health.fail(b"memory");
+        fail!(b"memory");
     };
     let Some(first_page) = memory.allocate_page() else {
-        health.fail(b"memory");
+        fail!(b"memory");
     };
-    health.check(b"memory", first_page & 0xfff == 0 && memory::self_check());
+    check!(b"memory", first_page & 0xfff == 0 && memory::self_check());
     let Some(mapped_page) = virtual_memory::install(&mut memory) else {
-        health.fail(b"virtual memory");
+        fail!(b"virtual memory");
     };
     let _ = (
         boot_info.framebuffer,
@@ -94,26 +115,26 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
         first_page,
         mapped_page,
     );
-    health.check(b"virtual memory", unsafe { virtual_memory::verify(mapped_page) });
+    check!(b"virtual memory", unsafe { virtual_memory::verify(mapped_page) });
     let keyboard_interrupts = interrupts::install();
     interrupts::enable();
     interrupts::wait_for_tick();
-    health.check(b"interrupts", keyboard_interrupts);
+    check!(b"interrupts", keyboard_interrupts);
     let mut scheduler = scheduler::Scheduler::new();
-    health.check(b"scheduler", scheduler::self_check());
+    check!(b"scheduler", scheduler::self_check());
     let mut task_a = scheduler::Task::new(task_a);
     let mut task_b = scheduler::Task::new(task_b);
     if !scheduler.spawn(&mut task_a) || !scheduler.spawn(&mut task_b) {
-        health.fail(b"scheduler");
+        fail!(b"scheduler");
     }
     while scheduler.run_next() {
         interrupts::wait_for_tick();
     }
     let mut capabilities = capabilities::CapabilityManager::new();
     let Some(debug_capability) = capabilities.grant(capabilities::CapabilityKind::Debug) else {
-        health.fail(b"capabilities");
+        fail!(b"capabilities");
     };
-    health.check(
+    check!(
         b"capabilities",
         capabilities.allows(debug_capability, capabilities::CapabilityKind::Debug)
             && capabilities.revoke(debug_capability)
@@ -121,34 +142,31 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     );
     let devices = pci::scan();
     let Some(first_device) = devices.first() else {
-        health.fail(b"pci");
+        fail!(b"pci");
     };
-    health.check(b"pci", devices.len() > 0);
+    check!(b"pci", devices.len() > 0);
     let _ = (first_device.location(), first_device.vendor_id(), first_device.device_id());
     let Some(virtio) = devices.find(0x1af4, 0x1002) else {
-        health.fail(b"virtio");
+        fail!(b"virtio");
     };
     let Some(service_capability) = capabilities.grant(capabilities::CapabilityKind::Service) else {
-        health.fail(b"capabilities");
+        fail!(b"capabilities");
     };
     let mut services = services::Registry::new();
     let Some(virtio_handle) =
         services.register(&capabilities, service_capability, services::Service::VirtioBalloon)
     else {
-        health.fail(b"services");
+        fail!(b"services");
     };
-    health.check(
-        b"services",
-        services.resolve(services::Service::VirtioBalloon) == Some(virtio_handle),
-    );
+    check!(b"services", services.resolve(services::Service::VirtioBalloon) == Some(virtio_handle),);
     let Some(virtio_service) = virtio::VirtioService::bind(virtio, virtio_handle, &mut memory)
     else {
-        health.fail(b"virtio");
+        fail!(b"virtio");
     };
     let channel = ipc::Channel::new();
     let responses = ipc::Channel::new();
     if !channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping) {
-        health.fail(b"ipc");
+        fail!(b"ipc");
     }
     let mut service_task = virtio::ServiceTask::new(
         &virtio_service,
@@ -160,19 +178,16 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     );
     let mut service_scheduler = scheduler::Scheduler::new();
     if !service_scheduler.spawn(&mut service_task) || !service_scheduler.run_next() {
-        health.fail(b"scheduler");
+        fail!(b"scheduler");
     }
-    health.check(
-        b"ipc",
-        responses.receive().is_some_and(|reply| reply.message == ipc::Message::Pong),
-    );
-    health.check(
+    check!(b"ipc", responses.receive().is_some_and(|reply| reply.message == ipc::Message::Pong),);
+    check!(
         b"service task",
         channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping)
             && service_scheduler.run_next()
             && responses.receive().is_some_and(|reply| reply.message == ipc::Message::Pong),
     );
-    health.check(
+    check!(
         b"virtio",
         channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Inflate)
             && service_scheduler.run_next()
@@ -183,11 +198,11 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
             && service_scheduler.run_next()
             && responses.receive().is_some_and(|reply| reply.message == ipc::Message::Complete),
     );
-    let Some(mut console) = console::Shell::new(
-        boot_info.framebuffer,
-        boot_info.resolution.0,
-        boot_info.resolution.1,
-        boot_info.stride,
+    check!(b"console", true);
+    check!(b"keyboard", keyboard::self_check());
+    check!(b"trace", trace::self_check());
+    let mut console = console::Shell::from_startup(
+        startup,
         console::Endpoint::new(
             &channel,
             &responses,
@@ -195,12 +210,8 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
             service_capability,
             virtio_handle,
         ),
-    ) else {
-        health.fail(b"console");
-    };
-    health.check(b"console", console.start());
-    health.check(b"keyboard", keyboard::self_check());
-    health.check(b"trace", trace::self_check());
+    );
+    let _ = console.start();
     health.finish();
     interrupts::disable_timer();
     console.run(|| {

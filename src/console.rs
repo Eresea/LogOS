@@ -19,6 +19,10 @@ pub struct Shell<'a> {
     endpoint: Endpoint<'a>,
 }
 
+pub struct Startup {
+    console: Console,
+}
+
 #[derive(Clone, Copy)]
 pub struct Endpoint<'a> {
     channel: &'a Channel,
@@ -61,25 +65,11 @@ struct Console {
 }
 
 impl<'a> Shell<'a> {
-    pub fn new(
-        framebuffer: *mut u8,
-        width: usize,
-        height: usize,
-        stride: usize,
-        endpoint: Endpoint<'a>,
-    ) -> Option<Self> {
-        (!framebuffer.is_null() && width > 0 && height > ORIGIN.1 && stride >= width).then_some(
-            Self {
-                console: Console { framebuffer, width, height, stride, cursor: ORIGIN },
-                command: [0; 16],
-                length: 0,
-                endpoint,
-            },
-        )
+    pub fn from_startup(startup: Startup, endpoint: Endpoint<'a>) -> Self {
+        Self { console: startup.console, command: [0; 16], length: 0, endpoint }
     }
 
     pub fn start(&mut self) -> bool {
-        self.console.reset();
         self.console.write(b"LOGOS KERNEL CONSOLE\nTYPE HELP TRACE PING INFLATE OR EXIT\n");
         self.prompt();
         true
@@ -109,7 +99,27 @@ impl<'a> Shell<'a> {
             }
         }
     }
+}
 
+impl Startup {
+    pub fn new(framebuffer: *mut u8, width: usize, height: usize, stride: usize) -> Option<Self> {
+        (!framebuffer.is_null() && width > 0 && height > ORIGIN.1 && stride >= width).then_some(
+            Self { console: Console { framebuffer, width, height, stride, cursor: ORIGIN } },
+        )
+    }
+
+    pub fn start(&mut self) {
+        self.console.reset();
+        self.console.write(b"LOGOS STARTUP HEALTH\n");
+    }
+
+    pub fn check(&mut self, module: &[u8], passed: bool) {
+        self.console.write(module);
+        self.console.write(if passed { b" OK\n" } else { b" FAIL\n" });
+    }
+}
+
+impl<'a> Shell<'a> {
     fn key(&mut self, key: u8) {
         match key {
             0x1b => self.exit(),

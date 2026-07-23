@@ -42,7 +42,7 @@ The kernel registers typed services behind opaque handles. Registration requires
 
 ## Startup health
 
-Each initialized kernel subsystem must report a startup self-check. A failed check emits its module name and halts; the boot verifier accepts only the final `startup self check passed` marker.
+Each initialized kernel subsystem must report a startup self-check to the debug console and framebuffer. A failed check emits its module name, displays `FAIL`, and halts; the boot verifier accepts only the final `startup self check passed` marker.
 
 ## Tracing
 
