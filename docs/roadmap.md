@@ -8,21 +8,23 @@ Core v1 is a dependable, event-driven kernel foundation. It is not a desktop OS,
 
 - [x] UEFI boot, debug output, startup health gate, and automated headless QEMU verification.
 - [x] Framebuffer console with PS/2 IRQ keyboard input.
-- [x] IDT, exception halt path, PIT bootstrap clock, and Q35 IOAPIC VirtIO completion IRQ.
-- [x] Cooperative ready/blocked task scheduler and event-driven idle.
-- [x] Physical-page allocation across conventional-memory ranges and one kernel-owned virtual mapping.
+- [x] IDT, exception halt path, PIT bootstrap clock, and ACPI-derived IOAPIC VirtIO completion IRQ.
+- [x] Cooperative ready/blocked task scheduler, generation-tagged task handles, and event-driven idle.
+- [x] Physical-page allocation across conventional-memory ranges, owned-page recycling, and a reversible bootstrap virtual mapping.
 - [x] Capability checks, service registry, queued IPC requests/replies, PCI discovery, and legacy VirtIO balloon service.
+- [x] ACPI RSDP/XSDT/MADT validation and APIC topology discovery.
+- [x] Fixed trace ring for bootstrap, scheduler, and VirtIO lifecycle events.
 
 ### Required before Core v1
 
-- [ ] Parse ACPI tables for APIC topology and PCI interrupt routing; remove fixed Q35 APIC addresses and route assumptions.
-- [ ] Track physical-page ownership and support freeing; make virtual mappings explicit, reversible, and permissioned.
-- [ ] Replace fixed scheduler slots and hard-coded wake indexes with task handles and event wait queues.
+- [ ] Parse ACPI PCI routing and remove reliance on firmware-programmed PCI interrupt lines.
+- [ ] Extend owned-page tracking beyond the bounded recycle pool; add permissioned mappings and service-lifetime reclamation.
+- [ ] Replace fixed scheduler slots with event wait queues.
 - [ ] Make IPC safe for interrupt and concurrent producers, with bounded backpressure and request/reply correlation.
 - [ ] Generalize VirtIO queue ownership, completion, errors, and device reset; keep the balloon driver as the hardware proof.
 - [ ] Define driver lifecycle: discover, bind, interrupt, quiesce, and recover without kernel-wide assumptions.
 - [ ] Add kernel panic/fault diagnostics, structured health reporting, and a defined recovery policy for failed drivers.
-- [ ] Expand the fixed trace ring into fault, scheduler, and driver lifecycle diagnostics with an export path.
+- [ ] Expand the trace ring into fault and driver lifecycle diagnostics with an export path.
 - [ ] Add ACPI power-off and reset for a real `exit` path.
 - [ ] Expand QEMU integration checks to cover console input, IPC replies, blocked-task wake-up, and driver recovery.
 
