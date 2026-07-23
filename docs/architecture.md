@@ -6,7 +6,7 @@ LogOS exits UEFI boot services into a Rust kernel. It retains the final UEFI mem
 
 ## Physical memory
 
-The bootstrap allocator returns 4 KiB physical pages from up to eight conventional-memory ranges. It does not yet free pages; freeing requires kernel-owned allocation metadata.
+The bootstrap allocator returns 4 KiB physical pages from up to eight conventional-memory ranges. Reclaimable callers use owned page tokens backed by a small recycle pool; long-lived driver pages remain reserved until driver teardown exists.
 
 ## Virtual memory
 
