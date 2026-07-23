@@ -2,11 +2,11 @@
 
 ## Current state
 
-LogOS exits UEFI boot services into a Rust kernel. It retains the final UEFI memory map and boot framebuffer metadata, then initializes a physical-page allocator from the largest conventional-memory range.
+LogOS exits UEFI boot services into a Rust kernel. It retains the final UEFI memory map and boot framebuffer metadata, then initializes a physical-page allocator from its conventional-memory ranges.
 
 ## Physical memory
 
-The bootstrap allocator returns 4 KiB physical pages from one conventional-memory range. It does not yet free pages or span ranges; both require a kernel-owned metadata allocator.
+The bootstrap allocator returns 4 KiB physical pages from up to eight conventional-memory ranges. It does not yet free pages; freeing requires kernel-owned allocation metadata.
 
 ## Virtual memory
 

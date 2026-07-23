@@ -79,7 +79,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     let Some(first_page) = memory.allocate_page() else {
         health.fail(b"memory");
     };
-    health.check(b"memory", first_page & 0xfff == 0);
+    health.check(b"memory", first_page & 0xfff == 0 && memory::self_check());
     let Some(mapped_page) = virtual_memory::install(&mut memory) else {
         health.fail(b"virtual memory");
     };
