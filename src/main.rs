@@ -138,7 +138,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     check!(b"scheduler", scheduler::self_check());
     let mut task_a = scheduler::Task::new(task_a);
     let mut task_b = scheduler::Task::new(task_b);
-    if !scheduler.spawn(&mut task_a) || !scheduler.spawn(&mut task_b) {
+    if scheduler.spawn(&mut task_a).is_none() || scheduler.spawn(&mut task_b).is_none() {
         fail!(b"scheduler");
     }
     while scheduler.run_next() {
@@ -191,7 +191,10 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         &mut memory,
     );
     let mut service_scheduler = scheduler::Scheduler::new();
-    if !service_scheduler.spawn(&mut service_task) || !service_scheduler.run_next() {
+    let Some(service_task_handle) = service_scheduler.spawn(&mut service_task) else {
+        fail!(b"scheduler");
+    };
+    if !service_scheduler.run_next() {
         fail!(b"scheduler");
     }
     check!(b"ipc", responses.receive().is_some_and(|reply| reply.message == ipc::Message::Pong),);
@@ -207,7 +210,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
             && service_scheduler.run_next()
             && {
                 interrupts::wait_for_virtio();
-                service_scheduler.wake(0)
+                service_scheduler.wake(service_task_handle)
             }
             && service_scheduler.run_next()
             && responses.receive().is_some_and(|reply| reply.message == ipc::Message::Complete),
@@ -230,7 +233,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     interrupts::disable_timer();
     console.run(|| {
         if virtio::completion_pending() {
-            let _ = service_scheduler.wake(0);
+            let _ = service_scheduler.wake(service_task_handle);
         }
         let _ = service_scheduler.run_next();
     })

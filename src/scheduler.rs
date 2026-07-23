@@ -10,6 +10,9 @@ pub trait Runnable {
     fn run(&mut self) -> TaskState;
 }
 
+#[derive(Clone, Copy)]
+pub struct TaskHandle(u32);
+
 pub struct Task {
     entry: fn(&mut Task) -> TaskState,
     runs: usize,
@@ -34,27 +37,30 @@ impl Runnable for Task {
 
 pub struct Scheduler<'a> {
     tasks: [Option<Entry<'a>>; TASKS],
+    generations: [u16; TASKS],
     next: usize,
 }
 
 struct Entry<'a> {
     task: &'a mut dyn Runnable,
     blocked: bool,
+    generation: u16,
 }
 
 impl<'a> Scheduler<'a> {
     pub const fn new() -> Self {
-        Self { tasks: [None, None], next: 0 }
+        Self { tasks: [None, None], generations: [1; TASKS], next: 0 }
     }
 
-    pub fn spawn(&mut self, task: &'a mut dyn Runnable) -> bool {
-        for slot in &mut self.tasks {
+    pub fn spawn(&mut self, task: &'a mut dyn Runnable) -> Option<TaskHandle> {
+        for (index, slot) in self.tasks.iter_mut().enumerate() {
             if slot.is_none() {
-                *slot = Some(Entry { task, blocked: false });
-                return true;
+                let generation = self.generations[index];
+                *slot = Some(Entry { task, blocked: false, generation });
+                return Some(TaskHandle((u32::from(generation) << 16) | index as u32));
             }
         }
-        false
+        None
     }
 
     pub fn run_next(&mut self) -> bool {
@@ -72,7 +78,9 @@ impl<'a> Scheduler<'a> {
                         entry.blocked = true;
                         self.tasks[index] = Some(entry);
                     }
-                    TaskState::Complete => {}
+                    TaskState::Complete => {
+                        self.generations[index] = self.generations[index].wrapping_add(1);
+                    }
                 }
                 return true;
             }
@@ -80,11 +88,13 @@ impl<'a> Scheduler<'a> {
         false
     }
 
-    pub fn wake(&mut self, index: usize) -> bool {
+    pub fn wake(&mut self, handle: TaskHandle) -> bool {
+        let index = handle.0 as u16 as usize;
+        let generation = (handle.0 >> 16) as u16;
         let Some(Some(entry)) = self.tasks.get_mut(index) else {
             return false;
         };
-        if !entry.blocked {
+        if !entry.blocked || entry.generation != generation {
             return false;
         }
         entry.blocked = false;
@@ -105,13 +115,15 @@ pub fn self_check() -> bool {
     let mut second = Task::new(complete);
     let mut third = Task::new(complete);
     let mut scheduler = Scheduler::new();
-    scheduler.spawn(&mut first)
-        && scheduler.spawn(&mut second)
-        && !scheduler.spawn(&mut third)
+    let Some(first_handle) = scheduler.spawn(&mut first) else {
+        return false;
+    };
+    scheduler.spawn(&mut second).is_some()
+        && scheduler.spawn(&mut third).is_none()
         && scheduler.run_next()
         && scheduler.run_next()
         && !scheduler.run_next()
-        && scheduler.wake(0)
+        && scheduler.wake(first_handle)
         && scheduler.run_next()
         && !scheduler.run_next()
 }
