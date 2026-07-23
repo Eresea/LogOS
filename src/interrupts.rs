@@ -80,6 +80,10 @@ pub fn wait_for_virtio() {
     }
 }
 
+pub fn disable_timer() {
+    unsafe { outb(0x21, 0xfd) };
+}
+
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct IdtEntry {

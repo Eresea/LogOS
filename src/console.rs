@@ -102,6 +102,7 @@ impl<'a> Shell<'a> {
             }
             if let Some(key) = keyboard::poll() {
                 self.key(key);
+                schedule();
             } else {
                 unsafe { core::arch::asm!("hlt") };
             }

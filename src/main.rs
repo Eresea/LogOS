@@ -199,6 +199,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     health.check(b"console", console.start());
     health.check(b"keyboard", keyboard::self_check());
     health.finish();
+    interrupts::disable_timer();
     console.run(|| {
         if virtio::completion_pending() {
             let _ = service_scheduler.wake(0);
