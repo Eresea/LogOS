@@ -145,7 +145,11 @@ impl<'a> Shell<'a> {
         match &self.command[..self.length] {
             b"help" => self.console.write(b"COMMANDS HELP TRACE CLEAR VERSION PING INFLATE EXIT\n"),
             b"clear" => self.console.reset(),
-            b"trace" => self.console.write(trace::message()),
+            b"trace" => {
+                for event in trace::snapshot().events() {
+                    self.console.write(trace::message(*event));
+                }
+            }
             b"ping" if self.endpoint.ping() => self.console.write(b"PING SENT\n"),
             b"inflate" if self.endpoint.inflate() => self.console.write(b"INFLATE SENT\n"),
             b"version" => self.console.write(b"LOGOS 0 1 0\n"),

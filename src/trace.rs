@@ -16,6 +16,12 @@ pub enum Event {
     SelfCheck,
 }
 
+#[derive(Clone, Copy)]
+pub struct Snapshot {
+    events: [Event; EVENTS],
+    len: usize,
+}
+
 struct Ring(UnsafeCell<[Event; EVENTS]>);
 
 unsafe impl Sync for Ring {}
@@ -42,13 +48,37 @@ pub fn latest() -> Event {
     if head == 0 { Event::Empty } else { unsafe { (*RING.0.get())[(head - 1) % EVENTS] } }
 }
 
-pub fn self_check() -> bool {
-    record(Event::SelfCheck);
-    latest() == Event::SelfCheck
+pub fn snapshot() -> Snapshot {
+    let flags: u64;
+    unsafe {
+        core::arch::asm!("pushfq", "pop {}", out(reg) flags);
+        core::arch::asm!("cli");
+        let head = HEAD.load(Ordering::Acquire);
+        let len = head.min(EVENTS);
+        let mut events = [Event::Empty; EVENTS];
+        for (index, event) in events[..len].iter_mut().enumerate() {
+            *event = (*RING.0.get())[(head - len + index) % EVENTS];
+        }
+        if flags & (1 << 9) != 0 {
+            core::arch::asm!("sti");
+        }
+        Snapshot { events, len }
+    }
 }
 
-pub fn message() -> &'static [u8] {
-    match latest() {
+impl Snapshot {
+    pub fn events(&self) -> &[Event] {
+        &self.events[..self.len]
+    }
+}
+
+pub fn self_check() -> bool {
+    record(Event::SelfCheck);
+    latest() == Event::SelfCheck && snapshot().events().last() == Some(&Event::SelfCheck)
+}
+
+pub fn message(event: Event) -> &'static [u8] {
+    match event {
         Event::Boot => b"TRACE BOOT\n",
         Event::TaskBlocked => b"TRACE TASK BLOCKED\n",
         Event::TaskWoken => b"TRACE TASK WOKEN\n",
