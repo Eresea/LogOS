@@ -59,8 +59,8 @@ impl PciDevice {
         config_read(self.bus, self.device, self.function, 0x10 + index * 4)
     }
 
-    pub fn interrupt_line(self) -> u8 {
-        config_read(self.bus, self.device, self.function, 0x3c) as u8
+    pub fn interrupt_pin(self) -> u8 {
+        (config_read(self.bus, self.device, self.function, 0x3c) >> 8) as u8
     }
 }
 

@@ -102,6 +102,7 @@ impl Runnable for ServiceTask<'_> {
 impl VirtioService {
     pub fn bind(
         device: PciDevice,
+        interrupt_gsi: u32,
         handle: ServiceHandle,
         memory: &mut PhysicalMemory,
     ) -> Option<Self> {
@@ -133,7 +134,7 @@ impl VirtioService {
         }
         let service = Self { queue, queue_size, ..service };
         if unsafe { inb(service.status_port) } & DRIVER_OK == 0
-            || !crate::interrupts::route_virtio(device.interrupt_line())
+            || !crate::interrupts::route_virtio(interrupt_gsi)
         {
             return None;
         }

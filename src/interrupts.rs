@@ -62,7 +62,7 @@ pub fn install(madt: crate::acpi::Madt) -> bool {
     crate::keyboard::enable_interrupts()
 }
 
-pub fn route_virtio(gsi: u8) -> bool {
+pub fn route_virtio(gsi: u32) -> bool {
     let gsi = gsi as usize;
     let base = IO_APIC_GSI_BASE.load(Ordering::Acquire);
     let Some(pin) = gsi.checked_sub(base) else {

@@ -18,7 +18,7 @@ The kernel owns the IDT and uses PIT IRQ0 only during startup, then masks it bef
 
 ## ACPI
 
-The UEFI entry path finds and validates the ACPI 2 RSDP and XSDT, retaining MADT APIC addresses after boot services end. PCI interrupt routing will be derived from those tables before fixed Q35 mappings are removed.
+The UEFI entry path finds and validates the ACPI 2 RSDP and XSDT, retaining MADT APIC addresses after boot services end. It selects QEMU's APIC `_PRT` package through the FADT and routes root-bus PCI interrupts by device and pin, rather than the firmware-programmed PCI interrupt line.
 
 ## Scheduling
 

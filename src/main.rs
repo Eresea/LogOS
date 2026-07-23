@@ -173,7 +173,14 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         fail!(b"services");
     };
     check!(b"services", services.resolve(services::Service::VirtioBalloon) == Some(virtio_handle),);
-    let Some(virtio_service) = virtio::VirtioService::bind(virtio, virtio_handle, &mut memory)
+    let Some(virtio_gsi) = acpi.and_then(|tables| {
+        let (bus, device, _) = virtio.location();
+        tables.pci_gsi(bus, device, virtio.interrupt_pin().checked_sub(1)?)
+    }) else {
+        fail!(b"acpi pci routing");
+    };
+    let Some(virtio_service) =
+        virtio::VirtioService::bind(virtio, virtio_gsi, virtio_handle, &mut memory)
     else {
         fail!(b"virtio");
     };
