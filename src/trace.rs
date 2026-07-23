@@ -9,6 +9,8 @@ const EVENTS: usize = 64;
 pub enum Event {
     Empty,
     Boot,
+    TaskBlocked,
+    TaskWoken,
     VirtioSubmit,
     VirtioComplete,
     SelfCheck,
@@ -48,6 +50,8 @@ pub fn self_check() -> bool {
 pub fn message() -> &'static [u8] {
     match latest() {
         Event::Boot => b"TRACE BOOT\n",
+        Event::TaskBlocked => b"TRACE TASK BLOCKED\n",
+        Event::TaskWoken => b"TRACE TASK WOKEN\n",
         Event::VirtioSubmit => b"TRACE VIRTIO SUBMIT\n",
         Event::VirtioComplete => b"TRACE VIRTIO COMPLETE\n",
         Event::SelfCheck => b"TRACE SELF CHECK\n",

@@ -77,6 +77,7 @@ impl<'a> Scheduler<'a> {
                     TaskState::Blocked => {
                         entry.blocked = true;
                         self.tasks[index] = Some(entry);
+                        crate::trace::record(crate::trace::Event::TaskBlocked);
                     }
                     TaskState::Complete => {
                         self.generations[index] = self.generations[index].wrapping_add(1);
@@ -98,6 +99,7 @@ impl<'a> Scheduler<'a> {
             return false;
         }
         entry.blocked = false;
+        crate::trace::record(crate::trace::Event::TaskWoken);
         true
     }
 }
