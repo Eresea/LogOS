@@ -16,6 +16,10 @@ LogOS copies the active UEFI top-level page table, adds one kernel-owned high vi
 
 The kernel owns the IDT and uses PIT IRQ0 only during startup, then masks it before entering the console so `hlt` wakes only for keyboard or device events. CPU exceptions halt safely; the keyboard handler queues scancodes. Q35 PCI interrupts are routed through its IOAPIC; the VirtIO completion IRQ acknowledges the device and wakes its blocked task. This assumes QEMU's standard Q35 IOAPIC and local-APIC addresses.
 
+## ACPI
+
+The UEFI entry path finds and validates the ACPI 2 RSDP, retaining its XSDT address after boot services end. APIC topology and PCI interrupt routing will be derived from those tables before fixed Q35 mappings are removed.
+
 ## Scheduling
 
 The bootstrap scheduler runs two fixed cooperative task slots in round-robin order. A task yields by returning `Ready`, sleeps by returning `Blocked`, and is removed when it returns `Complete`. An interrupt or event explicitly wakes a blocked task. The VirtIO service is a persistent task that consumes its IPC queue whenever the console loop yields to the scheduler.

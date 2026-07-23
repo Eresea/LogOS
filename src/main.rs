@@ -1,6 +1,7 @@
 #![no_main]
 #![no_std]
 
+mod acpi;
 mod capabilities;
 mod console;
 mod debug;
@@ -33,10 +34,11 @@ fn main() -> Status {
         Ok(info) => info,
         Err(_) => return Status::DEVICE_ERROR,
     };
+    let acpi = acpi::discover();
     debug::write_line(b"LogOS: leaving UEFI boot services");
 
     let memory_map = unsafe { boot::exit_boot_services(None) };
-    kernel_main(boot_info, memory_map)
+    kernel_main(boot_info, memory_map, acpi)
 }
 
 struct BootInfo {
@@ -63,7 +65,7 @@ fn draw_boot_screen() -> uefi::Result<BootInfo> {
     })
 }
 
-fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
+fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acpi::Tables>) -> ! {
     let health = health::Startup::new();
     trace::record(trace::Event::Boot);
     let framebuffer_ok = !boot_info.framebuffer.is_null()
@@ -95,6 +97,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     }
     check!(b"debug", true);
     check!(b"framebuffer", framebuffer_ok);
+    check!(b"acpi", acpi.is_some_and(|tables| tables.xsdt != 0));
     let memory_regions = memory_map.len();
     let Some(mut memory) = memory::PhysicalMemory::from_memory_map(&memory_map) else {
         fail!(b"memory");
