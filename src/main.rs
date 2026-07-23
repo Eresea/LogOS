@@ -97,7 +97,15 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     }
     check!(b"debug", true);
     check!(b"framebuffer", framebuffer_ok);
-    check!(b"acpi", acpi.is_some_and(|tables| tables.xsdt != 0));
+    check!(
+        b"acpi",
+        acpi.is_some_and(|tables| {
+            tables.xsdt != 0
+                && tables.madt.is_some_and(|madt| {
+                    madt.local_apic != 0 && madt.io_apic != 0 && madt.io_apic_gsi_base == 0
+                })
+        }),
+    );
     let memory_regions = memory_map.len();
     let Some(mut memory) = memory::PhysicalMemory::from_memory_map(&memory_map) else {
         fail!(b"memory");
