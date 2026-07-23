@@ -106,6 +106,9 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                 })
         }),
     );
+    let Some(madt) = acpi.and_then(|tables| tables.madt) else {
+        fail!(b"acpi");
+    };
     let memory_regions = memory_map.len();
     let Some(mut memory) = memory::PhysicalMemory::from_memory_map(&memory_map) else {
         fail!(b"memory");
@@ -127,7 +130,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         mapped_page,
     );
     check!(b"virtual memory", unsafe { virtual_memory::verify(mapped_page) });
-    let keyboard_interrupts = interrupts::install();
+    let keyboard_interrupts = interrupts::install(madt);
     interrupts::enable();
     interrupts::wait_for_tick();
     check!(b"interrupts", keyboard_interrupts);

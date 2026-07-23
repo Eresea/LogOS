@@ -1,6 +1,6 @@
 use core::{
     arch::{asm, global_asm},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 const TIMER_VECTOR: usize = 32;
@@ -11,6 +11,9 @@ const PIT_HZ: u16 = 100;
 const PIT_DIVISOR: u16 = (1_193_182u32 / PIT_HZ as u32) as u16;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
+static LOCAL_APIC: AtomicUsize = AtomicUsize::new(0);
+static IO_APIC: AtomicUsize = AtomicUsize::new(0);
+static IO_APIC_GSI_BASE: AtomicUsize = AtomicUsize::new(0);
 static mut IDT: [IdtEntry; 256] = [IdtEntry::MISSING; 256];
 
 unsafe extern "C" {
@@ -29,10 +32,17 @@ extern "C" fn timer_tick() {
 #[unsafe(no_mangle)]
 extern "C" fn virtio_interrupt() {
     crate::virtio::interrupt();
-    unsafe { core::ptr::write_volatile((0xfee0_0000usize + 0xb0) as *mut u32, 0) };
+    let local_apic = LOCAL_APIC.load(Ordering::Acquire);
+    unsafe { core::ptr::write_volatile((local_apic + 0xb0) as *mut u32, 0) };
 }
 
-pub fn install() -> bool {
+pub fn install(madt: crate::acpi::Madt) -> bool {
+    if madt.local_apic == 0 || madt.io_apic == 0 {
+        return false;
+    }
+    LOCAL_APIC.store(madt.local_apic, Ordering::Release);
+    IO_APIC.store(madt.io_apic, Ordering::Release);
+    IO_APIC_GSI_BASE.store(madt.io_apic_gsi_base as usize, Ordering::Release);
     unsafe {
         let idt = core::ptr::addr_of_mut!(IDT);
         let selector = code_selector();
@@ -53,12 +63,17 @@ pub fn install() -> bool {
 }
 
 pub fn route_virtio(gsi: u8) -> bool {
-    if gsi >= 24 {
+    let gsi = gsi as usize;
+    let base = IO_APIC_GSI_BASE.load(Ordering::Acquire);
+    let Some(pin) = gsi.checked_sub(base) else {
         return false;
-    }
+    };
     unsafe {
-        ioapic_write(0x10 + gsi * 2, VIRTIO_VECTOR as u32);
-        ioapic_write(0x11 + gsi * 2, 0);
+        if pin > ((ioapic_read(1) >> 16) & 0xff) as usize {
+            return false;
+        }
+        ioapic_write(0x10 + (pin as u8) * 2, VIRTIO_VECTOR as u32);
+        ioapic_write(0x11 + (pin as u8) * 2, 0);
     }
     true
 }
@@ -168,10 +183,18 @@ unsafe fn outb(port: u16, value: u8) {
 }
 
 unsafe fn ioapic_write(register: u8, value: u32) {
-    let select = 0xfec0_0000 as *mut u32;
+    let select = IO_APIC.load(Ordering::Acquire) as *mut u32;
     unsafe {
         select.write_volatile(register as u32);
         select.add(4).write_volatile(value);
+    }
+}
+
+unsafe fn ioapic_read(register: u8) -> u32 {
+    let select = IO_APIC.load(Ordering::Acquire) as *mut u32;
+    unsafe {
+        select.write_volatile(register as u32);
+        select.add(4).read_volatile()
     }
 }
 
