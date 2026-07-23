@@ -10,7 +10,7 @@ The bootstrap allocator returns 4 KiB physical pages from up to eight convention
 
 ## Virtual memory
 
-LogOS copies the active UEFI top-level page table, adds one kernel-owned high virtual mapping, then reloads CR3. This preserves the firmware mappings needed during bring-up while proving the kernel can own new mappings.
+LogOS copies the active UEFI top-level page table, adds one kernel-owned high virtual mapping, then reloads CR3. The bootstrap self-check verifies, unmaps, and releases that temporary mapping before continuing.
 
 ## Interrupts
 

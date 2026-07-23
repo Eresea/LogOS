@@ -1,41 +1,73 @@
 use core::{arch::asm, ptr};
 
-use crate::memory::PhysicalMemory;
+use crate::memory::{Page, PhysicalMemory};
 
 const ENTRIES: usize = 512;
 const PRESENT_WRITABLE: u64 = 0b11;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 
-pub fn install(physical: &mut PhysicalMemory) -> Option<u64> {
-    let pml4 = physical.allocate_page()?;
-    let pdpt = physical.allocate_page()?;
-    let pd = physical.allocate_page()?;
-    let pt = physical.allocate_page()?;
-    let mapped_page = physical.allocate_page()?;
+pub struct Mapping {
+    address: u64,
+    previous_cr3: u64,
+    pml4: Page,
+    pdpt: Page,
+    pd: Page,
+    pt: Page,
+    mapped: Page,
+}
+
+pub fn install(physical: &mut PhysicalMemory) -> Option<Mapping> {
+    let pml4 = physical.allocate_owned()?;
+    let pdpt = physical.allocate_owned()?;
+    let pd = physical.allocate_owned()?;
+    let pt = physical.allocate_owned()?;
+    let mapped = physical.allocate_owned()?;
+    let previous_cr3 = unsafe { read_cr3() };
+    let pml4_address = pml4.address();
+    let pdpt_address = pdpt.address();
+    let pd_address = pd.address();
+    let pt_address = pt.address();
+    let mapped_address = mapped.address();
 
     unsafe {
-        ptr::copy_nonoverlapping(read_cr3() as *const u64, pml4 as *mut u64, ENTRIES);
-        ptr::write_bytes(pdpt as *mut u8, 0, 4096);
-        ptr::write_bytes(pd as *mut u8, 0, 4096);
-        ptr::write_bytes(pt as *mut u8, 0, 4096);
+        ptr::copy_nonoverlapping(previous_cr3 as *const u64, pml4_address as *mut u64, ENTRIES);
+        ptr::write_bytes(pdpt_address as *mut u8, 0, 4096);
+        ptr::write_bytes(pd_address as *mut u8, 0, 4096);
+        ptr::write_bytes(pt_address as *mut u8, 0, 4096);
 
-        let pml4 = pml4 as *mut u64;
-        let slot = (256..ENTRIES).find(|&index| pml4.add(index).read() == 0)?;
-        pml4.add(slot).write(pdpt | PRESENT_WRITABLE);
-        (pdpt as *mut u64).write(pd | PRESENT_WRITABLE);
-        (pd as *mut u64).write(pt | PRESENT_WRITABLE);
-        (pt as *mut u64).write(mapped_page | PRESENT_WRITABLE);
-        write_cr3(pml4 as u64);
-        Some(canonical_address(slot))
+        let pml4_table = pml4_address as *mut u64;
+        let slot = (256..ENTRIES).find(|&index| pml4_table.add(index).read() == 0)?;
+        pml4_table.add(slot).write(pdpt_address | PRESENT_WRITABLE);
+        (pdpt_address as *mut u64).write(pd_address | PRESENT_WRITABLE);
+        (pd_address as *mut u64).write(pt_address | PRESENT_WRITABLE);
+        (pt_address as *mut u64).write(mapped_address | PRESENT_WRITABLE);
+        write_cr3(pml4_address);
+        Some(Mapping { address: canonical_address(slot), previous_cr3, pml4, pdpt, pd, pt, mapped })
     }
 }
 
-pub unsafe fn verify(address: u64) -> bool {
+pub unsafe fn verify(mapping: &Mapping) -> bool {
     let value = 0x004c_4f47_4f53_u64;
-    let page = address as *mut u64;
+    let page = mapping.address as *mut u64;
     unsafe {
         page.write_volatile(value);
         page.read_volatile() == value
+    }
+}
+
+impl Mapping {
+    pub fn release(self, physical: &mut PhysicalMemory) -> bool {
+        unsafe {
+            let pml4 = self.pml4.address() as *mut u64;
+            let slot = (self.address >> 39) as usize & 0x1ff;
+            pml4.add(slot).write(0);
+            write_cr3(self.previous_cr3);
+        }
+        physical.release_page(self.mapped)
+            && physical.release_page(self.pt)
+            && physical.release_page(self.pd)
+            && physical.release_page(self.pdpt)
+            && physical.release_page(self.pml4)
     }
 }
 
