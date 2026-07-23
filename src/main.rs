@@ -12,6 +12,7 @@ mod memory;
 mod pci;
 mod scheduler;
 mod services;
+mod trace;
 mod virtio;
 mod virtual_memory;
 
@@ -64,6 +65,7 @@ fn draw_boot_screen() -> uefi::Result<BootInfo> {
 
 fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     let health = health::Startup::new();
+    trace::record(trace::Event::Boot);
     health.check(b"debug", true);
     health.check(
         b"framebuffer",
@@ -198,6 +200,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap) -> ! {
     };
     health.check(b"console", console.start());
     health.check(b"keyboard", keyboard::self_check());
+    health.check(b"trace", trace::self_check());
     health.finish();
     interrupts::disable_timer();
     console.run(|| {

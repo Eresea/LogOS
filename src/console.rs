@@ -4,6 +4,7 @@ use crate::{
     ipc::{Channel, Message},
     keyboard,
     services::ServiceHandle,
+    trace,
 };
 
 const BACKGROUND: [u8; 3] = [12, 18, 30];
@@ -79,7 +80,7 @@ impl<'a> Shell<'a> {
 
     pub fn start(&mut self) -> bool {
         self.console.reset();
-        self.console.write(b"LOGOS KERNEL CONSOLE\nTYPE HELP PING INFLATE OR EXIT\n");
+        self.console.write(b"LOGOS KERNEL CONSOLE\nTYPE HELP TRACE PING INFLATE OR EXIT\n");
         self.prompt();
         true
     }
@@ -132,8 +133,9 @@ impl<'a> Shell<'a> {
     fn submit(&mut self) {
         self.console.newline();
         match &self.command[..self.length] {
-            b"help" => self.console.write(b"COMMANDS HELP CLEAR VERSION PING INFLATE EXIT\n"),
+            b"help" => self.console.write(b"COMMANDS HELP TRACE CLEAR VERSION PING INFLATE EXIT\n"),
             b"clear" => self.console.reset(),
+            b"trace" => self.console.write(trace::message()),
             b"ping" if self.endpoint.ping() => self.console.write(b"PING SENT\n"),
             b"inflate" if self.endpoint.inflate() => self.console.write(b"INFLATE SENT\n"),
             b"version" => self.console.write(b"LOGOS 0 1 0\n"),

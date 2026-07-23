@@ -44,6 +44,10 @@ The kernel registers typed services behind opaque handles. Registration requires
 
 Each initialized kernel subsystem must report a startup self-check. A failed check emits its module name and halts; the boot verifier accepts only the final `startup self check passed` marker.
 
+## Tracing
+
+The kernel keeps a fixed in-memory trace ring for low-overhead event diagnostics. It records bootstrap and VirtIO request/completion events without allocation; the console can show the latest event. Export, filtering, and multi-core writers are deferred until a real consumer requires them.
+
 ## Kernel console
 
 The kernel renders its console directly to the boot framebuffer and consumes PS/2 IRQ1 scancodes after firmware services end. It provides `help`, `clear`, `version`, `ping`, `inflate`, and `exit`; `ping` and `inflate` send capability-gated IPC requests to VirtIO and display their replies. A full terminal service remains a future userspace concern.

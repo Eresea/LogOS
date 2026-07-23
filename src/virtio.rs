@@ -178,6 +178,7 @@ impl VirtioService {
             ((avail + 2) as *mut u16).write_volatile(1);
             outw(self.notify_port, 0);
         }
+        crate::trace::record(crate::trace::Event::VirtioSubmit);
         true
     }
 }
@@ -186,6 +187,7 @@ pub fn interrupt() {
     let port = ISR_PORT.load(Ordering::Acquire);
     if port != 0 && unsafe { inb(port) } & 1 != 0 {
         COMPLETE.store(true, Ordering::Release);
+        crate::trace::record(crate::trace::Event::VirtioComplete);
     }
 }
 
