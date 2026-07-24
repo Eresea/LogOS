@@ -10,6 +10,9 @@ const ROUTES: usize = 64;
 static RESET_PORT: AtomicU16 = AtomicU16::new(0);
 static RESET_VALUE: AtomicU8 = AtomicU8::new(0);
 static RESET_READY: AtomicBool = AtomicBool::new(false);
+static POWER_PORT: AtomicU16 = AtomicU16::new(0);
+static POWER_VALUE: AtomicU16 = AtomicU16::new(0);
+static POWER_READY: AtomicBool = AtomicBool::new(false);
 
 #[repr(C, packed)]
 struct Rsdp {
@@ -30,6 +33,7 @@ pub struct Tables {
     pub madt: Option<Madt>,
     routes: [Option<PciRoute>; ROUTES],
     reset: Option<Reset>,
+    power: Option<Power>,
 }
 
 #[derive(Clone, Copy)]
@@ -53,7 +57,17 @@ struct Reset {
     value: u8,
 }
 
+#[derive(Clone, Copy)]
+struct Power {
+    port: u16,
+    value: u16,
+}
+
 impl Tables {
+    pub const fn has_power(&self) -> bool {
+        self.power.is_some()
+    }
+
     pub fn pci_gsi(&self, bus: u8, device: u8, pin: u8) -> Option<u32> {
         (bus == 0).then(|| {
             self.routes
@@ -68,6 +82,11 @@ impl Tables {
         RESET_PORT.store(reset.port, Ordering::Release);
         RESET_VALUE.store(reset.value, Ordering::Release);
         RESET_READY.store(true, Ordering::Release);
+        if let Some(power) = self.power {
+            POWER_PORT.store(power.port, Ordering::Release);
+            POWER_VALUE.store(power.value, Ordering::Release);
+            POWER_READY.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -77,6 +96,16 @@ pub fn reset() -> bool {
     }
     unsafe {
         asm!("out dx, al", in("dx") RESET_PORT.load(Ordering::Acquire), in("al") RESET_VALUE.load(Ordering::Acquire));
+    }
+    true
+}
+
+pub fn power_off() -> bool {
+    if !POWER_READY.load(Ordering::Acquire) {
+        return false;
+    }
+    unsafe {
+        asm!("out dx, ax", in("dx") POWER_PORT.load(Ordering::Acquire), in("ax") POWER_VALUE.load(Ordering::Acquire));
     }
     true
 }
@@ -100,6 +129,7 @@ pub fn discover() -> Option<Tables> {
         let mut madt = None;
         let mut routes = [None; ROUTES];
         let mut reset = None;
+        let mut power = None;
         for index in 0..entries {
             let address = unsafe {
                 (xsdt.cast::<u8>().add(core::mem::size_of::<Header>() + index * 8) as *const u64)
@@ -111,6 +141,7 @@ pub fn discover() -> Option<Tables> {
             } else if table_header(table, *b"FACP").is_some() {
                 routes = parse_pci_routes(table);
                 reset = parse_reset(table);
+                power = parse_power(table);
             } else if table_header(table, *b"SSDT").is_some() {
                 let ssdt_routes = parse_aml_routes(table);
                 if ssdt_routes.iter().any(Option::is_some) {
@@ -118,7 +149,7 @@ pub fn discover() -> Option<Tables> {
                 }
             }
         }
-        Some(Tables { xsdt: rsdp.xsdt, madt, routes, reset })
+        Some(Tables { xsdt: rsdp.xsdt, madt, routes, reset, power })
     })
 }
 
@@ -130,6 +161,28 @@ fn parse_reset(fadt: *const Header) -> Option<Reset> {
     let address = unsafe { bytes.add(120).cast::<u64>().read_unaligned() };
     let value = unsafe { bytes.add(128).read() };
     (space == 1).then_some(Reset { port: u16::try_from(address).ok()?, value })
+}
+
+fn parse_power(fadt: *const Header) -> Option<Power> {
+    let header = table_header(fadt, *b"FACP")?;
+    (header.length >= 90).then_some(())?;
+    let bytes = fadt.cast::<u8>();
+    let port = unsafe { bytes.add(64).cast::<u32>().read_unaligned() };
+    let dsdt = unsafe { bytes.add(40).cast::<u32>().read_unaligned() } as *const Header;
+    let dsdt_header = table_header(dsdt, *b"DSDT")?;
+    let aml =
+        unsafe { core::slice::from_raw_parts(dsdt.cast::<u8>(), dsdt_header.length as usize) };
+    let body = &aml[core::mem::size_of::<Header>()..];
+    let name = body.windows(4).position(|window| window == b"_S5_")?;
+    let package = body.get(name + 4..)?.iter().position(|&byte| byte == 0x12)? + name + 4;
+    let (length, package_header) = package_length(body.get(package + 1..)?)?;
+    let values = body.get(package + 1 + package_header..package + 1 + package_header + length)?;
+    let (sleep, used) = aml_integer(values.get(1..)?)?;
+    let (sleep_b, _) = aml_integer(values.get(used + 1..)?)?;
+    (sleep == sleep_b).then_some(Power {
+        port: u16::try_from(port).ok()?,
+        value: ((sleep as u16) << 10) | (1 << 13),
+    })
 }
 
 fn parse_pci_routes(fadt: *const Header) -> [Option<PciRoute>; ROUTES] {

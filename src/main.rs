@@ -107,6 +107,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                 && tables.madt.is_some_and(|madt| {
                     madt.local_apic != 0 && madt.io_apic != 0 && madt.io_apic_gsi_base == 0
                 })
+                && tables.has_power()
         }),
     );
     let Some(madt) = acpi.and_then(|tables| tables.madt) else {
