@@ -36,6 +36,10 @@ The kernel scans PCI configuration space and retains a small list of discovered 
 
 The VirtIO balloon service binds a legacy PCI function through its I/O BAR, allocates and programs queue 0 from owned physical pages, resets and releases them if binding fails, and, as a persistent task, answers routed `Ping` messages with `Pong`, submits an `Inflate` request with a completion reply, or processes a capability-gated `Recover` request. A failed completion returns a typed failure reply, then reactivates the same queue for subsequent requests.
 
+## Driver lifetime
+
+A driver owns its queue pages from bind until quiesce. Quiesce disables the device, clears its interrupt port, and returns those pages to physical memory; a fresh bind may then recover the service without global teardown.
+
 ## IPC
 
 The kernel provides capability-gated typed request and response channels. Each bounded enqueue receives a request ID; service replies preserve that ID for correlation. A local interrupt-safe spin lock protects queue producers and consumers; a full queue applies backpressure by rejecting the enqueue.

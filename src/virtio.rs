@@ -50,7 +50,8 @@ impl Queue {
     }
 
     fn release(self, memory: &mut PhysicalMemory) -> bool {
-        self.pages.into_iter().flatten().all(|page| memory.release_page(page))
+        // Release high-to-low so the LIFO allocator returns a contiguous queue low-to-high.
+        self.pages.into_iter().rev().flatten().all(|page| memory.release_page(page))
     }
 }
 
@@ -193,6 +194,13 @@ impl VirtioService {
 
     fn quiesce(&self) {
         unsafe { outb(self.status_port, 0) };
+    }
+
+    pub fn release(self, memory: &mut PhysicalMemory) -> bool {
+        // The ISR port is global interrupt state; clear it before returning the queue pages.
+        ISR_PORT.store(0, Ordering::Release);
+        self.quiesce();
+        self.queue.release(memory)
     }
 
     fn recover(&mut self) -> bool {
