@@ -36,6 +36,11 @@ extern "C" fn virtio_interrupt() {
     unsafe { core::ptr::write_volatile((local_apic + 0xb0) as *mut u32, 0) };
 }
 
+#[unsafe(no_mangle)]
+extern "C" fn fatal_fault() {
+    crate::trace::record(crate::trace::Event::Fault);
+}
+
 pub fn install(madt: crate::acpi::Madt) -> bool {
     if madt.local_apic == 0 || madt.io_apic == 0 {
         return false;
@@ -205,6 +210,9 @@ global_asm!(
     ".global fatal_interrupt",
     "fatal_interrupt:",
     "cli",
+    "sub rsp, 40",
+    "call fatal_fault",
+    "add rsp, 40",
     "mov dx, 0xe9",
     "mov al, 'F'",
     "out dx, al",

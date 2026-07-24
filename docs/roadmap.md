@@ -23,8 +23,8 @@ Core v1 is a dependable, event-driven kernel foundation. It is not a desktop OS,
 - [x] Make IPC safe for interrupt and concurrent producers, with bounded backpressure and request/reply correlation.
 - [x] Generalize VirtIO queue ownership, completion, errors, and device reset; keep the balloon driver as the hardware proof.
 - [x] Define driver lifecycle: discover, bind, interrupt, quiesce, and recover without kernel-wide assumptions.
-- [ ] Add kernel panic/fault diagnostics, structured health reporting, and a defined recovery policy for failed drivers.
-- [ ] Expand the trace ring into fault and driver lifecycle diagnostics with an export path.
+- [x] Add kernel panic/fault diagnostics, structured health reporting, and a defined recovery policy for failed drivers.
+- [x] Expand the trace ring into fault and driver lifecycle diagnostics with an export path.
 - [x] Add ACPI power-off and reset for a real `exit` path.
 - [x] Expand QEMU integration checks to cover console input, IPC replies, blocked-task wake-up, and driver recovery.
 

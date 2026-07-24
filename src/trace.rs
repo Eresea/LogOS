@@ -17,6 +17,7 @@ pub enum Event {
     DriverQuiesced,
     DriverRecovered,
     DriverFailed,
+    Fault,
     SelfCheck,
 }
 
@@ -92,6 +93,7 @@ pub fn message(event: Event) -> &'static [u8] {
         Event::DriverQuiesced => b"TRACE DRIVER QUIESCED\n",
         Event::DriverRecovered => b"TRACE DRIVER RECOVERED\n",
         Event::DriverFailed => b"TRACE DRIVER FAILED\n",
+        Event::Fault => b"TRACE FAULT\n",
         Event::SelfCheck => b"TRACE SELF CHECK\n",
         Event::Empty => b"TRACE NONE\n",
     }
