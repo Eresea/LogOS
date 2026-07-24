@@ -37,6 +37,7 @@ pub struct VirtioService {
     notify_port: u16,
     queue: Queue,
     queue_size: usize,
+    interrupt_gsi: u32,
 }
 
 struct Queue {
@@ -54,7 +55,7 @@ impl Queue {
 }
 
 pub struct ServiceTask<'a> {
-    service: &'a VirtioService,
+    service: &'a mut VirtioService,
     requests: &'a crate::ipc::Channel,
     responses: &'a crate::ipc::Channel,
     capabilities: &'a CapabilityManager,
@@ -65,7 +66,7 @@ pub struct ServiceTask<'a> {
 
 impl<'a> ServiceTask<'a> {
     pub fn new(
-        service: &'a VirtioService,
+        service: &'a mut VirtioService,
         requests: &'a crate::ipc::Channel,
         responses: &'a crate::ipc::Channel,
         capabilities: &'a CapabilityManager,
@@ -85,6 +86,7 @@ impl Runnable for ServiceTask<'_> {
             self.pending = None;
             if self.service.failed() {
                 crate::trace::record(crate::trace::Event::DriverFailed);
+                let _ = self.service.recover();
             }
             let _ = self.responses.reply(
                 self.capabilities,
@@ -138,6 +140,7 @@ impl VirtioService {
             notify_port: (bar & !3) as u16 + 0x10,
             queue: Queue { pages: [const { None }; QUEUE_PAGES] },
             queue_size: 0,
+            interrupt_gsi,
         };
         let base = service.status_port - 0x12;
         unsafe {
@@ -149,16 +152,9 @@ impl VirtioService {
         }
         let queue_size = unsafe { inw(base + 0x0c) } as usize;
         let queue = allocate_queue(memory, queue_size)?;
-        let pfn = u32::try_from(queue.address() >> 12).ok()?;
-        unsafe {
-            outl(base + 0x08, pfn);
-            outb(service.status_port, ACKNOWLEDGE | DRIVER | DRIVER_OK);
-        }
         let service = Self { queue, queue_size, ..service };
-        if unsafe { inb(service.status_port) } & DRIVER_OK == 0
-            || !crate::interrupts::route_virtio(interrupt_gsi)
-        {
-            service.reset();
+        if !service.activate() {
+            service.quiesce();
             let _ = service.queue.release(memory);
             crate::trace::record(crate::trace::Event::DriverFailed);
             return None;
@@ -187,8 +183,30 @@ impl VirtioService {
         (unsafe { inb(self.status_port) } & FAILED) != 0
     }
 
-    fn reset(&self) {
+    fn quiesce(&self) {
         unsafe { outb(self.status_port, 0) };
+    }
+
+    fn recover(&mut self) -> bool {
+        self.activate()
+    }
+
+    fn activate(&self) -> bool {
+        let base = self.status_port - 0x12;
+        let Ok(pfn) = u32::try_from(self.queue.address() >> 12) else {
+            return false;
+        };
+        unsafe {
+            outb(self.status_port, 0);
+            outb(self.status_port, ACKNOWLEDGE);
+            outl(base + 0x04, 0);
+            outb(self.status_port, ACKNOWLEDGE | DRIVER);
+            outw(base + 0x0e, 0);
+            outl(base + 0x08, pfn);
+            outb(self.status_port, ACKNOWLEDGE | DRIVER | DRIVER_OK);
+        }
+        (unsafe { inb(self.status_port) } & DRIVER_OK) != 0
+            && crate::interrupts::route_virtio(self.interrupt_gsi)
     }
 
     pub fn submit_inflate_one_page(&self, memory: &mut PhysicalMemory) -> bool {

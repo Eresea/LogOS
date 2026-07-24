@@ -186,7 +186,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     }) else {
         fail!(b"acpi pci routing");
     };
-    let Some(virtio_service) =
+    let Some(mut virtio_service) =
         virtio::VirtioService::bind(virtio, virtio_gsi, virtio_handle, &mut memory)
     else {
         fail!(b"virtio");
@@ -199,7 +199,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         fail!(b"ipc");
     };
     let mut service_task = virtio::ServiceTask::new(
-        &virtio_service,
+        &mut virtio_service,
         &channel,
         &responses,
         &capabilities,
