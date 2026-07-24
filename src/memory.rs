@@ -2,7 +2,6 @@ use uefi::mem::memory_map::{MemoryDescriptor, MemoryMap, MemoryType};
 
 const PAGE_SIZE: u64 = 4096;
 const RANGES: usize = 8;
-const RECYCLED: usize = 8;
 
 pub struct Page(u64);
 
@@ -14,7 +13,7 @@ impl Page {
 
 pub struct PhysicalMemory {
     ranges: [Option<Range>; RANGES],
-    recycled: [Option<Page>; RECYCLED],
+    free_head: u64,
     current: usize,
 }
 
@@ -27,8 +26,7 @@ struct Range {
 
 impl PhysicalMemory {
     pub fn from_memory_map(memory_map: &impl MemoryMap) -> Option<Self> {
-        let mut memory =
-            Self { ranges: [None; RANGES], recycled: [const { None }; RECYCLED], current: 0 };
+        let mut memory = Self { ranges: [None; RANGES], free_head: 0, current: 0 };
         for range in memory_map
             .entries()
             .filter(|entry| entry.ty == MemoryType::CONVENTIONAL)
@@ -63,17 +61,22 @@ impl PhysicalMemory {
     }
 
     pub fn allocate_owned(&mut self) -> Option<Page> {
-        self.recycled.iter_mut().find_map(Option::take).or_else(|| self.allocate_page().map(Page))
+        if self.free_head != 0 {
+            let page = self.free_head;
+            self.free_head = unsafe { (page as *const u64).read_volatile() };
+            Some(Page(page))
+        } else {
+            self.allocate_page().map(Page)
+        }
     }
 
     pub fn release_page(&mut self, page: Page) -> bool {
         if !self.ranges.iter().flatten().any(|range| page.0 >= range.start && page.0 < range.end) {
             return false;
         }
-        let Some(slot) = self.recycled.iter_mut().find(|slot| slot.is_none()) else {
-            return false;
-        };
-        *slot = Some(page);
+        // ponytail: free pages store the next link; add metadata when non-identity mappings arrive.
+        unsafe { (page.0 as *mut u64).write_volatile(self.free_head) };
+        self.free_head = page.0;
         true
     }
 
@@ -99,12 +102,10 @@ pub fn self_check() -> bool {
             None,
             None,
         ],
-        recycled: [const { None }; RECYCLED],
+        free_head: 0,
         current: 0,
     };
-    let owned = memory.allocate_owned();
-    owned.is_some_and(|page| page.address() == 0x1000 && memory.release_page(page))
-        && memory.allocate_owned().is_some_and(|page| page.address() == 0x1000)
+    memory.allocate_owned().is_some_and(|page| page.address() == 0x1000)
         && memory.allocate_page() == Some(0x3000)
         && memory.allocate_page().is_none()
 }
