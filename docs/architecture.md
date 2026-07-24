@@ -50,7 +50,7 @@ Each initialized kernel subsystem must report a startup self-check to the debug 
 
 ## Tracing
 
-The kernel keeps a fixed in-memory trace ring for low-overhead event diagnostics. It records bootstrap, scheduler block/wake, and VirtIO request/completion events without allocation; the console exports its oldest-to-newest snapshot with `trace`. Filtering and multi-core writers are deferred until a real consumer requires them.
+The kernel keeps a fixed in-memory trace ring for low-overhead event diagnostics. It records bootstrap, scheduler block/wake, VirtIO request/completion, and driver bind/failure events without allocation; the console exports its oldest-to-newest snapshot with `trace`. Filtering and multi-core writers are deferred until a real consumer requires them.
 
 ## Kernel console
 

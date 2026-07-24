@@ -13,6 +13,8 @@ pub enum Event {
     TaskWoken,
     VirtioSubmit,
     VirtioComplete,
+    DriverBound,
+    DriverFailed,
     SelfCheck,
 }
 
@@ -84,6 +86,8 @@ pub fn message(event: Event) -> &'static [u8] {
         Event::TaskWoken => b"TRACE TASK WOKEN\n",
         Event::VirtioSubmit => b"TRACE VIRTIO SUBMIT\n",
         Event::VirtioComplete => b"TRACE VIRTIO COMPLETE\n",
+        Event::DriverBound => b"TRACE DRIVER BOUND\n",
+        Event::DriverFailed => b"TRACE DRIVER FAILED\n",
         Event::SelfCheck => b"TRACE SELF CHECK\n",
         Event::Empty => b"TRACE NONE\n",
     }
