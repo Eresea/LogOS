@@ -35,21 +35,43 @@ pub struct VirtioService {
     handle: ServiceHandle,
     status_port: u16,
     notify_port: u16,
-    queue: Queue,
+    queue: VirtQueue,
     queue_size: usize,
     interrupt_gsi: u32,
 }
 
-struct Queue {
+pub struct VirtQueue {
     pages: [Option<Page>; QUEUE_PAGES],
 }
 
-impl Queue {
-    fn address(&self) -> u64 {
+impl VirtQueue {
+    pub fn allocate(memory: &mut PhysicalMemory, queue_size: usize) -> Option<Self> {
+        let bytes = queue_size.checked_mul(16)?.checked_add(6 + queue_size * 2)?;
+        let bytes = bytes.checked_add(PAGE_SIZE - 1)? / PAGE_SIZE * PAGE_SIZE;
+        let bytes = bytes.checked_add(6 + queue_size * 8)?;
+        let pages = bytes.div_ceil(PAGE_SIZE);
+        if pages > QUEUE_PAGES {
+            return None;
+        }
+        let mut queue = Self { pages: [const { None }; QUEUE_PAGES] };
+        for index in 0..pages {
+            let page = memory.allocate_owned()?;
+            if index > 0 && page.address() != queue.address() + (index * PAGE_SIZE) as u64 {
+                let _ = memory.release_page(page);
+                let _ = queue.release(memory);
+                return None;
+            }
+            queue.pages[index] = Some(page);
+        }
+        unsafe { core::ptr::write_bytes(queue.address() as *mut u8, 0, pages * PAGE_SIZE) };
+        Some(queue)
+    }
+
+    pub fn address(&self) -> u64 {
         self.pages[0].as_ref().map(Page::address).unwrap_or(0)
     }
 
-    fn release(self, memory: &mut PhysicalMemory) -> bool {
+    pub fn release(self, memory: &mut PhysicalMemory) -> bool {
         // Release high-to-low so the LIFO allocator returns a contiguous queue low-to-high.
         self.pages.into_iter().rev().flatten().all(|page| memory.release_page(page))
     }
@@ -142,7 +164,7 @@ impl VirtioService {
             handle,
             status_port: (bar & !3) as u16 + 0x12,
             notify_port: (bar & !3) as u16 + 0x10,
-            queue: Queue { pages: [const { None }; QUEUE_PAGES] },
+            queue: VirtQueue { pages: [const { None }; QUEUE_PAGES] },
             queue_size: 0,
             interrupt_gsi,
         };
@@ -155,7 +177,7 @@ impl VirtioService {
             outw(base + 0x0e, 0);
         }
         let queue_size = unsafe { inw(base + 0x0c) } as usize;
-        let queue = allocate_queue(memory, queue_size)?;
+        let queue = VirtQueue::allocate(memory, queue_size)?;
         let service = Self { queue, queue_size, ..service };
         if !service.activate() {
             service.quiesce();
@@ -268,28 +290,6 @@ pub fn completion_pending() -> bool {
 
 fn take_completion() -> bool {
     COMPLETE.swap(false, Ordering::AcqRel)
-}
-
-fn allocate_queue(memory: &mut PhysicalMemory, queue_size: usize) -> Option<Queue> {
-    let bytes = queue_size.checked_mul(16)?.checked_add(6 + queue_size * 2)?;
-    let bytes = bytes.checked_add(PAGE_SIZE - 1)? / PAGE_SIZE * PAGE_SIZE;
-    let bytes = bytes.checked_add(6 + queue_size * 8)?;
-    let pages = bytes.div_ceil(PAGE_SIZE);
-    if pages > QUEUE_PAGES {
-        return None;
-    }
-    let mut queue = Queue { pages: [const { None }; QUEUE_PAGES] };
-    for index in 0..pages {
-        let page = memory.allocate_owned()?;
-        if index > 0 && page.address() != queue.address() + (index * PAGE_SIZE) as u64 {
-            let _ = memory.release_page(page);
-            let _ = queue.release(memory);
-            return None;
-        }
-        queue.pages[index] = Some(page);
-    }
-    unsafe { core::ptr::write_bytes(queue.address() as *mut u8, 0, pages * PAGE_SIZE) };
-    Some(queue)
 }
 
 unsafe fn outb(port: u16, value: u8) {
