@@ -44,11 +44,15 @@ impl<'a> Endpoint<'a> {
     }
 
     fn ping(self) -> bool {
-        self.channel.send(self.capabilities, self.capability, self.destination, Message::Ping)
+        self.channel
+            .send(self.capabilities, self.capability, self.destination, Message::Ping)
+            .is_some()
     }
 
     fn inflate(self) -> bool {
-        self.channel.send(self.capabilities, self.capability, self.destination, Message::Inflate)
+        self.channel
+            .send(self.capabilities, self.capability, self.destination, Message::Inflate)
+            .is_some()
     }
 
     fn reply(self) -> Option<Message> {

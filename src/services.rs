@@ -10,6 +10,12 @@ pub enum Service {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ServiceHandle(u8);
 
+impl ServiceHandle {
+    pub(crate) const fn self_check() -> Self {
+        Self(0)
+    }
+}
+
 pub struct Registry {
     services: [Option<Service>; SERVICES],
 }

@@ -193,9 +193,11 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     };
     let channel = ipc::Channel::new();
     let responses = ipc::Channel::new();
-    if !channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping) {
+    let Some(ping_request) =
+        channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping)
+    else {
         fail!(b"ipc");
-    }
+    };
     let mut service_task = virtio::ServiceTask::new(
         &virtio_service,
         &channel,
@@ -211,16 +213,25 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     if !service_scheduler.run_next() {
         fail!(b"scheduler");
     }
-    check!(b"ipc", responses.receive().is_some_and(|reply| reply.message == ipc::Message::Pong),);
+    check!(
+        b"ipc",
+        responses.receive().is_some_and(|reply| {
+            reply.message == ipc::Message::Pong && reply.request == ping_request
+        }) && ipc::self_check(),
+    );
     check!(
         b"service task",
-        channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping)
+        channel
+            .send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping)
+            .is_some()
             && service_scheduler.run_next()
             && responses.receive().is_some_and(|reply| reply.message == ipc::Message::Pong),
     );
     check!(
         b"virtio",
-        channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Inflate)
+        channel
+            .send(&capabilities, service_capability, virtio_handle, ipc::Message::Inflate)
+            .is_some()
             && service_scheduler.run_next()
             && {
                 interrupts::wait_for_virtio();

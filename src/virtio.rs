@@ -59,7 +59,7 @@ pub struct ServiceTask<'a> {
     capabilities: &'a CapabilityManager,
     capability: Capability,
     memory: &'a mut PhysicalMemory,
-    pending: Option<ServiceHandle>,
+    pending: Option<(ServiceHandle, crate::ipc::RequestId)>,
 }
 
 impl<'a> ServiceTask<'a> {
@@ -77,16 +77,17 @@ impl<'a> ServiceTask<'a> {
 
 impl Runnable for ServiceTask<'_> {
     fn run(&mut self) -> TaskState {
-        if let Some(destination) = self.pending {
+        if let Some((destination, request)) = self.pending {
             if !take_completion() {
                 return TaskState::Blocked(crate::scheduler::Event::VIRTIO);
             }
             self.pending = None;
-            let _ = self.responses.send(
+            let _ = self.responses.reply(
                 self.capabilities,
                 self.capability,
                 destination,
                 Message::Complete,
+                request,
             );
             return TaskState::Ready;
         }
@@ -95,7 +96,7 @@ impl Runnable for ServiceTask<'_> {
                 Message::Ping => self.service.handle(envelope),
                 Message::Inflate if self.service.accepts(envelope) => {
                     if self.service.submit_inflate_one_page(self.memory) {
-                        self.pending = Some(envelope.destination);
+                        self.pending = Some((envelope.destination, envelope.request));
                         return TaskState::Blocked(crate::scheduler::Event::VIRTIO);
                     }
                     None
@@ -103,11 +104,12 @@ impl Runnable for ServiceTask<'_> {
                 _ => None,
             };
             if let Some(reply) = reply {
-                let _ = self.responses.send(
+                let _ = self.responses.reply(
                     self.capabilities,
                     self.capability,
                     envelope.destination,
                     reply,
+                    envelope.request,
                 );
             }
         }
