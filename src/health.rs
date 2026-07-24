@@ -34,3 +34,9 @@ impl Startup {
         }
     }
 }
+
+pub fn driver_failure(driver: &[u8], recovered: bool) {
+    debug::write(b"LogOS: driver ");
+    debug::write(driver);
+    debug::write_line(if recovered { b" recovered" } else { b" failed" });
+}

@@ -86,7 +86,7 @@ impl Runnable for ServiceTask<'_> {
             self.pending = None;
             if self.service.failed() {
                 crate::trace::record(crate::trace::Event::DriverFailed);
-                let _ = self.service.recover();
+                crate::health::driver_failure(b"virtio", self.service.recover());
             }
             let _ = self.responses.reply(
                 self.capabilities,
@@ -157,6 +157,7 @@ impl VirtioService {
             service.quiesce();
             let _ = service.queue.release(memory);
             crate::trace::record(crate::trace::Event::DriverFailed);
+            crate::health::driver_failure(b"virtio", false);
             return None;
         }
         ISR_PORT.store(base + 0x13, Ordering::Release);
