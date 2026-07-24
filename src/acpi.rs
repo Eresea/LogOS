@@ -1,7 +1,15 @@
+use core::{
+    arch::asm,
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering},
+};
+
 use uefi::{system, table::cfg::ACPI2_GUID};
 
 // ponytail: fixed QEMU routing table; add dynamic storage when bridge discovery needs more routes.
 const ROUTES: usize = 64;
+static RESET_PORT: AtomicU16 = AtomicU16::new(0);
+static RESET_VALUE: AtomicU8 = AtomicU8::new(0);
+static RESET_READY: AtomicBool = AtomicBool::new(false);
 
 #[repr(C, packed)]
 struct Rsdp {
@@ -21,6 +29,7 @@ pub struct Tables {
     pub xsdt: u64,
     pub madt: Option<Madt>,
     routes: [Option<PciRoute>; ROUTES],
+    reset: Option<Reset>,
 }
 
 #[derive(Clone, Copy)]
@@ -38,6 +47,12 @@ struct PciRoute {
     link: [u8; 4],
 }
 
+#[derive(Clone, Copy)]
+struct Reset {
+    port: u16,
+    value: u8,
+}
+
 impl Tables {
     pub fn pci_gsi(&self, bus: u8, device: u8, pin: u8) -> Option<u32> {
         (bus == 0).then(|| {
@@ -47,6 +62,23 @@ impl Tables {
                 .find_map(|route| (route.device == device && route.pin == pin).then_some(route.gsi))
         })?
     }
+
+    pub fn install_reset(&self) {
+        let Some(reset) = self.reset else { return };
+        RESET_PORT.store(reset.port, Ordering::Release);
+        RESET_VALUE.store(reset.value, Ordering::Release);
+        RESET_READY.store(true, Ordering::Release);
+    }
+}
+
+pub fn reset() -> bool {
+    if !RESET_READY.load(Ordering::Acquire) {
+        return false;
+    }
+    unsafe {
+        asm!("out dx, al", in("dx") RESET_PORT.load(Ordering::Acquire), in("al") RESET_VALUE.load(Ordering::Acquire));
+    }
+    true
 }
 
 pub fn discover() -> Option<Tables> {
@@ -67,6 +99,7 @@ pub fn discover() -> Option<Tables> {
         let entries = ((header.length as usize) - core::mem::size_of::<Header>()) / 8;
         let mut madt = None;
         let mut routes = [None; ROUTES];
+        let mut reset = None;
         for index in 0..entries {
             let address = unsafe {
                 (xsdt.cast::<u8>().add(core::mem::size_of::<Header>() + index * 8) as *const u64)
@@ -77,6 +110,7 @@ pub fn discover() -> Option<Tables> {
                 madt = parse_madt(table);
             } else if table_header(table, *b"FACP").is_some() {
                 routes = parse_pci_routes(table);
+                reset = parse_reset(table);
             } else if table_header(table, *b"SSDT").is_some() {
                 let ssdt_routes = parse_aml_routes(table);
                 if ssdt_routes.iter().any(Option::is_some) {
@@ -84,8 +118,18 @@ pub fn discover() -> Option<Tables> {
                 }
             }
         }
-        Some(Tables { xsdt: rsdp.xsdt, madt, routes })
+        Some(Tables { xsdt: rsdp.xsdt, madt, routes, reset })
     })
+}
+
+fn parse_reset(fadt: *const Header) -> Option<Reset> {
+    let header = table_header(fadt, *b"FACP")?;
+    (header.length >= 129).then_some(())?;
+    let bytes = fadt.cast::<u8>();
+    let space = unsafe { bytes.add(116).read() };
+    let address = unsafe { bytes.add(120).cast::<u64>().read_unaligned() };
+    let value = unsafe { bytes.add(128).read() };
+    (space == 1).then_some(Reset { port: u16::try_from(address).ok()?, value })
 }
 
 fn parse_pci_routes(fadt: *const Header) -> [Option<PciRoute>; ROUTES] {

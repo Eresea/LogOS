@@ -35,6 +35,9 @@ fn main() -> Status {
         Err(_) => return Status::DEVICE_ERROR,
     };
     let acpi = acpi::discover();
+    if let Some(tables) = acpi {
+        tables.install_reset();
+    }
     debug::write_line(b"LogOS: leaving UEFI boot services");
 
     let memory_map = unsafe { boot::exit_boot_services(None) };

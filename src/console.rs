@@ -174,6 +174,11 @@ impl<'a> Shell<'a> {
     }
 
     fn exit(&self) -> ! {
+        if crate::acpi::reset() {
+            loop {
+                unsafe { core::arch::asm!("hlt") };
+            }
+        }
         loop {
             unsafe { core::arch::asm!("cli", "hlt") };
         }
