@@ -117,7 +117,8 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         fail!(b"memory");
     };
     check!(b"memory", first_page & 0xfff == 0 && memory::self_check());
-    let Some(mapping) = virtual_memory::install(&mut memory) else {
+    let Some(mapping) = virtual_memory::install(&mut memory, virtual_memory::Permission::ReadWrite)
+    else {
         fail!(b"virtual memory");
     };
     let _ = (
@@ -128,8 +129,14 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         memory_regions,
         first_page,
     );
-    check!(b"virtual memory", unsafe { virtual_memory::verify(&mapping) });
-    check!(b"virtual memory", mapping.release(&mut memory));
+    check!(
+        b"virtual memory",
+        mapping.is_writable()
+            && unsafe { virtual_memory::verify(&mapping) }
+            && mapping.release(&mut memory)
+            && virtual_memory::install(&mut memory, virtual_memory::Permission::ReadOnly)
+                .is_some_and(|mapping| !mapping.is_writable() && mapping.release(&mut memory)),
+    );
     let keyboard_interrupts = interrupts::install(madt);
     interrupts::enable();
     interrupts::wait_for_tick();

@@ -3,7 +3,8 @@ use core::{arch::asm, ptr};
 use crate::memory::{Page, PhysicalMemory};
 
 const ENTRIES: usize = 512;
-const PRESENT_WRITABLE: u64 = 0b11;
+const PRESENT: u64 = 1;
+const WRITABLE: u64 = 1 << 1;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 
 pub struct Mapping {
@@ -16,7 +17,13 @@ pub struct Mapping {
     mapped: Page,
 }
 
-pub fn install(physical: &mut PhysicalMemory) -> Option<Mapping> {
+#[derive(Clone, Copy)]
+pub enum Permission {
+    ReadOnly,
+    ReadWrite,
+}
+
+pub fn install(physical: &mut PhysicalMemory, permission: Permission) -> Option<Mapping> {
     let pml4 = physical.allocate_owned()?;
     let pdpt = physical.allocate_owned()?;
     let pd = physical.allocate_owned()?;
@@ -37,10 +44,14 @@ pub fn install(physical: &mut PhysicalMemory) -> Option<Mapping> {
 
         let pml4_table = pml4_address as *mut u64;
         let slot = (256..ENTRIES).find(|&index| pml4_table.add(index).read() == 0)?;
-        pml4_table.add(slot).write(pdpt_address | PRESENT_WRITABLE);
-        (pdpt_address as *mut u64).write(pd_address | PRESENT_WRITABLE);
-        (pd_address as *mut u64).write(pt_address | PRESENT_WRITABLE);
-        (pt_address as *mut u64).write(mapped_address | PRESENT_WRITABLE);
+        pml4_table.add(slot).write(pdpt_address | PRESENT | WRITABLE);
+        (pdpt_address as *mut u64).write(pd_address | PRESENT | WRITABLE);
+        (pd_address as *mut u64).write(pt_address | PRESENT | WRITABLE);
+        (pt_address as *mut u64).write(
+            mapped_address
+                | PRESENT
+                | if matches!(permission, Permission::ReadWrite) { WRITABLE } else { 0 },
+        );
         write_cr3(pml4_address);
         Some(Mapping { address: canonical_address(slot), previous_cr3, pml4, pdpt, pd, pt, mapped })
     }
@@ -56,6 +67,10 @@ pub unsafe fn verify(mapping: &Mapping) -> bool {
 }
 
 impl Mapping {
+    pub fn is_writable(&self) -> bool {
+        unsafe { (self.pt.address() as *const u64).read_volatile() & WRITABLE != 0 }
+    }
+
     pub fn release(self, physical: &mut PhysicalMemory) -> bool {
         unsafe {
             let pml4 = self.pml4.address() as *mut u64;
