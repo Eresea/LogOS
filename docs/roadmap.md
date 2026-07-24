@@ -19,7 +19,7 @@ Core v1 is a dependable, event-driven kernel foundation. It is not a desktop OS,
 
 - [x] Parse ACPI PCI routing and remove reliance on firmware-programmed PCI interrupt lines.
 - [ ] Extend owned-page tracking beyond the bounded recycle pool; add permissioned mappings and service-lifetime reclamation.
-- [ ] Replace fixed scheduler slots with event wait queues.
+- [x] Replace fixed scheduler slots with event wait queues.
 - [ ] Make IPC safe for interrupt and concurrent producers, with bounded backpressure and request/reply correlation.
 - [ ] Generalize VirtIO queue ownership, completion, errors, and device reset; keep the balloon driver as the hardware proof.
 - [ ] Define driver lifecycle: discover, bind, interrupt, quiesce, and recover without kernel-wide assumptions.

@@ -205,9 +205,9 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         &mut memory,
     );
     let mut service_scheduler = scheduler::Scheduler::new();
-    let Some(service_task_handle) = service_scheduler.spawn(&mut service_task) else {
+    if service_scheduler.spawn(&mut service_task).is_none() {
         fail!(b"scheduler");
-    };
+    }
     if !service_scheduler.run_next() {
         fail!(b"scheduler");
     }
@@ -224,7 +224,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
             && service_scheduler.run_next()
             && {
                 interrupts::wait_for_virtio();
-                service_scheduler.wake(service_task_handle)
+                service_scheduler.wake_event(scheduler::Event::VIRTIO) > 0
             }
             && service_scheduler.run_next()
             && responses.receive().is_some_and(|reply| reply.message == ipc::Message::Complete),
@@ -247,7 +247,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     interrupts::disable_timer();
     console.run(|| {
         if virtio::completion_pending() {
-            let _ = service_scheduler.wake(service_task_handle);
+            let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
         }
         let _ = service_scheduler.run_next();
     })

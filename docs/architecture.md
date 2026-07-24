@@ -22,7 +22,7 @@ The UEFI entry path finds and validates the ACPI 2 RSDP and XSDT, retaining MADT
 
 ## Scheduling
 
-The bootstrap scheduler runs two fixed cooperative task slots in round-robin order. A task yields by returning `Ready`, sleeps by returning `Blocked`, and is removed when it returns `Complete`. Generation-tagged task handles prevent a stale wake from targeting a reused slot. The VirtIO service is a persistent task that consumes its IPC queue whenever the console loop yields to the scheduler.
+The bootstrap scheduler runs bounded cooperative tasks in round-robin order. A task yields by returning `Ready`, waits by returning `Blocked(event)`, and is removed when it returns `Complete`. Event wakes release every matching waiter; generation-tagged task handles remain available for direct stale-wake protection. The VirtIO service waits for the VirtIO completion event.
 
 ## Capabilities
 

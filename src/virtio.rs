@@ -79,7 +79,7 @@ impl Runnable for ServiceTask<'_> {
     fn run(&mut self) -> TaskState {
         if let Some(destination) = self.pending {
             if !take_completion() {
-                return TaskState::Blocked;
+                return TaskState::Blocked(crate::scheduler::Event::VIRTIO);
             }
             self.pending = None;
             let _ = self.responses.send(
@@ -96,7 +96,7 @@ impl Runnable for ServiceTask<'_> {
                 Message::Inflate if self.service.accepts(envelope) => {
                     if self.service.submit_inflate_one_page(self.memory) {
                         self.pending = Some(envelope.destination);
-                        return TaskState::Blocked;
+                        return TaskState::Blocked(crate::scheduler::Event::VIRTIO);
                     }
                     None
                 }
