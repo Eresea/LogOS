@@ -13,6 +13,7 @@ pub enum Message {
     Ping,
     Pong,
     Inflate,
+    Recover,
     Complete,
     Failed,
 }

@@ -244,6 +244,14 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
             && service_scheduler.run_next()
             && responses.receive().is_some_and(|reply| reply.message == ipc::Message::Complete),
     );
+    check!(
+        b"driver recovery",
+        channel
+            .send(&capabilities, service_capability, virtio_handle, ipc::Message::Recover)
+            .is_some()
+            && service_scheduler.run_next()
+            && responses.receive().is_some_and(|reply| reply.message == ipc::Message::Complete),
+    );
     check!(b"console", true);
     check!(b"keyboard", keyboard::self_check());
     check!(b"trace", trace::self_check());

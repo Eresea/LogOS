@@ -26,7 +26,7 @@ Core v1 is a dependable, event-driven kernel foundation. It is not a desktop OS,
 - [ ] Add kernel panic/fault diagnostics, structured health reporting, and a defined recovery policy for failed drivers.
 - [ ] Expand the trace ring into fault and driver lifecycle diagnostics with an export path.
 - [x] Add ACPI power-off and reset for a real `exit` path.
-- [ ] Expand QEMU integration checks to cover console input, IPC replies, blocked-task wake-up, and driver recovery.
+- [x] Expand QEMU integration checks to cover console input, IPC replies, blocked-task wake-up, and driver recovery.
 
 ### Core v1 exit criteria
 

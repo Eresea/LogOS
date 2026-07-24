@@ -107,6 +107,9 @@ impl Runnable for ServiceTask<'_> {
                     }
                     None
                 }
+                Message::Recover if self.service.accepts(envelope) => {
+                    Some(if self.service.recover() { Message::Complete } else { Message::Failed })
+                }
                 _ => None,
             };
             if let Some(reply) = reply {
@@ -171,7 +174,11 @@ impl VirtioService {
         }
         match envelope.message {
             Message::Ping => Some(Message::Pong),
-            Message::Pong | Message::Inflate | Message::Complete | Message::Failed => None,
+            Message::Pong
+            | Message::Inflate
+            | Message::Recover
+            | Message::Complete
+            | Message::Failed => None,
         }
     }
 
