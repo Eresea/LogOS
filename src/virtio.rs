@@ -38,6 +38,14 @@ pub struct VirtioService {
     queue: VirtQueue,
     queue_size: usize,
     interrupt_gsi: u32,
+    state: DriverState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DriverState {
+    Bound,
+    Quiesced,
+    Failed,
 }
 
 pub struct VirtQueue {
@@ -107,7 +115,8 @@ impl Runnable for ServiceTask<'_> {
                 return TaskState::Blocked(crate::scheduler::Event::VIRTIO);
             }
             self.pending = None;
-            if self.service.failed() {
+            let failed = self.service.failed();
+            if failed {
                 crate::trace::record(crate::trace::Event::DriverFailed);
                 crate::health::driver_failure(b"virtio", self.service.recover());
             }
@@ -115,7 +124,7 @@ impl Runnable for ServiceTask<'_> {
                 self.capabilities,
                 self.capability,
                 destination,
-                if self.service.failed() { Message::Failed } else { Message::Complete },
+                if failed { Message::Failed } else { Message::Complete },
                 request,
             );
             return TaskState::Ready;
@@ -160,13 +169,14 @@ impl VirtioService {
         if bar & 1 == 0 {
             return None;
         }
-        let service = Self {
+        let mut service = Self {
             handle,
             status_port: (bar & !3) as u16 + 0x12,
             notify_port: (bar & !3) as u16 + 0x10,
             queue: VirtQueue { pages: [const { None }; QUEUE_PAGES] },
             queue_size: 0,
             interrupt_gsi,
+            state: DriverState::Quiesced,
         };
         let base = service.status_port - 0x12;
         unsafe {
@@ -178,7 +188,8 @@ impl VirtioService {
         }
         let queue_size = unsafe { inw(base + 0x0c) } as usize;
         let queue = VirtQueue::allocate(memory, queue_size)?;
-        let service = Self { queue, queue_size, ..service };
+        service.queue = queue;
+        service.queue_size = queue_size;
         if !service.activate() {
             service.quiesce();
             let _ = service.queue.release(memory);
@@ -207,18 +218,25 @@ impl VirtioService {
 
     fn accepts(&self, envelope: Envelope) -> bool {
         envelope.destination == self.handle
+            && self.state == DriverState::Bound
             && (unsafe { inb(self.status_port) } & (DRIVER_OK | FAILED)) == DRIVER_OK
     }
 
-    fn failed(&self) -> bool {
-        (unsafe { inb(self.status_port) } & FAILED) != 0
+    fn failed(&mut self) -> bool {
+        let failed = (unsafe { inb(self.status_port) } & FAILED) != 0;
+        if failed {
+            self.state = DriverState::Failed;
+        }
+        failed
     }
 
-    fn quiesce(&self) {
+    fn quiesce(&mut self) {
         unsafe { outb(self.status_port, 0) };
+        self.state = DriverState::Quiesced;
+        crate::trace::record(crate::trace::Event::DriverQuiesced);
     }
 
-    pub fn release(self, memory: &mut PhysicalMemory) -> bool {
+    pub fn release(mut self, memory: &mut PhysicalMemory) -> bool {
         // The ISR port is global interrupt state; clear it before returning the queue pages.
         ISR_PORT.store(0, Ordering::Release);
         self.quiesce();
@@ -226,12 +244,18 @@ impl VirtioService {
     }
 
     fn recover(&mut self) -> bool {
-        self.activate()
+        self.quiesce();
+        let recovered = self.activate();
+        if recovered {
+            crate::trace::record(crate::trace::Event::DriverRecovered);
+        }
+        recovered
     }
 
-    fn activate(&self) -> bool {
+    fn activate(&mut self) -> bool {
         let base = self.status_port - 0x12;
         let Ok(pfn) = u32::try_from(self.queue.address() >> 12) else {
+            self.state = DriverState::Failed;
             return false;
         };
         unsafe {
@@ -243,8 +267,15 @@ impl VirtioService {
             outl(base + 0x08, pfn);
             outb(self.status_port, ACKNOWLEDGE | DRIVER | DRIVER_OK);
         }
-        (unsafe { inb(self.status_port) } & DRIVER_OK) != 0
-            && crate::interrupts::route_virtio(self.interrupt_gsi)
+        let active = (unsafe { inb(self.status_port) } & DRIVER_OK) != 0
+            && crate::interrupts::route_virtio(self.interrupt_gsi);
+        self.state = if active { DriverState::Bound } else { DriverState::Failed };
+        crate::trace::record(if active {
+            crate::trace::Event::DriverBound
+        } else {
+            crate::trace::Event::DriverFailed
+        });
+        active
     }
 
     pub fn submit_inflate_one_page(&self, memory: &mut PhysicalMemory) -> bool {

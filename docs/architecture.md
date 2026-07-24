@@ -38,7 +38,7 @@ The reusable legacy `VirtQueue` owns contiguous queue pages and releases them on
 
 ## Driver lifetime
 
-A driver owns its queue pages from bind until quiesce. Quiesce disables the device, clears its interrupt port, and returns those pages to physical memory; a fresh bind may then recover the service without global teardown.
+A driver owns its queue pages from bind until quiesce. The VirtIO proof driver transitions through bound, quiesced, and failed states; quiesce disables the device, clears its interrupt port, and returns those pages to physical memory. Recovery reactivates the same queue, while a fresh bind can replace the service without global teardown.
 
 ## IPC
 

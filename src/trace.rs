@@ -14,6 +14,8 @@ pub enum Event {
     VirtioSubmit,
     VirtioComplete,
     DriverBound,
+    DriverQuiesced,
+    DriverRecovered,
     DriverFailed,
     SelfCheck,
 }
@@ -87,6 +89,8 @@ pub fn message(event: Event) -> &'static [u8] {
         Event::VirtioSubmit => b"TRACE VIRTIO SUBMIT\n",
         Event::VirtioComplete => b"TRACE VIRTIO COMPLETE\n",
         Event::DriverBound => b"TRACE DRIVER BOUND\n",
+        Event::DriverQuiesced => b"TRACE DRIVER QUIESCED\n",
+        Event::DriverRecovered => b"TRACE DRIVER RECOVERED\n",
         Event::DriverFailed => b"TRACE DRIVER FAILED\n",
         Event::SelfCheck => b"TRACE SELF CHECK\n",
         Event::Empty => b"TRACE NONE\n",
