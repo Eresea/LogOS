@@ -253,6 +253,18 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                 && service_scheduler.run_next()
                 && responses.receive().is_some_and(|reply| reply.message == ipc::Message::Complete),
         );
+        let Some(cancel_request) =
+            channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Cancel)
+        else {
+            fail!(b"ipc cancel");
+        };
+        check!(
+            b"ipc cancel",
+            service_scheduler.run_next()
+                && responses.receive().is_some_and(|reply| {
+                    reply.message == ipc::Message::Failed && reply.request == cancel_request
+                }),
+        );
     }
     check!(b"service lifetime", virtio_service.release(&mut memory));
     let Some(mut virtio_service) =

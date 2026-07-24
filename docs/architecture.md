@@ -42,7 +42,7 @@ A driver owns its queue pages from bind until quiesce. The VirtIO proof driver t
 
 ## IPC
 
-The kernel provides capability-gated typed request and response channels. Each bounded enqueue receives a request ID; service replies preserve that ID for correlation. A local interrupt-safe spin lock protects queue producers and consumers; a full queue applies backpressure by rejecting the enqueue.
+The kernel provides capability-gated typed request and response channels. Each bounded enqueue receives a request ID; service replies preserve that ID for correlation, including typed cancellation failures. A local interrupt-safe spin lock protects queue producers and consumers; a full queue applies backpressure by rejecting the enqueue.
 
 ## Service registry
 

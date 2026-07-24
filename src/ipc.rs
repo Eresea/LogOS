@@ -14,6 +14,7 @@ pub enum Message {
     Pong,
     Inflate,
     Recover,
+    Cancel,
     Complete,
     Failed,
 }
