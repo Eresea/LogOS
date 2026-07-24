@@ -14,6 +14,7 @@ pub enum Message {
     Pong,
     Inflate,
     Complete,
+    Failed,
 }
 
 pub type RequestId = u16;

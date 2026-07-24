@@ -93,6 +93,11 @@ impl<'a> Shell<'a> {
                     self.console.write(b"PAGE ADDED\n");
                     self.prompt();
                 }
+                Some(Message::Failed) => {
+                    self.console.newline();
+                    self.console.write(b"DEVICE FAILED\n");
+                    self.prompt();
+                }
                 _ => {}
             }
             if let Some(key) = keyboard::poll() {

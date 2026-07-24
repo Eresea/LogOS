@@ -15,6 +15,7 @@ use crate::{
 const ACKNOWLEDGE: u8 = 1;
 const DRIVER: u8 = 2;
 const DRIVER_OK: u8 = 4;
+const FAILED: u8 = 128;
 const PAGE_SIZE: usize = 4096;
 // ponytail: QEMU legacy queue needs three pages; increase when a larger queue is bound.
 const QUEUE_PAGES: usize = 8;
@@ -86,7 +87,7 @@ impl Runnable for ServiceTask<'_> {
                 self.capabilities,
                 self.capability,
                 destination,
-                Message::Complete,
+                if self.service.failed() { Message::Failed } else { Message::Complete },
                 request,
             );
             return TaskState::Ready;
@@ -154,6 +155,7 @@ impl VirtioService {
         if unsafe { inb(service.status_port) } & DRIVER_OK == 0
             || !crate::interrupts::route_virtio(interrupt_gsi)
         {
+            service.reset();
             let _ = service.queue.release(memory);
             return None;
         }
@@ -167,12 +169,21 @@ impl VirtioService {
         }
         match envelope.message {
             Message::Ping => Some(Message::Pong),
-            Message::Pong | Message::Inflate | Message::Complete => None,
+            Message::Pong | Message::Inflate | Message::Complete | Message::Failed => None,
         }
     }
 
     fn accepts(&self, envelope: Envelope) -> bool {
-        envelope.destination == self.handle && unsafe { inb(self.status_port) } & DRIVER_OK != 0
+        envelope.destination == self.handle
+            && (unsafe { inb(self.status_port) } & (DRIVER_OK | FAILED)) == DRIVER_OK
+    }
+
+    fn failed(&self) -> bool {
+        (unsafe { inb(self.status_port) } & FAILED) != 0
+    }
+
+    fn reset(&self) {
+        unsafe { outb(self.status_port, 0) };
     }
 
     pub fn submit_inflate_one_page(&self, memory: &mut PhysicalMemory) -> bool {
