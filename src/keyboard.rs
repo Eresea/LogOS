@@ -26,7 +26,8 @@ pub fn poll() -> Option<u8> {
 }
 
 pub fn self_check() -> bool {
-    (unsafe { inb(0x64) } & 0xc0) == 0 && decode(0x22) == Some(b'g')
+    push(0x22);
+    (unsafe { inb(0x64) } & 0xc0) == 0 && poll() == Some(b'g')
 }
 
 pub fn enable_interrupts() -> bool {
