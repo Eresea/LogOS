@@ -14,7 +14,7 @@ LogOS copies the active UEFI top-level page table, adds one kernel-owned high vi
 
 ## Interrupts
 
-The kernel owns the IDT and uses PIT IRQ0 only during startup, then masks it before entering the console so `hlt` wakes only for keyboard or device events. CPU exceptions halt safely; the keyboard handler queues scancodes. ACPI MADT supplies the local-APIC and IOAPIC addresses used for PCI interrupt routing; the VirtIO completion IRQ acknowledges the device and wakes its blocked task.
+The kernel owns the IDT and uses PIT IRQ0 only during startup, then masks it before entering the console so `hlt` wakes only for keyboard or device events. CPU exceptions emit `FAULT HALT` to the debug console and halt; the keyboard handler queues scancodes. ACPI MADT supplies the local-APIC and IOAPIC addresses used for PCI interrupt routing; the VirtIO completion IRQ acknowledges the device and wakes its blocked task.
 
 ## ACPI
 
