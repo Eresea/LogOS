@@ -130,6 +130,7 @@ The normal terminal is not a kernel shell. It is a renderer and editor attached 
 - [x] Console v1 slice 7: add an explicit recovery capability and live `recovery` command handoff.
 - [x] Console v1 slice 8: normalize Foundation input with QWERTY/AZERTY layouts, modifiers, state, and bounded repeat.
 - [x] Console v1 slice 9: add bounded UTF-8 terminal editing with character-safe cursor movement and deletion.
+- [x] Console v1 slice 10: add an embedded normal-console font with metrics and fallback glyphs.
 - [ ] Move normal keyboard handling behind an input service.
 - [ ] Preserve a kernel-owned emergency output and input path for recovery.
 - [ ] Normalize physical keys, logical keys, text input, modifiers, and repeat.

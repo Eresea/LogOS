@@ -313,6 +313,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     check!(b"command registry", commands::self_check());
     check!(b"input normalization", input::Service::self_check());
     check!(b"terminal editing", terminal::Model::self_check());
+    check!(b"text font", text::Service::self_check());
     coordinator.announce();
     check!(b"trace", trace::self_check());
     health.finish();

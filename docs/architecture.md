@@ -75,6 +75,8 @@ The Foundation display service validates and presents normal framebuffer pixels.
 
 The Foundation text service rasterizes the fixed bitmap glyphs through the display service. The recovery console retains direct bitmap-glyph rendering; font loading, metrics beyond fixed cells, and UTF-8 remain future work.
 
+Normal text now owns an embedded monospace 5×7 font, fixed cell metrics, and a fallback glyph. Storage-backed font loading remains deferred to Persistence v1.
+
 ### Rules
 
 - Hardware access requires explicit capabilities.

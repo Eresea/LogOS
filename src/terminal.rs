@@ -106,13 +106,7 @@ impl Model {
 
     pub fn render(&self, display: &mut display::Service, text: &text::Service) -> bool {
         self.cells[..self.length].iter().enumerate().all(|(cell, glyph)| {
-            text.render(
-                display,
-                if glyph.is_ascii() { *glyph } else { b' ' },
-                ORIGIN.0 + cell * text::Service::ADVANCE,
-                ORIGIN.1,
-                ACCENT,
-            )
+            text.render(display, *glyph, ORIGIN.0 + cell * text::Service::ADVANCE, ORIGIN.1, ACCENT)
         })
     }
 
