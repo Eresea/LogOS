@@ -69,6 +69,10 @@ The Foundation input service owns normal PS/2 scancode decoding and exposes init
 
 The Foundation display service validates and presents normal framebuffer pixels. The kernel recovery console retains direct framebuffer output and does not depend on the service. A later terminal owns the normal display-service client role; recovery output remains available independently.
 
+### Console v1 text slice
+
+The Foundation text service rasterizes the fixed bitmap glyphs through the display service. The recovery console retains direct bitmap-glyph rendering; font loading, metrics beyond fixed cells, and UTF-8 remain future work.
+
 ### Rules
 
 - Hardware access requires explicit capabilities.

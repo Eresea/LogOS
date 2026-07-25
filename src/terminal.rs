@@ -1,8 +1,7 @@
-use crate::{display, input};
+use crate::{display, input, text};
 
 const ACCENT: [u8; 3] = [61, 220, 151];
 const ORIGIN: (usize, usize) = (32, 32);
-const SCALE: usize = 3;
 const CELLS: usize = 16;
 
 pub struct Model {
@@ -17,11 +16,7 @@ impl Model {
 
     pub fn apply(&mut self, event: input::Event) -> bool {
         match event {
-            input::Event::Text(text)
-                if self.length < self.cells.len()
-                    && text.is_ascii()
-                    && crate::glyph(text.to_ascii_uppercase()).is_some() =>
-            {
+            input::Event::Text(text) if self.length < self.cells.len() && text.is_ascii() => {
                 self.cells[self.length] = text;
                 self.length += 1;
                 true
@@ -34,9 +29,9 @@ impl Model {
         }
     }
 
-    pub fn render(&self, display: &mut display::Service) -> bool {
-        self.cells[..self.length].iter().enumerate().all(|(cell, text)| {
-            Self::draw_glyph(display, *text, ORIGIN.0 + cell * 6 * SCALE, ORIGIN.1)
+    pub fn render(&self, display: &mut display::Service, text: &text::Service) -> bool {
+        self.cells[..self.length].iter().enumerate().all(|(cell, glyph)| {
+            text.render(display, *glyph, ORIGIN.0 + cell * text::Service::ADVANCE, ORIGIN.1, ACCENT)
         })
     }
 
@@ -46,24 +41,5 @@ impl Model {
             && model.apply(input::Event::Backspace)
             && !model.apply(input::Event::Enter)
             && model.length == 0
-    }
-
-    fn draw_glyph(display: &mut display::Service, text: u8, x: usize, y: usize) -> bool {
-        crate::glyph(text.to_ascii_uppercase()).is_some_and(|rows| {
-            rows.iter().enumerate().all(|(row, bits)| {
-                (0..5).all(|column| {
-                    bits & (1 << (4 - column)) == 0
-                        || (0..SCALE).all(|dy| {
-                            (0..SCALE).all(|dx| {
-                                display.present(
-                                    x + column * SCALE + dx,
-                                    y + row * SCALE + dy,
-                                    ACCENT,
-                                )
-                            })
-                        })
-                })
-            })
-        })
     }
 }

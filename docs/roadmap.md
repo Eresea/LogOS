@@ -124,6 +124,7 @@ The normal terminal is not a kernel shell. It is a renderer and editor attached 
 - [x] Console v1 slice 1: introduce the Foundation input-service boundary while retaining direct kernel recovery input.
 - [x] Console v1 slice 2: introduce the Foundation display-service boundary while retaining direct kernel recovery output.
 - [x] Console v1 slice 3: add a minimal terminal model that consumes input events and renders through the display service.
+- [x] Console v1 slice 4: route normal terminal glyph rasterization through the Foundation text service.
 - [ ] Move normal keyboard handling behind an input service.
 - [ ] Preserve a kernel-owned emergency output and input path for recovery.
 - [ ] Normalize physical keys, logical keys, text input, modifiers, and repeat.

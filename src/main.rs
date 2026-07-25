@@ -16,6 +16,7 @@ mod pci;
 mod scheduler;
 mod services;
 mod terminal;
+mod text;
 mod trace;
 mod virtio;
 mod virtual_memory;
@@ -305,12 +306,14 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let mut input = input::Service::new();
     let _ = input.next();
     check!(b"input service", input::Service::self_check());
+    let text = text::Service::new();
+    check!(b"text service", text::Service::self_check());
     let mut terminal = terminal::Model::new();
     check!(
         b"terminal model",
         terminal::Model::self_check()
             && terminal.apply(input::Event::Text(b'g'))
-            && terminal.render(&mut display),
+            && terminal.render(&mut display, &text),
     );
     check!(b"trace", trace::self_check());
     let mut console = console::Shell::from_startup(
