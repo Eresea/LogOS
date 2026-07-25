@@ -43,8 +43,24 @@ impl Model {
     }
 
     pub fn apply(&mut self, event: input::Event) -> bool {
-        event.text().is_some_and(|text| self.insert_utf8(&[text]))
-            || event.is_backspace() && self.backspace()
+        match event.pressed() {
+            Some((input::LogicalKey::Text(text), _)) => self.insert_utf8(&[text]),
+            Some((input::LogicalKey::Backspace, _)) => self.backspace(),
+            Some((input::LogicalKey::Delete, _)) => self.delete(),
+            Some((input::LogicalKey::Left, _)) if event.control() => self.word_left(),
+            Some((input::LogicalKey::Right, _)) if event.control() => self.word_right(),
+            Some((input::LogicalKey::Left, _)) => self.move_left(),
+            Some((input::LogicalKey::Right, _)) => self.move_right(),
+            Some((input::LogicalKey::Home, _)) => {
+                self.home();
+                true
+            }
+            Some((input::LogicalKey::End, _)) => {
+                self.end();
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn insert_utf8(&mut self, bytes: &[u8]) -> bool {
@@ -93,6 +109,41 @@ impl Model {
         self.length -= self.cursor - start;
         self.cursor = start;
         true
+    }
+
+    fn delete(&mut self) -> bool {
+        if self.cursor == self.length {
+            return false;
+        }
+        let mut end = self.cursor + 1;
+        while end < self.length && self.cells[end] & 0xc0 == 0x80 {
+            end += 1;
+        }
+        self.cells.copy_within(end..self.length, self.cursor);
+        self.length -= end - self.cursor;
+        true
+    }
+
+    fn word_left(&mut self) -> bool {
+        let start = self.cursor;
+        while self.cursor > 0 && self.cells[self.cursor - 1] == b' ' {
+            let _ = self.move_left();
+        }
+        while self.cursor > 0 && self.cells[self.cursor - 1] != b' ' {
+            let _ = self.move_left();
+        }
+        self.cursor != start
+    }
+
+    fn word_right(&mut self) -> bool {
+        let start = self.cursor;
+        while self.cursor < self.length && self.cells[self.cursor] != b' ' {
+            let _ = self.move_right();
+        }
+        while self.cursor < self.length && self.cells[self.cursor] == b' ' {
+            let _ = self.move_right();
+        }
+        self.cursor != start
     }
 
     fn previous_boundary(&self, cursor: usize) -> Option<usize> {
@@ -159,12 +210,21 @@ impl Model {
         model.end();
         let visible = model.caret_visible;
         model.blink();
+        let mut navigation = Self::new();
+        let inserted = navigation.insert_utf8(b"one two");
+        navigation.home();
+        let navigation_ok = inserted
+            && navigation.word_right()
+            && navigation.delete()
+            && navigation.word_left()
+            && navigation.delete();
         edited
             && home
             && model.cursor == model.length
             && visible != model.caret_visible
             && model.submit().as_bytes() == b"g"
             && model.submit().as_bytes().is_empty()
+            && navigation_ok
     }
 
     fn columns_before_cursor(&self) -> usize {

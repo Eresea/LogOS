@@ -5,8 +5,13 @@ pub struct PhysicalKey(pub u8);
 pub enum LogicalKey {
     Text(u8),
     Backspace,
+    Delete,
     Enter,
     Escape,
+    Left,
+    Right,
+    Home,
+    End,
     Unknown,
 }
 
@@ -21,6 +26,7 @@ pub struct Modifiers(u8);
 
 impl Modifiers {
     const SHIFT: u8 = 1;
+    const CONTROL: u8 = 2;
 
     pub const fn none() -> Self {
         Self(0)
@@ -28,6 +34,10 @@ impl Modifiers {
 
     fn shift(self) -> bool {
         self.0 & Self::SHIFT != 0
+    }
+
+    fn control(self) -> bool {
+        self.0 & Self::CONTROL != 0
     }
 }
 
@@ -50,8 +60,16 @@ impl Event {
         matches!(self, Self::Key { logical: LogicalKey::Enter, state: State::Press, .. })
     }
 
-    pub fn is_backspace(self) -> bool {
-        matches!(self, Self::Key { logical: LogicalKey::Backspace, state: State::Press, .. })
+    pub fn pressed(self) -> Option<(LogicalKey, Modifiers)> {
+        match self {
+            Self::Key { logical, state: State::Press, modifiers, .. } => Some((logical, modifiers)),
+            Self::Repeat { logical, modifiers, .. } => Some((logical, modifiers)),
+            _ => None,
+        }
+    }
+
+    pub fn control(self) -> bool {
+        self.pressed().is_some_and(|(_, modifiers)| modifiers.control())
     }
 }
 
@@ -66,11 +84,18 @@ pub struct Service {
     modifiers: Modifiers,
     held: Option<(PhysicalKey, LogicalKey, Modifiers)>,
     repeat_budget: u8,
+    extended: bool,
 }
 
 impl Service {
     pub const fn new() -> Self {
-        Self { layout: Layout::Qwerty, modifiers: Modifiers::none(), held: None, repeat_budget: 0 }
+        Self {
+            layout: Layout::Qwerty,
+            modifiers: Modifiers::none(),
+            held: None,
+            repeat_budget: 0,
+            extended: false,
+        }
     }
 
     pub fn set_layout(&mut self, layout: Layout) {
@@ -78,8 +103,14 @@ impl Service {
     }
 
     pub fn next(&mut self) -> Option<Event> {
-        if let Some(scancode) = crate::keyboard::poll_scancode() {
-            return Some(self.decode(scancode));
+        while let Some(scancode) = crate::keyboard::poll_scancode() {
+            if scancode == 0xe0 {
+                self.extended = true;
+                continue;
+            }
+            let extended = self.extended;
+            self.extended = false;
+            return Some(self.decode(scancode, extended));
         }
         let (physical, logical, modifiers) = self.held?;
         if self.repeat_budget == 0 {
@@ -91,21 +122,34 @@ impl Service {
 
     pub fn self_check() -> bool {
         let mut input = Self::new();
-        let qwerty = input.decode(0x10).text() == Some(b'q');
+        let qwerty = input.decode(0x10, false).text() == Some(b'q');
         input.set_layout(Layout::Azerty);
-        let azerty = input.decode(0x10).text() == Some(b'a');
-        let pressed = matches!(input.decode(0x2a), Event::Key { state: State::Press, .. });
-        let released = matches!(input.decode(0xaa), Event::Key { state: State::Release, .. });
-        qwerty && azerty && pressed && released
+        let azerty = input.decode(0x10, false).text() == Some(b'a');
+        let pressed = matches!(input.decode(0x2a, false), Event::Key { state: State::Press, .. });
+        let released =
+            matches!(input.decode(0xaa, false), Event::Key { state: State::Release, .. });
+        let left = matches!(input.decode(0x4b, true), Event::Key { logical: LogicalKey::Left, .. });
+        qwerty && azerty && pressed && released && left
     }
 
-    fn decode(&mut self, scancode: u8) -> Event {
+    fn decode(&mut self, scancode: u8, extended: bool) -> Event {
         let state = if scancode & 0x80 == 0 { State::Press } else { State::Release };
         let physical = PhysicalKey(scancode & 0x7f);
         if physical.0 == 0x2a || physical.0 == 0x36 {
-            self.modifiers = Modifiers(if state == State::Press { Modifiers::SHIFT } else { 0 });
+            self.modifiers = Modifiers(if state == State::Press {
+                self.modifiers.0 | Modifiers::SHIFT
+            } else {
+                self.modifiers.0 & !Modifiers::SHIFT
+            });
         }
-        let logical = self.logical(physical);
+        if physical.0 == 0x1d {
+            self.modifiers = Modifiers(if state == State::Press {
+                self.modifiers.0 | Modifiers::CONTROL
+            } else {
+                self.modifiers.0 & !Modifiers::CONTROL
+            });
+        }
+        let logical = self.logical(physical, extended);
         let modifiers = self.modifiers;
         if state == State::Press && !matches!(logical, LogicalKey::Unknown) {
             self.held = Some((physical, logical, modifiers));
@@ -117,7 +161,17 @@ impl Service {
         Event::Key { physical, logical, state, modifiers }
     }
 
-    fn logical(&self, physical: PhysicalKey) -> LogicalKey {
+    fn logical(&self, physical: PhysicalKey, extended: bool) -> LogicalKey {
+        if extended {
+            return match physical.0 {
+                0x4b => LogicalKey::Left,
+                0x4d => LogicalKey::Right,
+                0x47 => LogicalKey::Home,
+                0x4f => LogicalKey::End,
+                0x53 => LogicalKey::Delete,
+                _ => LogicalKey::Unknown,
+            };
+        }
         let text = match (self.layout, physical.0) {
             (_, 0x01) => return LogicalKey::Escape,
             (_, 0x0e) => return LogicalKey::Backspace,

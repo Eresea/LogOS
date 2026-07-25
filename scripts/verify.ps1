@@ -17,6 +17,7 @@ $markers = @(
     'LogOS: check command registry passed',
     'LogOS: check input normalization passed',
     'LogOS: check terminal editing passed',
+    'LogOS: check terminal navigation passed',
     'LogOS: check terminal caret passed',
     'LogOS: check text font passed',
     'LogOS: startup self check passed'
