@@ -6,6 +6,12 @@ const ORIGIN: (usize, usize) = (32, 32);
 const CELLS: usize = 64;
 const SCROLLBACK: usize = 8;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    start: usize,
+    end: usize,
+}
+
 #[derive(Clone, Copy)]
 pub struct Submission {
     cells: [u8; CELLS],
@@ -41,6 +47,7 @@ pub struct Model {
     scrollback_head: usize,
     scrollback_len: usize,
     history_offset: Option<usize>,
+    selection: Option<Selection>,
 }
 
 impl Model {
@@ -54,6 +61,7 @@ impl Model {
             scrollback_head: 0,
             scrollback_len: 0,
             history_offset: None,
+            selection: None,
         }
     }
 
@@ -174,6 +182,11 @@ impl Model {
         Some(boundary)
     }
 
+    fn is_boundary(&self, index: usize) -> bool {
+        index == self.length
+            || index < self.length && (index == 0 || self.cells[index] & 0xc0 != 0x80)
+    }
+
     pub fn render(&self, display: &mut display::Service, text: &text::Service) -> bool {
         let columns = self.columns(display);
         let mut column = 0;
@@ -214,6 +227,22 @@ impl Model {
         self.length = 0;
         self.cursor = 0;
         submission
+    }
+
+    pub fn select(&mut self, start: usize, end: usize) -> bool {
+        if start > end || end > self.length || !self.is_boundary(start) || !self.is_boundary(end) {
+            return false;
+        }
+        self.selection = Some(Selection { start, end });
+        true
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    pub fn selected_bytes(&self) -> Option<&[u8]> {
+        self.selection.map(|selection| &self.cells[selection.start..selection.end])
     }
 
     pub fn scrollback_len(&self) -> usize {
@@ -301,6 +330,11 @@ impl Model {
         let history = scrollback.history_previous()
             && scrollback.latest_scrollback().as_bytes() == b"x"
             && scrollback.history_next();
+        let mut selection = Self::new();
+        let selected = selection.insert_utf8(b"a\xc3\xa9")
+            && selection.select(1, 3)
+            && selection.selected_bytes() == Some(b"\xc3\xa9" as &[u8]);
+        selection.clear_selection();
         edited
             && home
             && model.cursor == model.length
@@ -312,6 +346,8 @@ impl Model {
             && scrollback.scrollback_len() == SCROLLBACK
             && scrollback.latest_scrollback().as_bytes() == b"x"
             && history
+            && selected
+            && selection.selected_bytes().is_none()
     }
 
     fn columns_before_cursor(&self) -> usize {
