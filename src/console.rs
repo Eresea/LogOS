@@ -127,11 +127,6 @@ impl Startup {
         self.console.reset();
         self.console.write(b"LOGOS STARTUP HEALTH\n");
     }
-
-    pub fn check(&mut self, module: &[u8], passed: bool) {
-        self.console.write(module);
-        self.console.write(if passed { b" OK\n" } else { b" FAIL\n" });
-    }
 }
 
 impl<'a> Shell<'a> {

@@ -245,6 +245,8 @@ A native implementation should not become permanent merely because it was easier
 
 Kernel-owned, fixed-function, minimal.
 
+It is activated only when the normal console fails its health gate or an authorized live handoff requests recovery. Healthy normal boots keep recovery framebuffer output dormant.
+
 ```text
 recovery input
     -> tiny command parser

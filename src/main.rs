@@ -12,6 +12,7 @@ mod interrupts;
 mod ipc;
 mod keyboard;
 mod memory;
+mod mode;
 mod pci;
 mod scheduler;
 mod services;
@@ -21,20 +22,12 @@ mod trace;
 mod virtio;
 mod virtual_memory;
 
-use uefi::{
-    boot,
-    mem::memory_map::MemoryMap,
-    prelude::*,
-    proto::console::gop::{BltOp, BltPixel, GraphicsOutput},
-};
-
-const BACKGROUND: BltPixel = BltPixel::new(12, 18, 30);
-const ACCENT: BltPixel = BltPixel::new(61, 220, 151);
+use uefi::{boot, mem::memory_map::MemoryMap, prelude::*, proto::console::gop::GraphicsOutput};
 
 #[entry]
 fn main() -> Status {
     debug::write_line(b"LogOS: kernel entered");
-    let boot_info = match draw_boot_screen() {
+    let boot_info = match boot_info() {
         Ok(info) => info,
         Err(_) => return Status::DEVICE_ERROR,
     };
@@ -55,14 +48,11 @@ struct BootInfo {
     stride: usize,
 }
 
-fn draw_boot_screen() -> uefi::Result<BootInfo> {
+fn boot_info() -> uefi::Result<BootInfo> {
     let graphics_handle = boot::get_handle_for_protocol::<GraphicsOutput>()?;
     let mut gop = boot::open_protocol_exclusive::<GraphicsOutput>(graphics_handle)?;
     let mode = gop.current_mode_info();
     let (width, height) = mode.resolution();
-    let mut terminal = Terminal::new(&mut gop, width, height);
-    terminal.reset()?;
-    terminal.write(b"KERNEL\n")?;
     let mut framebuffer = gop.frame_buffer();
     Ok(BootInfo {
         framebuffer: framebuffer.as_mut_ptr(),
@@ -88,17 +78,14 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     ) else {
         health.fail(b"console");
     };
-    startup.start();
     macro_rules! check {
         ($module:expr, $passed:expr $(,)?) => {{
             let passed = $passed;
-            startup.check($module, passed);
             health.check($module, passed);
         }};
     }
     macro_rules! fail {
         ($module:expr) => {{
-            startup.check($module, false);
             health.fail($module);
         }};
     }
@@ -288,53 +275,58 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     if service_scheduler.spawn(&mut service_task).is_none() {
         fail!(b"scheduler rebind");
     }
-    check!(b"console", true);
-    let Some(mut display) = display::Service::new(
+    let mut display = display::Service::new(
         boot_info.framebuffer,
         boot_info.framebuffer_size,
         boot_info.resolution.0,
         boot_info.resolution.1,
         boot_info.stride,
-    ) else {
-        fail!(b"display service");
-    };
-    check!(
-        b"display service",
-        display::Service::self_check() && display.present(0, 0, [12, 18, 30])
     );
-    check!(b"keyboard", keyboard::self_check());
     let mut input = input::Service::new();
     let _ = input.next();
-    check!(b"input service", input::Service::self_check());
     let text = text::Service::new();
-    check!(b"text service", text::Service::self_check());
     let mut terminal = terminal::Model::new();
-    check!(
-        b"terminal model",
-        terminal::Model::self_check()
+    let normal_ready = display.as_mut().is_some_and(|display| {
+        display::Service::self_check()
+            && display.present(0, 0, [12, 18, 30])
+            && keyboard::self_check()
+            && input::Service::self_check()
+            && text::Service::self_check()
+            && terminal::Model::self_check()
             && terminal.apply(input::Event::Text(b'g'))
-            && terminal.render(&mut display, &text),
-    );
+            && terminal.render(display, &text)
+    });
+    let coordinator = mode::Coordinator::new(normal_ready);
+    check!(b"console mode", mode::Coordinator::self_check());
+    coordinator.announce();
     check!(b"trace", trace::self_check());
-    let mut console = console::Shell::from_startup(
-        startup,
-        console::Endpoint::new(
-            &channel,
-            &responses,
-            &capabilities,
-            service_capability,
-            virtio_handle,
-        ),
-    );
-    let _ = console.start();
     health.finish();
     interrupts::disable_timer();
-    console.run(|| {
-        if virtio::completion_pending() {
-            let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
+    match coordinator.mode() {
+        mode::ConsoleMode::Normal => loop {
+            unsafe { core::arch::asm!("hlt") };
+        },
+        mode::ConsoleMode::Recovery => {
+            startup.start();
+            let mut console = console::Shell::from_startup(
+                startup,
+                console::Endpoint::new(
+                    &channel,
+                    &responses,
+                    &capabilities,
+                    service_capability,
+                    virtio_handle,
+                ),
+            );
+            let _ = console.start();
+            console.run(|| {
+                if virtio::completion_pending() {
+                    let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
+                }
+                let _ = service_scheduler.run_next();
+            })
         }
-        let _ = service_scheduler.run_next();
-    })
+    }
 }
 
 fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {
@@ -350,82 +342,6 @@ fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {
 fn task_b(_: &mut scheduler::Task) -> scheduler::TaskState {
     debug::write_line(b"LogOS: task B complete");
     scheduler::TaskState::Complete
-}
-
-struct Terminal<'a> {
-    gop: &'a mut GraphicsOutput,
-    cursor: (usize, usize),
-    width: usize,
-    height: usize,
-}
-
-impl<'a> Terminal<'a> {
-    const ORIGIN: (usize, usize) = (32, 136);
-    const SCALE: usize = 3;
-
-    fn new(gop: &'a mut GraphicsOutput, width: usize, height: usize) -> Self {
-        Self { gop, cursor: Self::ORIGIN, width, height }
-    }
-
-    fn reset(&mut self) -> uefi::Result {
-        self.fill(BACKGROUND, (0, 0), (self.width, self.height))?;
-        self.fill(ACCENT, (32, 32), (self.width.saturating_sub(64), 80))?;
-        self.cursor = (56, 48);
-        self.write_with_color(b"LOGOS", BACKGROUND)?;
-        self.cursor = Self::ORIGIN;
-        Ok(())
-    }
-
-    fn write(&mut self, text: &[u8]) -> uefi::Result {
-        self.write_with_color(text, ACCENT)
-    }
-
-    fn write_with_color(&mut self, text: &[u8], color: BltPixel) -> uefi::Result {
-        for &byte in text {
-            if byte == b'\n' {
-                self.newline();
-            } else {
-                self.draw_glyph(byte.to_ascii_uppercase(), color)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn newline(&mut self) {
-        self.cursor = (Self::ORIGIN.0, self.cursor.1 + 8 * Self::SCALE);
-        if self.cursor.1 + 7 * Self::SCALE > self.height {
-            self.cursor = Self::ORIGIN;
-        }
-    }
-
-    fn draw_glyph(&mut self, byte: u8, color: BltPixel) -> uefi::Result {
-        if self.cursor.0 + 5 * Self::SCALE > self.width.saturating_sub(32) {
-            self.newline();
-        }
-        let glyph = glyph(byte).ok_or(Status::UNSUPPORTED)?;
-        for (row, &bits) in glyph.iter().enumerate() {
-            for column in 0..5 {
-                if bits & (1 << (4 - column)) != 0 {
-                    self.fill(
-                        color,
-                        (self.cursor.0 + column * Self::SCALE, self.cursor.1 + row * Self::SCALE),
-                        (Self::SCALE, Self::SCALE),
-                    )?;
-                }
-            }
-        }
-        self.cursor.0 += 6 * Self::SCALE;
-        Ok(())
-    }
-
-    fn fill(
-        &mut self,
-        color: BltPixel,
-        dest: (usize, usize),
-        dims: (usize, usize),
-    ) -> uefi::Result {
-        self.gop.blt(BltOp::VideoFill { color, dest, dims })
-    }
 }
 
 pub(crate) fn glyph(byte: u8) -> Option<&'static [u8; 7]> {
