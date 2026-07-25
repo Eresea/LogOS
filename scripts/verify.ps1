@@ -14,6 +14,7 @@ $markers = @(
     'LogOS: check display service passed',
     'LogOS: check keyboard passed',
     'LogOS: check input service passed',
+    'LogOS: check terminal model passed',
     'LogOS: startup self check passed'
 )
 $run = Join-Path $PSScriptRoot 'run.ps1'

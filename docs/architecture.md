@@ -261,6 +261,8 @@ input driver
     -> display service
 ```
 
+Console v1 currently has a minimal terminal model that accepts Foundation input events and renders through the display service. It has no shell, session, scrollback, or recovery role.
+
 Remote operation replaces only the input/output transport:
 
 ```text
