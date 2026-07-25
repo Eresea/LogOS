@@ -33,10 +33,9 @@ pub fn self_check() -> bool {
     let Some(recovery) = capabilities.grant(CapabilityKind::Recovery) else {
         return false;
     };
-    let submission = Submission::new(
-        [b'r', b'e', b'c', b'o', b'v', b'e', b'r', b'y', 0, 0, 0, 0, 0, 0, 0, 0],
-        8,
-    );
+    let Some(submission) = Submission::from_bytes(b"recovery") else {
+        return false;
+    };
     invoke(submission, &capabilities, debug) == Result::Denied
         && invoke(submission, &capabilities, recovery) == Result::Recovery
 }

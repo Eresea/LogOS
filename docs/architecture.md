@@ -271,6 +271,8 @@ input driver
 
 Console v1 currently has a minimal terminal model that accepts Foundation input events and renders through the display service. It has no shell, session, scrollback, or recovery role.
 
+The terminal model stores bounded UTF-8, edits only on character boundaries, and owns cursor position independently of rendering.
+
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
 
 The command registry authorizes a live recovery handoff with an explicit recovery capability. The handoff stops normal input processing before recovery activates its direct input/output path.

@@ -49,6 +49,10 @@ impl Event {
     pub fn is_enter(self) -> bool {
         matches!(self, Self::Key { logical: LogicalKey::Enter, state: State::Press, .. })
     }
+
+    pub fn is_backspace(self) -> bool {
+        matches!(self, Self::Key { logical: LogicalKey::Backspace, state: State::Press, .. })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
