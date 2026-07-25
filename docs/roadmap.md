@@ -50,7 +50,7 @@ The rings describe dependency and trust placement. They are not conventional CPU
 
 A component may be moved inward only when measurements or correctness requirements prove that an outer service cannot satisfy its contract.
 
-See [Architecture Annex](docs/ARCHITECTURE.md).
+See [Architecture Annex](ARCHITECTURE.md).
 
 ## 4. Current state
 
@@ -652,5 +652,5 @@ For every material change:
 
 ## Annexes
 
-- [Architecture and boundary model](docs/ARCHITECTURE.md)
-- [Subsystem naming register](docs/NAMING.md)
+- [Architecture and boundary model](ARCHITECTURE.md)
+- [Subsystem naming register](NAMING.md)
