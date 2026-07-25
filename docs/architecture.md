@@ -269,6 +269,8 @@ input driver
 
 Console v1 currently has a minimal terminal model that accepts Foundation input events and renders through the display service. It has no shell, session, scrollback, or recovery role.
 
+In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
+
 Remote operation replaces only the input/output transport:
 
 ```text

@@ -303,9 +303,18 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     health.finish();
     interrupts::disable_timer();
     match coordinator.mode() {
-        mode::ConsoleMode::Normal => loop {
-            unsafe { core::arch::asm!("hlt") };
-        },
+        mode::ConsoleMode::Normal => {
+            debug::write_line(b"LogOS: normal terminal active");
+            loop {
+                if let Some(event) = input.next() {
+                    if terminal.apply(event) {
+                        let _ = terminal.render(display.as_mut().unwrap(), &text);
+                    }
+                } else {
+                    unsafe { core::arch::asm!("hlt") };
+                }
+            }
+        }
         mode::ConsoleMode::Recovery => {
             startup.start();
             let mut console = console::Shell::from_startup(

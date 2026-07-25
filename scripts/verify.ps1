@@ -13,6 +13,7 @@ $markers = @(
     'LogOS: check service lifetime passed',
     'LogOS: check console mode passed',
     'LogOS: console mode normal',
+    'LogOS: normal terminal active',
     'LogOS: startup self check passed'
 )
 $run = Join-Path $PSScriptRoot 'run.ps1'
