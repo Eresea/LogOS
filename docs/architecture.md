@@ -1,73 +1,441 @@
-# Architecture
+# LogOS Architecture Annex
 
-## Current state
+> **Status:** Living architecture reference  
+> **Updated:** 2026-07-24
 
-LogOS exits UEFI boot services into a Rust kernel. It retains the final UEFI memory map and boot framebuffer metadata, then initializes a physical-page allocator from its conventional-memory ranges.
+## 1. Purpose
 
-## Physical memory
+This document defines where responsibilities belong, how components depend on one another, and how LogOS preserves a small kernel while still becoming a complete operating system.
 
-The bootstrap allocator returns 4 KiB physical pages from up to eight conventional-memory ranges. Reclaimable callers use owned page tokens; released physical pages form an intrusive free list, so reclamation is not capped by allocator metadata. Long-lived driver pages remain reserved until driver teardown exists.
+The ring model is architectural, not a direct representation of CPU privilege levels.
 
-## Virtual memory
+## 2. Ring model
 
-LogOS copies the active UEFI top-level page table, adds one kernel-owned high virtual mapping with an explicit read-only or read-write leaf permission, then reloads CR3. The bootstrap self-check verifies, unmaps, and releases a read-write temporary mapping before continuing.
+## Ring 0 — Core
 
-## Interrupts
+Core owns privileged mechanisms and global invariants.
 
-The kernel owns the IDT and uses PIT IRQ0 only during startup, then masks it before entering the console so `hlt` wakes only for keyboard or device events. CPU exceptions emit `FAULT HALT` to the debug console and halt; the keyboard handler queues scancodes. ACPI MADT supplies the local-APIC and IOAPIC addresses used for PCI interrupt routing; the VirtIO completion IRQ acknowledges the device and wakes its blocked task.
+### Responsibilities
 
-## ACPI
+- CPU and interrupt initialization
+- task scheduling and wake-up
+- physical-page ownership
+- virtual mappings and permissions
+- capability tables and enforcement
+- IPC transport primitives
+- bounded kernel diagnostics
+- fault and panic containment
+- minimal device discovery required to start drivers
+- minimal recovery console
+- reset and power-off
 
-The UEFI entry path finds and validates the ACPI 2 RSDP and XSDT, retaining MADT APIC addresses after boot services end. It selects QEMU's APIC `_PRT` package through the FADT and routes root-bus PCI interrupts by device and pin, rather than the firmware-programmed PCI interrupt line. The FADT I/O reset register and DSDT `_S5` package back the console `exit` power-off path, with reset as fallback.
+### Exclusions
 
-## Scheduling
+- keyboard layouts
+- fonts
+- normal terminal behavior
+- command parsing
+- user identities
+- secrets policy
+- files and directories
+- network protocols
+- package management
+- WASM execution
+- application policy
+- desktop composition
 
-The bootstrap scheduler runs bounded cooperative tasks in round-robin order. A task yields by returning `Ready`, waits by returning `Blocked(event)`, and is removed when it returns `Complete`. Event wakes release every matching waiter; generation-tagged task handles remain available for direct stale-wake protection. The VirtIO service waits for the VirtIO completion event.
+Core exposes mechanisms. It does not decide normal system policy.
 
-## Capabilities
+## Ring 1 — Foundation
 
-The kernel grants opaque, generation-tagged capability handles from a fixed table. Checks require a matching kind and generation; revocation invalidates existing handles.
+Foundation contains trusted native Rust services closest to hardware.
 
-## Device discovery
+### Typical services
 
-The kernel scans PCI configuration space and retains a small list of discovered vendor/device identities. Drivers remain separate and bind only when explicitly added.
+- driver host and device binding
+- input
+- display
+- text and glyph rasterization
+- block devices
+- network devices
+- entropy devices
+- hardware clock access
 
-## VirtIO
+### Rules
 
-The reusable legacy `VirtQueue` owns contiguous queue pages and releases them on quiesce. The VirtIO balloon service binds a legacy PCI function through its I/O BAR, programs queue 0, resets and releases it if binding fails, and, as a persistent task, answers routed `Ping` messages with `Pong`, submits an `Inflate` request with a completion reply, or processes a capability-gated `Recover` request. A failed completion returns a typed failure reply, then reactivates the same queue for subsequent requests.
+- Hardware access requires explicit capabilities.
+- Drivers own their queues, mappings, interrupts, and DMA resources.
+- Device-independent protocols face outward.
+- Driver crashes must not require kernel restart where hardware permits recovery.
+- Normal services do not depend on a specific driver implementation.
 
-## Driver lifetime
+## Ring 2 — System
 
-A driver owns its queue pages from bind until quiesce. The VirtIO proof driver transitions through bound, quiesced, and failed states; quiesce disables the device, clears its interrupt port, and returns those pages to physical memory. Recovery reactivates the same queue, while a fresh bind can replace the service without global teardown.
+System services provide shared machine-wide behavior.
 
-## IPC
+### Typical services
 
-The kernel provides capability-gated typed request and response channels. Each bounded enqueue receives a request ID; service replies preserve that ID for correlation, including typed cancellation failures. A local interrupt-safe spin lock protects queue producers and consumers; a full queue applies backpressure by rejecting the enqueue.
+- service supervision
+- identity and principals
+- secrets
+- trusted time
+- storage
+- networking
+- firewall and trust store
+- audit
+- update and rollback
+- package metadata
 
-## Service registry
+### Rules
 
-The kernel registers typed services behind opaque handles. Registration requires a service capability, and IPC envelopes use the resolved handle rather than a direct pointer.
+- Machine-wide policy lives here, not in drivers.
+- System services expose versioned typed protocols.
+- Services own persistent state through storage capabilities.
+- Privileged effects emit audit events.
+- System services remain remotely operable without a graphical environment.
 
-## Startup health
+## Ring 3 — Sessions
 
-Each initialized kernel subsystem must report a startup self-check to the debug console and framebuffer. A failed check emits its module name, displays `FAIL`, and halts; contained driver failures emit `driver <name> recovered` or `driver <name> failed`. The boot verifier accepts only the final `startup self check passed` marker.
+Sessions provide interactive and automated control of the system.
 
-## Tracing
+### Components
 
-The kernel keeps a fixed in-memory trace ring for low-overhead event diagnostics. It records bootstrap, scheduler block/wake, VirtIO request/completion, driver lifecycle, and fatal fault events without allocation; the console exports its oldest-to-newest snapshot with `trace`. CPU faults record the event, emit `FAULT HALT`, then halt; failed drivers report health and attempt queue reactivation.
+- session manager
+- authentication context
+- command registry
+- shell engine
+- job lifecycle
+- terminal model and renderer
+- remote session gateway
+- clipboard and interaction services
+- output formatters
 
-## Kernel console
+### Central rule
 
-The kernel renders its console directly to the boot framebuffer and consumes PS/2 IRQ1 scancodes after firmware services end. It provides `help`, `clear`, `version`, `ping`, `inflate`, and `exit`; `ping` and `inflate` send capability-gated IPC requests to VirtIO and display their replies. A full terminal service remains a future userspace concern.
+A terminal is one renderer for a session. It is not the definition of the session.
 
-## Execution model
+The same session and command contracts may be used by:
 
-- The kernel, drivers, scheduler, memory manager, IPC, filesystem, networking, and compositor are native Rust.
-- System services expose typed, capability-checked APIs.
-- Applications, plugins, automation, and AI agents run as isolated WASM modules.
-- WASM modules communicate through kernel-managed IPC, explicit shared memory, and delegated capabilities—not direct pointers.
-- WASM hot-loading and hot-swapping are first-class goals; native kernel components are not a dynamic-plugin surface.
+- the local terminal;
+- a graphical terminal;
+- a web client;
+- a desktop client;
+- a mobile client;
+- an SSH compatibility service;
+- an authorized AI agent.
 
-## Kernel boundary
+## Ring 4 — Runtime
 
-Keep the kernel focused on hardware resources, scheduling, memory, IPC, and capabilities. Higher-level functionality is replaceable services. See [boot sequence](boot-sequence.md) and [security](security.md).
+Runtime hosts sandboxed applications and user-scoped automation.
+
+### Components
+
+- WASM component runtime
+- application package service
+- application lifecycle
+- application identities
+- workspaces
+- application-owned storage
+- typed inter-application interfaces
+- generated SDKs
+- tool registry for authorized automation
+
+### Rules
+
+- WASM applications receive no ambient machine authority.
+- Host imports are capabilities.
+- Resource, CPU, memory, network, and storage limits are explicit.
+- Application failure does not compromise the runtime or other applications.
+- Native applications are exceptional and require a stronger trust policy.
+
+## Ring 5 — Experience
+
+Experience provides replaceable graphical and user-facing environments.
+
+### Components
+
+- compositor
+- graphical shell
+- launcher
+- settings
+- notifications
+- accessibility services
+- graphical applications
+- remote visual clients
+
+The machine must remain manageable when this entire ring is absent or failed.
+
+## 3. Dependency rules
+
+1. Dependencies point inward through public contracts.
+2. No outer component calls an inner implementation directly.
+3. Cross-ring communication uses versioned interfaces and capabilities.
+4. A service may depend on another service in the same ring only through the supervisor.
+5. Cycles in startup dependencies are prohibited.
+6. Runtime discovery may be dynamic, but required boot dependencies must remain explicit.
+7. Resource ownership is never inferred from reachability alone.
+
+## 4. Boot sequence
+
+A target boot flow is:
+
+1. Core initializes CPU, memory, interrupts, scheduler, capabilities, IPC, diagnostics, and recovery console.
+2. Core starts the minimum supervisor entry point.
+3. Supervisor validates the boot profile and service manifests.
+4. Foundation drivers discover and bind devices.
+5. System identity, time, entropy, secrets, and storage start.
+6. Normal display, input, and text services start.
+7. Session services start and present the local terminal.
+8. Networking and the remote gateway start.
+9. Update, WASM runtime, workspaces, and applications start according to policy.
+10. Graphical experience starts only when configured.
+
+Recovery boot stops at an earlier stage and starts only explicitly permitted services.
+
+## 5. Failure domains
+
+| Failure | Expected containment |
+|---|---|
+| WASM application | Application stopped; owned resources reclaimed; optional restart |
+| Terminal renderer | Session remains; renderer reconnects |
+| Shell engine | Jobs are cancelled or reattached according to contract |
+| Remote client | Session may remain resumable within policy |
+| Compositor | Applications and remote administration continue |
+| System service | Supervisor reports, reclaims, restarts, or enters degraded mode |
+| Driver | Device quiesced/reset; driver rebound where possible |
+| Supervisor | Core enters recovery path rather than continuing silently |
+| Core invariant failure | Panic diagnostics and controlled halt/reset |
+
+## 6. Native Rust versus WASM
+
+Use a native Rust service when the component:
+
+- directly controls hardware;
+- must participate in early boot or recovery;
+- requires privileged mappings, interrupts, or DMA;
+- enforces machine-wide security policy;
+- has latency constraints that the runtime cannot yet satisfy;
+- must remain available when the WASM runtime is unavailable.
+
+Use WASM when the component:
+
+- is an application or extension;
+- consumes stable host interfaces;
+- should be portable, replaceable, quota-bound, or hot-updated;
+- does not require direct hardware ownership;
+- benefits from language-independent component interfaces.
+
+A native implementation should not become permanent merely because it was easier during bootstrap. Record why it remains native.
+
+## 7. Terminal and session architecture
+
+## Recovery console
+
+Kernel-owned, fixed-function, minimal.
+
+```text
+recovery input
+    -> tiny command parser
+    -> fixed kernel diagnostics/recovery operations
+    -> bitmap framebuffer output
+```
+
+## Normal system terminal
+
+```text
+input driver
+    -> input service
+    -> session manager
+    -> shell / command registry
+    -> typed values and events
+    -> terminal model
+    -> text service
+    -> display service
+```
+
+Remote operation replaces only the input/output transport:
+
+```text
+remote client
+    <-> remote gateway
+    <-> session manager
+    <-> shell / command registry
+```
+
+## Component responsibilities
+
+| Component | Responsibility |
+|---|---|
+| Input service | Physical keys, logical keys, modifiers, repeat, layouts, text composition |
+| Text service | Fonts, glyph metrics, shaping, fallback, rasterization |
+| Terminal model | Lines, cells, cursor, selection, scrollback, redraw state |
+| Terminal renderer | Converts terminal model into display operations |
+| Shell | Syntax, variables, pipelines, jobs, cancellation |
+| Command registry | Discovery, descriptors, schemas, invocation |
+| Session manager | Identity, capabilities, environment, lifetime, reconnect |
+| Remote gateway | Authentication, transport, multiplexing, resume |
+| Formatters | Tables, trees, text, JSON, live views |
+
+No single component owns all of these responsibilities.
+
+## 8. Structured command model
+
+Command input and output use schemas.
+
+A pipeline passes values:
+
+```text
+services
+| where status == "failed"
+| select name, reason
+| sort name
+```
+
+It does not require parsing a text table.
+
+Text-only commands may still participate through adapters:
+
+```text
+text-command
+| parse lines
+| map ...
+```
+
+Structured references are first-class values:
+
+```text
+service:/network
+device:/pci/0000:00:03.0
+system:/health
+store:/workspaces/main
+session:/current
+app:/editor
+model:/local/default
+```
+
+These URI-like forms are user-facing references, not promises that every resource behaves like a file.
+
+## 9. Capability model
+
+Capabilities identify authority over an operation or resource.
+
+Examples:
+
+- invoke a specific command;
+- inspect health;
+- restart one service;
+- read one storage namespace;
+- write one object;
+- connect to a network endpoint;
+- listen on a port;
+- access a secret by identifier;
+- open an input stream;
+- present a surface;
+- install a signed package;
+- approve a sensitive agent action.
+
+Properties:
+
+- no ambient global authority for normal applications;
+- capabilities may be narrowed when delegated;
+- capabilities carry scope and, where useful, expiry;
+- ownership and authority are separate;
+- revocation behavior is explicit;
+- denial is a structured result, not an incidental error.
+
+## 10. Identity and workspaces
+
+Identity answers who is acting.
+
+Capabilities answer what that principal may do.
+
+A workspace groups:
+
+- resources;
+- applications;
+- persistent state;
+- shared services;
+- sessions;
+- capability grants;
+- policy.
+
+A workspace is not a Unix home directory and is not inherently tied to one machine.
+
+## 11. Storage model
+
+The native storage contract is based on objects, streams, versions, and transactions.
+
+A file view may provide:
+
+- paths;
+- directories;
+- files;
+- metadata;
+- streams;
+- atomic rename and replace.
+
+The compatibility view must not force every native service to use path-based APIs internally.
+
+## 12. Networking model
+
+Applications consume asynchronous connection and datagram interfaces through the network service.
+
+They do not own network drivers.
+
+Policy is separated from mechanism:
+
+- driver: packets and device state;
+- network service: protocols and connections;
+- firewall: allow/deny policy;
+- identity/trust: peer authentication;
+- session gateway: remote LogOS protocol.
+
+## 13. Update model
+
+An update passes through:
+
+1. acquisition;
+2. signature and policy validation;
+3. compatibility resolution;
+4. staging;
+5. activation;
+6. health gate;
+7. commit or rollback.
+
+Each phase is journaled and recoverable.
+
+Kernel, trusted services, drivers, runtimes, and applications may have different signing and rollout policies.
+
+## 14. AI addressability
+
+AI agents use the same typed command and service registry as other clients.
+
+A tool descriptor should expose:
+
+- stable operation identifier;
+- input and output schemas;
+- required capabilities;
+- side-effect classification;
+- cancellation support;
+- expected resource limits;
+- audit behavior;
+- whether human approval is required.
+
+AI integration must remain optional. Disabling the agent layer must not disable normal operation.
+
+## 15. Placement checklist
+
+Before adding a component, answer:
+
+1. What invariant does it own?
+2. What resources does it own?
+3. What capabilities does it require and expose?
+4. What is its failure boundary?
+5. Can it restart independently?
+6. Does it require hardware privilege?
+7. Must it exist during recovery?
+8. Could it be WASM?
+9. What contract faces outward?
+10. What automated proof demonstrates correct placement?
+
+When the answers are unclear, the subsystem boundary is not ready.
