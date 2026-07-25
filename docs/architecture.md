@@ -61,6 +61,10 @@ Foundation contains trusted native Rust services closest to hardware.
 - entropy devices
 - hardware clock access
 
+### Console v1 input slice
+
+The Foundation input service owns normal PS/2 scancode decoding and exposes initial text, backspace, enter, and escape events. The kernel recovery console retains a direct PS/2 input path and does not depend on the service. A later terminal consumes the service; it must not consume recovery input.
+
 ### Rules
 
 - Hardware access requires explicit capabilities.

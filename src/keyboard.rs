@@ -14,20 +14,23 @@ static SCANCODES_BUFFER: ScancodeBuffer = ScancodeBuffer(UnsafeCell::new([0; SCA
 static HEAD: AtomicUsize = AtomicUsize::new(0);
 static TAIL: AtomicUsize = AtomicUsize::new(0);
 
-pub fn poll() -> Option<u8> {
+pub fn recovery_poll() -> Option<u8> {
+    poll_scancode().and_then(decode)
+}
+
+pub fn poll_scancode() -> Option<u8> {
     if let Some(scancode) = pop() {
-        return decode(scancode);
+        return Some(scancode);
     }
     if unsafe { inb(0x64) } & 1 == 0 {
         return None;
     }
-    let scancode = unsafe { inb(0x60) };
-    (scancode & 0x80 == 0).then(|| decode(scancode)).flatten()
+    Some(unsafe { inb(0x60) })
 }
 
 pub fn self_check() -> bool {
     push(0x22);
-    (unsafe { inb(0x64) } & 0xc0) == 0 && poll() == Some(b'g')
+    (unsafe { inb(0x64) } & 0xc0) == 0 && recovery_poll() == Some(b'g')
 }
 
 pub fn enable_interrupts() -> bool {
@@ -105,7 +108,7 @@ unsafe fn outb(port: u16, value: u8) {
     unsafe { asm!("out dx, al", in("dx") port, in("al") value) };
 }
 
-fn decode(scancode: u8) -> Option<u8> {
+pub fn decode(scancode: u8) -> Option<u8> {
     match scancode {
         0x01 => Some(0x1b),
         0x0e => Some(0x08),

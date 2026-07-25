@@ -106,7 +106,7 @@ impl<'a> Shell<'a> {
                 }
                 _ => {}
             }
-            if let Some(key) = keyboard::poll() {
+            if let Some(key) = keyboard::recovery_poll() {
                 self.key(key);
                 schedule();
             } else {

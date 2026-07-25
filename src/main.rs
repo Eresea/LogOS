@@ -6,6 +6,7 @@ mod capabilities;
 mod console;
 mod debug;
 mod health;
+mod input;
 mod interrupts;
 mod ipc;
 mod keyboard;
@@ -286,6 +287,9 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     }
     check!(b"console", true);
     check!(b"keyboard", keyboard::self_check());
+    let mut input = input::Service::new();
+    let _ = input.next();
+    check!(b"input service", input::Service::self_check());
     check!(b"trace", trace::self_check());
     let mut console = console::Shell::from_startup(
         startup,
