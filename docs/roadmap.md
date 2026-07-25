@@ -145,7 +145,7 @@ The normal terminal is not a kernel shell. It is a renderer and editor attached 
 - [x] Insert/delete, left/right, home/end, word navigation.
 - [x] Line wrapping and resize-aware layout.
 - [x] Scrollback with bounded memory.
-- [ ] Command history.
+- [x] Command history.
 - [ ] Selection and clipboard-ready abstractions.
 - [ ] Search within visible output and scrollback.
 - [ ] Clear separation between output model and rendered cells.

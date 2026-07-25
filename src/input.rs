@@ -12,6 +12,8 @@ pub enum LogicalKey {
     Right,
     Home,
     End,
+    Up,
+    Down,
     Unknown,
 }
 
@@ -129,7 +131,8 @@ impl Service {
         let released =
             matches!(input.decode(0xaa, false), Event::Key { state: State::Release, .. });
         let left = matches!(input.decode(0x4b, true), Event::Key { logical: LogicalKey::Left, .. });
-        qwerty && azerty && pressed && released && left
+        let up = matches!(input.decode(0x48, true), Event::Key { logical: LogicalKey::Up, .. });
+        qwerty && azerty && pressed && released && left && up
     }
 
     fn decode(&mut self, scancode: u8, extended: bool) -> Event {
@@ -169,6 +172,8 @@ impl Service {
                 0x47 => LogicalKey::Home,
                 0x4f => LogicalKey::End,
                 0x53 => LogicalKey::Delete,
+                0x48 => LogicalKey::Up,
+                0x50 => LogicalKey::Down,
                 _ => LogicalKey::Unknown,
             };
         }

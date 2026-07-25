@@ -40,6 +40,7 @@ pub struct Model {
     scrollback: [Submission; SCROLLBACK],
     scrollback_head: usize,
     scrollback_len: usize,
+    history_offset: Option<usize>,
 }
 
 impl Model {
@@ -52,6 +53,7 @@ impl Model {
             scrollback: [Submission::EMPTY; SCROLLBACK],
             scrollback_head: 0,
             scrollback_len: 0,
+            history_offset: None,
         }
     }
 
@@ -72,6 +74,8 @@ impl Model {
                 self.end();
                 true
             }
+            Some((input::LogicalKey::Up, _)) => self.history_previous(),
+            Some((input::LogicalKey::Down, _)) => self.history_next(),
             _ => false,
         }
     }
@@ -220,10 +224,45 @@ impl Model {
         self.scrollback[self.scrollback_head] = submission;
         self.scrollback_head = (self.scrollback_head + 1) % SCROLLBACK;
         self.scrollback_len = (self.scrollback_len + 1).min(SCROLLBACK);
+        self.history_offset = None;
     }
 
     fn latest_scrollback(&self) -> Submission {
         self.scrollback[(self.scrollback_head + SCROLLBACK - 1) % SCROLLBACK]
+    }
+
+    fn history_previous(&mut self) -> bool {
+        if self.scrollback_len == 0 {
+            return false;
+        }
+        let offset =
+            self.history_offset.map_or(0, |offset| (offset + 1).min(self.scrollback_len - 1));
+        self.history_offset = Some(offset);
+        self.load_history(offset);
+        true
+    }
+
+    fn history_next(&mut self) -> bool {
+        let Some(offset) = self.history_offset else {
+            return false;
+        };
+        if offset == 0 {
+            self.history_offset = None;
+            self.length = 0;
+            self.cursor = 0;
+        } else {
+            self.history_offset = Some(offset - 1);
+            self.load_history(offset - 1);
+        }
+        true
+    }
+
+    fn load_history(&mut self, offset: usize) {
+        let index = (self.scrollback_head + SCROLLBACK - 1 - offset) % SCROLLBACK;
+        let submission = self.scrollback[index];
+        self.cells = submission.cells;
+        self.length = submission.length;
+        self.cursor = self.length;
     }
 
     pub fn self_check() -> bool {
@@ -259,6 +298,9 @@ impl Model {
             let _ = scrollback.insert_utf8(b"x");
             let _ = scrollback.submit();
         }
+        let history = scrollback.history_previous()
+            && scrollback.latest_scrollback().as_bytes() == b"x"
+            && scrollback.history_next();
         edited
             && home
             && model.cursor == model.length
@@ -269,6 +311,7 @@ impl Model {
             && Self::position(6, 4) == (1, 2)
             && scrollback.scrollback_len() == SCROLLBACK
             && scrollback.latest_scrollback().as_bytes() == b"x"
+            && history
     }
 
     fn columns_before_cursor(&self) -> usize {
