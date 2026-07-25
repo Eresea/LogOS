@@ -298,7 +298,12 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
             && input::Service::self_check()
             && text::Service::self_check()
             && terminal::Model::self_check()
-            && probe.apply(input::Event::Text(b'g'))
+            && probe.apply(input::Event::Key {
+                physical: input::PhysicalKey(0x22),
+                logical: input::LogicalKey::Text(b'g'),
+                state: input::State::Press,
+                modifiers: input::Modifiers::none(),
+            })
             && probe.render(display, &text)
             && commands::self_check()
     });
@@ -306,6 +311,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let coordinator = mode::Coordinator::new(normal_ready);
     check!(b"console mode", mode::Coordinator::self_check());
     check!(b"command registry", commands::self_check());
+    check!(b"input normalization", input::Service::self_check());
     coordinator.announce();
     check!(b"trace", trace::self_check());
     health.finish();
@@ -315,7 +321,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         debug::write_line(b"LogOS: normal terminal active");
         loop {
             if let Some(event) = input.next() {
-                if event == input::Event::Enter {
+                if event.is_enter() {
                     if commands::invoke(terminal.submit(), &capabilities, recovery_capability)
                         == commands::Result::Recovery
                     {

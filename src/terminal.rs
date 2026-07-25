@@ -31,14 +31,10 @@ impl Model {
     }
 
     pub fn apply(&mut self, event: input::Event) -> bool {
-        match event {
-            input::Event::Text(text) if self.length < self.cells.len() && text.is_ascii() => {
+        match event.text() {
+            Some(text) if self.length < self.cells.len() && text.is_ascii() => {
                 self.cells[self.length] = text;
                 self.length += 1;
-                true
-            }
-            input::Event::Backspace if self.length > 0 => {
-                self.length -= 1;
                 true
             }
             _ => false,
@@ -59,10 +55,20 @@ impl Model {
 
     pub fn self_check() -> bool {
         let mut model = Self::new();
-        model.apply(input::Event::Text(b'g'))
-            && model.apply(input::Event::Backspace)
-            && !model.apply(input::Event::Enter)
-            && model.length == 0
+        let text = input::Event::Key {
+            physical: input::PhysicalKey(0x22),
+            logical: input::LogicalKey::Text(b'g'),
+            state: input::State::Press,
+            modifiers: input::Modifiers::none(),
+        };
+        model.apply(text)
+            && !model.apply(input::Event::Key {
+                physical: input::PhysicalKey(0x1c),
+                logical: input::LogicalKey::Enter,
+                state: input::State::Press,
+                modifiers: input::Modifiers::none(),
+            })
+            && model.submit().as_bytes() == b"g"
             && model.submit().as_bytes().is_empty()
     }
 }
