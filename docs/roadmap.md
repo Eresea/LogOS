@@ -141,7 +141,7 @@ The normal terminal is not a kernel shell. It is a renderer and editor attached 
 
 ### Terminal renderer
 
-- [ ] Cursor and blinking caret.
+- [x] Cursor and blinking caret.
 - [ ] Insert/delete, left/right, home/end, word navigation.
 - [ ] Line wrapping and resize-aware layout.
 - [ ] Scrollback with bounded memory.

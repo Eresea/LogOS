@@ -1,6 +1,7 @@
 use crate::{display, input, text};
 
 const ACCENT: [u8; 3] = [61, 220, 151];
+const BACKGROUND: [u8; 3] = [12, 18, 30];
 const ORIGIN: (usize, usize) = (32, 32);
 const CELLS: usize = 64;
 
@@ -33,11 +34,12 @@ pub struct Model {
     cells: [u8; CELLS],
     length: usize,
     cursor: usize,
+    caret_visible: bool,
 }
 
 impl Model {
     pub const fn new() -> Self {
-        Self { cells: [0; CELLS], length: 0, cursor: 0 }
+        Self { cells: [0; CELLS], length: 0, cursor: 0, caret_visible: true }
     }
 
     pub fn apply(&mut self, event: input::Event) -> bool {
@@ -105,9 +107,29 @@ impl Model {
     }
 
     pub fn render(&self, display: &mut display::Service, text: &text::Service) -> bool {
-        self.cells[..self.length].iter().enumerate().all(|(cell, glyph)| {
-            text.render(display, *glyph, ORIGIN.0 + cell * text::Service::ADVANCE, ORIGIN.1, ACCENT)
-        })
+        let mut column = 0;
+        for &glyph in &self.cells[..self.length] {
+            if glyph & 0xc0 != 0x80
+                && !text.render(
+                    display,
+                    glyph,
+                    ORIGIN.0 + column * text::Service::ADVANCE,
+                    ORIGIN.1,
+                    ACCENT,
+                )
+            {
+                return false;
+            }
+            column += usize::from(glyph & 0xc0 != 0x80);
+        }
+        let caret = if self.caret_visible { ACCENT } else { BACKGROUND };
+        let x = ORIGIN.0 + self.columns_before_cursor() * text::Service::ADVANCE;
+        let y = ORIGIN.1 + text.metrics().height.saturating_sub(2);
+        (0..text::Service::ADVANCE).all(|dx| display.present(x + dx, y, caret))
+    }
+
+    pub fn blink(&mut self) {
+        self.caret_visible = !self.caret_visible;
     }
 
     pub fn submit(&mut self) -> Submission {
@@ -135,10 +157,17 @@ impl Model {
         model.home();
         let home = model.cursor == 0;
         model.end();
+        let visible = model.caret_visible;
+        model.blink();
         edited
             && home
             && model.cursor == model.length
+            && visible != model.caret_visible
             && model.submit().as_bytes() == b"g"
             && model.submit().as_bytes().is_empty()
+    }
+
+    fn columns_before_cursor(&self) -> usize {
+        self.cells[..self.cursor].iter().filter(|byte| **byte & 0xc0 != 0x80).count()
     }
 }

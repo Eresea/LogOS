@@ -87,6 +87,10 @@ pub fn enable() {
     unsafe { asm!("sti") };
 }
 
+pub fn ticks() -> u64 {
+    TICKS.load(Ordering::Acquire)
+}
+
 pub fn wait_for_tick() {
     let tick = TICKS.load(Ordering::Acquire);
     while TICKS.load(Ordering::Acquire) == tick {
@@ -98,10 +102,6 @@ pub fn wait_for_virtio() {
     while !crate::virtio::completion_pending() {
         unsafe { asm!("hlt") };
     }
-}
-
-pub fn disable_timer() {
-    unsafe { outb(0x21, 0xfd) };
 }
 
 #[repr(C, packed)]

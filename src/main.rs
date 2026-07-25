@@ -313,15 +313,22 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     check!(b"command registry", commands::self_check());
     check!(b"input normalization", input::Service::self_check());
     check!(b"terminal editing", terminal::Model::self_check());
+    check!(b"terminal caret", terminal::Model::self_check());
     check!(b"text font", text::Service::self_check());
     coordinator.announce();
     check!(b"trace", trace::self_check());
     health.finish();
-    interrupts::disable_timer();
     let mut console_mode = coordinator.mode();
     if console_mode == mode::ConsoleMode::Normal {
         debug::write_line(b"LogOS: normal terminal active");
+        let mut blink_tick = interrupts::ticks();
         loop {
+            let tick = interrupts::ticks();
+            if tick.wrapping_sub(blink_tick) >= 50 {
+                terminal.blink();
+                let _ = terminal.render(display.as_mut().unwrap(), &text);
+                blink_tick = tick;
+            }
             if let Some(event) = input.next() {
                 if event.is_enter() {
                     if commands::invoke(terminal.submit(), &capabilities, recovery_capability)
