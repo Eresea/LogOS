@@ -1,9 +1,10 @@
-const CAPABILITIES: usize = 4;
+const CAPABILITIES: usize = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityKind {
     Debug,
     Service,
+    Recovery,
 }
 
 #[derive(Clone, Copy)]

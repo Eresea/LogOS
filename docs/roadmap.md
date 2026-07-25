@@ -127,6 +127,7 @@ The normal terminal is not a kernel shell. It is a renderer and editor attached 
 - [x] Console v1 slice 4: route normal terminal glyph rasterization through the Foundation text service.
 - [x] Console v1 slice 5: select normal or recovery console mode without rendering recovery output on healthy normal boots.
 - [x] Console v1 slice 6: run the normal terminal as the sole input consumer in normal mode.
+- [x] Console v1 slice 7: add an explicit recovery capability and live `recovery` command handoff.
 - [ ] Move normal keyboard handling behind an input service.
 - [ ] Preserve a kernel-owned emergency output and input path for recovery.
 - [ ] Normalize physical keys, logical keys, text input, modifiers, and repeat.

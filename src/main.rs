@@ -3,6 +3,7 @@
 
 mod acpi;
 mod capabilities;
+mod commands;
 mod console;
 mod debug;
 mod display;
@@ -168,6 +169,10 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let Some(service_capability) = capabilities.grant(capabilities::CapabilityKind::Service) else {
         fail!(b"capabilities");
     };
+    let Some(recovery_capability) = capabilities.grant(capabilities::CapabilityKind::Recovery)
+    else {
+        fail!(b"capabilities");
+    };
     let mut services = services::Registry::new();
     let Some(virtio_handle) =
         services.register(&capabilities, service_capability, services::Service::VirtioBalloon)
@@ -285,7 +290,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let mut input = input::Service::new();
     let _ = input.next();
     let text = text::Service::new();
-    let mut terminal = terminal::Model::new();
+    let mut probe = terminal::Model::new();
     let normal_ready = display.as_mut().is_some_and(|display| {
         display::Service::self_check()
             && display.present(0, 0, [12, 18, 30])
@@ -293,48 +298,61 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
             && input::Service::self_check()
             && text::Service::self_check()
             && terminal::Model::self_check()
-            && terminal.apply(input::Event::Text(b'g'))
-            && terminal.render(display, &text)
+            && probe.apply(input::Event::Text(b'g'))
+            && probe.render(display, &text)
+            && commands::self_check()
     });
+    let mut terminal = terminal::Model::new();
     let coordinator = mode::Coordinator::new(normal_ready);
     check!(b"console mode", mode::Coordinator::self_check());
+    check!(b"command registry", commands::self_check());
     coordinator.announce();
     check!(b"trace", trace::self_check());
     health.finish();
     interrupts::disable_timer();
-    match coordinator.mode() {
-        mode::ConsoleMode::Normal => {
-            debug::write_line(b"LogOS: normal terminal active");
-            loop {
-                if let Some(event) = input.next() {
-                    if terminal.apply(event) {
-                        let _ = terminal.render(display.as_mut().unwrap(), &text);
+    let mut console_mode = coordinator.mode();
+    if console_mode == mode::ConsoleMode::Normal {
+        debug::write_line(b"LogOS: normal terminal active");
+        loop {
+            if let Some(event) = input.next() {
+                if event == input::Event::Enter {
+                    if commands::invoke(terminal.submit(), &capabilities, recovery_capability)
+                        == commands::Result::Recovery
+                    {
+                        debug::write_line(b"LogOS: recovery handoff requested");
+                        console_mode = mode::ConsoleMode::Recovery;
+                        break;
                     }
-                } else {
-                    unsafe { core::arch::asm!("hlt") };
+                } else if terminal.apply(event) {
+                    let _ = terminal.render(display.as_mut().unwrap(), &text);
                 }
+            } else {
+                unsafe { core::arch::asm!("hlt") };
             }
         }
-        mode::ConsoleMode::Recovery => {
-            startup.start();
-            let mut console = console::Shell::from_startup(
-                startup,
-                console::Endpoint::new(
-                    &channel,
-                    &responses,
-                    &capabilities,
-                    service_capability,
-                    virtio_handle,
-                ),
-            );
-            let _ = console.start();
-            console.run(|| {
-                if virtio::completion_pending() {
-                    let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
-                }
-                let _ = service_scheduler.run_next();
-            })
-        }
+    }
+    if console_mode == mode::ConsoleMode::Recovery {
+        startup.start();
+        let mut console = console::Shell::from_startup(
+            startup,
+            console::Endpoint::new(
+                &channel,
+                &responses,
+                &capabilities,
+                service_capability,
+                virtio_handle,
+            ),
+        );
+        let _ = console.start();
+        console.run(|| {
+            if virtio::completion_pending() {
+                let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
+            }
+            let _ = service_scheduler.run_next();
+        })
+    }
+    loop {
+        unsafe { core::arch::asm!("cli", "hlt") };
     }
 }
 

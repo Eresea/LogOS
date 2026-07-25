@@ -4,6 +4,22 @@ const ACCENT: [u8; 3] = [61, 220, 151];
 const ORIGIN: (usize, usize) = (32, 32);
 const CELLS: usize = 16;
 
+#[derive(Clone, Copy)]
+pub struct Submission {
+    cells: [u8; CELLS],
+    length: usize,
+}
+
+impl Submission {
+    pub const fn new(cells: [u8; CELLS], length: usize) -> Self {
+        Self { cells, length }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.cells[..self.length]
+    }
+}
+
 pub struct Model {
     cells: [u8; CELLS],
     length: usize,
@@ -35,11 +51,18 @@ impl Model {
         })
     }
 
+    pub fn submit(&mut self) -> Submission {
+        let submission = Submission::new(self.cells, self.length);
+        self.length = 0;
+        submission
+    }
+
     pub fn self_check() -> bool {
         let mut model = Self::new();
         model.apply(input::Event::Text(b'g'))
             && model.apply(input::Event::Backspace)
             && !model.apply(input::Event::Enter)
             && model.length == 0
+            && model.submit().as_bytes().is_empty()
     }
 }
