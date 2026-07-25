@@ -45,6 +45,10 @@ impl Service {
         true
     }
 
+    pub const fn dimensions(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
     pub fn self_check() -> bool {
         Self::new(core::ptr::dangling_mut(), 4, 1, 1, 1).is_some()
             && Self::new(core::ptr::dangling_mut(), 3, 1, 1, 1).is_none()

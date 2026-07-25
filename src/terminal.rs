@@ -158,24 +158,32 @@ impl Model {
     }
 
     pub fn render(&self, display: &mut display::Service, text: &text::Service) -> bool {
+        let columns = self.columns(display);
         let mut column = 0;
+        let mut row = 0;
         for &glyph in &self.cells[..self.length] {
             if glyph & 0xc0 != 0x80
                 && !text.render(
                     display,
                     glyph,
                     ORIGIN.0 + column * text::Service::ADVANCE,
-                    ORIGIN.1,
+                    ORIGIN.1 + row * text.metrics().height,
                     ACCENT,
                 )
             {
                 return false;
             }
             column += usize::from(glyph & 0xc0 != 0x80);
+            if column == columns {
+                column = 0;
+                row += 1;
+            }
         }
         let caret = if self.caret_visible { ACCENT } else { BACKGROUND };
-        let x = ORIGIN.0 + self.columns_before_cursor() * text::Service::ADVANCE;
-        let y = ORIGIN.1 + text.metrics().height.saturating_sub(2);
+        let (caret_row, caret_column) = Self::position(self.columns_before_cursor(), columns);
+        let x = ORIGIN.0 + caret_column * text::Service::ADVANCE;
+        let y =
+            ORIGIN.1 + caret_row * text.metrics().height + text.metrics().height.saturating_sub(2);
         (0..text::Service::ADVANCE).all(|dx| display.present(x + dx, y, caret))
     }
 
@@ -225,9 +233,19 @@ impl Model {
             && model.submit().as_bytes() == b"g"
             && model.submit().as_bytes().is_empty()
             && navigation_ok
+            && Self::position(6, 4) == (1, 2)
     }
 
     fn columns_before_cursor(&self) -> usize {
         self.cells[..self.cursor].iter().filter(|byte| **byte & 0xc0 != 0x80).count()
+    }
+
+    fn columns(&self, display: &display::Service) -> usize {
+        let width = display.dimensions().0.saturating_sub(ORIGIN.0 * 2);
+        (width / text::Service::ADVANCE).max(1)
+    }
+
+    const fn position(column: usize, columns: usize) -> (usize, usize) {
+        (column / columns, column % columns)
     }
 }
