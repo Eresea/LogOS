@@ -281,6 +281,8 @@ Terminal editing provides insert, delete, character-safe navigation, and Ctrl+le
 
 Terminal layout reads display dimensions on each redraw, wrapping cells to the current usable width without retaining display-mode state.
 
+Terminal scrollback is fixed-capacity and owned by the terminal model; persistence remains a separate storage contract.
+
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
 
 The command registry authorizes a live recovery handoff with an explicit recovery capability. The handoff stops normal input processing before recovery activates its direct input/output path.

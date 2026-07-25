@@ -4,6 +4,7 @@ const ACCENT: [u8; 3] = [61, 220, 151];
 const BACKGROUND: [u8; 3] = [12, 18, 30];
 const ORIGIN: (usize, usize) = (32, 32);
 const CELLS: usize = 64;
+const SCROLLBACK: usize = 8;
 
 #[derive(Clone, Copy)]
 pub struct Submission {
@@ -12,6 +13,7 @@ pub struct Submission {
 }
 
 impl Submission {
+    const EMPTY: Self = Self { cells: [0; CELLS], length: 0 };
     pub const fn new(cells: [u8; CELLS], length: usize) -> Self {
         Self { cells, length }
     }
@@ -35,11 +37,22 @@ pub struct Model {
     length: usize,
     cursor: usize,
     caret_visible: bool,
+    scrollback: [Submission; SCROLLBACK],
+    scrollback_head: usize,
+    scrollback_len: usize,
 }
 
 impl Model {
     pub const fn new() -> Self {
-        Self { cells: [0; CELLS], length: 0, cursor: 0, caret_visible: true }
+        Self {
+            cells: [0; CELLS],
+            length: 0,
+            cursor: 0,
+            caret_visible: true,
+            scrollback: [Submission::EMPTY; SCROLLBACK],
+            scrollback_head: 0,
+            scrollback_len: 0,
+        }
     }
 
     pub fn apply(&mut self, event: input::Event) -> bool {
@@ -193,9 +206,24 @@ impl Model {
 
     pub fn submit(&mut self) -> Submission {
         let submission = Submission::new(self.cells, self.length);
+        self.push_scrollback(submission);
         self.length = 0;
         self.cursor = 0;
         submission
+    }
+
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback_len
+    }
+
+    fn push_scrollback(&mut self, submission: Submission) {
+        self.scrollback[self.scrollback_head] = submission;
+        self.scrollback_head = (self.scrollback_head + 1) % SCROLLBACK;
+        self.scrollback_len = (self.scrollback_len + 1).min(SCROLLBACK);
+    }
+
+    fn latest_scrollback(&self) -> Submission {
+        self.scrollback[(self.scrollback_head + SCROLLBACK - 1) % SCROLLBACK]
     }
 
     pub fn self_check() -> bool {
@@ -226,6 +254,11 @@ impl Model {
             && navigation.delete()
             && navigation.word_left()
             && navigation.delete();
+        let mut scrollback = Self::new();
+        for _ in 0..SCROLLBACK + 1 {
+            let _ = scrollback.insert_utf8(b"x");
+            let _ = scrollback.submit();
+        }
         edited
             && home
             && model.cursor == model.length
@@ -234,6 +267,8 @@ impl Model {
             && model.submit().as_bytes().is_empty()
             && navigation_ok
             && Self::position(6, 4) == (1, 2)
+            && scrollback.scrollback_len() == SCROLLBACK
+            && scrollback.latest_scrollback().as_bytes() == b"x"
     }
 
     fn columns_before_cursor(&self) -> usize {
