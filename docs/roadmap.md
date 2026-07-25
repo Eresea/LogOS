@@ -122,7 +122,7 @@ The normal terminal is not a kernel shell. It is a renderer and editor attached 
 ### Foundation services
 
 - [x] Console v1 slice 1: introduce the Foundation input-service boundary while retaining direct kernel recovery input.
-- [ ] Move normal framebuffer ownership behind a display service.
+- [x] Console v1 slice 2: introduce the Foundation display-service boundary while retaining direct kernel recovery output.
 - [ ] Move normal keyboard handling behind an input service.
 - [ ] Preserve a kernel-owned emergency output and input path for recovery.
 - [ ] Normalize physical keys, logical keys, text input, modifiers, and repeat.

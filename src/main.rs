@@ -5,6 +5,7 @@ mod acpi;
 mod capabilities;
 mod console;
 mod debug;
+mod display;
 mod health;
 mod input;
 mod interrupts;
@@ -286,6 +287,19 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         fail!(b"scheduler rebind");
     }
     check!(b"console", true);
+    let Some(mut display) = display::Service::new(
+        boot_info.framebuffer,
+        boot_info.framebuffer_size,
+        boot_info.resolution.0,
+        boot_info.resolution.1,
+        boot_info.stride,
+    ) else {
+        fail!(b"display service");
+    };
+    check!(
+        b"display service",
+        display::Service::self_check() && display.present(0, 0, [12, 18, 30])
+    );
     check!(b"keyboard", keyboard::self_check());
     let mut input = input::Service::new();
     let _ = input.next();

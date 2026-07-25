@@ -65,6 +65,10 @@ Foundation contains trusted native Rust services closest to hardware.
 
 The Foundation input service owns normal PS/2 scancode decoding and exposes initial text, backspace, enter, and escape events. The kernel recovery console retains a direct PS/2 input path and does not depend on the service. A later terminal consumes the service; it must not consume recovery input.
 
+### Console v1 display slice
+
+The Foundation display service validates and presents normal framebuffer pixels. The kernel recovery console retains direct framebuffer output and does not depend on the service. A later terminal owns the normal display-service client role; recovery output remains available independently.
+
 ### Rules
 
 - Hardware access requires explicit capabilities.
