@@ -65,7 +65,7 @@ Core v1 is a dependable, event-driven kernel foundation. It is not a desktop OS,
 - [x] IDT, exception halt path, PIT bootstrap clock, and ACPI-derived IOAPIC VirtIO completion IRQ.
 - [x] Cooperative ready/blocked task scheduler, generation-tagged task handles, and event-driven idle.
 - [x] Physical-page allocation across conventional-memory ranges, owned-page recycling, and reversible bootstrap virtual mappings.
-- [x] Capability checks, service registry, queued IPC requests/replies, PCI discovery, and legacy VirtIO balloon service.
+- [x] Generation-tagged capability grants and revocation, service registry, queued IPC requests/replies, PCI discovery, and legacy VirtIO balloon service.
 - [x] ACPI RSDP/XSDT/MADT validation and APIC topology discovery.
 - [x] ACPI PCI routing without reliance on firmware-programmed interrupt lines.
 - [x] Permissioned mappings and service-lifetime memory reclamation.
@@ -106,6 +106,17 @@ It should not grow into the normal user environment.
 |     8 | **Experience v1**   | Replaceable graphical environments run entirely on system contracts         |
 
 Core hardening continues alongside these milestones and does not automatically block outward progress.
+
+## Repository migration
+
+The current kernel remains independently bootable while its single crate is split in stages:
+
+1. create a Cargo workspace and extract the no-std `logos-core` mechanisms;
+2. extract hardware-facing platform and driver crates;
+3. extract `logos-terminal` for the normal terminal stack while retaining the kernel recovery path;
+4. retain `logos-uefi` as the UEFI boot binary throughout.
+
+Every extraction must retain the current QEMU proof. Add `logos-abi` only when an independently built native service needs a stable contract; do not create an empty ABI crate in advance.
 
 ---
 
@@ -252,6 +263,8 @@ Turn kernel mechanisms into a supervised service platform with explicit identiti
 - [ ] Entropy and secure random service.
 - [ ] Secret store with service-scoped access.
 - [ ] Audit events for privileged operations.
+- [ ] Scoped, expiring, revocable standing-approval grants with separate audit records.
+- [ ] `system.inference` service owning model inventory, scheduling, and accelerator binding; Runtime consumers receive scoped invocation grants.
 - [ ] Resource discovery through typed references.
 
 ## Driver and device model
@@ -316,6 +329,7 @@ A conventional directory/file view may be built on top for compatibility and fam
 - [ ] Persistent service manifests and configuration.
 - [ ] Persistent terminal history.
 - [ ] Persistent identity, trust, and secret metadata.
+- [ ] Agent-memory Store namespaces with workspace visibility, retention, and redaction policy.
 - [ ] File compatibility API.
 - [ ] Memory-backed and temporary namespaces.
 
@@ -472,6 +486,7 @@ Run portable applications as capability-isolated WASM components without making 
 ## Runtime
 
 - [ ] WASM component validation and loading.
+- [ ] Native LogOS WIT component host interfaces; WASI is compatibility only.
 - [ ] Versioned host interfaces.
 - [ ] Capability-scoped imports.
 - [ ] Memory, CPU, storage, and network quotas.
@@ -513,6 +528,8 @@ A workspace is the user-facing unit that groups resources and authority without 
 - [ ] Human approval policies for sensitive operations.
 - [ ] Resource references usable by humans and agents.
 - [ ] Auditable agent sessions.
+- [ ] Bounded agent decision records correlated with action audit entries, retaining policy outcome, user-intent reference, and structured tool inputs/outputs but never private model reasoning.
+- [ ] Explicit re-approval when untrusted external content would trigger a privileged agent effect; global taint tracking is deferred pending a narrower information-flow design.
 - [ ] No implicit agent privilege.
 
 ## Exit criteria
@@ -664,89 +681,4 @@ For every material change:
 - [Architecture and boundary model](ARCHITECTURE.md)
 - [Subsystem naming register](NAMING.md)
 
-## Annex C — Roadmap Revisions & Architectural Refinements
-
-> **Date:** 2026-07-25
-> **Status:** Approved Architectural Suggestions
-> **Scope:** Core IPC, Capability Revocation, WASM Host Integration, and Sequence Ordering
-
-### 1. [Continuous Core] APIC Timer & Per-CPU State Sequencing
-
-- **Revision:** Move APIC Timer / HPET adoption and per-CPU state forward to precede **Platform v1** and **Network v1**.
-- **Rationale:** Relying on legacy PIT while building supervision heartbeats, connection timeouts, and TCP retransmission timers introduces tick-resolution jitter and timing race conditions in userspace.
-
-### 2. [Platform v1] Generation-Tagged Capability Revocation
-
-- **Suggestion:** Adopt epoch/generation-tagged resource handles in Ring 0 for capability validation.
-- **Rationale:** Prevents global locks or heavy kernel bookkeeping when a supervisor revokes or restarts a service (Ring 2). Invalidating stale generation tags at the IPC handle barrier keeps revocation $O(1)$.
-
-### 3. [Persistence/Network] Zero-Copy IPC Buffer Grants
-
-- **Suggestion:** Introduce Ring 0 shared-memory grant pages (ring buffers) for bulk data payload streaming (`Value::Stream`).
-- **Rationale:** Structured values (`Value::Bytes`, `Value::Table`) crossing ring boundaries incur serialization and CPU cache overhead. Typed descriptors should manage the control plane, while zero-copy grant pages drive the data plane.
-
-### 4. [Applications v1] LogOS Host Interface (WIT) Strategy
-
-- **Revision:** Explicitly scope **Applications v1** around a native LogOS WIT (WASM Interface Type) component host mapping rather than generic WASI.
-- **Rationale:** Exposes LogOS-native typed capability contracts directly to WASM sandboxes without requiring lossy string-translation wrappers.
-
----
-
-## Annex D — Repository & Workspace Architecture
-
-> **Date:** 2026-07-25
-> **Status:** Approved Cargo Workspace Structure
-> **Scope:** Code Organization, `no_std` Isolation, and Crate Splitting
-
-### 1. Cargo Workspace Strategy
-
-- **Root Workspace:** Uses Cargo resolver v2 with global dependency version pinning.
-- **`no_std` Boundary:** `core/*` and `drivers/*` are strictly `no_std` compliant. Systems in `services/*` and `flow/*` interact with core mechanisms purely through `logos-abi` contracts.
-
-### 2. Flow Compiler Decoupling
-
-- **Modular Pipeline:** Flow is split into granular crates (`flow-parser`, `flow-types`, `flow-runtime`, `flow-schema`).
-- **Host / Target Dual-Compilation:** Flow crates compile both natively inside LogOS userspace and on host developer environments (Linux/macOS/Windows) to power `flow-ls` (LSP) and CI static checks (`flow check --json`).
-
----
-
-## Annex E — External Architecture Review Notes
-
-> **Date:** 2026-07-25
-> **Status:** Proposed — Not Yet Approved
-> **Scope:** AI-native subsystem gaps, agent trust model, consent granularity
-
-### 1. [New Ring/Service] Inference and Model Ownership
-
-- **Gap:** `model:/local/default` exists as a resource reference in NAMING.md §7, but no subsystem owns model loading, local inference scheduling, GPU/NPU device binding, or local-vs-remote model routing.
-- **Suggestion:** Define an owning service (`system.inference` or a Runtime-adjacent `runtime.models`) with the same rigor as Store or Network — owned resources, capability surface, failure boundary. Extend the Foundation device model to cover AI accelerator devices (NPU/GPU) alongside Block and Net Device, since an AI-enabled OS shouldn't treat accelerated inference as out of scope for the driver layer.
-- **Placement question:** does model invocation belong in System (machine-wide shared resource, like Network) or Runtime (application-scoped, like WASM)? Likely both — a System-owned inference service with Runtime-scoped capability grants, mirroring how Network is owned in Ring 2 but consumed by Ring 4 applications.
-
-### 2. [Flow] Semantic Dry-Run Before Execution
-
-- **Gap:** Flow's `flow capabilities` preflight verifies _authority_ (what a script is allowed to do) but not _consequence_ (what it will actually change). Static type/capability checking catches malformed scripts, not scripts that are well-typed but do something unintended.
-- **Suggestion:** Add `flow simulate <script>` — executes against the command registry's effect classification (§8.8 in ARCHITECTURE.md) to produce a predicted change report (services restarted, objects deleted, capabilities exercised) without performing the operations. This becomes the natural gate between AI-generated script and human/policy approval, distinct from and complementary to `flow capabilities`.
-
-### 3. [Sessions/Identity] Tiered and Expiring Consent
-
-- **Gap:** The sensitive-operations table (ARCHITECTURE.md §8.8, ONION*RINGS.md) defines per-call interaction defaults (immediate / confirmation / strong confirmation) but no model for \_standing* approval across multiple calls over time — relevant once agents run continuously rather than per-invocation.
-- **Suggestion:** Extend the capability model with a standing-approval class: scope + expiry + revocation, distinct from a single-use grant or a durable capability. E.g. "may call `service.restart` on `service:/network` for 24h without re-prompting." Approval events should themselves be audited alongside the actions they cover.
-
-### 4. [Security] Taint Tracking for Untrusted External Content
-
-- **Gap:** Once agents consume external content (web fetch, email, files), that content becomes an injection vector at the OS level, not just the model level. Today "network read" and "consume untrusted content" are not distinguishable capabilities.
-- **Suggestion:** Consider a provenance/taint property on values that originate from untrusted external sources, checked at the capability barrier — e.g. a script that has ingested untrusted network content should not simultaneously hold `secrets.get` or `service.restart` capabilities in the same execution scope without an explicit sanitization or re-authorization step. This is a security primitive novel to agent-era systems and worth scoping now rather than retrofitting.
-
-### 5. [Audit] Decision Trace Distinct from Action Audit
-
-- **Gap:** Audit records _what happened_ (principal, operation, target, result, time). For AI agents, _why_ — which context, tools, and reasoning steps produced the action — is a separate and equally important trail, and doesn't fit cleanly into either Audit (security-focused) or Trace (bounded diagnostics).
-- **Suggestion:** Define a bounded, structured decision-trace record type, correlated to the audit entry it justifies, scoped to agent-initiated actions. Retention and access policy likely differ from both Audit and Trace (this is more sensitive — closer to Vault than to logs).
-
-### 6. [Store/Workspace] Agent Memory as a Distinct Primitive
-
-- **Gap:** Conversational/agent context has different retention, redaction, and privacy properties than application storage, but currently has no home beyond "another Store namespace."
-- **Suggestion:** Decide early whether agent memory is a Store namespace with agent-specific policy (retention window, redaction on request, workspace-scoped visibility) or a distinct primitive. Retrofitting privacy semantics onto general storage later is expensive; deciding the shape now — even if implementation is deferred — avoids that.
-
-### Sequencing note
-
-None of the above should block Console v1 / Platform v1. But #1 and #2 have roadmap implications: model ownership placement affects Runtime's Ring 4 scope, and `flow simulate` is cheap to design alongside the existing capability-preflight work in Phase 13 of FLOW.md rather than bolted on after 1.0.
+- [Reviewed architecture proposals — 2026-07-26](reviewed/2026-07-26.md)

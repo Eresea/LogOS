@@ -85,6 +85,7 @@ A name becomes **Reserved** when:
 | `system.time`           | **Time**             |    2 | Working   | Civil time, synchronization, trust state, and calendars                       |
 | `system.store`          | **Store**            |    2 | Working   | Persistent objects, streams, versions, transactions, namespaces, and quotas   |
 | `system.network`        | **Network**          |    2 | Working   | IP, transport protocols, DNS, connections, policy integration                 |
+| `system.inference`      | **Inference**        |    2 | Candidate | Model inventory, inference scheduling, accelerator binding, scoped invocation |
 | `system.audit`          | **Audit**            |    2 | Working   | Durable security-relevant action records                                      |
 | `system.update`         | **Update**           |    2 | Working   | Package validation, staging, activation, health gates, and rollback           |
 | `session.manager`       | **Sessions**         |    3 | Working   | Interactive session identity, capabilities, environment, lifetime, and resume |

@@ -1608,13 +1608,14 @@ fn main() {
 - [ ] capability schema;
 - [ ] static capability collection;
 - [ ] `flow capabilities`;
+- [ ] `flow simulate`, a non-executing best-effort preview of privileged effects, targets, and required capabilities;
 - [ ] capability-aware command calls;
 - [ ] runtime capability context;
 - [ ] denial diagnostics;
 - [ ] revocation handling;
 - [ ] audit correlation.
 
-**Exit criterion:** unauthorized service operations cannot execute and required authority can be reviewed beforehand.
+**Exit criterion:** unauthorized service operations cannot execute, required authority can be reviewed beforehand, and simulation reports predicted privileged effects without executing them.
 
 ---
 

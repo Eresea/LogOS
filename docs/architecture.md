@@ -241,6 +241,8 @@ Use WASM when the component:
 - does not require direct hardware ownership;
 - benefits from language-independent component interfaces.
 
+A WASM application's native host contract is LogOS WIT component interfaces. WASI may be supplied only as a compatibility layer and must not define the native capability model.
+
 A native implementation should not become permanent merely because it was easier during bootstrap. Record why it remains native.
 
 ## 7. Terminal and session architecture
@@ -377,6 +379,7 @@ Properties:
 - no ambient global authority for normal applications;
 - capabilities may be narrowed when delegated;
 - capabilities carry scope and, where useful, expiry;
+- standing approvals are scoped, expiring, revocable policy grants, distinct from durable capabilities and individual action approvals;
 - ownership and authority are separate;
 - revocation behavior is explicit;
 - denial is a structured result, not an incidental error.
@@ -398,6 +401,8 @@ A workspace groups:
 - policy.
 
 A workspace is not a Unix home directory and is not inherently tied to one machine.
+
+Agent memory is a Store namespace with workspace visibility, retention, and redaction policy; it is not a separate storage primitive.
 
 ## 11. Storage model
 
@@ -427,6 +432,10 @@ Policy is separated from mechanism:
 - firewall: allow/deny policy;
 - identity/trust: peer authentication;
 - session gateway: remote LogOS protocol.
+
+## 12.1 Inference model
+
+`system.inference` owns model inventory, local inference scheduling, and accelerator binding. Runtime applications invoke it only through scoped capabilities. Accelerator-device support is deferred until hardware needs justify it.
 
 ## 13. Update model
 
@@ -460,6 +469,8 @@ A tool descriptor should expose:
 - whether human approval is required.
 
 AI integration must remain optional. Disabling the agent layer must not disable normal operation.
+
+Agent-initiated actions produce a bounded decision record correlated with the action audit entry. It records policy outcome, a user-intent reference, and structured tool inputs and outputs; it never records private model reasoning. Untrusted external content requires explicit re-approval before it can trigger a privileged agent effect; global taint tracking is deferred pending a narrower information-flow design.
 
 ## 15. Placement checklist
 
