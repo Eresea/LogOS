@@ -208,7 +208,7 @@ Formatted text remains supported, but it is not the only interoperable form.
 
 ## Initial commands
 
-- [ ] `health`
+- [x] `health`
 - [ ] `tasks`
 - [ ] `services`
 - [ ] `drivers`
@@ -216,7 +216,8 @@ Formatted text remains supported, but it is not the only interoperable form.
 - [ ] `inspect <resource>`
 - [ ] `restart <service>`
 - [ ] `cancel <request-or-job>`
-- [ ] `clear`
+- [x] `clear`
+- [x] `layout <qwerty|azerty>`
 - [x] `reboot`
 - [x] `poweroff`
 - [x] `help`

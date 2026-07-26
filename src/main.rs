@@ -376,6 +376,14 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                                 let _ = terminal.write_output(b"poweroff unavailable");
                             }
                         }
+                        commands::Outcome::Clear => terminal.clear_output(),
+                        commands::Outcome::Layout(layout) => {
+                            input.set_layout(layout);
+                            let _ = terminal.write_output(match layout {
+                                input::Layout::Qwerty => b"layout qwerty",
+                                input::Layout::Azerty => b"layout azerty",
+                            });
+                        }
                         commands::Outcome::Text(value) => {
                             if let Some(value) = format::render(value, format::Style::Human) {
                                 let _ = terminal.write_output(value.as_bytes());

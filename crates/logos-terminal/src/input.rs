@@ -145,7 +145,8 @@ impl Service {
             matches!(input.decode(0x4b, true, 0), Event::Key { logical: LogicalKey::Left, .. });
         let up = matches!(input.decode(0x48, true, 0), Event::Key { logical: LogicalKey::Up, .. });
         let command_keys = input.decode(0x20, false, 0).text() == Some(b'd')
-            && input.decode(0x32, false, 0).text() == Some(b'm');
+            && input.decode(0x32, false, 0).text() == Some(b'm')
+            && input.decode(0x2c, false, 0).text() == Some(b'z');
         qwerty
             && azerty
             && pressed
@@ -223,7 +224,10 @@ impl Service {
             (_, 0x21) => b'f',
             (_, 0x22) => b'g',
             (_, 0x23) => b'h',
+            (_, 0x24) => b'j',
+            (_, 0x25) => b'k',
             (_, 0x26) => b'l',
+            (_, 0x2c) => b'z',
             (_, 0x30) => b'b',
             (_, 0x2d) => b'x',
             (_, 0x2e) => b'c',

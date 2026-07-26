@@ -65,7 +65,7 @@ Foundation contains trusted native Rust services closest to hardware.
 
 The Foundation input service owns normal PS/2 scancode decoding and exposes initial text, backspace, enter, and escape events. The kernel recovery console retains a direct PS/2 input path and does not depend on the service. A later terminal consumes the service; it must not consume recovery input.
 
-Normal input now exposes physical and logical keys, press/release state, modifiers, and bounded repeats. QWERTY is the default layout and AZERTY is selectable until preference storage exists.
+Normal input now exposes physical and logical keys, press/release state, modifiers, and bounded repeats. QWERTY is the default layout; the session `layout <qwerty|azerty>` command switches to AZERTY until preference storage exists.
 
 ### Console v1 display slice
 

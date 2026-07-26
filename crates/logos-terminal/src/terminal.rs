@@ -49,6 +49,11 @@ impl Output {
     fn line(&self, offset: usize) -> Submission {
         self.lines[(self.head + SCROLLBACK - self.length + offset) % SCROLLBACK]
     }
+
+    fn clear(&mut self) {
+        self.head = 0;
+        self.length = 0;
+    }
 }
 
 impl Submission {
@@ -331,6 +336,10 @@ impl Model {
         self.output.push(line)
     }
 
+    pub fn clear_output(&mut self) {
+        self.output.clear();
+    }
+
     pub fn select(&mut self, start: usize, end: usize) -> bool {
         if start > end || end > self.length || !self.is_boundary(start) || !self.is_boundary(end) {
             return false;
@@ -510,6 +519,10 @@ impl Model {
             && moved_selection.selected_bytes().is_none();
         let mut search = Self::new();
         let output = search.write_output(b"old output") && search.write_output(b"new output");
+        search.clear_output();
+        let output_cleared = search.output.length == 0;
+        let output =
+            output && search.write_output(b"old output") && search.write_output(b"new output");
         let _ = search.insert_utf8(b"visible output");
         let visible_match = search.search(b"output")
             == Some(SearchMatch { scrollback_offset: None, start: 8, end: 14 });
@@ -554,6 +567,7 @@ impl Model {
             && selection_collapsed
             && visible_match
             && output
+            && output_cleared
             && scrollback_match
             && search.search(b"missing").is_none()
             && display_restart

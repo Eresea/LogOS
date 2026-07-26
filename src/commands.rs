@@ -2,13 +2,15 @@ use crate::{
     capabilities::{CapabilityKind, CapabilityManager},
     session,
 };
-use logos_terminal::terminal::Submission;
+use logos_terminal::{input::Layout, terminal::Submission};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Recovery,
     Reboot,
     PowerOff,
+    Clear,
+    Layout(Layout),
     Text(Submission),
     Error(Error),
 }
@@ -76,8 +78,28 @@ pub struct Argument {
 const NO_ARGUMENTS: [Argument; 0] = [];
 const TEXT_ARGUMENT: [Argument; 1] =
     [Argument { name: b"text", kind: ArgumentKind::Text, required: true }];
+const LAYOUT_ARGUMENT: [Argument; 1] =
+    [Argument { name: b"layout", kind: ArgumentKind::Text, required: true }];
 
-const DESCRIPTORS: [Descriptor; 6] = [
+const DESCRIPTORS: [Descriptor; 9] = [
+    Descriptor {
+        name: b"health",
+        summary: b"show machine health",
+        arguments: &NO_ARGUMENTS,
+        required_capability: None,
+    },
+    Descriptor {
+        name: b"clear",
+        summary: b"clear terminal output",
+        arguments: &NO_ARGUMENTS,
+        required_capability: None,
+    },
+    Descriptor {
+        name: b"layout",
+        summary: b"set keyboard layout: qwerty or azerty",
+        arguments: &LAYOUT_ARGUMENT,
+        required_capability: None,
+    },
     Descriptor {
         name: b"recovery",
         summary: b"switch to the recovery console",
@@ -178,13 +200,22 @@ fn invoke_stage(
         Outcome::Reboot
     } else if descriptor.name == b"poweroff" {
         Outcome::PowerOff
+    } else if descriptor.name == b"health" {
+        Submission::from_bytes(b"healthy")
+            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
+    } else if descriptor.name == b"clear" {
+        Outcome::Clear
+    } else if descriptor.name == b"layout" && argument == b"qwerty" {
+        Outcome::Layout(Layout::Qwerty)
+    } else if descriptor.name == b"layout" && argument == b"azerty" {
+        Outcome::Layout(Layout::Azerty)
     } else if descriptor.name == b"echo" && !argument.is_empty() {
         Submission::from_bytes(argument)
             .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
     } else if descriptor.name == b"echo" {
         input.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
     } else if descriptor.name == b"commands" {
-        Submission::from_bytes(b"recovery echo help commands reboot poweroff")
+        Submission::from_bytes(b"health clear layout recovery echo help commands reboot poweroff")
             .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
     } else if descriptor.name == b"help" && !argument.is_empty() {
         descriptors()
@@ -240,6 +271,18 @@ pub fn self_check() -> bool {
     let Some(poweroff) = Submission::from_bytes(b"poweroff") else {
         return false;
     };
+    let Some(health) = Submission::from_bytes(b"health") else {
+        return false;
+    };
+    let Some(clear) = Submission::from_bytes(b"clear") else {
+        return false;
+    };
+    let Some(qwerty) = Submission::from_bytes(b"layout qwerty") else {
+        return false;
+    };
+    let Some(azerty) = Submission::from_bytes(b"layout azerty") else {
+        return false;
+    };
     invoke(submission, &denied_session, &capabilities, Invocation::new(2), 1)
         == Outcome::Error(Error::Denied)
         && invoke(submission, &session, &capabilities, Invocation::new(2), 1) == Outcome::Recovery
@@ -254,11 +297,17 @@ pub fn self_check() -> bool {
         && pipeline(pipe, &denied_session, &capabilities, Invocation::new(2), 1)
             == Outcome::Text(hello)
         && invoke(commands, &denied_session, &capabilities, Invocation::new(2), 1)
-            .is_text(b"recovery echo help commands reboot poweroff")
+            .is_text(b"health clear layout recovery echo help commands reboot poweroff")
         && invoke(reboot, &session, &capabilities, Invocation::new(2), 1) == Outcome::Reboot
         && invoke(poweroff, &session, &capabilities, Invocation::new(2), 1) == Outcome::PowerOff
-        && descriptors().len() == 6
-        && descriptors()[0].arguments.is_empty()
+        && invoke(health, &denied_session, &capabilities, Invocation::new(2), 1).is_text(b"healthy")
+        && invoke(clear, &denied_session, &capabilities, Invocation::new(2), 1) == Outcome::Clear
+        && invoke(qwerty, &denied_session, &capabilities, Invocation::new(2), 1)
+            == Outcome::Layout(Layout::Qwerty)
+        && invoke(azerty, &denied_session, &capabilities, Invocation::new(2), 1)
+            == Outcome::Layout(Layout::Azerty)
+        && descriptors().len() == 9
+        && descriptors()[3].arguments.is_empty()
         && text_argument.kind == ArgumentKind::Text
         && text_argument.required
 }
