@@ -25,6 +25,28 @@ pub struct SearchMatch {
     pub end: usize,
 }
 
+struct Output {
+    lines: [Submission; SCROLLBACK],
+    head: usize,
+    length: usize,
+}
+
+impl Output {
+    const fn new() -> Self {
+        Self { lines: [Submission::EMPTY; SCROLLBACK], head: 0, length: 0 }
+    }
+
+    fn push(&mut self, line: Submission) {
+        self.lines[self.head] = line;
+        self.head = (self.head + 1) % SCROLLBACK;
+        self.length = (self.length + 1).min(SCROLLBACK);
+    }
+
+    fn line(&self, offset: usize) -> Submission {
+        self.lines[(self.head + SCROLLBACK - self.length + offset) % SCROLLBACK]
+    }
+}
+
 impl Submission {
     const EMPTY: Self = Self { cells: [0; CELLS], length: 0 };
     pub const fn new(cells: [u8; CELLS], length: usize) -> Self {
@@ -50,6 +72,7 @@ pub struct Model {
     length: usize,
     cursor: usize,
     caret_visible: bool,
+    output: Output,
     scrollback: [Submission; SCROLLBACK],
     scrollback_head: usize,
     scrollback_len: usize,
@@ -64,6 +87,7 @@ impl Model {
             length: 0,
             cursor: 0,
             caret_visible: true,
+            output: Output::new(),
             scrollback: [Submission::EMPTY; SCROLLBACK],
             scrollback_head: 0,
             scrollback_len: 0,
@@ -198,30 +222,67 @@ impl Model {
         let columns = self.columns(display);
         let mut column = 0;
         let mut row = 0;
-        for &glyph in &self.cells[..self.length] {
+        for offset in 0..self.output.length {
+            if !self.render_bytes(
+                display,
+                text,
+                self.output.line(offset).as_bytes(),
+                columns,
+                &mut row,
+                &mut column,
+            ) {
+                return false;
+            }
+            row += 1;
+            column = 0;
+        }
+        if !self.render_bytes(
+            display,
+            text,
+            &self.cells[..self.length],
+            columns,
+            &mut row,
+            &mut column,
+        ) {
+            return false;
+        }
+        let caret = if self.caret_visible { ACCENT } else { BACKGROUND };
+        let (caret_row, caret_column) = Self::position(self.columns_before_cursor(), columns);
+        let x = ORIGIN.0 + caret_column * text::Service::ADVANCE;
+        let y = ORIGIN.1
+            + (row + caret_row) * text.metrics().height
+            + text.metrics().height.saturating_sub(2);
+        (0..text::Service::ADVANCE).all(|dx| display.present(x + dx, y, caret))
+    }
+
+    fn render_bytes(
+        &self,
+        display: &mut display::Service,
+        text: &text::Service,
+        bytes: &[u8],
+        columns: usize,
+        row: &mut usize,
+        column: &mut usize,
+    ) -> bool {
+        for &glyph in bytes {
             if glyph & 0xc0 != 0x80
                 && !text.render(
                     display,
                     glyph,
-                    ORIGIN.0 + column * text::Service::ADVANCE,
-                    ORIGIN.1 + row * text.metrics().height,
+                    ORIGIN.0 + *column * text::Service::ADVANCE,
+                    ORIGIN.1 + *row * text.metrics().height,
                     ACCENT,
                 )
             {
                 return false;
             }
-            column += usize::from(glyph & 0xc0 != 0x80);
-            if column == columns {
-                column = 0;
-                row += 1;
+            *column += usize::from(glyph & 0xc0 != 0x80);
+            if *column == columns {
+                *column = 0;
+                *row += 1;
             }
         }
-        let caret = if self.caret_visible { ACCENT } else { BACKGROUND };
-        let (caret_row, caret_column) = Self::position(self.columns_before_cursor(), columns);
-        let x = ORIGIN.0 + caret_column * text::Service::ADVANCE;
-        let y =
-            ORIGIN.1 + caret_row * text.metrics().height + text.metrics().height.saturating_sub(2);
-        (0..text::Service::ADVANCE).all(|dx| display.present(x + dx, y, caret))
+        true
     }
 
     pub fn blink(&mut self) {
@@ -234,6 +295,17 @@ impl Model {
         self.length = 0;
         self.cursor = 0;
         submission
+    }
+
+    pub fn write_output(&mut self, bytes: &[u8]) -> bool {
+        let Some(line) = Submission::from_bytes(bytes) else {
+            return false;
+        };
+        if core::str::from_utf8(bytes).is_err() {
+            return false;
+        }
+        self.output.push(line);
+        true
     }
 
     pub fn select(&mut self, start: usize, end: usize) -> bool {
@@ -262,6 +334,12 @@ impl Model {
         }
         if let Some((start, end)) = Self::find(&self.cells[..self.length], query) {
             return Some(SearchMatch { scrollback_offset: None, start, end });
+        }
+        for offset in 0..self.output.length {
+            let line = self.output.line(self.output.length - 1 - offset);
+            if let Some((start, end)) = Self::find(line.as_bytes(), query) {
+                return Some(SearchMatch { scrollback_offset: Some(offset), start, end });
+            }
         }
         for offset in 0..self.scrollback_len {
             let submission =
@@ -366,12 +444,10 @@ impl Model {
             && selection.selected_bytes() == Some(b"\xc3\xa9" as &[u8]);
         selection.clear_selection();
         let mut search = Self::new();
-        let _ = search.insert_utf8(b"old output");
-        let _ = search.submit();
+        let output = search.write_output(b"old output") && search.write_output(b"new output");
         let _ = search.insert_utf8(b"visible output");
         let visible_match = search.search(b"output")
             == Some(SearchMatch { scrollback_offset: None, start: 8, end: 14 });
-        search.submit();
         let scrollback_match = search.search(b"old")
             == Some(SearchMatch { scrollback_offset: Some(1), start: 0, end: 3 });
         edited
@@ -388,6 +464,7 @@ impl Model {
             && selected
             && selection.selected_bytes().is_none()
             && visible_match
+            && output
             && scrollback_match
             && search.search(b"missing").is_none()
     }

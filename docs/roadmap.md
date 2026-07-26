@@ -159,7 +159,7 @@ The normal terminal is not a kernel shell. It is a renderer and editor attached 
 - [x] Command history.
 - [x] Selection and clipboard-ready abstractions.
 - [x] Search within visible output and scrollback.
-- [ ] Clear separation between output model and rendered cells.
+- [x] Clear separation between output model and rendered cells.
 - [ ] Resilient redraw after display-service restart.
 
 ### Session and shell

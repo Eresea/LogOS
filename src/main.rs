@@ -318,6 +318,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     check!(b"terminal scrollback", terminal::Model::self_check());
     check!(b"terminal history", terminal::Model::self_check());
     check!(b"terminal selection", terminal::Model::self_check());
+    check!(b"terminal output", terminal::Model::self_check());
     check!(b"terminal caret", terminal::Model::self_check());
     check!(b"text font", text::Service::self_check());
     coordinator.announce();
@@ -336,13 +337,20 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
             }
             if let Some(event) = input.next() {
                 if event.is_enter() {
-                    if commands::invoke(terminal.submit(), &capabilities, recovery_capability)
-                        == commands::Result::Recovery
-                    {
-                        debug::write_line(b"LogOS: recovery handoff requested");
-                        console_mode = mode::ConsoleMode::Recovery;
-                        break;
+                    match commands::invoke(terminal.submit(), &capabilities, recovery_capability) {
+                        commands::Result::Recovery => {
+                            debug::write_line(b"LogOS: recovery handoff requested");
+                            console_mode = mode::ConsoleMode::Recovery;
+                            break;
+                        }
+                        commands::Result::Denied => {
+                            let _ = terminal.write_output(b"permission denied");
+                        }
+                        commands::Result::Unknown => {
+                            let _ = terminal.write_output(b"unknown command");
+                        }
                     }
+                    let _ = terminal.render(display.as_mut().unwrap(), &text);
                 } else if terminal.apply(event) {
                     let _ = terminal.render(display.as_mut().unwrap(), &text);
                 }
