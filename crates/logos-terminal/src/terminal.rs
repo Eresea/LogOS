@@ -137,6 +137,7 @@ impl Model {
         self.cells[self.cursor..self.cursor + bytes.len()].copy_from_slice(bytes);
         self.cursor += bytes.len();
         self.length += bytes.len();
+        self.selection = None;
         true
     }
 
@@ -174,6 +175,7 @@ impl Model {
         self.cells.copy_within(self.cursor..self.length, start);
         self.length -= self.cursor - start;
         self.cursor = start;
+        self.selection = None;
         true
     }
 
@@ -187,6 +189,7 @@ impl Model {
         }
         self.cells.copy_within(end..self.length, self.cursor);
         self.length -= end - self.cursor;
+        self.selection = None;
         true
     }
 
@@ -313,6 +316,7 @@ impl Model {
         self.push_scrollback(submission);
         self.length = 0;
         self.cursor = 0;
+        self.selection = None;
         submission
     }
 
@@ -430,6 +434,7 @@ impl Model {
         self.cells = submission.cells;
         self.length = submission.length;
         self.cursor = self.length;
+        self.selection = None;
     }
 
     fn find(haystack: &[u8], needle: &[u8]) -> Option<(usize, usize)> {
@@ -492,6 +497,11 @@ impl Model {
             && selection.select(1, 3)
             && selection.selected_bytes() == Some(b"\xc3\xa9" as &[u8]);
         selection.clear_selection();
+        let mut invalidated_selection = Self::new();
+        let selection_invalidated = invalidated_selection.insert_utf8(b"text")
+            && invalidated_selection.select(0, 4)
+            && invalidated_selection.insert_utf8(b"!")
+            && invalidated_selection.selected_bytes().is_none();
         let mut search = Self::new();
         let output = search.write_output(b"old output") && search.write_output(b"new output");
         let _ = search.insert_utf8(b"visible output");
@@ -534,6 +544,7 @@ impl Model {
             && restored_history
             && selected
             && selection.selected_bytes().is_none()
+            && selection_invalidated
             && visible_match
             && output
             && scrollback_match
