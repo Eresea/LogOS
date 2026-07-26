@@ -219,8 +219,8 @@ Formatted text remains supported, but it is not the only interoperable form.
 - [ ] `clear`
 - [ ] `reboot`
 - [ ] `poweroff`
-- [ ] `help`
-- [ ] `commands`
+- [x] `help`
+- [x] `commands`
 
 ## Exit criteria
 

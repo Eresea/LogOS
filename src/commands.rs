@@ -11,6 +11,12 @@ pub enum Outcome {
     Error(Error),
 }
 
+impl Outcome {
+    fn is_text(self, expected: &[u8]) -> bool {
+        matches!(self, Self::Text(value) if value.as_bytes() == expected)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Denied,
@@ -69,7 +75,7 @@ const NO_ARGUMENTS: [Argument; 0] = [];
 const TEXT_ARGUMENT: [Argument; 1] =
     [Argument { name: b"text", kind: ArgumentKind::Text, required: true }];
 
-const DESCRIPTORS: [Descriptor; 2] = [
+const DESCRIPTORS: [Descriptor; 4] = [
     Descriptor {
         name: b"recovery",
         summary: b"switch to the recovery console",
@@ -80,6 +86,18 @@ const DESCRIPTORS: [Descriptor; 2] = [
         name: b"echo",
         summary: b"return text",
         arguments: &TEXT_ARGUMENT,
+        required_capability: None,
+    },
+    Descriptor {
+        name: b"help",
+        summary: b"describe a command",
+        arguments: &TEXT_ARGUMENT,
+        required_capability: None,
+    },
+    Descriptor {
+        name: b"commands",
+        summary: b"list commands",
+        arguments: &NO_ARGUMENTS,
         required_capability: None,
     },
 ];
@@ -147,6 +165,18 @@ fn invoke_stage(
             .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
     } else if descriptor.name == b"echo" {
         input.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
+    } else if descriptor.name == b"commands" {
+        Submission::from_bytes(b"recovery echo help commands")
+            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
+    } else if descriptor.name == b"help" && !argument.is_empty() {
+        descriptors()
+            .iter()
+            .find(|candidate| candidate.name == argument)
+            .and_then(|candidate| Submission::from_bytes(candidate.summary))
+            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
+    } else if descriptor.name == b"help" {
+        Submission::from_bytes(b"use commands to list commands")
+            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
     } else {
         Outcome::Error(Error::UnknownCommand)
     }
@@ -183,6 +213,9 @@ pub fn self_check() -> bool {
     let Some(pipe) = Submission::from_bytes(b"echo hello | echo") else {
         return false;
     };
+    let Some(commands) = Submission::from_bytes(b"commands") else {
+        return false;
+    };
     invoke(submission, &denied_session, &capabilities, Invocation::new(2), 1)
         == Outcome::Error(Error::Denied)
         && invoke(submission, &session, &capabilities, Invocation::new(2), 1) == Outcome::Recovery
@@ -196,7 +229,9 @@ pub fn self_check() -> bool {
             == Outcome::Text(hello)
         && pipeline(pipe, &denied_session, &capabilities, Invocation::new(2), 1)
             == Outcome::Text(hello)
-        && descriptors().len() == 2
+        && invoke(commands, &denied_session, &capabilities, Invocation::new(2), 1)
+            .is_text(b"recovery echo help commands")
+        && descriptors().len() == 4
         && descriptors()[0].arguments.is_empty()
         && text_argument.kind == ArgumentKind::Text
         && text_argument.required
