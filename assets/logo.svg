@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 256 256"
+     role="img"
+     aria-labelledby="title desc">
+  <title id="title">LogOS mark</title>
+  <desc id="desc">Static white LogOS mark with four tapered points and a circular core.</desc>
+
+  <!-- Change this value to recolor the complete mark. -->
+  <g fill="#FFFFFF">
+    <!-- Outer points. -->
+    <g id="logos-points">
+      <path d="
+        M 111.55 88.27
+        A 43 43 0 0 1 144.45 88.27
+        C 136.20 71.40 130.80 48.50 128 14
+        C 125.20 48.50 119.80 71.40 111.55 88.27
+        Z"/>
+
+      <path d="
+        M 167.73 111.55
+        A 43 43 0 0 1 167.73 144.45
+        C 184.60 136.20 207.50 130.80 242 128
+        C 207.50 125.20 184.60 119.80 167.73 111.55
+        Z"/>
+
+      <path d="
+        M 144.45 167.73
+        A 43 43 0 0 1 111.55 167.73
+        C 119.80 184.60 125.20 207.50 128 242
+        C 130.80 207.50 136.20 184.60 144.45 167.73
+        Z"/>
+
+      <path d="
+        M 88.27 144.45
+        A 43 43 0 0 1 88.27 111.55
+        C 71.40 119.80 48.50 125.20 14 128
+        C 48.50 130.80 71.40 136.20 88.27 144.45
+        Z"/>
+
+    </g>
+
+    <!-- Fixed center. -->
+    <circle id="logos-core" cx="128" cy="128" r="24"/>
+  </g>
+</svg>
