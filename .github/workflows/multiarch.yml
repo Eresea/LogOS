@@ -1,0 +1,54 @@
+name: Multi-Architecture Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  uefi-build:
+    name: UEFI Build (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: x86_64-unknown-uefi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cargo-${{ runner.os }}-uefi-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build UEFI kernel
+        run: cargo build --target x86_64-unknown-uefi
+
+      - name: Build UEFI kernel (release)
+        run: cargo build --release --target x86_64-unknown-uefi
+
+  wasm-build:
+    name: WASM Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cargo-${{ runner.os }}-wasm-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build terminal crate for WASM
+        run: cargo build --target wasm32-unknown-unknown -p logos-terminal
+
+      - name: Build terminal crate for WASM (release)
+        run: cargo build --release --target wasm32-unknown-unknown -p logos-terminal

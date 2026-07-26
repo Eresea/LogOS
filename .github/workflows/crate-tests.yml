@@ -1,0 +1,44 @@
+name: Crate Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  RUSTFLAGS: "-D warnings"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  terminal-crate:
+    name: Terminal Crate Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cargo-${{ runner.os }}-terminal-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Format check (logos-terminal)
+        run: cargo fmt --check -p logos-terminal
+
+      - name: Clippy (logos-terminal)
+        run: cargo clippy -p logos-terminal --all-targets --all-features -- -D warnings
+
+      - name: Test logos-terminal
+        run: cargo test -p logos-terminal --lib --all-features
+
+      - name: Doc tests (logos-terminal)
+        run: cargo test -p logos-terminal --doc
+
+      - name: Build docs (logos-terminal)
+        run: cargo doc -p logos-terminal --no-deps --all-features
