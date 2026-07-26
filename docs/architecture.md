@@ -289,6 +289,8 @@ Command history traverses that bounded terminal state through up/down input even
 
 Terminal selection is UTF-8-boundary validated and exposes borrowed selected bytes, ready for a future clipboard service without coupling one into the terminal.
 
+Terminal search validates UTF-8 queries and searches the visible buffer before bounded scrollback, returning byte ranges on character boundaries.
+
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
 
 The command registry authorizes a live recovery handoff with an explicit recovery capability. The handoff stops normal input processing before recovery activates its direct input/output path.

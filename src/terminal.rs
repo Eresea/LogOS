@@ -18,6 +18,13 @@ pub struct Submission {
     length: usize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub scrollback_offset: Option<usize>,
+    pub start: usize,
+    pub end: usize,
+}
+
 impl Submission {
     const EMPTY: Self = Self { cells: [0; CELLS], length: 0 };
     pub const fn new(cells: [u8; CELLS], length: usize) -> Self {
@@ -249,6 +256,23 @@ impl Model {
         self.scrollback_len
     }
 
+    pub fn search(&self, query: &[u8]) -> Option<SearchMatch> {
+        if query.is_empty() || core::str::from_utf8(query).is_err() {
+            return None;
+        }
+        if let Some((start, end)) = Self::find(&self.cells[..self.length], query) {
+            return Some(SearchMatch { scrollback_offset: None, start, end });
+        }
+        for offset in 0..self.scrollback_len {
+            let submission =
+                self.scrollback[(self.scrollback_head + SCROLLBACK - 1 - offset) % SCROLLBACK];
+            if let Some((start, end)) = Self::find(submission.as_bytes(), query) {
+                return Some(SearchMatch { scrollback_offset: Some(offset), start, end });
+            }
+        }
+        None
+    }
+
     fn push_scrollback(&mut self, submission: Submission) {
         self.scrollback[self.scrollback_head] = submission;
         self.scrollback_head = (self.scrollback_head + 1) % SCROLLBACK;
@@ -294,6 +318,12 @@ impl Model {
         self.cursor = self.length;
     }
 
+    fn find(haystack: &[u8], needle: &[u8]) -> Option<(usize, usize)> {
+        let haystack = core::str::from_utf8(haystack).ok()?;
+        let needle = core::str::from_utf8(needle).ok()?;
+        haystack.find(needle).map(|start| (start, start + needle.len()))
+    }
+
     pub fn self_check() -> bool {
         let mut model = Self::new();
         let text = input::Event::Key {
@@ -335,6 +365,15 @@ impl Model {
             && selection.select(1, 3)
             && selection.selected_bytes() == Some(b"\xc3\xa9" as &[u8]);
         selection.clear_selection();
+        let mut search = Self::new();
+        let _ = search.insert_utf8(b"old output");
+        let _ = search.submit();
+        let _ = search.insert_utf8(b"visible output");
+        let visible_match = search.search(b"output")
+            == Some(SearchMatch { scrollback_offset: None, start: 8, end: 14 });
+        search.submit();
+        let scrollback_match = search.search(b"old")
+            == Some(SearchMatch { scrollback_offset: Some(1), start: 0, end: 3 });
         edited
             && home
             && model.cursor == model.length
@@ -348,6 +387,9 @@ impl Model {
             && history
             && selected
             && selection.selected_bytes().is_none()
+            && visible_match
+            && scrollback_match
+            && search.search(b"missing").is_none()
     }
 
     fn columns_before_cursor(&self) -> usize {
