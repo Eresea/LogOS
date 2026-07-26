@@ -293,6 +293,8 @@ Terminal search validates UTF-8 queries and searches the visible buffer before b
 
 Terminal output is a separate bounded line model; rendering consumes that model plus the editor state, and command results never write framebuffer pixels directly.
 
+Terminal redraw retains no display-service state: rendering the same model on a replacement display service reproduces the output and editor.
+
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
 
 The command registry authorizes a live recovery handoff with an explicit recovery capability. The handoff stops normal input processing before recovery activates its direct input/output path.

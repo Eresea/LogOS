@@ -450,6 +450,20 @@ impl Model {
             == Some(SearchMatch { scrollback_offset: None, start: 8, end: 14 });
         let scrollback_match = search.search(b"old")
             == Some(SearchMatch { scrollback_offset: Some(1), start: 0, end: 3 });
+        let Some(first_display) =
+            display::Service::new(core::ptr::dangling_mut(), 64 * 80 * 4, 64, 80, 64)
+        else {
+            return false;
+        };
+        let Some(replacement_display) =
+            display::Service::new(core::ptr::dangling_mut(), 64 * 80 * 4, 64, 80, 64)
+        else {
+            return false;
+        };
+        let mut redraw = Self::new();
+        let display_restart = redraw.write_output(b"x")
+            && redraw.insert_utf8(b"y")
+            && redraw.columns(&first_display) == redraw.columns(&replacement_display);
         edited
             && home
             && model.cursor == model.length
@@ -467,6 +481,7 @@ impl Model {
             && output
             && scrollback_match
             && search.search(b"missing").is_none()
+            && display_restart
     }
 
     fn columns_before_cursor(&self) -> usize {

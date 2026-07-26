@@ -319,6 +319,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     check!(b"terminal history", terminal::Model::self_check());
     check!(b"terminal selection", terminal::Model::self_check());
     check!(b"terminal output", terminal::Model::self_check());
+    check!(b"terminal display restart", terminal::Model::self_check());
     check!(b"terminal caret", terminal::Model::self_check());
     check!(b"text font", text::Service::self_check());
     coordinator.announce();
