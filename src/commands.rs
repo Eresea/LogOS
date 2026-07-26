@@ -95,6 +95,37 @@ pub fn invoke(
     invocation: Invocation,
     now: u64,
 ) -> Outcome {
+    invoke_stage(submission, None, session, capabilities, invocation, now)
+}
+
+pub fn pipeline(
+    submission: Submission,
+    session: &session::Context,
+    capabilities: &CapabilityManager,
+    invocation: Invocation,
+    now: u64,
+) -> Outcome {
+    let mut input = None;
+    for stage in submission.as_bytes().split(|byte| *byte == b'|') {
+        let Some(stage) = Submission::from_bytes(stage.trim_ascii()) else {
+            return Outcome::Error(Error::UnknownCommand);
+        };
+        match invoke_stage(stage, input, session, capabilities, invocation, now) {
+            Outcome::Text(value) => input = Some(value),
+            outcome => return outcome,
+        }
+    }
+    input.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
+}
+
+fn invoke_stage(
+    submission: Submission,
+    input: Option<Submission>,
+    session: &session::Context,
+    capabilities: &CapabilityManager,
+    invocation: Invocation,
+    now: u64,
+) -> Outcome {
     if let Some(error) = invocation.error(now) {
         return Outcome::Error(error);
     }
@@ -114,6 +145,8 @@ pub fn invoke(
     } else if descriptor.name == b"echo" && !argument.is_empty() {
         Submission::from_bytes(argument)
             .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
+    } else if descriptor.name == b"echo" {
+        input.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
     } else {
         Outcome::Error(Error::UnknownCommand)
     }
@@ -147,6 +180,9 @@ pub fn self_check() -> bool {
     let Some(hello) = Submission::from_bytes(b"hello") else {
         return false;
     };
+    let Some(pipe) = Submission::from_bytes(b"echo hello | echo") else {
+        return false;
+    };
     invoke(submission, &denied_session, &capabilities, Invocation::new(2), 1)
         == Outcome::Error(Error::Denied)
         && invoke(submission, &session, &capabilities, Invocation::new(2), 1) == Outcome::Recovery
@@ -157,6 +193,8 @@ pub fn self_check() -> bool {
         && invoke(submission, &session, &capabilities, Invocation::new(1), 1)
             == Outcome::Error(Error::TimedOut)
         && invoke(echo, &denied_session, &capabilities, Invocation::new(2), 1)
+            == Outcome::Text(hello)
+        && pipeline(pipe, &denied_session, &capabilities, Invocation::new(2), 1)
             == Outcome::Text(hello)
         && descriptors().len() == 2
         && descriptors()[0].arguments.is_empty()

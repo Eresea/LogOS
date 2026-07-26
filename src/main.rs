@@ -343,7 +343,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
             }
             if let Some(event) = input.next(tick, keyboard::poll_scancode) {
                 if event.is_enter() {
-                    match commands::invoke(
+                    match commands::pipeline(
                         terminal.submit(),
                         &session,
                         &capabilities,
