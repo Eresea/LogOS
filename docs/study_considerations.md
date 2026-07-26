@@ -1,0 +1,35 @@
+Here's a batch, sorted roughly from "grounded extension of what you already have" to "genuinely weird if it worked." I've tied each one back to a LogOS primitive so none of these require abandoning the architecture — they're extensions, not detours.
+
+## Hardware-level
+
+**1. CHERI-backed capabilities instead of just software-checked ones.**
+Your whole system is capability-first in software — Fabric/Authority enforce mappings and delegation, but ultimately on conventional x86/ARM MMU hardware, a bug in Core's capability check is still a bug. CHERI (ARM Morello, or CHERIoT on RISC-V) makes pointers themselves unforgeable at the hardware level — bounds, permissions, and provenance travel with the pointer, enforced by silicon, not by kernel discipline. For an OS that's _already_ architected around "no ambient authority," this is close to a perfect hardware match: Ring 0's `Authority` subsystem could delegate actual enforcement to hardware capability registers instead of only software tables. Worth a design note even if real hardware access is years out — RISC-V's extensibility in particular makes this plausible as a stated long-term target.
+
+**2. Heterogeneous compute as a typed resource, not a special case.**
+Modern ARM (big.LITTLE, Apple-style P/E cores) and any machine with an NPU alongside CPU/GPU means "the CPU" is already a fiction. Rather than bolting on NPU support later, treat all compute — CPU core, GPU shader unit, NPU tile — as a `ComputeRef` capability with declared throughput/latency/power characteristics, and let the Ring 0 scheduler (or a Ring 1 compute-broker service) place work by capability match rather than by device-specific code. This also sets up WASM component migration between cores of _different ISAs_ transparently — since your applications are already ISA-independent by construction, a running component could migrate from an ARM core to a RISC-V accelerator mid-execution based on load, which is not something a POSIX-shaped OS can do gracefully.
+
+**3. Power domains as a first-class capability, not a side effect.**
+You already have quiesce/reset as a driver lifecycle primitive. Extend that idea upward: entire rings or service groups can suspend on idle and wake on a capability-gated event, with power budget itself expressed as a quota (like your memory/CPU quotas for WASM apps). ARM's fine-grained power-domain hardware makes this a natural fit, and it turns "battery life" from an application afterthought into something the Supervisor actively schedules around — genuinely useful for anything from laptops to edge/robotics deployments.
+
+## AI / data flow — the actually novel part
+
+**4. A privacy label that's part of the _type_, not a policy note.**
+This is the one I'd push hardest. Right now sensitive data flows through Flow pipelines as ordinary typed `Value`s, with access control happening at the capability boundary (can this script call `secrets.get`). But there's a different, more interesting problem: once a value contains personal data, can Flow's _type system_ statically guarantee it never reaches a remote-model capability? Imagine `Sensitive<T>` — a wrapper type that propagates through `map`/`where`/pipelines, and the type checker refuses to compile a script that pipes a `Sensitive<T>` into any `logos:model/invoke` call unless it's explicitly declassified (a visible, audited operation) or the model is a `local:` capability. This turns "don't leak my data to the cloud" from a policy you hope services respect into a compile-time guarantee — which is a genuinely new idea; I'm not aware of another OS doing information-flow-typed data at the shell/scripting layer.
+
+**5. Signed action receipts for multi-agent trust.**
+If you're picturing multiple AI agents cooperating (or an agent delegating to sub-agents), each command execution could return a structured, capability-bound receipt — "principal X, using capability Y, performed Z at time T, with this result" — cryptographically signed by the executing service. Agent B doesn't have to trust agent A's account of what happened; it can verify the receipt chain. This is basically Audit turned into a portable, verifiable artifact instead of a local log, and it becomes important the moment agents start delegating work to each other rather than a human directing everything.
+
+**6. Compensating actions as a universal undo primitive.**
+Store already has versions/snapshots. Extend the _command_ model itself: any command with a mutation-class effect (per your existing effect classification table) can optionally declare a compensating command — `service.restart` might declare none (idempotent-ish), but `store.delete` declares `store.restore(version)`. Then any session — human or agent — gets a real `undo` that isn't "hope you had a backup," it's a structured, capability-checked reversal generated from the same schema that already powers your tool descriptors. Given how often an AI agent will confidently do the _wrong_ correct-looking thing, cheap universal undo might be the single highest-leverage AI-safety feature you could add, and it fits your existing architecture almost for free.
+
+## Systems/debugging — less flashy, very useful
+
+**7. Deterministic causal replay as a Core diagnostic, not just Trace.**
+You've already got generation-tagged handles and bounded IPC tracing. Push it one step further: record enough of the IPC/scheduling causal order that a crash or misbehavior can be _deterministically replayed_ — not just "here's what the trace shows," but "run it again exactly as it happened." This is closer to `rr`/time-travel debugging than a log, and it's dramatically more valuable for debugging capability-delegation bugs (which are inherently about _order_ of grants/revocations) than a linear trace is. Bounded and opt-in, same as your existing trace philosophy.
+
+**8. Semantic diff before any privileged apply — not just Flow scripts, system-wide.**
+You already flagged `flow simulate` for scripts. Generalize it: Update, capability grants, and Supervisor policy changes could all produce a structured "what actually changes" diff before commit — closer to `terraform plan` than a changelog. Since your command results are already typed values rather than text, this is much easier for you to build well than it would be for a POSIX system, where "what will this change" usually means reading shell script by eye.
+
+If I had to pick the two I think are most distinctively _yours_ — i.e., ideas that only make sense because of choices you've already made — it's **#4 (information-flow-typed privacy)** and **#6 (universal compensating-action undo)**. Both are basically free architecturally (you already have the type system and the effect classification that make them possible) and both attack a real, current problem: people don't trust AI agents with real authority yet, and these are concrete, verifiable reasons to trust yours a bit more than most.
+
+Want me to write any of these up as a proper design-note annex, the way we did with the review section?
