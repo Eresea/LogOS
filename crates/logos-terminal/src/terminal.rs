@@ -80,6 +80,12 @@ pub struct Model {
     selection: Option<Selection>,
 }
 
+impl Default for Model {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Model {
     pub const fn new() -> Self {
         Self {

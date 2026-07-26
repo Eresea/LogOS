@@ -89,6 +89,12 @@ pub struct Service {
     extended: bool,
 }
 
+impl Default for Service {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Service {
     pub const fn new() -> Self {
         Self {
@@ -104,8 +110,8 @@ impl Service {
         self.layout = layout;
     }
 
-    pub fn next(&mut self) -> Option<Event> {
-        while let Some(scancode) = crate::keyboard::poll_scancode() {
+    pub fn next(&mut self, mut poll_scancode: impl FnMut() -> Option<u8>) -> Option<Event> {
+        while let Some(scancode) = poll_scancode() {
             if scancode == 0xe0 {
                 self.extended = true;
                 continue;

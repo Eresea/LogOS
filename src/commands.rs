@@ -1,8 +1,8 @@
 use crate::{
     capabilities::{CapabilityKind, CapabilityManager},
     session,
-    terminal::Submission,
 };
+use logos_terminal::terminal::Submission;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Result {

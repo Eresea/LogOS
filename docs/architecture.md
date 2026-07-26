@@ -295,6 +295,8 @@ Terminal output is a separate bounded line model; rendering consumes that model 
 
 Terminal redraw retains no display-service state: rendering the same model on a replacement display service reproduces the output and editor.
 
+The normal-console bootstrap lives in the no-std `logos-terminal` crate. The UEFI binary retains only recovery-console code; a later `logos-core` extraction will not absorb the normal terminal.
+
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
 
 The command registry authorizes a live recovery handoff with an explicit recovery capability. The handoff stops normal input processing before recovery activates its direct input/output path.

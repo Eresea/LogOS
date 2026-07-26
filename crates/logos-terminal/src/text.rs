@@ -41,6 +41,12 @@ pub struct Metrics {
 
 pub struct Service;
 
+impl Default for Service {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Service {
     pub const ADVANCE: usize = (WIDTH + 1) * SCALE;
 
