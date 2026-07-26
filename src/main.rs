@@ -334,6 +334,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let mut console_mode = coordinator.mode();
     if console_mode == mode::ConsoleMode::Normal {
         debug::write_line(b"LogOS: normal terminal active");
+        let _ = terminal.write_output(b"LogOS terminal");
         if !terminal.render(display.as_mut().unwrap(), &text) {
             debug::write_line(b"LogOS: normal terminal initial redraw failed");
             console_mode = mode::ConsoleMode::Recovery;
@@ -343,7 +344,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
             let tick = interrupts::ticks();
             if tick.wrapping_sub(blink_tick) >= 50 {
                 terminal.blink();
-                if !terminal.render(display.as_mut().unwrap(), &text) {
+                if !terminal.render_caret(display.as_mut().unwrap(), &text) {
                     console_mode = mode::ConsoleMode::Recovery;
                     break;
                 }

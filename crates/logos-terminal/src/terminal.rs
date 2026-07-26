@@ -259,11 +259,17 @@ impl Model {
         ) {
             return false;
         }
-        let caret = if self.caret_visible { ACCENT } else { BACKGROUND };
+        self.render_caret(display, text)
+    }
+
+    pub fn render_caret(&self, display: &mut display::Service, text: &text::Service) -> bool {
+        let columns = self.columns(display);
         let (caret_row, caret_column) = Self::position(self.columns_before_cursor(), columns);
+        let output_rows = self.output_rows(columns);
+        let caret = if self.caret_visible { ACCENT } else { BACKGROUND };
         let x = ORIGIN.0 + caret_column * text::Service::ADVANCE;
         let y = ORIGIN.1
-            + (row + caret_row) * text.metrics().height
+            + (output_rows + caret_row) * text.metrics().height
             + text.metrics().height.saturating_sub(2);
         (0..text::Service::ADVANCE).all(|dx| display.present(x + dx, y, caret))
     }
@@ -538,6 +544,21 @@ impl Model {
 
     fn columns_before_cursor(&self) -> usize {
         self.cells[..self.cursor].iter().filter(|byte| **byte & 0xc0 != 0x80).count()
+    }
+
+    fn output_rows(&self, columns: usize) -> usize {
+        (0..self.output.length)
+            .map(|offset| {
+                let columns_used = self
+                    .output
+                    .line(offset)
+                    .as_bytes()
+                    .iter()
+                    .filter(|byte| **byte & 0xc0 != 0x80)
+                    .count();
+                columns_used / columns + 1
+            })
+            .sum()
     }
 
     fn columns(&self, display: &display::Service) -> usize {

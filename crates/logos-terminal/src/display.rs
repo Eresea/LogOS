@@ -46,6 +46,10 @@ impl Service {
     }
 
     pub fn clear(&mut self, color: [u8; 3]) -> bool {
+        if color == [0; 3] {
+            unsafe { core::ptr::write_bytes(self.framebuffer, 0, self.framebuffer_size) };
+            return true;
+        }
         for y in 0..self.height {
             for x in 0..self.width {
                 if !self.present(x, y, color) {
