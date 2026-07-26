@@ -142,13 +142,13 @@ The normal terminal is not a kernel shell. It is a renderer and editor attached 
 - [x] Console v1 slice 8: normalize Foundation input with QWERTY/AZERTY layouts, modifiers, state, and bounded repeat.
 - [x] Console v1 slice 9: add bounded UTF-8 terminal editing with character-safe cursor movement and deletion.
 - [x] Console v1 slice 10: add an embedded normal-console font with metrics and fallback glyphs.
-- [ ] Move normal keyboard handling behind an input service.
-- [ ] Preserve a kernel-owned emergency output and input path for recovery.
-- [ ] Normalize physical keys, logical keys, text input, modifiers, and repeat.
-- [ ] Support selectable keyboard layouts, beginning with QWERTY and AZERTY.
-- [ ] Introduce UTF-8 text handling.
-- [ ] Introduce font-backed monospace rendering.
-- [ ] Add a minimal text service for font loading, glyph metrics, and rasterization.
+- [x] Move normal keyboard handling behind an input service.
+- [x] Preserve a kernel-owned emergency output and input path for recovery.
+- [x] Normalize physical keys, logical keys, text input, modifiers, and repeat.
+- [x] Support selectable keyboard layouts, beginning with QWERTY and AZERTY.
+- [x] Introduce UTF-8 text handling.
+- [x] Introduce font-backed monospace rendering.
+- [x] Add a minimal text service for font loading, glyph metrics, and rasterization.
 
 ### Terminal renderer
 
