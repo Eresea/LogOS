@@ -76,7 +76,7 @@ A name becomes **Reserved** when:
 | `foundation.devices`    | **Devices**          |    1 | Working   | Discovery, binding, ownership, reset, and device-independent exposure         |
 | `foundation.input`      | **Input**            |    1 | Working   | Physical/logical keys, layouts, modifiers, repeat, composition, pointers      |
 | `foundation.display`    | **Display**          |    1 | Working   | Display modes, scanout, framebuffer/surface presentation; no window policy    |
-| `foundation.text`       | **Glyph**            |    1 | Candidate | Font loading, metrics, shaping, fallback, and rasterization                   |
+| `foundation.text`       | **Glyph**            |    1 | Working   | Font loading, metrics, shaping, fallback, and rasterization                   |
 | `foundation.block`      | **Block**            |    1 | Working   | Asynchronous block-device access and recovery                                 |
 | `foundation.netdev`     | **Net Device**       |    1 | Working   | Network-device packet transport and device lifecycle                          |
 | `system.supervisor`     | **Supervisor**       |    2 | Working   | Service manifests, dependencies, health, restart, quiesce, and recovery       |
@@ -90,7 +90,7 @@ A name becomes **Reserved** when:
 | `session.manager`       | **Sessions**         |    3 | Working   | Interactive session identity, capabilities, environment, lifetime, and resume |
 | `session.commands`      | **Commands**         |    3 | Working   | Command descriptors, discovery, schemas, invocation, and typed results        |
 | `session.shell`         | **Shell**            |    3 | Working   | Syntax, variables, pipelines, jobs, cancellation, and automation              |
-| `session.terminal`      | **Slate**            |    3 | Candidate | Terminal model, cursor, editing, scrollback, selection, and rendering         |
+| `session.terminal`      | **Slate**            |    3 | Working   | Terminal model, cursor, editing, scrollback, selection, and rendering         |
 | `session.remote`        | **Gateway**          |    3 | Candidate | Authenticated remote transport, multiplexing, resume, and client bridging     |
 | `runtime.wasm`          | **WASM Runtime**     |    4 | Working   | WASM validation, instantiation, host interfaces, quotas, and lifecycle        |
 | `runtime.package`       | **Packages**         |    4 | Working   | Signed application bundles, manifests, dependencies, and versions             |
@@ -156,7 +156,7 @@ Current preference: **Fabric**.
 - `Font`
 - `Script`
 
-Current preference: **Glyph**, pending implementation experience.
+Current preference: **Glyph**
 
 ## `session.terminal` — Slate
 

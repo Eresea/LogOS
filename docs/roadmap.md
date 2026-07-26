@@ -1,8 +1,8 @@
 # LogOS Roadmap
 
-> **Status:** Living document  
-> **Updated:** 2026-07-24  
-> **Current milestone:** Core v1 complete  
+> **Status:** Living document
+> **Updated:** 2026-07-24
+> **Current milestone:** Core v1 complete
 > **Primary target:** A remotely operable, capability-based Rust OS with replaceable native services and sandboxed WASM applications.
 
 ## 1. Vision
@@ -39,14 +39,14 @@ LogOS does not aim to reproduce Unix internally. Compatibility may be provided a
 
 The rings describe dependency and trust placement. They are not conventional CPU privilege rings.
 
-| Ring | Name | Responsibility |
-|---:|---|---|
-| 0 | **Core** | Privileged execution, memory ownership, scheduling, interrupts, capabilities, IPC transport, fault containment |
-| 1 | **Foundation** | Hardware-facing native services and stable device-independent interfaces |
-| 2 | **System** | Shared machine services: supervision, identity, secrets, time, storage, networking, updates |
-| 3 | **Sessions** | Authentication context, commands, structured shell, terminal rendering, local and remote interaction |
-| 4 | **Runtime** | WASM components, packages, workspaces, application lifecycle and application-facing APIs |
-| 5 | **Experience** | Compositor, graphical shell, accessibility, desktop applications and rich clients |
+| Ring | Name           | Responsibility                                                                                                 |
+| ---: | -------------- | -------------------------------------------------------------------------------------------------------------- |
+|    0 | **Core**       | Privileged execution, memory ownership, scheduling, interrupts, capabilities, IPC transport, fault containment |
+|    1 | **Foundation** | Hardware-facing native services and stable device-independent interfaces                                       |
+|    2 | **System**     | Shared machine services: supervision, identity, secrets, time, storage, networking, updates                    |
+|    3 | **Sessions**   | Authentication context, commands, structured shell, terminal rendering, local and remote interaction           |
+|    4 | **Runtime**    | WASM components, packages, workspaces, application lifecycle and application-facing APIs                       |
+|    5 | **Experience** | Compositor, graphical shell, accessibility, desktop applications and rich clients                              |
 
 A component may be moved inward only when measurements or correctness requirements prove that an outer service cannot satisfy its contract.
 
@@ -94,16 +94,16 @@ It should not grow into the normal user environment.
 
 # 5. Roadmap overview
 
-| Order | Milestone | Primary proof |
-|---:|---|---|
-| 1 | **Console v1** | A usable local structured terminal exists outside the kernel |
-| 2 | **Platform v1** | Native services start, fail, recover, and negotiate contracts independently |
-| 3 | **Persistence v1** | Configuration and service-owned data survive crashes and resets |
-| 4 | **Network v1** | LogOS securely reaches and is reachable over a network |
-| 5 | **Remote v1** | The machine is fully operable without physical access |
-| 6 | **Update v1** | System evolution is signed, atomic, health-gated, and reversible |
-| 7 | **Applications v1** | Sandboxed WASM applications can be installed, run, communicate, and persist |
-| 8 | **Experience v1** | Replaceable graphical environments run entirely on system contracts |
+| Order | Milestone           | Primary proof                                                               |
+| ----: | ------------------- | --------------------------------------------------------------------------- |
+|     1 | **Console v1**      | A usable local structured terminal exists outside the kernel                |
+|     2 | **Platform v1**     | Native services start, fail, recover, and negotiate contracts independently |
+|     3 | **Persistence v1**  | Configuration and service-owned data survive crashes and resets             |
+|     4 | **Network v1**      | LogOS securely reaches and is reachable over a network                      |
+|     5 | **Remote v1**       | The machine is fully operable without physical access                       |
+|     6 | **Update v1**       | System evolution is signed, atomic, health-gated, and reversible            |
+|     7 | **Applications v1** | Sandboxed WASM applications can be installed, run, communicate, and persist |
+|     8 | **Experience v1**   | Replaceable graphical environments run entirely on system contracts         |
 
 Core hardening continues alongside these milestones and does not automatically block outward progress.
 
@@ -663,3 +663,90 @@ For every material change:
 
 - [Architecture and boundary model](ARCHITECTURE.md)
 - [Subsystem naming register](NAMING.md)
+
+## Annex C — Roadmap Revisions & Architectural Refinements
+
+> **Date:** 2026-07-25
+> **Status:** Approved Architectural Suggestions
+> **Scope:** Core IPC, Capability Revocation, WASM Host Integration, and Sequence Ordering
+
+### 1. [Continuous Core] APIC Timer & Per-CPU State Sequencing
+
+- **Revision:** Move APIC Timer / HPET adoption and per-CPU state forward to precede **Platform v1** and **Network v1**.
+- **Rationale:** Relying on legacy PIT while building supervision heartbeats, connection timeouts, and TCP retransmission timers introduces tick-resolution jitter and timing race conditions in userspace.
+
+### 2. [Platform v1] Generation-Tagged Capability Revocation
+
+- **Suggestion:** Adopt epoch/generation-tagged resource handles in Ring 0 for capability validation.
+- **Rationale:** Prevents global locks or heavy kernel bookkeeping when a supervisor revokes or restarts a service (Ring 2). Invalidating stale generation tags at the IPC handle barrier keeps revocation $O(1)$.
+
+### 3. [Persistence/Network] Zero-Copy IPC Buffer Grants
+
+- **Suggestion:** Introduce Ring 0 shared-memory grant pages (ring buffers) for bulk data payload streaming (`Value::Stream`).
+- **Rationale:** Structured values (`Value::Bytes`, `Value::Table`) crossing ring boundaries incur serialization and CPU cache overhead. Typed descriptors should manage the control plane, while zero-copy grant pages drive the data plane.
+
+### 4. [Applications v1] LogOS Host Interface (WIT) Strategy
+
+- **Revision:** Explicitly scope **Applications v1** around a native LogOS WIT (WASM Interface Type) component host mapping rather than generic WASI.
+- **Rationale:** Exposes LogOS-native typed capability contracts directly to WASM sandboxes without requiring lossy string-translation wrappers.
+
+---
+
+## Annex D — Repository & Workspace Architecture
+
+> **Date:** 2026-07-25
+> **Status:** Approved Cargo Workspace Structure
+> **Scope:** Code Organization, `no_std` Isolation, and Crate Splitting
+
+### 1. Cargo Workspace Strategy
+
+- **Root Workspace:** Uses Cargo resolver v2 with global dependency version pinning.
+- **`no_std` Boundary:** `core/*` and `drivers/*` are strictly `no_std` compliant. Systems in `services/*` and `flow/*` interact with core mechanisms purely through `logos-abi` contracts.
+
+### 2. Flow Compiler Decoupling
+
+- **Modular Pipeline:** Flow is split into granular crates (`flow-parser`, `flow-types`, `flow-runtime`, `flow-schema`).
+- **Host / Target Dual-Compilation:** Flow crates compile both natively inside LogOS userspace and on host developer environments (Linux/macOS/Windows) to power `flow-ls` (LSP) and CI static checks (`flow check --json`).
+
+---
+
+## Annex E — External Architecture Review Notes
+
+> **Date:** 2026-07-25
+> **Status:** Proposed — Not Yet Approved
+> **Scope:** AI-native subsystem gaps, agent trust model, consent granularity
+
+### 1. [New Ring/Service] Inference and Model Ownership
+
+- **Gap:** `model:/local/default` exists as a resource reference in NAMING.md §7, but no subsystem owns model loading, local inference scheduling, GPU/NPU device binding, or local-vs-remote model routing.
+- **Suggestion:** Define an owning service (`system.inference` or a Runtime-adjacent `runtime.models`) with the same rigor as Store or Network — owned resources, capability surface, failure boundary. Extend the Foundation device model to cover AI accelerator devices (NPU/GPU) alongside Block and Net Device, since an AI-enabled OS shouldn't treat accelerated inference as out of scope for the driver layer.
+- **Placement question:** does model invocation belong in System (machine-wide shared resource, like Network) or Runtime (application-scoped, like WASM)? Likely both — a System-owned inference service with Runtime-scoped capability grants, mirroring how Network is owned in Ring 2 but consumed by Ring 4 applications.
+
+### 2. [Flow] Semantic Dry-Run Before Execution
+
+- **Gap:** Flow's `flow capabilities` preflight verifies _authority_ (what a script is allowed to do) but not _consequence_ (what it will actually change). Static type/capability checking catches malformed scripts, not scripts that are well-typed but do something unintended.
+- **Suggestion:** Add `flow simulate <script>` — executes against the command registry's effect classification (§8.8 in ARCHITECTURE.md) to produce a predicted change report (services restarted, objects deleted, capabilities exercised) without performing the operations. This becomes the natural gate between AI-generated script and human/policy approval, distinct from and complementary to `flow capabilities`.
+
+### 3. [Sessions/Identity] Tiered and Expiring Consent
+
+- **Gap:** The sensitive-operations table (ARCHITECTURE.md §8.8, ONION*RINGS.md) defines per-call interaction defaults (immediate / confirmation / strong confirmation) but no model for \_standing* approval across multiple calls over time — relevant once agents run continuously rather than per-invocation.
+- **Suggestion:** Extend the capability model with a standing-approval class: scope + expiry + revocation, distinct from a single-use grant or a durable capability. E.g. "may call `service.restart` on `service:/network` for 24h without re-prompting." Approval events should themselves be audited alongside the actions they cover.
+
+### 4. [Security] Taint Tracking for Untrusted External Content
+
+- **Gap:** Once agents consume external content (web fetch, email, files), that content becomes an injection vector at the OS level, not just the model level. Today "network read" and "consume untrusted content" are not distinguishable capabilities.
+- **Suggestion:** Consider a provenance/taint property on values that originate from untrusted external sources, checked at the capability barrier — e.g. a script that has ingested untrusted network content should not simultaneously hold `secrets.get` or `service.restart` capabilities in the same execution scope without an explicit sanitization or re-authorization step. This is a security primitive novel to agent-era systems and worth scoping now rather than retrofitting.
+
+### 5. [Audit] Decision Trace Distinct from Action Audit
+
+- **Gap:** Audit records _what happened_ (principal, operation, target, result, time). For AI agents, _why_ — which context, tools, and reasoning steps produced the action — is a separate and equally important trail, and doesn't fit cleanly into either Audit (security-focused) or Trace (bounded diagnostics).
+- **Suggestion:** Define a bounded, structured decision-trace record type, correlated to the audit entry it justifies, scoped to agent-initiated actions. Retention and access policy likely differ from both Audit and Trace (this is more sensitive — closer to Vault than to logs).
+
+### 6. [Store/Workspace] Agent Memory as a Distinct Primitive
+
+- **Gap:** Conversational/agent context has different retention, redaction, and privacy properties than application storage, but currently has no home beyond "another Store namespace."
+- **Suggestion:** Decide early whether agent memory is a Store namespace with agent-specific policy (retention window, redaction on request, workspace-scoped visibility) or a distinct primitive. Retrofitting privacy semantics onto general storage later is expensive; deciding the shape now — even if implementation is deferred — avoids that.
+
+### Sequencing note
+
+None of the above should block Console v1 / Platform v1. But #1 and #2 have roadmap implications: model ownership placement affects Runtime's Ring 4 scope, and `flow simulate` is cheap to design alongside the existing capability-preflight work in Phase 13 of FLOW.md rather than bolted on after 1.0.
