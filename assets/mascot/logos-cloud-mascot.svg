@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 256 256"
+     role="img"
+     aria-labelledby="title desc">
+  <title id="title">LogOS cloud mascot</title>
+  <desc id="desc">A friendly minimalist cloud with simple eyes and a small smile.</desc>
+
+  <defs>
+    <linearGradient id="cloudFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#EEF1F5"/>
+    </linearGradient>
+
+    <filter id="softShadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10"
+                    flood-color="#000000" flood-opacity="0.16"/>
+    </filter>
+  </defs>
+
+  <g id="mascot" filter="url(#softShadow)">
+    <path id="cloud-body"
+      d="M69 187
+         C43 187 24 168 24 143
+         C24 121 40 103 61 100
+         C65 73 87 53 115 53
+         C137 53 156 66 165 85
+         C171 82 179 80 187 80
+         C211 80 230 99 230 123
+         C230 128 229 133 227 138
+         C240 145 248 158 248 173
+         C248 197 229 216 205 216
+         H69
+         C44 216 24 207 24 187
+         C24 175 31 164 42 158
+         C46 176 56 187 69 187Z"
+      fill="url(#cloudFill)"
+      stroke="#D8DDE6"
+      stroke-width="4"
+      stroke-linejoin="round"/>
+
+    <g id="face" fill="none" stroke="#20242C"
+       stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+      <path id="left-eye" d="M91 139 L91 145"/>
+      <path id="right-eye" d="M165 139 L165 145"/>
+      <path id="mouth" d="M111 169 C121 178 135 178 145 169"/>
+    </g>
+
+    <ellipse id="cheek-left" cx="76" cy="164" rx="11" ry="5"
+             fill="#FF9A8B" opacity="0.28"/>
+    <ellipse id="cheek-right" cx="180" cy="164" rx="11" ry="5"
+             fill="#FF9A8B" opacity="0.28"/>
+  </g>
+</svg>
