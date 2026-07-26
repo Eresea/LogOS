@@ -1,6 +1,9 @@
 use crate::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
 const CAPABILITIES: usize = 3;
+const VARIABLES: usize = 4;
+const VARIABLE_NAME: usize = 16;
+const VARIABLE_VALUE: usize = 64;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Id(pub u32);
@@ -17,6 +20,24 @@ pub struct Context {
     principal: Principal,
     capabilities: [Option<Capability>; CAPABILITIES],
     length: usize,
+    variables: [Variable; VARIABLES],
+}
+
+#[derive(Clone, Copy)]
+struct Variable {
+    name: [u8; VARIABLE_NAME],
+    name_length: usize,
+    value: [u8; VARIABLE_VALUE],
+    value_length: usize,
+}
+
+impl Variable {
+    const EMPTY: Self = Self {
+        name: [0; VARIABLE_NAME],
+        name_length: 0,
+        value: [0; VARIABLE_VALUE],
+        value_length: 0,
+    };
 }
 
 impl Context {
@@ -24,8 +45,13 @@ impl Context {
         if capabilities.len() > CAPABILITIES {
             return None;
         }
-        let mut context =
-            Self { id, principal, capabilities: [None; CAPABILITIES], length: capabilities.len() };
+        let mut context = Self {
+            id,
+            principal,
+            capabilities: [None; CAPABILITIES],
+            length: capabilities.len(),
+            variables: [Variable::EMPTY; VARIABLES],
+        };
         for (slot, capability) in context.capabilities.iter_mut().zip(capabilities) {
             *slot = Some(*capability);
         }
@@ -47,6 +73,35 @@ impl Context {
             .any(|capability| manager.allows(*capability, kind))
     }
 
+    pub fn set_variable(&mut self, name: &[u8], value: &[u8]) -> bool {
+        if name.is_empty()
+            || name.len() > VARIABLE_NAME
+            || value.len() > VARIABLE_VALUE
+            || core::str::from_utf8(name).is_err()
+            || core::str::from_utf8(value).is_err()
+        {
+            return false;
+        }
+        let slot = self.variables.iter_mut().find(|variable| {
+            variable.name_length == 0 || variable.name[..variable.name_length] == *name
+        });
+        let Some(variable) = slot else {
+            return false;
+        };
+        variable.name[..name.len()].copy_from_slice(name);
+        variable.name_length = name.len();
+        variable.value[..value.len()].copy_from_slice(value);
+        variable.value_length = value.len();
+        true
+    }
+
+    pub fn variable(&self, name: &[u8]) -> Option<&[u8]> {
+        self.variables
+            .iter()
+            .find(|variable| variable.name[..variable.name_length] == *name)
+            .map(|variable| &variable.value[..variable.value_length])
+    }
+
     pub fn self_check() -> bool {
         let mut manager = CapabilityManager::new();
         let Some(debug) = manager.grant(CapabilityKind::Debug) else {
@@ -55,7 +110,7 @@ impl Context {
         let Some(recovery) = manager.grant(CapabilityKind::Recovery) else {
             return false;
         };
-        let Some(context) = Self::new(Id(1), Principal::LOCAL, &[recovery]) else {
+        let Some(mut context) = Self::new(Id(1), Principal::LOCAL, &[recovery]) else {
             return false;
         };
         context.id() == Id(1)
@@ -65,5 +120,7 @@ impl Context {
             && manager.revoke(recovery)
             && !context.allows(&manager, CapabilityKind::Recovery)
             && Self::new(Id(2), Principal::LOCAL, &[debug, debug, debug, debug]).is_none()
+            && context.set_variable(b"layout", b"qwerty")
+            && context.variable(b"layout") == Some(b"qwerty" as &[u8])
     }
 }

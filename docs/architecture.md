@@ -340,6 +340,8 @@ Each command invocation carries cancellation and a monotonic deadline. Commands 
 
 Terminal output is fixed-capacity. Once full, producers receive backpressure instead of silently evicting prior output.
 
+Sessions hold a bounded UTF-8 variable map. Variables are session-local; structured pipeline execution remains separate from text expansion.
+
 A pipeline passes values:
 
 ```text
