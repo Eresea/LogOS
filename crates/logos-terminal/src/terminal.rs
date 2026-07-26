@@ -340,6 +340,24 @@ impl Model {
         self.scrollback_len
     }
 
+    pub fn history_entry(&self, offset: usize) -> Option<Submission> {
+        (offset < self.scrollback_len)
+            .then(|| self.scrollback[(self.scrollback_head + SCROLLBACK - 1 - offset) % SCROLLBACK])
+    }
+
+    pub fn restore_history(&mut self, entries: &[Submission]) -> bool {
+        if entries.len() > SCROLLBACK {
+            return false;
+        }
+        self.scrollback = [Submission::EMPTY; SCROLLBACK];
+        self.scrollback_head = 0;
+        self.scrollback_len = 0;
+        for entry in entries.iter().rev() {
+            self.push_scrollback(*entry);
+        }
+        true
+    }
+
     pub fn search(&self, query: &[u8]) -> Option<SearchMatch> {
         if query.is_empty() || core::str::from_utf8(query).is_err() {
             return None;
@@ -450,6 +468,19 @@ impl Model {
         let history = scrollback.history_previous()
             && scrollback.latest_scrollback().as_bytes() == b"x"
             && scrollback.history_next();
+        let Some(x) = Submission::from_bytes(b"x") else {
+            return false;
+        };
+        let Some(first) = Submission::from_bytes(b"first") else {
+            return false;
+        };
+        let Some(second) = Submission::from_bytes(b"second") else {
+            return false;
+        };
+        let persisted_history = scrollback.history_entry(0) == Some(x);
+        let mut restored = Self::new();
+        let restored_history = restored.restore_history(&[first, second])
+            && restored.history_entry(0).is_some_and(|entry| entry.as_bytes() == b"first");
         let mut selection = Self::new();
         let selected = selection.insert_utf8(b"a\xc3\xa9")
             && selection.select(1, 3)
@@ -493,6 +524,8 @@ impl Model {
             && scrollback.scrollback_len() == SCROLLBACK
             && scrollback.latest_scrollback().as_bytes() == b"x"
             && history
+            && persisted_history
+            && restored_history
             && selected
             && selection.selected_bytes().is_none()
             && visible_match

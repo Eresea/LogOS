@@ -172,7 +172,7 @@ The normal terminal is not a kernel shell. It is a renderer and editor attached 
 - [x] Bounded output and backpressure.
 - [x] Basic variables and structured pipelines.
 - [x] Human-readable, table, tree, and JSON renderers.
-- [ ] Persistable history contract, even before storage exists.
+- [x] Persistable history contract, even before storage exists.
 
 ## Native command model
 
