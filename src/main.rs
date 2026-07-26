@@ -6,6 +6,7 @@ mod capabilities;
 mod commands;
 mod console;
 mod debug;
+mod format;
 mod health;
 mod interrupts;
 mod ipc;
@@ -314,6 +315,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let coordinator = mode::Coordinator::new(normal_ready);
     check!(b"console mode", mode::Coordinator::self_check());
     check!(b"command registry", commands::self_check());
+    check!(b"formatters", format::self_check());
     check!(b"session", session::Context::self_check());
     check!(b"input normalization", input::Service::self_check());
     check!(b"terminal editing", terminal::Model::self_check());
@@ -356,7 +358,9 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                             break;
                         }
                         commands::Outcome::Text(value) => {
-                            let _ = terminal.write_output(value.as_bytes());
+                            if let Some(value) = format::render(value, format::Style::Human) {
+                                let _ = terminal.write_output(value.as_bytes());
+                            }
                         }
                         commands::Outcome::Error(commands::Error::Denied) => {
                             let _ = terminal.write_output(b"permission denied");
