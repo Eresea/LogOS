@@ -169,7 +169,7 @@ The normal terminal is not a kernel shell. It is a renderer and editor attached 
 - [x] Typed argument schemas.
 - [x] Typed results and structured errors.
 - [x] Cancellation and timeout propagation.
-- [ ] Bounded output and backpressure.
+- [x] Bounded output and backpressure.
 - [ ] Basic variables and structured pipelines.
 - [ ] Human-readable, table, tree, and JSON renderers.
 - [ ] Persistable history contract, even before storage exists.

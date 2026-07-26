@@ -338,6 +338,8 @@ Command invocation returns a typed outcome: a command action or a structured err
 
 Each command invocation carries cancellation and a monotonic deadline. Commands reject cancelled or expired work before dispatch; later asynchronous commands retain the same context.
 
+Terminal output is fixed-capacity. Once full, producers receive backpressure instead of silently evicting prior output.
+
 A pipeline passes values:
 
 ```text
