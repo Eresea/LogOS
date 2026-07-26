@@ -299,6 +299,8 @@ In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is 
 
 The command registry authorizes a live recovery handoff with an explicit recovery capability. The handoff stops normal input processing before recovery activates its direct input/output path.
 
+The local session has a stable local principal and session identifier. Its capability context is explicit and revocable; commands authorize against that context rather than a global grant.
+
 Remote operation replaces only the input/output transport:
 
 ```text

@@ -17,6 +17,7 @@ mod mode;
 mod pci;
 mod scheduler;
 mod services;
+mod session;
 mod terminal;
 mod text;
 mod trace;
@@ -173,6 +174,11 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     else {
         fail!(b"capabilities");
     };
+    let Some(session) =
+        session::Context::new(session::Id(1), session::Principal::LOCAL, &[recovery_capability])
+    else {
+        fail!(b"session");
+    };
     let mut services = services::Registry::new();
     let Some(virtio_handle) =
         services.register(&capabilities, service_capability, services::Service::VirtioBalloon)
@@ -311,6 +317,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let coordinator = mode::Coordinator::new(normal_ready);
     check!(b"console mode", mode::Coordinator::self_check());
     check!(b"command registry", commands::self_check());
+    check!(b"session", session::Context::self_check());
     check!(b"input normalization", input::Service::self_check());
     check!(b"terminal editing", terminal::Model::self_check());
     check!(b"terminal navigation", terminal::Model::self_check());
@@ -338,7 +345,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
             }
             if let Some(event) = input.next() {
                 if event.is_enter() {
-                    match commands::invoke(terminal.submit(), &capabilities, recovery_capability) {
+                    match commands::invoke(terminal.submit(), &session, &capabilities) {
                         commands::Result::Recovery => {
                             debug::write_line(b"LogOS: recovery handoff requested");
                             console_mode = mode::ConsoleMode::Recovery;

@@ -1,5 +1,6 @@
 use crate::{
-    capabilities::{Capability, CapabilityKind, CapabilityManager},
+    capabilities::{CapabilityKind, CapabilityManager},
+    session,
     terminal::Submission,
 };
 
@@ -12,13 +13,13 @@ pub enum Result {
 
 pub fn invoke(
     submission: Submission,
+    session: &session::Context,
     capabilities: &CapabilityManager,
-    capability: Capability,
 ) -> Result {
     if submission.as_bytes() != b"recovery" {
         return Result::Unknown;
     }
-    if capabilities.allows(capability, CapabilityKind::Recovery) {
+    if session.allows(capabilities, CapabilityKind::Recovery) {
         Result::Recovery
     } else {
         Result::Denied
@@ -27,15 +28,22 @@ pub fn invoke(
 
 pub fn self_check() -> bool {
     let mut capabilities = CapabilityManager::new();
-    let Some(debug) = capabilities.grant(CapabilityKind::Debug) else {
+    let Some(recovery) = capabilities.grant(CapabilityKind::Recovery) else {
         return false;
     };
-    let Some(recovery) = capabilities.grant(CapabilityKind::Recovery) else {
+    let Some(session) =
+        session::Context::new(session::Id(1), session::Principal::LOCAL, &[recovery])
+    else {
+        return false;
+    };
+    let Some(denied_session) =
+        session::Context::new(session::Id(2), session::Principal::LOCAL, &[])
+    else {
         return false;
     };
     let Some(submission) = Submission::from_bytes(b"recovery") else {
         return false;
     };
-    invoke(submission, &capabilities, debug) == Result::Denied
-        && invoke(submission, &capabilities, recovery) == Result::Recovery
+    invoke(submission, &denied_session, &capabilities) == Result::Denied
+        && invoke(submission, &session, &capabilities) == Result::Recovery
 }
