@@ -53,12 +53,12 @@ impl Output {
 
 impl Submission {
     const EMPTY: Self = Self { cells: [0; CELLS], length: 0 };
-    pub const fn new(cells: [u8; CELLS], length: usize) -> Self {
+    const fn new(cells: [u8; CELLS], length: usize) -> Self {
         Self { cells, length }
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() > CELLS {
+        if bytes.len() > CELLS || core::str::from_utf8(bytes).is_err() {
             return None;
         }
         let mut cells = [0; CELLS];
@@ -146,6 +146,7 @@ impl Model {
             return false;
         };
         self.cursor = cursor;
+        self.selection = None;
         true
     }
 
@@ -157,15 +158,18 @@ impl Model {
         while self.cursor < self.length && self.cells[self.cursor] & 0xc0 == 0x80 {
             self.cursor += 1;
         }
+        self.selection = None;
         true
     }
 
     pub fn home(&mut self) {
         self.cursor = 0;
+        self.selection = None;
     }
 
     pub fn end(&mut self) {
         self.cursor = self.length;
+        self.selection = None;
     }
 
     fn backspace(&mut self) -> bool {
@@ -324,9 +328,6 @@ impl Model {
         let Some(line) = Submission::from_bytes(bytes) else {
             return false;
         };
-        if core::str::from_utf8(bytes).is_err() {
-            return false;
-        }
         self.output.push(line)
     }
 
@@ -502,6 +503,11 @@ impl Model {
             && invalidated_selection.select(0, 4)
             && invalidated_selection.insert_utf8(b"!")
             && invalidated_selection.selected_bytes().is_none();
+        let mut moved_selection = Self::new();
+        let selection_collapsed = moved_selection.insert_utf8(b"text")
+            && moved_selection.select(0, 4)
+            && moved_selection.move_left()
+            && moved_selection.selected_bytes().is_none();
         let mut search = Self::new();
         let output = search.write_output(b"old output") && search.write_output(b"new output");
         let _ = search.insert_utf8(b"visible output");
@@ -545,6 +551,7 @@ impl Model {
             && selected
             && selection.selected_bytes().is_none()
             && selection_invalidated
+            && selection_collapsed
             && visible_match
             && output
             && scrollback_match
