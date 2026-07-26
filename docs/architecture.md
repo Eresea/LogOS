@@ -334,6 +334,8 @@ Command input and output use schemas.
 
 Each command descriptor declares named argument kinds and requiredness. The initial recovery command has an explicit empty argument schema; parsing remains a shell responsibility.
 
+Command invocation returns a typed outcome: a command action or a structured error code. The terminal chooses presentation text and does not parse error strings.
+
 A pipeline passes values:
 
 ```text

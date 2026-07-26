@@ -344,15 +344,15 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
             if let Some(event) = input.next(tick, keyboard::poll_scancode) {
                 if event.is_enter() {
                     match commands::invoke(terminal.submit(), &session, &capabilities) {
-                        commands::Result::Recovery => {
+                        commands::Outcome::Recovery => {
                             debug::write_line(b"LogOS: recovery handoff requested");
                             console_mode = mode::ConsoleMode::Recovery;
                             break;
                         }
-                        commands::Result::Denied => {
+                        commands::Outcome::Error(commands::Error::Denied) => {
                             let _ = terminal.write_output(b"permission denied");
                         }
-                        commands::Result::Unknown => {
+                        commands::Outcome::Error(commands::Error::UnknownCommand) => {
                             let _ = terminal.write_output(b"unknown command");
                         }
                     }

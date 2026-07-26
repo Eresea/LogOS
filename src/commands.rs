@@ -5,10 +5,15 @@ use crate::{
 use logos_terminal::terminal::Submission;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Result {
+pub enum Outcome {
     Recovery,
+    Error(Error),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Error {
     Denied,
-    Unknown,
+    UnknownCommand,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -48,16 +53,16 @@ pub fn invoke(
     submission: Submission,
     session: &session::Context,
     capabilities: &CapabilityManager,
-) -> Result {
+) -> Outcome {
     let Some(descriptor) =
         descriptors().iter().find(|descriptor| descriptor.name == submission.as_bytes())
     else {
-        return Result::Unknown;
+        return Outcome::Error(Error::UnknownCommand);
     };
     if session.allows(capabilities, descriptor.required_capability) {
-        Result::Recovery
+        Outcome::Recovery
     } else {
-        Result::Denied
+        Outcome::Error(Error::Denied)
     }
 }
 
@@ -80,8 +85,12 @@ pub fn self_check() -> bool {
     let Some(submission) = Submission::from_bytes(b"recovery") else {
         return false;
     };
-    invoke(submission, &denied_session, &capabilities) == Result::Denied
-        && invoke(submission, &session, &capabilities) == Result::Recovery
+    let Some(unknown) = Submission::from_bytes(b"missing") else {
+        return false;
+    };
+    invoke(submission, &denied_session, &capabilities) == Outcome::Error(Error::Denied)
+        && invoke(submission, &session, &capabilities) == Outcome::Recovery
+        && invoke(unknown, &session, &capabilities) == Outcome::Error(Error::UnknownCommand)
         && descriptors().len() == 1
         && descriptors()[0] == DESCRIPTORS[0]
         && descriptors()[0].arguments.is_empty()
