@@ -334,13 +334,19 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let mut console_mode = coordinator.mode();
     if console_mode == mode::ConsoleMode::Normal {
         debug::write_line(b"LogOS: normal terminal active");
-        let _ = terminal.render(display.as_mut().unwrap(), &text);
+        if !terminal.render(display.as_mut().unwrap(), &text) {
+            debug::write_line(b"LogOS: normal terminal initial redraw failed");
+            console_mode = mode::ConsoleMode::Recovery;
+        }
         let mut blink_tick = interrupts::ticks();
-        loop {
+        while console_mode == mode::ConsoleMode::Normal {
             let tick = interrupts::ticks();
             if tick.wrapping_sub(blink_tick) >= 50 {
                 terminal.blink();
-                let _ = terminal.render(display.as_mut().unwrap(), &text);
+                if !terminal.render(display.as_mut().unwrap(), &text) {
+                    console_mode = mode::ConsoleMode::Recovery;
+                    break;
+                }
                 blink_tick = tick;
             }
             if let Some(event) = input.next(tick, keyboard::poll_scancode) {
@@ -375,9 +381,15 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                             let _ = terminal.write_output(b"timed out");
                         }
                     }
-                    let _ = terminal.render(display.as_mut().unwrap(), &text);
-                } else if terminal.apply(event) {
-                    let _ = terminal.render(display.as_mut().unwrap(), &text);
+                    if !terminal.render(display.as_mut().unwrap(), &text) {
+                        console_mode = mode::ConsoleMode::Recovery;
+                        break;
+                    }
+                } else if terminal.apply(event)
+                    && !terminal.render(display.as_mut().unwrap(), &text)
+                {
+                    console_mode = mode::ConsoleMode::Recovery;
+                    break;
                 }
             } else {
                 unsafe { core::arch::asm!("hlt") };

@@ -2,7 +2,7 @@ param([switch]$Release, [switch]$Headless)
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $profile = if ($Release) { "release" } else { "debug" }
-$efi = Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos.efi"
+$efi = Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-uefi.efi"
 $esp = Join-Path $repoRoot "target\esp"
 $qemu = Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue
 $qemuPath = if ($qemu) { $qemu.Source } else { "C:\Program Files\qemu\qemu-system-x86_64.exe" }

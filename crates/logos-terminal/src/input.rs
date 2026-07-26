@@ -144,12 +144,15 @@ impl Service {
         let left =
             matches!(input.decode(0x4b, true, 0), Event::Key { logical: LogicalKey::Left, .. });
         let up = matches!(input.decode(0x48, true, 0), Event::Key { logical: LogicalKey::Up, .. });
+        let command_keys = input.decode(0x20, false, 0).text() == Some(b'd')
+            && input.decode(0x32, false, 0).text() == Some(b'm');
         qwerty
             && azerty
             && pressed
             && released
             && left
             && up
+            && command_keys
             && input.next(1, || None).is_none()
             && matches!(input.next(25, || None), Some(Event::Repeat { .. }))
     }
@@ -208,20 +211,25 @@ impl Service {
             (Layout::Qwerty, 0x1e) => b'a',
             (Layout::Azerty, 0x1e) => b'q',
             (_, 0x12) => b'e',
+            (_, 0x15) => b'y',
+            (_, 0x16) => b'u',
             (_, 0x13) => b'r',
             (_, 0x14) => b't',
             (_, 0x17) => b'i',
             (_, 0x18) => b'o',
             (_, 0x19) => b'p',
             (_, 0x1f) => b's',
+            (_, 0x20) => b'd',
             (_, 0x21) => b'f',
             (_, 0x22) => b'g',
             (_, 0x23) => b'h',
             (_, 0x26) => b'l',
+            (_, 0x30) => b'b',
             (_, 0x2d) => b'x',
             (_, 0x2e) => b'c',
             (_, 0x2f) => b'v',
             (_, 0x31) => b'n',
+            (_, 0x32) => b'm',
             (_, 0x02) => b'1',
             (_, 0x0b) => b'0',
             _ => return LogicalKey::Unknown,
