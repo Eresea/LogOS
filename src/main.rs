@@ -343,7 +343,13 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
             }
             if let Some(event) = input.next(tick, keyboard::poll_scancode) {
                 if event.is_enter() {
-                    match commands::invoke(terminal.submit(), &session, &capabilities) {
+                    match commands::invoke(
+                        terminal.submit(),
+                        &session,
+                        &capabilities,
+                        commands::Invocation::new(tick.wrapping_add(50)),
+                        tick,
+                    ) {
                         commands::Outcome::Recovery => {
                             debug::write_line(b"LogOS: recovery handoff requested");
                             console_mode = mode::ConsoleMode::Recovery;
@@ -354,6 +360,12 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                         }
                         commands::Outcome::Error(commands::Error::UnknownCommand) => {
                             let _ = terminal.write_output(b"unknown command");
+                        }
+                        commands::Outcome::Error(commands::Error::Cancelled) => {
+                            let _ = terminal.write_output(b"cancelled");
+                        }
+                        commands::Outcome::Error(commands::Error::TimedOut) => {
+                            let _ = terminal.write_output(b"timed out");
                         }
                     }
                     let _ = terminal.render(display.as_mut().unwrap(), &text);

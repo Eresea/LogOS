@@ -336,6 +336,8 @@ Each command descriptor declares named argument kinds and requiredness. The init
 
 Command invocation returns a typed outcome: a command action or a structured error code. The terminal chooses presentation text and does not parse error strings.
 
+Each command invocation carries cancellation and a monotonic deadline. Commands reject cancelled or expired work before dispatch; later asynchronous commands retain the same context.
+
 A pipeline passes values:
 
 ```text

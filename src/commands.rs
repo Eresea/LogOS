@@ -14,6 +14,34 @@ pub enum Outcome {
 pub enum Error {
     Denied,
     UnknownCommand,
+    Cancelled,
+    TimedOut,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Invocation {
+    deadline: u64,
+    cancelled: bool,
+}
+
+impl Invocation {
+    pub const fn new(deadline: u64) -> Self {
+        Self { deadline, cancelled: false }
+    }
+
+    pub const fn cancelled(deadline: u64) -> Self {
+        Self { deadline, cancelled: true }
+    }
+
+    fn error(self, now: u64) -> Option<Error> {
+        if self.cancelled {
+            Some(Error::Cancelled)
+        } else if now.wrapping_sub(self.deadline) < 1 << 63 {
+            Some(Error::TimedOut)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,7 +81,12 @@ pub fn invoke(
     submission: Submission,
     session: &session::Context,
     capabilities: &CapabilityManager,
+    invocation: Invocation,
+    now: u64,
 ) -> Outcome {
+    if let Some(error) = invocation.error(now) {
+        return Outcome::Error(error);
+    }
     let Some(descriptor) =
         descriptors().iter().find(|descriptor| descriptor.name == submission.as_bytes())
     else {
@@ -88,9 +121,15 @@ pub fn self_check() -> bool {
     let Some(unknown) = Submission::from_bytes(b"missing") else {
         return false;
     };
-    invoke(submission, &denied_session, &capabilities) == Outcome::Error(Error::Denied)
-        && invoke(submission, &session, &capabilities) == Outcome::Recovery
-        && invoke(unknown, &session, &capabilities) == Outcome::Error(Error::UnknownCommand)
+    invoke(submission, &denied_session, &capabilities, Invocation::new(2), 1)
+        == Outcome::Error(Error::Denied)
+        && invoke(submission, &session, &capabilities, Invocation::new(2), 1) == Outcome::Recovery
+        && invoke(unknown, &session, &capabilities, Invocation::new(2), 1)
+            == Outcome::Error(Error::UnknownCommand)
+        && invoke(submission, &session, &capabilities, Invocation::cancelled(2), 1)
+            == Outcome::Error(Error::Cancelled)
+        && invoke(submission, &session, &capabilities, Invocation::new(1), 1)
+            == Outcome::Error(Error::TimedOut)
         && descriptors().len() == 1
         && descriptors()[0] == DESCRIPTORS[0]
         && descriptors()[0].arguments.is_empty()
