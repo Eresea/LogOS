@@ -352,8 +352,10 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
             }
             if let Some(event) = input.next(tick, keyboard::poll_scancode) {
                 if event.is_enter() {
+                    let submission = terminal.submit();
+                    let _ = terminal.write_output(submission.as_bytes());
                     match commands::pipeline(
-                        terminal.submit(),
+                        submission,
                         &session,
                         &capabilities,
                         commands::Invocation::new(tick.wrapping_add(50)),
@@ -363,6 +365,16 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                             debug::write_line(b"LogOS: recovery handoff requested");
                             console_mode = mode::ConsoleMode::Recovery;
                             break;
+                        }
+                        commands::Outcome::Reboot => {
+                            if !acpi::reset() {
+                                let _ = terminal.write_output(b"reboot unavailable");
+                            }
+                        }
+                        commands::Outcome::PowerOff => {
+                            if !acpi::power_off() {
+                                let _ = terminal.write_output(b"poweroff unavailable");
+                            }
                         }
                         commands::Outcome::Text(value) => {
                             if let Some(value) = format::render(value, format::Style::Human) {

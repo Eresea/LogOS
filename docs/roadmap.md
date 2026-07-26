@@ -217,8 +217,8 @@ Formatted text remains supported, but it is not the only interoperable form.
 - [ ] `restart <service>`
 - [ ] `cancel <request-or-job>`
 - [ ] `clear`
-- [ ] `reboot`
-- [ ] `poweroff`
+- [x] `reboot`
+- [x] `poweroff`
 - [x] `help`
 - [x] `commands`
 

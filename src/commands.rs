@@ -7,6 +7,8 @@ use logos_terminal::terminal::Submission;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Recovery,
+    Reboot,
+    PowerOff,
     Text(Submission),
     Error(Error),
 }
@@ -75,7 +77,7 @@ const NO_ARGUMENTS: [Argument; 0] = [];
 const TEXT_ARGUMENT: [Argument; 1] =
     [Argument { name: b"text", kind: ArgumentKind::Text, required: true }];
 
-const DESCRIPTORS: [Descriptor; 4] = [
+const DESCRIPTORS: [Descriptor; 6] = [
     Descriptor {
         name: b"recovery",
         summary: b"switch to the recovery console",
@@ -99,6 +101,18 @@ const DESCRIPTORS: [Descriptor; 4] = [
         summary: b"list commands",
         arguments: &NO_ARGUMENTS,
         required_capability: None,
+    },
+    Descriptor {
+        name: b"reboot",
+        summary: b"restart the machine",
+        arguments: &NO_ARGUMENTS,
+        required_capability: Some(CapabilityKind::Recovery),
+    },
+    Descriptor {
+        name: b"poweroff",
+        summary: b"turn off the machine",
+        arguments: &NO_ARGUMENTS,
+        required_capability: Some(CapabilityKind::Recovery),
     },
 ];
 
@@ -160,13 +174,17 @@ fn invoke_stage(
     }
     if descriptor.name == b"recovery" {
         Outcome::Recovery
+    } else if descriptor.name == b"reboot" {
+        Outcome::Reboot
+    } else if descriptor.name == b"poweroff" {
+        Outcome::PowerOff
     } else if descriptor.name == b"echo" && !argument.is_empty() {
         Submission::from_bytes(argument)
             .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
     } else if descriptor.name == b"echo" {
         input.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
     } else if descriptor.name == b"commands" {
-        Submission::from_bytes(b"recovery echo help commands")
+        Submission::from_bytes(b"recovery echo help commands reboot poweroff")
             .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
     } else if descriptor.name == b"help" && !argument.is_empty() {
         descriptors()
@@ -216,6 +234,12 @@ pub fn self_check() -> bool {
     let Some(commands) = Submission::from_bytes(b"commands") else {
         return false;
     };
+    let Some(reboot) = Submission::from_bytes(b"reboot") else {
+        return false;
+    };
+    let Some(poweroff) = Submission::from_bytes(b"poweroff") else {
+        return false;
+    };
     invoke(submission, &denied_session, &capabilities, Invocation::new(2), 1)
         == Outcome::Error(Error::Denied)
         && invoke(submission, &session, &capabilities, Invocation::new(2), 1) == Outcome::Recovery
@@ -230,8 +254,10 @@ pub fn self_check() -> bool {
         && pipeline(pipe, &denied_session, &capabilities, Invocation::new(2), 1)
             == Outcome::Text(hello)
         && invoke(commands, &denied_session, &capabilities, Invocation::new(2), 1)
-            .is_text(b"recovery echo help commands")
-        && descriptors().len() == 4
+            .is_text(b"recovery echo help commands reboot poweroff")
+        && invoke(reboot, &session, &capabilities, Invocation::new(2), 1) == Outcome::Reboot
+        && invoke(poweroff, &session, &capabilities, Invocation::new(2), 1) == Outcome::PowerOff
+        && descriptors().len() == 6
         && descriptors()[0].arguments.is_empty()
         && text_argument.kind == ArgumentKind::Text
         && text_argument.required
