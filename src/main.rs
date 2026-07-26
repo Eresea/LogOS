@@ -355,6 +355,9 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                             console_mode = mode::ConsoleMode::Recovery;
                             break;
                         }
+                        commands::Outcome::Text(value) => {
+                            let _ = terminal.write_output(value.as_bytes());
+                        }
                         commands::Outcome::Error(commands::Error::Denied) => {
                             let _ = terminal.write_output(b"permission denied");
                         }

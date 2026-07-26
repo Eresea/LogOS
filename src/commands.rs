@@ -7,6 +7,7 @@ use logos_terminal::terminal::Submission;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Recovery,
+    Text(Submission),
     Error(Error),
 }
 
@@ -49,7 +50,7 @@ pub struct Descriptor {
     pub name: &'static [u8],
     pub summary: &'static [u8],
     pub arguments: &'static [Argument],
-    pub required_capability: CapabilityKind,
+    pub required_capability: Option<CapabilityKind>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -65,13 +66,23 @@ pub struct Argument {
 }
 
 const NO_ARGUMENTS: [Argument; 0] = [];
+const TEXT_ARGUMENT: [Argument; 1] =
+    [Argument { name: b"text", kind: ArgumentKind::Text, required: true }];
 
-const DESCRIPTORS: [Descriptor; 1] = [Descriptor {
-    name: b"recovery",
-    summary: b"switch to the recovery console",
-    arguments: &NO_ARGUMENTS,
-    required_capability: CapabilityKind::Recovery,
-}];
+const DESCRIPTORS: [Descriptor; 2] = [
+    Descriptor {
+        name: b"recovery",
+        summary: b"switch to the recovery console",
+        arguments: &NO_ARGUMENTS,
+        required_capability: Some(CapabilityKind::Recovery),
+    },
+    Descriptor {
+        name: b"echo",
+        summary: b"return text",
+        arguments: &TEXT_ARGUMENT,
+        required_capability: None,
+    },
+];
 
 pub fn descriptors() -> &'static [Descriptor] {
     &DESCRIPTORS
@@ -87,15 +98,24 @@ pub fn invoke(
     if let Some(error) = invocation.error(now) {
         return Outcome::Error(error);
     }
-    let Some(descriptor) =
-        descriptors().iter().find(|descriptor| descriptor.name == submission.as_bytes())
-    else {
+    let bytes = submission.as_bytes();
+    let (name, argument) = bytes
+        .iter()
+        .position(|byte| *byte == b' ')
+        .map_or((bytes, &[][..]), |index| (&bytes[..index], &bytes[index + 1..]));
+    let Some(descriptor) = descriptors().iter().find(|descriptor| descriptor.name == name) else {
         return Outcome::Error(Error::UnknownCommand);
     };
-    if session.allows(capabilities, descriptor.required_capability) {
+    if descriptor.required_capability.is_some_and(|kind| !session.allows(capabilities, kind)) {
+        return Outcome::Error(Error::Denied);
+    }
+    if descriptor.name == b"recovery" {
         Outcome::Recovery
+    } else if descriptor.name == b"echo" && !argument.is_empty() {
+        Submission::from_bytes(argument)
+            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
     } else {
-        Outcome::Error(Error::Denied)
+        Outcome::Error(Error::UnknownCommand)
     }
 }
 
@@ -121,6 +141,12 @@ pub fn self_check() -> bool {
     let Some(unknown) = Submission::from_bytes(b"missing") else {
         return false;
     };
+    let Some(echo) = Submission::from_bytes(b"echo hello") else {
+        return false;
+    };
+    let Some(hello) = Submission::from_bytes(b"hello") else {
+        return false;
+    };
     invoke(submission, &denied_session, &capabilities, Invocation::new(2), 1)
         == Outcome::Error(Error::Denied)
         && invoke(submission, &session, &capabilities, Invocation::new(2), 1) == Outcome::Recovery
@@ -130,8 +156,9 @@ pub fn self_check() -> bool {
             == Outcome::Error(Error::Cancelled)
         && invoke(submission, &session, &capabilities, Invocation::new(1), 1)
             == Outcome::Error(Error::TimedOut)
-        && descriptors().len() == 1
-        && descriptors()[0] == DESCRIPTORS[0]
+        && invoke(echo, &denied_session, &capabilities, Invocation::new(2), 1)
+            == Outcome::Text(hello)
+        && descriptors().len() == 2
         && descriptors()[0].arguments.is_empty()
         && text_argument.kind == ArgumentKind::Text
         && text_argument.required

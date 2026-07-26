@@ -12,7 +12,7 @@ pub struct Selection {
     end: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Submission {
     cells: [u8; CELLS],
     length: usize,
