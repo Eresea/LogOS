@@ -1,7 +1,7 @@
 use crate::{display, input, text};
 
-const ACCENT: [u8; 3] = [61, 220, 151];
-const BACKGROUND: [u8; 3] = [12, 18, 30];
+const ACCENT: [u8; 3] = [255; 3];
+const BACKGROUND: [u8; 3] = [0; 3];
 const ORIGIN: (usize, usize) = (32, 32);
 const CELLS: usize = 64;
 const SCROLLBACK: usize = 8;

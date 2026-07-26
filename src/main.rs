@@ -297,7 +297,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let mut probe = terminal::Model::new();
     let normal_ready = display.as_mut().is_some_and(|display| {
         display::Service::self_check()
-            && display.present(0, 0, [12, 18, 30])
+            && display.present(0, 0, [0; 3])
             && keyboard::self_check()
             && input::Service::self_check()
             && text::Service::self_check()

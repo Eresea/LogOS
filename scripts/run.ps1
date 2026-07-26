@@ -1,4 +1,4 @@
-param([switch]$Release, [switch]$Headless)
+param([switch]$Release, [switch]$Headless, [switch]$Monitor)
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $profile = if ($Release) { "release" } else { "debug" }
@@ -22,5 +22,6 @@ $qemuArgs = @(
     '-debugcon', 'stdio', '-global', 'isa-debugcon.iobase=0xe9'
 )
 if ($Headless) { $qemuArgs += @('-display', 'none') }
+if ($Monitor) { $qemuArgs += @('-monitor', 'tcp:127.0.0.1:4444,server,nowait') }
 Write-Host "Booting LogOS; debug output follows (Ctrl+C to stop QEMU)."
 & $qemuPath @qemuArgs
