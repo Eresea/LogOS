@@ -85,7 +85,7 @@ pub struct Service {
     layout: Layout,
     modifiers: Modifiers,
     held: Option<(PhysicalKey, LogicalKey, Modifiers)>,
-    repeat_budget: u8,
+    repeat_at: u64,
     extended: bool,
 }
 
@@ -101,7 +101,7 @@ impl Service {
             layout: Layout::Qwerty,
             modifiers: Modifiers::none(),
             held: None,
-            repeat_budget: 0,
+            repeat_at: 0,
             extended: false,
         }
     }
@@ -110,7 +110,11 @@ impl Service {
         self.layout = layout;
     }
 
-    pub fn next(&mut self, mut poll_scancode: impl FnMut() -> Option<u8>) -> Option<Event> {
+    pub fn next(
+        &mut self,
+        now: u64,
+        mut poll_scancode: impl FnMut() -> Option<u8>,
+    ) -> Option<Event> {
         while let Some(scancode) = poll_scancode() {
             if scancode == 0xe0 {
                 self.extended = true;
@@ -118,30 +122,39 @@ impl Service {
             }
             let extended = self.extended;
             self.extended = false;
-            return Some(self.decode(scancode, extended));
+            return Some(self.decode(scancode, extended, now));
         }
         let (physical, logical, modifiers) = self.held?;
-        if self.repeat_budget == 0 {
+        if now < self.repeat_at {
             return None;
         }
-        self.repeat_budget -= 1;
+        self.repeat_at = now.wrapping_add(5);
         Some(Event::Repeat { physical, logical, modifiers })
     }
 
     pub fn self_check() -> bool {
         let mut input = Self::new();
-        let qwerty = input.decode(0x10, false).text() == Some(b'q');
+        let qwerty = input.decode(0x10, false, 0).text() == Some(b'q');
         input.set_layout(Layout::Azerty);
-        let azerty = input.decode(0x10, false).text() == Some(b'a');
-        let pressed = matches!(input.decode(0x2a, false), Event::Key { state: State::Press, .. });
+        let azerty = input.decode(0x10, false, 0).text() == Some(b'a');
+        let pressed =
+            matches!(input.decode(0x2a, false, 0), Event::Key { state: State::Press, .. });
         let released =
-            matches!(input.decode(0xaa, false), Event::Key { state: State::Release, .. });
-        let left = matches!(input.decode(0x4b, true), Event::Key { logical: LogicalKey::Left, .. });
-        let up = matches!(input.decode(0x48, true), Event::Key { logical: LogicalKey::Up, .. });
-        qwerty && azerty && pressed && released && left && up
+            matches!(input.decode(0xaa, false, 0), Event::Key { state: State::Release, .. });
+        let left =
+            matches!(input.decode(0x4b, true, 0), Event::Key { logical: LogicalKey::Left, .. });
+        let up = matches!(input.decode(0x48, true, 0), Event::Key { logical: LogicalKey::Up, .. });
+        qwerty
+            && azerty
+            && pressed
+            && released
+            && left
+            && up
+            && input.next(1, || None).is_none()
+            && matches!(input.next(25, || None), Some(Event::Repeat { .. }))
     }
 
-    fn decode(&mut self, scancode: u8, extended: bool) -> Event {
+    fn decode(&mut self, scancode: u8, extended: bool, now: u64) -> Event {
         let state = if scancode & 0x80 == 0 { State::Press } else { State::Release };
         let physical = PhysicalKey(scancode & 0x7f);
         if physical.0 == 0x2a || physical.0 == 0x36 {
@@ -162,10 +175,10 @@ impl Service {
         let modifiers = self.modifiers;
         if state == State::Press && !matches!(logical, LogicalKey::Unknown) {
             self.held = Some((physical, logical, modifiers));
-            self.repeat_budget = 1;
+            self.repeat_at = now.wrapping_add(25);
         } else if state == State::Release {
             self.held = None;
-            self.repeat_budget = 0;
+            self.repeat_at = 0;
         }
         Event::Key { physical, logical, state, modifiers }
     }

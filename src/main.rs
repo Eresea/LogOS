@@ -291,7 +291,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         boot_info.stride,
     );
     let mut input = input::Service::new();
-    let _ = input.next(keyboard::poll_scancode);
+    let _ = input.next(interrupts::ticks(), keyboard::poll_scancode);
     let text = text::Service::new();
     let mut probe = terminal::Model::new();
     let normal_ready = display.as_mut().is_some_and(|display| {
@@ -332,6 +332,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let mut console_mode = coordinator.mode();
     if console_mode == mode::ConsoleMode::Normal {
         debug::write_line(b"LogOS: normal terminal active");
+        let _ = terminal.render(display.as_mut().unwrap(), &text);
         let mut blink_tick = interrupts::ticks();
         loop {
             let tick = interrupts::ticks();
@@ -340,7 +341,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                 let _ = terminal.render(display.as_mut().unwrap(), &text);
                 blink_tick = tick;
             }
-            if let Some(event) = input.next(keyboard::poll_scancode) {
+            if let Some(event) = input.next(tick, keyboard::poll_scancode) {
                 if event.is_enter() {
                     match commands::invoke(terminal.submit(), &session, &capabilities) {
                         commands::Result::Recovery => {

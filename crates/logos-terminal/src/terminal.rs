@@ -225,6 +225,9 @@ impl Model {
     }
 
     pub fn render(&self, display: &mut display::Service, text: &text::Service) -> bool {
+        if !display.clear(BACKGROUND) {
+            return false;
+        }
         let columns = self.columns(display);
         let mut column = 0;
         let mut row = 0;

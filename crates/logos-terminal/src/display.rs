@@ -45,6 +45,17 @@ impl Service {
         true
     }
 
+    pub fn clear(&mut self, color: [u8; 3]) -> bool {
+        for y in 0..self.height {
+            for x in 0..self.width {
+                if !self.present(x, y, color) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     pub const fn dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
     }
