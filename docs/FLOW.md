@@ -78,20 +78,20 @@ Flow must never be required for Core correctness. The recovery console must rema
 
 ## 3. Naming Register
 
-| Concept | Name |
-|---|---|
-| Language | Flow |
-| Source file | `.flow` |
-| Compiler and CLI | `flow` |
-| Interactive evaluator | Flow REPL |
-| Language server | `flow-ls` |
-| Formatter | `flow fmt` |
-| Static checker | `flow check` |
-| Package manifest | `flow.toml` |
-| Lock file | `flow.lock` |
-| Compiled artifact | `.flowc` |
-| Package archive | `.flowpkg` |
-| Main specification | `docs/FLOW.md` |
+| Concept               | Name           |
+| --------------------- | -------------- |
+| Language              | Flow           |
+| Source file           | `.flow`        |
+| Compiler and CLI      | `flow`         |
+| Interactive evaluator | Flow REPL      |
+| Language server       | `flow-ls`      |
+| Formatter             | `flow fmt`     |
+| Static checker        | `flow check`   |
+| Package manifest      | `flow.toml`    |
+| Lock file             | `flow.lock`    |
+| Compiled artifact     | `.flowc`       |
+| Package archive       | `.flowpkg`     |
+| Main specification    | `docs/FLOW.md` |
 
 Examples:
 
@@ -222,7 +222,7 @@ Flow v1 will not provide:
 
 ## 7. Syntax Direction
 
-Flow uses restrained Rust-inspired syntax because enums, pattern matching, `Result`, `Option`, and `?` fit system operations well and are familiar to developers and AI models.
+Flow uses a modern C#-inspired syntax while retaining proven semantic ideas from Rust such as enums, pattern matching, `Result`, `Option`, and `?`. The goal is to maximize readability and familiarity while preserving strong static guarantees.
 
 Flow v1 should not expose:
 
@@ -239,7 +239,7 @@ Illustrative example:
 ```flow
 fn repair_failed_services() -> Result<RepairReport, RepairError> {
     let failed = services()
-        |> where(|service| service.health == Health::Failed);
+        |> where(service => service.health == Health.Failed);
 
     let mut restarted = [];
 
@@ -536,10 +536,50 @@ Closures support filtering and mapping:
 ```flow
 let failed =
     services()
-        |> where(|service| service.health == Health::Failed);
+        |> where(service => service.health == Health.Failed);
 ```
 
 Captured variables are immutable by default.
+
+### 13.1 Parameters and named arguments
+
+Parameter declarations use `name: Type`, with optional default values:
+
+```flow
+fn waitUntilOnline(
+    interface: InterfaceRef,
+    timeout: Duration = 30s,
+) -> Result<Interface, NetworkError>
+```
+
+Named arguments use `name: value`:
+
+```flow
+network.waitUntilOnline(interface, timeout: 10s)
+```
+
+### 13.2 Extension methods
+
+Flow supports extension methods so strongly typed APIs can be extended without inheritance or modifying the original type.
+
+Illustrative syntax:
+
+```flow
+extension List<Service> {
+    fn failed(self) -> List<Service> {
+        self
+            |> where(service => service.health == Health.Failed)
+    }
+}
+```
+
+Usage:
+
+```flow
+services().failed()
+```
+
+Exact extension declaration syntax remains provisional until the grammar phase.
 
 ---
 
@@ -549,8 +589,8 @@ The proposed pipeline operator is `|>`.
 
 ```flow
 services()
-    |> where(|service| service.health == Health::Failed)
-    |> map(|service| service.id)
+    |> where(service => service.health == Health.Failed)
+    |> map(service => service.id)
     |> restart_each();
 ```
 
@@ -584,6 +624,33 @@ pipeline provides:
 The same syntax should support `List<T>`, `Table<T>`, and `Stream<T>`.
 
 Streaming pipelines must preserve back-pressure and bounded buffering.
+
+### 14.1 Result and Option pipeline composition
+
+Flow should support concise happy-path composition for `Result<T, E>` and `Option<T>`, but the syntax and semantics are not yet approved.
+
+The language needs an explicit, coherent model for operations equivalent to:
+
+- mapping a successful or present value;
+- binding a function that returns another `Result` or `Option`;
+- observing or transforming errors;
+- recovering from errors;
+- mapping absent values;
+- preserving the wrapped type across pipelines.
+
+A future design may introduce dedicated operators or concise pipeline modifiers rather than silently lifting every function call.
+
+Illustrative intent only:
+
+```flow
+service("network")
+    |> inspect()
+    |> restart()
+```
+
+The final design must make it obvious whether each stage performs normal piping, `map`, `bind` / `andThen`, error mapping, or recovery. Automatic happy-path propagation must not silently catch, discard, or coerce errors.
+
+This remains an open language-design issue.
 
 ---
 
@@ -880,6 +947,33 @@ let workspace = store.open("workspace:/main")?;
 let file = workspace.read("config/settings.toml")?;
 ```
 
+### 21.1 Collection literals
+
+Collection types such as `List<T>`, `Map<K, V>`, and `Set<T>` belong to the standard library rather than being compiler-specialized implementations.
+
+The language should still provide concise literals for common collections:
+
+```flow
+let services = [network, storage, audit];
+
+let priorities = {
+    "network": 1,
+    "storage": 2,
+};
+```
+
+The exact map and set literal syntax remains provisional.
+
+### 21.2 String interpolation
+
+Flow supports string interpolation for readable diagnostics, logging, paths, and interactive output:
+
+```flow
+let message = $"Restarted {service.name} in {report.duration}";
+```
+
+Interpolated expressions must satisfy an explicit display contract. Secrets and protected values must not become renderable implicitly.
+
 ---
 
 ## 22. Shell Integration
@@ -888,7 +982,7 @@ Flow should support concise interactive use:
 
 ```flow
 services()
-    |> where(|service| service.health == Health::Failed)
+    |> where(service => service.health == Health.Failed)
 ```
 
 Interactive features:
@@ -1086,17 +1180,17 @@ Machine-readable command schema:
 
 ```json
 {
-  "name": "service.restart",
-  "description": "Restart a supervised service",
-  "parameters": {
-    "service": { "type": "ServiceRef" },
-    "mode": {
-      "type": "RestartMode",
-      "default": "Graceful"
-    }
-  },
-  "returns": "Result<RestartReport, ServiceError>",
-  "capabilities": ["service.restart"]
+    "name": "service.restart",
+    "description": "Restart a supervised service",
+    "parameters": {
+        "service": { "type": "ServiceRef" },
+        "mode": {
+            "type": "RestartMode",
+            "default": "Graceful"
+        }
+    },
+    "returns": "Result<RestartReport, ServiceError>",
+    "capabilities": ["service.restart"]
 }
 ```
 
@@ -1320,7 +1414,12 @@ Initial syntax:
 - [ ] lists;
 - [ ] field access;
 - [ ] pipelines;
-- [ ] return statements.
+- [ ] return statements;
+- [ ] parameter default values;
+- [ ] named arguments;
+- [ ] collection literals;
+- [ ] string interpolation;
+- [ ] extension method declarations and calls.
 
 Infrastructure:
 
@@ -1479,9 +1578,12 @@ fn main() {
 - [ ] `fold`;
 - [ ] `collect`;
 - [ ] pipeline diagnostics;
-- [ ] collection pipeline tests.
+- [ ] collection pipeline tests;
+- [ ] design explicit `Result<T, E>` and `Option<T>` pipeline composition;
+- [ ] define syntax for mapping, binding, error mapping, and recovery;
+- [ ] reject ambiguous implicit lifting.
 
-**Exit criterion:** a pipeline from `List<Service>` to typed restart results checks end to end.
+**Exit criterion:** a pipeline from `List<Service>` to typed restart results checks end to end, while wrapped-value pipeline semantics are documented even if deferred.
 
 ---
 
@@ -1749,8 +1851,8 @@ fn main() -> Result<Unit, ServiceError> {
 
 ```flow
 services()
-    |> where(|service| service.health == Health::Failed)
-    |> map(|service| service.id)
+    |> where(service => service.health == Health.Failed)
+    |> map(service => service.id)
     |> restart_each();
 ```
 
@@ -1772,20 +1874,39 @@ flow run --on machine:/home-server repair-network.flow
 
 ### Syntax
 
+Approved:
+
+- Closures use `parameter => expression`.
+- Enum members use `Type.Member`.
+- The pipeline operator is `|>`, representing left-to-right value piping into free functions.
+- Blocks use braces (`{ ... }`).
+- Whitespace is not semantically significant.
+- `flow fmt` provides deterministic formatting.
+- The overall syntax direction is modern C#-inspired while retaining Rust's `Result`, `Option`, `match`, and `?`.
+- Parameter declarations use `name: Type = default_value`.
+- Named arguments use `name: value`.
+- Flow has no general-purpose `null`; absence is represented with `Option<T>`.
+- Extension methods are supported for strongly typed APIs.
+- Collection implementations belong to the standard library, while concise collection literal syntax remains a language feature.
+- String interpolation is supported, subject to strict display and secret-safety rules.
+
+Remaining decisions:
+
 - [ ] semicolon policy;
 - [ ] final pipeline operator;
 - [ ] closure syntax;
 - [ ] module syntax;
-- [ ] named arguments;
+- [x] named arguments use `name: value`; declarations use `name: Type = default`;
 - [ ] duration literals;
 - [ ] resource literal syntax;
 - [ ] `using` syntax.
+- [ ] happy-path pipeline composition syntax for `Result<T, E>` and `Option<T>` (`map`, `bind`, error mapping, and recovery);
 
 ### Type system
 
 - [ ] nominal versus structural records;
 - [ ] numeric conversion rules;
-- [ ] nullability policy;
+- [x] no general-purpose `null`; use `Option<T>`;
 - [ ] user-defined generics;
 - [ ] effect typing;
 - [ ] capability typing depth;
@@ -1973,3 +2094,32 @@ Flow should remain easier to reason about than a general-purpose language and sa
 The final success criterion is:
 
 > A human or AI agent can write a concise `.flow` script, verify its types and authority before execution, run it locally or remotely, and receive structured results without weakening LogOS's architectural boundaries.
+
+## Section 39 — Revisions & Interactive Design Clarifications
+
+> **Date:** 2026-07-25
+> **Status:** Approved Language Architecture Clarifications
+> **Scope:** Live REPL Execution, Compilation Tiering, and System Contrast
+
+### 1. [REPL] Tiered Authority & Inline Escalation
+
+- **Design Rule:** The preflight capability declaration (`flow capabilities <file>`) is enforced strictly for stored `.flow` scripts, packages, and background jobs.
+- **Interactive Semantics:** The interactive REPL operates under the active user's session capability context. Unprivileged operations trigger non-blocking inline capability prompts rather than compilation errors.
+
+### 2. [Runtime] Tiered Compilation & Execution Strategy
+
+- **Design Rule:** Flow uses a tiered JIT/Interpreter pipeline to ensure zero-latency CLI use.
+    1. **Live REPL / One-Liners:** Single-pass AST parsing $\rightarrow$ type unification $\rightarrow$ direct execution via interruptible VM bytecode interpreter ($<1\text{ms}$ startup).
+    2. **Stored Scripts / Packages:** Full static type & capability analysis $\rightarrow$ compiled & cached `.flowc` bytecode.
+
+### 3. [Diagnostics] Machine-Readable Feedback & AI Closed-Loop
+
+- **Specification:** All Flow compiler and runtime diagnostics must expose a `--json` interface containing exact source spans, expected vs. actual types, required capabilities, and actionable fixes.
+- **Rationale:** Enables local AI agents to perform deterministic code generation, static verification (`flow check --json`), self-correction, and capability negotiation without unstructured string parsing.
+
+### 4. [System Paradigm] Shell Contrast & Data Flow
+
+- **Core Principle:** Flow completely replaces Unix raw byte-stream pipes (`stdin`/`stdout`) with typed system values (`Table<T>`, `List<ResourceRef>`).
+- **Presentation Isolation:** Value formatting (tables, JSON, plain text) occurs exclusively at the Terminal boundary (Ring 3/5). Intermediate commands in a pipeline always exchange typed objects.
+
+---
