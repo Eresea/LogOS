@@ -1,0 +1,78 @@
+# Pre-commit hooks for LogOS
+# Install: pip install pre-commit && pre-commit install
+
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --check --all
+        language: system
+        types: [rust]
+        pass_filenames: false
+        always_run: true
+      
+      - id: cargo-clippy
+        name: cargo clippy -- -D warnings
+        entry: cargo clippy --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+        always_run: true
+      
+      - id: cargo-test-host
+        name: cargo test (host)
+        entry: cargo test --features test,mock_hal --lib
+        language: system
+        types: [rust]
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-push]
+      
+      - id: arch-deps-check
+        name: Architecture dependency check
+        entry: python3 scripts/arch-deps.py --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+        always_run: true
+
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.41.0
+    hooks:
+      - id: markdownlint
+        name: Markdown lint
+        args: ["--config", ".markdownlint.json"]
+        files: docs/
+        stages: [pre-commit, pre-push]
+
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.2.6
+    hooks:
+      - id: codespell
+        name: Spell check
+        args: ["--config", ".codespellrc"]
+        files: [docs/, src/]
+        stages: [pre-commit, pre-push]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        name: Trim trailing whitespace
+        files: \.(rs|md|toml|py|json|yaml|yml)$
+      - id: end-of-file-fixer
+        name: Ensure newline at EOF
+        files: \.(rs|md|toml|py|json|yaml|yml)$
+      - id: check-yaml
+        name: Validate YAML
+        files: \.(yaml|yml)$
+      - id: check-toml
+        name: Validate TOML
+        files: \.toml$
+      - id: check-json
+        name: Validate JSON
+        files: \.json$
+      - id: mixed-line-ending
+        name: Consistent line endings
+        args: ["--fix=lf"]

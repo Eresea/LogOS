@@ -1,0 +1,159 @@
+# LogOS CI/CD Workflows
+
+name: Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  RUSTFLAGS: "-D warnings"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  host-tests:
+    name: Host Tests (no QEMU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          target: x86_64-unknown-uefi
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Format check
+        run: cargo fmt --check --all
+      
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      
+      - name: Host unit tests
+        run: cargo test --features test,mock_hal --lib --all-targets
+      
+      - name: Architecture validation
+        run: |
+          python3 scripts/arch-deps.py --check
+        continue-on-error: true
+
+  qemu-verify:
+    name: QEMU Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: host-tests
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: x86_64-unknown-uefi
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Install QEMU + OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86_64 ovmf
+      
+      - name: Build UEFI kernel
+        run: cargo build --release --target x86_64-unknown-uefi
+      
+      - name: Run QEMU verification
+        env:
+          OVMF_CODE: /usr/share/OVMF/OVMF_CODE.fd
+        run: |
+          timeout 60 ./scripts/verify.ps1 || {
+            echo "QEMU verification failed"
+            exit 1
+          }
+      
+      - name: Upload QEMU logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-serial-log
+          path: target/qemu-verify.log
+          retention-days: 7
+
+  doc-check:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check markdown links
+        uses: gaurav-nelson/github-action-markdown-link-check@v1
+        with:
+          folder-path: docs
+          config-file: .markdown-link-check.json
+      
+      - name: Spell check
+        uses: streetsidesoftware/cspell-action@v6
+        with:
+          files: docs/**/*.md
+          config: .cspell.json
+
+  adr-index:
+    name: ADR Index
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate ADR index
+        run: |
+          echo "# Architecture Decision Records" > ADR_INDEX.md
+          echo "" >> ADR_INDEX.md
+          for f in docs/adr/*.md; do
+            if [[ $(basename "$f") != "template.md" ]]; then
+              title=$(head -1 "$f" | sed 's/^# //')
+              status=$(grep -A1 '^## Status' "$f" | tail -1 | sed 's/^//')
+              echo "- [$title]($f) — $status" >> ADR_INDEX.md
+            fi
+          done
+          cat ADR_INDEX.md
+      
+      - name: Upload ADR index
+        uses: actions/upload-artifact@v4
+        with:
+          name: adr-index
+          path: ADR_INDEX.md
+
+  release-check:
+    name: Release Readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [host-tests, qemu-verify, doc-check]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: x86_64-unknown-uefi
+      
+      - name: Build release artifacts
+        run: |
+          cargo build --release --target x86_64-unknown-uefi
+          ls -la target/x86_64-unknown-uefi/release/logos.efi
+      
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: target/x86_64-unknown-uefi/release/logos.efi
+          generate_release_notes: true
