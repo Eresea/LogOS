@@ -15,12 +15,28 @@ pub enum Result {
 pub struct Descriptor {
     pub name: &'static [u8],
     pub summary: &'static [u8],
+    pub arguments: &'static [Argument],
     pub required_capability: CapabilityKind,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ArgumentKind {
+    Text,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Argument {
+    pub name: &'static [u8],
+    pub kind: ArgumentKind,
+    pub required: bool,
+}
+
+const NO_ARGUMENTS: [Argument; 0] = [];
 
 const DESCRIPTORS: [Descriptor; 1] = [Descriptor {
     name: b"recovery",
     summary: b"switch to the recovery console",
+    arguments: &NO_ARGUMENTS,
     required_capability: CapabilityKind::Recovery,
 }];
 
@@ -46,6 +62,7 @@ pub fn invoke(
 }
 
 pub fn self_check() -> bool {
+    let text_argument = Argument { name: b"target", kind: ArgumentKind::Text, required: true };
     let mut capabilities = CapabilityManager::new();
     let Some(recovery) = capabilities.grant(CapabilityKind::Recovery) else {
         return false;
@@ -67,4 +84,7 @@ pub fn self_check() -> bool {
         && invoke(submission, &session, &capabilities) == Result::Recovery
         && descriptors().len() == 1
         && descriptors()[0] == DESCRIPTORS[0]
+        && descriptors()[0].arguments.is_empty()
+        && text_argument.kind == ArgumentKind::Text
+        && text_argument.required
 }

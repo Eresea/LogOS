@@ -332,6 +332,8 @@ No single component owns all of these responsibilities.
 
 Command input and output use schemas.
 
+Each command descriptor declares named argument kinds and requiredness. The initial recovery command has an explicit empty argument schema; parsing remains a shell responsibility.
+
 A pipeline passes values:
 
 ```text

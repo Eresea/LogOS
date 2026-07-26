@@ -166,7 +166,7 @@ The normal terminal is not a kernel shell. It is a renderer and editor attached 
 
 - [x] Session identity and capability context.
 - [x] Command registry with discoverable descriptors.
-- [ ] Typed argument schemas.
+- [x] Typed argument schemas.
 - [ ] Typed results and structured errors.
 - [ ] Cancellation and timeout propagation.
 - [ ] Bounded output and backpressure.
