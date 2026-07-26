@@ -134,9 +134,18 @@ impl Service {
 
     pub fn self_check() -> bool {
         let mut input = Self::new();
-        let qwerty = input.decode(0x10, false, 0).text() == Some(b'q');
+        let qwerty = input.decode(0x10, false, 0).text() == Some(b'q')
+            && input.decode(0x2c, false, 0).text() == Some(b'z');
         input.set_layout(Layout::Azerty);
-        let azerty = input.decode(0x10, false, 0).text() == Some(b'a');
+        let azerty = input.decode(0x10, false, 0).text() == Some(b'a')
+            && input.decode(0x11, false, 0).text() == Some(b'z')
+            && input.decode(0x2c, false, 0).text() == Some(b'w')
+            && input.decode(0x27, false, 0).text() == Some(b'm');
+        let azerty_number = input.decode(0x2a, false, 0).text().is_none()
+            && input.decode(0x02, false, 0).text() == Some(b'1')
+            && input.decode(0x03, false, 0).text() == Some(b'2')
+            && input.decode(0x0b, false, 0).text() == Some(b'0')
+            && input.decode(0xaa, false, 0).text().is_none();
         let pressed =
             matches!(input.decode(0x2a, false, 0), Event::Key { state: State::Press, .. });
         let released =
@@ -145,10 +154,11 @@ impl Service {
             matches!(input.decode(0x4b, true, 0), Event::Key { logical: LogicalKey::Left, .. });
         let up = matches!(input.decode(0x48, true, 0), Event::Key { logical: LogicalKey::Up, .. });
         let command_keys = input.decode(0x20, false, 0).text() == Some(b'd')
-            && input.decode(0x32, false, 0).text() == Some(b'm')
-            && input.decode(0x2c, false, 0).text() == Some(b'z');
+            && input.decode(0x27, false, 0).text() == Some(b'm')
+            && input.decode(0x11, false, 0).text() == Some(b'z');
         qwerty
             && azerty
+            && azerty_number
             && pressed
             && released
             && left
@@ -204,40 +214,97 @@ impl Service {
             (_, 0x01) => return LogicalKey::Escape,
             (_, 0x0e) => return LogicalKey::Backspace,
             (_, 0x1c) => return LogicalKey::Enter,
-            (_, 0x39) => b' ',
-            (Layout::Qwerty, 0x10) => b'q',
-            (Layout::Azerty, 0x10) => b'a',
-            (Layout::Qwerty, 0x11) => b'w',
-            (Layout::Azerty, 0x11) => b'z',
-            (Layout::Qwerty, 0x1e) => b'a',
-            (Layout::Azerty, 0x1e) => b'q',
-            (_, 0x12) => b'e',
-            (_, 0x15) => b'y',
-            (_, 0x16) => b'u',
-            (_, 0x13) => b'r',
-            (_, 0x14) => b't',
-            (_, 0x17) => b'i',
-            (_, 0x18) => b'o',
-            (_, 0x19) => b'p',
-            (_, 0x1f) => b's',
-            (_, 0x20) => b'd',
-            (_, 0x21) => b'f',
-            (_, 0x22) => b'g',
-            (_, 0x23) => b'h',
-            (_, 0x24) => b'j',
-            (_, 0x25) => b'k',
-            (_, 0x26) => b'l',
-            (_, 0x2c) => b'z',
-            (_, 0x30) => b'b',
-            (_, 0x2d) => b'x',
-            (_, 0x2e) => b'c',
-            (_, 0x2f) => b'v',
-            (_, 0x31) => b'n',
-            (_, 0x32) => b'm',
-            (_, 0x02) => b'1',
-            (_, 0x0b) => b'0',
+            (_, 0x39) => (b' ', b' '),
+            (Layout::Qwerty, 0x02) => (b'1', b'!'),
+            (Layout::Qwerty, 0x03) => (b'2', b'@'),
+            (Layout::Qwerty, 0x04) => (b'3', b'#'),
+            (Layout::Qwerty, 0x05) => (b'4', b'$'),
+            (Layout::Qwerty, 0x06) => (b'5', b'%'),
+            (Layout::Qwerty, 0x07) => (b'6', b'^'),
+            (Layout::Qwerty, 0x08) => (b'7', b'&'),
+            (Layout::Qwerty, 0x09) => (b'8', b'*'),
+            (Layout::Qwerty, 0x0a) => (b'9', b'('),
+            (Layout::Qwerty, 0x0b) => (b'0', b')'),
+            (Layout::Azerty, 0x02) => (b'&', b'1'),
+            (Layout::Azerty, 0x03) => (0, b'2'),
+            (Layout::Azerty, 0x04) => (b'"', b'3'),
+            (Layout::Azerty, 0x05) => (b'\'', b'4'),
+            (Layout::Azerty, 0x06) => (b'(', b'5'),
+            (Layout::Azerty, 0x07) => (b'-', b'6'),
+            (Layout::Azerty, 0x08) => (0, b'7'),
+            (Layout::Azerty, 0x09) => (b'_', b'8'),
+            (Layout::Azerty, 0x0a) => (0, b'9'),
+            (Layout::Azerty, 0x0b) => (0, b'0'),
+            (Layout::Azerty, 0x1a) => (b'^', b'^'),
+            (Layout::Azerty, 0x1b) => (b'$', b'$'),
+            (Layout::Azerty, 0x32) => (b',', b'?'),
+            (Layout::Azerty, 0x33) => (b';', b'.'),
+            (Layout::Azerty, 0x34) => (b':', b'/'),
+            (Layout::Azerty, 0x35) => (b'!', b'!'),
+            (Layout::Qwerty, 0x1a) => (b'[', b'{'),
+            (Layout::Qwerty, 0x1b) => (b']', b'}'),
+            (Layout::Qwerty, 0x27) => (b';', b':'),
+            (Layout::Qwerty, 0x28) => (b'\'', b'"'),
+            (Layout::Qwerty, 0x29) => (b'`', b'~'),
+            (Layout::Qwerty, 0x2b) => (b'\\', b'|'),
+            (Layout::Qwerty, 0x33) => (b',', b'<'),
+            (Layout::Qwerty, 0x34) => (b'.', b'>'),
+            (Layout::Qwerty, 0x35) => (b'/', b'?'),
+            (Layout::Qwerty, 0x10) => (b'q', b'Q'),
+            (Layout::Qwerty, 0x11) => (b'w', b'W'),
+            (Layout::Qwerty, 0x12) => (b'e', b'E'),
+            (Layout::Qwerty, 0x13) => (b'r', b'R'),
+            (Layout::Qwerty, 0x14) => (b't', b'T'),
+            (Layout::Qwerty, 0x15) => (b'y', b'Y'),
+            (Layout::Qwerty, 0x16) => (b'u', b'U'),
+            (Layout::Qwerty, 0x17) => (b'i', b'I'),
+            (Layout::Qwerty, 0x18) => (b'o', b'O'),
+            (Layout::Qwerty, 0x19) => (b'p', b'P'),
+            (Layout::Qwerty, 0x1e) => (b'a', b'A'),
+            (Layout::Qwerty, 0x1f) => (b's', b'S'),
+            (Layout::Qwerty, 0x20) => (b'd', b'D'),
+            (Layout::Qwerty, 0x21) => (b'f', b'F'),
+            (Layout::Qwerty, 0x22) => (b'g', b'G'),
+            (Layout::Qwerty, 0x23) => (b'h', b'H'),
+            (Layout::Qwerty, 0x24) => (b'j', b'J'),
+            (Layout::Qwerty, 0x25) => (b'k', b'K'),
+            (Layout::Qwerty, 0x26) => (b'l', b'L'),
+            (Layout::Qwerty, 0x2c) => (b'z', b'Z'),
+            (Layout::Qwerty, 0x2d) => (b'x', b'X'),
+            (Layout::Qwerty, 0x2e) => (b'c', b'C'),
+            (Layout::Qwerty, 0x2f) => (b'v', b'V'),
+            (Layout::Qwerty, 0x30) => (b'b', b'B'),
+            (Layout::Qwerty, 0x31) => (b'n', b'N'),
+            (Layout::Qwerty, 0x32) => (b'm', b'M'),
+            (Layout::Azerty, 0x10) => (b'a', b'A'),
+            (Layout::Azerty, 0x11) => (b'z', b'Z'),
+            (Layout::Azerty, 0x12) => (b'e', b'E'),
+            (Layout::Azerty, 0x13) => (b'r', b'R'),
+            (Layout::Azerty, 0x14) => (b't', b'T'),
+            (Layout::Azerty, 0x15) => (b'y', b'Y'),
+            (Layout::Azerty, 0x16) => (b'u', b'U'),
+            (Layout::Azerty, 0x17) => (b'i', b'I'),
+            (Layout::Azerty, 0x18) => (b'o', b'O'),
+            (Layout::Azerty, 0x19) => (b'p', b'P'),
+            (Layout::Azerty, 0x1e) => (b'q', b'Q'),
+            (Layout::Azerty, 0x1f) => (b's', b'S'),
+            (Layout::Azerty, 0x20) => (b'd', b'D'),
+            (Layout::Azerty, 0x21) => (b'f', b'F'),
+            (Layout::Azerty, 0x22) => (b'g', b'G'),
+            (Layout::Azerty, 0x23) => (b'h', b'H'),
+            (Layout::Azerty, 0x24) => (b'j', b'J'),
+            (Layout::Azerty, 0x25) => (b'k', b'K'),
+            (Layout::Azerty, 0x26) => (b'l', b'L'),
+            (Layout::Azerty, 0x27) => (b'm', b'M'),
+            (Layout::Azerty, 0x2c) => (b'w', b'W'),
+            (Layout::Azerty, 0x2d) => (b'x', b'X'),
+            (Layout::Azerty, 0x2e) => (b'c', b'C'),
+            (Layout::Azerty, 0x2f) => (b'v', b'V'),
+            (Layout::Azerty, 0x30) => (b'b', b'B'),
+            (Layout::Azerty, 0x31) => (b'n', b'N'),
             _ => return LogicalKey::Unknown,
         };
-        LogicalKey::Text(if self.modifiers.shift() { text.to_ascii_uppercase() } else { text })
+        let text = if self.modifiers.shift() { text.1 } else { text.0 };
+        if text == 0 { LogicalKey::Unknown } else { LogicalKey::Text(text) }
     }
 }
