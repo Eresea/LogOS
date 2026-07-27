@@ -174,7 +174,7 @@ Turn kernel mechanisms into a supervised service platform with explicit identiti
 - [x] Audit events for privileged operations.
 - [x] Scoped, expiring, revocable standing-approval grants with separate audit records.
 - [x] `system.inference` service owning model inventory, scheduling, and accelerator binding; Runtime consumers receive scoped invocation grants.
-- [ ] Resource discovery through typed references.
+- [x] Resource discovery through typed references.
 
 ## Driver and device model
 

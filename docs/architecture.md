@@ -144,6 +144,9 @@ are individually revocable, and emit distinct grant and revoke audit events.
 `system.inference` owns the bounded model inventory and accelerator bindings. Invocation is
 represented by an expiring `Inference` approval granted only to the requesting runtime process.
 
+Resource discovery returns a typed reference resolved only for its declared kind. The registry
+records the owning principal rather than exposing implementation pointers to clients.
+
 Privileged operations append a bounded audit event carrying the initiating principal and effect.
 The bootstrap records secret writes; durable export and retention are Persistence v1 concerns.
 

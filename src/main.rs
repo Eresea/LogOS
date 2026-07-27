@@ -19,6 +19,7 @@ mod keyboard;
 mod memory;
 mod mode;
 mod pci;
+mod resources;
 mod scheduler;
 mod secrets;
 mod services;
@@ -118,6 +119,7 @@ fn kernel_main(
     check!(b"audit", audit::self_check());
     check!(b"approvals", approvals::self_check());
     check!(b"inference", inference::self_check());
+    check!(b"resources", resources::self_check());
     check!(b"framebuffer", framebuffer_ok);
     check!(
         b"acpi",
