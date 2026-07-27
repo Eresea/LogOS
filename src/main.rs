@@ -200,8 +200,8 @@ fn kernel_main(
     };
     check!(b"pci", devices.len() > 0);
     let _ = (first_device.location(), first_device.vendor_id(), first_device.device_id());
-    let Some(virtio) = devices.find(0x1af4, 0x1002) else {
-        fail!(b"virtio");
+    let Some(device) = platform::discover(&devices) else {
+        fail!(b"platform device");
     };
     let Some(supervisor) = supervisor::boot_plan(supervisor::Profile::Normal).ok() else {
         fail!(b"supervisor manifest");
@@ -289,13 +289,13 @@ fn kernel_main(
     };
     check!(b"services", services.resolve(services::Service::VirtioBalloon) == Some(virtio_handle),);
     let Some(virtio_gsi) = acpi.and_then(|tables| {
-        let (bus, device, _) = virtio.location();
-        tables.pci_gsi(bus, device, virtio.interrupt_pin().checked_sub(1)?)
+        let (bus, slot, _) = device.location();
+        tables.pci_gsi(bus, slot, device.interrupt_pin().checked_sub(1)?)
     }) else {
         fail!(b"acpi pci routing");
     };
     let Some(mut virtio_service) =
-        platform::Service::bind(virtio, virtio_gsi, virtio_handle, &mut memory)
+        platform::Service::bind(device, virtio_gsi, virtio_handle, &mut memory)
     else {
         supervisor::report_start_failure(supervisor::VIRTIO_BALLOON, supervisor::StartStage::Bind);
         fail!(b"virtio");
@@ -408,7 +408,7 @@ fn kernel_main(
                     return false;
                 }
                 replacement =
-                    platform::Service::bind(virtio, virtio_gsi, virtio_handle, &mut memory);
+                    platform::Service::bind(device, virtio_gsi, virtio_handle, &mut memory);
                 replacement.is_some()
             }),
     );

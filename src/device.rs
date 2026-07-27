@@ -5,6 +5,7 @@ pub enum Class {
     Block,
     Network,
     Entropy,
+    Memory,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -52,11 +53,13 @@ pub fn self_check() -> bool {
     let block = Interface::new(Class::Block);
     let network = Interface::new(Class::Network);
     let entropy = Interface::new(Class::Entropy);
+    let memory = Interface::new(Class::Memory);
     input.compatible(input)
         && !input.compatible(display)
         && block.class() == Class::Block
         && network.class() == Class::Network
         && entropy.class() == Class::Entropy
+        && memory.class() == Class::Memory
         && bind(
             &[DriverManifest {
                 interface: Interface::new(Class::Block),
