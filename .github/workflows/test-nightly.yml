@@ -1,0 +1,18 @@
+name: Testing Nightly Tier
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+jobs:
+  qemu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: {targets: x86_64-unknown-uefi}
+      - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
+      - run: cargo run -p logos-test -- suite nightly
+        env: {OVMF_CODE: /usr/share/OVMF/OVMF_CODE.fd}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: {name: logos-test-nightly, path: target/logos-test}
