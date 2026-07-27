@@ -576,7 +576,7 @@ extension List<Service> {
 Usage:
 
 ```flow
-services().failed()
+services().failed();
 ```
 
 Exact extension declaration syntax remains provisional until the grammar phase.
@@ -957,8 +957,8 @@ The language should still provide concise literals for common collections:
 let services = [network, storage, audit];
 
 let priorities = {
-    "network": 1,
-    "storage": 2,
+    network: 1,
+    storage: 2,
 };
 ```
 
@@ -1352,14 +1352,14 @@ flow-ls
 
 ## Phase 0 — Language Charter
 
-- [ ] approve the Flow name;
-- [ ] approve the `.flow` extension;
+- [x] approve the Flow name;
+- [x] approve the `.flow` extension;
 - [ ] define goals and non-goals;
 - [ ] define architectural ownership;
 - [ ] define initial syntax direction;
 - [ ] define primitive types;
 - [ ] define the command schema concept;
-- [ ] create `docs/FLOW.md`;
+- [x] create `docs/FLOW.md`;
 - [ ] create `docs/GRAMMAR.ebnf`;
 - [ ] add Flow to the LogOS architecture annex;
 - [ ] record unresolved decisions.
