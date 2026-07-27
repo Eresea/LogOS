@@ -154,6 +154,9 @@ before a fresh bind, without requiring a machine reboot.
 Input, display, block, network, and entropy use versioned device-interface classes. Clients bind
 to a class contract instead of a PCI or driver implementation.
 
+Driver manifests declare the hardware match, interface class, and requested capabilities. The
+binding policy selects a matching manifest; hardware-specific drivers do not decide policy.
+
 Privileged operations append a bounded audit event carrying the initiating principal and effect.
 The bootstrap records secret writes; durable export and retention are Persistence v1 concerns.
 
