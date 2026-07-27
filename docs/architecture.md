@@ -147,6 +147,10 @@ represented by an expiring `Inference` approval granted only to the requesting r
 Resource discovery returns a typed reference resolved only for its declared kind. The registry
 records the owning principal rather than exposing implementation pointers to clients.
 
+The bootstrap VirtIO driver owns its DMA queue pages, pending request page, routed interrupt, and
+device state. Recovery quiesces then reactivates the device; replacement releases all owned pages
+before a fresh bind, without requiring a machine reboot.
+
 Privileged operations append a bounded audit event carrying the initiating principal and effect.
 The bootstrap records secret writes; durable export and retention are Persistence v1 concerns.
 

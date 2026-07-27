@@ -181,9 +181,9 @@ Turn kernel mechanisms into a supervised service platform with explicit identiti
 - [ ] Device-independent interfaces for input, display, block, network, and entropy.
 - [ ] Driver binding policy outside the kernel where practical.
 - [ ] Driver capability manifests.
-- [ ] Device reset and rebinding.
-- [ ] Driver replacement without machine reboot.
-- [ ] Explicit ownership of DMA memory, queues, interrupts, and device state.
+- [x] Device reset and rebinding.
+- [x] Driver replacement without machine reboot.
+- [x] Explicit ownership of DMA memory, queues, interrupts, and device state.
 
 ## Exit criteria
 
