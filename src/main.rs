@@ -331,11 +331,21 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                 }),
         );
     }
-    check!(b"service lifetime", virtio_service.release(&mut memory));
-    let Some(mut virtio_service) =
-        virtio::VirtioService::bind(virtio, virtio_gsi, virtio_handle, &mut memory)
-    else {
-        fail!(b"virtio rebind");
+    let mut replacement = None;
+    check!(
+        b"service replacement",
+        supervisor::replacement_self_check()
+            && supervisor.replace(supervisor::VIRTIO_BALLOON, || {
+                if !virtio_service.release(&mut memory) {
+                    return false;
+                }
+                replacement =
+                    virtio::VirtioService::bind(virtio, virtio_gsi, virtio_handle, &mut memory);
+                replacement.is_some()
+            }),
+    );
+    let Some(mut virtio_service) = replacement else {
+        fail!(b"service replacement");
     };
     let mut service_task = virtio::ServiceTask::new(
         &mut virtio_service,

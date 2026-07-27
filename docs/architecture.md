@@ -123,6 +123,9 @@ minor version before registration; restart policy remains bounded bootstrap stat
 Failed bootstrap service starts emit the service name and the failed protocol, capability,
 registration, binding, or task stage to the debug console before the startup health gate stops.
 
+The supervisor requests replacement by declared service name only. The service-owned callback
+releases and binds implementation resources, so supervisor policy has no driver-specific logic.
+
 The supervisor watches a bounded heartbeat for each boot service. A scheduled service
 updates its heartbeat; an overdue heartbeat schedules bounded exponential-backoff
 recovery. The manifest owns retry limits and shutdown state; the existing VirtIO driver

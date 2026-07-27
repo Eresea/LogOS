@@ -205,6 +205,10 @@ impl Plan {
             version: required.version.min(offered.version),
         })
     }
+
+    pub fn replace(&self, name: &[u8], action: impl FnOnce() -> bool) -> bool {
+        self.manifest(name).is_some_and(|_| action())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -333,6 +337,13 @@ pub fn diagnostics_self_check() -> bool {
         && StartStage::Register.message() == b"register"
         && StartStage::Bind.message() == b"bind"
         && StartStage::Task.message() == b"task"
+}
+
+pub fn replacement_self_check() -> bool {
+    let Ok(plan) = boot_plan() else {
+        return false;
+    };
+    plan.replace(VIRTIO_BALLOON, || true) && !plan.replace(b"missing", || true)
 }
 
 pub fn grant_self_check() -> bool {
