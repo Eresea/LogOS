@@ -2,7 +2,7 @@
 
 > **Status:** Living document
 > **Updated:** 2026-07-24
-> **Current milestone:** Core v1 complete
+> **Current milestone:** Console v1 complete
 > **Primary target:** A remotely operable, capability-based Rust OS with replaceable native services and sandboxed WASM applications.
 
 ## 1. Vision
@@ -89,6 +89,22 @@ It remains:
 - limited to health, diagnostics, service recovery, trace export, reset, and power-off.
 
 It should not grow into the normal user environment.
+
+---
+
+## Console v1 â€” Complete
+
+Console v1 provides the normal local interface while preserving independent kernel recovery.
+
+### Demonstrated
+
+- [x] Normal terminal startup, typed command sessions, UTF-8 editing, layouts, font rendering, history, scrollback, selection, search, and redraw recovery.
+- [x] Discoverable typed commands with capability checks, cancellation/timeout handling, bounded output, pipelines, and human/table/tree/JSON formatting.
+- [x] Local operational commands for health, tasks, services, drivers, trace, inspection, recovery, restart, cancellation, reset, and power-off.
+- [x] Live transition to the recovery console when normal startup or redraw fails, or when authorized by the `recovery` command.
+- [x] QEMU proofs for terminal editing, command behavior, input/display restart, and recovery fallback.
+
+Next: Platform v1.
 
 ---
 
