@@ -35,6 +35,10 @@ name = "logos-terminal"
 version = "0.1.0"
 
 [[package]]
+name = "logos-test"
+version = "0.1.0"
+
+[[package]]
 name = "logos-uefi"
 version = "0.1.0"
 dependencies = [

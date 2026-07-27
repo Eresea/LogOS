@@ -27,6 +27,8 @@ mod secrets;
 mod services;
 mod session;
 mod supervisor;
+#[cfg(feature = "test-hooks")]
+mod test_hooks;
 mod time;
 mod trace;
 mod virtual_memory;
@@ -78,6 +80,7 @@ fn boot_info() -> uefi::Result<BootInfo> {
     })
 }
 
+#[cfg_attr(feature = "test-hooks", allow(unreachable_code, unused_mut, unused_variables))]
 fn kernel_main(
     boot_info: BootInfo,
     memory_map: impl MemoryMap,
@@ -454,6 +457,8 @@ fn kernel_main(
     coordinator.announce();
     check!(b"trace", trace::self_check());
     health.finish();
+    #[cfg(feature = "test-hooks")]
+    test_hooks::serve();
     let mut console_mode = coordinator.mode();
     if console_mode == mode::ConsoleMode::Normal {
         debug::write_line(b"LogOS: normal terminal active");
