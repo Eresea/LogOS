@@ -2,6 +2,7 @@
 #![no_std]
 
 mod acpi;
+mod approvals;
 mod audit;
 mod capabilities;
 mod commands;
@@ -114,6 +115,7 @@ fn kernel_main(
     );
     check!(b"secret store", secrets::self_check());
     check!(b"audit", audit::self_check());
+    check!(b"approvals", approvals::self_check());
     check!(b"framebuffer", framebuffer_ok);
     check!(
         b"acpi",

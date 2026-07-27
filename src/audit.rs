@@ -5,6 +5,8 @@ const EVENTS: usize = 8;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
     SecretWrite,
+    ApprovalGrant,
+    ApprovalRevoke,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

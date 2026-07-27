@@ -138,6 +138,9 @@ The bootstrap secret store is bounded and memory-only. It requires a `Secret` ca
 matches each record to its owning principal; Persistence v1 will provide durable encryption and
 operation-specific credential brokering.
 
+Standing approvals are bounded grants scoped to one principal and capability kind. They expire,
+are individually revocable, and emit distinct grant and revoke audit events.
+
 Privileged operations append a bounded audit event carrying the initiating principal and effect.
 The bootstrap records secret writes; durable export and retention are Persistence v1 concerns.
 

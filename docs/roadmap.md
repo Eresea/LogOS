@@ -172,7 +172,7 @@ Turn kernel mechanisms into a supervised service platform with explicit identiti
 - [x] Entropy and secure random service.
 - [x] Secret store with service-scoped access.
 - [x] Audit events for privileged operations.
-- [ ] Scoped, expiring, revocable standing-approval grants with separate audit records.
+- [x] Scoped, expiring, revocable standing-approval grants with separate audit records.
 - [ ] `system.inference` service owning model inventory, scheduling, and accelerator binding; Runtime consumers receive scoped invocation grants.
 - [ ] Resource discovery through typed references.
 
