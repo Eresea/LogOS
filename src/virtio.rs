@@ -39,6 +39,7 @@ pub struct VirtioService {
     queue_size: usize,
     interrupt_gsi: u32,
     state: DriverState,
+    pending_page: Option<Page>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -120,11 +121,12 @@ impl Runnable for ServiceTask<'_> {
                 crate::trace::record(crate::trace::Event::DriverFailed);
                 crate::health::driver_failure(b"virtio", self.service.recover());
             }
+            let reclaimed = self.service.reclaim_request(self.memory);
             let _ = self.responses.reply(
                 self.capabilities,
                 self.capability,
                 destination,
-                if failed { Message::Failed } else { Message::Complete },
+                if failed || !reclaimed { Message::Failed } else { Message::Complete },
                 request,
             );
             return TaskState::Ready;
@@ -178,6 +180,7 @@ impl VirtioService {
             queue_size: 0,
             interrupt_gsi,
             state: DriverState::Quiesced,
+            pending_page: None,
         };
         let base = service.status_port - 0x12;
         unsafe {
@@ -242,7 +245,7 @@ impl VirtioService {
         // The ISR port is global interrupt state; clear it before returning the queue pages.
         ISR_PORT.store(0, Ordering::Release);
         self.quiesce();
-        self.queue.release(memory)
+        self.reclaim_request(memory) && self.queue.release(memory)
     }
 
     fn recover(&mut self) -> bool {
@@ -280,21 +283,22 @@ impl VirtioService {
         active
     }
 
-    pub fn submit_inflate_one_page(&self, memory: &mut PhysicalMemory) -> bool {
-        let page = match memory.allocate_page() {
+    pub fn submit_inflate_one_page(&mut self, memory: &mut PhysicalMemory) -> bool {
+        let page = match memory.allocate_owned() {
             Some(page) => page,
             None => return false,
         };
-        let pfn = match u32::try_from(page >> 12) {
+        let address = page.address();
+        let pfn = match u32::try_from(address >> 12) {
             Ok(pfn) => pfn,
-            Err(_) => return false,
+            Err(_) => return memory.release_page(page),
         };
         let queue = self.queue.address();
         let avail = queue + (self.queue_size * core::mem::size_of::<Descriptor>()) as u64;
         unsafe {
-            (page as *mut u32).write_volatile(pfn);
+            (address as *mut u32).write_volatile(pfn);
             (queue as *mut Descriptor).write_volatile(Descriptor {
-                address: page,
+                address,
                 length: core::mem::size_of::<u32>() as u32,
                 flags: 0,
                 next: 0,
@@ -304,8 +308,17 @@ impl VirtioService {
             ((avail + 2) as *mut u16).write_volatile(1);
             outw(self.notify_port, 0);
         }
+        self.pending_page = Some(page);
         crate::trace::record(crate::trace::Event::VirtioSubmit);
         true
+    }
+
+    pub fn resources_reclaimed(&self) -> bool {
+        self.pending_page.is_none()
+    }
+
+    fn reclaim_request(&mut self, memory: &mut PhysicalMemory) -> bool {
+        self.pending_page.take().is_none_or(|page| memory.release_page(page))
     }
 }
 

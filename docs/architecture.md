@@ -126,6 +126,10 @@ registration, binding, or task stage to the debug console before the startup hea
 The supervisor requests replacement by declared service name only. The service-owned callback
 releases and binds implementation resources, so supervisor policy has no driver-specific logic.
 
+Services reclaim request-owned resources on completion and on release. The bootstrap VirtIO
+service returns its submitted page before replying and releases any pending page with its queue
+during replacement or shutdown.
+
 The supervisor watches a bounded heartbeat for each boot service. A scheduled service
 updates its heartbeat; an overdue heartbeat schedules bounded exponential-backoff
 recovery. The manifest owns retry limits and shutdown state; the existing VirtIO driver

@@ -331,6 +331,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                 }),
         );
     }
+    check!(b"service reclamation", virtio_service.resources_reclaimed());
     let mut replacement = None;
     check!(
         b"service replacement",
