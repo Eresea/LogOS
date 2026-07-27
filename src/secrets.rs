@@ -28,6 +28,7 @@ impl Store {
         capability: Capability,
         owner: Principal,
         bytes: &[u8],
+        audit: &mut crate::audit::Log,
     ) -> bool {
         if bytes.is_empty()
             || bytes.len() > BYTES
@@ -41,7 +42,10 @@ impl Store {
         let mut secret = Secret { owner, bytes: [0; BYTES], len: bytes.len() };
         secret.bytes[..bytes.len()].copy_from_slice(bytes);
         *slot = Some(secret);
-        true
+        audit.record(crate::audit::Event {
+            principal: owner,
+            effect: crate::audit::Effect::SecretWrite,
+        })
     }
 
     pub fn get(
@@ -70,8 +74,10 @@ pub fn self_check() -> bool {
     };
     let owner = Principal::service(1);
     let mut store = Store::new();
-    store.put(&capabilities, secret, owner, b"secret")
+    let mut audit = crate::audit::Log::new();
+    store.put(&capabilities, secret, owner, b"secret", &mut audit)
         && store.get(&capabilities, secret, owner) == Some(b"secret" as &[u8])
         && store.get(&capabilities, secret, Principal::service(2)).is_none()
         && store.get(&capabilities, service, owner).is_none()
+        && audit.latest().is_some_and(|event| event.principal == owner)
 }

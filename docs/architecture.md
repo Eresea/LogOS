@@ -138,6 +138,9 @@ The bootstrap secret store is bounded and memory-only. It requires a `Secret` ca
 matches each record to its owning principal; Persistence v1 will provide durable encryption and
 operation-specific credential brokering.
 
+Privileged operations append a bounded audit event carrying the initiating principal and effect.
+The bootstrap records secret writes; durable export and retention are Persistence v1 concerns.
+
 The monotonic-time service exposes the PIT tick count as an opaque increasing value. It makes no
 wall-clock claim and remains valid across timer consumers. Before boot services exit, the
 wall-clock service snapshots the UEFI RTC as explicitly `Untrusted`; a failed or invalid read is

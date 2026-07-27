@@ -2,6 +2,7 @@
 #![no_std]
 
 mod acpi;
+mod audit;
 mod capabilities;
 mod commands;
 mod console;
@@ -112,6 +113,7 @@ fn kernel_main(
         entropy::self_check() && identity::self_check() && machine.id() == machine.id(),
     );
     check!(b"secret store", secrets::self_check());
+    check!(b"audit", audit::self_check());
     check!(b"framebuffer", framebuffer_ok);
     check!(
         b"acpi",
