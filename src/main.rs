@@ -530,10 +530,12 @@ fn kernel_main(
                             let _ = terminal.write_output(b"scheduler active");
                         }
                         commands::Outcome::Services => {
-                            let _ = terminal.write_output(b"virtio-balloon running");
+                            let _ = terminal.write_output(platform::service_status(
+                                service_health.healthy(platform::NAME, tick),
+                            ));
                         }
                         commands::Outcome::Drivers => {
-                            let _ = terminal.write_output(b"virtio-balloon driver bound");
+                            let _ = terminal.write_output(platform::driver_status());
                         }
                         commands::Outcome::Trace => {
                             let _ = terminal.write_output(trace::message(trace::latest()));
@@ -541,22 +543,35 @@ fn kernel_main(
                         commands::Outcome::Inspect(resource) => {
                             let _ = terminal.write_output(resource.as_bytes());
                         }
-                        commands::Outcome::Restart => {
-                            let _ = terminal.write_output(if service_lifecycle.restart(tick) {
-                                b"restart scheduled"
-                            } else {
-                                b"restart unavailable"
-                            });
-                        }
-                        commands::Outcome::Cancel => {
-                            let _ = channel.send(
-                                &capabilities,
-                                service_capability,
-                                session::Principal::LOCAL,
-                                virtio_handle,
-                                ipc::Message::Cancel,
+                        commands::Outcome::Restart(target) => {
+                            let _ = terminal.write_output(
+                                if platform::matches(target.as_bytes())
+                                    && service_lifecycle.restart(tick)
+                                {
+                                    b"restart scheduled"
+                                } else {
+                                    b"unknown or unavailable service"
+                                },
                             );
-                            let _ = terminal.write_output(b"cancel requested");
+                        }
+                        commands::Outcome::Cancel(target) => {
+                            let _ = terminal.write_output(
+                                if platform::matches(target.as_bytes())
+                                    && channel
+                                        .send(
+                                            &capabilities,
+                                            service_capability,
+                                            session::Principal::LOCAL,
+                                            virtio_handle,
+                                            ipc::Message::Cancel,
+                                        )
+                                        .is_some()
+                                {
+                                    b"cancel requested"
+                                } else {
+                                    b"unknown or unavailable service"
+                                },
+                            );
                         }
                         commands::Outcome::CommandList => {
                             for line in commands::COMMAND_LIST {

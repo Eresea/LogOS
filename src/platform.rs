@@ -6,6 +6,18 @@ pub use driver::{ServiceTask as Task, VirtioService as Service, completion_pendi
 pub const NAME: &[u8] = crate::supervisor::VIRTIO_BALLOON;
 pub const SERVICE: crate::services::Service = crate::services::Service::VirtioBalloon;
 
+pub fn matches(name: &[u8]) -> bool {
+    name == NAME
+}
+
+pub fn service_status(healthy: bool) -> &'static [u8] {
+    if healthy { b"platform service running" } else { b"platform service overdue" }
+}
+
+pub const fn driver_status() -> &'static [u8] {
+    b"platform driver bound"
+}
+
 const BALLOON: crate::device::DriverManifest = crate::device::DriverManifest {
     interface: crate::device::Interface::new(crate::device::Class::Memory),
     vendor_id: 0x1af4,

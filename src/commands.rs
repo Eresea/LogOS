@@ -16,8 +16,8 @@ pub enum Outcome {
     Drivers,
     Trace,
     Inspect(Submission),
-    Restart,
-    Cancel,
+    Restart(Submission),
+    Cancel(Submission),
     CommandList,
     Text(Submission),
     Error(Error),
@@ -272,10 +272,12 @@ fn invoke_stage(
     } else if descriptor.name == b"inspect" && !argument.is_empty() {
         Submission::from_bytes(argument)
             .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Inspect)
-    } else if descriptor.name == b"restart" && argument == b"virtio-balloon" {
-        Outcome::Restart
-    } else if descriptor.name == b"cancel" && argument == b"virtio-balloon" {
-        Outcome::Cancel
+    } else if descriptor.name == b"restart" && !argument.is_empty() {
+        Submission::from_bytes(argument)
+            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Restart)
+    } else if descriptor.name == b"cancel" && !argument.is_empty() {
+        Submission::from_bytes(argument)
+            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Cancel)
     } else if descriptor.name == b"health" {
         Submission::from_bytes(b"healthy")
             .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
@@ -415,8 +417,14 @@ pub fn self_check() -> bool {
             invoke(inspect, &denied_session, &capabilities, Invocation::new(2), 1),
             Outcome::Inspect(_)
         )
-        && invoke(restart, &session, &capabilities, Invocation::new(2), 1) == Outcome::Restart
-        && invoke(cancel, &session, &capabilities, Invocation::new(2), 1) == Outcome::Cancel
+        && matches!(
+            invoke(restart, &session, &capabilities, Invocation::new(2), 1),
+            Outcome::Restart(_)
+        )
+        && matches!(
+            invoke(cancel, &session, &capabilities, Invocation::new(2), 1),
+            Outcome::Cancel(_)
+        )
         && descriptors().len() == 16
         && descriptors()[3].arguments.is_empty()
         && COMMAND_LIST.len() == 8
