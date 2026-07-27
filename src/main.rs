@@ -419,6 +419,11 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                             );
                             let _ = terminal.write_output(b"cancel requested");
                         }
+                        commands::Outcome::CommandList => {
+                            for line in commands::COMMAND_LIST {
+                                let _ = terminal.write_output(line);
+                            }
+                        }
                         commands::Outcome::Text(value) => {
                             if let Some(value) = format::render(value, format::Style::Human) {
                                 let _ = terminal.write_output(value.as_bytes());

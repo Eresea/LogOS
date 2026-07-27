@@ -38,7 +38,9 @@ impl Output {
 
     fn push(&mut self, line: Submission) -> bool {
         if self.length == SCROLLBACK {
-            return false;
+            self.lines[self.head] = line;
+            self.head = (self.head + 1) % SCROLLBACK;
+            return true;
         }
         self.lines[self.head] = line;
         self.head = (self.head + 1) % SCROLLBACK;
@@ -571,7 +573,7 @@ impl Model {
             && scrollback_match
             && search.search(b"missing").is_none()
             && display_restart
-            && !backpressure.write_output(b"x")
+            && backpressure.write_output(b"x")
     }
 
     fn columns_before_cursor(&self) -> usize {

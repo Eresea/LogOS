@@ -18,6 +18,7 @@ pub enum Outcome {
     Inspect(Submission),
     Restart,
     Cancel,
+    CommandList,
     Text(Submission),
     Error(Error),
 }
@@ -87,6 +88,17 @@ const TEXT_ARGUMENT: [Argument; 1] =
     [Argument { name: b"text", kind: ArgumentKind::Text, required: true }];
 const LAYOUT_ARGUMENT: [Argument; 1] =
     [Argument { name: b"layout", kind: ArgumentKind::Text, required: true }];
+
+pub const COMMAND_LIST: [&[u8]; 8] = [
+    b"health clear",
+    b"layout recovery",
+    b"echo help",
+    b"commands reboot",
+    b"poweroff tasks",
+    b"services drivers",
+    b"trace inspect",
+    b"restart cancel",
+];
 
 const DESCRIPTORS: [Descriptor; 16] = [
     Descriptor {
@@ -279,8 +291,7 @@ fn invoke_stage(
     } else if descriptor.name == b"echo" {
         input.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
     } else if descriptor.name == b"commands" {
-        Submission::from_bytes(b"16 commands")
-            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
+        Outcome::CommandList
     } else if descriptor.name == b"help" && !argument.is_empty() {
         descriptors()
             .iter()
@@ -385,7 +396,7 @@ pub fn self_check() -> bool {
         && pipeline(pipe, &denied_session, &capabilities, Invocation::new(2), 1)
             == Outcome::Text(hello)
         && invoke(commands, &denied_session, &capabilities, Invocation::new(2), 1)
-            .is_text(b"16 commands")
+            == Outcome::CommandList
         && invoke(reboot, &session, &capabilities, Invocation::new(2), 1) == Outcome::Reboot
         && invoke(poweroff, &session, &capabilities, Invocation::new(2), 1) == Outcome::PowerOff
         && invoke(health, &denied_session, &capabilities, Invocation::new(2), 1).is_text(b"healthy")
@@ -408,6 +419,7 @@ pub fn self_check() -> bool {
         && invoke(cancel, &session, &capabilities, Invocation::new(2), 1) == Outcome::Cancel
         && descriptors().len() == 16
         && descriptors()[3].arguments.is_empty()
+        && COMMAND_LIST.len() == 8
         && text_argument.kind == ArgumentKind::Text
         && text_argument.required
 }
