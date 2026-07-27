@@ -3,6 +3,9 @@ mod driver;
 
 pub use driver::{ServiceTask as Task, VirtioService as Service, completion_pending, interrupt};
 
+pub const NAME: &[u8] = crate::supervisor::VIRTIO_BALLOON;
+pub const SERVICE: crate::services::Service = crate::services::Service::VirtioBalloon;
+
 const BALLOON: crate::device::DriverManifest = crate::device::DriverManifest {
     interface: crate::device::Interface::new(crate::device::Class::Memory),
     vendor_id: 0x1af4,

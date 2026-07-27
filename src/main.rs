@@ -206,26 +206,18 @@ fn kernel_main(
     let Some(supervisor) = supervisor::boot_plan(supervisor::Profile::Normal).ok() else {
         fail!(b"supervisor manifest");
     };
-    check!(
-        b"supervisor manifest",
-        supervisor::self_check() && supervisor.starts(supervisor::VIRTIO_BALLOON),
-    );
+    check!(b"supervisor manifest", supervisor::self_check() && supervisor.starts(platform::NAME),);
     check!(b"service profiles", supervisor::profiles_self_check());
     check!(b"service dependency loss", supervisor::dependency_loss_self_check());
     check!(b"service startup failure", supervisor::startup_failure_self_check());
-    let Some(service_protocol) = supervisor
-        .negotiate(supervisor::VIRTIO_BALLOON, services::Service::VirtioBalloon.protocol())
+    let Some(service_protocol) = supervisor.negotiate(platform::NAME, platform::SERVICE.protocol())
     else {
-        supervisor::report_start_failure(
-            supervisor::VIRTIO_BALLOON,
-            supervisor::StartStage::Protocol,
-        );
+        supervisor::report_start_failure(platform::NAME, supervisor::StartStage::Protocol);
         fail!(b"service protocol");
     };
     check!(
         b"service protocol",
-        supervisor::protocol_self_check()
-            && service_protocol == services::Service::VirtioBalloon.protocol(),
+        supervisor::protocol_self_check() && service_protocol == platform::SERVICE.protocol(),
     );
     let Some(session_service_capability) =
         capabilities.grant(capabilities::CapabilityKind::Service)
@@ -243,15 +235,10 @@ fn kernel_main(
     ) else {
         fail!(b"session");
     };
-    let Some(service_capability) = supervisor.grant(
-        supervisor::VIRTIO_BALLOON,
-        &mut capabilities,
-        capabilities::CapabilityKind::Service,
-    ) else {
-        supervisor::report_start_failure(
-            supervisor::VIRTIO_BALLOON,
-            supervisor::StartStage::Capability,
-        );
+    let Some(service_capability) =
+        supervisor.grant(platform::NAME, &mut capabilities, capabilities::CapabilityKind::Service)
+    else {
+        supervisor::report_start_failure(platform::NAME, supervisor::StartStage::Capability);
         fail!(b"service capability");
     };
     check!(
@@ -264,30 +251,21 @@ fn kernel_main(
     check!(
         b"service health",
         supervisor::health_self_check()
-            && service_health.watch(
-                &supervisor,
-                supervisor::VIRTIO_BALLOON,
-                100,
-                interrupts::ticks(),
-            ),
+            && service_health.watch(&supervisor, platform::NAME, 100, interrupts::ticks(),),
     );
-    let Some(mut service_lifecycle) =
-        supervisor::Lifecycle::new(&supervisor, supervisor::VIRTIO_BALLOON)
+    let Some(mut service_lifecycle) = supervisor::Lifecycle::new(&supervisor, platform::NAME)
     else {
         fail!(b"service lifecycle");
     };
     check!(b"service lifecycle", supervisor::lifecycle_self_check());
     let mut services = services::Registry::new();
     let Some(virtio_handle) =
-        services.register(&capabilities, service_capability, services::Service::VirtioBalloon)
+        services.register(&capabilities, service_capability, platform::SERVICE)
     else {
-        supervisor::report_start_failure(
-            supervisor::VIRTIO_BALLOON,
-            supervisor::StartStage::Register,
-        );
+        supervisor::report_start_failure(platform::NAME, supervisor::StartStage::Register);
         fail!(b"services");
     };
-    check!(b"services", services.resolve(services::Service::VirtioBalloon) == Some(virtio_handle),);
+    check!(b"services", services.resolve(platform::SERVICE) == Some(virtio_handle),);
     let Some(virtio_gsi) = acpi.and_then(|tables| {
         let (bus, slot, _) = device.location();
         tables.pci_gsi(bus, slot, device.interrupt_pin().checked_sub(1)?)
@@ -297,8 +275,8 @@ fn kernel_main(
     let Some(mut virtio_service) =
         platform::Service::bind(device, virtio_gsi, virtio_handle, &mut memory)
     else {
-        supervisor::report_start_failure(supervisor::VIRTIO_BALLOON, supervisor::StartStage::Bind);
-        fail!(b"virtio");
+        supervisor::report_start_failure(platform::NAME, supervisor::StartStage::Bind);
+        fail!(b"platform service");
     };
     let channel = ipc::Channel::new();
     let responses = ipc::Channel::new();
@@ -403,7 +381,7 @@ fn kernel_main(
     check!(
         b"service replacement",
         supervisor::replacement_self_check()
-            && supervisor.replace(supervisor::VIRTIO_BALLOON, || {
+            && supervisor.replace(platform::NAME, || {
                 if !virtio_service.release(&mut memory) {
                     return false;
                 }
@@ -426,7 +404,7 @@ fn kernel_main(
     );
     let mut service_scheduler = scheduler::Scheduler::new();
     if service_scheduler.spawn(&mut service_task).is_none() {
-        supervisor::report_start_failure(supervisor::VIRTIO_BALLOON, supervisor::StartStage::Task);
+        supervisor::report_start_failure(platform::NAME, supervisor::StartStage::Task);
         fail!(b"scheduler rebind");
     }
     let mut display = display::Service::new(
@@ -500,9 +478,9 @@ fn kernel_main(
                 let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
             }
             if service_scheduler.run_next() {
-                let _ = service_health.beat(supervisor::VIRTIO_BALLOON, tick);
+                let _ = service_health.beat(platform::NAME, tick);
             }
-            if !service_health.healthy(supervisor::VIRTIO_BALLOON, tick) {
+            if !service_health.healthy(platform::NAME, tick) {
                 debug::write_line(b"LogOS: service heartbeat overdue");
                 let _ = service_lifecycle.failed(tick);
             }
@@ -637,7 +615,7 @@ fn kernel_main(
                 let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
             }
             if service_scheduler.run_next() {
-                let _ = service_health.beat(supervisor::VIRTIO_BALLOON, tick);
+                let _ = service_health.beat(platform::NAME, tick);
             }
         })
     }
