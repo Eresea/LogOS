@@ -110,6 +110,14 @@ System services provide shared machine-wide behavior.
 - Privileged effects emit audit events.
 - System services remain remotely operable without a graphical environment.
 
+### Platform v1 bootstrap
+
+The bootstrap supervisor validates static manifests before starting their services. A
+manifest has a stable service name and explicit dependencies; startup rejects duplicate
+names, missing dependencies, and cycles. The current bootstrap plan starts
+`virtio-balloon` after `supervisor`; it is bounded, in-memory, and has no package loader,
+protocol negotiation, or restart policy yet.
+
 ## Ring 3 — Sessions
 
 Sessions provide interactive and automated control of the system.

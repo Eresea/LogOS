@@ -17,6 +17,7 @@ mod pci;
 mod scheduler;
 mod services;
 mod session;
+mod supervisor;
 mod trace;
 mod virtio;
 mod virtual_memory;
@@ -179,6 +180,13 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     ) else {
         fail!(b"session");
     };
+    let Some(supervisor) = supervisor::boot_plan().ok() else {
+        fail!(b"supervisor manifest");
+    };
+    check!(
+        b"supervisor manifest",
+        supervisor::self_check() && supervisor.starts(supervisor::VIRTIO_BALLOON),
+    );
     let mut services = services::Registry::new();
     let Some(virtio_handle) =
         services.register(&capabilities, service_capability, services::Service::VirtioBalloon)

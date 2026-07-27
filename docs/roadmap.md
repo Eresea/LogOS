@@ -152,8 +152,7 @@ Turn kernel mechanisms into a supervised service platform with explicit identiti
 
 ## Service supervision
 
-- [ ] Declarative service manifests.
-- [ ] Dependency graph and startup ordering.
+- [x] Static declarative service manifests and bounded dependency startup ordering.
 - [ ] Capability declarations and grants.
 - [ ] Protocol and ABI version negotiation.
 - [ ] Health checks and heartbeats.
