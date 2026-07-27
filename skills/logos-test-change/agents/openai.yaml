@@ -1,0 +1,4 @@
+interface:
+  display_name: "LogOS Test Change"
+  short_description: "Select and run tests for a LogOS change"
+  default_prompt: "Use $logos-test-change to verify my current LogOS changes."

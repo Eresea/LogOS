@@ -1,0 +1,4 @@
+interface:
+  display_name: "Add LogOS Proof"
+  short_description: "Add a permanent roadmap-linked LogOS proof"
+  default_prompt: "Use $logos-add-proof to add a LogOS milestone proof."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "LogOS Build"
+  short_description: "Build LogOS through the canonical harness"
+  default_prompt: "Use $logos-build to build the correct LogOS image."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "LogOS QEMU Run"
+  short_description: "Run named LogOS QEMU proof scenarios"
+  default_prompt: "Use $logos-qemu-run to run the relevant LogOS QEMU proof."

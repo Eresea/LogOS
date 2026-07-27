@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug LogOS QEMU Failure"
+  short_description: "Diagnose a recorded LogOS QEMU failure"
+  default_prompt: "Use $logos-debug-qemu-failure to diagnose this failed proof."
