@@ -247,6 +247,8 @@ A native implementation should not become permanent merely because it was easier
 
 ## 7. Terminal and session architecture
 
+See [Console](CONSOLE.md) for the versioned terminal subsystem scope and checklist.
+
 ## Recovery console
 
 Kernel-owned, fixed-function, minimal.

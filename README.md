@@ -14,6 +14,7 @@ Console v1 is complete: a normal local terminal operates on typed commands and c
 
 - [Architecture](docs/ARCHITECTURE.md) — system boundaries, layers, and service model.
 - [Roadmap](docs/ROADMAP.md) — current progress and the path ahead.
+- [Console](docs/CONSOLE.md) — normal terminal scope and versioned checklist.
 - [Development](docs/development.md) — prerequisites, build, checks, and QEMU commands.
 
 ## Design constraints
