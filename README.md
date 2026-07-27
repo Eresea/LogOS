@@ -8,7 +8,7 @@
 
 LogOS keeps the kernel focused on the work only the kernel can do: hardware, memory, scheduling, IPC, and capability enforcement. Everything else is intended to be a replaceable service, with sandboxed WebAssembly applications as the long-term application model.
 
-The current milestone is observable UEFI bring-up in QEMU, with a dependable event-driven kernel foundation and a local console.
+Console v1 is complete: a normal local terminal operates on typed commands and can hand off to an independent recovery console. Next: Platform v1.
 
 ## Start here
 
