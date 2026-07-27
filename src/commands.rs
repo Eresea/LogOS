@@ -419,11 +419,11 @@ pub fn self_check() -> bool {
         )
         && matches!(
             invoke(restart, &session, &capabilities, Invocation::new(2), 1),
-            Outcome::Restart(_)
+            Outcome::Restart(target) if target.as_bytes() == b"virtio-balloon"
         )
         && matches!(
             invoke(cancel, &session, &capabilities, Invocation::new(2), 1),
-            Outcome::Cancel(_)
+            Outcome::Cancel(target) if target.as_bytes() == b"virtio-balloon"
         )
         && descriptors().len() == 16
         && descriptors()[3].arguments.is_empty()
