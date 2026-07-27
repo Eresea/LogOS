@@ -5,6 +5,7 @@ $log = Join-Path $env:TEMP "logos-qemu-$PID.log"
 $errorLog = Join-Path $env:TEMP "logos-qemu-$PID.err.log"
 $markers = @(
     'LogOS: check scheduler passed',
+    'LogOS: check machine identity passed',
     'LogOS: check ipc passed',
     'LogOS: check ipc cancel passed',
     'LogOS: check service task passed',

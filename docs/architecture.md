@@ -126,6 +126,10 @@ registration, binding, or task stage to the debug console before the startup hea
 The supervisor requests replacement by declared service name only. The service-owned callback
 releases and binds implementation resources, so supervisor policy has no driver-specific logic.
 
+Machine identity is a 128-bit UEFI runtime variable. It is stable when firmware variable storage
+is available; the bootstrap reports an explicit volatile fallback otherwise. Entropy-backed
+identity creation is deferred until the entropy service is available.
+
 Services reclaim request-owned resources on completion and on release. The bootstrap VirtIO
 service returns its submitted page before replying and releases any pending page with its queue
 during replacement or shutdown.

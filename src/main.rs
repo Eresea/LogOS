@@ -8,6 +8,7 @@ mod console;
 mod debug;
 mod format;
 mod health;
+mod identity;
 mod interrupts;
 mod ipc;
 mod keyboard;
@@ -28,6 +29,8 @@ use uefi::{boot, mem::memory_map::MemoryMap, prelude::*, proto::console::gop::Gr
 #[entry]
 fn main() -> Status {
     debug::write_line(b"LogOS: kernel entered");
+    let machine = identity::load();
+    identity::announce(&machine);
     let boot_info = match boot_info() {
         Ok(info) => info,
         Err(_) => return Status::DEVICE_ERROR,
@@ -39,7 +42,7 @@ fn main() -> Status {
     debug::write_line(b"LogOS: leaving UEFI boot services");
 
     let memory_map = unsafe { boot::exit_boot_services(None) };
-    kernel_main(boot_info, memory_map, acpi)
+    kernel_main(boot_info, memory_map, acpi, machine)
 }
 
 struct BootInfo {
@@ -63,7 +66,12 @@ fn boot_info() -> uefi::Result<BootInfo> {
     })
 }
 
-fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acpi::Tables>) -> ! {
+fn kernel_main(
+    boot_info: BootInfo,
+    memory_map: impl MemoryMap,
+    acpi: Option<acpi::Tables>,
+    machine: identity::Machine,
+) -> ! {
     let health = health::Startup::new();
     trace::record(trace::Event::Boot);
     let framebuffer_ok = !boot_info.framebuffer.is_null()
@@ -91,6 +99,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         }};
     }
     check!(b"debug", true);
+    check!(b"machine identity", identity::self_check() && machine.id() == machine.id());
     check!(b"framebuffer", framebuffer_ok);
     check!(
         b"acpi",

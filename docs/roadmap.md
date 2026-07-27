@@ -164,7 +164,7 @@ Turn kernel mechanisms into a supervised service platform with explicit identiti
 
 ## Machine services
 
-- [ ] Stable machine identity.
+- [x] Stable machine identity with explicit volatile fallback.
 - [ ] Service and process principals.
 - [ ] Local user principals.
 - [ ] Monotonic time service.
