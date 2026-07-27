@@ -1,12 +1,12 @@
 # Platform
 
-> **Status:** Platform v1 complete  
+> **Status:** Bootstrap mechanisms implemented; independent service execution pending
 > **Owner:** Foundation and System
 
-Platform turns Core mechanisms into supervised native services with explicit identities,
-capabilities, health, and versioned contracts.
+Platform currently provides the bootstrap mechanisms for supervised native services: identities,
+capabilities, health, and versioned contracts. They still execute in the UEFI image until the native task loader and service boundary exist.
 
-## V1 — Complete
+## Implemented bootstrap
 
 ### Service supervision
 
@@ -32,12 +32,14 @@ capabilities, health, and versioned contracts.
 
 - [x] `services` and `drivers` render Platform-owned status.
 - [x] `restart <target>` and `cancel <target>` preserve a typed target; Platform validates it.
+- [ ] Load `logos-terminal` as a separately executable Sessions service with only input/display/session capabilities.
 
 ### Exit evidence
 
-- [x] Services negotiate explicit contracts and start from manifests.
+- [x] Bootstrap services negotiate explicit contracts and start from manifests.
 - [x] Requests carry principal and capability context; failures reclaim and restart without reboot.
-- [x] QEMU verifies normal boot, startup rejection, dependency loss, runtime recovery, and replacement.
+- [x] QEMU verifies bootstrap normal boot, startup rejection, dependency loss, runtime recovery, and replacement.
+- [ ] QEMU proves an independently loaded native service can start, fail, restart, and lose its capabilities without compromising Core.
 
 ## V2 — Unplanned
 

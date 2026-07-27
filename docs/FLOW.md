@@ -1910,6 +1910,7 @@ Remaining decisions:
 - [x] no general-purpose `null`; use `Option<T>`;
 - [ ] user-defined generics;
 - [ ] effect typing;
+- [ ] information-flow labels for sensitive values and explicit audited declassification;
 - [ ] capability typing depth;
 - [ ] union types;
 - [ ] table semantics.

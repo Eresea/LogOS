@@ -3,27 +3,22 @@
 > Working list derived from ROADMAP.md, FLOW.md, ARCHITECTURE.md/ONION_RINGS.md, NAMING.md, and study_considerations.md.
 > This is a planning aid, not a replacement for ROADMAP.md's authoritative checklists.
 
-## 1. Console v1
+## 1. Implemented bootstrap
 
-Console v1 is complete. Its checklist and future scope live in [CONSOLE.md](CONSOLE.md).
+- [x] `logos-terminal` owns the bounded terminal model, input normalization, framebuffer rendering, and font rasterization.
+- [x] The UEFI image owns the normal-mode loop, command/session dispatch, framebuffer, and PS/2 polling.
+- [x] Platform bootstrap code provides static manifests, lifecycle policy, capability grants, identities, time, entropy, secrets, audit, and driver binding.
+- [x] The kernel-owned recovery console remains a direct, independent fallback.
 
-## 2. Next milestone: Platform v1 kickoff
+## 2. Current milestone: Platform v1 service boundary
 
-Nothing here is started. Suggested entry order, since later items depend on earlier
-ones:
+The missing boundary is execution, not another in-kernel abstraction. Suggested order:
 
-1. Declarative service manifests + dependency graph (everything else in this
-   milestone assumes manifests exist)
-2. Health checks/heartbeats + restart/backoff/quiesce policy
-3. Machine identity, service/process principals, local user principals (unblocks
-   `system.identity` moving from Working → exercised-by-real-services)
-4. Secret store + entropy/random service (unblocks Vault actually being used)
-5. Driver binding policy + capability manifests (turns the `drivers` command above
-   into something backed by real policy instead of a Core v1 stub)
-6. Run `logos-terminal` as a separately loaded, capability-only service; keep
-   framebuffer/PS/2 access and the recovery console kernel-owned.
-7. Everything else in the milestone (time, audit, `system.inference`) can follow
-   as needed rather than strictly in listed order
+1. Define the native task loader and lifecycle contract for separately loaded services.
+2. Define the minimal versioned input/display/session capability contracts required by `logos-terminal`.
+3. Build and load `logos-terminal` as a Sessions service from the QEMU boot payload; remove its direct framebuffer and PS/2 access.
+4. Prove terminal startup, redraw, restart, capability denial, and recovery handoff in headless QEMU.
+5. Only then move further bootstrap services out of `logos-uefi`; keep the recovery console kernel-owned.
 
 ## 3. Documentation debt (cheap, should happen soon)
 
@@ -36,18 +31,15 @@ ones:
       sitting in an otherwise mostly-**Working**/**Reserved** table. Worth deciding
       whether they graduate to Working now or stay pinned until Platform v1 /
       Remote v1 actually start — right now it's ambiguous which.
-- [ ] ROADMAP.md references `reviewed/2026-07-26.md` as an annex; that file isn't
-      among the current project files, so it couldn't be factored into this plan.
-      Worth confirming it's checked into the project.
+- [x] `docs/reviewed/2026-07-26.md` is present; its accepted decisions are reflected
+      in the roadmap and architecture documents.
 
 ## 4. Proposed roadmap additions (from study_considerations.md)
 
-None of these are represented in ROADMAP.md yet. Suggested placement per item:
+Information-flow labels and compensating actions are now roadmap items. The remaining ideas are candidates; suggested placement follows:
 
 | Idea | Suggested home | Priority read |
 |---|---|---|
-| **Sensitive\<T\> information-flow typing** (data can't reach a remote-model capability without explicit declassification) | New subsection under Flow's type system (§9) + a Runtime/System capability rule in ARCHITECTURE.md §14 | High — flagged in the source doc as the most distinctive idea; also directly strengthens the existing "no implicit agent privilege" principle already in ROADMAP.md §12 |
-| **Compensating actions / universal undo** (commands declare a reversal, generated from existing schema) | Extends Console v1's command model (`CommandDescriptor`) and Store's version/snapshot support — could be a Platform v1 or Applications v1 addition | High — same rationale, cheap given existing effect-classification table in ARCHITECTURE.md §8.8 |
 | **Signed action receipts** for multi-agent trust | System.audit extension — portable, verifiable version of existing audit records | Medium — only matters once agent-to-agent delegation is a real scenario, not yet in scope |
 | **Deterministic causal replay** | Continuous Core lane (§14) — extends existing Trace/generation-tagged handles | Medium — high debugging value for capability-delegation bugs, but bounded/opt-in like existing trace philosophy |
 | **Semantic diff/plan before privileged apply** (system-wide `terraform plan` equivalent) | Extends Flow's existing `flow simulate` (already in Phase 13) to Update, capability grants, and Supervisor policy changes | Medium — natural generalization of work already planned |
@@ -55,11 +47,7 @@ None of these are represented in ROADMAP.md yet. Suggested placement per item:
 | **Heterogeneous compute as typed `ComputeRef`** | Ring 0/Ring 1 boundary question — would need its own placement-checklist pass per ONION_RINGS.md §12 | Low near-term — no accelerator hardware target committed yet (`system.inference` accelerator binding is explicitly deferred) |
 | **Power domains as first-class capability/quota** | Extends existing quiesce/reset driver lifecycle + WASM quota model | Low near-term — most relevant once Phase 2 hardware target (PineTab2) is active |
 
-Recommendation: add a short "Candidate extensions" appendix to ROADMAP.md (or a new
-`EXTENSIONS.md` annex alongside ARCHITECTURE.md/NAMING.md) so these aren't only
-living in a study notes file. At minimum, #4 (Sensitive\<T\>) and #6 (compensating
-actions) seem worth turning into real roadmap line items now, since both piggyback
-on infrastructure ROADMAP.md already commits to building.
+Keep the remaining proposals as candidates until their target milestone begins.
 
 ## 5. Naming register follow-up
 
