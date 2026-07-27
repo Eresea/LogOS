@@ -376,6 +376,23 @@ pub fn protocol_self_check() -> bool {
         && plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 2, version: 0 }).is_none()
 }
 
+pub fn dependency_loss_self_check() -> bool {
+    const MISSING: &[Manifest] = &[Manifest {
+        name: b"a",
+        dependencies: &[b"missing"],
+        capabilities: &[],
+        protocol: Protocol { abi: 1, version: 0 },
+        restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+        profiles: Profiles::ALL,
+    }];
+    matches!(Plan::build(MISSING, Profile::Normal), Err(Error::MissingDependency))
+}
+
+pub fn startup_failure_self_check() -> bool {
+    boot_plan(Profile::Normal)
+        .is_ok_and(|plan| plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 2, version: 0 }).is_none())
+}
+
 pub fn diagnostics_self_check() -> bool {
     StartStage::Protocol.message() == b"protocol"
         && StartStage::Capability.message() == b"capability"

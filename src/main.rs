@@ -211,6 +211,8 @@ fn kernel_main(
         supervisor::self_check() && supervisor.starts(supervisor::VIRTIO_BALLOON),
     );
     check!(b"service profiles", supervisor::profiles_self_check());
+    check!(b"service dependency loss", supervisor::dependency_loss_self_check());
+    check!(b"service startup failure", supervisor::startup_failure_self_check());
     let Some(service_protocol) = supervisor
         .negotiate(supervisor::VIRTIO_BALLOON, services::Service::VirtioBalloon.protocol())
     else {

@@ -15,6 +15,8 @@ $markers = @(
     'LogOS: check service replacement passed',
     'LogOS: check supervisor manifest passed',
     'LogOS: check service profiles passed',
+    'LogOS: check service dependency loss passed',
+    'LogOS: check service startup failure passed',
     'LogOS: check service capability passed',
     'LogOS: check service protocol passed',
     'LogOS: check service diagnostics passed',
