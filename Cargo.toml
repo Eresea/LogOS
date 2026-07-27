@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/logos-terminal"]
+members = ["crates/logos-core", "crates/logos-terminal"]
+default-members = ["crates/logos-core", "crates/logos-terminal"]
 resolver = "3"
 
 [package]
@@ -8,5 +9,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+logos-core = { path = "crates/logos-core" }
 logos-terminal = { path = "crates/logos-terminal" }
 uefi = { version = "0.35", features = ["panic_handler"] }
+
+[features]
+test-hooks = []
