@@ -20,7 +20,9 @@ ones:
 4. Secret store + entropy/random service (unblocks Vault actually being used)
 5. Driver binding policy + capability manifests (turns the `drivers` command above
    into something backed by real policy instead of a Core v1 stub)
-6. Everything else in the milestone (time, audit, `system.inference`) can follow
+6. Run `logos-terminal` as a separately loaded, capability-only service; keep
+   framebuffer/PS/2 access and the recovery console kernel-owned.
+7. Everything else in the milestone (time, audit, `system.inference`) can follow
    as needed rather than strictly in listed order
 
 ## 3. Documentation debt (cheap, should happen soon)
