@@ -1,5 +1,5 @@
 use crate::{
-    audit::{Effect, Event, Log},
+    audit::{Effect, Log},
     capabilities::{Capability, CapabilityKind, CapabilityManager},
     session::Principal,
 };
@@ -38,10 +38,14 @@ impl Store {
         if expires.wrapping_sub(now) == 0 || expires.wrapping_sub(now) >= 1 << 63 {
             return None;
         }
-        let capability = capabilities.grant(kind)?;
         let (index, slot) = self.grants.iter_mut().enumerate().find(|(_, slot)| slot.is_none())?;
+        if !audit.can_record() {
+            return None;
+        }
+        let capability = capabilities.grant(kind)?;
         *slot = Some(Grant { principal, kind, capability, expires });
-        audit.record(Event { principal, effect: Effect::ApprovalGrant }).then_some(Id(index as u8))
+        debug_assert!(audit.record(principal, Effect::ApprovalGrant));
+        Some(Id(index as u8))
     }
 
     pub fn allows(
@@ -66,6 +70,9 @@ impl Store {
         id: Id,
         audit: &mut Log,
     ) -> bool {
+        if !audit.can_record() {
+            return false;
+        }
         let Some(slot) = self.grants.get_mut(id.0 as usize) else {
             return false;
         };
@@ -73,7 +80,7 @@ impl Store {
             return false;
         };
         capabilities.revoke(grant.capability)
-            && audit.record(Event { principal: grant.principal, effect: Effect::ApprovalRevoke })
+            && audit.record(grant.principal, Effect::ApprovalRevoke)
     }
 }
 
@@ -91,4 +98,10 @@ pub fn self_check() -> bool {
         && !grants.allows(&capabilities, id, principal, CapabilityKind::Recovery, 12)
         && grants.revoke(&mut capabilities, id, &mut audit)
         && audit.latest().is_some_and(|event| event.effect == Effect::ApprovalRevoke)
+        && {
+            while audit.record(principal, Effect::ApprovalGrant) {}
+            grants
+                .grant(&mut capabilities, principal, CapabilityKind::Recovery, 20, 10, &mut audit)
+                .is_none()
+        }
 }
