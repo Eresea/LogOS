@@ -6,6 +6,7 @@ pub enum CapabilityKind {
     Service,
     Recovery,
     Secret,
+    Inference,
 }
 
 #[derive(Clone, Copy)]

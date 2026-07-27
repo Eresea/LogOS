@@ -141,6 +141,9 @@ operation-specific credential brokering.
 Standing approvals are bounded grants scoped to one principal and capability kind. They expire,
 are individually revocable, and emit distinct grant and revoke audit events.
 
+`system.inference` owns the bounded model inventory and accelerator bindings. Invocation is
+represented by an expiring `Inference` approval granted only to the requesting runtime process.
+
 Privileged operations append a bounded audit event carrying the initiating principal and effect.
 The bootstrap records secret writes; durable export and retention are Persistence v1 concerns.
 
