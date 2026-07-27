@@ -118,6 +118,10 @@ names, missing dependencies, and cycles. The current bootstrap plan starts
 `virtio-balloon` after `supervisor`; it is bounded, in-memory, and has no package loader,
 protocol negotiation, or restart policy yet.
 
+The supervisor watches a bounded heartbeat for each boot service. A scheduled service
+updates its heartbeat; the supervisor can report an overdue service without choosing a
+recovery action. Restart, backoff, and quiesce policy remain separate.
+
 ## Ring 3 — Sessions
 
 Sessions provide interactive and automated control of the system.

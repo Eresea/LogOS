@@ -187,6 +187,17 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         b"supervisor manifest",
         supervisor::self_check() && supervisor.starts(supervisor::VIRTIO_BALLOON),
     );
+    let mut service_health = supervisor::Health::new();
+    check!(
+        b"service health",
+        supervisor::health_self_check()
+            && service_health.watch(
+                &supervisor,
+                supervisor::VIRTIO_BALLOON,
+                100,
+                interrupts::ticks(),
+            ),
+    );
     let mut services = services::Registry::new();
     let Some(virtio_handle) =
         services.register(&capabilities, service_capability, services::Service::VirtioBalloon)
@@ -352,6 +363,15 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         let mut blink_tick = interrupts::ticks();
         while console_mode == mode::ConsoleMode::Normal {
             let tick = interrupts::ticks();
+            if virtio::completion_pending() {
+                let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
+            }
+            if service_scheduler.run_next() {
+                let _ = service_health.beat(supervisor::VIRTIO_BALLOON, tick);
+            }
+            if !service_health.healthy(supervisor::VIRTIO_BALLOON, tick) {
+                debug::write_line(b"LogOS: service heartbeat overdue");
+            }
             if tick.wrapping_sub(blink_tick) >= 50 {
                 terminal.blink();
                 if !terminal.render_caret(display.as_mut().unwrap(), &text) {
@@ -479,10 +499,13 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         );
         let _ = console.start();
         console.run(|| {
+            let tick = interrupts::ticks();
             if virtio::completion_pending() {
                 let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
             }
-            let _ = service_scheduler.run_next();
+            if service_scheduler.run_next() {
+                let _ = service_health.beat(supervisor::VIRTIO_BALLOON, tick);
+            }
         })
     }
     loop {

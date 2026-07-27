@@ -24,6 +24,57 @@ pub struct Plan {
     len: usize,
 }
 
+#[derive(Clone, Copy)]
+struct Heartbeat {
+    name: &'static [u8],
+    timeout: u64,
+    last: u64,
+}
+
+pub struct Health {
+    heartbeats: [Option<Heartbeat>; MAX_MANIFESTS],
+}
+
+impl Health {
+    pub const fn new() -> Self {
+        Self { heartbeats: [None; MAX_MANIFESTS] }
+    }
+
+    pub fn watch(&mut self, plan: &Plan, name: &'static [u8], timeout: u64, tick: u64) -> bool {
+        if timeout == 0 || !plan.starts(name) || self.find(name).is_some() {
+            return false;
+        }
+        for slot in &mut self.heartbeats {
+            if slot.is_none() {
+                *slot = Some(Heartbeat { name, timeout, last: tick });
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn beat(&mut self, name: &[u8], tick: u64) -> bool {
+        let Some(index) = self.find(name) else {
+            return false;
+        };
+        self.heartbeats[index].as_mut().unwrap().last = tick;
+        true
+    }
+
+    pub fn healthy(&self, name: &[u8], tick: u64) -> bool {
+        self.find(name).is_some_and(|index| {
+            let heartbeat = self.heartbeats[index].unwrap();
+            tick.wrapping_sub(heartbeat.last) <= heartbeat.timeout
+        })
+    }
+
+    fn find(&self, name: &[u8]) -> Option<usize> {
+        self.heartbeats
+            .iter()
+            .position(|heartbeat| heartbeat.is_some_and(|heartbeat| heartbeat.name == name))
+    }
+}
+
 impl Plan {
     pub fn build(manifests: &'static [Manifest]) -> Result<Self, Error> {
         if manifests.len() > MAX_MANIFESTS {
@@ -88,4 +139,17 @@ pub fn self_check() -> bool {
     Plan::build(OK).is_ok_and(|plan| plan.starts(A) && plan.starts(B))
         && matches!(Plan::build(MISSING), Err(Error::MissingDependency))
         && matches!(Plan::build(CYCLE), Err(Error::Cycle))
+}
+
+pub fn health_self_check() -> bool {
+    let Ok(plan) = boot_plan() else {
+        return false;
+    };
+    let mut health = Health::new();
+    health.watch(&plan, VIRTIO_BALLOON, 2, 10)
+        && health.healthy(VIRTIO_BALLOON, 12)
+        && !health.healthy(VIRTIO_BALLOON, 13)
+        && health.beat(VIRTIO_BALLOON, 13)
+        && health.healthy(VIRTIO_BALLOON, 15)
+        && !health.watch(&plan, VIRTIO_BALLOON, 2, 15)
 }

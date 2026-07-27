@@ -12,6 +12,7 @@ $markers = @(
     'LogOS: check driver recovery passed',
     'LogOS: check service lifetime passed',
     'LogOS: check supervisor manifest passed',
+    'LogOS: check service health passed',
     'LogOS: check console mode passed',
     'LogOS: console mode normal',
     'LogOS: normal terminal active',
