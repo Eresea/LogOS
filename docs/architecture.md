@@ -130,6 +130,10 @@ Machine identity is a 128-bit UEFI runtime variable. It is stable when firmware 
 is available; the bootstrap reports an explicit volatile fallback otherwise. Entropy-backed
 identity creation is deferred until the entropy service is available.
 
+The entropy service reads the UEFI RNG protocol before boot services exit. Its 256-bit output
+seeds new machine identities; an unavailable RNG leaves identity explicitly volatile rather than
+using timestamp-derived data as a secure random substitute.
+
 The monotonic-time service exposes the PIT tick count as an opaque increasing value. It makes no
 wall-clock claim and remains valid across timer consumers. Before boot services exit, the
 wall-clock service snapshots the UEFI RTC as explicitly `Untrusted`; a failed or invalid read is

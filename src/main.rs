@@ -6,6 +6,7 @@ mod capabilities;
 mod commands;
 mod console;
 mod debug;
+mod entropy;
 mod format;
 mod health;
 mod identity;
@@ -30,7 +31,9 @@ use uefi::{boot, mem::memory_map::MemoryMap, prelude::*, proto::console::gop::Gr
 #[entry]
 fn main() -> Status {
     debug::write_line(b"LogOS: kernel entered");
-    let machine = identity::load();
+    let entropy = entropy::load();
+    entropy::announce(entropy);
+    let machine = identity::load(entropy.as_ref());
     identity::announce(&machine);
     let wall_clock = time::wall_clock();
     time::announce(wall_clock);
@@ -103,7 +106,10 @@ fn kernel_main(
         }};
     }
     check!(b"debug", true);
-    check!(b"machine identity", identity::self_check() && machine.id() == machine.id());
+    check!(
+        b"machine identity",
+        entropy::self_check() && identity::self_check() && machine.id() == machine.id(),
+    );
     check!(b"framebuffer", framebuffer_ok);
     check!(
         b"acpi",

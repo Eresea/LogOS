@@ -11,14 +11,9 @@ const NAME: &uefi::CStr16 = cstr16!("LogOSMachineId");
 pub struct MachineId([u8; 16]);
 
 impl MachineId {
-    fn from_seed(mut seed: u64) -> Self {
+    fn from_entropy(seed: &crate::entropy::Seed) -> Self {
         let mut bytes = [0; 16];
-        for byte in &mut bytes {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            *byte = seed as u8;
-        }
+        bytes.copy_from_slice(&seed.bytes()[..16]);
         Self(bytes)
     }
 }
@@ -44,7 +39,7 @@ impl Machine {
     }
 }
 
-pub fn load() -> Machine {
+pub fn load(entropy: Option<&crate::entropy::Seed>) -> Machine {
     let mut bytes = [0; 16];
     if let Ok((stored, _)) =
         runtime::get_variable(NAME, &VariableVendor::GLOBAL_VARIABLE, &mut bytes)
@@ -52,7 +47,10 @@ pub fn load() -> Machine {
     {
         return Machine { id: MachineId(bytes), source: Source::Firmware };
     }
-    let id = MachineId::from_seed(timestamp());
+    let Some(entropy) = entropy else {
+        return Machine { id: MachineId::from_seed(timestamp()), source: Source::Volatile };
+    };
+    let id = MachineId::from_entropy(entropy);
     let attributes = VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS;
     let source = if runtime::set_variable(NAME, &VariableVendor::GLOBAL_VARIABLE, attributes, &id.0)
         .is_ok()
@@ -72,8 +70,22 @@ pub fn announce(machine: &Machine) {
 }
 
 pub fn self_check() -> bool {
-    let one = MachineId::from_seed(1);
-    one == MachineId::from_seed(1) && one != MachineId::from_seed(2)
+    let one = MachineId::from_entropy(&crate::entropy::Seed::from_bytes([1; 32]));
+    one == MachineId::from_entropy(&crate::entropy::Seed::from_bytes([1; 32]))
+        && one != MachineId::from_entropy(&crate::entropy::Seed::from_bytes([2; 32]))
+}
+
+impl MachineId {
+    fn from_seed(mut seed: u64) -> Self {
+        let mut bytes = [0; 16];
+        for byte in &mut bytes {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            *byte = seed as u8;
+        }
+        Self(bytes)
+    }
 }
 
 fn timestamp() -> u64 {
