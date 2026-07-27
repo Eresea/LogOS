@@ -1,0 +1,28 @@
+name: Testing PR Tier
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: {components: "rustfmt, clippy", targets: x86_64-unknown-uefi}
+      - run: cargo fmt --check --all
+      - run: cargo clippy -p logos-core -p logos-terminal -p logos-test --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
+      - run: cargo test -p logos-core -p logos-terminal -p logos-test --target x86_64-unknown-linux-gnu
+  qemu:
+    needs: host
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: {targets: x86_64-unknown-uefi}
+      - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
+      - run: cargo run -p logos-test -- suite pr
+        env: {OVMF_CODE: /usr/share/OVMF/OVMF_CODE.fd}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: {name: logos-test-pr, path: target/logos-test}
