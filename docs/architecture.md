@@ -130,6 +130,10 @@ Services reclaim request-owned resources on completion and on release. The boots
 service returns its submitted page before replying and releases any pending page with its queue
 during replacement or shutdown.
 
+Manifests declare normal, recovery, and diagnostics profile membership. Recovery starts the
+minimum service set needed for recovery operations; diagnostics starts only the supervisor until
+diagnostic-specific services exist. Normal boot selects the normal profile.
+
 The supervisor watches a bounded heartbeat for each boot service. A scheduled service
 updates its heartbeat; an overdue heartbeat schedules bounded exponential-backoff
 recovery. The manifest owns retry limits and shutdown state; the existing VirtIO driver

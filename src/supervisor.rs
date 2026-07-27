@@ -9,6 +9,35 @@ pub const SUPERVISOR: &[u8] = b"supervisor";
 pub const VIRTIO_BALLOON: &[u8] = b"virtio-balloon";
 
 #[derive(Clone, Copy)]
+pub enum Profile {
+    Normal,
+    Recovery,
+    Diagnostics,
+}
+
+#[derive(Clone, Copy)]
+pub struct Profiles(u8);
+
+impl Profiles {
+    const NORMAL: u8 = 1;
+    const RECOVERY: u8 = 2;
+    const DIAGNOSTICS: u8 = 4;
+
+    pub const ALL: Self = Self(Self::NORMAL | Self::RECOVERY | Self::DIAGNOSTICS);
+    pub const NORMAL_RECOVERY: Self = Self(Self::NORMAL | Self::RECOVERY);
+
+    const fn includes(self, profile: Profile) -> bool {
+        self.0
+            & match profile {
+                Profile::Normal => Self::NORMAL,
+                Profile::Recovery => Self::RECOVERY,
+                Profile::Diagnostics => Self::DIAGNOSTICS,
+            }
+            != 0
+    }
+}
+
+#[derive(Clone, Copy)]
 pub enum StartStage {
     Protocol,
     Capability,
@@ -42,6 +71,7 @@ pub struct Manifest {
     pub capabilities: &'static [CapabilityKind],
     pub protocol: Protocol,
     pub restart: RestartPolicy,
+    pub profiles: Profiles,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -62,6 +92,7 @@ const SUPERVISOR_MANIFEST: Manifest = Manifest {
     capabilities: &[],
     protocol: Protocol { abi: 1, version: 0 },
     restart: RestartPolicy { retries: 0, backoff_ticks: 0 },
+    profiles: Profiles::ALL,
 };
 const VIRTIO_MANIFEST: Manifest = Manifest {
     name: VIRTIO_BALLOON,
@@ -69,6 +100,7 @@ const VIRTIO_MANIFEST: Manifest = Manifest {
     capabilities: &[CapabilityKind::Service],
     protocol: Protocol { abi: 1, version: 0 },
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
+    profiles: Profiles::NORMAL_RECOVERY,
 };
 const BOOT_MANIFESTS: &[Manifest] = &[SUPERVISOR_MANIFEST, VIRTIO_MANIFEST];
 
@@ -136,29 +168,37 @@ impl Health {
 }
 
 impl Plan {
-    pub fn build(manifests: &'static [Manifest]) -> Result<Self, Error> {
-        if manifests.len() > MAX_MANIFESTS {
+    pub fn build(manifests: &'static [Manifest], profile: Profile) -> Result<Self, Error> {
+        let selected = manifests.iter().filter(|manifest| manifest.profiles.includes(profile));
+        let selected_len = selected.count();
+        if selected_len > MAX_MANIFESTS {
             return Err(Error::Cycle);
         }
         for (index, manifest) in manifests.iter().enumerate() {
+            if !manifest.profiles.includes(profile) {
+                continue;
+            }
             if manifest.name.is_empty()
-                || manifests[..index].iter().any(|other| other.name == manifest.name)
+                || manifests[..index]
+                    .iter()
+                    .any(|other| other.profiles.includes(profile) && other.name == manifest.name)
             {
                 return Err(Error::Duplicate);
             }
-            if manifest
-                .dependencies
-                .iter()
-                .any(|dependency| !manifests.iter().any(|other| other.name == *dependency))
-            {
+            if manifest.dependencies.iter().any(|dependency| {
+                !manifests
+                    .iter()
+                    .any(|other| other.profiles.includes(profile) && other.name == *dependency)
+            }) {
                 return Err(Error::MissingDependency);
             }
         }
         let mut plan = Self { order: [None; MAX_MANIFESTS], len: 0 };
-        while plan.len < manifests.len() {
+        while plan.len < selected_len {
             let mut progressed = false;
             for manifest in manifests {
-                if !plan.contains(manifest.name)
+                if manifest.profiles.includes(profile)
+                    && !plan.contains(manifest.name)
                     && manifest.dependencies.iter().all(|dependency| plan.contains(dependency))
                 {
                     plan.order[plan.len] = Some(manifest);
@@ -271,8 +311,8 @@ impl Lifecycle {
     }
 }
 
-pub fn boot_plan() -> Result<Plan, Error> {
-    Plan::build(BOOT_MANIFESTS)
+pub fn boot_plan(profile: Profile) -> Result<Plan, Error> {
+    Plan::build(BOOT_MANIFESTS, profile)
 }
 
 pub fn self_check() -> bool {
@@ -285,6 +325,7 @@ pub fn self_check() -> bool {
             capabilities: &[],
             protocol: Protocol { abi: 1, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+            profiles: Profiles::ALL,
         },
         Manifest {
             name: A,
@@ -292,6 +333,7 @@ pub fn self_check() -> bool {
             capabilities: &[],
             protocol: Protocol { abi: 1, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+            profiles: Profiles::ALL,
         },
     ];
     const MISSING: &[Manifest] = &[Manifest {
@@ -300,6 +342,7 @@ pub fn self_check() -> bool {
         capabilities: &[],
         protocol: Protocol { abi: 1, version: 0 },
         restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+        profiles: Profiles::ALL,
     }];
     const CYCLE: &[Manifest] = &[
         Manifest {
@@ -308,6 +351,7 @@ pub fn self_check() -> bool {
             capabilities: &[],
             protocol: Protocol { abi: 1, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+            profiles: Profiles::ALL,
         },
         Manifest {
             name: B,
@@ -315,15 +359,16 @@ pub fn self_check() -> bool {
             capabilities: &[],
             protocol: Protocol { abi: 1, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+            profiles: Profiles::ALL,
         },
     ];
-    Plan::build(OK).is_ok_and(|plan| plan.starts(A) && plan.starts(B))
-        && matches!(Plan::build(MISSING), Err(Error::MissingDependency))
-        && matches!(Plan::build(CYCLE), Err(Error::Cycle))
+    Plan::build(OK, Profile::Normal).is_ok_and(|plan| plan.starts(A) && plan.starts(B))
+        && matches!(Plan::build(MISSING, Profile::Normal), Err(Error::MissingDependency))
+        && matches!(Plan::build(CYCLE, Profile::Normal), Err(Error::Cycle))
 }
 
 pub fn protocol_self_check() -> bool {
-    let Ok(plan) = boot_plan() else {
+    let Ok(plan) = boot_plan(Profile::Normal) else {
         return false;
     };
     plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 1, version: 2 })
@@ -340,14 +385,14 @@ pub fn diagnostics_self_check() -> bool {
 }
 
 pub fn replacement_self_check() -> bool {
-    let Ok(plan) = boot_plan() else {
+    let Ok(plan) = boot_plan(Profile::Normal) else {
         return false;
     };
     plan.replace(VIRTIO_BALLOON, || true) && !plan.replace(b"missing", || true)
 }
 
 pub fn grant_self_check() -> bool {
-    let Ok(plan) = boot_plan() else {
+    let Ok(plan) = boot_plan(Profile::Normal) else {
         return false;
     };
     let mut manager = CapabilityManager::new();
@@ -360,7 +405,7 @@ pub fn grant_self_check() -> bool {
 }
 
 pub fn lifecycle_self_check() -> bool {
-    let Ok(plan) = boot_plan() else {
+    let Ok(plan) = boot_plan(Profile::Normal) else {
         return false;
     };
     let Some(mut lifecycle) = Lifecycle::new(&plan, VIRTIO_BALLOON) else {
@@ -387,8 +432,15 @@ pub fn lifecycle_self_check() -> bool {
         }
 }
 
+pub fn profiles_self_check() -> bool {
+    boot_plan(Profile::Normal).is_ok_and(|plan| plan.starts(VIRTIO_BALLOON))
+        && boot_plan(Profile::Recovery).is_ok_and(|plan| plan.starts(VIRTIO_BALLOON))
+        && boot_plan(Profile::Diagnostics)
+            .is_ok_and(|plan| plan.starts(SUPERVISOR) && !plan.starts(VIRTIO_BALLOON))
+}
+
 pub fn health_self_check() -> bool {
-    let Ok(plan) = boot_plan() else {
+    let Ok(plan) = boot_plan(Profile::Normal) else {
         return false;
     };
     let mut health = Health::new();

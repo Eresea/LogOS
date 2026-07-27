@@ -160,7 +160,7 @@ Turn kernel mechanisms into a supervised service platform with explicit identiti
 - [x] Failed-start diagnostics.
 - [x] Service replacement without kernel-specific knowledge.
 - [x] Service-owned resource reclamation.
-- [ ] Boot profiles: normal, recovery, diagnostics.
+- [x] Boot profiles: normal, recovery, diagnostics.
 
 ## Machine services
 

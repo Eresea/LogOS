@@ -166,13 +166,14 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let Some(virtio) = devices.find(0x1af4, 0x1002) else {
         fail!(b"virtio");
     };
-    let Some(supervisor) = supervisor::boot_plan().ok() else {
+    let Some(supervisor) = supervisor::boot_plan(supervisor::Profile::Normal).ok() else {
         fail!(b"supervisor manifest");
     };
     check!(
         b"supervisor manifest",
         supervisor::self_check() && supervisor.starts(supervisor::VIRTIO_BALLOON),
     );
+    check!(b"service profiles", supervisor::profiles_self_check());
     let Some(service_protocol) = supervisor
         .negotiate(supervisor::VIRTIO_BALLOON, services::Service::VirtioBalloon.protocol())
     else {
