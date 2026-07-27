@@ -8,6 +8,7 @@ mod capabilities;
 mod commands;
 mod console;
 mod debug;
+mod device;
 mod entropy;
 mod format;
 mod health;
@@ -120,6 +121,7 @@ fn kernel_main(
     check!(b"approvals", approvals::self_check());
     check!(b"inference", inference::self_check());
     check!(b"resources", resources::self_check());
+    check!(b"device interfaces", device::self_check());
     check!(b"framebuffer", framebuffer_ok);
     check!(
         b"acpi",

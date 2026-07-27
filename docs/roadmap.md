@@ -178,7 +178,7 @@ Turn kernel mechanisms into a supervised service platform with explicit identiti
 
 ## Driver and device model
 
-- [ ] Device-independent interfaces for input, display, block, network, and entropy.
+- [x] Device-independent interfaces for input, display, block, network, and entropy.
 - [ ] Driver binding policy outside the kernel where practical.
 - [ ] Driver capability manifests.
 - [x] Device reset and rebinding.

@@ -151,6 +151,9 @@ The bootstrap VirtIO driver owns its DMA queue pages, pending request page, rout
 device state. Recovery quiesces then reactivates the device; replacement releases all owned pages
 before a fresh bind, without requiring a machine reboot.
 
+Input, display, block, network, and entropy use versioned device-interface classes. Clients bind
+to a class contract instead of a PCI or driver implementation.
+
 Privileged operations append a bounded audit event carrying the initiating principal and effect.
 The bootstrap records secret writes; durable export and retention are Persistence v1 concerns.
 
