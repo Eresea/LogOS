@@ -344,7 +344,7 @@ input driver
     -> display service
 ```
 
-Console v1 currently has a minimal terminal model that accepts Foundation input events and renders through the display service. It has no shell, session, scrollback, or recovery role.
+Console v1 currently has a bounded terminal model with scrollback, history, selection, search, and rendering. Its command/session wiring remains in the UEFI bootstrap; it has no independent service boundary or recovery role.
 
 The terminal model stores bounded UTF-8, edits only on character boundaries, and owns cursor position independently of rendering.
 
@@ -366,7 +366,7 @@ Terminal output is a separate bounded line model; rendering consumes that model 
 
 Terminal redraw retains no display-service state: rendering the same model on a replacement display service reproduces the output and editor.
 
-The normal-console bootstrap lives in the no-std `logos-terminal` crate. The UEFI binary retains only recovery-console code; a later `logos-core` extraction will not absorb the normal terminal.
+The normal terminal model lives in the no-std `logos-terminal` crate, but is currently linked into the UEFI binary and run by its normal-mode loop. This is a bootstrap arrangement, not a Core boundary. Platform v1 must load it as a Sessions service with capability-only input and display contracts; the UEFI binary then retains only recovery-console code.
 
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
 

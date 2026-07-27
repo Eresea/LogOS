@@ -1,8 +1,8 @@
 # LogOS Roadmap
 
 > **Status:** Living document
-> **Updated:** 2026-07-24
-> **Current milestone:** Platform v1 complete
+> **Updated:** 2026-07-27
+> **Current milestone:** Platform v1 service boundary
 > **Primary target:** A remotely operable, capability-based Rust OS with replaceable native services and sandboxed WASM applications.
 
 ## 1. Vision
@@ -96,7 +96,7 @@ It should not grow into the normal user environment.
 
 | Order | Milestone           | Primary proof                                                               |
 | ----: | ------------------- | --------------------------------------------------------------------------- |
-|     1 | **Console v1**      | A usable local structured terminal exists outside the kernel                |
+|     1 | **Console v1**      | A bounded terminal model and independent recovery path work in QEMU         |
 |     2 | **Platform v1**     | Native services start, fail, recover, and negotiate contracts independently |
 |     3 | **Persistence v1**  | Configuration and service-owned data survive crashes and resets             |
 |     4 | **Network v1**      | LogOS securely reaches and is reachable over a network                      |
@@ -113,20 +113,21 @@ The current kernel remains independently bootable while its single crate is spli
 
 1. create a Cargo workspace and extract the no-std `logos-core` mechanisms;
 2. extract hardware-facing platform and driver crates;
-3. extract `logos-terminal` for the normal terminal stack while retaining the kernel recovery path;
-4. retain `logos-uefi` as the UEFI boot binary throughout.
+3. extract `logos-terminal` as the normal terminal model while retaining the kernel recovery path;
+4. add the native task loader and capability-only service contract, then run `logos-terminal` as a separately loaded service;
+5. retain `logos-uefi` as the UEFI boot binary throughout.
 
 Every extraction must retain the current QEMU proof. Add `logos-abi` only when an independently built native service needs a stable contract; do not create an empty ABI crate in advance.
 
 ---
 
-# 6. Console v1 — Complete
+# 6. Console v1 — Terminal model complete
 
 Console scope, V1 evidence, and future V2/V3 planning live in [Console](CONSOLE.md)
 
 ---
 
-# 7. Platform v1 — Replaceable native services
+# 7. Platform v1 — Replaceable native services in progress
 
 Platform scope, V1 evidence, and future planning live in [Platform](PLATFORM.md)
 
@@ -375,6 +376,8 @@ A workspace is the user-facing unit that groups resources and authority without 
 - [ ] Auditable agent sessions.
 - [ ] Bounded agent decision records correlated with action audit entries, retaining policy outcome, user-intent reference, and structured tool inputs/outputs but never private model reasoning.
 - [ ] Explicit re-approval when untrusted external content would trigger a privileged agent effect; global taint tracking is deferred pending a narrower information-flow design.
+- [ ] Information-flow labels for sensitive values, with explicit audited declassification before a remote-model capability may receive them.
+- [ ] Optional compensating actions on mutating command descriptors, using Store versions where a reversal is available.
 - [ ] No implicit agent privilege.
 
 ## Exit criteria
