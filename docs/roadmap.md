@@ -168,7 +168,7 @@ Turn kernel mechanisms into a supervised service platform with explicit identiti
 - [x] Service and process principals.
 - [x] Local user principals.
 - [x] Monotonic time service.
-- [ ] RTC-backed wall clock with an explicit unknown/untrusted state.
+- [x] RTC-backed wall clock with an explicit unknown/untrusted state.
 - [ ] Entropy and secure random service.
 - [ ] Secret store with service-scoped access.
 - [ ] Audit events for privileged operations.

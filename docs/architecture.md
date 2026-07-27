@@ -131,7 +131,10 @@ is available; the bootstrap reports an explicit volatile fallback otherwise. Ent
 identity creation is deferred until the entropy service is available.
 
 The monotonic-time service exposes the PIT tick count as an opaque increasing value. It makes no
-wall-clock claim and remains valid across timer consumers; RTC calibration is deferred.
+wall-clock claim and remains valid across timer consumers. Before boot services exit, the
+wall-clock service snapshots the UEFI RTC as explicitly `Untrusted`; a failed or invalid read is
+explicitly `Unknown`. Neither state authorizes time-sensitive security decisions until a future
+trusted-time source calibrates it.
 
 Services reclaim request-owned resources on completion and on release. The bootstrap VirtIO
 service returns its submitted page before replying and releases any pending page with its queue

@@ -32,6 +32,8 @@ fn main() -> Status {
     debug::write_line(b"LogOS: kernel entered");
     let machine = identity::load();
     identity::announce(&machine);
+    let wall_clock = time::wall_clock();
+    time::announce(wall_clock);
     let boot_info = match boot_info() {
         Ok(info) => info,
         Err(_) => return Status::DEVICE_ERROR,
@@ -43,7 +45,7 @@ fn main() -> Status {
     debug::write_line(b"LogOS: leaving UEFI boot services");
 
     let memory_map = unsafe { boot::exit_boot_services(None) };
-    kernel_main(boot_info, memory_map, acpi, machine)
+    kernel_main(boot_info, memory_map, acpi, machine, wall_clock)
 }
 
 struct BootInfo {
@@ -72,6 +74,7 @@ fn kernel_main(
     memory_map: impl MemoryMap,
     acpi: Option<acpi::Tables>,
     machine: identity::Machine,
+    wall_clock: time::WallClock,
 ) -> ! {
     let health = health::Startup::new();
     trace::record(trace::Event::Boot);
@@ -147,7 +150,12 @@ fn kernel_main(
     interrupts::enable();
     interrupts::wait_for_tick();
     check!(b"interrupts", keyboard_interrupts);
-    check!(b"monotonic time", time::self_check() && time::now().ticks() >= 1);
+    check!(
+        b"time",
+        time::self_check()
+            && time::now().ticks() >= 1
+            && matches!(wall_clock, time::WallClock::Unknown | time::WallClock::Untrusted { .. }),
+    );
     let mut scheduler = scheduler::Scheduler::new();
     check!(b"scheduler", scheduler::self_check());
     let mut task_a = scheduler::Task::new(task_a);
