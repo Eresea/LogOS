@@ -3,32 +3,9 @@
 > Working list derived from ROADMAP.md, FLOW.md, ARCHITECTURE.md/ONION_RINGS.md, NAMING.md, and study_considerations.md.
 > This is a planning aid, not a replacement for ROADMAP.md's authoritative checklists.
 
-## 1. Immediate: close out Console v1
+## 1. Console v1
 
-Everything else in Console v1 is checked. The only remaining gap is the command set,
-which is also the literal exit criterion ("operate the machine without the recovery
-console"):
-
-- [ ] `tasks` — list scheduler task handles/state (data already exists in Core v1)
-- [ ] `services` — list the current service registry (Core v1 registry, not the
-      future Platform v1 manifest model)
-- [ ] `drivers` — list bound drivers and health via existing driver lifecycle states
-- [ ] `trace` — expose the existing bounded trace/diagnostic export
-- [ ] `inspect <resource>` — needs the resource-reference scheme from NAMING.md §7
-      (`service:/`, `device:/`, etc.) wired to a generic dispatch, even in stub form
-- [ ] `restart <service>` — thin wrapper over whatever restart mechanism Core v1
-      already has; do not wait for Supervisor
-- [ ] `cancel <request-or-job>` — hook into existing IPC cancellation primitives
-
-**Sequencing note:** these seven commands should ship against *current* Core v1
-introspection now, then get upgraded in place once Platform v1's Supervisor,
-manifests, and health checks land — they are not new commands at that point, just
-richer backends for the same command surface. Don't gate Console v1 completion on
-Platform v1.
-
-Once these land, re-check Console v1's full exit-criteria list (QEMU coverage for
-editing/history/structured commands/cancellation/display restart/input-service
-restart) before declaring it complete.
+Console v1 is complete. Its checklist and future scope live in [CONSOLE.md](CONSOLE.md).
 
 ## 2. Next milestone: Platform v1 kickoff
 
