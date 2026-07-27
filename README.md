@@ -13,7 +13,7 @@ The normal terminal model and recovery handoff are implemented. The terminal sti
 ## Start here
 
 - [Architecture](docs/ARCHITECTURE.md) — system boundaries, layers, and service model.
-- [Roadmap](docs/ROADMAP.md) — current progress and the path ahead.
+- [Roadmap](docs/roadmap.md) — current progress and the path ahead.
 - [Console](docs/CONSOLE.md) — normal terminal scope and versioned checklist.
 - [Development](docs/development.md) — prerequisites, build, checks, and QEMU commands.
 
