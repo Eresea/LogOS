@@ -20,6 +20,7 @@ mod keyboard;
 mod memory;
 mod mode;
 mod pci;
+mod platform;
 mod resources;
 mod scheduler;
 mod secrets;
@@ -295,7 +296,7 @@ fn kernel_main(
         fail!(b"acpi pci routing");
     };
     let Some(mut virtio_service) =
-        virtio::VirtioService::bind(virtio, virtio_gsi, virtio_handle, &mut memory)
+        platform::Service::bind(virtio, virtio_gsi, virtio_handle, &mut memory)
     else {
         supervisor::report_start_failure(supervisor::VIRTIO_BALLOON, supervisor::StartStage::Bind);
         fail!(b"virtio");
@@ -312,7 +313,7 @@ fn kernel_main(
         fail!(b"ipc");
     };
     {
-        let mut service_task = virtio::ServiceTask::new(
+        let mut service_task = platform::Task::new(
             &mut virtio_service,
             &channel,
             &responses,
@@ -408,14 +409,14 @@ fn kernel_main(
                     return false;
                 }
                 replacement =
-                    virtio::VirtioService::bind(virtio, virtio_gsi, virtio_handle, &mut memory);
+                    platform::Service::bind(virtio, virtio_gsi, virtio_handle, &mut memory);
                 replacement.is_some()
             }),
     );
     let Some(mut virtio_service) = replacement else {
         fail!(b"service replacement");
     };
-    let mut service_task = virtio::ServiceTask::new(
+    let mut service_task = platform::Task::new(
         &mut virtio_service,
         &channel,
         &responses,
@@ -496,7 +497,7 @@ fn kernel_main(
                     ipc::Message::Recover,
                 );
             }
-            if virtio::completion_pending() {
+            if platform::completion_pending() {
                 let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
             }
             if service_scheduler.run_next() {
@@ -633,7 +634,7 @@ fn kernel_main(
         let _ = console.start();
         console.run(|| {
             let tick = interrupts::ticks();
-            if virtio::completion_pending() {
+            if platform::completion_pending() {
                 let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
             }
             if service_scheduler.run_next() {
