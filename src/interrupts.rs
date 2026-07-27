@@ -31,7 +31,7 @@ extern "C" fn timer_tick() {
 
 #[unsafe(no_mangle)]
 extern "C" fn virtio_interrupt() {
-    crate::virtio::interrupt();
+    crate::platform::interrupt();
     let local_apic = LOCAL_APIC.load(Ordering::Acquire);
     unsafe { core::ptr::write_volatile((local_apic + 0xb0) as *mut u32, 0) };
 }
@@ -99,7 +99,7 @@ pub fn wait_for_tick() {
 }
 
 pub fn wait_for_virtio() {
-    while !crate::virtio::completion_pending() {
+    while !crate::platform::completion_pending() {
         unsafe { asm!("hlt") };
     }
 }

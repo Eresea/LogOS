@@ -29,7 +29,6 @@ mod session;
 mod supervisor;
 mod time;
 mod trace;
-mod virtio;
 mod virtual_memory;
 
 use logos_terminal::{display, input, terminal, text};
