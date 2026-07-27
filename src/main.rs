@@ -176,6 +176,10 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let Some(service_protocol) = supervisor
         .negotiate(supervisor::VIRTIO_BALLOON, services::Service::VirtioBalloon.protocol())
     else {
+        supervisor::report_start_failure(
+            supervisor::VIRTIO_BALLOON,
+            supervisor::StartStage::Protocol,
+        );
         fail!(b"service protocol");
     };
     check!(
@@ -204,6 +208,10 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         &mut capabilities,
         capabilities::CapabilityKind::Service,
     ) else {
+        supervisor::report_start_failure(
+            supervisor::VIRTIO_BALLOON,
+            supervisor::StartStage::Capability,
+        );
         fail!(b"service capability");
     };
     check!(
@@ -211,6 +219,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         supervisor::grant_self_check()
             && capabilities.allows(service_capability, capabilities::CapabilityKind::Service),
     );
+    check!(b"service diagnostics", supervisor::diagnostics_self_check());
     let mut service_health = supervisor::Health::new();
     check!(
         b"service health",
@@ -232,6 +241,10 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let Some(virtio_handle) =
         services.register(&capabilities, service_capability, services::Service::VirtioBalloon)
     else {
+        supervisor::report_start_failure(
+            supervisor::VIRTIO_BALLOON,
+            supervisor::StartStage::Register,
+        );
         fail!(b"services");
     };
     check!(b"services", services.resolve(services::Service::VirtioBalloon) == Some(virtio_handle),);
@@ -244,6 +257,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let Some(mut virtio_service) =
         virtio::VirtioService::bind(virtio, virtio_gsi, virtio_handle, &mut memory)
     else {
+        supervisor::report_start_failure(supervisor::VIRTIO_BALLOON, supervisor::StartStage::Bind);
         fail!(b"virtio");
     };
     let channel = ipc::Channel::new();
@@ -333,6 +347,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     );
     let mut service_scheduler = scheduler::Scheduler::new();
     if service_scheduler.spawn(&mut service_task).is_none() {
+        supervisor::report_start_failure(supervisor::VIRTIO_BALLOON, supervisor::StartStage::Task);
         fail!(b"scheduler rebind");
     }
     let mut display = display::Service::new(

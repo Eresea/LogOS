@@ -157,7 +157,7 @@ Turn kernel mechanisms into a supervised service platform with explicit identiti
 - [x] Protocol and ABI version negotiation.
 - [x] Bounded service health checks and heartbeats.
 - [x] Bounded restart, retry/backoff, quiesce, and shutdown policies.
-- [ ] Failed-start diagnostics.
+- [x] Failed-start diagnostics.
 - [ ] Service replacement without kernel-specific knowledge.
 - [ ] Service-owned resource reclamation.
 - [ ] Boot profiles: normal, recovery, diagnostics.

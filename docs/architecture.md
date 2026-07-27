@@ -120,6 +120,9 @@ only the capability kinds declared by that service's manifest. The current boots
 or package ABI loader. A service negotiates its declared ABI major and compatible protocol
 minor version before registration; restart policy remains bounded bootstrap state.
 
+Failed bootstrap service starts emit the service name and the failed protocol, capability,
+registration, binding, or task stage to the debug console before the startup health gate stops.
+
 The supervisor watches a bounded heartbeat for each boot service. A scheduled service
 updates its heartbeat; an overdue heartbeat schedules bounded exponential-backoff
 recovery. The manifest owns retry limits and shutdown state; the existing VirtIO driver

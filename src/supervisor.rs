@@ -1,9 +1,40 @@
-use crate::capabilities::{Capability, CapabilityKind, CapabilityManager};
+use crate::{
+    capabilities::{Capability, CapabilityKind, CapabilityManager},
+    debug,
+};
 
 const MAX_MANIFESTS: usize = 4;
 
 pub const SUPERVISOR: &[u8] = b"supervisor";
 pub const VIRTIO_BALLOON: &[u8] = b"virtio-balloon";
+
+#[derive(Clone, Copy)]
+pub enum StartStage {
+    Protocol,
+    Capability,
+    Register,
+    Bind,
+    Task,
+}
+
+impl StartStage {
+    const fn message(self) -> &'static [u8] {
+        match self {
+            Self::Protocol => b"protocol",
+            Self::Capability => b"capability",
+            Self::Register => b"register",
+            Self::Bind => b"bind",
+            Self::Task => b"task",
+        }
+    }
+}
+
+pub fn report_start_failure(name: &[u8], stage: StartStage) {
+    debug::write(b"LogOS: service start failed ");
+    debug::write(name);
+    debug::write(b" at ");
+    debug::write_line(stage.message());
+}
 
 pub struct Manifest {
     pub name: &'static [u8],
@@ -294,6 +325,14 @@ pub fn protocol_self_check() -> bool {
     plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 1, version: 2 })
         == Some(Protocol { abi: 1, version: 0 })
         && plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 2, version: 0 }).is_none()
+}
+
+pub fn diagnostics_self_check() -> bool {
+    StartStage::Protocol.message() == b"protocol"
+        && StartStage::Capability.message() == b"capability"
+        && StartStage::Register.message() == b"register"
+        && StartStage::Bind.message() == b"bind"
+        && StartStage::Task.message() == b"task"
 }
 
 pub fn grant_self_check() -> bool {
