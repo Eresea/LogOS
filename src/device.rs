@@ -22,7 +22,7 @@ impl Interface {
         self.class
     }
 
-    pub const fn compatible(self, other: Self) -> bool {
+    pub fn compatible(self, other: Self) -> bool {
         self.class == other.class && self.version == other.version
     }
 }
