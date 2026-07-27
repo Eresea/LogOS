@@ -167,7 +167,7 @@ Turn kernel mechanisms into a supervised service platform with explicit identiti
 - [x] Stable machine identity with explicit volatile fallback.
 - [x] Service and process principals.
 - [x] Local user principals.
-- [ ] Monotonic time service.
+- [x] Monotonic time service.
 - [ ] RTC-backed wall clock with an explicit unknown/untrusted state.
 - [ ] Entropy and secure random service.
 - [ ] Secret store with service-scoped access.

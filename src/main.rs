@@ -19,6 +19,7 @@ mod scheduler;
 mod services;
 mod session;
 mod supervisor;
+mod time;
 mod trace;
 mod virtio;
 mod virtual_memory;
@@ -146,6 +147,7 @@ fn kernel_main(
     interrupts::enable();
     interrupts::wait_for_tick();
     check!(b"interrupts", keyboard_interrupts);
+    check!(b"monotonic time", time::self_check() && time::now().ticks() >= 1);
     let mut scheduler = scheduler::Scheduler::new();
     check!(b"scheduler", scheduler::self_check());
     let mut task_a = scheduler::Task::new(task_a);

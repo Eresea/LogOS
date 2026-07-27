@@ -130,6 +130,9 @@ Machine identity is a 128-bit UEFI runtime variable. It is stable when firmware 
 is available; the bootstrap reports an explicit volatile fallback otherwise. Entropy-backed
 identity creation is deferred until the entropy service is available.
 
+The monotonic-time service exposes the PIT tick count as an opaque increasing value. It makes no
+wall-clock claim and remains valid across timer consumers; RTC calibration is deferred.
+
 Services reclaim request-owned resources on completion and on release. The bootstrap VirtIO
 service returns its submitted page before replying and releases any pending page with its queue
 during replacement or shutdown.
