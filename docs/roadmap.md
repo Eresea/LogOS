@@ -209,13 +209,13 @@ Formatted text remains supported, but it is not the only interoperable form.
 ## Initial commands
 
 - [x] `health`
-- [ ] `tasks`
-- [ ] `services`
-- [ ] `drivers`
-- [ ] `trace`
-- [ ] `inspect <resource>`
-- [ ] `restart <service>`
-- [ ] `cancel <request-or-job>`
+- [x] `tasks`
+- [x] `services`
+- [x] `drivers`
+- [x] `trace`
+- [x] `inspect <resource>`
+- [x] `restart <service>`
+- [x] `cancel <request-or-job>`
 - [x] `clear`
 - [x] `layout <qwerty|azerty>`
 - [x] `reboot`

@@ -172,9 +172,11 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     else {
         fail!(b"capabilities");
     };
-    let Some(session) =
-        session::Context::new(session::Id(1), session::Principal::LOCAL, &[recovery_capability])
-    else {
+    let Some(session) = session::Context::new(
+        session::Id(1),
+        session::Principal::LOCAL,
+        &[recovery_capability, service_capability],
+    ) else {
         fail!(b"session");
     };
     let mut services = services::Registry::new();
@@ -383,6 +385,39 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                                 input::Layout::Qwerty => b"layout qwerty",
                                 input::Layout::Azerty => b"layout azerty",
                             });
+                        }
+                        commands::Outcome::Tasks => {
+                            let _ = terminal.write_output(b"scheduler active");
+                        }
+                        commands::Outcome::Services => {
+                            let _ = terminal.write_output(b"virtio-balloon running");
+                        }
+                        commands::Outcome::Drivers => {
+                            let _ = terminal.write_output(b"virtio-balloon driver bound");
+                        }
+                        commands::Outcome::Trace => {
+                            let _ = terminal.write_output(trace::message(trace::latest()));
+                        }
+                        commands::Outcome::Inspect(resource) => {
+                            let _ = terminal.write_output(resource.as_bytes());
+                        }
+                        commands::Outcome::Restart => {
+                            let _ = channel.send(
+                                &capabilities,
+                                service_capability,
+                                virtio_handle,
+                                ipc::Message::Recover,
+                            );
+                            let _ = terminal.write_output(b"restart requested");
+                        }
+                        commands::Outcome::Cancel => {
+                            let _ = channel.send(
+                                &capabilities,
+                                service_capability,
+                                virtio_handle,
+                                ipc::Message::Cancel,
+                            );
+                            let _ = terminal.write_output(b"cancel requested");
                         }
                         commands::Outcome::Text(value) => {
                             if let Some(value) = format::render(value, format::Style::Human) {

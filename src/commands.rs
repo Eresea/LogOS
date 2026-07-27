@@ -11,6 +11,13 @@ pub enum Outcome {
     PowerOff,
     Clear,
     Layout(Layout),
+    Tasks,
+    Services,
+    Drivers,
+    Trace,
+    Inspect(Submission),
+    Restart,
+    Cancel,
     Text(Submission),
     Error(Error),
 }
@@ -81,7 +88,7 @@ const TEXT_ARGUMENT: [Argument; 1] =
 const LAYOUT_ARGUMENT: [Argument; 1] =
     [Argument { name: b"layout", kind: ArgumentKind::Text, required: true }];
 
-const DESCRIPTORS: [Descriptor; 9] = [
+const DESCRIPTORS: [Descriptor; 16] = [
     Descriptor {
         name: b"health",
         summary: b"show machine health",
@@ -135,6 +142,48 @@ const DESCRIPTORS: [Descriptor; 9] = [
         summary: b"turn off the machine",
         arguments: &NO_ARGUMENTS,
         required_capability: Some(CapabilityKind::Recovery),
+    },
+    Descriptor {
+        name: b"tasks",
+        summary: b"list tasks",
+        arguments: &NO_ARGUMENTS,
+        required_capability: None,
+    },
+    Descriptor {
+        name: b"services",
+        summary: b"list services",
+        arguments: &NO_ARGUMENTS,
+        required_capability: None,
+    },
+    Descriptor {
+        name: b"drivers",
+        summary: b"list drivers",
+        arguments: &NO_ARGUMENTS,
+        required_capability: None,
+    },
+    Descriptor {
+        name: b"trace",
+        summary: b"show latest trace",
+        arguments: &NO_ARGUMENTS,
+        required_capability: None,
+    },
+    Descriptor {
+        name: b"inspect",
+        summary: b"inspect a resource",
+        arguments: &TEXT_ARGUMENT,
+        required_capability: None,
+    },
+    Descriptor {
+        name: b"restart",
+        summary: b"restart a service",
+        arguments: &TEXT_ARGUMENT,
+        required_capability: Some(CapabilityKind::Service),
+    },
+    Descriptor {
+        name: b"cancel",
+        summary: b"cancel a service request",
+        arguments: &TEXT_ARGUMENT,
+        required_capability: Some(CapabilityKind::Service),
     },
 ];
 
@@ -200,6 +249,21 @@ fn invoke_stage(
         Outcome::Reboot
     } else if descriptor.name == b"poweroff" {
         Outcome::PowerOff
+    } else if descriptor.name == b"tasks" {
+        Outcome::Tasks
+    } else if descriptor.name == b"services" {
+        Outcome::Services
+    } else if descriptor.name == b"drivers" {
+        Outcome::Drivers
+    } else if descriptor.name == b"trace" {
+        Outcome::Trace
+    } else if descriptor.name == b"inspect" && !argument.is_empty() {
+        Submission::from_bytes(argument)
+            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Inspect)
+    } else if descriptor.name == b"restart" && argument == b"virtio-balloon" {
+        Outcome::Restart
+    } else if descriptor.name == b"cancel" && argument == b"virtio-balloon" {
+        Outcome::Cancel
     } else if descriptor.name == b"health" {
         Submission::from_bytes(b"healthy")
             .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
@@ -215,7 +279,7 @@ fn invoke_stage(
     } else if descriptor.name == b"echo" {
         input.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
     } else if descriptor.name == b"commands" {
-        Submission::from_bytes(b"health clear layout recovery echo help commands reboot poweroff")
+        Submission::from_bytes(b"16 commands")
             .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
     } else if descriptor.name == b"help" && !argument.is_empty() {
         descriptors()
@@ -237,8 +301,11 @@ pub fn self_check() -> bool {
     let Some(recovery) = capabilities.grant(CapabilityKind::Recovery) else {
         return false;
     };
+    let Some(service) = capabilities.grant(CapabilityKind::Service) else {
+        return false;
+    };
     let Some(session) =
-        session::Context::new(session::Id(1), session::Principal::LOCAL, &[recovery])
+        session::Context::new(session::Id(1), session::Principal::LOCAL, &[recovery, service])
     else {
         return false;
     };
@@ -283,6 +350,27 @@ pub fn self_check() -> bool {
     let Some(azerty) = Submission::from_bytes(b"layout azerty") else {
         return false;
     };
+    let Some(tasks) = Submission::from_bytes(b"tasks") else {
+        return false;
+    };
+    let Some(services) = Submission::from_bytes(b"services") else {
+        return false;
+    };
+    let Some(drivers) = Submission::from_bytes(b"drivers") else {
+        return false;
+    };
+    let Some(trace) = Submission::from_bytes(b"trace") else {
+        return false;
+    };
+    let Some(inspect) = Submission::from_bytes(b"inspect service:/virtio-balloon") else {
+        return false;
+    };
+    let Some(restart) = Submission::from_bytes(b"restart virtio-balloon") else {
+        return false;
+    };
+    let Some(cancel) = Submission::from_bytes(b"cancel virtio-balloon") else {
+        return false;
+    };
     invoke(submission, &denied_session, &capabilities, Invocation::new(2), 1)
         == Outcome::Error(Error::Denied)
         && invoke(submission, &session, &capabilities, Invocation::new(2), 1) == Outcome::Recovery
@@ -297,7 +385,7 @@ pub fn self_check() -> bool {
         && pipeline(pipe, &denied_session, &capabilities, Invocation::new(2), 1)
             == Outcome::Text(hello)
         && invoke(commands, &denied_session, &capabilities, Invocation::new(2), 1)
-            .is_text(b"health clear layout recovery echo help commands reboot poweroff")
+            .is_text(b"16 commands")
         && invoke(reboot, &session, &capabilities, Invocation::new(2), 1) == Outcome::Reboot
         && invoke(poweroff, &session, &capabilities, Invocation::new(2), 1) == Outcome::PowerOff
         && invoke(health, &denied_session, &capabilities, Invocation::new(2), 1).is_text(b"healthy")
@@ -306,7 +394,19 @@ pub fn self_check() -> bool {
             == Outcome::Layout(Layout::Qwerty)
         && invoke(azerty, &denied_session, &capabilities, Invocation::new(2), 1)
             == Outcome::Layout(Layout::Azerty)
-        && descriptors().len() == 9
+        && invoke(tasks, &denied_session, &capabilities, Invocation::new(2), 1) == Outcome::Tasks
+        && invoke(services, &denied_session, &capabilities, Invocation::new(2), 1)
+            == Outcome::Services
+        && invoke(drivers, &denied_session, &capabilities, Invocation::new(2), 1)
+            == Outcome::Drivers
+        && invoke(trace, &denied_session, &capabilities, Invocation::new(2), 1) == Outcome::Trace
+        && matches!(
+            invoke(inspect, &denied_session, &capabilities, Invocation::new(2), 1),
+            Outcome::Inspect(_)
+        )
+        && invoke(restart, &session, &capabilities, Invocation::new(2), 1) == Outcome::Restart
+        && invoke(cancel, &session, &capabilities, Invocation::new(2), 1) == Outcome::Cancel
+        && descriptors().len() == 16
         && descriptors()[3].arguments.is_empty()
         && text_argument.kind == ArgumentKind::Text
         && text_argument.required
