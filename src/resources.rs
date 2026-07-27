@@ -29,14 +29,12 @@ impl Registry {
     }
 
     pub fn publish(&mut self, kind: Kind, owner: Principal) -> Option<Ref> {
-        self.resources
-            .iter_mut()
-            .enumerate()
-            .find(|(_, slot)| slot.is_none())
-            .map(|(index, slot)| {
+        self.resources.iter_mut().enumerate().find(|(_, slot)| slot.is_none()).map(
+            |(index, slot)| {
                 *slot = Some(Resource { kind, owner });
                 Ref(index as u8)
-            })
+            },
+        )
     }
 
     pub fn resolve(&self, reference: Ref, kind: Kind) -> Option<Principal> {
@@ -50,10 +48,9 @@ impl Registry {
 
 pub fn self_check() -> bool {
     let mut resources = Registry::new();
-    resources
-        .publish(Kind::Entropy, Principal::service(1))
-        .is_some_and(|reference| {
-            resources.resolve(reference, Kind::Entropy) == Some(Principal::service(1))
-                && resources.resolve(reference, Kind::Input).is_none()
-        })
+    resources.publish(Kind::Entropy, Principal::service(1)).is_some_and(|reference| {
+        resources.resolve(reference, Kind::Entropy) == Some(Principal::service(1))
+            && resources.resolve(reference, Kind::Input).is_none()
+    }) && resources.publish(Kind::Display, Principal::service(2)).is_some()
+        && resources.publish(Kind::Inference, Principal::service(3)).is_some()
 }
