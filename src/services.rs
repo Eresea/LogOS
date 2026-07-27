@@ -1,10 +1,19 @@
 use crate::capabilities::{Capability, CapabilityKind, CapabilityManager};
+use crate::supervisor::Protocol;
 
 const SERVICES: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Service {
     VirtioBalloon,
+}
+
+impl Service {
+    pub const fn protocol(self) -> Protocol {
+        match self {
+            Self::VirtioBalloon => Protocol { abi: 1, version: 0 },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

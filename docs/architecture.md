@@ -117,7 +117,8 @@ manifest has a stable service name, explicit dependencies, and declared capabili
 startup rejects duplicate names, missing dependencies, and cycles. It grants a service
 only the capability kinds declared by that service's manifest. The current bootstrap plan starts
 `virtio-balloon` after `supervisor`; it is bounded, in-memory, and has no package loader,
-protocol negotiation, or restart policy yet.
+or package ABI loader. A service negotiates its declared ABI major and compatible protocol
+minor version before registration; restart policy remains bounded bootstrap state.
 
 The supervisor watches a bounded heartbeat for each boot service. A scheduled service
 updates its heartbeat; an overdue heartbeat schedules bounded exponential-backoff

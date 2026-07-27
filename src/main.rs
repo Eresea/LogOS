@@ -173,6 +173,16 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         b"supervisor manifest",
         supervisor::self_check() && supervisor.starts(supervisor::VIRTIO_BALLOON),
     );
+    let Some(service_protocol) = supervisor
+        .negotiate(supervisor::VIRTIO_BALLOON, services::Service::VirtioBalloon.protocol())
+    else {
+        fail!(b"service protocol");
+    };
+    check!(
+        b"service protocol",
+        supervisor::protocol_self_check()
+            && service_protocol == services::Service::VirtioBalloon.protocol(),
+    );
     let Some(session_service_capability) =
         capabilities.grant(capabilities::CapabilityKind::Service)
     else {

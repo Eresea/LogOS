@@ -9,7 +9,14 @@ pub struct Manifest {
     pub name: &'static [u8],
     pub dependencies: &'static [&'static [u8]],
     pub capabilities: &'static [CapabilityKind],
+    pub protocol: Protocol,
     pub restart: RestartPolicy,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Protocol {
+    pub abi: u16,
+    pub version: u16,
 }
 
 #[derive(Clone, Copy)]
@@ -22,12 +29,14 @@ const SUPERVISOR_MANIFEST: Manifest = Manifest {
     name: SUPERVISOR,
     dependencies: &[],
     capabilities: &[],
+    protocol: Protocol { abi: 1, version: 0 },
     restart: RestartPolicy { retries: 0, backoff_ticks: 0 },
 };
 const VIRTIO_MANIFEST: Manifest = Manifest {
     name: VIRTIO_BALLOON,
     dependencies: &[SUPERVISOR],
     capabilities: &[CapabilityKind::Service],
+    protocol: Protocol { abi: 1, version: 0 },
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
 };
 const BOOT_MANIFESTS: &[Manifest] = &[SUPERVISOR_MANIFEST, VIRTIO_MANIFEST];
@@ -157,6 +166,14 @@ impl Plan {
             .filter(|manifest| manifest.capabilities.contains(&kind))
             .and_then(|_| manager.grant(kind))
     }
+
+    pub fn negotiate(&self, name: &[u8], offered: Protocol) -> Option<Protocol> {
+        let required = self.manifest(name)?.protocol;
+        (required.abi == offered.abi).then_some(Protocol {
+            abi: required.abi,
+            version: required.version.min(offered.version),
+        })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -231,12 +248,14 @@ pub fn self_check() -> bool {
             name: B,
             dependencies: &[A],
             capabilities: &[],
+            protocol: Protocol { abi: 1, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         },
         Manifest {
             name: A,
             dependencies: &[],
             capabilities: &[],
+            protocol: Protocol { abi: 1, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         },
     ];
@@ -244,6 +263,7 @@ pub fn self_check() -> bool {
         name: A,
         dependencies: &[B],
         capabilities: &[],
+        protocol: Protocol { abi: 1, version: 0 },
         restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
     }];
     const CYCLE: &[Manifest] = &[
@@ -251,18 +271,29 @@ pub fn self_check() -> bool {
             name: A,
             dependencies: &[B],
             capabilities: &[],
+            protocol: Protocol { abi: 1, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         },
         Manifest {
             name: B,
             dependencies: &[A],
             capabilities: &[],
+            protocol: Protocol { abi: 1, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         },
     ];
     Plan::build(OK).is_ok_and(|plan| plan.starts(A) && plan.starts(B))
         && matches!(Plan::build(MISSING), Err(Error::MissingDependency))
         && matches!(Plan::build(CYCLE), Err(Error::Cycle))
+}
+
+pub fn protocol_self_check() -> bool {
+    let Ok(plan) = boot_plan() else {
+        return false;
+    };
+    plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 1, version: 2 })
+        == Some(Protocol { abi: 1, version: 0 })
+        && plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 2, version: 0 }).is_none()
 }
 
 pub fn grant_self_check() -> bool {

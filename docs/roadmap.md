@@ -154,7 +154,7 @@ Turn kernel mechanisms into a supervised service platform with explicit identiti
 
 - [x] Static declarative service manifests and bounded dependency startup ordering.
 - [x] Manifest capability declarations and grants.
-- [ ] Protocol and ABI version negotiation.
+- [x] Protocol and ABI version negotiation.
 - [x] Bounded service health checks and heartbeats.
 - [x] Bounded restart, retry/backoff, quiesce, and shutdown policies.
 - [ ] Failed-start diagnostics.
