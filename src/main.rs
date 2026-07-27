@@ -17,6 +17,7 @@ mod memory;
 mod mode;
 mod pci;
 mod scheduler;
+mod secrets;
 mod services;
 mod session;
 mod supervisor;
@@ -110,6 +111,7 @@ fn kernel_main(
         b"machine identity",
         entropy::self_check() && identity::self_check() && machine.id() == machine.id(),
     );
+    check!(b"secret store", secrets::self_check());
     check!(b"framebuffer", framebuffer_ok);
     check!(
         b"acpi",

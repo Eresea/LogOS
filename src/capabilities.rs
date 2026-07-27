@@ -5,6 +5,7 @@ pub enum CapabilityKind {
     Debug,
     Service,
     Recovery,
+    Secret,
 }
 
 #[derive(Clone, Copy)]

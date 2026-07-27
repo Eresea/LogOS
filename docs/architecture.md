@@ -134,6 +134,10 @@ The entropy service reads the UEFI RNG protocol before boot services exit. Its 2
 seeds new machine identities; an unavailable RNG leaves identity explicitly volatile rather than
 using timestamp-derived data as a secure random substitute.
 
+The bootstrap secret store is bounded and memory-only. It requires a `Secret` capability and
+matches each record to its owning principal; Persistence v1 will provide durable encryption and
+operation-specific credential brokering.
+
 The monotonic-time service exposes the PIT tick count as an opaque increasing value. It makes no
 wall-clock claim and remains valid across timer consumers. Before boot services exit, the
 wall-clock service snapshots the UEFI RTC as explicitly `Untrusted`; a failed or invalid read is
