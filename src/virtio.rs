@@ -10,6 +10,7 @@ use crate::{
     pci::PciDevice,
     scheduler::{Runnable, TaskState},
     services::ServiceHandle,
+    session::Principal,
 };
 
 const ACKNOWLEDGE: u8 = 1;
@@ -92,6 +93,7 @@ pub struct ServiceTask<'a> {
     responses: &'a crate::ipc::Channel,
     capabilities: &'a CapabilityManager,
     capability: Capability,
+    principal: Principal,
     memory: &'a mut PhysicalMemory,
     pending: Option<(ServiceHandle, crate::ipc::RequestId)>,
 }
@@ -103,9 +105,19 @@ impl<'a> ServiceTask<'a> {
         responses: &'a crate::ipc::Channel,
         capabilities: &'a CapabilityManager,
         capability: Capability,
+        principal: Principal,
         memory: &'a mut PhysicalMemory,
     ) -> Self {
-        Self { service, requests, responses, capabilities, capability, memory, pending: None }
+        Self {
+            service,
+            requests,
+            responses,
+            capabilities,
+            capability,
+            principal,
+            memory,
+            pending: None,
+        }
     }
 }
 
@@ -125,6 +137,7 @@ impl Runnable for ServiceTask<'_> {
             let _ = self.responses.reply(
                 self.capabilities,
                 self.capability,
+                self.principal,
                 destination,
                 if failed || !reclaimed { Message::Failed } else { Message::Complete },
                 request,
@@ -151,6 +164,7 @@ impl Runnable for ServiceTask<'_> {
                 let _ = self.responses.reply(
                     self.capabilities,
                     self.capability,
+                    self.principal,
                     envelope.destination,
                     reply,
                     envelope.request,

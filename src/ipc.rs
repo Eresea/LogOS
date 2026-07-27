@@ -5,6 +5,7 @@ use core::{
 
 use crate::capabilities::{Capability, CapabilityKind, CapabilityManager};
 use crate::services::ServiceHandle;
+use crate::session::Principal;
 
 const MESSAGES: usize = 4;
 
@@ -23,6 +24,7 @@ pub type RequestId = u16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Envelope {
+    pub principal: Principal,
     pub destination: ServiceHandle,
     pub message: Message,
     pub request: RequestId,
@@ -55,6 +57,7 @@ impl Channel {
         &self,
         capabilities: &CapabilityManager,
         capability: Capability,
+        principal: Principal,
         destination: ServiceHandle,
         message: Message,
     ) -> Option<RequestId> {
@@ -62,19 +65,20 @@ impl Channel {
             return None;
         }
         let request = self.next_request.fetch_add(1, Ordering::Relaxed);
-        self.enqueue(Envelope { destination, message, request }).then_some(request)
+        self.enqueue(Envelope { principal, destination, message, request }).then_some(request)
     }
 
     pub fn reply(
         &self,
         capabilities: &CapabilityManager,
         capability: Capability,
+        principal: Principal,
         destination: ServiceHandle,
         message: Message,
         request: RequestId,
     ) -> bool {
         capabilities.allows(capability, CapabilityKind::Service)
-            && self.enqueue(Envelope { destination, message, request })
+            && self.enqueue(Envelope { principal, destination, message, request })
     }
 
     pub fn receive(&self) -> Option<Envelope> {
@@ -121,8 +125,12 @@ impl Channel {
 
 pub fn self_check() -> bool {
     let channel = Channel::new();
-    let envelope =
-        Envelope { destination: ServiceHandle::self_check(), message: Message::Ping, request: 7 };
+    let envelope = Envelope {
+        principal: Principal::process(7),
+        destination: ServiceHandle::self_check(),
+        message: Message::Ping,
+        request: 7,
+    };
     (0..MESSAGES).all(|_| channel.enqueue(envelope))
         && !channel.enqueue(envelope)
         && channel.receive().is_some_and(|message| message.request == envelope.request)

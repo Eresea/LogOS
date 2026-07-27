@@ -23,6 +23,10 @@ impl ServiceHandle {
     pub(crate) const fn self_check() -> Self {
         Self(0)
     }
+
+    pub const fn principal(self) -> crate::session::Principal {
+        crate::session::Principal::service(self.0 as u32)
+    }
 }
 
 pub struct Registry {

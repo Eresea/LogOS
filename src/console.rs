@@ -4,6 +4,7 @@ use crate::{
     ipc::{Channel, Message},
     keyboard,
     services::ServiceHandle,
+    session::Principal,
     trace,
 };
 
@@ -45,19 +46,37 @@ impl<'a> Endpoint<'a> {
 
     fn ping(self) -> bool {
         self.channel
-            .send(self.capabilities, self.capability, self.destination, Message::Ping)
+            .send(
+                self.capabilities,
+                self.capability,
+                Principal::LOCAL,
+                self.destination,
+                Message::Ping,
+            )
             .is_some()
     }
 
     fn inflate(self) -> bool {
         self.channel
-            .send(self.capabilities, self.capability, self.destination, Message::Inflate)
+            .send(
+                self.capabilities,
+                self.capability,
+                Principal::LOCAL,
+                self.destination,
+                Message::Inflate,
+            )
             .is_some()
     }
 
     fn recover(self) -> bool {
         self.channel
-            .send(self.capabilities, self.capability, self.destination, Message::Recover)
+            .send(
+                self.capabilities,
+                self.capability,
+                Principal::LOCAL,
+                self.destination,
+                Message::Recover,
+            )
             .is_some()
     }
 

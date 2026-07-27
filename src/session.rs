@@ -5,14 +5,26 @@ const VARIABLES: usize = 4;
 const VARIABLE_NAME: usize = 16;
 const VARIABLE_VALUE: usize = 64;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Id(pub u32);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Principal(pub u32);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Principal {
+    LocalUser(u32),
+    Service(u32),
+    Process(u32),
+}
 
 impl Principal {
-    pub const LOCAL: Self = Self(0);
+    pub const LOCAL: Self = Self::LocalUser(0);
+
+    pub const fn service(id: u32) -> Self {
+        Self::Service(id)
+    }
+
+    pub const fn process(id: u32) -> Self {
+        Self::Process(id)
+    }
 }
 
 pub struct Context {
@@ -115,6 +127,7 @@ impl Context {
         };
         context.id() == Id(1)
             && context.principal() == Principal::LOCAL
+            && Principal::service(1) != Principal::process(1)
             && context.allows(&manager, CapabilityKind::Recovery)
             && !context.allows(&manager, CapabilityKind::Debug)
             && manager.revoke(recovery)

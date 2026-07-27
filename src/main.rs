@@ -272,9 +272,13 @@ fn kernel_main(
     };
     let channel = ipc::Channel::new();
     let responses = ipc::Channel::new();
-    let Some(ping_request) =
-        channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping)
-    else {
+    let Some(ping_request) = channel.send(
+        &capabilities,
+        service_capability,
+        session::Principal::LOCAL,
+        virtio_handle,
+        ipc::Message::Ping,
+    ) else {
         fail!(b"ipc");
     };
     {
@@ -284,6 +288,7 @@ fn kernel_main(
             &responses,
             &capabilities,
             service_capability,
+            virtio_handle.principal(),
             &mut memory,
         );
         let mut service_scheduler = scheduler::Scheduler::new();
@@ -302,7 +307,13 @@ fn kernel_main(
         check!(
             b"service task",
             channel
-                .send(&capabilities, service_capability, virtio_handle, ipc::Message::Ping)
+                .send(
+                    &capabilities,
+                    service_capability,
+                    session::Principal::LOCAL,
+                    virtio_handle,
+                    ipc::Message::Ping
+                )
                 .is_some()
                 && service_scheduler.run_next()
                 && responses.receive().is_some_and(|reply| reply.message == ipc::Message::Pong),
@@ -310,7 +321,13 @@ fn kernel_main(
         check!(
             b"virtio",
             channel
-                .send(&capabilities, service_capability, virtio_handle, ipc::Message::Inflate)
+                .send(
+                    &capabilities,
+                    service_capability,
+                    session::Principal::LOCAL,
+                    virtio_handle,
+                    ipc::Message::Inflate
+                )
                 .is_some()
                 && service_scheduler.run_next()
                 && {
@@ -323,14 +340,24 @@ fn kernel_main(
         check!(
             b"driver recovery",
             channel
-                .send(&capabilities, service_capability, virtio_handle, ipc::Message::Recover)
+                .send(
+                    &capabilities,
+                    service_capability,
+                    session::Principal::LOCAL,
+                    virtio_handle,
+                    ipc::Message::Recover
+                )
                 .is_some()
                 && service_scheduler.run_next()
                 && responses.receive().is_some_and(|reply| reply.message == ipc::Message::Complete),
         );
-        let Some(cancel_request) =
-            channel.send(&capabilities, service_capability, virtio_handle, ipc::Message::Cancel)
-        else {
+        let Some(cancel_request) = channel.send(
+            &capabilities,
+            service_capability,
+            session::Principal::LOCAL,
+            virtio_handle,
+            ipc::Message::Cancel,
+        ) else {
             fail!(b"ipc cancel");
         };
         check!(
@@ -364,6 +391,7 @@ fn kernel_main(
         &responses,
         &capabilities,
         service_capability,
+        virtio_handle.principal(),
         &mut memory,
     );
     let mut service_scheduler = scheduler::Scheduler::new();
@@ -433,6 +461,7 @@ fn kernel_main(
                 let _ = channel.send(
                     &capabilities,
                     service_capability,
+                    session::Principal::LOCAL,
                     virtio_handle,
                     ipc::Message::Recover,
                 );
@@ -515,6 +544,7 @@ fn kernel_main(
                             let _ = channel.send(
                                 &capabilities,
                                 service_capability,
+                                session::Principal::LOCAL,
                                 virtio_handle,
                                 ipc::Message::Cancel,
                             );
