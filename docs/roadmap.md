@@ -35,6 +35,11 @@ LogOS does not aim to reproduce Unix internally. Compatibility may be provided a
 11. **AI is a client of typed capabilities, not an implicit superuser.**
 12. **Each milestone ends with automated QEMU proofs, not only manual demonstrations.**
 
+Completed proof IDs are permanent regression contracts until their corresponding public contract
+is explicitly deprecated. The canonical registry is `cargo run -p logos-test -- list`; unavailable
+future milestone proofs must report `skipped`, never pass. Current permanent suites are `core`,
+`console`, and `platform`.
+
 ## 3. Architectural rings
 
 The rings describe dependency and trust placement. They are not conventional CPU privilege rings.

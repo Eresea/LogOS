@@ -3,6 +3,14 @@
 > **Status:** Living architecture reference  
 > **Updated:** 2026-07-24
 
+## Testing boundary
+
+Repository testing is not an OS ring or runtime service. Host tests prove portable models; the
+`logos-test` harness proves assembled contracts in QEMU. Test builds alone expose `LOGOS/1` over
+COM2, semantic fault controls, virtual time, and debug-exit completion. Production builds expose
+none of that control surface. Completed milestone proof IDs remain regression contracts until the
+corresponding public contract is explicitly deprecated. See [ADR-0002](adr/0002-test-control-boundary.md).
+
 ## 1. Purpose
 
 This document defines where responsibilities belong, how components depend on one another, and how LogOS preserves a small kernel while still becoming a complete operating system.

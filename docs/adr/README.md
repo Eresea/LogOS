@@ -7,3 +7,4 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | ADR | Status | Decision |
 | --- | --- | --- |
 | [0001](0001-terminal-service-boundary.md) | Accepted | Run the normal terminal as a separately loaded Sessions service. |
+| [0002](0002-test-control-boundary.md) | Accepted | Gate deterministic test control outside production. |
