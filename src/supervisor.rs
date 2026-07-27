@@ -6,10 +6,25 @@ pub const VIRTIO_BALLOON: &[u8] = b"virtio-balloon";
 pub struct Manifest {
     pub name: &'static [u8],
     pub dependencies: &'static [&'static [u8]],
+    pub restart: RestartPolicy,
 }
 
-const SUPERVISOR_MANIFEST: Manifest = Manifest { name: SUPERVISOR, dependencies: &[] };
-const VIRTIO_MANIFEST: Manifest = Manifest { name: VIRTIO_BALLOON, dependencies: &[SUPERVISOR] };
+#[derive(Clone, Copy)]
+pub struct RestartPolicy {
+    retries: u8,
+    backoff_ticks: u64,
+}
+
+const SUPERVISOR_MANIFEST: Manifest = Manifest {
+    name: SUPERVISOR,
+    dependencies: &[],
+    restart: RestartPolicy { retries: 0, backoff_ticks: 0 },
+};
+const VIRTIO_MANIFEST: Manifest = Manifest {
+    name: VIRTIO_BALLOON,
+    dependencies: &[SUPERVISOR],
+    restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
+};
 const BOOT_MANIFESTS: &[Manifest] = &[SUPERVISOR_MANIFEST, VIRTIO_MANIFEST];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -122,6 +137,70 @@ impl Plan {
             .iter()
             .any(|manifest| manifest.is_some_and(|manifest| manifest.name == name))
     }
+
+    fn manifest(&self, name: &[u8]) -> Option<&'static Manifest> {
+        self.order[..self.len].iter().flatten().find(|manifest| manifest.name == name).copied()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LifecycleState {
+    Running,
+    Backoff,
+    Stopped,
+}
+
+pub struct Lifecycle {
+    policy: RestartPolicy,
+    retries: u8,
+    retry_at: u64,
+    state: LifecycleState,
+}
+
+impl Lifecycle {
+    pub fn new(plan: &Plan, name: &[u8]) -> Option<Self> {
+        plan.manifest(name).map(|manifest| Self {
+            policy: manifest.restart,
+            retries: 0,
+            retry_at: 0,
+            state: LifecycleState::Running,
+        })
+    }
+
+    pub fn restart(&mut self, tick: u64) -> bool {
+        self.schedule(tick)
+    }
+
+    pub fn failed(&mut self, tick: u64) -> bool {
+        if self.state != LifecycleState::Running || self.retries >= self.policy.retries {
+            self.state = LifecycleState::Stopped;
+            return false;
+        }
+        self.retries += 1;
+        self.schedule(tick)
+    }
+
+    pub fn due(&mut self, tick: u64) -> bool {
+        if self.state == LifecycleState::Backoff && tick.wrapping_sub(self.retry_at) < (1 << 63) {
+            self.state = LifecycleState::Running;
+            return true;
+        }
+        false
+    }
+
+    pub fn shutdown(&mut self) {
+        self.state = LifecycleState::Stopped;
+    }
+
+    fn schedule(&mut self, tick: u64) -> bool {
+        if self.state != LifecycleState::Running || self.policy.backoff_ticks == 0 {
+            return false;
+        }
+        let shift = self.retries.saturating_sub(1).min(3);
+        self.retry_at = tick.saturating_add(self.policy.backoff_ticks << shift);
+        self.state = LifecycleState::Backoff;
+        true
+    }
 }
 
 pub fn boot_plan() -> Result<Plan, Error> {
@@ -131,14 +210,66 @@ pub fn boot_plan() -> Result<Plan, Error> {
 pub fn self_check() -> bool {
     const A: &[u8] = b"a";
     const B: &[u8] = b"b";
-    const OK: &[Manifest] =
-        &[Manifest { name: B, dependencies: &[A] }, Manifest { name: A, dependencies: &[] }];
-    const MISSING: &[Manifest] = &[Manifest { name: A, dependencies: &[B] }];
-    const CYCLE: &[Manifest] =
-        &[Manifest { name: A, dependencies: &[B] }, Manifest { name: B, dependencies: &[A] }];
+    const OK: &[Manifest] = &[
+        Manifest {
+            name: B,
+            dependencies: &[A],
+            restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+        },
+        Manifest {
+            name: A,
+            dependencies: &[],
+            restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+        },
+    ];
+    const MISSING: &[Manifest] = &[Manifest {
+        name: A,
+        dependencies: &[B],
+        restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+    }];
+    const CYCLE: &[Manifest] = &[
+        Manifest {
+            name: A,
+            dependencies: &[B],
+            restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+        },
+        Manifest {
+            name: B,
+            dependencies: &[A],
+            restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+        },
+    ];
     Plan::build(OK).is_ok_and(|plan| plan.starts(A) && plan.starts(B))
         && matches!(Plan::build(MISSING), Err(Error::MissingDependency))
         && matches!(Plan::build(CYCLE), Err(Error::Cycle))
+}
+
+pub fn lifecycle_self_check() -> bool {
+    let Ok(plan) = boot_plan() else {
+        return false;
+    };
+    let Some(mut lifecycle) = Lifecycle::new(&plan, VIRTIO_BALLOON) else {
+        return false;
+    };
+    let Some(mut shutdown) = Lifecycle::new(&plan, VIRTIO_BALLOON) else {
+        return false;
+    };
+    lifecycle.restart(10)
+        && !lifecycle.due(11)
+        && lifecycle.due(12)
+        && lifecycle.failed(20)
+        && !lifecycle.due(21)
+        && lifecycle.due(22)
+        && lifecycle.failed(30)
+        && lifecycle.due(34)
+        && lifecycle.failed(40)
+        && lifecycle.due(48)
+        && !lifecycle.failed(50)
+        && !lifecycle.restart(51)
+        && {
+            shutdown.shutdown();
+            !shutdown.restart(1)
+        }
 }
 
 pub fn health_self_check() -> bool {

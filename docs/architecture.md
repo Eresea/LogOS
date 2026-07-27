@@ -119,8 +119,9 @@ names, missing dependencies, and cycles. The current bootstrap plan starts
 protocol negotiation, or restart policy yet.
 
 The supervisor watches a bounded heartbeat for each boot service. A scheduled service
-updates its heartbeat; the supervisor can report an overdue service without choosing a
-recovery action. Restart, backoff, and quiesce policy remain separate.
+updates its heartbeat; an overdue heartbeat schedules bounded exponential-backoff
+recovery. The manifest owns retry limits and shutdown state; the existing VirtIO driver
+quiesces when released. Replacing a stopped service task remains a later supervisor task.
 
 ## Ring 3 — Sessions
 

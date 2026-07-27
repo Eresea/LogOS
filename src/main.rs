@@ -198,6 +198,12 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                 interrupts::ticks(),
             ),
     );
+    let Some(mut service_lifecycle) =
+        supervisor::Lifecycle::new(&supervisor, supervisor::VIRTIO_BALLOON)
+    else {
+        fail!(b"service lifecycle");
+    };
+    check!(b"service lifecycle", supervisor::lifecycle_self_check());
     let mut services = services::Registry::new();
     let Some(virtio_handle) =
         services.register(&capabilities, service_capability, services::Service::VirtioBalloon)
@@ -363,6 +369,14 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
         let mut blink_tick = interrupts::ticks();
         while console_mode == mode::ConsoleMode::Normal {
             let tick = interrupts::ticks();
+            if service_lifecycle.due(tick) {
+                let _ = channel.send(
+                    &capabilities,
+                    service_capability,
+                    virtio_handle,
+                    ipc::Message::Recover,
+                );
+            }
             if virtio::completion_pending() {
                 let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
             }
@@ -371,6 +385,7 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
             }
             if !service_health.healthy(supervisor::VIRTIO_BALLOON, tick) {
                 debug::write_line(b"LogOS: service heartbeat overdue");
+                let _ = service_lifecycle.failed(tick);
             }
             if tick.wrapping_sub(blink_tick) >= 50 {
                 terminal.blink();
@@ -430,13 +445,11 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
                             let _ = terminal.write_output(resource.as_bytes());
                         }
                         commands::Outcome::Restart => {
-                            let _ = channel.send(
-                                &capabilities,
-                                service_capability,
-                                virtio_handle,
-                                ipc::Message::Recover,
-                            );
-                            let _ = terminal.write_output(b"restart requested");
+                            let _ = terminal.write_output(if service_lifecycle.restart(tick) {
+                                b"restart scheduled"
+                            } else {
+                                b"restart unavailable"
+                            });
                         }
                         commands::Outcome::Cancel => {
                             let _ = channel.send(
