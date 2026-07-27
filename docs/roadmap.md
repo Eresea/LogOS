@@ -146,56 +146,8 @@ Console scope, V1 evidence, and future V2/V3 planning live in [Console](CONSOLE.
 
 # 7. Platform v1 — Replaceable native services
 
-## Goal
-
-> **Status:** Complete. `scripts/verify.ps1` boots QEMU and proves manifest validation,
-> startup rejection, dependency loss, service recovery, replacement, and normal operation.
-
-Turn kernel mechanisms into a supervised service platform with explicit identities, dependencies, health, and versioned protocols.
-
-## Service supervision
-
-- [x] Static declarative service manifests and bounded dependency startup ordering.
-- [x] Manifest capability declarations and grants.
-- [x] Protocol and ABI version negotiation.
-- [x] Bounded service health checks and heartbeats.
-- [x] Bounded restart, retry/backoff, quiesce, and shutdown policies.
-- [x] Failed-start diagnostics.
-- [x] Service replacement without kernel-specific knowledge.
-- [x] Service-owned resource reclamation.
-- [x] Boot profiles: normal, recovery, diagnostics.
-
-## Machine services
-
-- [x] Stable machine identity with explicit volatile fallback.
-- [x] Service and process principals.
-- [x] Local user principals.
-- [x] Monotonic time service.
-- [x] RTC-backed wall clock with an explicit unknown/untrusted state.
-- [x] Entropy and secure random service.
-- [x] Secret store with service-scoped access.
-- [x] Audit events for privileged operations.
-- [x] Scoped, expiring, revocable standing-approval grants with separate audit records.
-- [x] `system.inference` service owning model inventory, scheduling, and accelerator binding; Runtime consumers receive scoped invocation grants.
-- [x] Resource discovery through typed references.
-
-## Driver and device model
-
-- [x] Device-independent interfaces for input, display, block, network, and entropy.
-- [x] Driver binding policy outside the kernel where practical.
-- [x] Driver capability manifests.
-- [x] Device reset and rebinding.
-- [x] Driver replacement without machine reboot.
-- [x] Explicit ownership of DMA memory, queues, interrupts, and device state.
-
-## Exit criteria
-
-- [x] Services start from manifests rather than hard-coded bootstrap assumptions.
-- [x] A failed service is diagnosed, reclaimed, and restarted without rebooting the machine.
-- [x] Every service operation has a principal and capability context.
-- [x] Kernel and service protocols have explicit compatibility rules.
-- [x] Normal operation requires no module-specific code in the kernel.
-- [x] QEMU tests inject startup failure, runtime failure, dependency loss, and recovery.
+Platform scope, V1 evidence, and future planning live in [Platform](PLATFORM.md). The roadmap
+only tracks milestone ordering.
 
 ---
 
