@@ -1,6 +1,6 @@
 # Console
 
-> **Status:** Console v1 complete  
+> **Status:** Console v1 complete
 > **Owner:** Sessions (normal terminal); Core (recovery console)
 
 Console is LogOS's local textual interface. The normal terminal consumes typed command results; the kernel recovery console is an independent fallback.
@@ -36,3 +36,11 @@ Console is LogOS's local textual interface. The normal terminal consumes typed c
 ## V2 — Unplanned
 
 Record future console scope here before adding it to the roadmap. Do not infer V2 work from V1 implementation details.
+
+### Demonstrated
+
+- [x] Normal terminal startup, typed command sessions, UTF-8 editing, layouts, font rendering, history, scrollback, selection, search, and redraw recovery.
+- [x] Discoverable typed commands with capability checks, cancellation/timeout handling, bounded output, pipelines, and human/table/tree/JSON formatting.
+- [x] Local operational commands for health, tasks, services, drivers, trace, inspection, recovery, restart, cancellation, reset, and power-off.
+- [x] Live transition to the recovery console when normal startup or redraw fails, or when authorized by the `recovery` command.
+- [x] QEMU proofs for terminal editing, command behavior, input/display restart, and recovery fallback.

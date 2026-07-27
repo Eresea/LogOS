@@ -56,7 +56,7 @@ See [Architecture Annex](ARCHITECTURE.md).
 
 ## Core v1 — Complete
 
-Core v1 is a dependable, event-driven kernel foundation. It is not a desktop OS, userspace, network stack, filesystem, or WASM runtime.
+Future V2/V3 planning live in [Core](CORE.MD). The roadmap only tracks milestone ordering.
 
 ### Demonstrated
 
@@ -92,22 +92,6 @@ It should not grow into the normal user environment.
 
 ---
 
-## Console v1 â€” Complete
-
-Console v1 provides the normal local interface while preserving independent kernel recovery.
-
-### Demonstrated
-
-- [x] Normal terminal startup, typed command sessions, UTF-8 editing, layouts, font rendering, history, scrollback, selection, search, and redraw recovery.
-- [x] Discoverable typed commands with capability checks, cancellation/timeout handling, bounded output, pipelines, and human/table/tree/JSON formatting.
-- [x] Local operational commands for health, tasks, services, drivers, trace, inspection, recovery, restart, cancellation, reset, and power-off.
-- [x] Live transition to the recovery console when normal startup or redraw fails, or when authorized by the `recovery` command.
-- [x] QEMU proofs for terminal editing, command behavior, input/display restart, and recovery fallback.
-
-Next: Persistence v1.
-
----
-
 # 5. Roadmap overview
 
 | Order | Milestone           | Primary proof                                                               |
@@ -138,16 +122,13 @@ Every extraction must retain the current QEMU proof. Add `logos-abi` only when a
 
 # 6. Console v1 — Complete
 
-Console scope, V1 evidence, and future V2/V3 planning live in [Console](CONSOLE.md). The roadmap only tracks milestone ordering.
-
-
+Console scope, V1 evidence, and future V2/V3 planning live in [Console](CONSOLE.md)
 
 ---
 
 # 7. Platform v1 — Replaceable native services
 
-Platform scope, V1 evidence, and future planning live in [Platform](PLATFORM.md). The roadmap
-only tracks milestone ordering.
+Platform scope, V1 evidence, and future planning live in [Platform](PLATFORM.md)
 
 ---
 
