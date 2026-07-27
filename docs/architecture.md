@@ -368,6 +368,8 @@ Terminal redraw retains no display-service state: rendering the same model on a 
 
 The normal terminal model lives in the no-std `logos-terminal` crate, but is currently linked into the UEFI binary and run by its normal-mode loop. This is a bootstrap arrangement, not a Core boundary. Platform v1 must load it as a Sessions service with capability-only input and display contracts; the UEFI binary then retains only recovery-console code.
 
+See [ADR-0001](adr/0001-terminal-service-boundary.md).
+
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
 
 The command registry authorizes a live recovery handoff with an explicit recovery capability. The handoff stops normal input processing before recovery activates its direct input/output path.

@@ -528,5 +528,6 @@ For every material change:
 
 - [Architecture and boundary model](ARCHITECTURE.md)
 - [Subsystem naming register](NAMING.md)
+- [Architecture decision records](adr/README.md)
 
 - [Reviewed architecture proposals — 2026-07-26](reviewed/2026-07-26.md)
