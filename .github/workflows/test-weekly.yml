@@ -1,0 +1,18 @@
+name: Testing Weekly Tier
+on:
+  schedule:
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+jobs:
+  resilience:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: {targets: x86_64-unknown-uefi}
+      - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
+      - run: cargo run -p logos-test -- suite weekly
+        env: {OVMF_CODE: /usr/share/OVMF/OVMF_CODE.fd}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: {name: logos-test-weekly, path: target/logos-test}
