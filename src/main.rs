@@ -166,7 +166,16 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let Some(virtio) = devices.find(0x1af4, 0x1002) else {
         fail!(b"virtio");
     };
-    let Some(service_capability) = capabilities.grant(capabilities::CapabilityKind::Service) else {
+    let Some(supervisor) = supervisor::boot_plan().ok() else {
+        fail!(b"supervisor manifest");
+    };
+    check!(
+        b"supervisor manifest",
+        supervisor::self_check() && supervisor.starts(supervisor::VIRTIO_BALLOON),
+    );
+    let Some(session_service_capability) =
+        capabilities.grant(capabilities::CapabilityKind::Service)
+    else {
         fail!(b"capabilities");
     };
     let Some(recovery_capability) = capabilities.grant(capabilities::CapabilityKind::Recovery)
@@ -176,16 +185,21 @@ fn kernel_main(boot_info: BootInfo, memory_map: impl MemoryMap, acpi: Option<acp
     let Some(session) = session::Context::new(
         session::Id(1),
         session::Principal::LOCAL,
-        &[recovery_capability, service_capability],
+        &[recovery_capability, session_service_capability],
     ) else {
         fail!(b"session");
     };
-    let Some(supervisor) = supervisor::boot_plan().ok() else {
-        fail!(b"supervisor manifest");
+    let Some(service_capability) = supervisor.grant(
+        supervisor::VIRTIO_BALLOON,
+        &mut capabilities,
+        capabilities::CapabilityKind::Service,
+    ) else {
+        fail!(b"service capability");
     };
     check!(
-        b"supervisor manifest",
-        supervisor::self_check() && supervisor.starts(supervisor::VIRTIO_BALLOON),
+        b"service capability",
+        supervisor::grant_self_check()
+            && capabilities.allows(service_capability, capabilities::CapabilityKind::Service),
     );
     let mut service_health = supervisor::Health::new();
     check!(

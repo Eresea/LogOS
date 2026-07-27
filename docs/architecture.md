@@ -113,8 +113,9 @@ System services provide shared machine-wide behavior.
 ### Platform v1 bootstrap
 
 The bootstrap supervisor validates static manifests before starting their services. A
-manifest has a stable service name and explicit dependencies; startup rejects duplicate
-names, missing dependencies, and cycles. The current bootstrap plan starts
+manifest has a stable service name, explicit dependencies, and declared capabilities;
+startup rejects duplicate names, missing dependencies, and cycles. It grants a service
+only the capability kinds declared by that service's manifest. The current bootstrap plan starts
 `virtio-balloon` after `supervisor`; it is bounded, in-memory, and has no package loader,
 protocol negotiation, or restart policy yet.
 

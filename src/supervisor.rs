@@ -1,3 +1,5 @@
+use crate::capabilities::{Capability, CapabilityKind, CapabilityManager};
+
 const MAX_MANIFESTS: usize = 4;
 
 pub const SUPERVISOR: &[u8] = b"supervisor";
@@ -6,6 +8,7 @@ pub const VIRTIO_BALLOON: &[u8] = b"virtio-balloon";
 pub struct Manifest {
     pub name: &'static [u8],
     pub dependencies: &'static [&'static [u8]],
+    pub capabilities: &'static [CapabilityKind],
     pub restart: RestartPolicy,
 }
 
@@ -18,11 +21,13 @@ pub struct RestartPolicy {
 const SUPERVISOR_MANIFEST: Manifest = Manifest {
     name: SUPERVISOR,
     dependencies: &[],
+    capabilities: &[],
     restart: RestartPolicy { retries: 0, backoff_ticks: 0 },
 };
 const VIRTIO_MANIFEST: Manifest = Manifest {
     name: VIRTIO_BALLOON,
     dependencies: &[SUPERVISOR],
+    capabilities: &[CapabilityKind::Service],
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
 };
 const BOOT_MANIFESTS: &[Manifest] = &[SUPERVISOR_MANIFEST, VIRTIO_MANIFEST];
@@ -141,6 +146,17 @@ impl Plan {
     fn manifest(&self, name: &[u8]) -> Option<&'static Manifest> {
         self.order[..self.len].iter().flatten().find(|manifest| manifest.name == name).copied()
     }
+
+    pub fn grant(
+        &self,
+        name: &[u8],
+        manager: &mut CapabilityManager,
+        kind: CapabilityKind,
+    ) -> Option<Capability> {
+        self.manifest(name)
+            .filter(|manifest| manifest.capabilities.contains(&kind))
+            .and_then(|_| manager.grant(kind))
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -214,34 +230,52 @@ pub fn self_check() -> bool {
         Manifest {
             name: B,
             dependencies: &[A],
+            capabilities: &[],
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         },
         Manifest {
             name: A,
             dependencies: &[],
+            capabilities: &[],
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         },
     ];
     const MISSING: &[Manifest] = &[Manifest {
         name: A,
         dependencies: &[B],
+        capabilities: &[],
         restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
     }];
     const CYCLE: &[Manifest] = &[
         Manifest {
             name: A,
             dependencies: &[B],
+            capabilities: &[],
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         },
         Manifest {
             name: B,
             dependencies: &[A],
+            capabilities: &[],
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         },
     ];
     Plan::build(OK).is_ok_and(|plan| plan.starts(A) && plan.starts(B))
         && matches!(Plan::build(MISSING), Err(Error::MissingDependency))
         && matches!(Plan::build(CYCLE), Err(Error::Cycle))
+}
+
+pub fn grant_self_check() -> bool {
+    let Ok(plan) = boot_plan() else {
+        return false;
+    };
+    let mut manager = CapabilityManager::new();
+    let Some(service) = plan.grant(VIRTIO_BALLOON, &mut manager, CapabilityKind::Service) else {
+        return false;
+    };
+    manager.allows(service, CapabilityKind::Service)
+        && plan.grant(VIRTIO_BALLOON, &mut manager, CapabilityKind::Debug).is_none()
+        && plan.grant(SUPERVISOR, &mut manager, CapabilityKind::Service).is_none()
 }
 
 pub fn lifecycle_self_check() -> bool {
