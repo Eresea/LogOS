@@ -2,7 +2,7 @@
 
 > **Status:** Living document
 > **Updated:** 2026-07-24
-> **Current milestone:** Console v1 complete
+> **Current milestone:** Platform v1 complete
 > **Primary target:** A remotely operable, capability-based Rust OS with replaceable native services and sandboxed WASM applications.
 
 ## 1. Vision
@@ -104,7 +104,7 @@ Console v1 provides the normal local interface while preserving independent kern
 - [x] Live transition to the recovery console when normal startup or redraw fails, or when authorized by the `recovery` command.
 - [x] QEMU proofs for terminal editing, command behavior, input/display restart, and recovery fallback.
 
-Next: Platform v1.
+Next: Persistence v1.
 
 ---
 
@@ -148,6 +148,9 @@ Console scope, V1 evidence, and future V2/V3 planning live in [Console](CONSOLE.
 
 ## Goal
 
+> **Status:** Complete. `scripts/verify.ps1` boots QEMU and proves manifest validation,
+> startup rejection, dependency loss, service recovery, replacement, and normal operation.
+
 Turn kernel mechanisms into a supervised service platform with explicit identities, dependencies, health, and versioned protocols.
 
 ## Service supervision
@@ -187,12 +190,12 @@ Turn kernel mechanisms into a supervised service platform with explicit identiti
 
 ## Exit criteria
 
-- Services start from manifests rather than hard-coded bootstrap assumptions.
-- A failed service is diagnosed, reclaimed, and restarted without rebooting the machine.
-- Every service operation has a principal and capability context.
-- Kernel and service protocols have explicit compatibility rules.
-- Normal operation requires no module-specific code in the kernel.
-- QEMU tests inject startup failure, runtime failure, dependency loss, and recovery.
+- [x] Services start from manifests rather than hard-coded bootstrap assumptions.
+- [x] A failed service is diagnosed, reclaimed, and restarted without rebooting the machine.
+- [x] Every service operation has a principal and capability context.
+- [x] Kernel and service protocols have explicit compatibility rules.
+- [x] Normal operation requires no module-specific code in the kernel.
+- [x] QEMU tests inject startup failure, runtime failure, dependency loss, and recovery.
 
 ---
 
