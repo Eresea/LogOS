@@ -406,9 +406,9 @@ before resuming. A native terminal entry may use that path only after it has an 
 Native service headers carry the ABI version, service name, and native entry function. The loader
 derives that entry's RVA after firmware relocation and accepts it only when it lies in an executable
 PE section. Core maps a versioned service-context page and passes its user virtual address to the
-entry. `Ready` resumes Ring 3 after Core acknowledges it; `Wait` captures a Core-owned service
-frame, and `Complete` returns control to Core. Input, display, and session operations remain unmapped
-until their capability-scoped IPC contracts are added.
+entry. `Ready` resumes Ring 3 after Core acknowledges it; `ReadInput` captures a Core-owned service
+frame and Core supplies one typed input byte before resuming it; `Complete` returns control to Core.
+Display and session operations remain unmapped until their capability-scoped IPC contracts are added.
 
 A long-lived native service is suspended only at a Core gate. Core saves its registers and `iretq`
 frame on Core-owned memory, then later restores that frame on the service's supervisor stack. A

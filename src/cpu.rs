@@ -155,7 +155,7 @@ extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
         return 1;
     }
     if context != 0
-        && unsafe { logos_core::native_service::Context::waiting_at(context) }
+        && unsafe { logos_core::native_service::Context::input_waiting_at(context) }
         && save_user_frame(frame)
     {
         return 2;

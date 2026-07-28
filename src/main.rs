@@ -226,6 +226,9 @@ fn kernel_main(
             terminal_address_space.map_context(&mut memory).is_some_and(|(physical, context)| {
                 privilege.run_entry(&mut terminal_address_space, entry, context)
                     == Some(cpu::EntryState::Blocked)
+                    && unsafe {
+                        logos_core::native_service::Context::deliver_input_at(physical, b'k')
+                    }
                     && privilege.resume_entry(&mut terminal_address_space)
                     && unsafe { logos_core::native_service::Context::complete_at(physical) }
             })

@@ -1,7 +1,7 @@
 pub const MAGIC: [u8; 4] = *b"LGSV";
 pub const ABI: u16 = 1;
 pub const READY: u32 = 1;
-pub const WAIT: u32 = 2;
+pub const READ_INPUT: u32 = 2;
 pub const COMPLETE: u32 = 3;
 pub const ACKNOWLEDGED: u32 = 1;
 
@@ -12,11 +12,12 @@ pub struct Context {
     pub reserved: u16,
     pub operation: u32,
     pub status: u32,
+    pub input: u32,
 }
 
 impl Context {
     pub const fn new() -> Self {
-        Self { abi: ABI, reserved: 0, operation: 0, status: 0 }
+        Self { abi: ABI, reserved: 0, operation: 0, status: 0, input: 0 }
     }
 
     /// # Safety
@@ -57,12 +58,29 @@ impl Context {
     /// # Safety
     ///
     /// `address` must point to a live, aligned `Context` mapping.
-    pub unsafe fn waiting_at(address: u64) -> bool {
+    pub unsafe fn input_waiting_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
         context.abi == ABI
             && context.reserved == 0
-            && context.operation == WAIT
+            && context.operation == READ_INPUT
             && context.status == ACKNOWLEDGED
+    }
+
+    /// # Safety
+    ///
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn deliver_input_at(address: u64, input: u8) -> bool {
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != READ_INPUT
+            || context.status != ACKNOWLEDGED
+        {
+            return false;
+        }
+        context.input = u32::from(input);
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
     }
 }
 
