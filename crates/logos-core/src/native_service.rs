@@ -2,7 +2,8 @@ pub const MAGIC: [u8; 4] = *b"LGSV";
 pub const ABI: u16 = 1;
 pub const READY: u32 = 1;
 pub const READ_INPUT: u32 = 2;
-pub const COMPLETE: u32 = 3;
+pub const PRESENT_PIXEL: u32 = 3;
+pub const COMPLETE: u32 = 4;
 pub const ACKNOWLEDGED: u32 = 1;
 
 #[repr(C)]
@@ -13,11 +14,14 @@ pub struct Context {
     pub operation: u32,
     pub status: u32,
     pub input: u32,
+    pub x: u32,
+    pub y: u32,
+    pub color: u32,
 }
 
 impl Context {
     pub const fn new() -> Self {
-        Self { abi: ABI, reserved: 0, operation: 0, status: 0, input: 0 }
+        Self { abi: ABI, reserved: 0, operation: 0, status: 0, input: 0, x: 0, y: 0, color: 0 }
     }
 
     /// # Safety
@@ -81,6 +85,22 @@ impl Context {
         context.input = u32::from(input);
         unsafe { (address as *mut Self).write_volatile(context) };
         true
+    }
+
+    /// # Safety
+    ///
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn pixel_at(address: u64) -> Option<(u32, u32, [u8; 3])> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI
+            && context.reserved == 0
+            && context.operation == PRESENT_PIXEL
+            && context.status == ACKNOWLEDGED)
+            .then_some((
+                context.x,
+                context.y,
+                [context.color as u8, (context.color >> 8) as u8, (context.color >> 16) as u8],
+            ))
     }
 }
 

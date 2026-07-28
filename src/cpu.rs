@@ -120,11 +120,11 @@ impl Privilege {
         USER_BLOCKED.store(false, Ordering::Release);
         USER_CONTEXT.store(context, Ordering::Release);
         unsafe { enter_user(space.cr3(), entry, space.stack_top(), context) };
-        USER_CONTEXT.store(0, Ordering::Release);
         unsafe { set_tss_stack(self.stack.address() + 4096) };
         if USER_BLOCKED.load(Ordering::Acquire) {
             Some(EntryState::Blocked)
         } else {
+            USER_CONTEXT.store(0, Ordering::Release);
             USER_RETURNED.load(Ordering::Acquire).then_some(EntryState::Returned)
         }
     }
@@ -138,6 +138,7 @@ impl Privilege {
         unsafe { set_tss_stack(space.kernel_stack_top()) };
         USER_RETURNED.store(false, Ordering::Release);
         unsafe { resume_user(space.cr3(), space.kernel_stack_top()) };
+        USER_CONTEXT.store(0, Ordering::Release);
         unsafe { set_tss_stack(self.stack.address() + 4096) };
         USER_RETURNED.load(Ordering::Acquire)
     }
@@ -152,6 +153,9 @@ extern "C" fn user_gate_returned() {
 extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
     let context = USER_CONTEXT.load(Ordering::Acquire);
     if context != 0 && unsafe { logos_core::native_service::Context::acknowledge_at(context) } {
+        return 1;
+    }
+    if context != 0 && crate::native_display::present(context) {
         return 1;
     }
     if context != 0

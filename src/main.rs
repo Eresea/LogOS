@@ -21,6 +21,7 @@ mod ipc;
 mod keyboard;
 mod memory;
 mod mode;
+mod native_display;
 mod payload;
 mod pci;
 mod pe;
@@ -137,6 +138,16 @@ fn kernel_main(
     check!(b"device interfaces", device::self_check());
     check!(b"framebuffer", framebuffer_ok);
     check!(
+        b"native display",
+        native_display::install(
+            boot_info.framebuffer,
+            boot_info.framebuffer_size,
+            boot_info.resolution.0,
+            boot_info.resolution.1,
+            boot_info.stride,
+        ),
+    );
+    check!(
         b"acpi",
         acpi.is_some_and(|tables| {
             tables.xsdt != 0
@@ -224,13 +235,16 @@ fn kernel_main(
         b"native service entry",
         terminal_address_space.map_image(&mut memory, payload).is_some_and(|entry| {
             terminal_address_space.map_context(&mut memory).is_some_and(|(physical, context)| {
-                privilege.run_entry(&mut terminal_address_space, entry, context)
-                    == Some(cpu::EntryState::Blocked)
-                    && unsafe {
-                        logos_core::native_service::Context::deliver_input_at(physical, b'k')
-                    }
-                    && privilege.resume_entry(&mut terminal_address_space)
-                    && unsafe { logos_core::native_service::Context::complete_at(physical) }
+                let blocked = privilege.run_entry(&mut terminal_address_space, entry, context)
+                    == Some(cpu::EntryState::Blocked);
+                let input = unsafe {
+                    logos_core::native_service::Context::deliver_input_at(physical, b'k')
+                };
+                let resumed = privilege.resume_entry(&mut terminal_address_space);
+                let displayed = native_display::matches(0, 0, [0, 0xff, 0]);
+                let complete =
+                    unsafe { logos_core::native_service::Context::complete_at(physical) };
+                blocked && input && resumed && displayed && complete
             })
         }) && terminal_address_space.release(&mut memory),
     );
