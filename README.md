@@ -4,9 +4,9 @@
 
 <h1 align="center">LogOS</h1>
 
-<p align="center">A small, capability-based operating system written in Rust.</p>
+<p align="center">An OS-building thought experiment in Rust.</p>
 
-LogOS keeps the kernel focused on the work only the kernel can do: hardware, memory, scheduling, IPC, and capability enforcement. Everything else is intended to be a replaceable service, with sandboxed WebAssembly applications as the long-term application model.
+LogOS is an experimental, capability-based operating system. It keeps the kernel focused on the work only the kernel can do: hardware, memory, scheduling, IPC, and capability enforcement. Everything else is intended to be a replaceable service, with sandboxed WebAssembly applications as the long-term application model.
 
 The normal terminal model and recovery handoff are implemented. The terminal still runs in the UEFI image; Platform v1 must move it to a separately loaded, capability-only service.
 
@@ -25,3 +25,7 @@ The normal terminal model and recovery handoff are implemented. The terminal sti
 ## Contributing
 
 Read the [agent guide](AGENTS.md) before changing the kernel. Keep changes small, independently bootable, and observable through the QEMU debug console.
+
+## License
+
+LogOS is open source under the [MIT License](LICENSE).
