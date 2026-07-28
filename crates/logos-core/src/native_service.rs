@@ -1,6 +1,8 @@
 pub const MAGIC: [u8; 4] = *b"LGSV";
 pub const ABI: u16 = 1;
 pub const READY: u32 = 1;
+pub const COMPLETE: u32 = 2;
+pub const ACKNOWLEDGED: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -8,11 +10,12 @@ pub struct Context {
     pub abi: u16,
     pub reserved: u16,
     pub operation: u32,
+    pub status: u32,
 }
 
 impl Context {
     pub const fn new() -> Self {
-        Self { abi: ABI, reserved: 0, operation: 0 }
+        Self { abi: ABI, reserved: 0, operation: 0, status: 0 }
     }
 
     /// # Safety
@@ -21,6 +24,33 @@ impl Context {
     pub unsafe fn ready_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
         context.abi == ABI && context.reserved == 0 && context.operation == READY
+    }
+
+    /// # Safety
+    ///
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn acknowledge_at(address: u64) -> bool {
+        let context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != READY
+            || context.status != 0
+        {
+            return false;
+        }
+        unsafe { (address as *mut Self).cast::<u32>().add(2).write_volatile(ACKNOWLEDGED) };
+        true
+    }
+
+    /// # Safety
+    ///
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn complete_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == COMPLETE
+            && context.status == ACKNOWLEDGED
     }
 }
 

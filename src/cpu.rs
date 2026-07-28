@@ -2,7 +2,7 @@ use core::{
     arch::asm,
     mem::size_of,
     ptr,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use crate::memory::{Page, PhysicalMemory};
@@ -41,6 +41,7 @@ static mut TSS: Tss = Tss {
     iomap_base: size_of::<Tss>() as u16,
 };
 static USER_RETURNED: AtomicBool = AtomicBool::new(false);
+static USER_CONTEXT: AtomicU64 = AtomicU64::new(0);
 #[unsafe(no_mangle)]
 static mut USER_RETURN_RSP: u64 = 0;
 #[unsafe(no_mangle)]
@@ -106,7 +107,9 @@ impl Privilege {
         }
         unsafe { set_tss_stack(space.kernel_stack_top()) };
         USER_RETURNED.store(false, Ordering::Release);
+        USER_CONTEXT.store(context, Ordering::Release);
         unsafe { enter_user(space.cr3(), entry, space.stack_top(), context) };
+        USER_CONTEXT.store(0, Ordering::Release);
         unsafe { set_tss_stack(self.stack.address() + 4096) };
         USER_RETURNED.load(Ordering::Acquire)
     }
@@ -115,6 +118,12 @@ impl Privilege {
 #[unsafe(no_mangle)]
 extern "C" fn user_gate_returned() {
     USER_RETURNED.store(true, Ordering::Release);
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn user_gate_resume() -> bool {
+    let context = USER_CONTEXT.load(Ordering::Acquire);
+    context != 0 && unsafe { logos_core::native_service::Context::acknowledge_at(context) }
 }
 
 fn tss_low(base: u64) -> u64 {
@@ -167,6 +176,44 @@ core::arch::global_asm!(
     "iretq",
     ".global user_gate",
     "user_gate:",
+    "push rax",
+    "push rcx",
+    "push rdx",
+    "push rbx",
+    "push rbp",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
+    "sub rsp, 48",
+    "call user_gate_resume",
+    "add rsp, 48",
+    "test al, al",
+    "jz user_gate_exit",
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rbp",
+    "pop rbx",
+    "pop rdx",
+    "pop rcx",
+    "pop rax",
+    "iretq",
+    "user_gate_exit:",
+    "add rsp, 120",
     "sub rsp, 40",
     "call user_gate_returned",
     "add rsp, 40",

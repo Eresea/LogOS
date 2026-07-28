@@ -226,7 +226,7 @@ fn kernel_main(
         terminal_address_space.map_image(&mut memory, payload).is_some_and(|entry| {
             terminal_address_space.map_context(&mut memory).is_some_and(|(physical, context)| {
                 privilege.run_entry(&mut terminal_address_space, entry, context)
-                    && unsafe { logos_core::native_service::Context::ready_at(physical) }
+                    && unsafe { logos_core::native_service::Context::complete_at(physical) }
             })
         }) && terminal_address_space.release(&mut memory),
     );
