@@ -836,13 +836,25 @@ fn native_command_reply(
     ) {
         commands::Outcome::Text(value) => endpoint.reply(value.as_bytes()),
         commands::Outcome::CommandList => command_list_reply(endpoint),
+        commands::Outcome::Tasks => endpoint.reply(b"scheduler active"),
+        commands::Outcome::Services => endpoint.reply(platform::service_status(true)),
+        commands::Outcome::Drivers => endpoint.reply(platform::driver_status()),
+        commands::Outcome::Trace => endpoint.reply(trace::message(trace::latest())),
+        commands::Outcome::Inspect(resource) => endpoint.reply(resource.as_bytes()),
+        commands::Outcome::Clear => endpoint.reply(b"\x1eclear"),
+        commands::Outcome::Layout(input::Layout::Qwerty) => endpoint.reply(b"layout qwerty"),
+        commands::Outcome::Layout(input::Layout::Azerty) => endpoint.reply(b"layout azerty"),
+        commands::Outcome::Restart(_) => endpoint.reply(b"restart unavailable"),
+        commands::Outcome::Cancel(_) => endpoint.reply(b"cancel unavailable"),
+        commands::Outcome::Recovery => endpoint.reply(b"recovery requested"),
+        commands::Outcome::Reboot => endpoint.reply(b"reboot requires recovery"),
+        commands::Outcome::PowerOff => endpoint.reply(b"poweroff requires recovery"),
         commands::Outcome::Error(commands::Error::Denied) => endpoint.reply(b"permission denied"),
         commands::Outcome::Error(commands::Error::UnknownCommand) => {
             endpoint.reply(b"unknown command")
         }
         commands::Outcome::Error(commands::Error::Cancelled) => endpoint.reply(b"cancelled"),
         commands::Outcome::Error(commands::Error::TimedOut) => endpoint.reply(b"timed out"),
-        _ => endpoint.reply(b"command accepted"),
     }
 }
 

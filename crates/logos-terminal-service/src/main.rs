@@ -41,9 +41,13 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
                         asm!("int 0x80");
                         let length =
                             usize::try_from((*context).text_length).unwrap_or(0).min(MAX_TEXT);
-                        for line in (&(*context).text)[..length].split(|byte| *byte == b'\n') {
-                            if !line.is_empty() {
-                                let _ = terminal.write_output(line);
+                        if &(&(*context).text)[..length] == b"\x1eclear" {
+                            terminal.clear_output();
+                        } else {
+                            for line in (&(*context).text)[..length].split(|byte| *byte == b'\n') {
+                                if !line.is_empty() {
+                                    let _ = terminal.write_output(line);
+                                }
                             }
                         }
                     } else {
