@@ -408,6 +408,8 @@ derives that entry's RVA after firmware relocation and accepts it only when it l
 PE section. Core maps a versioned service-context page and passes its user virtual address to the
 entry. `Ready` resumes Ring 3 after Core acknowledges it; `ReadInput` captures a Core-owned service
 frame and Core supplies one typed input byte before resuming it; `Complete` returns control to Core.
+`SubmitCommand` copies at most 32 bytes into the same context page, suspends the service at a
+Core-owned frame, and resumes it only after Core has copied and replied to the request.
 `PresentPixel` supplies bounded coordinates and color only; Core validates them and writes the
 framebuffer. Display and session operations remain unmapped until their capability-scoped IPC
 contracts are added.
