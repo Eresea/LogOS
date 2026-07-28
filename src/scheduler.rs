@@ -12,7 +12,8 @@ pub struct Event(u8);
 
 impl Event {
     pub const VIRTIO: Self = Self(1);
-    const SELF_CHECK: Self = Self(2);
+    pub const INPUT: Self = Self(2);
+    const SELF_CHECK: Self = Self(3);
 }
 
 pub trait Runnable {

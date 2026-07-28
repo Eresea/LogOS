@@ -229,21 +229,30 @@ fn kernel_main(
                 == Some(cpu::EntryState::Returned)
         }) && service_address_space.release(&mut memory),
     );
-    let Some(mut terminal_task) = native_task::Terminal::load(&mut memory, payload) else {
+    let Some(mut terminal_task) = native_task::Terminal::load(&mut memory, payload, &privilege)
+    else {
         fail!(b"native service entry");
+    };
+    let terminal_input = terminal_task.input_endpoint();
+    let terminal_result = {
+        let mut terminal_scheduler = scheduler::Scheduler::new();
+        let terminal_handle = terminal_scheduler.spawn(&mut terminal_task);
+        terminal_handle.is_some()
+            && terminal_scheduler.run_next()
+            && !terminal_scheduler.run_next()
+            && terminal_input.deliver(b'k')
+            && terminal_scheduler.wake(terminal_handle.unwrap())
+            && terminal_scheduler.run_next()
+            && !terminal_scheduler.run_next()
+            && native_display::matches(0, 0, [0, 0xff, 0])
+            && terminal_input.deliver(0x1b)
+            && terminal_scheduler.wake(terminal_handle.unwrap())
+            && terminal_scheduler.run_next()
+            && !terminal_scheduler.run_next()
     };
     check!(
         b"native service entry",
-        terminal_task.start(&privilege)
-            && terminal_task.blocked()
-            && terminal_task.deliver_input(b'k')
-            && terminal_task.resume(&privilege)
-            && terminal_task.blocked()
-            && native_display::matches(0, 0, [0, 0xff, 0])
-            && terminal_task.deliver_input(0x1b)
-            && terminal_task.resume(&privilege)
-            && terminal_task.complete()
-            && terminal_task.release(&mut memory),
+        terminal_result && terminal_task.complete() && terminal_task.release(&mut memory),
     );
     check!(
         b"time",

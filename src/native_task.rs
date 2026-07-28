@@ -3,19 +3,39 @@ use crate::{
     cpu::{EntryState, Privilege},
     memory::PhysicalMemory,
     payload::Payload,
+    scheduler::{Event, Runnable, TaskState},
 };
 
-pub struct Terminal {
+pub struct Terminal<'a> {
+    privilege: &'a Privilege,
     space: AddressSpace,
     entry: u64,
     context_physical: u64,
     context: u64,
+    started: bool,
     blocked: bool,
     complete: bool,
 }
 
-impl Terminal {
-    pub fn load(memory: &mut PhysicalMemory, payload: Payload) -> Option<Self> {
+#[derive(Clone, Copy)]
+pub struct InputEndpoint {
+    context_physical: u64,
+}
+
+impl InputEndpoint {
+    pub fn deliver(self, input: u8) -> bool {
+        unsafe {
+            logos_core::native_service::Context::deliver_input_at(self.context_physical, input)
+        }
+    }
+}
+
+impl<'a> Terminal<'a> {
+    pub fn load(
+        memory: &mut PhysicalMemory,
+        payload: Payload,
+        privilege: &'a Privilege,
+    ) -> Option<Self> {
         let mut space = AddressSpace::new(memory)?;
         let Some(entry) = space.map_image(memory, payload) else {
             let _ = space.release(memory);
@@ -25,28 +45,31 @@ impl Terminal {
             let _ = space.release(memory);
             return None;
         };
-        Some(Self { space, entry, context_physical, context, blocked: false, complete: false })
+        Some(Self {
+            privilege,
+            space,
+            entry,
+            context_physical,
+            context,
+            started: false,
+            blocked: false,
+            complete: false,
+        })
     }
 
-    pub fn start(&mut self, privilege: &Privilege) -> bool {
-        let state = privilege.run_entry(&mut self.space, self.entry, self.context);
+    pub fn start(&mut self) -> bool {
+        let state = self.privilege.run_entry(&mut self.space, self.entry, self.context);
+        self.started = true;
         self.advance(state)
     }
 
-    pub fn deliver_input(&self, input: u8) -> bool {
-        self.blocked
-            && unsafe {
-                logos_core::native_service::Context::deliver_input_at(self.context_physical, input)
-            }
+    pub const fn input_endpoint(&self) -> InputEndpoint {
+        InputEndpoint { context_physical: self.context_physical }
     }
 
-    pub fn resume(&mut self, privilege: &Privilege) -> bool {
-        let state = privilege.resume_entry(&mut self.space);
+    pub fn resume(&mut self) -> bool {
+        let state = self.privilege.resume_entry(&mut self.space);
         self.advance(state)
-    }
-
-    pub const fn blocked(&self) -> bool {
-        self.blocked
     }
 
     pub const fn complete(&self) -> bool {
@@ -71,6 +94,26 @@ impl Terminal {
                 self.complete
             }
             None => false,
+        }
+    }
+}
+
+impl Runnable for Terminal<'_> {
+    fn run(&mut self) -> TaskState {
+        if self.complete {
+            return TaskState::Complete;
+        }
+        if !self.started {
+            return if self.start() {
+                TaskState::Blocked(Event::INPUT)
+            } else {
+                TaskState::Complete
+            };
+        }
+        if self.resume() {
+            if self.complete { TaskState::Complete } else { TaskState::Blocked(Event::INPUT) }
+        } else {
+            TaskState::Complete
         }
     }
 }
