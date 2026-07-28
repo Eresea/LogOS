@@ -545,6 +545,7 @@ fn kernel_main(
     coordinator.announce();
     check!(b"trace", trace::self_check());
     let native_input = native_terminal.input_endpoint();
+    let native_command = native_terminal.command_endpoint();
     let mut native_scheduler = scheduler::Scheduler::new();
     let Some(native_handle) = native_scheduler.spawn(&mut native_terminal) else {
         fail!(b"native terminal task");
@@ -607,7 +608,15 @@ fn kernel_main(
                 if let Some(byte) = native_input_byte(event) {
                     let _ = native_input.deliver(byte)
                         && native_scheduler.wake(native_handle)
-                        && native_scheduler.run_next();
+                        && native_scheduler.run_next()
+                        && (!native_command.submission().is_some()
+                            || (native_command_reply(
+                                native_command,
+                                &session,
+                                &capabilities,
+                                tick,
+                            ) && native_scheduler.wake(native_handle)
+                                && native_scheduler.run_next()));
                 }
                 if event.is_enter() {
                     let submission = terminal.submit();
@@ -764,6 +773,37 @@ fn native_input_byte(event: input::Event) -> Option<u8> {
             _ => None,
         })
     })
+}
+
+fn native_command_reply(
+    endpoint: native_task::CommandEndpoint,
+    session: &session::Context,
+    capabilities: &capabilities::CapabilityManager,
+    tick: u64,
+) -> bool {
+    let Some(request) = endpoint.submission() else {
+        return true;
+    };
+    let reply: &[u8] =
+        logos_terminal::terminal::Submission::from_bytes(&request.text[..request.length])
+            .map(|submission| {
+                match commands::pipeline(
+                    submission,
+                    session,
+                    capabilities,
+                    commands::Invocation::new(tick.wrapping_add(50)),
+                    tick,
+                ) {
+                    commands::Outcome::Text(value) => value.as_bytes(),
+                    commands::Outcome::Error(commands::Error::Denied) => b"permission denied",
+                    commands::Outcome::Error(commands::Error::UnknownCommand) => b"unknown command",
+                    commands::Outcome::Error(commands::Error::Cancelled) => b"cancelled",
+                    commands::Outcome::Error(commands::Error::TimedOut) => b"timed out",
+                    _ => b"command accepted",
+                }
+            })
+            .unwrap_or(b"unknown command");
+    endpoint.reply(reply)
 }
 
 fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {

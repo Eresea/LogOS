@@ -4,6 +4,7 @@
 use core::arch::asm;
 use logos_core::native_service::{
     ACKNOWLEDGED, CLEAR_DISPLAY, COMPLETE, Context, Header, PRESENT_TEXT, READ_INPUT, READY,
+    SUBMIT_COMMAND,
 };
 use logos_terminal::terminal::Model;
 use uefi::{Status, prelude::*};
@@ -30,7 +31,18 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
             if let Ok(input) = u8::try_from((*context).input) {
                 if input == b'\n' {
                     let submission = terminal.submit();
-                    let _ = terminal.write_output(submission.as_bytes());
+                    if submission.as_bytes().len() <= 32 {
+                        (*context).text = [0; 32];
+                        (&mut (*context).text)[..submission.as_bytes().len()]
+                            .copy_from_slice(submission.as_bytes());
+                        (*context).text_length = submission.as_bytes().len() as u32;
+                        (*context).operation = SUBMIT_COMMAND;
+                        asm!("int 0x80");
+                        let length = usize::try_from((*context).text_length).unwrap_or(0).min(32);
+                        let _ = terminal.write_output(&(*context).text[..length]);
+                    } else {
+                        let _ = terminal.write_output(b"command too long");
+                    }
                 } else if input != 0x1b {
                     let _ = terminal.insert_utf8(&[input]);
                 }

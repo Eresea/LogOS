@@ -43,6 +43,7 @@ static mut TSS: Tss = Tss {
 static USER_RETURNED: AtomicBool = AtomicBool::new(false);
 static USER_CONTEXT: AtomicU64 = AtomicU64::new(0);
 static USER_BLOCKED: AtomicBool = AtomicBool::new(false);
+static USER_COMMAND: AtomicBool = AtomicBool::new(false);
 const USER_FRAME_WORDS: usize = 20;
 #[unsafe(no_mangle)]
 static mut USER_FRAME: [u64; USER_FRAME_WORDS] = [0; USER_FRAME_WORDS];
@@ -60,7 +61,8 @@ pub struct Privilege {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum EntryState {
     Returned,
-    Blocked,
+    Input,
+    Command,
 }
 
 impl Privilege {
@@ -118,11 +120,16 @@ impl Privilege {
         unsafe { set_tss_stack(space.kernel_stack_top()) };
         USER_RETURNED.store(false, Ordering::Release);
         USER_BLOCKED.store(false, Ordering::Release);
+        USER_COMMAND.store(false, Ordering::Release);
         USER_CONTEXT.store(context, Ordering::Release);
         unsafe { enter_user(space.cr3(), entry, space.stack_top(), context) };
         unsafe { set_tss_stack(self.stack.address() + 4096) };
         if USER_BLOCKED.load(Ordering::Acquire) {
-            Some(EntryState::Blocked)
+            Some(if USER_COMMAND.load(Ordering::Acquire) {
+                EntryState::Command
+            } else {
+                EntryState::Input
+            })
         } else {
             USER_CONTEXT.store(0, Ordering::Release);
             USER_RETURNED.load(Ordering::Acquire).then_some(EntryState::Returned)
@@ -143,7 +150,11 @@ impl Privilege {
         unsafe { resume_user(space.cr3(), space.kernel_stack_top()) };
         unsafe { set_tss_stack(self.stack.address() + 4096) };
         if USER_BLOCKED.load(Ordering::Acquire) {
-            Some(EntryState::Blocked)
+            Some(if USER_COMMAND.load(Ordering::Acquire) {
+                EntryState::Command
+            } else {
+                EntryState::Input
+            })
         } else {
             USER_CONTEXT.store(0, Ordering::Release);
             USER_RETURNED.load(Ordering::Acquire).then_some(EntryState::Returned)
@@ -173,20 +184,27 @@ extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
     }
     if context != 0
         && unsafe { logos_core::native_service::Context::input_waiting_at(context) }
-        && save_user_frame(frame)
+        && save_user_frame(frame, false)
+    {
+        return 2;
+    }
+    if context != 0
+        && unsafe { logos_core::native_service::Context::command_at(context) }.is_some()
+        && save_user_frame(frame, true)
     {
         return 2;
     }
     0
 }
 
-fn save_user_frame(frame: *const u64) -> bool {
+fn save_user_frame(frame: *const u64, command: bool) -> bool {
     if USER_BLOCKED.swap(true, Ordering::AcqRel) {
         return false;
     }
     unsafe {
         ptr::copy_nonoverlapping(frame, ptr::addr_of_mut!(USER_FRAME).cast(), USER_FRAME_WORDS)
     };
+    USER_COMMAND.store(command, Ordering::Release);
     true
 }
 

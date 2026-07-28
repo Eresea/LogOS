@@ -13,6 +13,7 @@ pub struct Event(u8);
 impl Event {
     pub const VIRTIO: Self = Self(1);
     pub const INPUT: Self = Self(2);
+    pub const COMMAND: Self = Self(4);
     const SELF_CHECK: Self = Self(3);
 }
 

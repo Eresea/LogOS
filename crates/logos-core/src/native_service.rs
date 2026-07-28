@@ -6,6 +6,7 @@ pub const PRESENT_PIXEL: u32 = 3;
 pub const PRESENT_TEXT: u32 = 4;
 pub const CLEAR_DISPLAY: u32 = 5;
 pub const COMPLETE: u32 = 6;
+pub const SUBMIT_COMMAND: u32 = 7;
 pub const ACKNOWLEDGED: u32 = 1;
 
 #[repr(C)]
@@ -107,6 +108,33 @@ impl Context {
             return false;
         }
         context.input = u32::from(input);
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn command_at(address: u64) -> Option<TextRequest> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        let length = usize::try_from(context.text_length).ok()?;
+        (context.abi == ABI
+            && context.reserved == 0
+            && context.operation == SUBMIT_COMMAND
+            && context.status == ACKNOWLEDGED
+            && length <= context.text.len())
+        .then_some(TextRequest { x: 0, y: 0, color: [0; 3], text: context.text, length })
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn reply_at(address: u64, reply: &[u8]) -> bool {
+        if reply.len() > 32 || unsafe { Self::command_at(address) }.is_none() {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        context.text = [0; 32];
+        context.text[..reply.len()].copy_from_slice(reply);
+        context.text_length = reply.len() as u32;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }

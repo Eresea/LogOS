@@ -14,6 +14,7 @@ pub struct Terminal<'a> {
     context: u64,
     started: bool,
     blocked: bool,
+    event: Event,
     complete: bool,
 }
 
@@ -27,6 +28,21 @@ impl InputEndpoint {
         unsafe {
             logos_core::native_service::Context::deliver_input_at(self.context_physical, input)
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct CommandEndpoint {
+    context_physical: u64,
+}
+
+impl CommandEndpoint {
+    pub fn submission(self) -> Option<logos_core::native_service::TextRequest> {
+        unsafe { logos_core::native_service::Context::command_at(self.context_physical) }
+    }
+
+    pub fn reply(self, bytes: &[u8]) -> bool {
+        unsafe { logos_core::native_service::Context::reply_at(self.context_physical, bytes) }
     }
 }
 
@@ -53,6 +69,7 @@ impl<'a> Terminal<'a> {
             context,
             started: false,
             blocked: false,
+            event: Event::INPUT,
             complete: false,
         })
     }
@@ -65,6 +82,10 @@ impl<'a> Terminal<'a> {
 
     pub const fn input_endpoint(&self) -> InputEndpoint {
         InputEndpoint { context_physical: self.context_physical }
+    }
+
+    pub const fn command_endpoint(&self) -> CommandEndpoint {
+        CommandEndpoint { context_physical: self.context_physical }
     }
 
     pub fn resume(&mut self) -> bool {
@@ -82,8 +103,10 @@ impl<'a> Terminal<'a> {
 
     fn advance(&mut self, state: Option<EntryState>) -> bool {
         match state {
-            Some(EntryState::Blocked) => {
+            Some(EntryState::Input) | Some(EntryState::Command) => {
                 self.blocked = true;
+                self.event =
+                    if state == Some(EntryState::Command) { Event::COMMAND } else { Event::INPUT };
                 true
             }
             Some(EntryState::Returned) => {
@@ -104,14 +127,10 @@ impl Runnable for Terminal<'_> {
             return TaskState::Complete;
         }
         if !self.started {
-            return if self.start() {
-                TaskState::Blocked(Event::INPUT)
-            } else {
-                TaskState::Complete
-            };
+            return if self.start() { TaskState::Blocked(self.event) } else { TaskState::Complete };
         }
         if self.resume() {
-            if self.complete { TaskState::Complete } else { TaskState::Blocked(Event::INPUT) }
+            if self.complete { TaskState::Complete } else { TaskState::Blocked(self.event) }
         } else {
             TaskState::Complete
         }
