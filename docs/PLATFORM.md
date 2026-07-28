@@ -1,6 +1,6 @@
 # Platform
 
-> **Status:** Bootstrap mechanisms implemented; independent service execution pending
+> **Status:** Bootstrap mechanisms and Ring-3 gate round trips implemented; suspended service execution pending
 > **Owner:** Foundation and System
 
 Platform currently provides the bootstrap mechanisms for supervised native services: identities,

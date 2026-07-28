@@ -410,7 +410,11 @@ entry. `Ready` resumes Ring 3 after Core acknowledges it; `Complete` returns con
 display, and session operations remain unmapped
 until their capability-scoped IPC contracts are added.
 
-See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), and [ADR-0004](adr/0004-native-service-address-spaces.md).
+A long-lived native service is suspended only at a Core gate. Core saves its registers and `iretq`
+frame on Core-owned memory, then later restores that frame on the service's supervisor stack. A
+service cannot select its return frame, kernel stack, CR3, or device mappings.
+
+See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), and [ADR-0005](adr/0005-native-service-suspension.md).
 
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
 

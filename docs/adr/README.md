@@ -10,3 +10,4 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0002](0002-test-control-boundary.md) | Accepted | Gate deterministic test control outside production. |
 | [0003](0003-native-service-payload-contract.md) | Accepted | Stage native services as versioned boot payloads. |
 | [0004](0004-native-service-address-spaces.md) | Accepted | Isolate each native service in its own address space. |
+| [0005](0005-native-service-suspension.md) | Accepted | Suspend native services at Core-owned gates. |
