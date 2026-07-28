@@ -129,18 +129,25 @@ impl Privilege {
         }
     }
 
-    pub fn resume_entry(&self, space: &mut crate::address_space::AddressSpace) -> bool {
+    pub fn resume_entry(
+        &self,
+        space: &mut crate::address_space::AddressSpace,
+    ) -> Option<EntryState> {
         if !USER_BLOCKED.swap(false, Ordering::AcqRel)
             || !space.map_kernel_stack(self.stack.address())
         {
-            return false;
+            return None;
         }
         unsafe { set_tss_stack(space.kernel_stack_top()) };
         USER_RETURNED.store(false, Ordering::Release);
         unsafe { resume_user(space.cr3(), space.kernel_stack_top()) };
-        USER_CONTEXT.store(0, Ordering::Release);
         unsafe { set_tss_stack(self.stack.address() + 4096) };
-        USER_RETURNED.load(Ordering::Acquire)
+        if USER_BLOCKED.load(Ordering::Acquire) {
+            Some(EntryState::Blocked)
+        } else {
+            USER_CONTEXT.store(0, Ordering::Release);
+            USER_RETURNED.load(Ordering::Acquire).then_some(EntryState::Returned)
+        }
     }
 }
 

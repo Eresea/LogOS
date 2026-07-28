@@ -22,6 +22,7 @@ mod keyboard;
 mod memory;
 mod mode;
 mod native_display;
+mod native_task;
 mod payload;
 mod pci;
 mod pe;
@@ -228,25 +229,18 @@ fn kernel_main(
                 == Some(cpu::EntryState::Returned)
         }) && service_address_space.release(&mut memory),
     );
-    let Some(mut terminal_address_space) = address_space::AddressSpace::new(&mut memory) else {
+    let Some(mut terminal_task) = native_task::Terminal::load(&mut memory, payload) else {
         fail!(b"native service entry");
     };
     check!(
         b"native service entry",
-        terminal_address_space.map_image(&mut memory, payload).is_some_and(|entry| {
-            terminal_address_space.map_context(&mut memory).is_some_and(|(physical, context)| {
-                let blocked = privilege.run_entry(&mut terminal_address_space, entry, context)
-                    == Some(cpu::EntryState::Blocked);
-                let input = unsafe {
-                    logos_core::native_service::Context::deliver_input_at(physical, b'k')
-                };
-                let resumed = privilege.resume_entry(&mut terminal_address_space);
-                let displayed = native_display::matches(0, 0, [0, 0xff, 0]);
-                let complete =
-                    unsafe { logos_core::native_service::Context::complete_at(physical) };
-                blocked && input && resumed && displayed && complete
-            })
-        }) && terminal_address_space.release(&mut memory),
+        terminal_task.start(&privilege)
+            && terminal_task.blocked()
+            && terminal_task.deliver_input(b'k')
+            && terminal_task.resume(&privilege)
+            && native_display::matches(0, 0, [0, 0xff, 0])
+            && terminal_task.complete()
+            && terminal_task.release(&mut memory),
     );
     check!(
         b"time",
