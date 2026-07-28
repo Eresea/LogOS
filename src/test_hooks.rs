@@ -38,6 +38,7 @@ const IMPLEMENTED: &[&str] = &[
     "platform/unauthorized-capability",
     "platform/diagnostics",
     "platform/native-payload-staged",
+    "platform/service-address-space",
 ];
 
 pub fn serve() -> ! {

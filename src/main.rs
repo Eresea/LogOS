@@ -2,6 +2,7 @@
 #![no_std]
 
 mod acpi;
+mod address_space;
 mod approvals;
 mod audit;
 mod capabilities;
@@ -170,6 +171,16 @@ fn kernel_main(
             && mapping.release(&mut memory)
             && virtual_memory::install(&mut memory, virtual_memory::Permission::ReadOnly)
                 .is_some_and(|mapping| !mapping.is_writable() && mapping.release(&mut memory)),
+    );
+    let Some(service_address_space) = address_space::AddressSpace::new(&mut memory) else {
+        fail!(b"service address space");
+    };
+    check!(
+        b"service address space",
+        service_address_space.code_address() != 0
+            && service_address_space.stack_top() > service_address_space.code_address()
+            && service_address_space.verifies_isolation()
+            && service_address_space.release(&mut memory),
     );
     let keyboard_interrupts = interrupts::install(madt);
     interrupts::enable();

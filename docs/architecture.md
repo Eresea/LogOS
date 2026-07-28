@@ -379,6 +379,15 @@ The normal terminal model lives in the no-std `logos-terminal` crate, but is cur
 Each native service has its own Core-owned address space. Only service code, stack, IPC buffers,
 and granted endpoints are mapped there; raw devices and kernel memory are never service mappings.
 
+### Native service address-space bootstrap
+
+Core creates a fresh PML4 for each service, retains the current supervisor-only kernel mappings,
+and assigns a free lower-half slot to that service. The first mapping set is one read/execute code
+page and one read/write stack page, both marked user-accessible; all inherited PML4 entries must
+remain supervisor-only. Core owns every page-table and service frame and releases all of them if
+setup fails or the service exits. Ring-3 entry, PE-section mapping, IPC buffer mapping, and fault
+return are the next loader steps; until then the terminal remains linked into `logos-uefi`.
+
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), and [ADR-0004](adr/0004-native-service-address-spaces.md).
 
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
