@@ -1584,16 +1584,15 @@ A pull request introducing or moving a subsystem should answer:
 
 These decisions should be resolved through focused design notes rather than implicitly during implementation.
 
-1. **Native service isolation:** one address space per native service, shared address spaces with language isolation, or a hybrid.
-2. **Driver hosting:** one driver per task, grouped driver hosts, or class-specific hosts.
-3. **Protocol representation:** Rust-native schemas initially, WIT/component interfaces, a custom IDL, or a layered approach.
-4. **Capability transfer:** copy, move, lend, derive, and revocation semantics.
-5. **Session persistence:** which jobs survive client and session detachment.
-6. **Structured shell syntax:** custom language versus adapting an existing structured-shell model.
-7. **Store implementation:** native object store first, conventional filesystem first, or a shared transactional substrate.
-8. **WASM engine:** interpreter, JIT, AOT, or multiple execution modes.
-9. **Compositor/application boundary:** WASM UI command streams, shared pixel buffers, retained UI trees, or hybrid surfaces.
-10. **Real-hardware scope:** when USB, NVMe, GPU, IOMMU, and multicore support become roadmap blockers.
+1. **Driver hosting:** one driver per task, grouped driver hosts, or class-specific hosts.
+2. **Protocol representation:** Rust-native schemas initially, WIT/component interfaces, a custom IDL, or a layered approach.
+3. **Capability transfer:** copy, move, lend, derive, and revocation semantics.
+4. **Session persistence:** which jobs survive client and session detachment.
+5. **Structured shell syntax:** custom language versus adapting an existing structured-shell model.
+6. **Store implementation:** native object store first, conventional filesystem first, or a shared transactional substrate.
+7. **WASM engine:** interpreter, JIT, AOT, or multiple execution modes.
+8. **Compositor/application boundary:** WASM UI command streams, shared pixel buffers, retained UI trees, or hybrid surfaces.
+9. **Real-hardware scope:** when USB, NVMe, GPU, IOMMU, and multicore support become roadmap blockers.
 
 Each decision should record:
 

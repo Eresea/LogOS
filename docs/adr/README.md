@@ -9,3 +9,4 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0001](0001-terminal-service-boundary.md) | Accepted | Run the normal terminal as a separately loaded Sessions service. |
 | [0002](0002-test-control-boundary.md) | Accepted | Gate deterministic test control outside production. |
 | [0003](0003-native-service-payload-contract.md) | Accepted | Stage native services as versioned boot payloads. |
+| [0004](0004-native-service-address-spaces.md) | Accepted | Isolate each native service in its own address space. |
