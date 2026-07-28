@@ -179,7 +179,7 @@ impl Model {
         self.selection = None;
     }
 
-    fn backspace(&mut self) -> bool {
+    pub fn backspace(&mut self) -> bool {
         let Some(start) = self.previous_boundary(self.cursor) else {
             return false;
         };

@@ -31,6 +31,7 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
             if let Ok(input) = u8::try_from((*context).input) {
                 if input == b'\n' {
                     let submission = terminal.submit();
+                    let _ = terminal.write_output(submission.as_bytes());
                     if submission.as_bytes().len() <= 32 {
                         (*context).text = [0; 32];
                         (&mut (*context).text)[..submission.as_bytes().len()]
@@ -43,6 +44,8 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
                     } else {
                         let _ = terminal.write_output(b"command too long");
                     }
+                } else if input == 0x08 {
+                    let _ = terminal.backspace();
                 } else if input != 0x1b {
                     let _ = terminal.insert_utf8(&[input]);
                 }
@@ -60,11 +63,11 @@ unsafe fn render(terminal: &Model, context: *mut Context) {
         asm!("int 0x80");
         let mut row = 0u32;
         while let Some(line) = terminal.output_line(row as usize) {
-            present(context, 32, 32 + row * 8, line.as_bytes());
+            present(context, 32, 32 + row * 20, line.as_bytes());
             row += 1;
         }
-        present(context, 32, 32 + row * 8, b">");
-        present(context, 38, 32 + row * 8, terminal.input_line());
+        present(context, 32, 32 + row * 20, b">");
+        present(context, 40, 32 + row * 20, terminal.input_line());
     }
 }
 
@@ -73,7 +76,7 @@ unsafe fn present(context: *mut Context, x: u32, y: u32, bytes: &[u8]) {
         for (chunk, bytes) in bytes.chunks(32).enumerate() {
             (*context).text = [0; 32];
             (&mut (*context).text)[..bytes.len()].copy_from_slice(bytes);
-            (*context).x = x + u32::try_from(chunk * 32 * 6).unwrap_or(u32::MAX);
+            (*context).x = x + u32::try_from(chunk * 32 * 8).unwrap_or(u32::MAX);
             (*context).y = y;
             (*context).text_length = bytes.len() as u32;
             (*context).color = 0x0000_ff00;

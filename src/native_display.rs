@@ -70,15 +70,15 @@ pub fn present_text(context: u64) -> bool {
         return false;
     };
     request.text[..request.length].iter().enumerate().all(|(index, &byte)| {
-        let Some(x) = usize::try_from(request.x).ok().and_then(|x| x.checked_add(index * 6)) else {
+        let Some(x) = usize::try_from(request.x).ok().and_then(|x| x.checked_add(index * 8)) else {
             return false;
         };
         let Some(y) = usize::try_from(request.y).ok() else {
             return false;
         };
-        glyph(byte).iter().enumerate().all(|(row, bits)| {
-            (0..5).all(|column| {
-                bits & (1 << (4 - column)) == 0 || write_pixel(x + column, y + row, request.color)
+        logos_terminal::text::glyph(byte).iter().enumerate().all(|(row, bits)| {
+            (0..8).all(|column| {
+                bits & (1 << (7 - column)) == 0 || write_pixel(x + column, y + row, request.color)
             })
         })
     })
@@ -142,9 +142,4 @@ fn write_pixel(x: usize, y: usize, color: [u8; 3]) -> bool {
         pixel.add(3).write_volatile(0);
     }
     true
-}
-
-fn glyph(byte: u8) -> &'static [u8; 7] {
-    const UNKNOWN: [u8; 7] = [0b01110, 0b10001, 0b00010, 0b00100, 0, 0b00100, 0];
-    crate::glyph(byte).unwrap_or(&UNKNOWN)
 }

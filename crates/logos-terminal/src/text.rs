@@ -443,6 +443,10 @@ impl Service {
     }
 
     fn glyph(&self, text: u8) -> &'static [u8; HEIGHT] {
-        if (b' '..=b'~').contains(&text) { &GLYPHS[usize::from(text - b' ')] } else { &UNKNOWN }
+        glyph(text)
     }
+}
+
+pub fn glyph(text: u8) -> &'static [u8; HEIGHT] {
+    if (b' '..=b'~').contains(&text) { &GLYPHS[usize::from(text - b' ')] } else { &UNKNOWN }
 }
