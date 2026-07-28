@@ -41,6 +41,7 @@ const IMPLEMENTED: &[&str] = &[
     "platform/service-address-space",
     "platform/native-image-mapped",
     "platform/service-privilege-setup",
+    "platform/service-ring3-transition",
 ];
 
 pub fn serve() -> ! {

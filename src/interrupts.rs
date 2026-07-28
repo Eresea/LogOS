@@ -6,6 +6,7 @@ use core::{
 const TIMER_VECTOR: usize = 32;
 const KEYBOARD_VECTOR: usize = 33;
 const VIRTIO_VECTOR: usize = 48;
+const SERVICE_GATE_VECTOR: usize = 0x80;
 const EXCEPTIONS: usize = 32;
 const PIT_HZ: u16 = 100;
 const PIT_DIVISOR: u16 = (1_193_182u32 / PIT_HZ as u32) as u16;
@@ -22,6 +23,7 @@ unsafe extern "C" {
     fn timer_interrupt();
     fn keyboard_irq();
     fn virtio_irq();
+    fn user_gate();
 }
 
 #[unsafe(no_mangle)]
@@ -60,6 +62,8 @@ pub fn install(madt: crate::acpi::Madt) -> bool {
         (*idt)[TIMER_VECTOR] = IdtEntry::new(timer_interrupt as *const () as usize, selector);
         (*idt)[KEYBOARD_VECTOR] = IdtEntry::new(keyboard_irq as *const () as usize, selector);
         (*idt)[VIRTIO_VECTOR] = IdtEntry::new(virtio_irq as *const () as usize, selector);
+        (*idt)[SERVICE_GATE_VECTOR] =
+            IdtEntry::new(user_gate as *const () as usize, selector).user_callable();
         load_idt(idt);
         configure_pic();
         configure_pit();
@@ -137,6 +141,11 @@ impl IdtEntry {
             offset_high: (handler >> 32) as u32,
             reserved: 0,
         }
+    }
+
+    fn user_callable(mut self) -> Self {
+        self.attributes = 0xee;
+        self
     }
 }
 

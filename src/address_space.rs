@@ -59,7 +59,7 @@ impl AddressSpace {
             ptr::write_bytes(pd_address as *mut u8, 0, PAGE_SIZE as usize);
             ptr::write_bytes(pt_address as *mut u8, 0, PAGE_SIZE as usize);
             let pml4_table = pml4_address as *mut u64;
-            let Some(slot) = (0..ENTRIES).find(|&index| pml4_table.add(index).read() == 0) else {
+            let Some(slot) = (256..ENTRIES).find(|&index| pml4_table.add(index).read() == 0) else {
                 let _ = physical.release_page(stack);
                 let _ = physical.release_page(pt);
                 let _ = physical.release_page(pd);
@@ -98,7 +98,7 @@ impl AddressSpace {
             let end_rva = section.address.checked_add(section.size)?;
             let end = usize::try_from(end_rva.checked_add(PAGE_SIZE as u32 - 1)?).ok()?
                 / PAGE_SIZE as usize;
-            if end >= ENTRIES - 1 {
+            if end >= ENTRIES - 2 {
                 self.unmap_image(physical);
                 return None;
             }
@@ -113,8 +113,44 @@ impl AddressSpace {
         self.image_maps(entry).then_some(entry)
     }
 
+    pub fn map_probe(&mut self, physical: &mut PhysicalMemory) -> Option<u64> {
+        if self.mapped[0].is_some() {
+            return None;
+        }
+        let page = physical.allocate_owned()?;
+        unsafe {
+            ptr::write_bytes(page.address() as *mut u8, 0, PAGE_SIZE as usize);
+            (page.address() as *mut u8).write_volatile(0xcd);
+            (page.address() as *mut u8).add(1).write_volatile(0x80);
+        }
+        let address = page.address();
+        self.mapped[0] = Some(page);
+        unsafe { (self.pt.address() as *mut u64).write_volatile(address | PRESENT | USER) };
+        Some(self.base)
+    }
+
+    pub const fn cr3(&self) -> u64 {
+        self.pml4.address()
+    }
+
     pub fn stack_top(&self) -> u64 {
         self.base + PAGE_SIZE * ENTRIES as u64
+    }
+
+    pub fn map_kernel_stack(&mut self, address: u64) -> bool {
+        if address & (PAGE_SIZE - 1) != 0 {
+            return false;
+        }
+        unsafe {
+            (self.pt.address() as *mut u64)
+                .add(ENTRIES - 2)
+                .write_volatile(address | PRESENT | WRITABLE | NO_EXECUTE);
+        }
+        true
+    }
+
+    pub fn kernel_stack_top(&self) -> u64 {
+        self.base + PAGE_SIZE * (ENTRIES - 1) as u64
     }
 
     pub fn verifies_isolation(&self) -> bool {
@@ -220,5 +256,5 @@ unsafe fn read_cr3() -> u64 {
 }
 
 const fn canonical_address(pml4_index: usize) -> u64 {
-    (pml4_index as u64) << 39
+    ((pml4_index as u64) << 39) | 0xffff_0000_0000_0000
 }

@@ -1,4 +1,9 @@
-use core::{arch::asm, mem::size_of, ptr};
+use core::{
+    arch::asm,
+    mem::size_of,
+    ptr,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use crate::memory::{Page, PhysicalMemory};
 
@@ -35,6 +40,13 @@ static mut TSS: Tss = Tss {
     reserved4: 0,
     iomap_base: size_of::<Tss>() as u16,
 };
+static USER_RETURNED: AtomicBool = AtomicBool::new(false);
+#[unsafe(no_mangle)]
+static mut USER_RETURN_RSP: u64 = 0;
+#[unsafe(no_mangle)]
+static mut USER_RETURN_CR3: u64 = 0;
+#[unsafe(no_mangle)]
+static mut USER_RETURN_FLAGS: u64 = 0;
 
 pub struct Privilege {
     stack: Page,
@@ -82,6 +94,22 @@ impl Privilege {
             && USER_DATA == 0x1b
             && USER_CODE == 0x23
     }
+
+    pub fn run_probe(&self, space: &mut crate::address_space::AddressSpace, entry: u64) -> bool {
+        if !space.map_kernel_stack(self.stack.address()) {
+            return false;
+        }
+        unsafe { set_tss_stack(space.kernel_stack_top()) };
+        USER_RETURNED.store(false, Ordering::Release);
+        unsafe { enter_user(space.cr3(), entry, space.stack_top()) };
+        unsafe { set_tss_stack(self.stack.address() + 4096) };
+        USER_RETURNED.load(Ordering::Acquire)
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn user_gate_returned() {
+    USER_RETURNED.store(true, Ordering::Release);
 }
 
 fn tss_low(base: u64) -> u64 {
@@ -93,8 +121,13 @@ fn tss_low(base: u64) -> u64 {
         | (base & 0xff00_0000) << 32
 }
 
+unsafe fn set_tss_stack(stack_top: u64) {
+    unsafe { (*ptr::addr_of_mut!(TSS)).rsp[0] = stack_top };
+}
+
 unsafe extern "C" {
     fn reload_segments();
+    fn enter_user(cr3: u64, entry: u64, stack: u64);
 }
 
 core::arch::global_asm!(
@@ -109,5 +142,32 @@ core::arch::global_asm!(
     "push rax",
     "retfq",
     "1:",
+    "ret",
+    ".global enter_user",
+    "enter_user:",
+    "mov [rip + USER_RETURN_RSP], rsp",
+    "mov rax, cr3",
+    "mov [rip + USER_RETURN_CR3], rax",
+    "pushfq",
+    "pop qword ptr [rip + USER_RETURN_FLAGS]",
+    "cli",
+    "mov rax, rcx",
+    "mov cr3, rax",
+    "push 0x1b",
+    "push r8",
+    "push 0x202",
+    "push 0x23",
+    "push rdx",
+    "iretq",
+    ".global user_gate",
+    "user_gate:",
+    "sub rsp, 40",
+    "call user_gate_returned",
+    "add rsp, 40",
+    "mov rax, [rip + USER_RETURN_CR3]",
+    "mov cr3, rax",
+    "mov rsp, [rip + USER_RETURN_RSP]",
+    "push qword ptr [rip + USER_RETURN_FLAGS]",
+    "popfq",
     "ret",
 );

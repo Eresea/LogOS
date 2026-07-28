@@ -396,6 +396,12 @@ stack pages non-executable. It will not reparse untrusted offsets while creating
 Before any service entry, Core installs a kernel GDT and bootstrap TSS. The TSS supplies a
 Core-owned ring-0 stack for faults and gates entered from Ring 3; service selectors have DPL 3 and
 cannot reuse the kernel selectors. The bootstrap is single-CPU until multicore support is in scope.
+Each service space maps that stack supervisor-only before entry and restores the bootstrap TSS stack
+after return.
+
+The first transition proof switches to the service CR3, enters a user-mapped probe with `iretq`,
+and returns only through a DPL-3 gate on the TSS stack. Core restores its original CR3 and stack
+before resuming. A native terminal entry may use that path only after it has an explicit IPC ABI.
 
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), and [ADR-0004](adr/0004-native-service-address-spaces.md).
 
