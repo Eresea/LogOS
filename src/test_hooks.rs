@@ -42,6 +42,7 @@ const IMPLEMENTED: &[&str] = &[
     "platform/native-image-mapped",
     "platform/service-privilege-setup",
     "platform/service-ring3-transition",
+    "platform/native-service-ready",
 ];
 
 pub fn serve() -> ! {

@@ -60,6 +60,7 @@ const SCENARIOS: &[Scenario] = &[
     scenario("platform/native-image-mapped", "platform"),
     scenario("platform/service-privilege-setup", "platform"),
     scenario("platform/service-ring3-transition", "platform"),
+    scenario("platform/native-service-ready", "platform"),
     future("persistence/write-interruption", "persistence"),
     future("persistence/recovery", "persistence"),
     future("persistence/capability-denied", "persistence"),

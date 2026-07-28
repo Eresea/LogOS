@@ -20,11 +20,12 @@ static PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
 pub struct Payload {
     base: *const u8,
     image: crate::pe::Image,
+    entry_rva: u32,
 }
 
 impl Payload {
     pub fn entry_rva(self) -> u32 {
-        self.image.entry_rva()
+        self.entry_rva
     }
 
     pub fn sections(self) -> impl Iterator<Item = crate::pe::Section> {
@@ -92,17 +93,21 @@ pub fn stage() -> Option<Payload> {
     let Ok(image_size) = usize::try_from(metadata.image_size()) else {
         return None;
     };
+    let header = image.windows(core::mem::size_of::<Header>()).find_map(|bytes| {
+        let header = unsafe { (bytes.as_ptr().cast::<Header>()).read_unaligned() };
+        header.valid_for(NAME).then_some(header)
+    })?;
+    let entry = header.entry_address();
+    let base_address = base as usize;
+    let entry_rva = entry.checked_sub(base_address).and_then(|rva| u32::try_from(rva).ok())?;
     (metadata.entry_rva() != 0
         && image_size <= size
+        && metadata.executable_rva(entry_rva)
         && metadata.sections().all(|section| {
             section
                 .address
                 .checked_add(section.size)
                 .is_some_and(|end| end <= metadata.image_size())
-        })
-        && image.windows(core::mem::size_of::<Header>()).any(|bytes| {
-            let header = unsafe { (bytes.as_ptr().cast::<Header>()).read_unaligned() };
-            header.valid_for(NAME)
         }))
-    .then_some(Payload { base: base.cast(), image: metadata })
+    .then_some(Payload { base: base.cast(), image: metadata, entry_rva })
 }

@@ -82,6 +82,16 @@ impl Image {
     pub fn sections(self) -> impl Iterator<Item = Section> {
         self.sections.into_iter().take(self.section_count).flatten()
     }
+
+    pub fn executable_rva(self, rva: u32) -> bool {
+        self.sections().any(|section| {
+            section.executable
+                && section
+                    .address
+                    .checked_add(section.size)
+                    .is_some_and(|end| rva >= section.address && rva < end)
+        })
+    }
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {

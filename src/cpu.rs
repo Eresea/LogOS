@@ -95,7 +95,7 @@ impl Privilege {
             && USER_CODE == 0x23
     }
 
-    pub fn run_probe(&self, space: &mut crate::address_space::AddressSpace, entry: u64) -> bool {
+    pub fn run_entry(&self, space: &mut crate::address_space::AddressSpace, entry: u64) -> bool {
         if !space.map_kernel_stack(self.stack.address()) {
             return false;
         }

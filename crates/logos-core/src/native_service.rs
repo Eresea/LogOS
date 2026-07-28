@@ -8,11 +8,16 @@ pub struct Header {
     pub abi: u16,
     pub reserved: u16,
     pub name: [u8; 16],
+    pub entry: extern "C" fn() -> !,
 }
 
 impl Header {
-    pub const fn new(name: [u8; 16]) -> Self {
-        Self { magic: MAGIC, abi: ABI, reserved: 0, name }
+    pub const fn new(name: [u8; 16], entry: extern "C" fn() -> !) -> Self {
+        Self { magic: MAGIC, abi: ABI, reserved: 0, name, entry }
+    }
+
+    pub fn entry_address(&self) -> usize {
+        self.entry as usize
     }
 
     pub fn valid_for(&self, name: &[u8]) -> bool {
@@ -35,6 +40,12 @@ impl Header {
 }
 
 pub fn self_check() -> bool {
-    Header::new(*b"terminal\0\0\0\0\0\0\0\0").valid_for(b"terminal")
-        && !Header::new(*b"terminal\0\0\0\0\0\0\0\0").valid_for(b"other")
+    Header::new(*b"terminal\0\0\0\0\0\0\0\0", self_check_entry).valid_for(b"terminal")
+        && !Header::new(*b"terminal\0\0\0\0\0\0\0\0", self_check_entry).valid_for(b"other")
+}
+
+extern "C" fn self_check_entry() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
 }
