@@ -11,7 +11,7 @@ if (-not (Test-Path $qemuPath)) { throw "Install QEMU or add qemu-system-x86_64 
 $ovmf = if ($env:OVMF_CODE) { $env:OVMF_CODE } else { "C:\Program Files\qemu\share\edk2-x86_64-code.fd" }
 if (-not (Test-Path $ovmf)) { throw "Set OVMF_CODE to an EDK2/OVMF firmware file." }
 
-cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --target x86_64-unknown-uefi $(if ($Release) { "--release" })
+cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-uefi --target x86_64-unknown-uefi $(if ($Release) { "--release" })
 cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-terminal-service --target x86_64-unknown-uefi $(if ($Release) { "--release" })
 New-Item -ItemType Directory -Force "$esp\EFI\BOOT" | Out-Null
 New-Item -ItemType Directory -Force "$esp\EFI\LOGOS" | Out-Null
