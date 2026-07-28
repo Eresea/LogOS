@@ -338,6 +338,14 @@ impl Model {
         self.output.push(line)
     }
 
+    pub fn output_line(&self, index: usize) -> Option<Submission> {
+        (index < self.output.length).then(|| self.output.line(index))
+    }
+
+    pub fn input_line(&self) -> &[u8] {
+        &self.cells[..self.length]
+    }
+
     pub fn clear_output(&mut self) {
         self.output.clear();
     }

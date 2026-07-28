@@ -76,15 +76,24 @@ pub fn present_text(context: u64) -> bool {
         let Some(y) = usize::try_from(request.y).ok() else {
             return false;
         };
-        crate::glyph(byte).is_some_and(|glyph| {
-            glyph.iter().enumerate().all(|(row, bits)| {
-                (0..5).all(|column| {
-                    bits & (1 << (4 - column)) == 0
-                        || write_pixel(x + column, y + row, request.color)
-                })
+        glyph(byte).iter().enumerate().all(|(row, bits)| {
+            (0..5).all(|column| {
+                bits & (1 << (4 - column)) == 0 || write_pixel(x + column, y + row, request.color)
             })
         })
     })
+}
+
+pub fn clear(context: u64) -> bool {
+    if !unsafe { logos_core::native_service::Context::clear_at(context) } {
+        return false;
+    }
+    let framebuffer = FRAMEBUFFER.load(Ordering::Acquire) as *mut u8;
+    if framebuffer.is_null() {
+        return false;
+    }
+    unsafe { core::ptr::write_bytes(framebuffer, 0, FRAMEBUFFER_SIZE.load(Ordering::Acquire)) };
+    true
 }
 
 pub fn matches(x: usize, y: usize, color: [u8; 3]) -> bool {
@@ -133,4 +142,9 @@ fn write_pixel(x: usize, y: usize, color: [u8; 3]) -> bool {
         pixel.add(3).write_volatile(0);
     }
     true
+}
+
+fn glyph(byte: u8) -> &'static [u8; 7] {
+    const UNKNOWN: [u8; 7] = [0b01110, 0b10001, 0b00010, 0b00100, 0, 0b00100, 0];
+    crate::glyph(byte).unwrap_or(&UNKNOWN)
 }

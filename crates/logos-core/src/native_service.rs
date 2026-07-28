@@ -4,7 +4,8 @@ pub const READY: u32 = 1;
 pub const READ_INPUT: u32 = 2;
 pub const PRESENT_PIXEL: u32 = 3;
 pub const PRESENT_TEXT: u32 = 4;
-pub const COMPLETE: u32 = 5;
+pub const CLEAR_DISPLAY: u32 = 5;
+pub const COMPLETE: u32 = 6;
 pub const ACKNOWLEDGED: u32 = 1;
 
 #[repr(C)]
@@ -144,6 +145,17 @@ impl Context {
             text: context.text,
             length,
         })
+    }
+
+    /// # Safety
+    ///
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn clear_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == CLEAR_DISPLAY
+            && context.status == ACKNOWLEDGED
     }
 }
 
