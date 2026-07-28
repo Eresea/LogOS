@@ -418,7 +418,8 @@ service cannot select its return frame, kernel stack, CR3, or device mappings.
 
 Core models each loaded native terminal as a task with its address space, entry, context page, and
 blocked/completed state. Scheduler integration wakes that task only after Core has written a valid
-response into its context page.
+response into its context page. The bootstrap terminal repeats `ReadInput` and `PresentPixel` until
+Core delivers Escape, which requests a clean `Complete` return.
 
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), and [ADR-0005](adr/0005-native-service-suspension.md).
 

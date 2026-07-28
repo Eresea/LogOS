@@ -16,14 +16,16 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
     unsafe {
         (*context).operation = READY;
         asm!("int 0x80");
-        if (*context).status == ACKNOWLEDGED {
+        while (*context).status == ACKNOWLEDGED {
             (*context).operation = READ_INPUT;
             asm!("int 0x80");
+            if (*context).input == 0x1b {
+                (*context).operation = COMPLETE;
+                asm!("int 0x80");
+            }
             if (*context).input == u32::from(b'k') {
                 (*context).operation = PRESENT_PIXEL;
                 (*context).color = 0x0000_ff00;
-                asm!("int 0x80");
-                (*context).operation = COMPLETE;
                 asm!("int 0x80");
             }
         }

@@ -238,7 +238,10 @@ fn kernel_main(
             && terminal_task.blocked()
             && terminal_task.deliver_input(b'k')
             && terminal_task.resume(&privilege)
+            && terminal_task.blocked()
             && native_display::matches(0, 0, [0, 0xff, 0])
+            && terminal_task.deliver_input(0x1b)
+            && terminal_task.resume(&privilege)
             && terminal_task.complete()
             && terminal_task.release(&mut memory),
     );
