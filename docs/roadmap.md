@@ -119,7 +119,7 @@ The current kernel remains independently bootable while its single crate is spli
 1. create a Cargo workspace and extract the no-std `logos-core` mechanisms;
 2. extract hardware-facing platform and driver crates;
 3. extract `logos-terminal` as the normal terminal model while retaining the kernel recovery path;
-4. add the native task loader and capability-only service contract, then run `logos-terminal` as a separately loaded service;
+4. stage and validate a versioned native-service boot payload, add the native task loader and capability-only service contract, then run `logos-terminal` as a separately loaded service;
 5. retain `logos-uefi` as the UEFI boot binary throughout.
 
 Every extraction must retain the current QEMU proof. Add `logos-abi` only when an independently built native service needs a stable contract; do not create an empty ABI crate in advance.
