@@ -1468,7 +1468,8 @@ Check the Naming Register:
 
 # 14. Transitional architecture from the current system
 
-LogOS currently has Core v1 with a basic framebuffer console and keyboard path.
+LogOS currently has Core v1 with a separately loaded Ring-3 terminal behind a bounded bootstrap
+gate. Core retains the basic framebuffer console and keyboard path only for recovery.
 
 The next transition should avoid a large rewrite.
 
@@ -1482,10 +1483,9 @@ The next transition should avoid a large rewrite.
 
 ## Phase B — Create Foundation abstractions
 
-- Introduce `foundation.display`.
-- Introduce `foundation.input`.
-- Introduce `foundation.text`.
-- Route a new normal terminal through these services.
+- Replace the terminal bootstrap gate with `foundation.display`.
+- Replace the terminal bootstrap gate with `foundation.input`.
+- Introduce `foundation.text` if it is distinct from display.
 - Keep recovery output independent.
 
 ## Phase C — Create Sessions
@@ -1493,8 +1493,8 @@ The next transition should avoid a large rewrite.
 - Introduce `session.manager`.
 - Introduce `session.commands`.
 - Introduce `session.shell`.
-- Introduce `session.terminal`.
-- Move normal commands out of Core.
+- Keep `session.terminal` in Ring 3.
+- Move normal command/session dispatch out of Core.
 - Implement structured values and cancellation.
 
 ## Phase D — Introduce System authority

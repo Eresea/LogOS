@@ -352,11 +352,11 @@ input driver
     -> display service
 ```
 
-Console v1 currently has a bounded terminal model with scrollback, history, selection, search, and rendering. Its command/session wiring remains in the UEFI bootstrap; it has no independent service boundary or recovery role.
+Console v1 has a bounded terminal model with scrollback, history, selection, search, and rendering. The normal terminal runs as an independently loaded Ring-3 service through a bounded Core bootstrap gate; command/session dispatch remains bootstrap code and has no recovery role.
 
 The terminal model stores bounded UTF-8, edits only on character boundaries, and owns cursor position independently of rendering.
 
-The terminal owns caret visibility; the normal terminal loop drives its blink timer and redraws it through the text/display services.
+The terminal model owns caret visibility. The current Ring-3 bootstrap renderer redraws through bounded presentation requests; dedicated text/display client contracts remain pending.
 
 Terminal editing provides insert, delete, character-safe navigation, and Ctrl+left/right word navigation without giving the renderer ownership of the input buffer.
 
@@ -410,7 +410,7 @@ derives that entry's RVA after firmware relocation and accepts it only when it l
 PE section. Core maps a versioned service-context page and passes its user virtual address to the
 entry. `Ready` resumes Ring 3 after Core acknowledges it; `ReadInput` captures a Core-owned service
 frame and Core supplies one typed input byte before resuming it; `Complete` returns control to Core.
-`SubmitCommand` copies at most 32 bytes into the same context page, suspends the service at a
+`SubmitCommand` copies at most 256 bytes into the same context page, suspends the service at a
 Core-owned frame, and resumes it only after Core has copied and replied to the request.
 `PresentPixel` supplies bounded coordinates and color only; Core validates them and writes the
 framebuffer. Display and session operations remain unmapped until their capability-scoped IPC
@@ -423,10 +423,10 @@ service cannot select its return frame, kernel stack, CR3, or device mappings.
 Core models each loaded native terminal as a task with its address space, entry, context page, and
 blocked/completed state. Scheduler integration wakes that task only after Core has written a valid
 response into its context page. `ReadInput` blocks on the scheduler input event. The bootstrap
-terminal repeats `ReadInput` and `PresentPixel` until Core delivers Escape, which requests a clean
+terminal repeats `ReadInput`, `ClearDisplay`, and `PresentText` until Core delivers Escape, which requests a clean
 `Complete` return.
 
-`PresentText` carries at most 32 bytes plus bounded pixel coordinates and color. Core validates that
+`PresentText` carries at most 256 bytes plus bounded pixel coordinates and color. Core validates that
 request and rasterizes it through the Core-owned framebuffer; native services never map the display.
 The QEMU native-terminal proof injects a PS/2 key through QMP, then Core normalizes and delivers it
 through the task's input endpoint before resuming Ring 3.

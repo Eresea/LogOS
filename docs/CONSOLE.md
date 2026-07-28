@@ -1,13 +1,13 @@
 # Console
 
-> **Status:** Terminal model complete; native terminal handoff bootstrapped, service fan-out pending Platform v1
-> **Owner:** UEFI bootstrap (normal terminal); Core (recovery console); Sessions after extraction
+> **Status:** Ring-3 native terminal active; capability-only service fan-out pending Platform v1
+> **Owner:** Sessions (normal terminal); Core (bootstrap gate and recovery console)
 
-Console is LogOS's local textual interface. The normal terminal consumes typed command results; the kernel recovery console is an independent fallback.
+Console is LogOS's local textual interface. The normal terminal consumes bounded command results; the kernel recovery console is an independent fallback.
 
-## Implemented bootstrap
+## Current implementation
 
-The normal terminal is currently linked into the UEFI image. It is not yet an independently loaded Sessions service; its direct framebuffer and PS/2 access must move behind capability-scoped input and display contracts. The kernel recovery console remains independent and kernel-owned.
+`logos-terminal-service.efi` is staged from the boot payload and runs in its own Core-owned Ring-3 address space. It has no raw framebuffer, PS/2, kernel-memory, or device mapping; its bounded context gate carries input, presentation, and command requests. Core validates and executes privileged operations, while `clear` remains a terminal-local redraw action. The kernel recovery console remains independent and kernel-owned.
 
 ### Foundation
 
@@ -33,13 +33,14 @@ The normal terminal is currently linked into the UEFI image. It is not yet an in
 
 - [x] Normal operation does not require the recovery console.
 - [x] Recovery remains available on startup/redraw failure and authorized live handoff.
-- [x] Headless QEMU verifies startup self-checks and normal/recovery mode selection.
-- [ ] QEMU proves a separately loaded terminal service can start, redraw, fail, and hand off to recovery.
+- [x] Headless QEMU boots the separately loaded Ring-3 terminal, redraws it, and executes its command path.
+- [x] Recovery remains the direct fallback on normal-startup failure and authorized handoff.
+- [ ] QEMU proves terminal-service failure, restart, and capability denial without compromising Core.
 
 ## Next required boundary
 
-- [x] Load `logos-terminal` as a native Sessions service rather than link it into `logos-uefi`.
-- [ ] Replace raw framebuffer and PS/2 access with capability-only input and display client contracts.
+- [x] Load `logos-terminal-service` as a native Sessions service rather than link it into `logos-uefi`.
+- [ ] Replace the bootstrap context gate with capability-only Input, Display, and Session client contracts.
 - [ ] Keep command/session dispatch outside Core and preserve kernel-only recovery input/output.
 
 ## Later — Unplanned

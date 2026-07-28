@@ -1,10 +1,10 @@
 # Platform
 
-> **Status:** Bootstrap mechanisms and Ring-3 gate round trips implemented; suspended service execution pending
+> **Status:** Native Ring-3 terminal loading, suspension, and gate round trips implemented
 > **Owner:** Foundation and System
 
-Platform currently provides the bootstrap mechanisms for supervised native services: identities,
-capabilities, health, and versioned contracts. They still execute in the UEFI image until the native task loader and service boundary exist.
+Platform provides the bootstrap mechanisms for supervised native services: identities,
+capabilities, health, versioned contracts, isolated address spaces, and Core-owned suspension at service gates. The normal terminal is the first separately loaded native service; general capability-only service contracts remain pending.
 
 ## Implemented bootstrap
 
@@ -31,15 +31,18 @@ capabilities, health, and versioned contracts. They still execute in the UEFI im
 ### Terminal integration
 
 - [x] `services` and `drivers` render Platform-owned status.
+- [x] `ping` completes a capability-gated IPC round trip to the platform service.
 - [x] `restart <target>` and `cancel <target>` preserve a typed target; Platform validates it.
-- [ ] Load `logos-terminal` as a separately executable Sessions service with only input/display/session capabilities.
+- [x] Load `logos-terminal-service` as a separately executable Ring-3 service with a bounded bootstrap context gate.
+- [ ] Replace that gate with only Input, Display, and Session capabilities.
 
 ### Exit evidence
 
 - [x] Bootstrap services negotiate explicit contracts and start from manifests.
 - [x] Requests carry principal and capability context; failures reclaim and restart without reboot.
 - [x] QEMU verifies bootstrap normal boot, startup rejection, dependency loss, runtime recovery, and replacement.
-- [ ] QEMU proves an independently loaded native service can start, fail, restart, and lose its capabilities without compromising Core.
+- [x] QEMU proves an independently loaded terminal service can start, redraw, and execute bounded commands.
+- [ ] QEMU proves service failure, restart, and capability denial without compromising Core.
 
 ## V2 — Unplanned
 

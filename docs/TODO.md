@@ -6,18 +6,18 @@
 ## 1. Implemented bootstrap
 
 - [x] `logos-terminal` owns the bounded terminal model, input normalization, framebuffer rendering, and font rasterization.
-- [x] The UEFI image owns the normal-mode loop, command/session dispatch, framebuffer, and PS/2 polling.
+- [x] `logos-terminal-service` runs as a separately loaded Ring-3 payload through a bounded Core gate.
 - [x] Platform bootstrap code provides static manifests, lifecycle policy, capability grants, identities, time, entropy, secrets, audit, and driver binding.
 - [x] The kernel-owned recovery console remains a direct, independent fallback.
 
 ## 2. Current milestone: Platform v1 service boundary
 
-The missing boundary is execution, not another in-kernel abstraction. Suggested order:
+The execution boundary exists. The remaining work is replacing its bootstrap transport with service contracts:
 
-1. Define the native task loader and lifecycle contract for separately loaded services.
-2. Define the minimal versioned input/display/session capability contracts required by `logos-terminal`.
-3. Build and load `logos-terminal` as a Sessions service from the QEMU boot payload; remove its direct framebuffer and PS/2 access.
-4. Prove terminal startup, redraw, restart, capability denial, and recovery handoff in headless QEMU.
+1. Define the minimal versioned Input, Display, and Session capability contracts required by `logos-terminal`.
+2. Replace the bounded Core context gate with those contracts without granting raw framebuffer or PS/2 access.
+3. Move normal command/session dispatch out of Core while keeping privileged execution capability-gated.
+4. Prove terminal-service failure, restart, capability denial, and recovery handoff in headless QEMU.
 5. Only then move further bootstrap services out of `logos-uefi`; keep the recovery console kernel-owned.
 
 ## 3. Documentation debt (cheap, should happen soon)
