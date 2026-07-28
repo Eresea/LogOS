@@ -1,5 +1,6 @@
 pub const MAGIC: [u8; 4] = *b"LGSV";
 pub const ABI: u16 = 1;
+pub const MAX_TEXT: usize = 256;
 pub const READY: u32 = 1;
 pub const READ_INPUT: u32 = 2;
 pub const PRESENT_PIXEL: u32 = 3;
@@ -21,7 +22,7 @@ pub struct Context {
     pub y: u32,
     pub color: u32,
     pub text_length: u32,
-    pub text: [u8; 32],
+    pub text: [u8; MAX_TEXT],
 }
 
 #[derive(Clone, Copy)]
@@ -29,7 +30,7 @@ pub struct TextRequest {
     pub x: u32,
     pub y: u32,
     pub color: [u8; 3],
-    pub text: [u8; 32],
+    pub text: [u8; MAX_TEXT],
     pub length: usize,
 }
 
@@ -45,7 +46,7 @@ impl Context {
             y: 0,
             color: 0,
             text_length: 0,
-            text: [0; 32],
+            text: [0; MAX_TEXT],
         }
     }
 
@@ -128,11 +129,11 @@ impl Context {
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
     pub unsafe fn reply_at(address: u64, reply: &[u8]) -> bool {
-        if reply.len() > 32 || unsafe { Self::command_at(address) }.is_none() {
+        if reply.len() > MAX_TEXT || unsafe { Self::command_at(address) }.is_none() {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
-        context.text = [0; 32];
+        context.text = [0; MAX_TEXT];
         context.text[..reply.len()].copy_from_slice(reply);
         context.text_length = reply.len() as u32;
         unsafe { (address as *mut Self).write_volatile(context) };

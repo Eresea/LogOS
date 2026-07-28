@@ -3,22 +3,11 @@
 
 use core::arch::asm;
 use logos_core::native_service::{
-    ACKNOWLEDGED, CLEAR_DISPLAY, COMPLETE, Context, Header, PRESENT_TEXT, READ_INPUT, READY,
-    SUBMIT_COMMAND,
+    ACKNOWLEDGED, CLEAR_DISPLAY, COMPLETE, Context, Header, MAX_TEXT, PRESENT_TEXT, READ_INPUT,
+    READY, SUBMIT_COMMAND,
 };
 use logos_terminal::terminal::Model;
 use uefi::{Status, prelude::*};
-
-const COMMAND_LIST: [&[u8]; 8] = [
-    b"health clear",
-    b"layout recovery",
-    b"echo help",
-    b"commands reboot",
-    b"poweroff tasks",
-    b"services drivers",
-    b"trace inspect",
-    b"restart cancel",
-];
 
 #[used]
 #[unsafe(link_section = ".logos")]
@@ -43,20 +32,19 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
                 if input == b'\n' {
                     let submission = terminal.submit();
                     let _ = terminal.write_output(submission.as_bytes());
-                    if submission.as_bytes().len() <= 32 {
-                        (*context).text = [0; 32];
+                    if submission.as_bytes().len() <= MAX_TEXT {
+                        (*context).text = [0; MAX_TEXT];
                         (&mut (*context).text)[..submission.as_bytes().len()]
                             .copy_from_slice(submission.as_bytes());
                         (*context).text_length = submission.as_bytes().len() as u32;
                         (*context).operation = SUBMIT_COMMAND;
                         asm!("int 0x80");
-                        let length = usize::try_from((*context).text_length).unwrap_or(0).min(32);
-                        if &(&(*context).text)[..length] == b"\x1ecommands" {
-                            for line in COMMAND_LIST {
+                        let length =
+                            usize::try_from((*context).text_length).unwrap_or(0).min(MAX_TEXT);
+                        for line in (&(*context).text)[..length].split(|byte| *byte == b'\n') {
+                            if !line.is_empty() {
                                 let _ = terminal.write_output(line);
                             }
-                        } else {
-                            let _ = terminal.write_output(&(&(*context).text)[..length]);
                         }
                     } else {
                         let _ = terminal.write_output(b"command too long");
@@ -90,10 +78,10 @@ unsafe fn render(terminal: &Model, context: *mut Context) {
 
 unsafe fn present(context: *mut Context, x: u32, y: u32, bytes: &[u8]) {
     unsafe {
-        for (chunk, bytes) in bytes.chunks(32).enumerate() {
-            (*context).text = [0; 32];
+        for (chunk, bytes) in bytes.chunks(MAX_TEXT).enumerate() {
+            (*context).text = [0; MAX_TEXT];
             (&mut (*context).text)[..bytes.len()].copy_from_slice(bytes);
-            (*context).x = x + u32::try_from(chunk * 32 * 8).unwrap_or(u32::MAX);
+            (*context).x = x + u32::try_from(chunk * MAX_TEXT * 8).unwrap_or(u32::MAX);
             (*context).y = y;
             (*context).text_length = bytes.len() as u32;
             (*context).color = 0x0000_ff00;

@@ -835,7 +835,7 @@ fn native_command_reply(
         tick,
     ) {
         commands::Outcome::Text(value) => endpoint.reply(value.as_bytes()),
-        commands::Outcome::CommandList => endpoint.reply(b"\x1ecommands"),
+        commands::Outcome::CommandList => command_list_reply(endpoint),
         commands::Outcome::Error(commands::Error::Denied) => endpoint.reply(b"permission denied"),
         commands::Outcome::Error(commands::Error::UnknownCommand) => {
             endpoint.reply(b"unknown command")
@@ -844,6 +844,21 @@ fn native_command_reply(
         commands::Outcome::Error(commands::Error::TimedOut) => endpoint.reply(b"timed out"),
         _ => endpoint.reply(b"command accepted"),
     }
+}
+
+fn command_list_reply(endpoint: native_task::CommandEndpoint) -> bool {
+    let mut reply = [0; 256];
+    let mut length = 0;
+    for line in commands::COMMAND_LIST {
+        if length != 0 {
+            reply[length] = b'\n';
+            length += 1;
+        }
+        let end = length + line.len();
+        reply[length..end].copy_from_slice(line);
+        length = end;
+    }
+    endpoint.reply(&reply[..length])
 }
 
 fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {
