@@ -389,8 +389,9 @@ setup fails or the service exits. Ring-3 entry, PE-section mapping, IPC buffer m
 return are the next loader steps; until then the terminal remains linked into `logos-uefi`.
 
 The loader accepts only a bounded PE32+ image with a valid DOS/PE header, image bounds, executable
-entry RVA, and non-empty in-bounds sections. Mapping will consume this validated section metadata;
-it will not reparse untrusted offsets while creating page tables.
+entry RVA, and non-empty in-bounds sections. It copies each validated section page into a
+Core-owned frame, maps it user-accessible with its write/execute permissions, and marks data and
+stack pages non-executable. It will not reparse untrusted offsets while creating page tables.
 
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), and [ADR-0004](adr/0004-native-service-address-spaces.md).
 

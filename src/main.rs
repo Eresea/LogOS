@@ -58,9 +58,9 @@ fn main() -> Status {
     }
     debug::write_line(b"LogOS: leaving UEFI boot services");
 
-    let payload_staged = payload::stage();
+    let payload = payload::stage();
     let memory_map = unsafe { boot::exit_boot_services(None) };
-    kernel_main(boot_info, memory_map, acpi, machine, wall_clock, payload_staged)
+    kernel_main(boot_info, memory_map, acpi, machine, wall_clock, payload)
 }
 
 struct BootInfo {
@@ -91,7 +91,7 @@ fn kernel_main(
     acpi: Option<acpi::Tables>,
     machine: identity::Machine,
     wall_clock: time::WallClock,
-    payload_staged: bool,
+    payload: Option<payload::Payload>,
 ) -> ! {
     let health = health::Startup::new();
     trace::record(trace::Event::Boot);
@@ -122,7 +122,7 @@ fn kernel_main(
     check!(b"debug", true);
     check!(
         b"native payload",
-        payload_staged && logos_core::native_service::self_check() && pe::self_check(),
+        payload.is_some() && logos_core::native_service::self_check() && pe::self_check(),
     );
     check!(
         b"machine identity",
@@ -181,9 +181,21 @@ fn kernel_main(
     };
     check!(
         b"service address space",
-        service_address_space.code_address() != 0
-            && service_address_space.stack_top() > service_address_space.code_address()
+        service_address_space.stack_top() != 0
             && service_address_space.verifies_isolation()
+            && service_address_space.release(&mut memory),
+    );
+    let Some(payload) = payload else {
+        fail!(b"native image map");
+    };
+    let Some(mut service_address_space) = address_space::AddressSpace::new(&mut memory) else {
+        fail!(b"native image map");
+    };
+    check!(
+        b"native image map",
+        service_address_space
+            .map_image(&mut memory, payload)
+            .is_some_and(|entry| entry != 0 && service_address_space.verifies_isolation())
             && service_address_space.release(&mut memory),
     );
     let keyboard_interrupts = interrupts::install(madt);

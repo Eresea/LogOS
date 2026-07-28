@@ -26,4 +26,6 @@ Core v1 is complete. The kernel exits UEFI boot services, initializes physical m
 The first Platform v1 loader stage creates a separate service PML4 after physical memory is ready
 and before service startup. It depends on the existing kernel map and allocator; an allocation or
 mapping failure rejects normal-service startup and leaves the recovery console path intact. It does
-not yet execute service code.
+not yet execute service code. The second stage validates the staged PE32+ payload, copies its
+sections into Core-owned frames, and applies user/write/execute page permissions; failure follows
+the same recovery path.

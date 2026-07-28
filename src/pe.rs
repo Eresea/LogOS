@@ -79,8 +79,8 @@ impl Image {
         self.image_size
     }
 
-    pub fn sections(&self) -> impl Iterator<Item = Section> + '_ {
-        self.sections[..self.section_count].iter().flatten().copied()
+    pub fn sections(self) -> impl Iterator<Item = Section> {
+        self.sections.into_iter().take(self.section_count).flatten()
     }
 }
 

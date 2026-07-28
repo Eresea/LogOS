@@ -39,6 +39,7 @@ const IMPLEMENTED: &[&str] = &[
     "platform/diagnostics",
     "platform/native-payload-staged",
     "platform/service-address-space",
+    "platform/native-image-mapped",
 ];
 
 pub fn serve() -> ! {

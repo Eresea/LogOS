@@ -57,6 +57,7 @@ const SCENARIOS: &[Scenario] = &[
     scenario("platform/diagnostics", "platform"),
     scenario("platform/native-payload-staged", "platform"),
     scenario("platform/service-address-space", "platform"),
+    scenario("platform/native-image-mapped", "platform"),
     future("persistence/write-interruption", "persistence"),
     future("persistence/recovery", "persistence"),
     future("persistence/capability-denied", "persistence"),
