@@ -22,6 +22,7 @@ mod memory;
 mod mode;
 mod payload;
 mod pci;
+mod pe;
 mod platform;
 mod resources;
 mod scheduler;
@@ -119,7 +120,10 @@ fn kernel_main(
         }};
     }
     check!(b"debug", true);
-    check!(b"native payload", payload_staged && logos_core::native_service::self_check());
+    check!(
+        b"native payload",
+        payload_staged && logos_core::native_service::self_check() && pe::self_check(),
+    );
     check!(
         b"machine identity",
         entropy::self_check() && identity::self_check() && machine.id() == machine.id(),

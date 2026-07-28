@@ -54,8 +54,22 @@ pub fn stage() -> bool {
         return false;
     }
     let image = unsafe { slice::from_raw_parts(base.cast::<u8>(), size) };
-    image.windows(core::mem::size_of::<Header>()).any(|bytes| {
-        let header = unsafe { (bytes.as_ptr().cast::<Header>()).read_unaligned() };
-        header.valid_for(NAME)
-    })
+    let Some(metadata) = crate::pe::Image::parse(image) else {
+        return false;
+    };
+    let Ok(image_size) = usize::try_from(metadata.image_size()) else {
+        return false;
+    };
+    metadata.entry_rva() != 0
+        && image_size <= size
+        && metadata.sections().all(|section| {
+            section
+                .address
+                .checked_add(section.size)
+                .is_some_and(|end| end <= metadata.image_size())
+        })
+        && image.windows(core::mem::size_of::<Header>()).any(|bytes| {
+            let header = unsafe { (bytes.as_ptr().cast::<Header>()).read_unaligned() };
+            header.valid_for(NAME)
+        })
 }
