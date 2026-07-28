@@ -40,6 +40,7 @@ const IMPLEMENTED: &[&str] = &[
     "platform/native-payload-staged",
     "platform/service-address-space",
     "platform/native-image-mapped",
+    "platform/service-privilege-setup",
 ];
 
 pub fn serve() -> ! {

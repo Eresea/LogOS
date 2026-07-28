@@ -393,6 +393,10 @@ entry RVA, and non-empty in-bounds sections. It copies each validated section pa
 Core-owned frame, maps it user-accessible with its write/execute permissions, and marks data and
 stack pages non-executable. It will not reparse untrusted offsets while creating page tables.
 
+Before any service entry, Core installs a kernel GDT and bootstrap TSS. The TSS supplies a
+Core-owned ring-0 stack for faults and gates entered from Ring 3; service selectors have DPL 3 and
+cannot reuse the kernel selectors. The bootstrap is single-CPU until multicore support is in scope.
+
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), and [ADR-0004](adr/0004-native-service-address-spaces.md).
 
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.

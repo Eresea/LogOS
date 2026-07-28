@@ -24,6 +24,7 @@ $markers = @(
     'LogOS: check service lifecycle passed',
     'LogOS: check service address space passed',
     'LogOS: check native image map passed',
+    'LogOS: check service privilege passed',
     'LogOS: check console mode passed',
     'LogOS: console mode normal',
     'LogOS: normal terminal active',

@@ -29,3 +29,7 @@ mapping failure rejects normal-service startup and leaves the recovery console p
 not yet execute service code. The second stage validates the staged PE32+ payload, copies its
 sections into Core-owned frames, and applies user/write/execute page permissions; failure follows
 the same recovery path.
+
+The third stage installs the privilege-transition GDT and TSS after memory initialization and
+before interrupt setup. Its ring-0 stack is Core-owned; a failure prevents service entry and keeps
+recovery available.

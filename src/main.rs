@@ -8,6 +8,7 @@ mod audit;
 mod capabilities;
 mod commands;
 mod console;
+mod cpu;
 mod debug;
 mod device;
 mod entropy;
@@ -176,6 +177,10 @@ fn kernel_main(
             && virtual_memory::install(&mut memory, virtual_memory::Permission::ReadOnly)
                 .is_some_and(|mapping| !mapping.is_writable() && mapping.release(&mut memory)),
     );
+    let Some(privilege) = cpu::Privilege::install(&mut memory) else {
+        fail!(b"service privilege");
+    };
+    check!(b"service privilege", privilege.self_check());
     let Some(service_address_space) = address_space::AddressSpace::new(&mut memory) else {
         fail!(b"service address space");
     };
