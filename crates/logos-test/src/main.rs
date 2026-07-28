@@ -279,6 +279,7 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
         if scenario.id == "platform/native-service-ready" {
             for command in [
                 "health",
+                "ping",
                 "tasks",
                 "services",
                 "drivers",

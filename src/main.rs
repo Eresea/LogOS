@@ -572,6 +572,8 @@ fn kernel_main(
                             service_healthy: service_health
                                 .healthy(platform::NAME, interrupts::ticks()),
                             channel: &channel,
+                            responses: &responses,
+                            service_scheduler: &mut service_scheduler,
                             service_capability,
                             service: virtio_handle,
                         },
@@ -633,6 +635,8 @@ fn kernel_main(
                                 lifecycle: &mut service_lifecycle,
                                 service_healthy: service_health.healthy(platform::NAME, tick),
                                 channel: &channel,
+                                responses: &responses,
+                                service_scheduler: &mut service_scheduler,
                                 service_capability,
                                 service: virtio_handle,
                             },
@@ -698,6 +702,8 @@ fn kernel_main(
                                     lifecycle: &mut service_lifecycle,
                                     service_healthy: service_health.healthy(platform::NAME, tick),
                                     channel: &channel,
+                                    responses: &responses,
+                                    service_scheduler: &mut service_scheduler,
                                     service_capability,
                                     service: virtio_handle,
                                 },
@@ -728,6 +734,24 @@ fn kernel_main(
                             if !acpi::power_off() {
                                 let _ = terminal.write_output(b"poweroff unavailable");
                             }
+                        }
+                        commands::Outcome::Ping => {
+                            let _ = terminal.write_output(
+                                if channel
+                                    .send(
+                                        &capabilities,
+                                        service_capability,
+                                        session::Principal::LOCAL,
+                                        virtio_handle,
+                                        ipc::Message::Ping,
+                                    )
+                                    .is_some()
+                                {
+                                    b"ping sent"
+                                } else {
+                                    b"platform service unavailable"
+                                },
+                            );
                         }
                         commands::Outcome::Clear => terminal.clear_output(),
                         commands::Outcome::Layout(layout) => {
@@ -865,7 +889,7 @@ fn native_input_byte(event: input::Event) -> Option<u8> {
     })
 }
 
-struct NativeCommandContext<'a> {
+struct NativeCommandContext<'a, 'task> {
     session: &'a session::Context,
     capabilities: &'a capabilities::CapabilityManager,
     tick: u64,
@@ -873,13 +897,15 @@ struct NativeCommandContext<'a> {
     lifecycle: &'a mut supervisor::Lifecycle,
     service_healthy: bool,
     channel: &'a ipc::Channel,
+    responses: &'a ipc::Channel,
+    service_scheduler: &'a mut scheduler::Scheduler<'task>,
     service_capability: capabilities::Capability,
     service: services::ServiceHandle,
 }
 
 fn native_command_reply(
     endpoint: native_task::CommandEndpoint,
-    context: NativeCommandContext<'_>,
+    context: NativeCommandContext<'_, '_>,
 ) -> bool {
     let NativeCommandContext {
         session,
@@ -889,6 +915,8 @@ fn native_command_reply(
         lifecycle,
         service_healthy,
         channel,
+        responses,
+        service_scheduler,
         service_capability,
         service,
     } = context;
@@ -961,6 +989,20 @@ fn native_command_reply(
                 endpoint.reply(b"poweroff unavailable")
             }
         }
+        commands::Outcome::Ping => endpoint.reply(
+            if ping_platform(
+                channel,
+                responses,
+                service_scheduler,
+                capabilities,
+                service_capability,
+                service,
+            ) {
+                b"pong"
+            } else {
+                b"ping unavailable"
+            },
+        ),
         commands::Outcome::Error(commands::Error::Denied) => endpoint.reply(b"permission denied"),
         commands::Outcome::Error(commands::Error::UnknownCommand) => {
             endpoint.reply(b"unknown command")
@@ -968,6 +1010,33 @@ fn native_command_reply(
         commands::Outcome::Error(commands::Error::Cancelled) => endpoint.reply(b"cancelled"),
         commands::Outcome::Error(commands::Error::TimedOut) => endpoint.reply(b"timed out"),
     }
+}
+
+fn ping_platform(
+    channel: &ipc::Channel,
+    responses: &ipc::Channel,
+    scheduler: &mut scheduler::Scheduler<'_>,
+    capabilities: &capabilities::CapabilityManager,
+    capability: capabilities::Capability,
+    service: services::ServiceHandle,
+) -> bool {
+    let Some(request) = channel.send(
+        capabilities,
+        capability,
+        session::Principal::LOCAL,
+        service,
+        ipc::Message::Ping,
+    ) else {
+        return false;
+    };
+    if !scheduler.run_next() {
+        return false;
+    }
+    (0..4).any(|_| {
+        responses
+            .receive()
+            .is_some_and(|reply| reply.request == request && reply.message == ipc::Message::Pong)
+    })
 }
 
 fn command_list_reply(endpoint: native_task::CommandEndpoint) -> bool {

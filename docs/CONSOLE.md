@@ -27,7 +27,7 @@ The normal terminal is currently linked into the UEFI image. It is not yet an in
 - [x] Discoverable descriptors, typed arguments/results/errors, cancellation, timeout, backpressure, variables, and structured pipelines.
 - [x] Human, table, tree, and JSON formatting.
 - [x] Persistable history contract; Persistence v1 owns durable storage.
-- [x] `health`, `tasks`, `services`, `drivers`, `trace`, `inspect`, `restart`, `cancel`, `clear`, `layout`, `reboot`, `poweroff`, `help`, and `commands`.
+- [x] `health`, `ping` (Pong round trip), `tasks`, `services`, `drivers`, `trace`, `inspect`, `restart`, `cancel`, `clear`, `layout`, `reboot`, `poweroff`, `help`, and `commands`.
 
 ### Exit evidence
 

@@ -9,6 +9,7 @@ pub enum Outcome {
     Recovery,
     Reboot,
     PowerOff,
+    Ping,
     Clear,
     Layout(Layout),
     Tasks,
@@ -94,13 +95,13 @@ pub const COMMAND_LIST: [&[u8]; 8] = [
     b"layout recovery",
     b"echo help",
     b"commands reboot",
-    b"poweroff tasks",
-    b"services drivers",
-    b"trace inspect",
-    b"restart cancel",
+    b"ping poweroff",
+    b"tasks services",
+    b"drivers trace",
+    b"inspect restart cancel",
 ];
 
-const DESCRIPTORS: [Descriptor; 16] = [
+const DESCRIPTORS: [Descriptor; 17] = [
     Descriptor {
         name: b"health",
         summary: b"show machine health",
@@ -154,6 +155,12 @@ const DESCRIPTORS: [Descriptor; 16] = [
         summary: b"turn off the machine",
         arguments: &NO_ARGUMENTS,
         required_capability: Some(CapabilityKind::Recovery),
+    },
+    Descriptor {
+        name: b"ping",
+        summary: b"ping the platform service and await pong",
+        arguments: &NO_ARGUMENTS,
+        required_capability: Some(CapabilityKind::Service),
     },
     Descriptor {
         name: b"tasks",
@@ -261,6 +268,8 @@ fn invoke_stage(
         Outcome::Reboot
     } else if descriptor.name == b"poweroff" {
         Outcome::PowerOff
+    } else if descriptor.name == b"ping" {
+        Outcome::Ping
     } else if descriptor.name == b"tasks" {
         Outcome::Tasks
     } else if descriptor.name == b"services" {
@@ -351,6 +360,9 @@ pub fn self_check() -> bool {
     let Some(poweroff) = Submission::from_bytes(b"poweroff") else {
         return false;
     };
+    let Some(ping) = Submission::from_bytes(b"ping") else {
+        return false;
+    };
     let Some(health) = Submission::from_bytes(b"health") else {
         return false;
     };
@@ -401,6 +413,7 @@ pub fn self_check() -> bool {
             == Outcome::CommandList
         && invoke(reboot, &session, &capabilities, Invocation::new(2), 1) == Outcome::Reboot
         && invoke(poweroff, &session, &capabilities, Invocation::new(2), 1) == Outcome::PowerOff
+        && invoke(ping, &session, &capabilities, Invocation::new(2), 1) == Outcome::Ping
         && invoke(health, &denied_session, &capabilities, Invocation::new(2), 1).is_text(b"healthy")
         && invoke(clear, &denied_session, &capabilities, Invocation::new(2), 1) == Outcome::Clear
         && invoke(qwerty, &denied_session, &capabilities, Invocation::new(2), 1)
@@ -425,7 +438,7 @@ pub fn self_check() -> bool {
             invoke(cancel, &session, &capabilities, Invocation::new(2), 1),
             Outcome::Cancel(target) if target.as_bytes() == b"virtio-balloon"
         )
-        && descriptors().len() == 16
+        && descriptors().len() == 17
         && descriptors()[3].arguments.is_empty()
         && COMMAND_LIST.len() == 8
         && text_argument.kind == ArgumentKind::Text
