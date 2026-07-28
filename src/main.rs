@@ -555,16 +555,20 @@ fn kernel_main(
     }
     health.finish();
     #[cfg(feature = "test-hooks")]
-    test_hooks::serve(|| {
-        input
-            .next(interrupts::ticks(), keyboard::poll_scancode)
-            .and_then(native_input_byte)
-            .is_some_and(|byte| {
-                native_input.deliver(byte)
-                    && native_scheduler.wake(native_handle)
-                    && native_scheduler.run_next()
-                    && native_display::matches(33, 35, [0, 0xff, 0])
-            })
+    test_hooks::serve(|value| {
+        value.bytes().chain(core::iter::once(b'\n')).all(|byte| {
+            native_input.deliver(byte)
+                && native_scheduler.wake(native_handle)
+                && native_scheduler.run_next()
+                && (native_command.submission().is_none()
+                    || (native_command_reply(
+                        native_command,
+                        &session,
+                        &capabilities,
+                        interrupts::ticks(),
+                    ) && native_scheduler.wake(native_handle)
+                        && native_scheduler.run_next()))
+        })
     });
     let mut console_mode = coordinator.mode();
     if console_mode == mode::ConsoleMode::Normal {
@@ -841,7 +845,7 @@ fn native_command_reply(
         commands::Outcome::Drivers => endpoint.reply(platform::driver_status()),
         commands::Outcome::Trace => endpoint.reply(trace::message(trace::latest())),
         commands::Outcome::Inspect(resource) => endpoint.reply(resource.as_bytes()),
-        commands::Outcome::Clear => endpoint.reply(b"\x1eclear"),
+        commands::Outcome::Clear => endpoint.reply(b"clear unavailable"),
         commands::Outcome::Layout(input::Layout::Qwerty) => endpoint.reply(b"layout qwerty"),
         commands::Outcome::Layout(input::Layout::Azerty) => endpoint.reply(b"layout azerty"),
         commands::Outcome::Restart(_) => endpoint.reply(b"restart unavailable"),

@@ -277,9 +277,7 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
         send(&mut stream, &mut transcript_file, "LOGOS/1 HELLO\n")?;
         wait_file(&debug_log, deadline, "LOGOS/1 RESULT hello=ok")?;
         if scenario.id == "platform/native-service-ready" {
-            send_qmp_key(qmp_port, "k")?;
-            std::thread::sleep(Duration::from_millis(100));
-            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT terminal\n")?;
+            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT clear\n")?;
             wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
         }
         send(&mut stream, &mut transcript_file, &format!("LOGOS/1 RUN {}\n", scenario.id))?;
@@ -391,6 +389,7 @@ fn capture_qmp(port: u16, log: &Path, artifacts: &Path) {
     let _ = fs::write(log, output);
 }
 
+#[allow(dead_code)]
 fn send_qmp_key(port: u16, key: &str) -> Result<(), String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(io_error)?;
     stream.set_read_timeout(Some(Duration::from_secs(1))).map_err(io_error)?;
