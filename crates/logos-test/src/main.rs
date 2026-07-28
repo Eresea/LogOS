@@ -55,6 +55,7 @@ const SCENARIOS: &[Scenario] = &[
     scenario("platform/protocol-incompatible", "platform"),
     scenario("platform/unauthorized-capability", "platform"),
     scenario("platform/diagnostics", "platform"),
+    scenario("platform/native-payload-staged", "platform"),
     future("persistence/write-interruption", "persistence"),
     future("persistence/recovery", "persistence"),
     future("persistence/capability-denied", "persistence"),
@@ -201,6 +202,10 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
     let esp = artifacts.join("esp/EFI/BOOT");
     fs::create_dir_all(&esp).map_err(io_error)?;
     fs::copy(&efi, esp.join("BOOTX64.EFI")).map_err(io_error)?;
+    let payload = root.join("target/x86_64-unknown-uefi/debug/logos-terminal-service.efi");
+    let payload_dir = artifacts.join("esp/EFI/LOGOS");
+    fs::create_dir_all(&payload_dir).map_err(io_error)?;
+    fs::copy(payload, payload_dir.join("TERMINAL.EFI")).map_err(io_error)?;
     fs::write(
         artifacts.join("image.hash"),
         format!("{:016x}\n", fnv(&fs::read(&efi).map_err(io_error)?)),
@@ -296,7 +301,15 @@ fn build(root: &Path) -> Result<(), String> {
         ])
         .status()
         .map_err(io_error)?;
-    if status.success() { Ok(()) } else { Err("kernel build failed".into()) }
+    if !status.success() {
+        return Err("kernel build failed".into());
+    }
+    let status = Command::new("cargo")
+        .current_dir(root)
+        .args(["build", "--package", "logos-terminal-service", "--target", "x86_64-unknown-uefi"])
+        .status()
+        .map_err(io_error)?;
+    if status.success() { Ok(()) } else { Err("terminal service build failed".into()) }
 }
 
 fn accept_until(

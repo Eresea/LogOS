@@ -12,10 +12,10 @@ as a loaded service would not establish the required boundary.
 ## Decision
 
 The first native-service loader increment will stage an independently built service image in the
-QEMU boot payload. The UEFI boot binary validates a fixed, versioned image header before exit from
-boot services, retains the validated image for the kernel, and starts it only with manifest-granted
-capabilities. The image header identifies the ABI version, entry point, and image size; it carries
-no capability handles or hardware addresses.
+QEMU boot payload. The UEFI boot binary asks firmware to validate the PE image, retains the loaded
+image for the kernel, and validates a fixed header carrying the ABI version and service name before
+exit from boot services. The PE image owns its entry point and image size; the header carries no
+capability handles or hardware addresses.
 
 The loader contract does not decide native-service address-space isolation. That remains the open
 Core decision and must be settled before untrusted native code can run.

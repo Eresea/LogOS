@@ -12,8 +12,11 @@ $ovmf = if ($env:OVMF_CODE) { $env:OVMF_CODE } else { "C:\Program Files\qemu\sha
 if (-not (Test-Path $ovmf)) { throw "Set OVMF_CODE to an EDK2/OVMF firmware file." }
 
 cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --target x86_64-unknown-uefi $(if ($Release) { "--release" })
+cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-terminal-service --target x86_64-unknown-uefi $(if ($Release) { "--release" })
 New-Item -ItemType Directory -Force "$esp\EFI\BOOT" | Out-Null
+New-Item -ItemType Directory -Force "$esp\EFI\LOGOS" | Out-Null
 Copy-Item $efi "$esp\EFI\BOOT\BOOTX64.EFI" -Force
+Copy-Item (Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-terminal-service.efi") "$esp\EFI\LOGOS\TERMINAL.EFI" -Force
 $qemuArgs = @(
     '-machine', 'q35', '-m', '256M',
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",

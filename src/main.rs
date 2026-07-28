@@ -19,6 +19,7 @@ mod ipc;
 mod keyboard;
 mod memory;
 mod mode;
+mod payload;
 mod pci;
 mod platform;
 mod resources;
@@ -55,8 +56,9 @@ fn main() -> Status {
     }
     debug::write_line(b"LogOS: leaving UEFI boot services");
 
+    let payload_staged = payload::stage();
     let memory_map = unsafe { boot::exit_boot_services(None) };
-    kernel_main(boot_info, memory_map, acpi, machine, wall_clock)
+    kernel_main(boot_info, memory_map, acpi, machine, wall_clock, payload_staged)
 }
 
 struct BootInfo {
@@ -87,6 +89,7 @@ fn kernel_main(
     acpi: Option<acpi::Tables>,
     machine: identity::Machine,
     wall_clock: time::WallClock,
+    payload_staged: bool,
 ) -> ! {
     let health = health::Startup::new();
     trace::record(trace::Event::Boot);
@@ -115,6 +118,7 @@ fn kernel_main(
         }};
     }
     check!(b"debug", true);
+    check!(b"native payload", payload_staged && logos_core::native_service::self_check());
     check!(
         b"machine identity",
         entropy::self_check() && identity::self_check() && machine.id() == machine.id(),

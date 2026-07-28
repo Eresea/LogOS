@@ -37,6 +37,7 @@ const IMPLEMENTED: &[&str] = &[
     "platform/protocol-incompatible",
     "platform/unauthorized-capability",
     "platform/diagnostics",
+    "platform/native-payload-staged",
 ];
 
 pub fn serve() -> ! {

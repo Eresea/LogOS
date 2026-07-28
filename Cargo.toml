@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/logos-core", "crates/logos-terminal", "crates/logos-test"]
+members = ["crates/logos-core", "crates/logos-terminal", "crates/logos-terminal-service", "crates/logos-test"]
 default-members = ["crates/logos-core", "crates/logos-terminal", "crates/logos-test"]
 resolver = "3"
 
