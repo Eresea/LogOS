@@ -39,7 +39,7 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
                         (*context).operation = SUBMIT_COMMAND;
                         asm!("int 0x80");
                         let length = usize::try_from((*context).text_length).unwrap_or(0).min(32);
-                        let _ = terminal.write_output(&(*context).text[..length]);
+                        let _ = terminal.write_output(&(&(*context).text)[..length]);
                     } else {
                         let _ = terminal.write_output(b"command too long");
                     }

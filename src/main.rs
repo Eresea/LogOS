@@ -568,6 +568,40 @@ fn kernel_main(
     });
     let mut console_mode = coordinator.mode();
     if console_mode == mode::ConsoleMode::Normal {
+        debug::write_line(b"LogOS: native terminal active");
+        loop {
+            let tick = interrupts::ticks();
+            if let Some(event) = input.next(tick, keyboard::poll_scancode) {
+                if native_input_byte(event).is_some_and(|byte| {
+                    native_input.deliver(byte)
+                        && native_scheduler.wake(native_handle)
+                        && native_scheduler.run_next()
+                }) {
+                    if event.pressed().is_some_and(|(key, _)| key == input::LogicalKey::Escape) {
+                        debug::write_line(b"LogOS: recovery handoff requested");
+                        console_mode = mode::ConsoleMode::Recovery;
+                        break;
+                    }
+                    if native_command.submission().is_some_and(|request| {
+                        request.length == b"recovery".len()
+                            && &request.text[..request.length] == b"recovery"
+                    }) {
+                        debug::write_line(b"LogOS: recovery handoff requested");
+                        console_mode = mode::ConsoleMode::Recovery;
+                        break;
+                    }
+                    if native_command.submission().is_some() {
+                        let _ = native_command_reply(native_command, &session, &capabilities, tick)
+                            && native_scheduler.wake(native_handle)
+                            && native_scheduler.run_next();
+                    }
+                }
+            } else {
+                unsafe { core::arch::asm!("hlt") };
+            }
+        }
+    }
+    if legacy_normal_loop_enabled() && console_mode == mode::ConsoleMode::Normal {
         debug::write_line(b"LogOS: normal terminal active");
         let _ = terminal.write_output(b"LogOS terminal");
         if !terminal.render(display.as_mut().unwrap(), &text) {
@@ -609,7 +643,7 @@ fn kernel_main(
                     let _ = native_input.deliver(byte)
                         && native_scheduler.wake(native_handle)
                         && native_scheduler.run_next()
-                        && (!native_command.submission().is_some()
+                        && (native_command.submission().is_none()
                             || (native_command_reply(
                                 native_command,
                                 &session,
@@ -764,6 +798,10 @@ fn kernel_main(
     }
 }
 
+const fn legacy_normal_loop_enabled() -> bool {
+    false
+}
+
 fn native_input_byte(event: input::Event) -> Option<u8> {
     event.text().or_else(|| {
         event.pressed().and_then(|(key, _)| match key {
@@ -784,26 +822,27 @@ fn native_command_reply(
     let Some(request) = endpoint.submission() else {
         return true;
     };
-    let reply: &[u8] =
+    let Some(submission) =
         logos_terminal::terminal::Submission::from_bytes(&request.text[..request.length])
-            .map(|submission| {
-                match commands::pipeline(
-                    submission,
-                    session,
-                    capabilities,
-                    commands::Invocation::new(tick.wrapping_add(50)),
-                    tick,
-                ) {
-                    commands::Outcome::Text(value) => value.as_bytes(),
-                    commands::Outcome::Error(commands::Error::Denied) => b"permission denied",
-                    commands::Outcome::Error(commands::Error::UnknownCommand) => b"unknown command",
-                    commands::Outcome::Error(commands::Error::Cancelled) => b"cancelled",
-                    commands::Outcome::Error(commands::Error::TimedOut) => b"timed out",
-                    _ => b"command accepted",
-                }
-            })
-            .unwrap_or(b"unknown command");
-    endpoint.reply(reply)
+    else {
+        return endpoint.reply(b"unknown command");
+    };
+    match commands::pipeline(
+        submission,
+        session,
+        capabilities,
+        commands::Invocation::new(tick.wrapping_add(50)),
+        tick,
+    ) {
+        commands::Outcome::Text(value) => endpoint.reply(value.as_bytes()),
+        commands::Outcome::Error(commands::Error::Denied) => endpoint.reply(b"permission denied"),
+        commands::Outcome::Error(commands::Error::UnknownCommand) => {
+            endpoint.reply(b"unknown command")
+        }
+        commands::Outcome::Error(commands::Error::Cancelled) => endpoint.reply(b"cancelled"),
+        commands::Outcome::Error(commands::Error::TimedOut) => endpoint.reply(b"timed out"),
+        _ => endpoint.reply(b"command accepted"),
+    }
 }
 
 fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {

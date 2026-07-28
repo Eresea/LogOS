@@ -34,6 +34,7 @@ The third stage installs the privilege-transition GDT and TSS after memory initi
 before interrupt setup. Its ring-0 stack is Core-owned; a failure prevents service entry and keeps
 recovery available.
 
-The fourth stage proves one Ring-3 entry and return through the service gate after the IDT is
-installed. A failed transition is a fatal service-start failure; normal-terminal startup is refused
-and recovery remains the fallback.
+The fourth stage starts the staged Ring-3 terminal through the service gate after the IDT is
+installed. Core routes normal input, presentation, and bounded command replies through that gate;
+Escape or the authorized `recovery` command returns to the direct recovery console. A failed
+transition refuses normal-terminal startup and leaves recovery available.

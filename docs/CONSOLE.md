@@ -1,6 +1,6 @@
 # Console
 
-> **Status:** Terminal model complete; service boundary pending Platform v1
+> **Status:** Terminal model complete; native terminal handoff bootstrapped, service fan-out pending Platform v1
 > **Owner:** UEFI bootstrap (normal terminal); Core (recovery console); Sessions after extraction
 
 Console is LogOS's local textual interface. The normal terminal consumes typed command results; the kernel recovery console is an independent fallback.
@@ -38,7 +38,7 @@ The normal terminal is currently linked into the UEFI image. It is not yet an in
 
 ## Next required boundary
 
-- [ ] Load `logos-terminal` as a native Sessions service rather than link it into `logos-uefi`.
+- [x] Load `logos-terminal` as a native Sessions service rather than link it into `logos-uefi`.
 - [ ] Replace raw framebuffer and PS/2 access with capability-only input and display client contracts.
 - [ ] Keep command/session dispatch outside Core and preserve kernel-only recovery input/output.
 
