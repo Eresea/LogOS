@@ -563,9 +563,18 @@ fn kernel_main(
                 && (native_command.submission().is_none()
                     || (native_command_reply(
                         native_command,
-                        &session,
-                        &capabilities,
-                        interrupts::ticks(),
+                        NativeCommandContext {
+                            session: &session,
+                            capabilities: &capabilities,
+                            tick: interrupts::ticks(),
+                            input: &mut input,
+                            lifecycle: &mut service_lifecycle,
+                            service_healthy: service_health
+                                .healthy(platform::NAME, interrupts::ticks()),
+                            channel: &channel,
+                            service_capability,
+                            service: virtio_handle,
+                        },
                     ) && native_scheduler.wake(native_handle)
                         && native_scheduler.run_next()))
         })
@@ -575,6 +584,25 @@ fn kernel_main(
         debug::write_line(b"LogOS: native terminal active");
         loop {
             let tick = interrupts::ticks();
+            if service_lifecycle.due(tick) {
+                let _ = channel.send(
+                    &capabilities,
+                    service_capability,
+                    session::Principal::LOCAL,
+                    virtio_handle,
+                    ipc::Message::Recover,
+                );
+            }
+            if platform::completion_pending() {
+                let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
+            }
+            if service_scheduler.run_next() {
+                let _ = service_health.beat(platform::NAME, tick);
+            }
+            if !service_health.healthy(platform::NAME, tick) {
+                debug::write_line(b"LogOS: service heartbeat overdue");
+                let _ = service_lifecycle.failed(tick);
+            }
             if let Some(event) = input.next(tick, keyboard::poll_scancode) {
                 if native_input_byte(event).is_some_and(|byte| {
                     native_input.deliver(byte)
@@ -595,8 +623,20 @@ fn kernel_main(
                         break;
                     }
                     if native_command.submission().is_some() {
-                        let _ = native_command_reply(native_command, &session, &capabilities, tick)
-                            && native_scheduler.wake(native_handle)
+                        let _ = native_command_reply(
+                            native_command,
+                            NativeCommandContext {
+                                session: &session,
+                                capabilities: &capabilities,
+                                tick,
+                                input: &mut input,
+                                lifecycle: &mut service_lifecycle,
+                                service_healthy: service_health.healthy(platform::NAME, tick),
+                                channel: &channel,
+                                service_capability,
+                                service: virtio_handle,
+                            },
+                        ) && native_scheduler.wake(native_handle)
                             && native_scheduler.run_next();
                     }
                 }
@@ -650,9 +690,17 @@ fn kernel_main(
                         && (native_command.submission().is_none()
                             || (native_command_reply(
                                 native_command,
-                                &session,
-                                &capabilities,
-                                tick,
+                                NativeCommandContext {
+                                    session: &session,
+                                    capabilities: &capabilities,
+                                    tick,
+                                    input: &mut input,
+                                    lifecycle: &mut service_lifecycle,
+                                    service_healthy: service_health.healthy(platform::NAME, tick),
+                                    channel: &channel,
+                                    service_capability,
+                                    service: virtio_handle,
+                                },
                             ) && native_scheduler.wake(native_handle)
                                 && native_scheduler.run_next()));
                 }
@@ -817,12 +865,33 @@ fn native_input_byte(event: input::Event) -> Option<u8> {
     })
 }
 
+struct NativeCommandContext<'a> {
+    session: &'a session::Context,
+    capabilities: &'a capabilities::CapabilityManager,
+    tick: u64,
+    input: &'a mut input::Service,
+    lifecycle: &'a mut supervisor::Lifecycle,
+    service_healthy: bool,
+    channel: &'a ipc::Channel,
+    service_capability: capabilities::Capability,
+    service: services::ServiceHandle,
+}
+
 fn native_command_reply(
     endpoint: native_task::CommandEndpoint,
-    session: &session::Context,
-    capabilities: &capabilities::CapabilityManager,
-    tick: u64,
+    context: NativeCommandContext<'_>,
 ) -> bool {
+    let NativeCommandContext {
+        session,
+        capabilities,
+        tick,
+        input,
+        lifecycle,
+        service_healthy,
+        channel,
+        service_capability,
+        service,
+    } = context;
     let Some(request) = endpoint.submission() else {
         return true;
     };
@@ -841,18 +910,57 @@ fn native_command_reply(
         commands::Outcome::Text(value) => endpoint.reply(value.as_bytes()),
         commands::Outcome::CommandList => command_list_reply(endpoint),
         commands::Outcome::Tasks => endpoint.reply(b"scheduler active"),
-        commands::Outcome::Services => endpoint.reply(platform::service_status(true)),
+        commands::Outcome::Services => endpoint.reply(platform::service_status(service_healthy)),
         commands::Outcome::Drivers => endpoint.reply(platform::driver_status()),
         commands::Outcome::Trace => endpoint.reply(trace::message(trace::latest())),
         commands::Outcome::Inspect(resource) => endpoint.reply(resource.as_bytes()),
-        commands::Outcome::Clear => endpoint.reply(b"clear unavailable"),
-        commands::Outcome::Layout(input::Layout::Qwerty) => endpoint.reply(b"layout qwerty"),
-        commands::Outcome::Layout(input::Layout::Azerty) => endpoint.reply(b"layout azerty"),
-        commands::Outcome::Restart(_) => endpoint.reply(b"restart unavailable"),
-        commands::Outcome::Cancel(_) => endpoint.reply(b"cancel unavailable"),
+        commands::Outcome::Clear => endpoint.reply(b"clear handled by terminal"),
+        commands::Outcome::Layout(layout) => {
+            input.set_layout(layout);
+            endpoint.reply(match layout {
+                input::Layout::Qwerty => b"layout qwerty",
+                input::Layout::Azerty => b"layout azerty",
+            })
+        }
+        commands::Outcome::Restart(target) => {
+            endpoint.reply(if platform::matches(target.as_bytes()) && lifecycle.restart(tick) {
+                b"restart scheduled"
+            } else {
+                b"unknown or unavailable service"
+            })
+        }
+        commands::Outcome::Cancel(target) => endpoint.reply(
+            if platform::matches(target.as_bytes())
+                && channel
+                    .send(
+                        capabilities,
+                        service_capability,
+                        session::Principal::LOCAL,
+                        service,
+                        ipc::Message::Cancel,
+                    )
+                    .is_some()
+            {
+                b"cancel requested"
+            } else {
+                b"unknown or unavailable service"
+            },
+        ),
         commands::Outcome::Recovery => endpoint.reply(b"recovery requested"),
-        commands::Outcome::Reboot => endpoint.reply(b"reboot requires recovery"),
-        commands::Outcome::PowerOff => endpoint.reply(b"poweroff requires recovery"),
+        commands::Outcome::Reboot => {
+            if acpi::reset() {
+                true
+            } else {
+                endpoint.reply(b"reboot unavailable")
+            }
+        }
+        commands::Outcome::PowerOff => {
+            if acpi::power_off() {
+                true
+            } else {
+                endpoint.reply(b"poweroff unavailable")
+            }
+        }
         commands::Outcome::Error(commands::Error::Denied) => endpoint.reply(b"permission denied"),
         commands::Outcome::Error(commands::Error::UnknownCommand) => {
             endpoint.reply(b"unknown command")

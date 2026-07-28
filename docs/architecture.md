@@ -374,7 +374,10 @@ Terminal output is a separate bounded line model; rendering consumes that model 
 
 Terminal redraw retains no display-service state: rendering the same model on a replacement display service reproduces the output and editor.
 
-The normal terminal model lives in the no-std `logos-terminal` crate, but is currently linked into the UEFI binary and run by its normal-mode loop. This is a bootstrap arrangement, not a Core boundary. Platform v1 first stages and validates its versioned boot payload, then loads it as a Sessions service with capability-only input and display contracts; the UEFI binary then retains only recovery-console code.
+The normal terminal model lives in the no-std `logos-terminal` crate and is loaded from its staged
+native payload. Core's normal-mode loop is disabled; it routes the bootstrap gate only while the
+kernel retains its direct recovery-console code. Platform v1 still replaces that bootstrap gate
+with separate capability-only Input, Display, and Session services.
 
 Each native service has its own Core-owned address space. Only service code, stack, IPC buffers,
 and granted endpoints are mapped there; raw devices and kernel memory are never service mappings.
@@ -382,16 +385,15 @@ and granted endpoints are mapped there; raw devices and kernel memory are never 
 ### Native service address-space bootstrap
 
 Core creates a fresh PML4 for each service, retains the current supervisor-only kernel mappings,
-and assigns a free lower-half slot to that service. The first mapping set is one read/execute code
-page and one read/write stack page, both marked user-accessible; all inherited PML4 entries must
-remain supervisor-only. Core owns every page-table and service frame and releases all of them if
-setup fails or the service exits. Ring-3 entry, PE-section mapping, IPC buffer mapping, and fault
-return are the next loader steps; until then the terminal remains linked into `logos-uefi`.
+and assigns a free slot to that service. Validated PE sections, a two-page stack, and the shared
+service context are user-accessible; the gate stack and inherited mappings remain supervisor-only.
+Core owns every page-table and service frame and releases all of them if setup fails or the service
+exits.
 
 The loader accepts only a bounded PE32+ image with a valid DOS/PE header, image bounds, executable
-entry RVA, and non-empty in-bounds sections. It copies each validated section page into a
-Core-owned frame, maps it user-accessible with its write/execute permissions, and marks data and
-stack pages non-executable. It will not reparse untrusted offsets while creating page tables.
+entry RVA, in-bounds sections, and in-bounds base-relocation directory. It copies each section into
+Core-owned frames, applies only AMD64 `DIR64` relocations for the service virtual base, maps section
+write/execute permissions, and marks data and stack pages non-executable.
 
 Before any service entry, Core installs a kernel GDT and bootstrap TSS. The TSS supplies a
 Core-owned ring-0 stack for faults and gates entered from Ring 3; service selectors have DPL 3 and

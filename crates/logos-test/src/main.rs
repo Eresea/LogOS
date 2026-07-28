@@ -277,8 +277,25 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
         send(&mut stream, &mut transcript_file, "LOGOS/1 HELLO\n")?;
         wait_file(&debug_log, deadline, "LOGOS/1 RESULT hello=ok")?;
         if scenario.id == "platform/native-service-ready" {
-            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT clear\n")?;
-            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
+            for command in [
+                "health",
+                "tasks",
+                "services",
+                "drivers",
+                "trace",
+                "inspect service:/virtio-balloon",
+                "restart virtio-balloon",
+                "cancel virtio-balloon",
+                "layout azerty",
+                "layout qwerty",
+                "echo hello",
+                "help clear",
+                "commands",
+                "clear",
+            ] {
+                send(&mut stream, &mut transcript_file, &format!("LOGOS/1 INPUT {command}\n"))?;
+                wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
+            }
         }
         send(&mut stream, &mut transcript_file, &format!("LOGOS/1 RUN {}\n", scenario.id))?;
         wait_file(

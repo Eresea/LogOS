@@ -27,6 +27,11 @@ pub fn parse(frame: &[u8]) -> Result<Request<'_>, Error> {
     }
     let line = core::str::from_utf8(frame).map_err(|_| Error::InvalidUtf8)?.trim();
     let Some(rest) = line.strip_prefix("LOGOS/1 ") else { return Err(Error::BadVersion) };
+    if let Some(value) = rest.strip_prefix("INPUT ") {
+        return (!value.trim().is_empty())
+            .then_some(Request::Input(value.trim()))
+            .ok_or(Error::Malformed);
+    }
     let mut words = rest.split_ascii_whitespace();
     match words.next() {
         Some("HELLO") if words.next().is_none() => Ok(Request::Hello),
@@ -35,7 +40,6 @@ pub fn parse(frame: &[u8]) -> Result<Request<'_>, Error> {
             point: words.next().ok_or(Error::Malformed)?,
             action: one(words)?,
         }),
-        Some("INPUT") => one(words).map(Request::Input),
         Some("QUERY") => one(words).map(Request::Query),
         Some("ADVANCE") => one(words)?.parse().map(Request::Advance).map_err(|_| Error::Malformed),
         Some("RESET") => one(words).map(Request::Reset),
@@ -56,6 +60,7 @@ mod tests {
     #[test]
     fn parses_and_rejects_bounded_frames() {
         assert_eq!(parse(b"LOGOS/1 RUN core/boot-normal"), Ok(Request::Run("core/boot-normal")));
+        assert_eq!(parse(b"LOGOS/1 INPUT echo hello"), Ok(Request::Input("echo hello")));
         assert_eq!(parse(b"LOGOS/2 HELLO"), Err(Error::BadVersion));
         assert_eq!(parse(&[b'x'; MAX_FRAME + 1]), Err(Error::TooLong));
         assert_eq!(parse(b"LOGOS/1 ADVANCE nope"), Err(Error::Malformed));

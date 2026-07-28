@@ -6,6 +6,7 @@ const MAX_SECTIONS: usize = 8;
 pub struct Image {
     entry_rva: u32,
     image_size: u32,
+    relocations: Option<(u32, u32)>,
     sections: [Option<Section>; MAX_SECTIONS],
     section_count: usize,
 }
@@ -30,7 +31,7 @@ impl Image {
         let file = pe.checked_add(4)?;
         let section_count = usize::from(read_u16(bytes, file.checked_add(2)?)?);
         let optional_size = usize::from(read_u16(bytes, file.checked_add(16)?)?);
-        if section_count == 0 || section_count > MAX_SECTIONS {
+        if section_count == 0 || section_count > MAX_SECTIONS || optional_size < 160 {
             return None;
         }
         let optional = file.checked_add(20)?;
@@ -39,6 +40,8 @@ impl Image {
         }
         let entry_rva = read_u32(bytes, optional.checked_add(16)?)?;
         let image_size = read_u32(bytes, optional.checked_add(56)?)?;
+        let relocation_rva = read_u32(bytes, optional.checked_add(152)?)?;
+        let relocation_size = read_u32(bytes, optional.checked_add(156)?)?;
         if image_size == 0
             || usize::try_from(image_size).ok()? > bytes.len()
             || entry_rva >= image_size
@@ -68,7 +71,24 @@ impl Image {
                 writable: characteristics & 0x8000_0000 != 0,
             });
         }
-        entry_executable.then_some(Self { entry_rva, image_size, sections, section_count })
+        let relocations = match (relocation_rva, relocation_size) {
+            (0, 0) => None,
+            (rva, size)
+                if rva != 0
+                    && size >= 8
+                    && rva.checked_add(size).is_some_and(|end| end <= image_size) =>
+            {
+                Some((rva, size))
+            }
+            _ => return None,
+        };
+        entry_executable.then_some(Self {
+            entry_rva,
+            image_size,
+            relocations,
+            sections,
+            section_count,
+        })
     }
 
     pub const fn entry_rva(&self) -> u32 {
@@ -77,6 +97,10 @@ impl Image {
 
     pub const fn image_size(&self) -> u32 {
         self.image_size
+    }
+
+    pub const fn relocations(&self) -> Option<(u32, u32)> {
+        self.relocations
     }
 
     pub fn sections(self) -> impl Iterator<Item = Section> {
@@ -114,6 +138,8 @@ pub fn self_check() -> bool {
     bytes[0x98..0x9a].copy_from_slice(&PE32_PLUS.to_le_bytes());
     bytes[0xa8..0xac].copy_from_slice(&(0x200u32).to_le_bytes());
     bytes[0xd0..0xd4].copy_from_slice(&(0x400u32).to_le_bytes());
+    bytes[0x130..0x134].copy_from_slice(&(0x300u32).to_le_bytes());
+    bytes[0x134..0x138].copy_from_slice(&(0x10u32).to_le_bytes());
     let section = 0x188;
     bytes[section + 8..section + 12].copy_from_slice(&(0x100u32).to_le_bytes());
     bytes[section + 12..section + 16].copy_from_slice(&(0x200u32).to_le_bytes());
@@ -121,6 +147,7 @@ pub fn self_check() -> bool {
     let valid = Image::parse(&bytes).is_some_and(|image| {
         image.entry_rva() == 0x200
             && image.image_size() == 0x400
+            && image.relocations() == Some((0x300, 0x10))
             && image
                 .sections()
                 .next()

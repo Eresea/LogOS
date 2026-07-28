@@ -18,6 +18,7 @@ pub struct AddressSpace {
     pdpt: Page,
     pd: Page,
     pt: Page,
+    stack_lower: Page,
     stack: Page,
     mapped: [Option<Page>; ENTRIES],
     base: u64,
@@ -41,7 +42,15 @@ impl AddressSpace {
             let _ = physical.release_page(pml4);
             return None;
         };
+        let Some(stack_lower) = physical.allocate_owned() else {
+            let _ = physical.release_page(pt);
+            let _ = physical.release_page(pd);
+            let _ = physical.release_page(pdpt);
+            let _ = physical.release_page(pml4);
+            return None;
+        };
         let Some(stack) = physical.allocate_owned() else {
+            let _ = physical.release_page(stack_lower);
             let _ = physical.release_page(pt);
             let _ = physical.release_page(pd);
             let _ = physical.release_page(pdpt);
@@ -71,6 +80,9 @@ impl AddressSpace {
             (pdpt_address as *mut u64).write(pd_address | PRESENT | WRITABLE | USER);
             (pd_address as *mut u64).write(pt_address | PRESENT | WRITABLE | USER);
             (pt_address as *mut u64)
+                .add(ENTRIES - 2)
+                .write(stack_lower.address() | PRESENT | WRITABLE | USER | NO_EXECUTE);
+            (pt_address as *mut u64)
                 .add(ENTRIES - 1)
                 .write(stack_address | PRESENT | WRITABLE | USER | NO_EXECUTE);
             Some(Self {
@@ -78,6 +90,7 @@ impl AddressSpace {
                 pdpt,
                 pd,
                 pt,
+                stack_lower,
                 stack,
                 mapped: [const { None }; ENTRIES],
                 base: canonical_address(slot),
@@ -162,14 +175,14 @@ impl AddressSpace {
         }
         unsafe {
             (self.pt.address() as *mut u64)
-                .add(ENTRIES - 2)
+                .add(ENTRIES - 3)
                 .write_volatile(address | PRESENT | WRITABLE | NO_EXECUTE);
         }
         true
     }
 
     pub fn kernel_stack_top(&self) -> u64 {
-        self.base + PAGE_SIZE * (ENTRIES - 1) as u64
+        self.base + PAGE_SIZE * (ENTRIES - 2) as u64
     }
 
     pub fn verifies_isolation(&self) -> bool {
@@ -194,11 +207,12 @@ impl AddressSpace {
             .flatten()
             .fold(true, |released, page| physical.release_page(page) && released);
         let stack = physical.release_page(self.stack);
+        let stack_lower = physical.release_page(self.stack_lower);
         let pt = physical.release_page(self.pt);
         let pd = physical.release_page(self.pd);
         let pdpt = physical.release_page(self.pdpt);
         let pml4 = physical.release_page(self.pml4);
-        mapped && stack && pt && pd && pdpt && pml4
+        mapped && stack && stack_lower && pt && pd && pdpt && pml4
     }
 
     fn map_page(
@@ -219,7 +233,7 @@ impl AddressSpace {
             let Some(page) = physical.allocate_owned() else {
                 return false;
             };
-            if !payload.copy_page(rva, page.address()) {
+            if !payload.copy_page(rva, page.address(), self.base) {
                 let _ = physical.release_page(page);
                 return false;
             }

@@ -32,7 +32,9 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
                 if input == b'\n' {
                     let submission = terminal.submit();
                     let _ = terminal.write_output(submission.as_bytes());
-                    if submission.as_bytes().len() <= MAX_TEXT {
+                    if submission.as_bytes() == b"clear" {
+                        terminal.clear_output();
+                    } else if submission.as_bytes().len() <= MAX_TEXT {
                         (*context).text = [0; MAX_TEXT];
                         (&mut (*context).text)[..submission.as_bytes().len()]
                             .copy_from_slice(submission.as_bytes());
@@ -70,6 +72,9 @@ unsafe fn render(terminal: &Model, context: *mut Context) {
         while let Some(line) = terminal.output_line(row as usize) {
             present(context, 32, 32 + row * 20, line.as_bytes());
             row += 1;
+        }
+        if row == 0 {
+            row = 1;
         }
         present(context, 32, 32 + row * 20, b">");
         present(context, 40, 32 + row * 20, terminal.input_line());

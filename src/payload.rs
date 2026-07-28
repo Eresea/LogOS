@@ -1,4 +1,4 @@
-use core::{cell::UnsafeCell, slice};
+use core::{cell::UnsafeCell, mem::size_of, slice};
 use logos_core::native_service::Header;
 use uefi::{
     boot::{self, LoadImageSource},
@@ -32,7 +32,7 @@ impl Payload {
         self.image.sections()
     }
 
-    pub fn copy_page(self, rva: u32, destination: u64) -> bool {
+    pub fn copy_page(self, rva: u32, destination: u64, mapped_base: u64) -> bool {
         let Ok(rva) = usize::try_from(rva) else {
             return false;
         };
@@ -49,6 +49,63 @@ impl Payload {
                 destination as *mut u8,
                 remaining.min(4096),
             );
+        }
+        self.relocate_page(rva as u32, destination, mapped_base)
+    }
+
+    fn relocate_page(self, page_rva: u32, destination: u64, mapped_base: u64) -> bool {
+        let Some((rva, size)) = self.image.relocations() else {
+            return mapped_base == self.base as u64;
+        };
+        let Ok(rva) = usize::try_from(rva) else {
+            return false;
+        };
+        let Ok(size) = usize::try_from(size) else {
+            return false;
+        };
+        let relocations = unsafe { slice::from_raw_parts(self.base.add(rva), size) };
+        let mut block = 0;
+        // ponytail: bounded native images are tiny; index relocations if payloads grow.
+        while block < relocations.len() {
+            let Some(header) = relocations.get(block..block + 8) else {
+                return false;
+            };
+            let target_page = u32::from_le_bytes(header[..4].try_into().unwrap());
+            let block_size = u32::from_le_bytes(header[4..].try_into().unwrap()) as usize;
+            let Some(entries) = relocations.get(block + 8..block + block_size) else {
+                return false;
+            };
+            if block_size < 8 || !block_size.is_multiple_of(2) {
+                return false;
+            }
+            for entry in entries.chunks_exact(2) {
+                let entry = u16::from_le_bytes([entry[0], entry[1]]);
+                if entry >> 12 == 0 {
+                    continue;
+                }
+                if entry >> 12 != 10 {
+                    return false;
+                }
+                let Some(target_rva) = target_page.checked_add(u32::from(entry & 0x0fff)) else {
+                    return false;
+                };
+                if target_rva / 4096 != page_rva / 4096 {
+                    continue;
+                }
+                let offset = usize::try_from(target_rva - page_rva).unwrap();
+                if offset > 4096 - size_of::<u64>() {
+                    return false;
+                }
+                unsafe {
+                    let target = (destination as *mut u8).add(offset).cast::<u64>();
+                    target.write_unaligned(
+                        target
+                            .read_unaligned()
+                            .wrapping_add(mapped_base.wrapping_sub(self.base as u64)),
+                    );
+                }
+            }
+            block += block_size;
         }
         true
     }
