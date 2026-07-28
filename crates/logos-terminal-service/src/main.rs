@@ -2,7 +2,7 @@
 #![no_std]
 
 use core::arch::asm;
-use logos_core::native_service::{ACKNOWLEDGED, COMPLETE, Context, Header, READY};
+use logos_core::native_service::{ACKNOWLEDGED, COMPLETE, Context, Header, READY, WAIT};
 use uefi::{Status, prelude::*};
 
 #[used]
@@ -15,6 +15,8 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
         (*context).operation = READY;
         asm!("int 0x80");
         if (*context).status == ACKNOWLEDGED {
+            (*context).operation = WAIT;
+            asm!("int 0x80");
             (*context).operation = COMPLETE;
             asm!("int 0x80");
         }

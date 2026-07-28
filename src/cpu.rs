@@ -42,6 +42,10 @@ static mut TSS: Tss = Tss {
 };
 static USER_RETURNED: AtomicBool = AtomicBool::new(false);
 static USER_CONTEXT: AtomicU64 = AtomicU64::new(0);
+static USER_BLOCKED: AtomicBool = AtomicBool::new(false);
+const USER_FRAME_WORDS: usize = 20;
+#[unsafe(no_mangle)]
+static mut USER_FRAME: [u64; USER_FRAME_WORDS] = [0; USER_FRAME_WORDS];
 #[unsafe(no_mangle)]
 static mut USER_RETURN_RSP: u64 = 0;
 #[unsafe(no_mangle)]
@@ -51,6 +55,12 @@ static mut USER_RETURN_FLAGS: u64 = 0;
 
 pub struct Privilege {
     stack: Page,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum EntryState {
+    Returned,
+    Blocked,
 }
 
 impl Privilege {
@@ -101,15 +111,33 @@ impl Privilege {
         space: &mut crate::address_space::AddressSpace,
         entry: u64,
         context: u64,
-    ) -> bool {
+    ) -> Option<EntryState> {
         if !space.map_kernel_stack(self.stack.address()) {
+            return None;
+        }
+        unsafe { set_tss_stack(space.kernel_stack_top()) };
+        USER_RETURNED.store(false, Ordering::Release);
+        USER_BLOCKED.store(false, Ordering::Release);
+        USER_CONTEXT.store(context, Ordering::Release);
+        unsafe { enter_user(space.cr3(), entry, space.stack_top(), context) };
+        USER_CONTEXT.store(0, Ordering::Release);
+        unsafe { set_tss_stack(self.stack.address() + 4096) };
+        if USER_BLOCKED.load(Ordering::Acquire) {
+            Some(EntryState::Blocked)
+        } else {
+            USER_RETURNED.load(Ordering::Acquire).then_some(EntryState::Returned)
+        }
+    }
+
+    pub fn resume_entry(&self, space: &mut crate::address_space::AddressSpace) -> bool {
+        if !USER_BLOCKED.swap(false, Ordering::AcqRel)
+            || !space.map_kernel_stack(self.stack.address())
+        {
             return false;
         }
         unsafe { set_tss_stack(space.kernel_stack_top()) };
         USER_RETURNED.store(false, Ordering::Release);
-        USER_CONTEXT.store(context, Ordering::Release);
-        unsafe { enter_user(space.cr3(), entry, space.stack_top(), context) };
-        USER_CONTEXT.store(0, Ordering::Release);
+        unsafe { resume_user(space.cr3(), space.kernel_stack_top()) };
         unsafe { set_tss_stack(self.stack.address() + 4096) };
         USER_RETURNED.load(Ordering::Acquire)
     }
@@ -121,9 +149,28 @@ extern "C" fn user_gate_returned() {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn user_gate_resume() -> bool {
+extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
     let context = USER_CONTEXT.load(Ordering::Acquire);
-    context != 0 && unsafe { logos_core::native_service::Context::acknowledge_at(context) }
+    if context != 0 && unsafe { logos_core::native_service::Context::acknowledge_at(context) } {
+        return 1;
+    }
+    if context != 0
+        && unsafe { logos_core::native_service::Context::waiting_at(context) }
+        && save_user_frame(frame)
+    {
+        return 2;
+    }
+    0
+}
+
+fn save_user_frame(frame: *const u64) -> bool {
+    if USER_BLOCKED.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(frame, ptr::addr_of_mut!(USER_FRAME).cast(), USER_FRAME_WORDS)
+    };
+    true
 }
 
 fn tss_low(base: u64) -> u64 {
@@ -142,6 +189,7 @@ unsafe fn set_tss_stack(stack_top: u64) {
 unsafe extern "C" {
     fn reload_segments();
     fn enter_user(cr3: u64, entry: u64, stack: u64, context: u64);
+    fn resume_user(cr3: u64, stack: u64);
 }
 
 core::arch::global_asm!(
@@ -192,10 +240,11 @@ core::arch::global_asm!(
     "push r14",
     "push r15",
     "sub rsp, 48",
+    "lea rcx, [rsp + 48]",
     "call user_gate_resume",
     "add rsp, 48",
-    "test al, al",
-    "jz user_gate_exit",
+    "cmp al, 1",
+    "jne user_gate_not_resumed",
     "pop r15",
     "pop r14",
     "pop r13",
@@ -212,8 +261,9 @@ core::arch::global_asm!(
     "pop rcx",
     "pop rax",
     "iretq",
-    "user_gate_exit:",
+    "user_gate_not_resumed:",
     "add rsp, 120",
+    "user_gate_exit:",
     "sub rsp, 40",
     "call user_gate_returned",
     "add rsp, 40",
@@ -223,4 +273,37 @@ core::arch::global_asm!(
     "push qword ptr [rip + USER_RETURN_FLAGS]",
     "popfq",
     "ret",
+    ".global resume_user",
+    "resume_user:",
+    "mov [rip + USER_RETURN_RSP], rsp",
+    "mov rax, cr3",
+    "mov [rip + USER_RETURN_CR3], rax",
+    "pushfq",
+    "pop qword ptr [rip + USER_RETURN_FLAGS]",
+    "cli",
+    "mov rax, rcx",
+    "mov cr3, rax",
+    "mov rsp, rdx",
+    "sub rsp, 160",
+    "lea rsi, [rip + USER_FRAME]",
+    "mov rdi, rsp",
+    "mov rcx, 20",
+    "cld",
+    "rep movsq",
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rbp",
+    "pop rbx",
+    "pop rdx",
+    "pop rcx",
+    "pop rax",
+    "iretq",
 );

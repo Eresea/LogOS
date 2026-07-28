@@ -1,7 +1,8 @@
 pub const MAGIC: [u8; 4] = *b"LGSV";
 pub const ABI: u16 = 1;
 pub const READY: u32 = 1;
-pub const COMPLETE: u32 = 2;
+pub const WAIT: u32 = 2;
+pub const COMPLETE: u32 = 3;
 pub const ACKNOWLEDGED: u32 = 1;
 
 #[repr(C)]
@@ -50,6 +51,17 @@ impl Context {
         context.abi == ABI
             && context.reserved == 0
             && context.operation == COMPLETE
+            && context.status == ACKNOWLEDGED
+    }
+
+    /// # Safety
+    ///
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn waiting_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == WAIT
             && context.status == ACKNOWLEDGED
     }
 }
