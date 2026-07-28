@@ -835,6 +835,7 @@ fn native_command_reply(
         tick,
     ) {
         commands::Outcome::Text(value) => endpoint.reply(value.as_bytes()),
+        commands::Outcome::CommandList => endpoint.reply(b"\x1ecommands"),
         commands::Outcome::Error(commands::Error::Denied) => endpoint.reply(b"permission denied"),
         commands::Outcome::Error(commands::Error::UnknownCommand) => {
             endpoint.reply(b"unknown command")

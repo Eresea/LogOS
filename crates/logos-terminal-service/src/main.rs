@@ -9,6 +9,17 @@ use logos_core::native_service::{
 use logos_terminal::terminal::Model;
 use uefi::{Status, prelude::*};
 
+const COMMAND_LIST: [&[u8]; 8] = [
+    b"health clear",
+    b"layout recovery",
+    b"echo help",
+    b"commands reboot",
+    b"poweroff tasks",
+    b"services drivers",
+    b"trace inspect",
+    b"restart cancel",
+];
+
 #[used]
 #[unsafe(link_section = ".logos")]
 static HEADER: Header = Header::new(*b"terminal\0\0\0\0\0\0\0\0", logos_service_entry);
@@ -40,7 +51,13 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
                         (*context).operation = SUBMIT_COMMAND;
                         asm!("int 0x80");
                         let length = usize::try_from((*context).text_length).unwrap_or(0).min(32);
-                        let _ = terminal.write_output(&(&(*context).text)[..length]);
+                        if &(&(*context).text)[..length] == b"\x1ecommands" {
+                            for line in COMMAND_LIST {
+                                let _ = terminal.write_output(line);
+                            }
+                        } else {
+                            let _ = terminal.write_output(&(&(*context).text)[..length]);
+                        }
                     } else {
                         let _ = terminal.write_output(b"command too long");
                     }
