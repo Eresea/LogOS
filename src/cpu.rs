@@ -95,13 +95,18 @@ impl Privilege {
             && USER_CODE == 0x23
     }
 
-    pub fn run_entry(&self, space: &mut crate::address_space::AddressSpace, entry: u64) -> bool {
+    pub fn run_entry(
+        &self,
+        space: &mut crate::address_space::AddressSpace,
+        entry: u64,
+        context: u64,
+    ) -> bool {
         if !space.map_kernel_stack(self.stack.address()) {
             return false;
         }
         unsafe { set_tss_stack(space.kernel_stack_top()) };
         USER_RETURNED.store(false, Ordering::Release);
-        unsafe { enter_user(space.cr3(), entry, space.stack_top()) };
+        unsafe { enter_user(space.cr3(), entry, space.stack_top(), context) };
         unsafe { set_tss_stack(self.stack.address() + 4096) };
         USER_RETURNED.load(Ordering::Acquire)
     }
@@ -127,7 +132,7 @@ unsafe fn set_tss_stack(stack_top: u64) {
 
 unsafe extern "C" {
     fn reload_segments();
-    fn enter_user(cr3: u64, entry: u64, stack: u64);
+    fn enter_user(cr3: u64, entry: u64, stack: u64, context: u64);
 }
 
 core::arch::global_asm!(
@@ -153,6 +158,7 @@ core::arch::global_asm!(
     "cli",
     "mov rax, rcx",
     "mov cr3, rax",
+    "mov rcx, r9",
     "push 0x1b",
     "push r8",
     "push 0x202",

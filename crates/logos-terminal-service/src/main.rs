@@ -2,7 +2,7 @@
 #![no_std]
 
 use core::arch::asm;
-use logos_core::native_service::Header;
+use logos_core::native_service::{Context, Header, READY};
 use uefi::{Status, prelude::*};
 
 #[used]
@@ -10,8 +10,11 @@ use uefi::{Status, prelude::*};
 static HEADER: Header = Header::new(*b"terminal\0\0\0\0\0\0\0\0", logos_service_entry);
 
 #[unsafe(no_mangle)]
-extern "C" fn logos_service_entry() -> ! {
-    unsafe { asm!("int 0x80") };
+extern "C" fn logos_service_entry(context: *mut Context) -> ! {
+    unsafe {
+        (*context).operation = READY;
+        asm!("int 0x80");
+    }
     loop {
         core::hint::spin_loop();
     }

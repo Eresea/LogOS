@@ -212,20 +212,23 @@ fn kernel_main(
     };
     check!(
         b"service transition",
-        service_address_space
-            .map_probe(&mut memory)
-            .is_some_and(|entry| privilege.run_entry(&mut service_address_space, entry))
-            && service_address_space.release(&mut memory),
+        service_address_space.map_probe(&mut memory).is_some_and(|entry| privilege.run_entry(
+            &mut service_address_space,
+            entry,
+            0
+        )) && service_address_space.release(&mut memory),
     );
     let Some(mut terminal_address_space) = address_space::AddressSpace::new(&mut memory) else {
         fail!(b"native service entry");
     };
     check!(
         b"native service entry",
-        terminal_address_space
-            .map_image(&mut memory, payload)
-            .is_some_and(|entry| privilege.run_entry(&mut terminal_address_space, entry))
-            && terminal_address_space.release(&mut memory),
+        terminal_address_space.map_image(&mut memory, payload).is_some_and(|entry| {
+            terminal_address_space.map_context(&mut memory).is_some_and(|(physical, context)| {
+                privilege.run_entry(&mut terminal_address_space, entry, context)
+                    && unsafe { logos_core::native_service::Context::ready_at(physical) }
+            })
+        }) && terminal_address_space.release(&mut memory),
     );
     check!(
         b"time",

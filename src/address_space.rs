@@ -129,6 +129,25 @@ impl AddressSpace {
         Some(self.base)
     }
 
+    pub fn map_context(&mut self, physical: &mut PhysicalMemory) -> Option<(u64, u64)> {
+        const CONTEXT_PAGE: usize = ENTRIES - 4;
+        if self.mapped[CONTEXT_PAGE].is_some() {
+            return None;
+        }
+        let page = physical.allocate_owned()?;
+        unsafe {
+            ptr::write_bytes(page.address() as *mut u8, 0, PAGE_SIZE as usize);
+            (page.address() as *mut logos_core::native_service::Context)
+                .write_volatile(logos_core::native_service::Context::new());
+            (self.pt.address() as *mut u64)
+                .add(CONTEXT_PAGE)
+                .write_volatile(page.address() | PRESENT | WRITABLE | USER | NO_EXECUTE);
+        }
+        let address = page.address();
+        self.mapped[CONTEXT_PAGE] = Some(page);
+        Some((address, self.base + PAGE_SIZE * CONTEXT_PAGE as u64))
+    }
+
     pub const fn cr3(&self) -> u64 {
         self.pml4.address()
     }

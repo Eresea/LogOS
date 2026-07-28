@@ -405,8 +405,9 @@ before resuming. A native terminal entry may use that path only after it has an 
 
 Native service headers carry the ABI version, service name, and native entry function. The loader
 derives that entry's RVA after firmware relocation and accepts it only when it lies in an executable
-PE section. The first gate operation is `Ready`; input, display, and session operations remain
-unmapped until their capability-scoped IPC contracts are added.
+PE section. Core maps a versioned service-context page and passes its user virtual address to the
+entry. The first gate operation is `Ready`; input, display, and session operations remain unmapped
+until their capability-scoped IPC contracts are added.
 
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), and [ADR-0004](adr/0004-native-service-address-spaces.md).
 
