@@ -422,6 +422,9 @@ response into its context page. `ReadInput` blocks on the scheduler input event.
 terminal repeats `ReadInput` and `PresentPixel` until Core delivers Escape, which requests a clean
 `Complete` return.
 
+`PresentText` carries at most 32 bytes plus bounded pixel coordinates and color. Core validates that
+request and rasterizes it through the Core-owned framebuffer; native services never map the display.
+
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), and [ADR-0005](adr/0005-native-service-suspension.md).
 
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.

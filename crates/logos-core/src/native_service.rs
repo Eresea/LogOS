@@ -3,7 +3,8 @@ pub const ABI: u16 = 1;
 pub const READY: u32 = 1;
 pub const READ_INPUT: u32 = 2;
 pub const PRESENT_PIXEL: u32 = 3;
-pub const COMPLETE: u32 = 4;
+pub const PRESENT_TEXT: u32 = 4;
+pub const COMPLETE: u32 = 5;
 pub const ACKNOWLEDGED: u32 = 1;
 
 #[repr(C)]
@@ -17,11 +18,33 @@ pub struct Context {
     pub x: u32,
     pub y: u32,
     pub color: u32,
+    pub text_length: u32,
+    pub text: [u8; 32],
+}
+
+#[derive(Clone, Copy)]
+pub struct TextRequest {
+    pub x: u32,
+    pub y: u32,
+    pub color: [u8; 3],
+    pub text: [u8; 32],
+    pub length: usize,
 }
 
 impl Context {
     pub const fn new() -> Self {
-        Self { abi: ABI, reserved: 0, operation: 0, status: 0, input: 0, x: 0, y: 0, color: 0 }
+        Self {
+            abi: ABI,
+            reserved: 0,
+            operation: 0,
+            status: 0,
+            input: 0,
+            x: 0,
+            y: 0,
+            color: 0,
+            text_length: 0,
+            text: [0; 32],
+        }
     }
 
     /// # Safety
@@ -101,6 +124,26 @@ impl Context {
                 context.y,
                 [context.color as u8, (context.color >> 8) as u8, (context.color >> 16) as u8],
             ))
+    }
+
+    /// # Safety
+    ///
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn text_at(address: u64) -> Option<TextRequest> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        let length = usize::try_from(context.text_length).ok()?;
+        (context.abi == ABI
+            && context.reserved == 0
+            && context.operation == PRESENT_TEXT
+            && context.status == ACKNOWLEDGED
+            && length <= context.text.len())
+        .then_some(TextRequest {
+            x: context.x,
+            y: context.y,
+            color: [context.color as u8, (context.color >> 8) as u8, (context.color >> 16) as u8],
+            text: context.text,
+            length,
+        })
     }
 }
 

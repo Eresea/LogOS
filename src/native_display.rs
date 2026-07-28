@@ -65,6 +65,28 @@ pub fn present(context: u64) -> bool {
     true
 }
 
+pub fn present_text(context: u64) -> bool {
+    let Some(request) = (unsafe { logos_core::native_service::Context::text_at(context) }) else {
+        return false;
+    };
+    request.text[..request.length].iter().enumerate().all(|(index, &byte)| {
+        let Some(x) = usize::try_from(request.x).ok().and_then(|x| x.checked_add(index * 6)) else {
+            return false;
+        };
+        let Some(y) = usize::try_from(request.y).ok() else {
+            return false;
+        };
+        crate::glyph(byte).is_some_and(|glyph| {
+            glyph.iter().enumerate().all(|(row, bits)| {
+                (0..5).all(|column| {
+                    bits & (1 << (4 - column)) == 0
+                        || write_pixel(x + column, y + row, request.color)
+                })
+            })
+        })
+    })
+}
+
 pub fn matches(x: usize, y: usize, color: [u8; 3]) -> bool {
     if x >= WIDTH.load(Ordering::Acquire) || y >= HEIGHT.load(Ordering::Acquire) {
         return false;
@@ -83,4 +105,32 @@ pub fn matches(x: usize, y: usize, color: [u8; 3]) -> bool {
             [pixel.read_volatile(), pixel.add(1).read_volatile(), pixel.add(2).read_volatile()]
                 == color
         }
+}
+
+fn write_pixel(x: usize, y: usize, color: [u8; 3]) -> bool {
+    let Some(offset) = y
+        .checked_mul(STRIDE.load(Ordering::Acquire))
+        .and_then(|row| row.checked_add(x))
+        .and_then(|pixel| pixel.checked_mul(4))
+    else {
+        return false;
+    };
+    if x >= WIDTH.load(Ordering::Acquire)
+        || y >= HEIGHT.load(Ordering::Acquire)
+        || offset.checked_add(3).is_none_or(|end| end >= FRAMEBUFFER_SIZE.load(Ordering::Acquire))
+    {
+        return false;
+    }
+    let framebuffer = FRAMEBUFFER.load(Ordering::Acquire) as *mut u8;
+    if framebuffer.is_null() {
+        return false;
+    }
+    unsafe {
+        let pixel = framebuffer.add(offset);
+        pixel.write_volatile(color[0]);
+        pixel.add(1).write_volatile(color[1]);
+        pixel.add(2).write_volatile(color[2]);
+        pixel.add(3).write_volatile(0);
+    }
+    true
 }

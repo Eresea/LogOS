@@ -239,6 +239,7 @@ fn kernel_main(
         let terminal_handle = terminal_scheduler.spawn(&mut terminal_task);
         terminal_handle.is_some()
             && terminal_scheduler.run_next()
+            && native_display::matches(0, 0, [0, 0xff, 0])
             && !terminal_scheduler.run_next()
             && terminal_input.deliver(b'k')
             && terminal_scheduler.wake(terminal_handle.unwrap())
