@@ -45,7 +45,7 @@ const IMPLEMENTED: &[&str] = &[
     "platform/native-service-ready",
 ];
 
-pub fn serve() -> ! {
+pub fn serve(mut native_input: impl FnMut() -> bool) -> ! {
     init();
     line(b"LOGOS/1 READY stage=session-ready");
     let mut frame = [0u8; test_protocol::MAX_FRAME];
@@ -79,7 +79,8 @@ pub fn serve() -> ! {
             }
             Ok(Request::Advance(_)) => line(b"LOGOS/1 RESULT advance=accepted"),
             Ok(Request::Query(_)) => line(b"LOGOS/1 RESULT query=available"),
-            Ok(Request::Input(_)) => line(b"LOGOS/1 RESULT input=accepted"),
+            Ok(Request::Input(_)) if native_input() => line(b"LOGOS/1 RESULT input=accepted"),
+            Ok(Request::Input(_)) => line(b"LOGOS/1 ERROR input=rejected"),
             Ok(Request::Reset(_)) => line(b"LOGOS/1 RESULT reset=accepted"),
             Ok(Request::Shutdown) => exit(0),
             Ok(_) => line(b"LOGOS/1 ERROR reason=unavailable"),

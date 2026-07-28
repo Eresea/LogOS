@@ -30,6 +30,7 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
             }
             if (*context).input == u32::from(b'k') {
                 (*context).operation = PRESENT_PIXEL;
+                (*context).x = 100;
                 (*context).color = 0x0000_ff00;
                 asm!("int 0x80");
             }

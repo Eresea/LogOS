@@ -245,7 +245,7 @@ fn kernel_main(
             && terminal_scheduler.wake(terminal_handle.unwrap())
             && terminal_scheduler.run_next()
             && !terminal_scheduler.run_next()
-            && native_display::matches(0, 0, [0, 0xff, 0])
+            && native_display::matches(100, 0, [0, 0xff, 0])
             && terminal_input.deliver(0x1b)
             && terminal_scheduler.wake(terminal_handle.unwrap())
             && terminal_scheduler.run_next()
@@ -480,6 +480,10 @@ fn kernel_main(
     let Some(mut virtio_service) = replacement else {
         fail!(b"service replacement");
     };
+    let Some(mut native_terminal) = native_task::Terminal::load(&mut memory, payload, &privilege)
+    else {
+        fail!(b"native terminal task");
+    };
     let mut service_task = platform::Task::new(
         &mut virtio_service,
         &channel,
@@ -540,9 +544,27 @@ fn kernel_main(
     check!(b"text font", text::Service::self_check());
     coordinator.announce();
     check!(b"trace", trace::self_check());
+    let native_input = native_terminal.input_endpoint();
+    let mut native_scheduler = scheduler::Scheduler::new();
+    let Some(native_handle) = native_scheduler.spawn(&mut native_terminal) else {
+        fail!(b"native terminal task");
+    };
+    if !native_scheduler.run_next() {
+        fail!(b"native terminal task");
+    }
     health.finish();
     #[cfg(feature = "test-hooks")]
-    test_hooks::serve();
+    test_hooks::serve(|| {
+        input
+            .next(interrupts::ticks(), keyboard::poll_scancode)
+            .and_then(native_input_byte)
+            .is_some_and(|byte| {
+                native_input.deliver(byte)
+                    && native_scheduler.wake(native_handle)
+                    && native_scheduler.run_next()
+                    && native_display::matches(100, 0, [0, 0xff, 0])
+            })
+    });
     let mut console_mode = coordinator.mode();
     if console_mode == mode::ConsoleMode::Normal {
         debug::write_line(b"LogOS: normal terminal active");
@@ -582,6 +604,11 @@ fn kernel_main(
                 blink_tick = tick;
             }
             if let Some(event) = input.next(tick, keyboard::poll_scancode) {
+                if let Some(byte) = native_input_byte(event) {
+                    let _ = native_input.deliver(byte)
+                        && native_scheduler.wake(native_handle)
+                        && native_scheduler.run_next();
+                }
                 if event.is_enter() {
                     let submission = terminal.submit();
                     let _ = terminal.write_output(submission.as_bytes());
@@ -726,6 +753,17 @@ fn kernel_main(
     loop {
         unsafe { core::arch::asm!("cli", "hlt") };
     }
+}
+
+fn native_input_byte(event: input::Event) -> Option<u8> {
+    event.text().or_else(|| {
+        event.pressed().and_then(|(key, _)| match key {
+            input::LogicalKey::Escape => Some(0x1b),
+            input::LogicalKey::Enter => Some(b'\n'),
+            input::LogicalKey::Backspace => Some(0x08),
+            _ => None,
+        })
+    })
 }
 
 fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {

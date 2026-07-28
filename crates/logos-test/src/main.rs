@@ -276,6 +276,12 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
         wait_file(&debug_log, deadline, "LOGOS/1 READY")?;
         send(&mut stream, &mut transcript_file, "LOGOS/1 HELLO\n")?;
         wait_file(&debug_log, deadline, "LOGOS/1 RESULT hello=ok")?;
+        if scenario.id == "platform/native-service-ready" {
+            send_qmp_key(qmp_port, "k")?;
+            std::thread::sleep(Duration::from_millis(100));
+            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT terminal\n")?;
+            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
+        }
         send(&mut stream, &mut transcript_file, &format!("LOGOS/1 RUN {}\n", scenario.id))?;
         wait_file(
             &debug_log,
@@ -383,6 +389,29 @@ fn capture_qmp(port: u16, log: &Path, artifacts: &Path) {
     let mut output = String::new();
     while reader.read_line(&mut output).is_ok_and(|read| read > 0) {}
     let _ = fs::write(log, output);
+}
+
+fn send_qmp_key(port: u16, key: &str) -> Result<(), String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(io_error)?;
+    stream.set_read_timeout(Some(Duration::from_secs(1))).map_err(io_error)?;
+    let mut reader = BufReader::new(stream.try_clone().map_err(io_error)?);
+    let mut response = String::new();
+    reader.read_line(&mut response).map_err(io_error)?;
+    stream.write_all(b"{\"execute\":\"qmp_capabilities\"}\n").map_err(io_error)?;
+    response.clear();
+    reader.read_line(&mut response).map_err(io_error)?;
+    if response.contains("error") {
+        return Err(format!("QMP capabilities rejected: {response}"));
+    }
+    let command = format!(
+        "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"key\",\"data\":{{\"down\":true,\"key\":{{\"type\":\"qcode\",\"data\":\"{key}\"}}}}}},{{\"type\":\"key\",\"data\":{{\"down\":false,\"key\":{{\"type\":\"qcode\",\"data\":\"{key}\"}}}}}}]}}}}\n"
+    );
+    stream.write_all(command.as_bytes()).map_err(io_error)?;
+    response.clear();
+    reader.read_line(&mut response).map_err(io_error)?;
+    (!response.contains("error"))
+        .then_some(())
+        .ok_or_else(|| format!("QMP key rejected: {response}"))
 }
 
 fn write_reports(result: &ResultRecord) -> Result<(), String> {
