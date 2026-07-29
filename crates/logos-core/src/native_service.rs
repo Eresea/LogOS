@@ -1,5 +1,5 @@
 pub const MAGIC: [u8; 4] = *b"LGSV";
-pub const ABI: u16 = 2;
+pub const ABI: u16 = 3;
 pub const MAX_TEXT: usize = 256;
 pub const READY: u32 = 1;
 pub const READ_INPUT: u32 = 2;
@@ -8,6 +8,7 @@ pub const PRESENT_TEXT: u32 = 4;
 pub const CLEAR_DISPLAY: u32 = 5;
 pub const COMPLETE: u32 = 6;
 pub const SYSCALL: u32 = 7;
+pub const SESSION_REPLY: u32 = 8;
 pub const ACKNOWLEDGED: u32 = 1;
 
 #[derive(Clone, Copy)]
@@ -115,6 +116,28 @@ impl Context {
 
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn deliver_session_at(address: u64, request: logos_abi::SessionRequest) -> bool {
+        if !request.valid() {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != READ_INPUT
+            || context.status != ACKNOWLEDGED
+        {
+            return false;
+        }
+        context.input = 1;
+        context.x = request.syscall as u32;
+        context.text = request.argument;
+        context.text_length = request.length as u32;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
     pub unsafe fn syscall_at(address: u64) -> Option<logos_abi::SessionRequest> {
         let context = unsafe { (address as *const Self).read_volatile() };
         let length = usize::try_from(context.text_length).ok()?;
@@ -159,6 +182,19 @@ impl Context {
             text: context.text,
             length,
         })
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn session_reply_at(address: u64) -> Option<logos_abi::SessionReply> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        let length = usize::try_from(context.text_length).ok()?;
+        (context.abi == ABI
+            && context.reserved == 0
+            && context.operation == SESSION_REPLY
+            && context.status == ACKNOWLEDGED
+            && length <= context.text.len())
+        .then_some(logos_abi::SessionReply { text: context.text, length })
     }
 
     /// # Safety
@@ -267,11 +303,22 @@ pub fn self_check() -> bool {
     let unknown = unsafe { Context::syscall_at((&syscall as *const Context) as u64) }.is_none();
     syscall.x = logos_abi::Syscall::Reboot as u32;
     let malformed = unsafe { Context::syscall_at((&syscall as *const Context) as u64) }.is_none();
+    let request = logos_abi::SessionRequest::new(logos_abi::Syscall::Tasks, [0; MAX_TEXT], 0);
+    syscall.operation = READ_INPUT;
+    let delivered =
+        unsafe { Context::deliver_session_at((&mut syscall as *mut Context) as u64, request) };
+    syscall.operation = SESSION_REPLY;
+    syscall.text[..2].copy_from_slice(b"ok");
+    syscall.text_length = 2;
+    let reply = unsafe { Context::session_reply_at((&syscall as *const Context) as u64) }
+        .is_some_and(|reply| reply.length == 2 && reply.text[..2] == *b"ok");
     Header::new(*b"terminal\0\0\0\0\0\0\0\0", self_check_entry).valid_for(b"terminal")
         && !Header::new(*b"terminal\0\0\0\0\0\0\0\0", self_check_entry).valid_for(b"other")
         && valid
         && unknown
         && malformed
+        && delivered
+        && reply
 }
 
 extern "C" fn self_check_entry(_: *mut Context) -> ! {
