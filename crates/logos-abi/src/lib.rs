@@ -2,6 +2,7 @@
 
 pub const ABI: u16 = 1;
 pub const MAX_TEXT: usize = 64;
+pub const MAX_SESSION_TEXT: usize = 256;
 
 /// `foundation.session` v1 command request.  The transport stays bounded by
 /// `logos_core::native_service::Context`; this is the shared wire contract.
@@ -43,6 +44,25 @@ impl Syscall {
 
     pub const fn takes_argument(self) -> bool {
         matches!(self, Self::Inspect | Self::Restart | Self::Cancel | Self::SetInputLayout)
+    }
+}
+
+/// Bounded `foundation.session` v1 request passed between native services.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct SessionRequest {
+    pub syscall: Syscall,
+    pub argument: [u8; MAX_SESSION_TEXT],
+    pub length: usize,
+}
+
+impl SessionRequest {
+    pub const fn new(syscall: Syscall, argument: [u8; MAX_SESSION_TEXT], length: usize) -> Self {
+        Self { syscall, argument, length }
+    }
+
+    pub const fn valid(self) -> bool {
+        self.length <= self.argument.len() && self.syscall.takes_argument() == (self.length != 0)
     }
 }
 
@@ -196,4 +216,6 @@ pub fn self_check() -> bool {
         && Syscall::from_wire(Syscall::Restart as u32)
             .is_some_and(|call| call == Syscall::Restart && call.takes_argument())
         && Syscall::from_wire(0).is_none()
+        && SessionRequest::new(Syscall::Inspect, [0; MAX_SESSION_TEXT], 1).valid()
+        && !SessionRequest::new(Syscall::Reboot, [0; MAX_SESSION_TEXT], 1).valid()
 }

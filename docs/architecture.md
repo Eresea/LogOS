@@ -450,6 +450,8 @@ capability. A denial or malformed presentation stops the normal terminal and ent
 Core keeps bootstrap command dispatch while it owns the privileged effects; a missing Session
 capability returns the bounded `permission denied` reply without dispatching the syscall. Its
 versioned syscall identifiers live in `logos-abi`, not Core.
+The bounded syscall request value lives there too, so a Sessions service can consume the same
+contract without depending on Core internals.
 
 The next Platform v1 stage replaces that bootstrap dispatcher with a separately loaded Sessions
 service. The terminal sends it bounded Session requests; Core brokers those requests and exposes

@@ -11,14 +11,7 @@ pub const SYSCALL: u32 = 7;
 pub const ACKNOWLEDGED: u32 = 1;
 
 #[derive(Clone, Copy)]
-pub struct SyscallRequest {
-    pub syscall: logos_abi::Syscall,
-    pub argument: [u8; MAX_TEXT],
-    pub length: usize,
-}
-
 #[repr(C)]
-#[derive(Clone, Copy)]
 pub struct Context {
     pub abi: u16,
     pub reserved: u16,
@@ -122,7 +115,7 @@ impl Context {
 
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
-    pub unsafe fn syscall_at(address: u64) -> Option<SyscallRequest> {
+    pub unsafe fn syscall_at(address: u64) -> Option<logos_abi::SessionRequest> {
         let context = unsafe { (address as *const Self).read_volatile() };
         let length = usize::try_from(context.text_length).ok()?;
         let syscall = logos_abi::Syscall::from_wire(context.x)?;
@@ -132,7 +125,7 @@ impl Context {
             && context.status == ACKNOWLEDGED
             && length <= context.text.len()
             && syscall.takes_argument() == (length != 0))
-            .then_some(SyscallRequest { syscall, argument: context.text, length })
+            .then_some(logos_abi::SessionRequest::new(syscall, context.text, length))
     }
 
     /// # Safety

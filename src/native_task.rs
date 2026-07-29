@@ -55,11 +55,11 @@ impl DisplayEndpoint {
 }
 
 impl SyscallEndpoint {
-    pub fn submission(self) -> Option<logos_core::native_service::SyscallRequest> {
+    pub fn submission(self) -> Option<logos_abi::SessionRequest> {
         self.request()
     }
 
-    pub fn request(self) -> Option<logos_core::native_service::SyscallRequest> {
+    pub fn request(self) -> Option<logos_abi::SessionRequest> {
         unsafe { logos_core::native_service::Context::syscall_at(self.context_physical) }
     }
 
