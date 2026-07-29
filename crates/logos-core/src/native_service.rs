@@ -47,6 +47,10 @@ impl Syscall {
             _ => None,
         }
     }
+
+    const fn takes_argument(self) -> bool {
+        matches!(self, Self::Inspect | Self::Restart | Self::Cancel)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -169,8 +173,9 @@ impl Context {
             && context.reserved == 0
             && context.operation == SYSCALL
             && context.status == ACKNOWLEDGED
-            && length <= context.text.len())
-        .then_some(SyscallRequest { syscall, argument: context.text, length })
+            && length <= context.text.len()
+            && syscall.takes_argument() == (length != 0))
+            .then_some(SyscallRequest { syscall, argument: context.text, length })
     }
 
     /// # Safety

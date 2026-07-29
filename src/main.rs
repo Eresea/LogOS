@@ -561,7 +561,7 @@ fn kernel_main(
                 && native_scheduler.wake(native_handle)
                 && native_scheduler.run_next()
                 && (native_command.request().is_none()
-                    || (native_command_reply(
+                    || (native_syscall_reply(
                         native_command,
                         NativeCommandContext {
                             session: &session,
@@ -619,7 +619,7 @@ fn kernel_main(
                         break;
                     }
                     if native_command.request().is_some() {
-                        match native_command_reply(
+                        match native_syscall_reply(
                             native_command,
                             NativeCommandContext {
                                 session: &session,
@@ -706,7 +706,7 @@ struct NativeCommandContext<'a, 'task> {
     service: services::ServiceHandle,
 }
 
-/// Result of handling one native-terminal command submission.
+/// Result of handling one native syscall.
 ///
 /// This exists so recovery hand-off is a real outcome the caller matches on,
 /// rather than the caller re-parsing the raw request bytes itself (as the
@@ -733,10 +733,9 @@ impl CommandReply {
     }
 }
 
-/// Answer one command submission from the native terminal task.
+/// Answer one syscall from the native terminal task.
 ///
-/// All command *parsing* lives in `logos_terminal::command` now -- this
-/// function never inspects command text or argument grammar. It only:
+/// All command parsing lives in Ring 3; this function only handles typed syscalls.
 /// - executes `Local::Layout`, because the kernel is what owns the physical
 ///   keyboard scancode decoder (`input::Service`); the terminal payload has
 ///   no way to act on a layout change itself.
@@ -746,7 +745,7 @@ impl CommandReply {
 /// - dispatches `Call` (tasks/services/drivers/trace/inspect/restart/cancel/
 ///   recovery/reboot/poweroff/ping) through `commands::dispatch`, the one
 ///   place capability checks happen.
-fn native_command_reply(
+fn native_syscall_reply(
     endpoint: native_task::SyscallEndpoint,
     context: NativeCommandContext<'_, '_>,
 ) -> CommandReply {
