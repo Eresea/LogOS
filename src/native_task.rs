@@ -89,6 +89,16 @@ impl SessionEndpoint {
     pub fn reply(self) -> Option<logos_abi::SessionReply> {
         unsafe { logos_core::native_service::Context::session_reply_at(self.context_physical) }
     }
+
+    pub fn effect(self) -> Option<logos_abi::SessionRequest> {
+        unsafe { logos_core::native_service::Context::session_effect_at(self.context_physical) }
+    }
+
+    pub fn reply_effect(self, reply: &[u8]) -> bool {
+        unsafe {
+            logos_core::native_service::Context::reply_effect_at(self.context_physical, reply)
+        }
+    }
 }
 
 impl<'a> Service<'a> {

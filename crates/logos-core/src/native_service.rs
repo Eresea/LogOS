@@ -9,6 +9,7 @@ pub const CLEAR_DISPLAY: u32 = 5;
 pub const COMPLETE: u32 = 6;
 pub const SYSCALL: u32 = 7;
 pub const SESSION_REPLY: u32 = 8;
+pub const SESSION_EFFECT: u32 = 9;
 pub const ACKNOWLEDGED: u32 = 1;
 
 #[derive(Clone, Copy)]
@@ -195,6 +196,35 @@ impl Context {
             && context.status == ACKNOWLEDGED
             && length <= context.text.len())
         .then_some(logos_abi::SessionReply { text: context.text, length })
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn session_effect_at(address: u64) -> Option<logos_abi::SessionRequest> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        let length = usize::try_from(context.text_length).ok()?;
+        let syscall = logos_abi::Syscall::from_wire(context.x)?;
+        (context.abi == ABI
+            && context.reserved == 0
+            && context.operation == SESSION_EFFECT
+            && context.status == ACKNOWLEDGED
+            && length <= context.text.len()
+            && syscall.takes_argument() == (length != 0))
+            .then_some(logos_abi::SessionRequest::new(syscall, context.text, length))
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn reply_effect_at(address: u64, reply: &[u8]) -> bool {
+        if reply.len() > MAX_TEXT || unsafe { Self::session_effect_at(address) }.is_none() {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        context.text = [0; MAX_TEXT];
+        context.text[..reply.len()].copy_from_slice(reply);
+        context.text_length = reply.len() as u32;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
     }
 
     /// # Safety

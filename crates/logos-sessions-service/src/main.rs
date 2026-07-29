@@ -3,7 +3,7 @@
 
 use core::arch::asm;
 use logos_core::native_service::{
-    ACKNOWLEDGED, Context, Header, MAX_TEXT, READ_INPUT, READY, SESSION_REPLY,
+    ACKNOWLEDGED, Context, Header, READ_INPUT, READY, SESSION_EFFECT, SESSION_REPLY,
 };
 use uefi::{Status, prelude::*};
 
@@ -20,14 +20,8 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
             (*context).operation = READ_INPUT;
             asm!("int 0x80");
             if (*context).input == 1 {
-                (*context).text = [0; MAX_TEXT];
-                let reply = if (*context).x == logos_abi::Syscall::Tasks as u32 {
-                    b"scheduler active" as &[u8]
-                } else {
-                    b"unknown command"
-                };
-                (&mut (*context).text)[..reply.len()].copy_from_slice(reply);
-                (*context).text_length = reply.len() as u32;
+                (*context).operation = SESSION_EFFECT;
+                asm!("int 0x80");
                 (*context).operation = SESSION_REPLY;
                 asm!("int 0x80");
             }

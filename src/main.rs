@@ -632,6 +632,12 @@ fn kernel_main(
                 0,
             )) && native_scheduler.wake(sessions_handle)
                 && native_scheduler.run_next()
+                && native_sessions_endpoint.effect().is_some_and(|effect| {
+                    effect.syscall == logos_abi::Syscall::Tasks
+                        && native_sessions_endpoint.reply_effect(b"scheduler active")
+                })
+                && native_scheduler.wake(sessions_handle)
+                && native_scheduler.run_next()
                 && native_sessions_endpoint.reply().is_some_and(|reply| {
                     reply.length == b"scheduler active".len()
                         && reply.text[..reply.length] == *b"scheduler active"
@@ -787,6 +793,13 @@ fn kernel_main(
                             };
                             if !session.allows(&capabilities, capabilities::CapabilityKind::Session)
                                 || !native_sessions_endpoint.deliver(request)
+                                || !native_scheduler.wake(sessions_handle)
+                                || !native_scheduler.run_next()
+                                || !native_sessions_endpoint.effect().is_some_and(|effect| {
+                                    effect.syscall == logos_abi::Syscall::Tasks
+                                        && native_sessions_endpoint
+                                            .reply_effect(b"scheduler active")
+                                })
                                 || !native_scheduler.wake(sessions_handle)
                                 || !native_scheduler.run_next()
                                 || !native_sessions_endpoint.reply().is_some_and(|reply| {
