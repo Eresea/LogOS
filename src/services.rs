@@ -1,5 +1,5 @@
-use crate::capabilities::{Capability, CapabilityKind, CapabilityManager};
 use crate::supervisor::Protocol;
+use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
 const SERVICES: usize = 4;
 

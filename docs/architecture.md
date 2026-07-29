@@ -460,7 +460,7 @@ native-service policies belong in the System supervisor.
 
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), and [ADR-0005](adr/0005-native-service-suspension.md).
 
-In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
+In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after startup selects recovery mode.
 
 The Core effect executor authorizes a live recovery handoff with an explicit recovery capability. The handoff stops normal input processing before recovery activates its direct input/output path.
 

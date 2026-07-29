@@ -1,9 +1,9 @@
 use crate::{
     approvals::{Id as ApprovalId, Store as Approvals},
     audit::Log,
-    capabilities::{CapabilityKind, CapabilityManager},
     session::Principal,
 };
+use logos_core::capabilities::{CapabilityKind, CapabilityManager};
 
 const MODELS: usize = 2;
 

@@ -5,14 +5,12 @@ mod acpi;
 mod address_space;
 mod approvals;
 mod audit;
-mod capabilities;
 mod console;
 mod cpu;
 mod debug;
 mod device;
 mod effects;
 mod entropy;
-mod format;
 mod health;
 mod identity;
 mod inference;
@@ -39,6 +37,7 @@ mod time;
 mod trace;
 mod virtual_memory;
 
+use logos_core::capabilities;
 use logos_terminal::{command, display, input, terminal, text};
 use uefi::{boot, mem::memory_map::MemoryMap, prelude::*, proto::console::gop::GraphicsOutput};
 
@@ -240,8 +239,7 @@ fn kernel_main(
                 == Some(cpu::EntryState::Returned)
         }) && service_address_space.release(&mut memory),
     );
-    let Some(mut terminal_task) = native_task::Service::load(&mut memory, payload, &privilege)
-    else {
+    let Some(mut terminal_task) = native_task::Task::load(&mut memory, payload, &privilege) else {
         fail!(b"native service entry");
     };
     let terminal_input = terminal_task.input_endpoint();
@@ -532,12 +530,12 @@ fn kernel_main(
     let Some(mut virtio_service) = replacement else {
         fail!(b"service replacement");
     };
-    let Some(mut native_terminal) = native_task::Service::load(&mut memory, payload, &privilege)
+    let Some(mut native_terminal) = native_task::Task::load(&mut memory, payload, &privilege)
     else {
         fail!(b"native terminal task");
     };
     let Some(mut native_sessions) =
-        native_task::Service::load(&mut memory, payloads.sessions, &privilege)
+        native_task::Task::load(&mut memory, payloads.sessions, &privilege)
     else {
         fail!(b"native sessions task");
     };
@@ -582,11 +580,10 @@ fn kernel_main(
             && probe.render(display, &text)
             && command::self_check()
     });
-    let coordinator = mode::Coordinator::new(normal_ready);
-    check!(b"console mode", mode::Coordinator::self_check());
+    let mut console_mode = mode::ConsoleMode::new(normal_ready);
+    check!(b"console mode", mode::ConsoleMode::self_check());
     check!(b"command registry", command::self_check());
     check!(b"effect executor", effects::self_check());
-    check!(b"formatters", format::self_check());
     check!(b"session", session::Context::self_check());
     check!(b"input normalization", input::Service::self_check());
     check!(b"terminal editing", terminal::Model::self_check());
@@ -599,7 +596,7 @@ fn kernel_main(
     check!(b"terminal display restart", terminal::Model::self_check());
     check!(b"terminal caret", terminal::Model::self_check());
     check!(b"text font", text::Service::self_check());
-    coordinator.announce();
+    console_mode.announce();
     check!(b"trace", trace::self_check());
     let native_input = native_terminal.input_endpoint();
     let native_command = native_terminal.syscall_endpoint();
@@ -785,7 +782,6 @@ fn kernel_main(
                     }))
         })
     });
-    let mut console_mode = coordinator.mode();
     // ponytail: one bootstrap retry; use supervisor policy when native services join System lifecycle.
     let mut terminal_restart_available = true;
     let mut sessions_restart_available = true;

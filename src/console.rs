@@ -1,5 +1,4 @@
 use crate::{
-    capabilities::{Capability, CapabilityManager},
     glyph,
     ipc::{Channel, Message},
     keyboard,
@@ -7,6 +6,7 @@ use crate::{
     session::Principal,
     trace,
 };
+use logos_core::capabilities::{Capability, CapabilityManager};
 
 const BACKGROUND: [u8; 3] = [12, 18, 30];
 const ACCENT: [u8; 3] = [61, 220, 151];

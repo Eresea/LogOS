@@ -1,7 +1,5 @@
-use crate::{
-    capabilities::{Capability, CapabilityKind, CapabilityManager},
-    session::Principal,
-};
+use crate::session::Principal;
+use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
 const SECRETS: usize = 4;
 const BYTES: usize = 64;

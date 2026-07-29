@@ -4,28 +4,19 @@ pub enum ConsoleMode {
     Recovery,
 }
 
-pub struct Coordinator {
-    mode: ConsoleMode,
-}
-
-impl Coordinator {
+impl ConsoleMode {
     pub const fn new(normal_ready: bool) -> Self {
-        Self { mode: if normal_ready { ConsoleMode::Normal } else { ConsoleMode::Recovery } }
-    }
-
-    pub const fn mode(&self) -> ConsoleMode {
-        self.mode
+        if normal_ready { Self::Normal } else { Self::Recovery }
     }
 
     pub fn announce(&self) {
-        crate::debug::write_line(match self.mode {
-            ConsoleMode::Normal => b"LogOS: console mode normal",
-            ConsoleMode::Recovery => b"LogOS: console mode recovery",
+        crate::debug::write_line(match self {
+            Self::Normal => b"LogOS: console mode normal",
+            Self::Recovery => b"LogOS: console mode recovery",
         });
     }
 
     pub fn self_check() -> bool {
-        Self::new(true).mode == ConsoleMode::Normal
-            && Self::new(false).mode == ConsoleMode::Recovery
+        Self::new(true) == Self::Normal && Self::new(false) == Self::Recovery
     }
 }

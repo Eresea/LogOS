@@ -1,8 +1,8 @@
 use crate::{
     audit::{Effect, Log},
-    capabilities::{Capability, CapabilityKind, CapabilityManager},
     session::Principal,
 };
+use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
 const GRANTS: usize = 4;
 

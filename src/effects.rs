@@ -1,9 +1,6 @@
-use crate::{
-    acpi,
-    capabilities::{Capability, CapabilityKind, CapabilityManager},
-    ipc, platform, scheduler, services, session, supervisor, trace,
-};
+use crate::{acpi, ipc, platform, scheduler, services, session, supervisor, trace};
 use logos_abi::{Effect, EffectRequest, EffectResult, InputLayout};
+use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 use logos_terminal::input;
 
 pub struct Context<'a, 'task> {

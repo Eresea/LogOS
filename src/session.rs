@@ -1,4 +1,4 @@
-use crate::capabilities::{Capability, CapabilityKind, CapabilityManager};
+use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
 const CAPABILITIES: usize = 5;
 const VARIABLES: usize = 4;

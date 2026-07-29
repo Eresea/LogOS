@@ -14,7 +14,7 @@ const BALLOON: crate::device::DriverManifest = crate::device::DriverManifest {
     interface: crate::device::Interface::new(crate::device::Class::Memory),
     vendor_id: 0x1af4,
     device_id: 0x1002,
-    capabilities: &[crate::capabilities::CapabilityKind::Service],
+    capabilities: &[logos_core::capabilities::CapabilityKind::Service],
 };
 
 pub fn discover(devices: &crate::pci::PciDevices) -> Option<crate::pci::PciDevice> {

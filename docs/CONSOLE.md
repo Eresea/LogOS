@@ -25,7 +25,7 @@ Console is LogOS's local textual interface. The normal terminal consumes bounded
 
 - [x] Session identity and explicit capability context.
 - [x] Discoverable descriptors, typed arguments/results/errors, cancellation, timeout, backpressure, variables, and structured pipelines.
-- [x] Human, table, tree, and JSON formatting.
+- [x] Bounded human reply formatting owned by Sessions.
 - [x] Persistable history contract; Persistence v1 owns durable storage.
 - [x] `health`, `ping` (Pong round trip), `tasks`, `services`, `drivers`, `trace`, `inspect`, `restart`, `cancel`, `clear`, `layout`, `reboot`, `poweroff`, `help`, and `commands`.
 
@@ -50,7 +50,7 @@ Record future console scope here before adding it to the roadmap. Do not infer V
 ### Demonstrated
 
 - [x] Normal terminal startup, typed command sessions, UTF-8 editing, layouts, font rendering, history, scrollback, selection, search, and redraw recovery.
-- [x] Discoverable typed commands with capability checks, cancellation/timeout handling, bounded output, pipelines, and human/table/tree/JSON formatting.
+- [x] Discoverable typed commands with capability checks, cancellation/timeout handling, bounded output, pipelines, and Sessions-owned replies.
 - [x] Local operational commands for health, tasks, services, drivers, trace, inspection, recovery, restart, cancellation, reset, and power-off.
 - [x] Live transition to the recovery console when normal startup or redraw fails, or when authorized by the `recovery` command.
 - [x] QEMU startup proofs for the normal-mode health gate and recovery fallback.

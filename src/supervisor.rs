@@ -1,7 +1,5 @@
-use crate::{
-    capabilities::{Capability, CapabilityKind, CapabilityManager},
-    debug,
-};
+use crate::debug;
+use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
 const MAX_MANIFESTS: usize = 4;
 

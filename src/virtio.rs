@@ -4,7 +4,6 @@ use core::{
 };
 
 use crate::{
-    capabilities::{Capability, CapabilityManager},
     ipc::{Envelope, Message},
     memory::{Page, PhysicalMemory},
     pci::PciDevice,
@@ -12,6 +11,7 @@ use crate::{
     services::ServiceHandle,
     session::Principal,
 };
+use logos_core::capabilities::{Capability, CapabilityManager};
 
 const ACKNOWLEDGE: u8 = 1;
 const DRIVER: u8 = 2;

@@ -6,14 +6,13 @@ use crate::{
     scheduler::{Event, Runnable, TaskState},
 };
 
-pub struct Service<'a> {
+pub struct Task<'a> {
     privilege: &'a Privilege,
     space: AddressSpace,
     entry: u64,
     context_physical: u64,
     context: u64,
     started: bool,
-    blocked: bool,
     event: Event,
     complete: bool,
     gate: crate::cpu::GateState,
@@ -98,7 +97,7 @@ impl SessionEndpoint {
     }
 }
 
-impl<'a> Service<'a> {
+impl<'a> Task<'a> {
     pub fn load(
         memory: &mut PhysicalMemory,
         payload: Payload,
@@ -120,7 +119,6 @@ impl<'a> Service<'a> {
             context_physical,
             context,
             started: false,
-            blocked: false,
             event: Event::INPUT,
             complete: false,
             gate: crate::cpu::GateState::new(),
@@ -166,7 +164,6 @@ impl<'a> Service<'a> {
     fn advance(&mut self, state: Option<EntryState>) -> bool {
         match state {
             Some(EntryState::Input) | Some(EntryState::Command) | Some(EntryState::Display) => {
-                self.blocked = true;
                 self.event = if state == Some(EntryState::Command) {
                     Event::COMMAND
                 } else if state == Some(EntryState::Display) {
@@ -177,7 +174,6 @@ impl<'a> Service<'a> {
                 true
             }
             Some(EntryState::Returned) => {
-                self.blocked = false;
                 self.complete = unsafe {
                     logos_core::native_service::Context::complete_at(self.context_physical)
                 };
@@ -188,7 +184,7 @@ impl<'a> Service<'a> {
     }
 }
 
-impl Runnable for Service<'_> {
+impl Runnable for Task<'_> {
     fn run(&mut self) -> TaskState {
         if self.complete {
             return TaskState::Complete;
@@ -208,7 +204,6 @@ impl Runnable for Service<'_> {
             return false;
         }
         self.started = false;
-        self.blocked = false;
         self.event = Event::INPUT;
         self.complete = false;
         self.gate = crate::cpu::GateState::new();

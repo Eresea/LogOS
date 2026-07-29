@@ -74,4 +74,4 @@ pub fn self_check() -> bool {
             manifest.interface == block && manifest.capabilities == [CapabilityKind::Service]
         })
 }
-use crate::capabilities::CapabilityKind;
+use logos_core::capabilities::CapabilityKind;
