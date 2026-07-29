@@ -48,6 +48,11 @@ impl SyscallEndpoint {
     pub fn reply(self, bytes: &[u8]) -> bool {
         unsafe { logos_core::native_service::Context::reply_at(self.context_physical, bytes) }
     }
+
+    pub fn reply_matches(self, expected: &[u8]) -> bool {
+        unsafe { logos_core::native_service::Context::response_at(self.context_physical) }
+            .is_some_and(|response| response.text[..response.length] == *expected)
+    }
 }
 
 impl<'a> Terminal<'a> {

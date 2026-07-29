@@ -193,6 +193,19 @@ impl Context {
     }
 
     /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn response_at(address: u64) -> Option<TextRequest> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        let length = usize::try_from(context.text_length).ok()?;
+        (context.abi == ABI
+            && context.reserved == 0
+            && context.operation == SYSCALL
+            && context.status == ACKNOWLEDGED
+            && length <= context.text.len())
+        .then_some(TextRequest { x: 0, y: 0, color: [0; 3], text: context.text, length })
+    }
+
+    /// # Safety
     ///
     /// `address` must point to a live, aligned `Context` mapping.
     pub unsafe fn pixel_at(address: u64) -> Option<(u32, u32, [u8; 3])> {

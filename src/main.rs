@@ -322,6 +322,12 @@ fn kernel_main(
     ) else {
         fail!(b"session");
     };
+    #[cfg(feature = "test-hooks")]
+    let Some(denied_session) =
+        session::Context::new(session::Id(2), session::Principal::LOCAL, &[])
+    else {
+        fail!(b"session");
+    };
     let Some(service_capability) =
         supervisor.grant(platform::NAME, &mut capabilities, capabilities::CapabilityKind::Service)
     else {
@@ -556,31 +562,42 @@ fn kernel_main(
     health.finish();
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(|value| {
+        let (value, request_session, expected) = if value == "deny-recovery" {
+            ("recovery", &denied_session, Some(b"permission denied" as &[u8]))
+        } else {
+            (value, &session, None)
+        };
         value.bytes().chain(core::iter::once(b'\n')).all(|byte| {
             native_input.deliver(byte)
                 && native_scheduler.wake(native_handle)
                 && native_scheduler.run_next()
                 && (native_command.request().is_none()
-                    || (native_syscall_reply(
-                        native_command,
-                        NativeCommandContext {
-                            session: &session,
-                            capabilities: &capabilities,
-                            tick: interrupts::ticks(),
-                            input: &mut input,
-                            lifecycle: &mut service_lifecycle,
-                            service_healthy: service_health
-                                .healthy(platform::NAME, interrupts::ticks()),
-                            channel: &channel,
-                            responses: &responses,
-                            service_scheduler: &mut service_scheduler,
-                            service_capability,
-                            service: virtio_handle,
-                        },
-                    )
-                    .ok()
-                        && native_scheduler.wake(native_handle)
-                        && native_scheduler.run_next()))
+                    || ({
+                        let reply = native_syscall_reply(
+                            native_command,
+                            NativeCommandContext {
+                                session: request_session,
+                                capabilities: &capabilities,
+                                tick: interrupts::ticks(),
+                                input: &mut input,
+                                lifecycle: &mut service_lifecycle,
+                                service_healthy: service_health
+                                    .healthy(platform::NAME, interrupts::ticks()),
+                                channel: &channel,
+                                responses: &responses,
+                                service_scheduler: &mut service_scheduler,
+                                service_capability,
+                                service: virtio_handle,
+                            },
+                        );
+                        reply.ok()
+                            && expected.is_none_or(|expected| {
+                                matches!(reply, CommandReply::Handled(true))
+                                    && native_command.reply_matches(expected)
+                            })
+                            && native_scheduler.wake(native_handle)
+                            && native_scheduler.run_next()
+                    }))
         })
     });
     let mut console_mode = coordinator.mode();
@@ -712,6 +729,7 @@ struct NativeCommandContext<'a, 'task> {
 /// rather than the caller re-parsing the raw request bytes itself (as the
 /// old code did, comparing `request.text[..request.length]` against the
 /// literal string `b"recovery"` *before* the command was even dispatched).
+#[derive(Clone, Copy)]
 enum CommandReply {
     /// The command was answered; `true` if the IPC reply itself was sent
     /// successfully.

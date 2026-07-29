@@ -20,6 +20,7 @@ const IMPLEMENTED: &[&str] = &[
     "console/editing-utf8",
     "console/history",
     "console/structured-command",
+    "console/capability-denied",
     "console/cancellation",
     "console/display-restart",
     "console/input-service-restart",
