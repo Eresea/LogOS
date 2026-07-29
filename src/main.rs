@@ -602,6 +602,10 @@ fn kernel_main(
     health.finish();
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(|value| {
+        if value == "assert-crash-restart" {
+            let tick = interrupts::ticks();
+            return service_lifecycle.failed(tick) && service_lifecycle.due(tick.saturating_add(2));
+        }
         let deny_display = value == "deny-display";
         let (value, request_session, expected, expect_qwerty) = if value == "deny-recovery" {
             ("recovery", &denied_session, Some(b"permission denied" as &[u8]), false)
