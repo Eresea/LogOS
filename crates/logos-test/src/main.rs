@@ -318,6 +318,18 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
             send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT deny-session\n")?;
             wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
         }
+        if scenario.id == "console/structured-command" {
+            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-tasks\n")?;
+            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
+        }
+        if scenario.id == "console/input-service-restart" {
+            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-restart\n")?;
+            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
+        }
+        if scenario.id == "console/cancellation" {
+            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-cancel\n")?;
+            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
+        }
         send(&mut stream, &mut transcript_file, &format!("LOGOS/1 RUN {}\n", scenario.id))?;
         wait_file(
             &debug_log,

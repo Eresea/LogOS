@@ -609,6 +609,12 @@ fn kernel_main(
             ("layout azerty", &denied_session, Some(b"permission denied" as &[u8]), true)
         } else if value == "deny-session" {
             ("tasks", &denied_session, Some(b"permission denied" as &[u8]), false)
+        } else if value == "assert-tasks" {
+            ("tasks", &session, Some(b"scheduler active" as &[u8]), false)
+        } else if value == "assert-restart" {
+            ("restart virtio-balloon", &session, Some(b"restart scheduled" as &[u8]), false)
+        } else if value == "assert-cancel" {
+            ("cancel virtio-balloon", &session, Some(b"cancel requested" as &[u8]), false)
         } else if deny_display {
             ("x", &session, None, false)
         } else {
