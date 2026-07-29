@@ -236,7 +236,7 @@ fn kernel_main(
     check!(
         b"service transition",
         service_address_space.map_probe(&mut memory).is_some_and(|entry| {
-            privilege.run_entry(&mut service_address_space, entry, 0)
+            privilege.run_entry(&mut service_address_space, entry, 0, &mut cpu::GateState::new())
                 == Some(cpu::EntryState::Returned)
         }) && service_address_space.release(&mut memory),
     );
@@ -530,6 +530,11 @@ fn kernel_main(
     else {
         fail!(b"native terminal task");
     };
+    let Some(mut native_sessions) =
+        native_task::Service::load(&mut memory, payloads.sessions, &privilege)
+    else {
+        fail!(b"native sessions task");
+    };
     let mut service_task = platform::Task::new(
         &mut virtio_service,
         &channel,
@@ -609,6 +614,12 @@ fn kernel_main(
         native_handle,
     ) {
         fail!(b"native terminal display");
+    }
+    let Some(_sessions_handle) = native_scheduler.spawn(&mut native_sessions) else {
+        fail!(b"native sessions task");
+    };
+    if !native_scheduler.run_next() {
+        fail!(b"native sessions ready");
     }
     health.finish();
     #[cfg(feature = "test-hooks")]

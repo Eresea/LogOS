@@ -16,6 +16,7 @@ pub struct Service<'a> {
     blocked: bool,
     event: Event,
     complete: bool,
+    gate: crate::cpu::GateState,
 }
 
 #[derive(Clone, Copy)]
@@ -98,11 +99,13 @@ impl<'a> Service<'a> {
             blocked: false,
             event: Event::INPUT,
             complete: false,
+            gate: crate::cpu::GateState::new(),
         })
     }
 
     pub fn start(&mut self) -> bool {
-        let state = self.privilege.run_entry(&mut self.space, self.entry, self.context);
+        let state =
+            self.privilege.run_entry(&mut self.space, self.entry, self.context, &mut self.gate);
         self.started = true;
         self.advance(state)
     }
@@ -120,7 +123,7 @@ impl<'a> Service<'a> {
     }
 
     pub fn resume(&mut self) -> bool {
-        let state = self.privilege.resume_entry(&mut self.space);
+        let state = self.privilege.resume_entry(&mut self.space, self.context, &mut self.gate);
         self.advance(state)
     }
 

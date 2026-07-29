@@ -59,6 +59,19 @@ pub struct Privilege {
     stack: Page,
 }
 
+pub struct GateState {
+    blocked: bool,
+    command: bool,
+    display: bool,
+    frame: [u64; USER_FRAME_WORDS],
+}
+
+impl GateState {
+    pub const fn new() -> Self {
+        Self { blocked: false, command: false, display: false, frame: [0; USER_FRAME_WORDS] }
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum EntryState {
     Returned,
@@ -115,36 +128,28 @@ impl Privilege {
         space: &mut crate::address_space::AddressSpace,
         entry: u64,
         context: u64,
+        gate: &mut GateState,
     ) -> Option<EntryState> {
         if !space.map_kernel_stack(self.stack.address()) {
             return None;
         }
         unsafe { set_tss_stack(space.kernel_stack_top()) };
+        self.restore_gate(gate);
         USER_RETURNED.store(false, Ordering::Release);
         USER_BLOCKED.store(false, Ordering::Release);
-        USER_COMMAND.store(false, Ordering::Release);
-        USER_DISPLAY.store(false, Ordering::Release);
         USER_CONTEXT.store(context, Ordering::Release);
         unsafe { enter_user(space.cr3(), entry, space.stack_top(), context) };
         unsafe { set_tss_stack(self.stack.address() + 4096) };
-        if USER_BLOCKED.load(Ordering::Acquire) {
-            Some(if USER_DISPLAY.load(Ordering::Acquire) {
-                EntryState::Display
-            } else if USER_COMMAND.load(Ordering::Acquire) {
-                EntryState::Command
-            } else {
-                EntryState::Input
-            })
-        } else {
-            USER_CONTEXT.store(0, Ordering::Release);
-            USER_RETURNED.load(Ordering::Acquire).then_some(EntryState::Returned)
-        }
+        self.capture_gate(gate)
     }
 
     pub fn resume_entry(
         &self,
         space: &mut crate::address_space::AddressSpace,
+        context: u64,
+        gate: &mut GateState,
     ) -> Option<EntryState> {
+        self.restore_gate(gate);
         if !USER_BLOCKED.swap(false, Ordering::AcqRel)
             || !space.map_kernel_stack(self.stack.address())
         {
@@ -152,9 +157,37 @@ impl Privilege {
         }
         unsafe { set_tss_stack(space.kernel_stack_top()) };
         USER_RETURNED.store(false, Ordering::Release);
+        USER_CONTEXT.store(context, Ordering::Release);
         unsafe { resume_user(space.cr3(), space.kernel_stack_top()) };
         unsafe { set_tss_stack(self.stack.address() + 4096) };
-        if USER_BLOCKED.load(Ordering::Acquire) {
+        self.capture_gate(gate)
+    }
+
+    fn restore_gate(&self, gate: &GateState) {
+        unsafe {
+            ptr::copy_nonoverlapping(
+                gate.frame.as_ptr(),
+                ptr::addr_of_mut!(USER_FRAME).cast(),
+                USER_FRAME_WORDS,
+            )
+        };
+        USER_BLOCKED.store(gate.blocked, Ordering::Release);
+        USER_COMMAND.store(gate.command, Ordering::Release);
+        USER_DISPLAY.store(gate.display, Ordering::Release);
+    }
+
+    fn capture_gate(&self, gate: &mut GateState) -> Option<EntryState> {
+        gate.blocked = USER_BLOCKED.load(Ordering::Acquire);
+        gate.command = USER_COMMAND.load(Ordering::Acquire);
+        gate.display = USER_DISPLAY.load(Ordering::Acquire);
+        unsafe {
+            ptr::copy_nonoverlapping(
+                ptr::addr_of!(USER_FRAME).cast(),
+                gate.frame.as_mut_ptr(),
+                USER_FRAME_WORDS,
+            )
+        };
+        if gate.blocked {
             Some(if USER_DISPLAY.load(Ordering::Acquire) {
                 EntryState::Display
             } else if USER_COMMAND.load(Ordering::Acquire) {
