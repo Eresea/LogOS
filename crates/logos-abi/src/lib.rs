@@ -24,6 +24,23 @@ pub enum Syscall {
 }
 
 impl Syscall {
+    pub fn from_name(name: &[u8]) -> Option<Self> {
+        match name {
+            b"recovery" => Some(Self::Recovery),
+            b"reboot" => Some(Self::Reboot),
+            b"poweroff" => Some(Self::PowerOff),
+            b"ping" => Some(Self::Ping),
+            b"tasks" => Some(Self::Tasks),
+            b"services" => Some(Self::Services),
+            b"drivers" => Some(Self::Drivers),
+            b"trace" => Some(Self::Trace),
+            b"inspect" => Some(Self::Inspect),
+            b"restart" => Some(Self::Restart),
+            b"cancel" => Some(Self::Cancel),
+            _ => None,
+        }
+    }
+
     pub const fn from_wire(value: u32) -> Option<Self> {
         match value {
             1 => Some(Self::Recovery),
@@ -47,6 +64,54 @@ impl Syscall {
     }
 }
 
+/// Privileged or machine-state operation requested by Sessions from Core.
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(u32)]
+pub enum Effect {
+    EnterRecovery = 1,
+    ResetMachine,
+    PowerOffMachine,
+    PingService,
+    ReadTasks,
+    ReadServices,
+    ReadDrivers,
+    ReadTrace,
+    InspectResource,
+    RestartService,
+    CancelService,
+    SetInputLayout,
+}
+
+impl Effect {
+    pub const fn from_wire(value: u32) -> Option<Self> {
+        match value {
+            1 => Some(Self::EnterRecovery),
+            2 => Some(Self::ResetMachine),
+            3 => Some(Self::PowerOffMachine),
+            4 => Some(Self::PingService),
+            5 => Some(Self::ReadTasks),
+            6 => Some(Self::ReadServices),
+            7 => Some(Self::ReadDrivers),
+            8 => Some(Self::ReadTrace),
+            9 => Some(Self::InspectResource),
+            10 => Some(Self::RestartService),
+            11 => Some(Self::CancelService),
+            12 => Some(Self::SetInputLayout),
+            _ => None,
+        }
+    }
+
+    pub const fn takes_argument(self) -> bool {
+        matches!(
+            self,
+            Self::InspectResource
+                | Self::RestartService
+                | Self::CancelService
+                | Self::SetInputLayout
+        )
+    }
+}
+
 /// Bounded `foundation.session` v1 request passed between native services.
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -61,8 +126,30 @@ impl SessionRequest {
         Self { syscall, argument, length }
     }
 
-    pub const fn valid(self) -> bool {
-        self.length <= self.argument.len() && self.syscall.takes_argument() == (self.length != 0)
+    pub fn valid(self) -> bool {
+        self.length <= self.argument.len()
+            && self.syscall.takes_argument() == (self.length != 0)
+            && core::str::from_utf8(&self.argument[..self.length]).is_ok()
+    }
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct EffectRequest {
+    pub effect: Effect,
+    pub argument: [u8; MAX_SESSION_TEXT],
+    pub length: usize,
+}
+
+impl EffectRequest {
+    pub const fn new(effect: Effect, argument: [u8; MAX_SESSION_TEXT], length: usize) -> Self {
+        Self { effect, argument, length }
+    }
+
+    pub fn valid(self) -> bool {
+        self.length <= self.argument.len()
+            && self.effect.takes_argument() == (self.length != 0)
+            && core::str::from_utf8(&self.argument[..self.length]).is_ok()
     }
 }
 
@@ -86,6 +173,75 @@ impl SessionReply {
 
     pub const fn valid(self) -> bool {
         self.length <= self.text.len()
+    }
+}
+
+/// Typed result of one capability-gated Core effect. Sessions owns rendering
+/// this value into a terminal reply.
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(u32)]
+pub enum EffectResult {
+    Completed = 1,
+    Recovery,
+    Unavailable,
+    Pong,
+    TasksActive,
+    ServiceRunning,
+    ServiceOverdue,
+    DriverBound,
+    TraceNone,
+    TraceBoot,
+    TraceTaskBlocked,
+    TraceTaskWoken,
+    TraceVirtioSubmit,
+    TraceVirtioComplete,
+    TraceDriverBound,
+    TraceDriverQuiesced,
+    TraceDriverRecovered,
+    TraceDriverFailed,
+    TraceFault,
+    TraceSelfCheck,
+    Inspected,
+    RestartScheduled,
+    CancelRequested,
+    LayoutQwerty,
+    LayoutAzerty,
+    Denied,
+    Unknown,
+}
+
+impl EffectResult {
+    pub const fn from_wire(value: u32) -> Option<Self> {
+        match value {
+            1 => Some(Self::Completed),
+            2 => Some(Self::Recovery),
+            3 => Some(Self::Unavailable),
+            4 => Some(Self::Pong),
+            5 => Some(Self::TasksActive),
+            6 => Some(Self::ServiceRunning),
+            7 => Some(Self::ServiceOverdue),
+            8 => Some(Self::DriverBound),
+            9 => Some(Self::TraceNone),
+            10 => Some(Self::TraceBoot),
+            11 => Some(Self::TraceTaskBlocked),
+            12 => Some(Self::TraceTaskWoken),
+            13 => Some(Self::TraceVirtioSubmit),
+            14 => Some(Self::TraceVirtioComplete),
+            15 => Some(Self::TraceDriverBound),
+            16 => Some(Self::TraceDriverQuiesced),
+            17 => Some(Self::TraceDriverRecovered),
+            18 => Some(Self::TraceDriverFailed),
+            19 => Some(Self::TraceFault),
+            20 => Some(Self::TraceSelfCheck),
+            21 => Some(Self::Inspected),
+            22 => Some(Self::RestartScheduled),
+            23 => Some(Self::CancelRequested),
+            24 => Some(Self::LayoutQwerty),
+            25 => Some(Self::LayoutAzerty),
+            26 => Some(Self::Denied),
+            27 => Some(Self::Unknown),
+            _ => None,
+        }
     }
 }
 
@@ -238,8 +394,16 @@ pub fn self_check() -> bool {
         && DisplayColor::from_wire(0xff00_0000).is_none()
         && Syscall::from_wire(Syscall::Restart as u32)
             .is_some_and(|call| call == Syscall::Restart && call.takes_argument())
+        && Syscall::from_name(b"restart") == Some(Syscall::Restart)
+        && Syscall::from_name(b"missing").is_none()
         && Syscall::from_wire(0).is_none()
+        && Effect::from_wire(Effect::RestartService as u32) == Some(Effect::RestartService)
+        && Effect::from_wire(0).is_none()
         && SessionRequest::new(Syscall::Inspect, [0; MAX_SESSION_TEXT], 1).valid()
         && !SessionRequest::new(Syscall::Reboot, [0; MAX_SESSION_TEXT], 1).valid()
+        && EffectRequest::new(Effect::InspectResource, [0; MAX_SESSION_TEXT], 1).valid()
         && SessionReply::from_bytes(b"ok").is_some_and(|reply| reply.valid() && reply.length == 2)
+        && EffectResult::from_wire(EffectResult::RestartScheduled as u32)
+            == Some(EffectResult::RestartScheduled)
+        && EffectResult::from_wire(0).is_none()
 }

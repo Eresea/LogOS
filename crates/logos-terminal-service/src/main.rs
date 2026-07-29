@@ -62,7 +62,7 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
                             }],
                             &mut terminal,
                         ),
-                        Resolution::Call(call) => match call_command(call) {
+                        Resolution::Call(call) => match Syscall::from_name(call.name) {
                             Some(command) => submit_call(context, command, call, &mut terminal),
                             None => {
                                 let _ = terminal.write_output(b"unknown command");
@@ -114,23 +114,6 @@ unsafe fn submit_with_argument(
                 let _ = terminal.write_output(line);
             }
         }
-    }
-}
-
-fn call_command(call: Call) -> Option<Syscall> {
-    match call.name {
-        b"recovery" => Some(Syscall::Recovery),
-        b"reboot" => Some(Syscall::Reboot),
-        b"poweroff" => Some(Syscall::PowerOff),
-        b"ping" => Some(Syscall::Ping),
-        b"tasks" => Some(Syscall::Tasks),
-        b"services" => Some(Syscall::Services),
-        b"drivers" => Some(Syscall::Drivers),
-        b"trace" => Some(Syscall::Trace),
-        b"inspect" => Some(Syscall::Inspect),
-        b"restart" => Some(Syscall::Restart),
-        b"cancel" => Some(Syscall::Cancel),
-        _ => None,
     }
 }
 

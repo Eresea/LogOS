@@ -12,11 +12,11 @@
 
 ## 2. Current milestone: Platform v1 service boundary
 
-The execution boundary exists. The remaining work is replacing its bootstrap transport with service contracts:
+The execution boundary and initial service contracts exist. Remaining work:
 
-1. Define the minimal versioned Input, Display, and Session capability contracts required by `logos-terminal`.
-2. Replace the bounded Core context gate with those contracts without granting raw framebuffer or PS/2 access.
-3. Move normal command/session dispatch out of Core while keeping privileged execution capability-gated.
+1. [x] Define the minimal versioned Input, Display, and Session capability contracts required by `logos-terminal`.
+2. [x] Replace the bounded Core context gate with those contracts without granting raw framebuffer or PS/2 access.
+3. [x] Move normal command/session dispatch out of Core while keeping privileged execution capability-gated.
 4. Prove terminal-service failure, restart, capability denial, and recovery handoff in headless QEMU.
 5. Only then move further bootstrap services out of `logos-uefi`; keep the recovery console kernel-owned.
 

@@ -6,11 +6,11 @@ mod address_space;
 mod approvals;
 mod audit;
 mod capabilities;
-mod commands;
 mod console;
 mod cpu;
 mod debug;
 mod device;
+mod effects;
 mod entropy;
 mod format;
 mod health;
@@ -368,6 +368,12 @@ fn kernel_main(
     else {
         fail!(b"session");
     };
+    #[cfg(feature = "test-hooks")]
+    let Some(restricted_session) =
+        session::Context::new(session::Id(3), session::Principal::LOCAL, &[session_capability])
+    else {
+        fail!(b"session");
+    };
     let Some(service_capability) =
         supervisor.grant(platform::NAME, &mut capabilities, capabilities::CapabilityKind::Service)
     else {
@@ -574,12 +580,12 @@ fn kernel_main(
                 modifiers: input::Modifiers::none(),
             })
             && probe.render(display, &text)
-            && commands::self_check()
             && command::self_check()
     });
     let coordinator = mode::Coordinator::new(normal_ready);
     check!(b"console mode", mode::Coordinator::self_check());
-    check!(b"command registry", commands::self_check() && command::self_check());
+    check!(b"command registry", command::self_check());
+    check!(b"effect executor", effects::self_check());
     check!(b"formatters", format::self_check());
     check!(b"session", session::Context::self_check());
     check!(b"input normalization", input::Service::self_check());
@@ -633,8 +639,9 @@ fn kernel_main(
             )) && native_scheduler.wake(sessions_handle)
                 && native_scheduler.run_next()
                 && native_sessions_endpoint.effect().is_some_and(|effect| {
-                    effect.syscall == logos_abi::Syscall::Tasks
-                        && native_sessions_endpoint.reply_effect(b"scheduler active")
+                    effect.effect == logos_abi::Effect::ReadTasks
+                        && native_sessions_endpoint
+                            .reply_effect(logos_abi::EffectResult::TasksActive)
                 })
                 && native_scheduler.wake(sessions_handle)
                 && native_scheduler.run_next()
@@ -658,9 +665,9 @@ fn kernel_main(
         }
         let deny_display = value == "deny-display";
         let (value, request_session, expected, expect_qwerty) = if value == "deny-recovery" {
-            ("recovery", &denied_session, Some(b"permission denied" as &[u8]), false)
+            ("recovery", &restricted_session, Some(b"permission denied" as &[u8]), false)
         } else if value == "deny-layout" {
-            ("layout azerty", &denied_session, Some(b"permission denied" as &[u8]), true)
+            ("layout azerty", &restricted_session, Some(b"permission denied" as &[u8]), true)
         } else if value == "deny-session" {
             ("tasks", &denied_session, Some(b"permission denied" as &[u8]), false)
         } else if value == "assert-tasks" {
@@ -707,9 +714,12 @@ fn kernel_main(
                 })
                 && (native_command.request().is_none()
                     || ({
-                        let reply = native_syscall_reply(
+                        let reply = relay_session_request(
                             native_command,
-                            NativeCommandContext {
+                            native_sessions_endpoint,
+                            &mut native_scheduler,
+                            sessions_handle,
+                            effects::Context {
                                 session: request_session,
                                 capabilities: &capabilities,
                                 tick: interrupts::ticks(),
@@ -726,7 +736,7 @@ fn kernel_main(
                         );
                         reply.ok()
                             && expected.is_none_or(|expected| {
-                                matches!(reply, CommandReply::Handled(true))
+                                matches!(reply, SessionRelay::Handled(true))
                                     && native_command.reply_matches(expected)
                             })
                             && (!expect_qwerty || input.layout() == input::Layout::Qwerty)
@@ -783,40 +793,12 @@ fn kernel_main(
                         break;
                     }
                     if native_command.request().is_some() {
-                        if native_command
-                            .request()
-                            .is_some_and(|request| request.syscall == logos_abi::Syscall::Tasks)
-                        {
-                            let Some(request) = native_command.request() else {
-                                console_mode = mode::ConsoleMode::Recovery;
-                                break;
-                            };
-                            if !session.allows(&capabilities, capabilities::CapabilityKind::Session)
-                                || !native_sessions_endpoint.deliver(request)
-                                || !native_scheduler.wake(sessions_handle)
-                                || !native_scheduler.run_next()
-                                || !native_sessions_endpoint.effect().is_some_and(|effect| {
-                                    effect.syscall == logos_abi::Syscall::Tasks
-                                        && native_sessions_endpoint
-                                            .reply_effect(b"scheduler active")
-                                })
-                                || !native_scheduler.wake(sessions_handle)
-                                || !native_scheduler.run_next()
-                                || !native_sessions_endpoint.reply().is_some_and(|reply| {
-                                    native_command.reply(&reply.text[..reply.length])
-                                })
-                                || !native_scheduler.wake(native_handle)
-                                || !native_scheduler.run_next()
-                            {
-                                debug::write_line(b"LogOS: Sessions relay failed");
-                                console_mode = mode::ConsoleMode::Recovery;
-                                break;
-                            }
-                            continue;
-                        }
-                        match native_syscall_reply(
+                        match relay_session_request(
                             native_command,
-                            NativeCommandContext {
+                            native_sessions_endpoint,
+                            &mut native_scheduler,
+                            sessions_handle,
+                            effects::Context {
                                 session: &session,
                                 capabilities: &capabilities,
                                 tick,
@@ -830,14 +812,18 @@ fn kernel_main(
                                 service: virtio_handle,
                             },
                         ) {
-                            CommandReply::Recovery => {
+                            SessionRelay::Recovery => {
                                 debug::write_line(b"LogOS: recovery handoff requested");
                                 console_mode = mode::ConsoleMode::Recovery;
                                 break;
                             }
-                            CommandReply::Handled(ok) => {
-                                let _ = ok
-                                    && native_scheduler.wake(native_handle)
+                            SessionRelay::Handled(false) => {
+                                debug::write_line(b"LogOS: Sessions relay failed");
+                                console_mode = mode::ConsoleMode::Recovery;
+                                break;
+                            }
+                            SessionRelay::Handled(true) => {
+                                let _ = native_scheduler.wake(native_handle)
                                     && native_scheduler.run_next();
                             }
                         }
@@ -927,39 +913,13 @@ fn resume_probe_display(
     true
 }
 
-struct NativeCommandContext<'a, 'task> {
-    session: &'a session::Context,
-    capabilities: &'a capabilities::CapabilityManager,
-    tick: u64,
-    input: &'a mut input::Service,
-    lifecycle: &'a mut supervisor::Lifecycle,
-    service_healthy: bool,
-    channel: &'a ipc::Channel,
-    responses: &'a ipc::Channel,
-    service_scheduler: &'a mut scheduler::Scheduler<'task>,
-    service_capability: capabilities::Capability,
-    service: services::ServiceHandle,
-}
-
-/// Result of handling one native syscall.
-///
-/// This exists so recovery hand-off is a real outcome the caller matches on,
-/// rather than the caller re-parsing the raw request bytes itself (as the
-/// old code did, comparing `request.text[..request.length]` against the
-/// literal string `b"recovery"` *before* the command was even dispatched).
 #[derive(Clone, Copy)]
-enum CommandReply {
-    /// The command was answered; `true` if the IPC reply itself was sent
-    /// successfully.
+enum SessionRelay {
     Handled(bool),
-    /// The command resolved to a recovery hand-off. The reply has already
-    /// been sent; the caller should switch console modes.
     Recovery,
 }
 
-impl CommandReply {
-    /// For contexts (like the test-hooks harness) that only care whether the
-    /// step succeeded, not whether it happened to be a recovery hand-off.
+impl SessionRelay {
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     fn ok(self) -> bool {
         match self {
@@ -969,182 +929,36 @@ impl CommandReply {
     }
 }
 
-/// Answer one syscall from the native terminal task.
-///
-/// All command parsing lives in Ring 3; this function only handles typed syscalls.
-/// - executes `Local::Layout`, because the kernel is what owns the physical
-///   keyboard scancode decoder (`input::Service`); the terminal payload has
-///   no way to act on a layout change itself.
-/// - relays every other `Local` resolution's reply text back down, since the
-///   terminal payload -- not the kernel -- interprets those replies (e.g.
-///   `clear` is acknowledged here but actually performed by the payload).
-/// - dispatches `Call` (tasks/services/drivers/trace/inspect/restart/cancel/
-///   recovery/reboot/poweroff/ping) through `commands::dispatch`, the one
-///   place capability checks happen.
-fn native_syscall_reply(
-    endpoint: native_task::SyscallEndpoint,
-    context: NativeCommandContext<'_, '_>,
-) -> CommandReply {
-    let NativeCommandContext {
-        session,
-        capabilities,
-        tick,
-        input,
-        lifecycle,
-        service_healthy,
-        channel,
-        responses,
-        service_scheduler,
-        service_capability,
-        service,
-    } = context;
-    let Some(request) = endpoint.submission() else {
-        return CommandReply::Handled(true);
-    };
-    if !session.allows(capabilities, capabilities::CapabilityKind::Session) {
-        return CommandReply::Handled(endpoint.reply(b"permission denied"));
-    }
-    let argument =
-        logos_terminal::terminal::Submission::from_bytes(&request.argument[..request.length]);
-    if request.length != 0 && argument.is_none() {
-        return CommandReply::Handled(endpoint.reply(b"unknown command"));
-    }
-    match request.syscall {
-        logos_abi::Syscall::SetInputLayout => {
-            let layout = argument
-                .filter(|argument| argument.as_bytes().len() == 1)
-                .and_then(|argument| logos_abi::InputLayout::from_wire(argument.as_bytes()[0]));
-            if !session.allows(capabilities, capabilities::CapabilityKind::Input) {
-                CommandReply::Handled(endpoint.reply(b"permission denied"))
-            } else if let Some(layout) = layout {
-                input.set_layout(match layout {
-                    logos_abi::InputLayout::Qwerty => input::Layout::Qwerty,
-                    logos_abi::InputLayout::Azerty => input::Layout::Azerty,
-                });
-                CommandReply::Handled(endpoint.reply(match layout {
-                    logos_abi::InputLayout::Qwerty => b"layout qwerty",
-                    logos_abi::InputLayout::Azerty => b"layout azerty",
-                }))
-            } else {
-                CommandReply::Handled(endpoint.reply(b"unknown command"))
-            }
-        }
-        command => match commands::dispatch(
-            command,
-            argument,
-            session,
-            capabilities,
-            commands::Invocation::new(tick.wrapping_add(50)),
-            tick,
-        ) {
-            commands::Outcome::Tasks => CommandReply::Handled(endpoint.reply(b"scheduler active")),
-            commands::Outcome::Services => {
-                CommandReply::Handled(endpoint.reply(platform::service_status(service_healthy)))
-            }
-            commands::Outcome::Drivers => {
-                CommandReply::Handled(endpoint.reply(platform::driver_status()))
-            }
-            commands::Outcome::Trace => {
-                CommandReply::Handled(endpoint.reply(trace::message(trace::latest())))
-            }
-            commands::Outcome::Inspect(resource) => {
-                CommandReply::Handled(endpoint.reply(resource.as_bytes()))
-            }
-            commands::Outcome::Restart(target) => CommandReply::Handled(endpoint.reply(
-                if platform::matches(target.as_bytes()) && lifecycle.restart(tick) {
-                    b"restart scheduled"
-                } else {
-                    b"unknown or unavailable service"
-                },
-            )),
-            commands::Outcome::Cancel(target) => CommandReply::Handled(
-                endpoint.reply(
-                    if platform::matches(target.as_bytes())
-                        && channel
-                            .send(
-                                capabilities,
-                                service_capability,
-                                session::Principal::LOCAL,
-                                service,
-                                ipc::Message::Cancel,
-                            )
-                            .is_some()
-                    {
-                        b"cancel requested"
-                    } else {
-                        b"unknown or unavailable service"
-                    },
-                ),
-            ),
-            commands::Outcome::Recovery => {
-                let _ = endpoint.reply(b"recovery requested");
-                CommandReply::Recovery
-            }
-            commands::Outcome::Reboot => CommandReply::Handled(if acpi::reset() {
-                true
-            } else {
-                endpoint.reply(b"reboot unavailable")
-            }),
-            commands::Outcome::PowerOff => CommandReply::Handled(if acpi::power_off() {
-                true
-            } else {
-                endpoint.reply(b"poweroff unavailable")
-            }),
-            commands::Outcome::Ping => CommandReply::Handled(endpoint.reply(
-                if ping_platform(
-                    channel,
-                    responses,
-                    service_scheduler,
-                    capabilities,
-                    service_capability,
-                    service,
-                ) {
-                    b"pong"
-                } else {
-                    b"ping unavailable"
-                },
-            )),
-            commands::Outcome::Error(commands::Error::Denied) => {
-                CommandReply::Handled(endpoint.reply(b"permission denied"))
-            }
-            commands::Outcome::Error(commands::Error::UnknownCommand) => {
-                CommandReply::Handled(endpoint.reply(b"unknown command"))
-            }
-            commands::Outcome::Error(commands::Error::Cancelled) => {
-                CommandReply::Handled(endpoint.reply(b"cancelled"))
-            }
-            commands::Outcome::Error(commands::Error::TimedOut) => {
-                CommandReply::Handled(endpoint.reply(b"timed out"))
-            }
-        },
-    }
-}
-
-fn ping_platform(
-    channel: &ipc::Channel,
-    responses: &ipc::Channel,
+fn relay_session_request(
+    terminal: native_task::SyscallEndpoint,
+    sessions: native_task::SessionEndpoint,
     scheduler: &mut scheduler::Scheduler<'_>,
-    capabilities: &capabilities::CapabilityManager,
-    capability: capabilities::Capability,
-    service: services::ServiceHandle,
-) -> bool {
-    let Some(request) = channel.send(
-        capabilities,
-        capability,
-        session::Principal::LOCAL,
-        service,
-        ipc::Message::Ping,
-    ) else {
-        return false;
+    sessions_handle: scheduler::TaskHandle,
+    context: effects::Context<'_, '_>,
+) -> SessionRelay {
+    let Some(request) = terminal.request() else {
+        return SessionRelay::Handled(true);
     };
-    if !scheduler.run_next() {
-        return false;
+    if !context.session.allows(context.capabilities, capabilities::CapabilityKind::Session) {
+        return SessionRelay::Handled(terminal.reply(b"permission denied"));
     }
-    (0..4).any(|_| {
-        responses
-            .receive()
-            .is_some_and(|reply| reply.request == request && reply.message == ipc::Message::Pong)
-    })
+    if !sessions.deliver(request) || !scheduler.wake(sessions_handle) || !scheduler.run_next() {
+        return SessionRelay::Handled(false);
+    }
+    let Some(effect) = sessions.effect() else {
+        return SessionRelay::Handled(false);
+    };
+    let result = effects::execute(effect, context);
+    if !sessions.reply_effect(result) || !scheduler.wake(sessions_handle) || !scheduler.run_next() {
+        return SessionRelay::Handled(false);
+    }
+    let forwarded =
+        sessions.reply().is_some_and(|reply| terminal.reply(&reply.text[..reply.length]));
+    if result == logos_abi::EffectResult::Recovery && forwarded {
+        SessionRelay::Recovery
+    } else {
+        SessionRelay::Handled(forwarded)
+    }
 }
 
 fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {

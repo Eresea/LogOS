@@ -10,14 +10,6 @@ pub fn matches(name: &[u8]) -> bool {
     name == NAME
 }
 
-pub fn service_status(healthy: bool) -> &'static [u8] {
-    if healthy { b"platform service running" } else { b"platform service overdue" }
-}
-
-pub const fn driver_status() -> &'static [u8] {
-    b"platform driver bound"
-}
-
 const BALLOON: crate::device::DriverManifest = crate::device::DriverManifest {
     interface: crate::device::Interface::new(crate::device::Class::Memory),
     vendor_id: 0x1af4,

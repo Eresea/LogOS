@@ -61,10 +61,6 @@ impl DisplayEndpoint {
 }
 
 impl SyscallEndpoint {
-    pub fn submission(self) -> Option<logos_abi::SessionRequest> {
-        self.request()
-    }
-
     pub fn request(self) -> Option<logos_abi::SessionRequest> {
         unsafe { logos_core::native_service::Context::syscall_at(self.context_physical) }
     }
@@ -73,6 +69,7 @@ impl SyscallEndpoint {
         unsafe { logos_core::native_service::Context::reply_at(self.context_physical, bytes) }
     }
 
+    #[cfg(feature = "test-hooks")]
     pub fn reply_matches(self, expected: &[u8]) -> bool {
         unsafe { logos_core::native_service::Context::response_at(self.context_physical) }
             .is_some_and(|response| response.text[..response.length] == *expected)
@@ -90,11 +87,11 @@ impl SessionEndpoint {
         unsafe { logos_core::native_service::Context::session_reply_at(self.context_physical) }
     }
 
-    pub fn effect(self) -> Option<logos_abi::SessionRequest> {
+    pub fn effect(self) -> Option<logos_abi::EffectRequest> {
         unsafe { logos_core::native_service::Context::session_effect_at(self.context_physical) }
     }
 
-    pub fn reply_effect(self, reply: &[u8]) -> bool {
+    pub fn reply_effect(self, reply: logos_abi::EffectResult) -> bool {
         unsafe {
             logos_core::native_service::Context::reply_effect_at(self.context_physical, reply)
         }

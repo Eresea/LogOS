@@ -447,21 +447,17 @@ capability. A denial or malformed presentation stops the normal terminal and ent
 ### Platform v1 Session contract
 
 `foundation.session` v1 gates every typed terminal syscall with an explicit Session capability.
-Core keeps bootstrap command dispatch while it owns the privileged effects; a missing Session
-capability returns the bounded `permission denied` reply without dispatching the syscall. Its
-versioned syscall identifiers live in `logos-abi`, not Core.
-The bounded syscall request value lives there too, so a Sessions service can consume the same
-contract without depending on Core internals.
-
-The next Platform v1 stage replaces that bootstrap dispatcher with a separately loaded Sessions
-service. The terminal sends it bounded Session requests; Core brokers those requests and exposes
-only individually capability-gated privileged primitives. Recovery remains a direct Core path.
+Core brokers each request to the separately loaded Sessions service. Sessions requests an
+individually capability-gated privileged effect, receives a typed `EffectResult`, formats the
+bounded reply, and returns it to the terminal. A missing Session capability is rejected before
+dispatch. Versioned requests and effect results live in `logos-abi`; Core retains no normal-command
+registry or terminal reply switch. Recovery remains a direct Core path.
 
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), and [ADR-0005](adr/0005-native-service-suspension.md).
 
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
 
-The command registry authorizes a live recovery handoff with an explicit recovery capability. The handoff stops normal input processing before recovery activates its direct input/output path.
+The Core effect executor authorizes a live recovery handoff with an explicit recovery capability. The handoff stops normal input processing before recovery activates its direct input/output path.
 
 The local session has a stable local principal and session identifier. Its capability context is explicit and revocable; commands authorize against that context rather than a global grant.
 

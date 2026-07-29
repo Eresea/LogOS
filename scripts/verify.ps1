@@ -29,7 +29,7 @@ $markers = @(
     'LogOS: check native service entry passed',
     'LogOS: check console mode passed',
     'LogOS: console mode normal',
-    'LogOS: normal terminal active',
+    'LogOS: native terminal active',
     'LogOS: check command registry passed',
     'LogOS: check input normalization passed',
     'LogOS: check terminal editing passed',

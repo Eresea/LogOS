@@ -1,13 +1,13 @@
 # Console
 
-> **Status:** Ring-3 native terminal active; command/session dispatch remains in Core for Platform v1
-> **Owner:** Sessions (normal terminal); Core (bootstrap gate and recovery console)
+> **Status:** Ring-3 terminal and Sessions services active; failure/restart proofs remain
+> **Owner:** Sessions (normal terminal and command replies); Core (privileged effects and recovery console)
 
 Console is LogOS's local textual interface. The normal terminal consumes bounded command results; the kernel recovery console is an independent fallback.
 
 ## Current implementation
 
-`logos-terminal-service.efi` is staged from the boot payload and runs in its own Core-owned Ring-3 address space. It has no raw framebuffer, PS/2, kernel-memory, or device mapping; its bounded context gate carries input, presentation, and command requests. Core validates and executes privileged operations, while `clear` remains a terminal-local redraw action. The kernel recovery console remains independent and kernel-owned.
+`logos-terminal-service.efi` and `logos-sessions-service.efi` are staged from the boot payload and run in separate Core-owned Ring-3 address spaces. The terminal has no raw framebuffer, PS/2, kernel-memory, or device mapping. Sessions formats typed Core effect results and forwards bounded replies; `clear` remains terminal-local. The kernel recovery console remains independent and kernel-owned.
 
 ### Foundation
 
@@ -41,7 +41,7 @@ Console is LogOS's local textual interface. The normal terminal consumes bounded
 
 - [x] Load `logos-terminal-service` as a native Sessions service rather than link it into `logos-uefi`.
 - [x] Gate the bootstrap context's input, display, and typed syscall operations with explicit Input, Display, and Session capabilities.
-- [ ] Keep command/session dispatch outside Core and preserve kernel-only recovery input/output.
+- [x] Keep command/session dispatch outside Core and preserve kernel-only recovery input/output.
 
 ## Later — Unplanned
 

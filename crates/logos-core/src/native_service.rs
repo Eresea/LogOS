@@ -143,13 +143,13 @@ impl Context {
         let context = unsafe { (address as *const Self).read_volatile() };
         let length = usize::try_from(context.text_length).ok()?;
         let syscall = logos_abi::Syscall::from_wire(context.x)?;
+        let request = logos_abi::SessionRequest::new(syscall, context.text, length);
         (context.abi == ABI
             && context.reserved == 0
             && context.operation == SYSCALL
             && context.status == ACKNOWLEDGED
-            && length <= context.text.len()
-            && syscall.takes_argument() == (length != 0))
-            .then_some(logos_abi::SessionRequest::new(syscall, context.text, length))
+            && request.valid())
+        .then_some(request)
     }
 
     /// # Safety
@@ -200,29 +200,29 @@ impl Context {
 
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
-    pub unsafe fn session_effect_at(address: u64) -> Option<logos_abi::SessionRequest> {
+    pub unsafe fn session_effect_at(address: u64) -> Option<logos_abi::EffectRequest> {
         let context = unsafe { (address as *const Self).read_volatile() };
         let length = usize::try_from(context.text_length).ok()?;
-        let syscall = logos_abi::Syscall::from_wire(context.x)?;
+        let effect = logos_abi::Effect::from_wire(context.x)?;
+        let request = logos_abi::EffectRequest::new(effect, context.text, length);
         (context.abi == ABI
             && context.reserved == 0
             && context.operation == SESSION_EFFECT
             && context.status == ACKNOWLEDGED
-            && length <= context.text.len()
-            && syscall.takes_argument() == (length != 0))
-            .then_some(logos_abi::SessionRequest::new(syscall, context.text, length))
+            && request.valid())
+        .then_some(request)
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
-    pub unsafe fn reply_effect_at(address: u64, reply: &[u8]) -> bool {
-        if reply.len() > MAX_TEXT || unsafe { Self::session_effect_at(address) }.is_none() {
+    pub unsafe fn reply_effect_at(address: u64, reply: logos_abi::EffectResult) -> bool {
+        if unsafe { Self::session_effect_at(address) }.is_none() {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
+        context.x = reply as u32;
         context.text = [0; MAX_TEXT];
-        context.text[..reply.len()].copy_from_slice(reply);
-        context.text_length = reply.len() as u32;
+        context.text_length = 0;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -337,6 +337,14 @@ pub fn self_check() -> bool {
     syscall.operation = READ_INPUT;
     let delivered =
         unsafe { Context::deliver_session_at((&mut syscall as *mut Context) as u64, request) };
+    syscall.operation = SESSION_EFFECT;
+    syscall.x = logos_abi::Effect::ReadTasks as u32;
+    let effect = unsafe {
+        Context::reply_effect_at(
+            (&mut syscall as *mut Context) as u64,
+            logos_abi::EffectResult::TasksActive,
+        )
+    } && syscall.x == logos_abi::EffectResult::TasksActive as u32;
     syscall.operation = SESSION_REPLY;
     syscall.text[..2].copy_from_slice(b"ok");
     syscall.text_length = 2;
@@ -348,6 +356,7 @@ pub fn self_check() -> bool {
         && unknown
         && malformed
         && delivered
+        && effect
         && reply
 }
 
