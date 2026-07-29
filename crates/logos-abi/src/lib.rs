@@ -4,6 +4,39 @@ pub const ABI: u16 = 1;
 pub const MAX_TEXT: usize = 64;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct InputEvent(u8);
+
+impl InputEvent {
+    pub const BACKSPACE: Self = Self(0x08);
+    pub const ENTER: Self = Self(b'\n');
+    pub const ESCAPE: Self = Self(0x1b);
+
+    pub const fn from_byte(byte: u8) -> Option<Self> {
+        if byte == Self::BACKSPACE.0
+            || byte == Self::ENTER.0
+            || byte == Self::ESCAPE.0
+            || (byte >= 0x20 && byte <= 0x7e)
+        {
+            Some(Self(byte))
+        } else {
+            None
+        }
+    }
+
+    pub const fn byte(self) -> u8 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(u8)]
+pub enum InputLayout {
+    Qwerty = 1,
+    Azerty = 2,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Service {
     Input,
@@ -75,4 +108,6 @@ pub fn self_check() -> bool {
         .is_some_and(|message| {
             message.valid() && &message.text[..message.length as usize] == b"LogOS"
         })
+        && InputEvent::from_byte(b'a').is_some_and(|event| event.byte() == b'a')
+        && InputEvent::from_byte(0).is_none()
 }

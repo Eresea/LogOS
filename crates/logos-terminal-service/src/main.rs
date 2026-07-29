@@ -31,7 +31,10 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
                 (*context).operation = COMPLETE;
                 asm!("int 0x80");
             }
-            if let Ok(input) = u8::try_from((*context).input) {
+            if let Ok(input) = u8::try_from((*context).input)
+                && let Some(input) = logos_abi::InputEvent::from_byte(input)
+            {
+                let input = input.byte();
                 if input == b'\n' {
                     let submission = terminal.submit();
                     let _ = terminal.write_output(submission.as_bytes());

@@ -241,12 +241,12 @@ fn kernel_main(
             && terminal_scheduler.run_next()
             && native_display::matches(33, 35, [0, 0xff, 0])
             && !terminal_scheduler.run_next()
-            && terminal_input.deliver(b'k')
+            && terminal_input.deliver(logos_abi::InputEvent::from_byte(b'k').unwrap())
             && terminal_scheduler.wake(terminal_handle.unwrap())
             && terminal_scheduler.run_next()
             && !terminal_scheduler.run_next()
             && native_display::matches(33, 35, [0, 0xff, 0])
-            && terminal_input.deliver(0x1b)
+            && terminal_input.deliver(logos_abi::InputEvent::ESCAPE)
             && terminal_scheduler.wake(terminal_handle.unwrap())
             && terminal_scheduler.run_next()
             && !terminal_scheduler.run_next()
@@ -568,7 +568,7 @@ fn kernel_main(
             (value, &session, None)
         };
         value.bytes().chain(core::iter::once(b'\n')).all(|byte| {
-            native_input.deliver(byte)
+            logos_abi::InputEvent::from_byte(byte).is_some_and(|event| native_input.deliver(event))
                 && native_scheduler.wake(native_handle)
                 && native_scheduler.run_next()
                 && (native_command.request().is_none()
@@ -625,8 +625,8 @@ fn kernel_main(
                 let _ = service_lifecycle.failed(tick);
             }
             if let Some(event) = input.next(tick, keyboard::poll_scancode) {
-                if native_input_byte(event).is_some_and(|byte| {
-                    native_input.deliver(byte)
+                if native_input_event(event).is_some_and(|event| {
+                    native_input.deliver(event)
                         && native_scheduler.wake(native_handle)
                         && native_scheduler.run_next()
                 }) {
@@ -698,15 +698,18 @@ fn kernel_main(
     }
 }
 
-fn native_input_byte(event: input::Event) -> Option<u8> {
-    event.text().or_else(|| {
-        event.pressed().and_then(|(key, _)| match key {
-            input::LogicalKey::Escape => Some(0x1b),
-            input::LogicalKey::Enter => Some(b'\n'),
-            input::LogicalKey::Backspace => Some(0x08),
-            _ => None,
+fn native_input_event(event: input::Event) -> Option<logos_abi::InputEvent> {
+    event
+        .text()
+        .or_else(|| {
+            event.pressed().and_then(|(key, _)| match key {
+                input::LogicalKey::Escape => Some(0x1b),
+                input::LogicalKey::Enter => Some(b'\n'),
+                input::LogicalKey::Backspace => Some(0x08),
+                _ => None,
+            })
         })
-    })
+        .and_then(logos_abi::InputEvent::from_byte)
 }
 
 struct NativeCommandContext<'a, 'task> {

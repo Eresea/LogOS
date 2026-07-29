@@ -10,6 +10,7 @@ edition = "2024"
 
 [dependencies]
 logos-core = { path = "crates/logos-core" }
+logos-abi = { path = "crates/logos-abi" }
 logos-terminal = { path = "crates/logos-terminal" }
 uefi = { version = "0.35", features = ["panic_handler"] }
 

@@ -24,9 +24,12 @@ pub struct InputEndpoint {
 }
 
 impl InputEndpoint {
-    pub fn deliver(self, input: u8) -> bool {
+    pub fn deliver(self, input: logos_abi::InputEvent) -> bool {
         unsafe {
-            logos_core::native_service::Context::deliver_input_at(self.context_physical, input)
+            logos_core::native_service::Context::deliver_input_at(
+                self.context_physical,
+                input.byte(),
+            )
         }
     }
 }
