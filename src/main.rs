@@ -709,6 +709,19 @@ fn kernel_main(
                 ("tasks", &denied_session, Some(b"permission denied" as &[u8]), false)
             } else if value == "assert-tasks" {
                 ("tasks", &session, Some(b"scheduler active" as &[u8]), false)
+            } else if value == "assert-ping" {
+                ("ping", &session, Some(b"pong" as &[u8]), false)
+            } else if value == "assert-services" {
+                ("services", &session, Some(b"platform service running" as &[u8]), false)
+            } else if value == "assert-drivers" {
+                ("drivers", &session, Some(b"platform driver bound" as &[u8]), false)
+            } else if value == "assert-inspect" {
+                (
+                    "inspect service:/virtio-balloon",
+                    &session,
+                    Some(b"service:/virtio-balloon" as &[u8]),
+                    false,
+                )
             } else if value == "assert-restart" {
                 ("restart virtio-balloon", &session, Some(b"restart scheduled" as &[u8]), false)
             } else if value == "assert-cancel" {

@@ -290,12 +290,12 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
         if scenario.id == "platform/native-service-ready" {
             for command in [
                 "health",
-                "ping",
+                "assert-ping",
                 "tasks",
-                "services",
-                "drivers",
+                "assert-services",
+                "assert-drivers",
                 "trace",
-                "inspect service:/virtio-balloon",
+                "assert-inspect",
                 "restart virtio-balloon",
                 "cancel virtio-balloon",
                 "layout azerty",
