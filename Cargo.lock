@@ -33,6 +33,9 @@ version = "0.1.0"
 [[package]]
 name = "logos-core"
 version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
 
 [[package]]
 name = "logos-terminal"

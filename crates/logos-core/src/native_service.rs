@@ -77,7 +77,7 @@ pub struct Context {
 pub struct TextRequest {
     pub x: u32,
     pub y: u32,
-    pub color: [u8; 3],
+    pub color: logos_abi::DisplayColor,
     pub text: [u8; MAX_TEXT],
     pub length: usize,
 }
@@ -200,23 +200,26 @@ impl Context {
             && context.operation == SYSCALL
             && context.status == ACKNOWLEDGED
             && length <= context.text.len())
-        .then_some(TextRequest { x: 0, y: 0, color: [0; 3], text: context.text, length })
+        .then_some(TextRequest {
+            x: 0,
+            y: 0,
+            color: logos_abi::DisplayColor::BLACK,
+            text: context.text,
+            length,
+        })
     }
 
     /// # Safety
     ///
     /// `address` must point to a live, aligned `Context` mapping.
-    pub unsafe fn pixel_at(address: u64) -> Option<(u32, u32, [u8; 3])> {
+    pub unsafe fn pixel_at(address: u64) -> Option<(u32, u32, logos_abi::DisplayColor)> {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let color = logos_abi::DisplayColor::from_wire(context.color)?;
         (context.abi == ABI
             && context.reserved == 0
             && context.operation == PRESENT_PIXEL
             && context.status == ACKNOWLEDGED)
-            .then_some((
-                context.x,
-                context.y,
-                [context.color as u8, (context.color >> 8) as u8, (context.color >> 16) as u8],
-            ))
+            .then_some((context.x, context.y, color))
     }
 
     /// # Safety
@@ -225,18 +228,13 @@ impl Context {
     pub unsafe fn text_at(address: u64) -> Option<TextRequest> {
         let context = unsafe { (address as *const Self).read_volatile() };
         let length = usize::try_from(context.text_length).ok()?;
+        let color = logos_abi::DisplayColor::from_wire(context.color)?;
         (context.abi == ABI
             && context.reserved == 0
             && context.operation == PRESENT_TEXT
             && context.status == ACKNOWLEDGED
             && length <= context.text.len())
-        .then_some(TextRequest {
-            x: context.x,
-            y: context.y,
-            color: [context.color as u8, (context.color >> 8) as u8, (context.color >> 16) as u8],
-            text: context.text,
-            length,
-        })
+        .then_some(TextRequest { x: context.x, y: context.y, color, text: context.text, length })
     }
 
     /// # Safety

@@ -158,7 +158,7 @@ unsafe fn present(context: *mut Context, x: u32, y: u32, bytes: &[u8]) {
             (*context).x = x + u32::try_from(chunk * MAX_TEXT * 8).unwrap_or(u32::MAX);
             (*context).y = y;
             (*context).text_length = bytes.len() as u32;
-            (*context).color = 0x0000_ff00;
+            (*context).color = logos_abi::DisplayColor::GREEN.wire();
             (*context).operation = PRESENT_TEXT;
             asm!("int 0x80");
         }

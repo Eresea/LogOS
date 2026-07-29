@@ -36,6 +36,27 @@ pub enum InputLayout {
     Azerty = 2,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct DisplayColor(u32);
+
+impl DisplayColor {
+    pub const BLACK: Self = Self(0);
+    pub const GREEN: Self = Self(0x0000_ff00);
+
+    pub const fn from_wire(value: u32) -> Option<Self> {
+        if value & 0xff00_0000 == 0 { Some(Self(value)) } else { None }
+    }
+
+    pub const fn wire(self) -> u32 {
+        self.0
+    }
+
+    pub const fn rgb(self) -> [u8; 3] {
+        [self.0 as u8, (self.0 >> 8) as u8, (self.0 >> 16) as u8]
+    }
+}
+
 impl InputLayout {
     pub const fn wire(self) -> u8 {
         match self {
@@ -127,4 +148,6 @@ pub fn self_check() -> bool {
         })
         && InputEvent::from_byte(b'a').is_some_and(|event| event.byte() == b'a')
         && InputEvent::from_byte(0).is_none()
+        && DisplayColor::from_wire(DisplayColor::GREEN.wire()) == Some(DisplayColor::GREEN)
+        && DisplayColor::from_wire(0xff00_0000).is_none()
 }

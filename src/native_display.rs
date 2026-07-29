@@ -57,6 +57,7 @@ pub fn present(context: u64) -> bool {
     }
     unsafe {
         let pixel = framebuffer.add(offset);
+        let color = color.rgb();
         pixel.write_volatile(color[0]);
         pixel.add(1).write_volatile(color[1]);
         pixel.add(2).write_volatile(color[2]);
@@ -78,7 +79,8 @@ pub fn present_text(context: u64) -> bool {
         };
         logos_terminal::text::glyph(byte).iter().enumerate().all(|(row, bits)| {
             (0..8).all(|column| {
-                bits & (1 << (7 - column)) == 0 || write_pixel(x + column, y + row, request.color)
+                bits & (1 << (7 - column)) == 0
+                    || write_pixel(x + column, y + row, request.color.rgb())
             })
         })
     })
