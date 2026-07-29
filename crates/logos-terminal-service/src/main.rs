@@ -3,8 +3,8 @@
 
 use core::arch::asm;
 use logos_core::native_service::{
-    ACKNOWLEDGED, CLEAR_DISPLAY, COMPLETE, Command, Context, Header, MAX_TEXT, PRESENT_TEXT,
-    READ_INPUT, READY, SUBMIT_COMMAND,
+    ACKNOWLEDGED, CLEAR_DISPLAY, COMPLETE, Context, Header, MAX_TEXT, PRESENT_TEXT, READ_INPUT,
+    READY, SYSCALL, Syscall,
 };
 use logos_terminal::{
     command::{self, Call, Local, Resolution},
@@ -48,8 +48,8 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
                         Resolution::Local(Local::Layout(layout)) => submit(
                             context,
                             match layout {
-                                logos_terminal::input::Layout::Qwerty => Command::LayoutQwerty,
-                                logos_terminal::input::Layout::Azerty => Command::LayoutAzerty,
+                                logos_terminal::input::Layout::Qwerty => Syscall::LayoutQwerty,
+                                logos_terminal::input::Layout::Azerty => Syscall::LayoutAzerty,
                             },
                             &mut terminal,
                         ),
@@ -76,32 +76,32 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
     }
 }
 
-unsafe fn submit(context: *mut Context, command: Command, terminal: &mut Model) {
-    unsafe { submit_with_argument(context, command, &[], terminal) }
+unsafe fn submit(context: *mut Context, syscall: Syscall, terminal: &mut Model) {
+    unsafe { submit_with_argument(context, syscall, &[], terminal) }
 }
 
-unsafe fn submit_call(context: *mut Context, command: Command, call: Call, terminal: &mut Model) {
+unsafe fn submit_call(context: *mut Context, syscall: Syscall, call: Call, terminal: &mut Model) {
     unsafe {
         if let Some(value) = call.argument {
-            submit_with_argument(context, command, value.as_bytes(), terminal)
+            submit_with_argument(context, syscall, value.as_bytes(), terminal)
         } else {
-            submit_with_argument(context, command, &[], terminal)
+            submit_with_argument(context, syscall, &[], terminal)
         }
     }
 }
 
 unsafe fn submit_with_argument(
     context: *mut Context,
-    command: Command,
+    syscall: Syscall,
     argument: &[u8],
     terminal: &mut Model,
 ) {
     unsafe {
-        (*context).x = command as u32;
+        (*context).x = syscall as u32;
         (*context).text = [0; MAX_TEXT];
         (&mut (*context).text)[..argument.len()].copy_from_slice(argument);
         (*context).text_length = argument.len() as u32;
-        (*context).operation = SUBMIT_COMMAND;
+        (*context).operation = SYSCALL;
         asm!("int 0x80");
         let length = usize::try_from((*context).text_length).unwrap_or(0).min(MAX_TEXT);
         for line in (&(*context).text)[..length].split(|byte| *byte == b'\n') {
@@ -112,19 +112,19 @@ unsafe fn submit_with_argument(
     }
 }
 
-fn call_command(call: Call) -> Option<Command> {
+fn call_command(call: Call) -> Option<Syscall> {
     match call.name {
-        b"recovery" => Some(Command::Recovery),
-        b"reboot" => Some(Command::Reboot),
-        b"poweroff" => Some(Command::PowerOff),
-        b"ping" => Some(Command::Ping),
-        b"tasks" => Some(Command::Tasks),
-        b"services" => Some(Command::Services),
-        b"drivers" => Some(Command::Drivers),
-        b"trace" => Some(Command::Trace),
-        b"inspect" => Some(Command::Inspect),
-        b"restart" => Some(Command::Restart),
-        b"cancel" => Some(Command::Cancel),
+        b"recovery" => Some(Syscall::Recovery),
+        b"reboot" => Some(Syscall::Reboot),
+        b"poweroff" => Some(Syscall::PowerOff),
+        b"ping" => Some(Syscall::Ping),
+        b"tasks" => Some(Syscall::Tasks),
+        b"services" => Some(Syscall::Services),
+        b"drivers" => Some(Syscall::Drivers),
+        b"trace" => Some(Syscall::Trace),
+        b"inspect" => Some(Syscall::Inspect),
+        b"restart" => Some(Syscall::Restart),
+        b"cancel" => Some(Syscall::Cancel),
         _ => None,
     }
 }

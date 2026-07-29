@@ -7,12 +7,12 @@ pub const PRESENT_PIXEL: u32 = 3;
 pub const PRESENT_TEXT: u32 = 4;
 pub const CLEAR_DISPLAY: u32 = 5;
 pub const COMPLETE: u32 = 6;
-pub const SUBMIT_COMMAND: u32 = 7;
+pub const SYSCALL: u32 = 7;
 pub const ACKNOWLEDGED: u32 = 1;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(u32)]
-pub enum Command {
+pub enum Syscall {
     Recovery = 1,
     Reboot,
     PowerOff,
@@ -28,7 +28,7 @@ pub enum Command {
     LayoutAzerty,
 }
 
-impl Command {
+impl Syscall {
     const fn from_raw(value: u32) -> Option<Self> {
         match value {
             1 => Some(Self::Recovery),
@@ -50,8 +50,8 @@ impl Command {
 }
 
 #[derive(Clone, Copy)]
-pub struct CommandRequest {
-    pub command: Command,
+pub struct SyscallRequest {
+    pub syscall: Syscall,
     pub argument: [u8; MAX_TEXT],
     pub length: usize,
 }
@@ -161,22 +161,22 @@ impl Context {
 
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
-    pub unsafe fn command_at(address: u64) -> Option<CommandRequest> {
+    pub unsafe fn syscall_at(address: u64) -> Option<SyscallRequest> {
         let context = unsafe { (address as *const Self).read_volatile() };
         let length = usize::try_from(context.text_length).ok()?;
-        let command = Command::from_raw(context.x)?;
+        let syscall = Syscall::from_raw(context.x)?;
         (context.abi == ABI
             && context.reserved == 0
-            && context.operation == SUBMIT_COMMAND
+            && context.operation == SYSCALL
             && context.status == ACKNOWLEDGED
             && length <= context.text.len())
-        .then_some(CommandRequest { command, argument: context.text, length })
+        .then_some(SyscallRequest { syscall, argument: context.text, length })
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
     pub unsafe fn reply_at(address: u64, reply: &[u8]) -> bool {
-        if reply.len() > MAX_TEXT || unsafe { Self::command_at(address) }.is_none() {
+        if reply.len() > MAX_TEXT || unsafe { Self::syscall_at(address) }.is_none() {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };

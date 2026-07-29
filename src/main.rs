@@ -545,7 +545,7 @@ fn kernel_main(
     coordinator.announce();
     check!(b"trace", trace::self_check());
     let native_input = native_terminal.input_endpoint();
-    let native_command = native_terminal.command_endpoint();
+    let native_command = native_terminal.syscall_endpoint();
     let mut native_scheduler = scheduler::Scheduler::new();
     let Some(native_handle) = native_scheduler.spawn(&mut native_terminal) else {
         fail!(b"native terminal task");
@@ -560,7 +560,7 @@ fn kernel_main(
             native_input.deliver(byte)
                 && native_scheduler.wake(native_handle)
                 && native_scheduler.run_next()
-                && (native_command.submission().is_none()
+                && (native_command.request().is_none()
                     || (native_command_reply(
                         native_command,
                         NativeCommandContext {
@@ -618,7 +618,7 @@ fn kernel_main(
                         console_mode = mode::ConsoleMode::Recovery;
                         break;
                     }
-                    if native_command.submission().is_some() {
+                    if native_command.request().is_some() {
                         match native_command_reply(
                             native_command,
                             NativeCommandContext {
@@ -747,7 +747,7 @@ impl CommandReply {
 ///   recovery/reboot/poweroff/ping) through `commands::dispatch`, the one
 ///   place capability checks happen.
 fn native_command_reply(
-    endpoint: native_task::CommandEndpoint,
+    endpoint: native_task::SyscallEndpoint,
     context: NativeCommandContext<'_, '_>,
 ) -> CommandReply {
     let NativeCommandContext {
@@ -771,13 +771,13 @@ fn native_command_reply(
     if request.length != 0 && argument.is_none() {
         return CommandReply::Handled(endpoint.reply(b"unknown command"));
     }
-    match request.command {
-        logos_core::native_service::Command::LayoutQwerty => {
+    match request.syscall {
+        logos_core::native_service::Syscall::LayoutQwerty => {
             let layout = input::Layout::Qwerty;
             input.set_layout(layout);
             CommandReply::Handled(endpoint.reply(b"layout qwerty"))
         }
-        logos_core::native_service::Command::LayoutAzerty => {
+        logos_core::native_service::Syscall::LayoutAzerty => {
             input.set_layout(input::Layout::Azerty);
             CommandReply::Handled(endpoint.reply(b"layout azerty"))
         }

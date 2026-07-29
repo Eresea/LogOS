@@ -32,13 +32,17 @@ impl InputEndpoint {
 }
 
 #[derive(Clone, Copy)]
-pub struct CommandEndpoint {
+pub struct SyscallEndpoint {
     context_physical: u64,
 }
 
-impl CommandEndpoint {
-    pub fn submission(self) -> Option<logos_core::native_service::CommandRequest> {
-        unsafe { logos_core::native_service::Context::command_at(self.context_physical) }
+impl SyscallEndpoint {
+    pub fn submission(self) -> Option<logos_core::native_service::SyscallRequest> {
+        self.request()
+    }
+
+    pub fn request(self) -> Option<logos_core::native_service::SyscallRequest> {
+        unsafe { logos_core::native_service::Context::syscall_at(self.context_physical) }
     }
 
     pub fn reply(self, bytes: &[u8]) -> bool {
@@ -84,8 +88,8 @@ impl<'a> Terminal<'a> {
         InputEndpoint { context_physical: self.context_physical }
     }
 
-    pub const fn command_endpoint(&self) -> CommandEndpoint {
-        CommandEndpoint { context_physical: self.context_physical }
+    pub const fn syscall_endpoint(&self) -> SyscallEndpoint {
+        SyscallEndpoint { context_physical: self.context_physical }
     }
 
     pub fn resume(&mut self) -> bool {

@@ -6,7 +6,8 @@ use crate::{
     capabilities::{CapabilityKind, CapabilityManager},
     session,
 };
-use logos_core::native_service::Command;
+use logos_core::native_service::Syscall;
+use logos_core::native_service::Syscall as Command;
 use logos_terminal::terminal::Submission;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -63,16 +64,16 @@ impl Invocation {
 /// means the name isn't a call the kernel recognizes at all -- this should
 /// only happen if something upstream is corrupted or out of sync with
 /// `logos_terminal::command`'s descriptor table.
-fn required_capability(command: Command) -> Option<CapabilityKind> {
-    match command {
-        Command::Recovery | Command::Reboot | Command::PowerOff => Some(CapabilityKind::Recovery),
-        Command::Ping | Command::Restart | Command::Cancel => Some(CapabilityKind::Service),
+fn required_capability(syscall: Syscall) -> Option<CapabilityKind> {
+    match syscall {
+        Syscall::Recovery | Syscall::Reboot | Syscall::PowerOff => Some(CapabilityKind::Recovery),
+        Syscall::Ping | Syscall::Restart | Syscall::Cancel => Some(CapabilityKind::Service),
         _ => None,
     }
 }
 
 pub fn dispatch(
-    command: Command,
+    syscall: Syscall,
     argument: Option<Submission>,
     session: &session::Context,
     capabilities: &CapabilityManager,
@@ -82,11 +83,11 @@ pub fn dispatch(
     if let Some(error) = invocation.error(now) {
         return Outcome::Error(error);
     }
-    let required = required_capability(command);
+    let required = required_capability(syscall);
     if required.is_some_and(|kind| !session.allows(capabilities, kind)) {
         return Outcome::Error(Error::Denied);
     }
-    match command {
+    match syscall {
         Command::Recovery => Outcome::Recovery,
         Command::Reboot => Outcome::Reboot,
         Command::PowerOff => Outcome::PowerOff,

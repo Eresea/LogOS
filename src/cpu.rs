@@ -189,7 +189,7 @@ extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
         return 2;
     }
     if context != 0
-        && unsafe { logos_core::native_service::Context::command_at(context) }.is_some()
+        && unsafe { logos_core::native_service::Context::syscall_at(context) }.is_some()
         && save_user_frame(frame, true)
     {
         return 2;
