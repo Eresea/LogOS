@@ -210,6 +210,7 @@ fn run_scenario(scenario: Scenario) -> Result<ResultRecord, String> {
 }
 
 fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
+    LOG_OFFSET.store(0, Ordering::Relaxed);
     let root = repo_root();
     build(&root)?;
     let efi = root.join("target/x86_64-unknown-uefi/debug/logos-uefi.efi");
