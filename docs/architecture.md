@@ -453,6 +453,11 @@ bounded reply, and returns it to the terminal. A missing Session capability is r
 dispatch. Versioned requests and effect results live in `logos-abi`; Core retains no normal-command
 registry or terminal reply switch. Recovery remains a direct Core path.
 
+Core retains a failed native task so its supervisor can reset the Core-owned context and saved
+frame, invalidate the stale generation-tagged handle, and re-enter the service. The bootstrap path
+allows one Terminal or Sessions restart before falling back to the direct recovery console; later
+native-service policies belong in the System supervisor.
+
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), and [ADR-0005](adr/0005-native-service-suspension.md).
 
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.

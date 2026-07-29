@@ -132,12 +132,12 @@ Console scope, V1 evidence, and future V2/V3 planning live in [Console](CONSOLE.
 
 ---
 
-# 7. Platform v1 — Replaceable native services in progress
+# 7. Platform v1 — Replaceable native services complete
 
 Platform scope, V1 evidence, and future planning live in [Platform](PLATFORM.md)
 
-Current sub-stage: prove terminal and Sessions service failure, restart, capability denial, and
-recovery handoff; recovery remains Core-owned.
+Terminal and Sessions now fail and restart independently with bounded Core-owned state; recovery
+remains Core-owned. Persistence v1 is the next milestone.
 
 ---
 

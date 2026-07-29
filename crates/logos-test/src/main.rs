@@ -45,6 +45,8 @@ const SCENARIOS: &[Scenario] = &[
     scenario("console/cancellation", "console"),
     scenario("console/display-restart", "console"),
     scenario("console/input-service-restart", "console"),
+    scenario("console/terminal-service-restart", "console"),
+    scenario("console/sessions-service-restart", "console"),
     scenario("console/recovery-handoff", "console"),
     scenario("platform/manifest-valid", "platform"),
     scenario("platform/manifest-invalid", "platform"),
@@ -328,6 +330,22 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
         }
         if scenario.id == "console/input-service-restart" {
             send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-restart\n")?;
+            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
+        }
+        if scenario.id == "console/terminal-service-restart" {
+            send(
+                &mut stream,
+                &mut transcript_file,
+                "LOGOS/1 INPUT assert-terminal-service-restart\n",
+            )?;
+            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
+        }
+        if scenario.id == "console/sessions-service-restart" {
+            send(
+                &mut stream,
+                &mut transcript_file,
+                "LOGOS/1 INPUT assert-sessions-service-restart\n",
+            )?;
             wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
         }
         if scenario.id == "console/cancellation" {

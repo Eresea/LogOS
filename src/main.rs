@@ -606,7 +606,7 @@ fn kernel_main(
     let native_display = native_terminal.display_endpoint();
     let native_sessions_endpoint = native_sessions.session_endpoint();
     let mut native_scheduler = scheduler::Scheduler::new();
-    let Some(native_handle) = native_scheduler.spawn(&mut native_terminal) else {
+    let Some(mut native_handle) = native_scheduler.spawn(&mut native_terminal) else {
         fail!(b"native terminal task");
     };
     if !native_scheduler.run_next() {
@@ -622,7 +622,7 @@ fn kernel_main(
     ) {
         fail!(b"native terminal display");
     }
-    let Some(sessions_handle) = native_scheduler.spawn(&mut native_sessions) else {
+    let Some(mut sessions_handle) = native_scheduler.spawn(&mut native_sessions) else {
         fail!(b"native sessions task");
     };
     if !native_scheduler.run_next() {
@@ -631,6 +631,43 @@ fn kernel_main(
     health.finish();
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(|value| {
+        let terminal_restart = value == "assert-terminal-service-restart";
+        let sessions_restart = value == "assert-sessions-service-restart";
+        if terminal_restart {
+            let previous = native_handle;
+            if !native_scheduler.fail(previous) || !startup.start() {
+                return false;
+            }
+            let Some(restarted) = restart_native_service(&mut native_scheduler, previous) else {
+                return false;
+            };
+            native_handle = restarted;
+            if native_scheduler.wake(previous)
+                || !resume_display(
+                    native_display,
+                    &session,
+                    &capabilities,
+                    session_display_capability,
+                    &mut native_scheduler,
+                    native_handle,
+                )
+            {
+                return false;
+            }
+        }
+        if sessions_restart {
+            let previous = sessions_handle;
+            if !native_scheduler.fail(previous) || !startup.start() {
+                return false;
+            }
+            let Some(restarted) = restart_native_service(&mut native_scheduler, previous) else {
+                return false;
+            };
+            sessions_handle = restarted;
+            if native_scheduler.wake(previous) {
+                return false;
+            }
+        }
         if value == "assert-sessions" {
             return native_sessions_endpoint.deliver(logos_abi::SessionRequest::new(
                 logos_abi::Syscall::Tasks,
@@ -664,23 +701,26 @@ fn kernel_main(
                 && service_lifecycle.due(tick.saturating_add(6));
         }
         let deny_display = value == "deny-display";
-        let (value, request_session, expected, expect_qwerty) = if value == "deny-recovery" {
-            ("recovery", &restricted_session, Some(b"permission denied" as &[u8]), false)
-        } else if value == "deny-layout" {
-            ("layout azerty", &restricted_session, Some(b"permission denied" as &[u8]), true)
-        } else if value == "deny-session" {
-            ("tasks", &denied_session, Some(b"permission denied" as &[u8]), false)
-        } else if value == "assert-tasks" {
-            ("tasks", &session, Some(b"scheduler active" as &[u8]), false)
-        } else if value == "assert-restart" {
-            ("restart virtio-balloon", &session, Some(b"restart scheduled" as &[u8]), false)
-        } else if value == "assert-cancel" {
-            ("cancel virtio-balloon", &session, Some(b"cancel requested" as &[u8]), false)
-        } else if deny_display {
-            ("x", &session, None, false)
-        } else {
-            (value, &session, None, false)
-        };
+        let (value, request_session, expected, expect_qwerty) =
+            if terminal_restart || sessions_restart {
+                ("tasks", &session, Some(b"scheduler active" as &[u8]), false)
+            } else if value == "deny-recovery" {
+                ("recovery", &restricted_session, Some(b"permission denied" as &[u8]), false)
+            } else if value == "deny-layout" {
+                ("layout azerty", &restricted_session, Some(b"permission denied" as &[u8]), true)
+            } else if value == "deny-session" {
+                ("tasks", &denied_session, Some(b"permission denied" as &[u8]), false)
+            } else if value == "assert-tasks" {
+                ("tasks", &session, Some(b"scheduler active" as &[u8]), false)
+            } else if value == "assert-restart" {
+                ("restart virtio-balloon", &session, Some(b"restart scheduled" as &[u8]), false)
+            } else if value == "assert-cancel" {
+                ("cancel virtio-balloon", &session, Some(b"cancel requested" as &[u8]), false)
+            } else if deny_display {
+                ("x", &session, None, false)
+            } else {
+                (value, &session, None, false)
+            };
         if deny_display {
             return logos_abi::InputEvent::from_byte(b'x').is_some_and(|event| {
                 native_input.deliver(event)
@@ -746,6 +786,9 @@ fn kernel_main(
         })
     });
     let mut console_mode = coordinator.mode();
+    // ponytail: one bootstrap retry; use supervisor policy when native services join System lifecycle.
+    let mut terminal_restart_available = true;
+    let mut sessions_restart_available = true;
     if console_mode == mode::ConsoleMode::Normal {
         debug::write_line(b"LogOS: native terminal active");
         loop {
@@ -783,6 +826,25 @@ fn kernel_main(
                             native_handle,
                         )
                     {
+                        if terminal_restart_available {
+                            terminal_restart_available = false;
+                            if let Some(restarted) =
+                                restart_native_service(&mut native_scheduler, native_handle)
+                            {
+                                native_handle = restarted;
+                                if resume_display(
+                                    native_display,
+                                    &session,
+                                    &capabilities,
+                                    session_display_capability,
+                                    &mut native_scheduler,
+                                    native_handle,
+                                ) {
+                                    debug::write_line(b"LogOS: native terminal restarted");
+                                    continue;
+                                }
+                            }
+                        }
                         debug::write_line(b"LogOS: native terminal display failed");
                         console_mode = mode::ConsoleMode::Recovery;
                         break;
@@ -793,7 +855,7 @@ fn kernel_main(
                         break;
                     }
                     if native_command.request().is_some() {
-                        match relay_session_request(
+                        let mut relay = relay_session_request(
                             native_command,
                             native_sessions_endpoint,
                             &mut native_scheduler,
@@ -811,7 +873,22 @@ fn kernel_main(
                                 service_capability,
                                 service: virtio_handle,
                             },
-                        ) {
+                        );
+                        if matches!(relay, SessionRelay::Handled(false))
+                            && sessions_restart_available
+                        {
+                            sessions_restart_available = false;
+                            if let Some(restarted) =
+                                restart_native_service(&mut native_scheduler, sessions_handle)
+                            {
+                                sessions_handle = restarted;
+                                debug::write_line(b"LogOS: native Sessions restarted");
+                                relay = SessionRelay::Handled(
+                                    native_command.reply(b"session restarted; retry command"),
+                                );
+                            }
+                        }
+                        match relay {
                             SessionRelay::Recovery => {
                                 debug::write_line(b"LogOS: recovery handoff requested");
                                 console_mode = mode::ConsoleMode::Recovery;
@@ -835,7 +912,7 @@ fn kernel_main(
         }
     }
     if console_mode == mode::ConsoleMode::Recovery {
-        startup.start();
+        let _ = startup.start();
         let mut console = console::Shell::from_startup(
             startup,
             console::Endpoint::new(
@@ -927,6 +1004,17 @@ impl SessionRelay {
             Self::Recovery => true,
         }
     }
+}
+
+fn restart_native_service(
+    scheduler: &mut scheduler::Scheduler<'_>,
+    handle: scheduler::TaskHandle,
+) -> Option<scheduler::TaskHandle> {
+    if !scheduler.failed(handle) && !scheduler.fail(handle) {
+        return None;
+    }
+    let restarted = scheduler.restart(handle)?;
+    (scheduler.run_next() && !scheduler.failed(restarted)).then_some(restarted)
 }
 
 fn relay_session_request(

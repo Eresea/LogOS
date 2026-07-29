@@ -1,10 +1,10 @@
 # Platform
 
-> **Status:** Native Ring-3 terminal and Sessions boundaries implemented; failure/restart proofs remain
+> **Status:** Platform v1 complete
 > **Owner:** Foundation and System
 
 Platform provides the bootstrap mechanisms for supervised native services: identities,
-capabilities, health, versioned contracts, isolated address spaces, and Core-owned suspension at service gates. The normal terminal is the first separately loaded native service; general capability-only service contracts remain pending.
+capabilities, health, versioned contracts, isolated address spaces, Core-owned suspension, and bounded restart at service gates. The Terminal and Sessions payloads are the first separately loaded native services; broader service extraction remains future work.
 
 ## Implemented bootstrap
 
@@ -43,7 +43,7 @@ capabilities, health, versioned contracts, isolated address spaces, and Core-own
 - [x] Requests carry principal and capability context; failures reclaim and restart without reboot.
 - [x] QEMU verifies bootstrap normal boot, startup rejection, dependency loss, runtime recovery, and replacement.
 - [x] QEMU proves an independently loaded terminal service can start, redraw, and execute bounded commands.
-- [ ] QEMU proves service failure, restart, and capability denial without compromising Core.
+- [x] QEMU proves Terminal and Sessions failure, restart, capability denial, and direct recovery availability without compromising Core.
 
 ## V2 — Unplanned
 

@@ -17,7 +17,7 @@ The execution boundary and initial service contracts exist. Remaining work:
 1. [x] Define the minimal versioned Input, Display, and Session capability contracts required by `logos-terminal`.
 2. [x] Replace the bounded Core context gate with those contracts without granting raw framebuffer or PS/2 access.
 3. [x] Move normal command/session dispatch out of Core while keeping privileged execution capability-gated.
-4. Prove terminal-service failure, restart, capability denial, and recovery handoff in headless QEMU.
+4. [x] Prove Terminal and Sessions failure, restart, capability denial, and recovery handoff in headless QEMU.
 5. Only then move further bootstrap services out of `logos-uefi`; keep the recovery console kernel-owned.
 
 ## 3. Documentation debt (cheap, should happen soon)

@@ -27,6 +27,8 @@ const IMPLEMENTED: &[&str] = &[
     "console/cancellation",
     "console/display-restart",
     "console/input-service-restart",
+    "console/terminal-service-restart",
+    "console/sessions-service-restart",
     "console/recovery-handoff",
     "platform/manifest-valid",
     "platform/manifest-invalid",

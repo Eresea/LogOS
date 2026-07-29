@@ -21,7 +21,7 @@ UEFI firmware
 
 ## Current point
 
-Core v1 is complete. The kernel exits UEFI boot services, initializes physical memory and reversible virtual mappings, receives PS/2 and ACPI-routed VirtIO interrupts through its IDT, runs cooperative ready/blocked tasks, enforces capability-gated IPC, and reclaims service-owned resources. It then stages, relocates, maps, and starts the normal terminal as a separate Ring-3 payload; keyboard, presentation, and typed commands cross the bounded bootstrap gate. Recovery framebuffer output remains dormant unless normal-terminal startup fails or an authorized handoff requests it. Every stage added later must state its dependencies, failure mode, and recovery path.
+Core v1 is complete. The kernel exits UEFI boot services, initializes physical memory and reversible virtual mappings, receives PS/2 and ACPI-routed VirtIO interrupts through its IDT, runs cooperative ready/blocked tasks, enforces capability-gated IPC, and reclaims service-owned resources. It then stages, relocates, maps, and starts separate Ring-3 Terminal and Sessions payloads; keyboard, presentation, session requests, and typed effects cross bounded Core gates. Recovery framebuffer output remains dormant unless normal-service startup fails or an authorized handoff requests it. Every stage added later must state its dependencies, failure mode, and recovery path.
 
 The first Platform v1 loader stage creates a separate service PML4 after physical memory is ready
 and before service startup. It depends on the existing kernel map and allocator; an allocation or
@@ -38,4 +38,5 @@ The fourth stage starts the staged Ring-3 terminal through the service gate afte
 installed. Core routes normal input, presentation, and bounded command requests through that gate;
 the terminal handles local redraw while Core delegates system operations to ACPI or platform IPC.
 Escape or the authorized `recovery` command returns to the direct recovery console. A failed
-transition refuses normal-terminal startup and leaves recovery available.
+Terminal or Sessions task gets one reset-and-reentry attempt with a new generation-tagged handle;
+a failed restart enters the direct recovery console.

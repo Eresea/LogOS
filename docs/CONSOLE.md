@@ -1,6 +1,6 @@
 # Console
 
-> **Status:** Ring-3 terminal and Sessions services active; failure/restart proofs remain
+> **Status:** Console v1 complete
 > **Owner:** Sessions (normal terminal and command replies); Core (privileged effects and recovery console)
 
 Console is LogOS's local textual interface. The normal terminal consumes bounded command results; the kernel recovery console is an independent fallback.
@@ -35,7 +35,7 @@ Console is LogOS's local textual interface. The normal terminal consumes bounded
 - [x] Recovery remains available on startup/redraw failure and authorized live handoff.
 - [x] Headless QEMU boots the separately loaded Ring-3 terminal, redraws it, and executes its command path.
 - [x] Recovery remains the direct fallback on normal-startup failure and authorized handoff.
-- [ ] QEMU proves terminal-service failure, restart, and capability denial without compromising Core.
+- [x] QEMU proves Terminal and Sessions service failure, restart, capability denial, and direct recovery availability without compromising Core.
 
 ## Next required boundary
 

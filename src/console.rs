@@ -142,9 +142,10 @@ impl Startup {
         )
     }
 
-    pub fn start(&mut self) {
+    pub fn start(&mut self) -> bool {
         self.console.reset();
         self.console.write(b"LOGOS STARTUP HEALTH\n");
+        true
     }
 }
 

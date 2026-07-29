@@ -194,12 +194,24 @@ impl Runnable for Service<'_> {
             return TaskState::Complete;
         }
         if !self.started {
-            return if self.start() { TaskState::Blocked(self.event) } else { TaskState::Complete };
+            return if self.start() { TaskState::Blocked(self.event) } else { TaskState::Failed };
         }
         if self.resume() {
             if self.complete { TaskState::Complete } else { TaskState::Blocked(self.event) }
         } else {
-            TaskState::Complete
+            TaskState::Failed
         }
+    }
+
+    fn restart(&mut self) -> bool {
+        if !unsafe { logos_core::native_service::Context::reset_at(self.context_physical) } {
+            return false;
+        }
+        self.started = false;
+        self.blocked = false;
+        self.event = Event::INPUT;
+        self.complete = false;
+        self.gate = crate::cpu::GateState::new();
+        true
     }
 }

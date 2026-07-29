@@ -1,3 +1,5 @@
+use core::mem::align_of;
+
 pub const MAGIC: [u8; 4] = *b"LGSV";
 pub const ABI: u16 = 3;
 pub const MAX_TEXT: usize = 256;
@@ -50,6 +52,16 @@ impl Context {
             text_length: 0,
             text: [0; MAX_TEXT],
         }
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn reset_at(address: u64) -> bool {
+        if address == 0 || !address.is_multiple_of(align_of::<Self>() as u64) {
+            return false;
+        }
+        unsafe { (address as *mut Self).write_volatile(Self::new()) };
+        true
     }
 
     /// # Safety
@@ -350,6 +362,9 @@ pub fn self_check() -> bool {
     syscall.text_length = 2;
     let reply = unsafe { Context::session_reply_at((&syscall as *const Context) as u64) }
         .is_some_and(|reply| reply.length == 2 && reply.text[..2] == *b"ok");
+    let reset = unsafe { Context::reset_at((&mut syscall as *mut Context) as u64) }
+        && syscall.abi == ABI
+        && syscall.operation == 0;
     Header::new(*b"terminal\0\0\0\0\0\0\0\0", self_check_entry).valid_for(b"terminal")
         && !Header::new(*b"terminal\0\0\0\0\0\0\0\0", self_check_entry).valid_for(b"other")
         && valid
@@ -358,6 +373,7 @@ pub fn self_check() -> bool {
         && delivered
         && effect
         && reply
+        && reset
 }
 
 extern "C" fn self_check_entry(_: *mut Context) -> ! {
