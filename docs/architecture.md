@@ -431,6 +431,14 @@ request and rasterizes it through the Core-owned framebuffer; native services ne
 The QEMU native-terminal proof injects a PS/2 key through QMP, then Core normalizes and delivers it
 through the task's input endpoint before resuming Ring 3.
 
+### Platform v1 Input contract
+
+The first bootstrap-gate replacement is `foundation.input` v1. It carries one bounded typed input
+event (`Text`, `Backspace`, `Enter`, or `Escape`) and accepts one typed layout request (`Qwerty` or
+`Azerty`). Core retains the PS/2 driver and recovery input path, enforces the terminal's explicit
+Input capability, and never exposes PS/2 ports or scancodes to the terminal. Display and Session
+remain bootstrap-gate operations until their own versioned contracts exist.
+
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), and [ADR-0005](adr/0005-native-service-suspension.md).
 
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
