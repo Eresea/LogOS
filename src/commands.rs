@@ -103,7 +103,7 @@ pub fn dispatch(
             argument.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Restart)
         }
         Command::Cancel => argument.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Cancel),
-        Command::LayoutQwerty | Command::LayoutAzerty => Outcome::Error(Error::UnknownCommand),
+        Command::SetInputLayout => Outcome::Error(Error::UnknownCommand),
     }
 }
 

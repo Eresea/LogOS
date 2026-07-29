@@ -24,8 +24,7 @@ pub enum Syscall {
     Inspect,
     Restart,
     Cancel,
-    LayoutQwerty,
-    LayoutAzerty,
+    SetInputLayout,
 }
 
 impl Syscall {
@@ -42,14 +41,13 @@ impl Syscall {
             9 => Some(Self::Inspect),
             10 => Some(Self::Restart),
             11 => Some(Self::Cancel),
-            12 => Some(Self::LayoutQwerty),
-            13 => Some(Self::LayoutAzerty),
+            12 => Some(Self::SetInputLayout),
             _ => None,
         }
     }
 
     const fn takes_argument(self) -> bool {
-        matches!(self, Self::Inspect | Self::Restart | Self::Cancel)
+        matches!(self, Self::Inspect | Self::Restart | Self::Cancel | Self::SetInputLayout)
     }
 }
 

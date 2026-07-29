@@ -48,12 +48,17 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
                                 let _ = terminal.write_output(line);
                             }
                         }
-                        Resolution::Local(Local::Layout(layout)) => submit(
+                        Resolution::Local(Local::Layout(layout)) => submit_with_argument(
                             context,
-                            match layout {
-                                logos_terminal::input::Layout::Qwerty => Syscall::LayoutQwerty,
-                                logos_terminal::input::Layout::Azerty => Syscall::LayoutAzerty,
-                            },
+                            Syscall::SetInputLayout,
+                            &[match layout {
+                                logos_terminal::input::Layout::Qwerty => {
+                                    logos_abi::InputLayout::Qwerty.wire()
+                                }
+                                logos_terminal::input::Layout::Azerty => {
+                                    logos_abi::InputLayout::Azerty.wire()
+                                }
+                            }],
                             &mut terminal,
                         ),
                         Resolution::Call(call) => match call_command(call) {
@@ -77,10 +82,6 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
     loop {
         core::hint::spin_loop();
     }
-}
-
-unsafe fn submit(context: *mut Context, syscall: Syscall, terminal: &mut Model) {
-    unsafe { submit_with_argument(context, syscall, &[], terminal) }
 }
 
 unsafe fn submit_call(context: *mut Context, syscall: Syscall, call: Call, terminal: &mut Model) {

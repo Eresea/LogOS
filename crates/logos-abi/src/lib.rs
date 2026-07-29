@@ -36,6 +36,23 @@ pub enum InputLayout {
     Azerty = 2,
 }
 
+impl InputLayout {
+    pub const fn wire(self) -> u8 {
+        match self {
+            Self::Qwerty => b'q',
+            Self::Azerty => b'a',
+        }
+    }
+
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            b'q' => Some(Self::Qwerty),
+            b'a' => Some(Self::Azerty),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Service {

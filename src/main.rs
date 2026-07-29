@@ -311,6 +311,10 @@ fn kernel_main(
     else {
         fail!(b"capabilities");
     };
+    let Some(session_input_capability) = capabilities.grant(capabilities::CapabilityKind::Input)
+    else {
+        fail!(b"capabilities");
+    };
     let Some(recovery_capability) = capabilities.grant(capabilities::CapabilityKind::Recovery)
     else {
         fail!(b"capabilities");
@@ -318,7 +322,7 @@ fn kernel_main(
     let Some(session) = session::Context::new(
         session::Id(1),
         session::Principal::LOCAL,
-        &[recovery_capability, session_service_capability],
+        &[recovery_capability, session_service_capability, session_input_capability],
     ) else {
         fail!(b"session");
     };
@@ -792,14 +796,24 @@ fn native_syscall_reply(
         return CommandReply::Handled(endpoint.reply(b"unknown command"));
     }
     match request.syscall {
-        logos_core::native_service::Syscall::LayoutQwerty => {
-            let layout = input::Layout::Qwerty;
-            input.set_layout(layout);
-            CommandReply::Handled(endpoint.reply(b"layout qwerty"))
-        }
-        logos_core::native_service::Syscall::LayoutAzerty => {
-            input.set_layout(input::Layout::Azerty);
-            CommandReply::Handled(endpoint.reply(b"layout azerty"))
+        logos_core::native_service::Syscall::SetInputLayout => {
+            let layout = argument
+                .filter(|argument| argument.as_bytes().len() == 1)
+                .and_then(|argument| logos_abi::InputLayout::from_wire(argument.as_bytes()[0]));
+            if !session.allows(capabilities, capabilities::CapabilityKind::Input) {
+                CommandReply::Handled(endpoint.reply(b"permission denied"))
+            } else if let Some(layout) = layout {
+                input.set_layout(match layout {
+                    logos_abi::InputLayout::Qwerty => input::Layout::Qwerty,
+                    logos_abi::InputLayout::Azerty => input::Layout::Azerty,
+                });
+                CommandReply::Handled(endpoint.reply(match layout {
+                    logos_abi::InputLayout::Qwerty => b"layout qwerty",
+                    logos_abi::InputLayout::Azerty => b"layout azerty",
+                }))
+            } else {
+                CommandReply::Handled(endpoint.reply(b"unknown command"))
+            }
         }
         command => match commands::dispatch(
             command,
