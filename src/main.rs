@@ -94,7 +94,7 @@ fn kernel_main(
     acpi: Option<acpi::Tables>,
     machine: identity::Machine,
     wall_clock: time::WallClock,
-    payload: Option<payload::Payload>,
+    payload: Option<payload::Payloads>,
 ) -> ! {
     let health = health::Startup::new();
     trace::record(trace::Event::Boot);
@@ -202,9 +202,10 @@ fn kernel_main(
             && service_address_space.verifies_isolation()
             && service_address_space.release(&mut memory),
     );
-    let Some(payload) = payload else {
+    let Some(payloads) = payload else {
         fail!(b"native image map");
     };
+    let payload = payloads.terminal;
     let Some(mut service_address_space) = address_space::AddressSpace::new(&mut memory) else {
         fail!(b"native image map");
     };
@@ -214,6 +215,16 @@ fn kernel_main(
             .map_image(&mut memory, payload)
             .is_some_and(|entry| entry != 0 && service_address_space.verifies_isolation())
             && service_address_space.release(&mut memory),
+    );
+    let Some(mut sessions_address_space) = address_space::AddressSpace::new(&mut memory) else {
+        fail!(b"sessions image map");
+    };
+    check!(
+        b"sessions image map",
+        sessions_address_space
+            .map_image(&mut memory, payloads.sessions)
+            .is_some_and(|entry| entry != 0 && sessions_address_space.verifies_isolation())
+            && sessions_address_space.release(&mut memory),
     );
     let keyboard_interrupts = interrupts::install(madt);
     interrupts::enable();

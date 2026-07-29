@@ -5,22 +5,27 @@ use uefi::{
     cstr16,
     proto::{
         loaded_image::LoadedImage,
-        media::file::{File, FileAttribute, FileMode},
+        media::file::{File, FileAttribute, FileMode, RegularFile},
     },
 };
 
 const MAX_PAYLOAD: usize = 512 * 1024;
-const NAME: &[u8] = b"terminal";
-
 struct Buffer(UnsafeCell<[u8; MAX_PAYLOAD]>);
 unsafe impl Sync for Buffer {}
-static PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
+static TERMINAL_PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
+static SESSIONS_PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
 
 #[derive(Clone, Copy)]
 pub struct Payload {
     base: *const u8,
     image: crate::pe::Image,
     entry_rva: u32,
+}
+
+#[derive(Clone, Copy)]
+pub struct Payloads {
+    pub terminal: Payload,
+    pub sessions: Payload,
 }
 
 impl Payload {
@@ -111,18 +116,29 @@ impl Payload {
     }
 }
 
-pub fn stage() -> Option<Payload> {
+pub fn stage() -> Option<Payloads> {
     let Ok(mut file_system) = boot::get_image_file_system(boot::image_handle()) else {
         return None;
     };
     let Ok(mut root) = file_system.open_volume() else {
         return None;
     };
-    let mut file = root
+    let mut terminal = root
         .open(cstr16!(r"\EFI\LOGOS\TERMINAL.EFI"), FileMode::Read, FileAttribute::empty())
         .ok()
         .and_then(|file| file.into_regular_file())?;
-    let buffer = unsafe { &mut *PAYLOAD.0.get() };
+    let terminal_buffer = unsafe { &mut *TERMINAL_PAYLOAD.0.get() };
+    let terminal = load(&mut terminal, terminal_buffer, b"terminal")?;
+    let mut sessions = root
+        .open(cstr16!(r"\EFI\LOGOS\SESSIONS.EFI"), FileMode::Read, FileAttribute::empty())
+        .ok()
+        .and_then(|file| file.into_regular_file())?;
+    let sessions_buffer = unsafe { &mut *SESSIONS_PAYLOAD.0.get() };
+    let sessions = load(&mut sessions, sessions_buffer, b"sessions")?;
+    Some(Payloads { terminal, sessions })
+}
+
+fn load(file: &mut RegularFile, buffer: &mut [u8; MAX_PAYLOAD], name: &[u8]) -> Option<Payload> {
     let Ok(length) = file.read(buffer) else {
         return None;
     };
@@ -152,7 +168,7 @@ pub fn stage() -> Option<Payload> {
     };
     let header = image.windows(core::mem::size_of::<Header>()).find_map(|bytes| {
         let header = unsafe { (bytes.as_ptr().cast::<Header>()).read_unaligned() };
-        header.valid_for(NAME).then_some(header)
+        header.valid_for(name).then_some(header)
     })?;
     let entry = header.entry_address();
     let base_address = base as usize;
