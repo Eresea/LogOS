@@ -1,0 +1,8 @@
+[package]
+name = "logos-sessions-service"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+logos-core = { path = "../logos-core" }
+uefi = { version = "0.35", features = ["panic_handler"] }

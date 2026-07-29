@@ -13,10 +13,12 @@ if (-not (Test-Path $ovmf)) { throw "Set OVMF_CODE to an EDK2/OVMF firmware file
 
 cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-uefi --target x86_64-unknown-uefi $(if ($Release) { "--release" })
 cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-terminal-service --target x86_64-unknown-uefi $(if ($Release) { "--release" })
+cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-sessions-service --target x86_64-unknown-uefi $(if ($Release) { "--release" })
 New-Item -ItemType Directory -Force "$esp\EFI\BOOT" | Out-Null
 New-Item -ItemType Directory -Force "$esp\EFI\LOGOS" | Out-Null
 Copy-Item $efi "$esp\EFI\BOOT\BOOTX64.EFI" -Force
 Copy-Item (Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-terminal-service.efi") "$esp\EFI\LOGOS\TERMINAL.EFI" -Force
+Copy-Item (Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-sessions-service.efi") "$esp\EFI\LOGOS\SESSIONS.EFI" -Force
 $qemuArgs = @(
     '-machine', 'q35', '-m', '256M',
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",

@@ -38,6 +38,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos-sessions-service"
+version = "0.1.0"
+dependencies = [
+ "logos-core",
+ "uefi",
+]
+
+[[package]]
 name = "logos-terminal"
 version = "0.1.0"
 

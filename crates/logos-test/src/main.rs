@@ -212,9 +212,11 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
     fs::create_dir_all(&esp).map_err(io_error)?;
     fs::copy(&efi, esp.join("BOOTX64.EFI")).map_err(io_error)?;
     let payload = root.join("target/x86_64-unknown-uefi/debug/logos-terminal-service.efi");
+    let sessions_payload = root.join("target/x86_64-unknown-uefi/debug/logos-sessions-service.efi");
     let payload_dir = artifacts.join("esp/EFI/LOGOS");
     fs::create_dir_all(&payload_dir).map_err(io_error)?;
     fs::copy(payload, payload_dir.join("TERMINAL.EFI")).map_err(io_error)?;
+    fs::copy(sessions_payload, payload_dir.join("SESSIONS.EFI")).map_err(io_error)?;
     fs::write(
         artifacts.join("image.hash"),
         format!("{:016x}\n", fnv(&fs::read(&efi).map_err(io_error)?)),
@@ -376,7 +378,15 @@ fn build(root: &Path) -> Result<(), String> {
         .args(["build", "--package", "logos-terminal-service", "--target", "x86_64-unknown-uefi"])
         .status()
         .map_err(io_error)?;
-    if status.success() { Ok(()) } else { Err("terminal service build failed".into()) }
+    if !status.success() {
+        return Err("terminal service build failed".into());
+    }
+    let status = Command::new("cargo")
+        .current_dir(root)
+        .args(["build", "--package", "logos-sessions-service", "--target", "x86_64-unknown-uefi"])
+        .status()
+        .map_err(io_error)?;
+    if status.success() { Ok(()) } else { Err("sessions service build failed".into()) }
 }
 
 fn accept_until(
