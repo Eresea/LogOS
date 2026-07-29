@@ -136,6 +136,9 @@ Console scope, V1 evidence, and future V2/V3 planning live in [Console](CONSOLE.
 
 Platform scope, V1 evidence, and future planning live in [Platform](PLATFORM.md)
 
+Current sub-stage: move normal command/session dispatch from the bootstrap gate into a separately
+loaded Sessions service; recovery remains Core-owned.
+
 ---
 
 # 8. Persistence v1 — Durable system state
