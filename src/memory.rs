@@ -11,6 +11,31 @@ impl Page {
     }
 }
 
+pub struct Contiguous {
+    start: u64,
+    pages: usize,
+}
+
+impl Contiguous {
+    pub const fn address(&self) -> u64 {
+        self.start
+    }
+
+    pub const fn pages(&self) -> usize {
+        self.pages
+    }
+
+    pub fn release(self, memory: &mut PhysicalMemory) -> bool {
+        (0..self.pages).all(|index| {
+            u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_mul(PAGE_SIZE))
+                .and_then(|offset| self.start.checked_add(offset))
+                .is_some_and(|address| memory.release_page(Page(address)))
+        })
+    }
+}
+
 pub struct PhysicalMemory {
     ranges: [Option<Range>; RANGES],
     free_head: u64,
@@ -70,6 +95,27 @@ impl PhysicalMemory {
         }
     }
 
+    pub fn allocate_contiguous(&mut self, pages: usize) -> Option<Contiguous> {
+        let bytes = u64::try_from(pages).ok()?.checked_mul(PAGE_SIZE)?;
+        if pages == 0 {
+            return None;
+        }
+        while self.current < RANGES {
+            let Some(range) = &mut self.ranges[self.current] else {
+                self.current += 1;
+                continue;
+            };
+            let end = range.next.checked_add(bytes)?;
+            if end <= range.end {
+                let start = range.next;
+                range.next = end;
+                return Some(Contiguous { start, pages });
+            }
+            self.current += 1;
+        }
+        None
+    }
+
     pub fn release_page(&mut self, page: Page) -> bool {
         if !self.ranges.iter().flatten().any(|range| page.0 >= range.start && page.0 < range.end) {
             return false;
@@ -93,8 +139,8 @@ impl PhysicalMemory {
 pub fn self_check() -> bool {
     let mut memory = PhysicalMemory {
         ranges: [
-            Some(Range { start: 0x1000, next: 0x1000, end: 0x2000 }),
-            Some(Range { start: 0x3000, next: 0x3000, end: 0x4000 }),
+            Some(Range { start: 0x1000, next: 0x1000, end: 0x4000 }),
+            None,
             None,
             None,
             None,
@@ -105,7 +151,10 @@ pub fn self_check() -> bool {
         free_head: 0,
         current: 0,
     };
-    memory.allocate_owned().is_some_and(|page| page.address() == 0x1000)
+    let contiguous = memory.allocate_contiguous(2);
+    contiguous.as_ref().is_some_and(|pages| pages.address() == 0x1000 && pages.pages() == 2)
+        && contiguous.is_some_and(|pages| pages.release(&mut memory))
+        && memory.allocate_owned().is_some_and(|page| page.address() == 0x2000)
         && memory.allocate_page() == Some(0x3000)
         && memory.allocate_page().is_none()
 }
