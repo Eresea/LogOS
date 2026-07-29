@@ -41,6 +41,7 @@ dependencies = [
 name = "logos-sessions-service"
 version = "0.1.0"
 dependencies = [
+ "logos-abi",
  "logos-core",
  "uefi",
 ]

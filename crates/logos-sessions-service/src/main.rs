@@ -21,8 +21,13 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
             asm!("int 0x80");
             if (*context).input == 1 {
                 (*context).text = [0; MAX_TEXT];
-                (&mut (*context).text)[..14].copy_from_slice(b"sessions ready");
-                (*context).text_length = 14;
+                let reply = if (*context).x == logos_abi::Syscall::Tasks as u32 {
+                    b"scheduler active" as &[u8]
+                } else {
+                    b"unknown command"
+                };
+                (&mut (*context).text)[..reply.len()].copy_from_slice(reply);
+                (*context).text_length = reply.len() as u32;
                 (*context).operation = SESSION_REPLY;
                 asm!("int 0x80");
             }

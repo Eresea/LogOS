@@ -598,6 +598,7 @@ fn kernel_main(
     let native_input = native_terminal.input_endpoint();
     let native_command = native_terminal.syscall_endpoint();
     let native_display = native_terminal.display_endpoint();
+    let native_sessions_endpoint = native_sessions.session_endpoint();
     let mut native_scheduler = scheduler::Scheduler::new();
     let Some(native_handle) = native_scheduler.spawn(&mut native_terminal) else {
         fail!(b"native terminal task");
@@ -615,7 +616,7 @@ fn kernel_main(
     ) {
         fail!(b"native terminal display");
     }
-    let Some(_sessions_handle) = native_scheduler.spawn(&mut native_sessions) else {
+    let Some(sessions_handle) = native_scheduler.spawn(&mut native_sessions) else {
         fail!(b"native sessions task");
     };
     if !native_scheduler.run_next() {
@@ -624,6 +625,18 @@ fn kernel_main(
     health.finish();
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(|value| {
+        if value == "assert-sessions" {
+            return native_sessions_endpoint.deliver(logos_abi::SessionRequest::new(
+                logos_abi::Syscall::Tasks,
+                [0; logos_abi::MAX_SESSION_TEXT],
+                0,
+            )) && native_scheduler.wake(sessions_handle)
+                && native_scheduler.run_next()
+                && native_sessions_endpoint.reply().is_some_and(|reply| {
+                    reply.length == b"scheduler active".len()
+                        && reply.text[..reply.length] == *b"scheduler active"
+                });
+        }
         if value == "assert-crash-restart" {
             let tick = interrupts::ticks();
             return service_lifecycle.failed(tick) && service_lifecycle.due(tick.saturating_add(2));
@@ -764,6 +777,30 @@ fn kernel_main(
                         break;
                     }
                     if native_command.request().is_some() {
+                        if native_command
+                            .request()
+                            .is_some_and(|request| request.syscall == logos_abi::Syscall::Tasks)
+                        {
+                            let Some(request) = native_command.request() else {
+                                console_mode = mode::ConsoleMode::Recovery;
+                                break;
+                            };
+                            if !session.allows(&capabilities, capabilities::CapabilityKind::Session)
+                                || !native_sessions_endpoint.deliver(request)
+                                || !native_scheduler.wake(sessions_handle)
+                                || !native_scheduler.run_next()
+                                || !native_sessions_endpoint.reply().is_some_and(|reply| {
+                                    native_command.reply(&reply.text[..reply.length])
+                                })
+                                || !native_scheduler.wake(native_handle)
+                                || !native_scheduler.run_next()
+                            {
+                                debug::write_line(b"LogOS: Sessions relay failed");
+                                console_mode = mode::ConsoleMode::Recovery;
+                                break;
+                            }
+                            continue;
+                        }
                         match native_syscall_reply(
                             native_command,
                             NativeCommandContext {

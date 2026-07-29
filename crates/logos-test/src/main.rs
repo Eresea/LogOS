@@ -323,6 +323,8 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
         if scenario.id == "console/structured-command" {
             send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-tasks\n")?;
             wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
+            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-sessions\n")?;
+            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
         }
         if scenario.id == "console/input-service-restart" {
             send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-restart\n")?;

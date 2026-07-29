@@ -41,6 +41,11 @@ pub struct SyscallEndpoint {
 }
 
 #[derive(Clone, Copy)]
+pub struct SessionEndpoint {
+    context_physical: u64,
+}
+
+#[derive(Clone, Copy)]
 pub struct DisplayEndpoint {
     context_physical: u64,
 }
@@ -71,6 +76,18 @@ impl SyscallEndpoint {
     pub fn reply_matches(self, expected: &[u8]) -> bool {
         unsafe { logos_core::native_service::Context::response_at(self.context_physical) }
             .is_some_and(|response| response.text[..response.length] == *expected)
+    }
+}
+
+impl SessionEndpoint {
+    pub fn deliver(self, request: logos_abi::SessionRequest) -> bool {
+        unsafe {
+            logos_core::native_service::Context::deliver_session_at(self.context_physical, request)
+        }
+    }
+
+    pub fn reply(self) -> Option<logos_abi::SessionReply> {
+        unsafe { logos_core::native_service::Context::session_reply_at(self.context_physical) }
     }
 }
 
@@ -120,6 +137,10 @@ impl<'a> Service<'a> {
 
     pub const fn display_endpoint(&self) -> DisplayEndpoint {
         DisplayEndpoint { context_physical: self.context_physical }
+    }
+
+    pub const fn session_endpoint(&self) -> SessionEndpoint {
+        SessionEndpoint { context_physical: self.context_physical }
     }
 
     pub fn resume(&mut self) -> bool {
