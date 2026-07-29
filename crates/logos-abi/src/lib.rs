@@ -66,6 +66,29 @@ impl SessionRequest {
     }
 }
 
+/// Bounded `foundation.session` v1 reply returned to a terminal client.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct SessionReply {
+    pub text: [u8; MAX_SESSION_TEXT],
+    pub length: usize,
+}
+
+impl SessionReply {
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > MAX_SESSION_TEXT {
+            return None;
+        }
+        let mut text = [0; MAX_SESSION_TEXT];
+        text[..bytes.len()].copy_from_slice(bytes);
+        Some(Self { text, length: bytes.len() })
+    }
+
+    pub const fn valid(self) -> bool {
+        self.length <= self.text.len()
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct InputEvent(u8);
@@ -218,4 +241,5 @@ pub fn self_check() -> bool {
         && Syscall::from_wire(0).is_none()
         && SessionRequest::new(Syscall::Inspect, [0; MAX_SESSION_TEXT], 1).valid()
         && !SessionRequest::new(Syscall::Reboot, [0; MAX_SESSION_TEXT], 1).valid()
+        && SessionReply::from_bytes(b"ok").is_some_and(|reply| reply.valid() && reply.length == 2)
 }
