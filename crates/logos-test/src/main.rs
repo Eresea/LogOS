@@ -4,6 +4,7 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -76,6 +77,8 @@ const SCENARIOS: &[Scenario] = &[
     future("network/reset-reconnect", "network"),
     future("network/unauthorized-operation", "network"),
 ];
+
+static LOG_OFFSET: AtomicUsize = AtomicUsize::new(0);
 
 const fn scenario(id: &'static str, suite: &'static str) -> Scenario {
     Scenario { id, suite, timeout: 20, implemented: true }
@@ -433,10 +436,12 @@ fn accept_until(
 
 fn wait_file(path: &Path, deadline: Instant, expected: &str) -> Result<(), String> {
     while Instant::now() < deadline {
-        if fs::read_to_string(path)
-            .is_ok_and(|contents| contents.lines().any(|line| line.starts_with(expected)))
-        {
-            return Ok(());
+        if let Ok(contents) = fs::read_to_string(path) {
+            let offset = LOG_OFFSET.load(Ordering::Relaxed).min(contents.len());
+            if contents[offset..].lines().any(|line| line.starts_with(expected)) {
+                LOG_OFFSET.store(contents.len(), Ordering::Relaxed);
+                return Ok(());
+            }
         }
         std::thread::sleep(Duration::from_millis(20));
     }

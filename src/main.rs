@@ -779,6 +779,14 @@ fn kernel_main(
                             && (!expect_qwerty || input.layout() == input::Layout::Qwerty)
                             && native_scheduler.wake(native_handle)
                             && native_scheduler.run_next()
+                            && resume_display(
+                                native_display,
+                                &session,
+                                &capabilities,
+                                session_display_capability,
+                                &mut native_scheduler,
+                                native_handle,
+                            )
                     }))
         })
     });
@@ -896,8 +904,21 @@ fn kernel_main(
                                 break;
                             }
                             SessionRelay::Handled(true) => {
-                                let _ = native_scheduler.wake(native_handle)
-                                    && native_scheduler.run_next();
+                                if !native_scheduler.wake(native_handle)
+                                    || !native_scheduler.run_next()
+                                    || !resume_display(
+                                        native_display,
+                                        &session,
+                                        &capabilities,
+                                        session_display_capability,
+                                        &mut native_scheduler,
+                                        native_handle,
+                                    )
+                                {
+                                    debug::write_line(b"LogOS: native terminal display failed");
+                                    console_mode = mode::ConsoleMode::Recovery;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1036,8 +1057,11 @@ fn relay_session_request(
     if !sessions.reply_effect(result) || !scheduler.wake(sessions_handle) || !scheduler.run_next() {
         return SessionRelay::Handled(false);
     }
-    let forwarded =
-        sessions.reply().is_some_and(|reply| terminal.reply(&reply.text[..reply.length]));
+    let forwarded = sessions.reply().is_some_and(|reply| {
+        terminal.reply(&reply.text[..reply.length])
+            && scheduler.wake(sessions_handle)
+            && scheduler.run_next()
+    });
     if result == logos_abi::EffectResult::Recovery && forwarded {
         SessionRelay::Recovery
     } else {
