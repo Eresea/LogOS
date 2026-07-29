@@ -39,6 +39,7 @@ const SCENARIOS: &[Scenario] = &[
     scenario("console/history", "console"),
     scenario("console/structured-command", "console"),
     scenario("console/capability-denied", "console"),
+    scenario("console/input-capability-denied", "console"),
     scenario("console/cancellation", "console"),
     scenario("console/display-restart", "console"),
     scenario("console/input-service-restart", "console"),
@@ -301,6 +302,10 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
         }
         if scenario.id == "console/capability-denied" {
             send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT deny-recovery\n")?;
+            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
+        }
+        if scenario.id == "console/input-capability-denied" {
+            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT deny-layout\n")?;
             wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
         }
         send(&mut stream, &mut transcript_file, &format!("LOGOS/1 RUN {}\n", scenario.id))?;

@@ -566,10 +566,12 @@ fn kernel_main(
     health.finish();
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(|value| {
-        let (value, request_session, expected) = if value == "deny-recovery" {
-            ("recovery", &denied_session, Some(b"permission denied" as &[u8]))
+        let (value, request_session, expected, expect_qwerty) = if value == "deny-recovery" {
+            ("recovery", &denied_session, Some(b"permission denied" as &[u8]), false)
+        } else if value == "deny-layout" {
+            ("layout azerty", &denied_session, Some(b"permission denied" as &[u8]), true)
         } else {
-            (value, &session, None)
+            (value, &session, None, false)
         };
         value.bytes().chain(core::iter::once(b'\n')).all(|byte| {
             logos_abi::InputEvent::from_byte(byte).is_some_and(|event| native_input.deliver(event))
@@ -599,6 +601,7 @@ fn kernel_main(
                                 matches!(reply, CommandReply::Handled(true))
                                     && native_command.reply_matches(expected)
                             })
+                            && (!expect_qwerty || input.layout() == input::Layout::Qwerty)
                             && native_scheduler.wake(native_handle)
                             && native_scheduler.run_next()
                     }))

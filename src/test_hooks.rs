@@ -21,6 +21,7 @@ const IMPLEMENTED: &[&str] = &[
     "console/history",
     "console/structured-command",
     "console/capability-denied",
+    "console/input-capability-denied",
     "console/cancellation",
     "console/display-restart",
     "console/input-service-restart",

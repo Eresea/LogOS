@@ -110,6 +110,10 @@ impl Service {
         self.layout = layout;
     }
 
+    pub const fn layout(&self) -> Layout {
+        self.layout
+    }
+
     pub fn next(
         &mut self,
         now: u64,
