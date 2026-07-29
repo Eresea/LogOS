@@ -37,7 +37,7 @@ pub struct CommandEndpoint {
 }
 
 impl CommandEndpoint {
-    pub fn submission(self) -> Option<logos_core::native_service::TextRequest> {
+    pub fn submission(self) -> Option<logos_core::native_service::CommandRequest> {
         unsafe { logos_core::native_service::Context::command_at(self.context_physical) }
     }
 

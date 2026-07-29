@@ -1,5 +1,5 @@
 pub const MAGIC: [u8; 4] = *b"LGSV";
-pub const ABI: u16 = 1;
+pub const ABI: u16 = 2;
 pub const MAX_TEXT: usize = 256;
 pub const READY: u32 = 1;
 pub const READ_INPUT: u32 = 2;
@@ -9,6 +9,52 @@ pub const CLEAR_DISPLAY: u32 = 5;
 pub const COMPLETE: u32 = 6;
 pub const SUBMIT_COMMAND: u32 = 7;
 pub const ACKNOWLEDGED: u32 = 1;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(u32)]
+pub enum Command {
+    Recovery = 1,
+    Reboot,
+    PowerOff,
+    Ping,
+    Tasks,
+    Services,
+    Drivers,
+    Trace,
+    Inspect,
+    Restart,
+    Cancel,
+    LayoutQwerty,
+    LayoutAzerty,
+}
+
+impl Command {
+    const fn from_raw(value: u32) -> Option<Self> {
+        match value {
+            1 => Some(Self::Recovery),
+            2 => Some(Self::Reboot),
+            3 => Some(Self::PowerOff),
+            4 => Some(Self::Ping),
+            5 => Some(Self::Tasks),
+            6 => Some(Self::Services),
+            7 => Some(Self::Drivers),
+            8 => Some(Self::Trace),
+            9 => Some(Self::Inspect),
+            10 => Some(Self::Restart),
+            11 => Some(Self::Cancel),
+            12 => Some(Self::LayoutQwerty),
+            13 => Some(Self::LayoutAzerty),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct CommandRequest {
+    pub command: Command,
+    pub argument: [u8; MAX_TEXT],
+    pub length: usize,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -115,15 +161,16 @@ impl Context {
 
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
-    pub unsafe fn command_at(address: u64) -> Option<TextRequest> {
+    pub unsafe fn command_at(address: u64) -> Option<CommandRequest> {
         let context = unsafe { (address as *const Self).read_volatile() };
         let length = usize::try_from(context.text_length).ok()?;
+        let command = Command::from_raw(context.x)?;
         (context.abi == ABI
             && context.reserved == 0
             && context.operation == SUBMIT_COMMAND
             && context.status == ACKNOWLEDGED
             && length <= context.text.len())
-        .then_some(TextRequest { x: 0, y: 0, color: [0; 3], text: context.text, length })
+        .then_some(CommandRequest { command, argument: context.text, length })
     }
 
     /// # Safety

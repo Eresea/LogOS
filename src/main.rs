@@ -766,31 +766,24 @@ fn native_command_reply(
     let Some(request) = endpoint.submission() else {
         return CommandReply::Handled(true);
     };
-    let Some(submission) =
-        logos_terminal::terminal::Submission::from_bytes(&request.text[..request.length])
-    else {
+    let argument =
+        logos_terminal::terminal::Submission::from_bytes(&request.argument[..request.length]);
+    if request.length != 0 && argument.is_none() {
         return CommandReply::Handled(endpoint.reply(b"unknown command"));
-    };
-    match command::pipeline(submission) {
-        command::Resolution::Local(command::Local::Text(value)) => {
-            CommandReply::Handled(endpoint.reply(value.as_bytes()))
-        }
-        command::Resolution::Local(command::Local::Clear) => {
-            CommandReply::Handled(endpoint.reply(b"clear handled by terminal"))
-        }
-        command::Resolution::Local(command::Local::CommandList) => {
-            CommandReply::Handled(command_list_reply(endpoint))
-        }
-        command::Resolution::Local(command::Local::Layout(layout)) => {
+    }
+    match request.command {
+        logos_core::native_service::Command::LayoutQwerty => {
+            let layout = input::Layout::Qwerty;
             input.set_layout(layout);
-            CommandReply::Handled(endpoint.reply(match layout {
-                input::Layout::Qwerty => b"layout qwerty",
-                input::Layout::Azerty => b"layout azerty",
-            }))
+            CommandReply::Handled(endpoint.reply(b"layout qwerty"))
         }
-        command::Resolution::Error(_) => CommandReply::Handled(endpoint.reply(b"unknown command")),
-        command::Resolution::Call(call) => match commands::dispatch(
-            call,
+        logos_core::native_service::Command::LayoutAzerty => {
+            input.set_layout(input::Layout::Azerty);
+            CommandReply::Handled(endpoint.reply(b"layout azerty"))
+        }
+        command => match commands::dispatch(
+            command,
+            argument,
             session,
             capabilities,
             commands::Invocation::new(tick.wrapping_add(50)),
@@ -904,21 +897,6 @@ fn ping_platform(
             .receive()
             .is_some_and(|reply| reply.request == request && reply.message == ipc::Message::Pong)
     })
-}
-
-fn command_list_reply(endpoint: native_task::CommandEndpoint) -> bool {
-    let mut reply = [0; 256];
-    let mut length = 0;
-    for line in command::COMMAND_LIST {
-        if length != 0 {
-            reply[length] = b'\n';
-            length += 1;
-        }
-        let end = length + line.len();
-        reply[length..end].copy_from_slice(line);
-        length = end;
-    }
-    endpoint.reply(&reply[..length])
 }
 
 fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {

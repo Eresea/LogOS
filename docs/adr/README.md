@@ -12,3 +12,4 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0004](0004-native-service-address-spaces.md) | Accepted | Isolate each native service in its own address space. |
 | [0005](0005-native-service-suspension.md) | Accepted | Suspend native services at Core-owned gates. |
 | [0006](0006-native-normal-console-handoff.md) | Accepted | Hand off the normal console to the loaded native terminal. |
+| [0007](0007-typed-native-command-gate.md) | Accepted | Send typed terminal calls across the native command gate. |

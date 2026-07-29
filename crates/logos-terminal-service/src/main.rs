@@ -3,10 +3,13 @@
 
 use core::arch::asm;
 use logos_core::native_service::{
-    ACKNOWLEDGED, CLEAR_DISPLAY, COMPLETE, Context, Header, MAX_TEXT, PRESENT_TEXT, READ_INPUT,
-    READY, SUBMIT_COMMAND,
+    ACKNOWLEDGED, CLEAR_DISPLAY, COMPLETE, Command, Context, Header, MAX_TEXT, PRESENT_TEXT,
+    READ_INPUT, READY, SUBMIT_COMMAND,
 };
-use logos_terminal::terminal::Model;
+use logos_terminal::{
+    command::{self, Call, Local, Resolution},
+    terminal::Model,
+};
 use uefi::{Status, prelude::*};
 
 #[used]
@@ -32,24 +35,33 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
                 if input == b'\n' {
                     let submission = terminal.submit();
                     let _ = terminal.write_output(submission.as_bytes());
-                    if submission.as_bytes() == b"clear" {
-                        terminal.clear_output();
-                    } else if submission.as_bytes().len() <= MAX_TEXT {
-                        (*context).text = [0; MAX_TEXT];
-                        (&mut (*context).text)[..submission.as_bytes().len()]
-                            .copy_from_slice(submission.as_bytes());
-                        (*context).text_length = submission.as_bytes().len() as u32;
-                        (*context).operation = SUBMIT_COMMAND;
-                        asm!("int 0x80");
-                        let length =
-                            usize::try_from((*context).text_length).unwrap_or(0).min(MAX_TEXT);
-                        for line in (&(*context).text)[..length].split(|byte| *byte == b'\n') {
-                            if !line.is_empty() {
+                    match command::pipeline(submission) {
+                        Resolution::Local(Local::Text(value)) => {
+                            let _ = terminal.write_output(value.as_bytes());
+                        }
+                        Resolution::Local(Local::Clear) => terminal.clear_output(),
+                        Resolution::Local(Local::CommandList) => {
+                            for line in command::COMMAND_LIST {
                                 let _ = terminal.write_output(line);
                             }
                         }
-                    } else {
-                        let _ = terminal.write_output(b"command too long");
+                        Resolution::Local(Local::Layout(layout)) => submit(
+                            context,
+                            match layout {
+                                logos_terminal::input::Layout::Qwerty => Command::LayoutQwerty,
+                                logos_terminal::input::Layout::Azerty => Command::LayoutAzerty,
+                            },
+                            &mut terminal,
+                        ),
+                        Resolution::Call(call) => match call_command(call) {
+                            Some(command) => submit_call(context, command, call, &mut terminal),
+                            None => {
+                                let _ = terminal.write_output(b"unknown command");
+                            }
+                        },
+                        Resolution::Error(_) => {
+                            let _ = terminal.write_output(b"unknown command");
+                        }
                     }
                 } else if input == 0x08 {
                     let _ = terminal.backspace();
@@ -61,6 +73,59 @@ extern "C" fn logos_service_entry(context: *mut Context) -> ! {
     }
     loop {
         core::hint::spin_loop();
+    }
+}
+
+unsafe fn submit(context: *mut Context, command: Command, terminal: &mut Model) {
+    unsafe { submit_with_argument(context, command, &[], terminal) }
+}
+
+unsafe fn submit_call(context: *mut Context, command: Command, call: Call, terminal: &mut Model) {
+    unsafe {
+        if let Some(value) = call.argument {
+            submit_with_argument(context, command, value.as_bytes(), terminal)
+        } else {
+            submit_with_argument(context, command, &[], terminal)
+        }
+    }
+}
+
+unsafe fn submit_with_argument(
+    context: *mut Context,
+    command: Command,
+    argument: &[u8],
+    terminal: &mut Model,
+) {
+    unsafe {
+        (*context).x = command as u32;
+        (*context).text = [0; MAX_TEXT];
+        (&mut (*context).text)[..argument.len()].copy_from_slice(argument);
+        (*context).text_length = argument.len() as u32;
+        (*context).operation = SUBMIT_COMMAND;
+        asm!("int 0x80");
+        let length = usize::try_from((*context).text_length).unwrap_or(0).min(MAX_TEXT);
+        for line in (&(*context).text)[..length].split(|byte| *byte == b'\n') {
+            if !line.is_empty() {
+                let _ = terminal.write_output(line);
+            }
+        }
+    }
+}
+
+fn call_command(call: Call) -> Option<Command> {
+    match call.name {
+        b"recovery" => Some(Command::Recovery),
+        b"reboot" => Some(Command::Reboot),
+        b"poweroff" => Some(Command::PowerOff),
+        b"ping" => Some(Command::Ping),
+        b"tasks" => Some(Command::Tasks),
+        b"services" => Some(Command::Services),
+        b"drivers" => Some(Command::Drivers),
+        b"trace" => Some(Command::Trace),
+        b"inspect" => Some(Command::Inspect),
+        b"restart" => Some(Command::Restart),
+        b"cancel" => Some(Command::Cancel),
+        _ => None,
     }
 }
 

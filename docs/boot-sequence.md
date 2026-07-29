@@ -21,7 +21,7 @@ UEFI firmware
 
 ## Current point
 
-Core v1 is complete. The kernel exits UEFI boot services, initializes physical memory and reversible virtual mappings, receives PS/2 and ACPI-routed VirtIO interrupts through its IDT, runs cooperative ready/blocked tasks, enforces capability-gated IPC, and reclaims service-owned resources. It then stages, relocates, maps, and starts the normal terminal as a separate Ring-3 payload; keyboard, presentation, and commands cross the bounded bootstrap gate. Recovery framebuffer output remains dormant unless normal-terminal startup fails or an authorized handoff requests it. Every stage added later must state its dependencies, failure mode, and recovery path.
+Core v1 is complete. The kernel exits UEFI boot services, initializes physical memory and reversible virtual mappings, receives PS/2 and ACPI-routed VirtIO interrupts through its IDT, runs cooperative ready/blocked tasks, enforces capability-gated IPC, and reclaims service-owned resources. It then stages, relocates, maps, and starts the normal terminal as a separate Ring-3 payload; keyboard, presentation, and typed commands cross the bounded bootstrap gate. Recovery framebuffer output remains dormant unless normal-terminal startup fails or an authorized handoff requests it. Every stage added later must state its dependencies, failure mode, and recovery path.
 
 The first Platform v1 loader stage creates a separate service PML4 after physical memory is ready
 and before service startup. It depends on the existing kernel map and allocator; an allocation or

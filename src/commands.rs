@@ -6,7 +6,8 @@ use crate::{
     capabilities::{CapabilityKind, CapabilityManager},
     session,
 };
-use logos_terminal::{command::Call, terminal::Submission};
+use logos_core::native_service::Command;
+use logos_terminal::terminal::Submission;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -62,17 +63,17 @@ impl Invocation {
 /// means the name isn't a call the kernel recognizes at all -- this should
 /// only happen if something upstream is corrupted or out of sync with
 /// `logos_terminal::command`'s descriptor table.
-fn required_capability(name: &[u8]) -> Result<Option<CapabilityKind>, ()> {
-    match name {
-        b"recovery" | b"reboot" | b"poweroff" => Ok(Some(CapabilityKind::Recovery)),
-        b"ping" | b"restart" | b"cancel" => Ok(Some(CapabilityKind::Service)),
-        b"tasks" | b"services" | b"drivers" | b"trace" | b"inspect" => Ok(None),
-        _ => Err(()),
+fn required_capability(command: Command) -> Option<CapabilityKind> {
+    match command {
+        Command::Recovery | Command::Reboot | Command::PowerOff => Some(CapabilityKind::Recovery),
+        Command::Ping | Command::Restart | Command::Cancel => Some(CapabilityKind::Service),
+        _ => None,
     }
 }
 
 pub fn dispatch(
-    call: Call,
+    command: Command,
+    argument: Option<Submission>,
     session: &session::Context,
     capabilities: &CapabilityManager,
     invocation: Invocation,
@@ -81,25 +82,27 @@ pub fn dispatch(
     if let Some(error) = invocation.error(now) {
         return Outcome::Error(error);
     }
-    let Ok(required) = required_capability(call.name) else {
-        return Outcome::Error(Error::UnknownCommand);
-    };
+    let required = required_capability(command);
     if required.is_some_and(|kind| !session.allows(capabilities, kind)) {
         return Outcome::Error(Error::Denied);
     }
-    match call.name {
-        b"recovery" => Outcome::Recovery,
-        b"reboot" => Outcome::Reboot,
-        b"poweroff" => Outcome::PowerOff,
-        b"ping" => Outcome::Ping,
-        b"tasks" => Outcome::Tasks,
-        b"services" => Outcome::Services,
-        b"drivers" => Outcome::Drivers,
-        b"trace" => Outcome::Trace,
-        b"inspect" => call.argument.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Inspect),
-        b"restart" => call.argument.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Restart),
-        b"cancel" => call.argument.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Cancel),
-        _ => Outcome::Error(Error::UnknownCommand),
+    match command {
+        Command::Recovery => Outcome::Recovery,
+        Command::Reboot => Outcome::Reboot,
+        Command::PowerOff => Outcome::PowerOff,
+        Command::Ping => Outcome::Ping,
+        Command::Tasks => Outcome::Tasks,
+        Command::Services => Outcome::Services,
+        Command::Drivers => Outcome::Drivers,
+        Command::Trace => Outcome::Trace,
+        Command::Inspect => {
+            argument.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Inspect)
+        }
+        Command::Restart => {
+            argument.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Restart)
+        }
+        Command::Cancel => argument.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Cancel),
+        Command::LayoutQwerty | Command::LayoutAzerty => Outcome::Error(Error::UnknownCommand),
     }
 }
 
@@ -127,53 +130,58 @@ pub fn self_check() -> bool {
         return false;
     };
 
-    let recovery_call = Call { name: b"recovery", argument: None };
-    let reboot_call = Call { name: b"reboot", argument: None };
-    let poweroff_call = Call { name: b"poweroff", argument: None };
-    let ping_call = Call { name: b"ping", argument: None };
-    let tasks_call = Call { name: b"tasks", argument: None };
-    let services_call = Call { name: b"services", argument: None };
-    let drivers_call = Call { name: b"drivers", argument: None };
-    let trace_call = Call { name: b"trace", argument: None };
-    let inspect_call = Call { name: b"inspect", argument: Some(target) };
-    let restart_call = Call { name: b"restart", argument: Some(target) };
-    let cancel_call = Call { name: b"cancel", argument: Some(target) };
-    let bogus_call = Call { name: b"not-a-real-call", argument: None };
+    let recovery_call = Command::Recovery;
+    let reboot_call = Command::Reboot;
+    let poweroff_call = Command::PowerOff;
+    let ping_call = Command::Ping;
+    let tasks_call = Command::Tasks;
+    let services_call = Command::Services;
+    let drivers_call = Command::Drivers;
+    let trace_call = Command::Trace;
+    let inspect_call = Command::Inspect;
+    let restart_call = Command::Restart;
+    let cancel_call = Command::Cancel;
 
-    dispatch(recovery_call, &denied_session, &capabilities, Invocation::new(2), 1)
+    dispatch(recovery_call, None, &denied_session, &capabilities, Invocation::new(2), 1)
         == Outcome::Error(Error::Denied)
-        && dispatch(recovery_call, &session, &capabilities, Invocation::new(2), 1)
+        && dispatch(recovery_call, None, &session, &capabilities, Invocation::new(2), 1)
             == Outcome::Recovery
-        && dispatch(bogus_call, &session, &capabilities, Invocation::new(2), 1)
-            == Outcome::Error(Error::UnknownCommand)
-        && dispatch(recovery_call, &session, &capabilities, Invocation::cancelled(2), 1)
+        && dispatch(recovery_call, None, &session, &capabilities, Invocation::cancelled(2), 1)
             == Outcome::Error(Error::Cancelled)
-        && dispatch(recovery_call, &session, &capabilities, Invocation::new(1), 1)
+        && dispatch(recovery_call, None, &session, &capabilities, Invocation::new(1), 1)
             == Outcome::Error(Error::TimedOut)
-        && dispatch(reboot_call, &session, &capabilities, Invocation::new(2), 1) == Outcome::Reboot
-        && dispatch(poweroff_call, &session, &capabilities, Invocation::new(2), 1)
+        && dispatch(reboot_call, None, &session, &capabilities, Invocation::new(2), 1)
+            == Outcome::Reboot
+        && dispatch(poweroff_call, None, &session, &capabilities, Invocation::new(2), 1)
             == Outcome::PowerOff
-        && dispatch(ping_call, &session, &capabilities, Invocation::new(2), 1) == Outcome::Ping
-        && dispatch(tasks_call, &denied_session, &capabilities, Invocation::new(2), 1)
+        && dispatch(ping_call, None, &session, &capabilities, Invocation::new(2), 1)
+            == Outcome::Ping
+        && dispatch(tasks_call, None, &denied_session, &capabilities, Invocation::new(2), 1)
             == Outcome::Tasks
-        && dispatch(services_call, &denied_session, &capabilities, Invocation::new(2), 1)
+        && dispatch(services_call, None, &denied_session, &capabilities, Invocation::new(2), 1)
             == Outcome::Services
-        && dispatch(drivers_call, &denied_session, &capabilities, Invocation::new(2), 1)
+        && dispatch(drivers_call, None, &denied_session, &capabilities, Invocation::new(2), 1)
             == Outcome::Drivers
-        && dispatch(trace_call, &denied_session, &capabilities, Invocation::new(2), 1)
+        && dispatch(trace_call, None, &denied_session, &capabilities, Invocation::new(2), 1)
             == Outcome::Trace
         && matches!(
-            dispatch(inspect_call, &denied_session, &capabilities, Invocation::new(2), 1),
+            dispatch(inspect_call, Some(target), &denied_session, &capabilities, Invocation::new(2), 1),
             Outcome::Inspect(value) if value.as_bytes() == b"virtio-balloon"
         )
         && matches!(
-            dispatch(restart_call, &session, &capabilities, Invocation::new(2), 1),
+            dispatch(restart_call, Some(target), &session, &capabilities, Invocation::new(2), 1),
             Outcome::Restart(value) if value.as_bytes() == b"virtio-balloon"
         )
         && matches!(
-            dispatch(cancel_call, &session, &capabilities, Invocation::new(2), 1),
+            dispatch(cancel_call, Some(target), &session, &capabilities, Invocation::new(2), 1),
             Outcome::Cancel(value) if value.as_bytes() == b"virtio-balloon"
         )
-        && dispatch(restart_call, &denied_session, &capabilities, Invocation::new(2), 1)
-            == Outcome::Error(Error::Denied)
+        && dispatch(
+            restart_call,
+            Some(target),
+            &denied_session,
+            &capabilities,
+            Invocation::new(2),
+            1,
+        ) == Outcome::Error(Error::Denied)
 }
