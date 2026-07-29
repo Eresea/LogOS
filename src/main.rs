@@ -606,6 +606,15 @@ fn kernel_main(
             let tick = interrupts::ticks();
             return service_lifecycle.failed(tick) && service_lifecycle.due(tick.saturating_add(2));
         }
+        if value == "assert-restart-backoff" {
+            let tick = interrupts::ticks();
+            return service_lifecycle.failed(tick)
+                && !service_lifecycle.due(tick.saturating_add(1))
+                && service_lifecycle.due(tick.saturating_add(2))
+                && service_lifecycle.failed(tick.saturating_add(2))
+                && !service_lifecycle.due(tick.saturating_add(5))
+                && service_lifecycle.due(tick.saturating_add(6));
+        }
         let deny_display = value == "deny-display";
         let (value, request_session, expected, expect_qwerty) = if value == "deny-recovery" {
             ("recovery", &denied_session, Some(b"permission denied" as &[u8]), false)

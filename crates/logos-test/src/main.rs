@@ -334,6 +334,10 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
             send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-crash-restart\n")?;
             wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
         }
+        if scenario.id == "platform/restart-backoff" {
+            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-restart-backoff\n")?;
+            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
+        }
         send(&mut stream, &mut transcript_file, &format!("LOGOS/1 RUN {}\n", scenario.id))?;
         wait_file(
             &debug_log,
