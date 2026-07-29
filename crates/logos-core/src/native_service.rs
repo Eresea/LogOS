@@ -285,8 +285,23 @@ impl Header {
 }
 
 pub fn self_check() -> bool {
+    let mut syscall = Context::new();
+    syscall.operation = SYSCALL;
+    syscall.status = ACKNOWLEDGED;
+    syscall.x = Syscall::Inspect as u32;
+    syscall.text[..4].copy_from_slice(b"name");
+    syscall.text_length = 4;
+    let valid = unsafe { Context::syscall_at((&syscall as *const Context) as u64) }
+        .is_some_and(|request| request.syscall == Syscall::Inspect && request.length == 4);
+    syscall.x = 0;
+    let unknown = unsafe { Context::syscall_at((&syscall as *const Context) as u64) }.is_none();
+    syscall.x = Syscall::Reboot as u32;
+    let malformed = unsafe { Context::syscall_at((&syscall as *const Context) as u64) }.is_none();
     Header::new(*b"terminal\0\0\0\0\0\0\0\0", self_check_entry).valid_for(b"terminal")
         && !Header::new(*b"terminal\0\0\0\0\0\0\0\0", self_check_entry).valid_for(b"other")
+        && valid
+        && unknown
+        && malformed
 }
 
 extern "C" fn self_check_entry(_: *mut Context) -> ! {
