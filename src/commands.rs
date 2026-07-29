@@ -1,8 +1,12 @@
+//! Everything a `Call` needs on the kernel side: capability gating and the
+//! handful of actions that actually require kernel state (ACPI, scheduler,
+//! service registry, IPC channel). Command *parsing* lives entirely in
+//! `logos_terminal::command` now — this module never sees raw command text.
 use crate::{
     capabilities::{CapabilityKind, CapabilityManager},
     session,
 };
-use logos_terminal::{input::Layout, terminal::Submission};
+use logos_terminal::{command::Call, terminal::Submission};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -10,8 +14,6 @@ pub enum Outcome {
     Reboot,
     PowerOff,
     Ping,
-    Clear,
-    Layout(Layout),
     Tasks,
     Services,
     Drivers,
@@ -19,15 +21,7 @@ pub enum Outcome {
     Inspect(Submission),
     Restart(Submission),
     Cancel(Submission),
-    CommandList,
-    Text(Submission),
     Error(Error),
-}
-
-impl Outcome {
-    fn is_text(self, expected: &[u8]) -> bool {
-        matches!(self, Self::Text(value) if value.as_bytes() == expected)
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -64,185 +58,21 @@ impl Invocation {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Descriptor {
-    pub name: &'static [u8],
-    pub summary: &'static [u8],
-    pub arguments: &'static [Argument],
-    pub required_capability: Option<CapabilityKind>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ArgumentKind {
-    Text,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Argument {
-    pub name: &'static [u8],
-    pub kind: ArgumentKind,
-    pub required: bool,
-}
-
-const NO_ARGUMENTS: [Argument; 0] = [];
-const TEXT_ARGUMENT: [Argument; 1] =
-    [Argument { name: b"text", kind: ArgumentKind::Text, required: true }];
-const LAYOUT_ARGUMENT: [Argument; 1] =
-    [Argument { name: b"layout", kind: ArgumentKind::Text, required: true }];
-
-pub const COMMAND_LIST: [&[u8]; 8] = [
-    b"health clear",
-    b"layout recovery",
-    b"echo help",
-    b"commands reboot",
-    b"ping poweroff",
-    b"tasks services",
-    b"drivers trace",
-    b"inspect restart cancel",
-];
-
-const DESCRIPTORS: [Descriptor; 17] = [
-    Descriptor {
-        name: b"health",
-        summary: b"show machine health",
-        arguments: &NO_ARGUMENTS,
-        required_capability: None,
-    },
-    Descriptor {
-        name: b"clear",
-        summary: b"clear terminal output",
-        arguments: &NO_ARGUMENTS,
-        required_capability: None,
-    },
-    Descriptor {
-        name: b"layout",
-        summary: b"set keyboard layout: qwerty or azerty",
-        arguments: &LAYOUT_ARGUMENT,
-        required_capability: None,
-    },
-    Descriptor {
-        name: b"recovery",
-        summary: b"switch to the recovery console",
-        arguments: &NO_ARGUMENTS,
-        required_capability: Some(CapabilityKind::Recovery),
-    },
-    Descriptor {
-        name: b"echo",
-        summary: b"return text",
-        arguments: &TEXT_ARGUMENT,
-        required_capability: None,
-    },
-    Descriptor {
-        name: b"help",
-        summary: b"describe a command",
-        arguments: &TEXT_ARGUMENT,
-        required_capability: None,
-    },
-    Descriptor {
-        name: b"commands",
-        summary: b"list commands",
-        arguments: &NO_ARGUMENTS,
-        required_capability: None,
-    },
-    Descriptor {
-        name: b"reboot",
-        summary: b"restart the machine",
-        arguments: &NO_ARGUMENTS,
-        required_capability: Some(CapabilityKind::Recovery),
-    },
-    Descriptor {
-        name: b"poweroff",
-        summary: b"turn off the machine",
-        arguments: &NO_ARGUMENTS,
-        required_capability: Some(CapabilityKind::Recovery),
-    },
-    Descriptor {
-        name: b"ping",
-        summary: b"ping the platform service and await pong",
-        arguments: &NO_ARGUMENTS,
-        required_capability: Some(CapabilityKind::Service),
-    },
-    Descriptor {
-        name: b"tasks",
-        summary: b"list tasks",
-        arguments: &NO_ARGUMENTS,
-        required_capability: None,
-    },
-    Descriptor {
-        name: b"services",
-        summary: b"list services",
-        arguments: &NO_ARGUMENTS,
-        required_capability: None,
-    },
-    Descriptor {
-        name: b"drivers",
-        summary: b"list drivers",
-        arguments: &NO_ARGUMENTS,
-        required_capability: None,
-    },
-    Descriptor {
-        name: b"trace",
-        summary: b"show latest trace",
-        arguments: &NO_ARGUMENTS,
-        required_capability: None,
-    },
-    Descriptor {
-        name: b"inspect",
-        summary: b"inspect a resource",
-        arguments: &TEXT_ARGUMENT,
-        required_capability: None,
-    },
-    Descriptor {
-        name: b"restart",
-        summary: b"restart a service",
-        arguments: &TEXT_ARGUMENT,
-        required_capability: Some(CapabilityKind::Service),
-    },
-    Descriptor {
-        name: b"cancel",
-        summary: b"cancel a service request",
-        arguments: &TEXT_ARGUMENT,
-        required_capability: Some(CapabilityKind::Service),
-    },
-];
-
-pub fn descriptors() -> &'static [Descriptor] {
-    &DESCRIPTORS
-}
-
-pub fn invoke(
-    submission: Submission,
-    session: &session::Context,
-    capabilities: &CapabilityManager,
-    invocation: Invocation,
-    now: u64,
-) -> Outcome {
-    invoke_stage(submission, None, session, capabilities, invocation, now)
-}
-
-pub fn pipeline(
-    submission: Submission,
-    session: &session::Context,
-    capabilities: &CapabilityManager,
-    invocation: Invocation,
-    now: u64,
-) -> Outcome {
-    let mut input = None;
-    for stage in submission.as_bytes().split(|byte| *byte == b'|') {
-        let Some(stage) = Submission::from_bytes(stage.trim_ascii()) else {
-            return Outcome::Error(Error::UnknownCommand);
-        };
-        match invoke_stage(stage, input, session, capabilities, invocation, now) {
-            Outcome::Text(value) => input = Some(value),
-            outcome => return outcome,
-        }
+/// Which capability (if any) a remote call requires. Returning `Err(())`
+/// means the name isn't a call the kernel recognizes at all -- this should
+/// only happen if something upstream is corrupted or out of sync with
+/// `logos_terminal::command`'s descriptor table.
+fn required_capability(name: &[u8]) -> Result<Option<CapabilityKind>, ()> {
+    match name {
+        b"recovery" | b"reboot" | b"poweroff" => Ok(Some(CapabilityKind::Recovery)),
+        b"ping" | b"restart" | b"cancel" => Ok(Some(CapabilityKind::Service)),
+        b"tasks" | b"services" | b"drivers" | b"trace" | b"inspect" => Ok(None),
+        _ => Err(()),
     }
-    input.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
 }
 
-fn invoke_stage(
-    submission: Submission,
-    input: Option<Submission>,
+pub fn dispatch(
+    call: Call,
     session: &session::Context,
     capabilities: &CapabilityManager,
     invocation: Invocation,
@@ -251,84 +81,41 @@ fn invoke_stage(
     if let Some(error) = invocation.error(now) {
         return Outcome::Error(error);
     }
-    let bytes = submission.as_bytes();
-    let (name, argument) = bytes
-        .iter()
-        .position(|byte| *byte == b' ')
-        .map_or((bytes, &[][..]), |index| (&bytes[..index], &bytes[index + 1..]));
-    let Some(descriptor) = descriptors().iter().find(|descriptor| descriptor.name == name) else {
+    let Ok(required) = required_capability(call.name) else {
         return Outcome::Error(Error::UnknownCommand);
     };
-    if descriptor.required_capability.is_some_and(|kind| !session.allows(capabilities, kind)) {
+    if required.is_some_and(|kind| !session.allows(capabilities, kind)) {
         return Outcome::Error(Error::Denied);
     }
-    if descriptor.name == b"recovery" {
-        Outcome::Recovery
-    } else if descriptor.name == b"reboot" {
-        Outcome::Reboot
-    } else if descriptor.name == b"poweroff" {
-        Outcome::PowerOff
-    } else if descriptor.name == b"ping" {
-        Outcome::Ping
-    } else if descriptor.name == b"tasks" {
-        Outcome::Tasks
-    } else if descriptor.name == b"services" {
-        Outcome::Services
-    } else if descriptor.name == b"drivers" {
-        Outcome::Drivers
-    } else if descriptor.name == b"trace" {
-        Outcome::Trace
-    } else if descriptor.name == b"inspect" && !argument.is_empty() {
-        Submission::from_bytes(argument)
-            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Inspect)
-    } else if descriptor.name == b"restart" && !argument.is_empty() {
-        Submission::from_bytes(argument)
-            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Restart)
-    } else if descriptor.name == b"cancel" && !argument.is_empty() {
-        Submission::from_bytes(argument)
-            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Cancel)
-    } else if descriptor.name == b"health" {
-        Submission::from_bytes(b"healthy")
-            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
-    } else if descriptor.name == b"clear" {
-        Outcome::Clear
-    } else if descriptor.name == b"layout" && argument == b"qwerty" {
-        Outcome::Layout(Layout::Qwerty)
-    } else if descriptor.name == b"layout" && argument == b"azerty" {
-        Outcome::Layout(Layout::Azerty)
-    } else if descriptor.name == b"echo" && !argument.is_empty() {
-        Submission::from_bytes(argument)
-            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
-    } else if descriptor.name == b"echo" {
-        input.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
-    } else if descriptor.name == b"commands" {
-        Outcome::CommandList
-    } else if descriptor.name == b"help" && !argument.is_empty() {
-        descriptors()
-            .iter()
-            .find(|candidate| candidate.name == argument)
-            .and_then(|candidate| Submission::from_bytes(candidate.summary))
-            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
-    } else if descriptor.name == b"help" {
-        Submission::from_bytes(b"use commands to list commands")
-            .map_or(Outcome::Error(Error::UnknownCommand), Outcome::Text)
-    } else {
-        Outcome::Error(Error::UnknownCommand)
+    match call.name {
+        b"recovery" => Outcome::Recovery,
+        b"reboot" => Outcome::Reboot,
+        b"poweroff" => Outcome::PowerOff,
+        b"ping" => Outcome::Ping,
+        b"tasks" => Outcome::Tasks,
+        b"services" => Outcome::Services,
+        b"drivers" => Outcome::Drivers,
+        b"trace" => Outcome::Trace,
+        b"inspect" => call.argument.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Inspect),
+        b"restart" => call.argument.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Restart),
+        b"cancel" => call.argument.map_or(Outcome::Error(Error::UnknownCommand), Outcome::Cancel),
+        _ => Outcome::Error(Error::UnknownCommand),
     }
 }
 
 pub fn self_check() -> bool {
-    let text_argument = Argument { name: b"target", kind: ArgumentKind::Text, required: true };
     let mut capabilities = CapabilityManager::new();
-    let Some(recovery) = capabilities.grant(CapabilityKind::Recovery) else {
+    let Some(recovery_capability) = capabilities.grant(CapabilityKind::Recovery) else {
         return false;
     };
-    let Some(service) = capabilities.grant(CapabilityKind::Service) else {
+    let Some(service_capability) = capabilities.grant(CapabilityKind::Service) else {
         return false;
     };
-    let Some(session) =
-        session::Context::new(session::Id(1), session::Principal::LOCAL, &[recovery, service])
-    else {
+    let Some(session) = session::Context::new(
+        session::Id(1),
+        session::Principal::LOCAL,
+        &[recovery_capability, service_capability],
+    ) else {
         return false;
     };
     let Some(denied_session) =
@@ -336,111 +123,57 @@ pub fn self_check() -> bool {
     else {
         return false;
     };
-    let Some(submission) = Submission::from_bytes(b"recovery") else {
+    let Some(target) = Submission::from_bytes(b"virtio-balloon") else {
         return false;
     };
-    let Some(unknown) = Submission::from_bytes(b"missing") else {
-        return false;
-    };
-    let Some(echo) = Submission::from_bytes(b"echo hello") else {
-        return false;
-    };
-    let Some(hello) = Submission::from_bytes(b"hello") else {
-        return false;
-    };
-    let Some(pipe) = Submission::from_bytes(b"echo hello | echo") else {
-        return false;
-    };
-    let Some(commands) = Submission::from_bytes(b"commands") else {
-        return false;
-    };
-    let Some(reboot) = Submission::from_bytes(b"reboot") else {
-        return false;
-    };
-    let Some(poweroff) = Submission::from_bytes(b"poweroff") else {
-        return false;
-    };
-    let Some(ping) = Submission::from_bytes(b"ping") else {
-        return false;
-    };
-    let Some(health) = Submission::from_bytes(b"health") else {
-        return false;
-    };
-    let Some(clear) = Submission::from_bytes(b"clear") else {
-        return false;
-    };
-    let Some(qwerty) = Submission::from_bytes(b"layout qwerty") else {
-        return false;
-    };
-    let Some(azerty) = Submission::from_bytes(b"layout azerty") else {
-        return false;
-    };
-    let Some(tasks) = Submission::from_bytes(b"tasks") else {
-        return false;
-    };
-    let Some(services) = Submission::from_bytes(b"services") else {
-        return false;
-    };
-    let Some(drivers) = Submission::from_bytes(b"drivers") else {
-        return false;
-    };
-    let Some(trace) = Submission::from_bytes(b"trace") else {
-        return false;
-    };
-    let Some(inspect) = Submission::from_bytes(b"inspect service:/virtio-balloon") else {
-        return false;
-    };
-    let Some(restart) = Submission::from_bytes(b"restart virtio-balloon") else {
-        return false;
-    };
-    let Some(cancel) = Submission::from_bytes(b"cancel virtio-balloon") else {
-        return false;
-    };
-    invoke(submission, &denied_session, &capabilities, Invocation::new(2), 1)
+
+    let recovery_call = Call { name: b"recovery", argument: None };
+    let reboot_call = Call { name: b"reboot", argument: None };
+    let poweroff_call = Call { name: b"poweroff", argument: None };
+    let ping_call = Call { name: b"ping", argument: None };
+    let tasks_call = Call { name: b"tasks", argument: None };
+    let services_call = Call { name: b"services", argument: None };
+    let drivers_call = Call { name: b"drivers", argument: None };
+    let trace_call = Call { name: b"trace", argument: None };
+    let inspect_call = Call { name: b"inspect", argument: Some(target) };
+    let restart_call = Call { name: b"restart", argument: Some(target) };
+    let cancel_call = Call { name: b"cancel", argument: Some(target) };
+    let bogus_call = Call { name: b"not-a-real-call", argument: None };
+
+    dispatch(recovery_call, &denied_session, &capabilities, Invocation::new(2), 1)
         == Outcome::Error(Error::Denied)
-        && invoke(submission, &session, &capabilities, Invocation::new(2), 1) == Outcome::Recovery
-        && invoke(unknown, &session, &capabilities, Invocation::new(2), 1)
+        && dispatch(recovery_call, &session, &capabilities, Invocation::new(2), 1)
+            == Outcome::Recovery
+        && dispatch(bogus_call, &session, &capabilities, Invocation::new(2), 1)
             == Outcome::Error(Error::UnknownCommand)
-        && invoke(submission, &session, &capabilities, Invocation::cancelled(2), 1)
+        && dispatch(recovery_call, &session, &capabilities, Invocation::cancelled(2), 1)
             == Outcome::Error(Error::Cancelled)
-        && invoke(submission, &session, &capabilities, Invocation::new(1), 1)
+        && dispatch(recovery_call, &session, &capabilities, Invocation::new(1), 1)
             == Outcome::Error(Error::TimedOut)
-        && invoke(echo, &denied_session, &capabilities, Invocation::new(2), 1)
-            == Outcome::Text(hello)
-        && pipeline(pipe, &denied_session, &capabilities, Invocation::new(2), 1)
-            == Outcome::Text(hello)
-        && invoke(commands, &denied_session, &capabilities, Invocation::new(2), 1)
-            == Outcome::CommandList
-        && invoke(reboot, &session, &capabilities, Invocation::new(2), 1) == Outcome::Reboot
-        && invoke(poweroff, &session, &capabilities, Invocation::new(2), 1) == Outcome::PowerOff
-        && invoke(ping, &session, &capabilities, Invocation::new(2), 1) == Outcome::Ping
-        && invoke(health, &denied_session, &capabilities, Invocation::new(2), 1).is_text(b"healthy")
-        && invoke(clear, &denied_session, &capabilities, Invocation::new(2), 1) == Outcome::Clear
-        && invoke(qwerty, &denied_session, &capabilities, Invocation::new(2), 1)
-            == Outcome::Layout(Layout::Qwerty)
-        && invoke(azerty, &denied_session, &capabilities, Invocation::new(2), 1)
-            == Outcome::Layout(Layout::Azerty)
-        && invoke(tasks, &denied_session, &capabilities, Invocation::new(2), 1) == Outcome::Tasks
-        && invoke(services, &denied_session, &capabilities, Invocation::new(2), 1)
+        && dispatch(reboot_call, &session, &capabilities, Invocation::new(2), 1) == Outcome::Reboot
+        && dispatch(poweroff_call, &session, &capabilities, Invocation::new(2), 1)
+            == Outcome::PowerOff
+        && dispatch(ping_call, &session, &capabilities, Invocation::new(2), 1) == Outcome::Ping
+        && dispatch(tasks_call, &denied_session, &capabilities, Invocation::new(2), 1)
+            == Outcome::Tasks
+        && dispatch(services_call, &denied_session, &capabilities, Invocation::new(2), 1)
             == Outcome::Services
-        && invoke(drivers, &denied_session, &capabilities, Invocation::new(2), 1)
+        && dispatch(drivers_call, &denied_session, &capabilities, Invocation::new(2), 1)
             == Outcome::Drivers
-        && invoke(trace, &denied_session, &capabilities, Invocation::new(2), 1) == Outcome::Trace
+        && dispatch(trace_call, &denied_session, &capabilities, Invocation::new(2), 1)
+            == Outcome::Trace
         && matches!(
-            invoke(inspect, &denied_session, &capabilities, Invocation::new(2), 1),
-            Outcome::Inspect(_)
+            dispatch(inspect_call, &denied_session, &capabilities, Invocation::new(2), 1),
+            Outcome::Inspect(value) if value.as_bytes() == b"virtio-balloon"
         )
         && matches!(
-            invoke(restart, &session, &capabilities, Invocation::new(2), 1),
-            Outcome::Restart(target) if target.as_bytes() == b"virtio-balloon"
+            dispatch(restart_call, &session, &capabilities, Invocation::new(2), 1),
+            Outcome::Restart(value) if value.as_bytes() == b"virtio-balloon"
         )
         && matches!(
-            invoke(cancel, &session, &capabilities, Invocation::new(2), 1),
-            Outcome::Cancel(target) if target.as_bytes() == b"virtio-balloon"
+            dispatch(cancel_call, &session, &capabilities, Invocation::new(2), 1),
+            Outcome::Cancel(value) if value.as_bytes() == b"virtio-balloon"
         )
-        && descriptors().len() == 17
-        && descriptors()[3].arguments.is_empty()
-        && COMMAND_LIST.len() == 8
-        && text_argument.kind == ArgumentKind::Text
-        && text_argument.required
+        && dispatch(restart_call, &denied_session, &capabilities, Invocation::new(2), 1)
+            == Outcome::Error(Error::Denied)
 }

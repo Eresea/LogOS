@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod command;
 pub mod display;
 pub mod input;
 pub mod terminal;
@@ -7,7 +8,7 @@ pub mod text;
 
 #[cfg(test)]
 mod tests {
-    use super::{display, input, terminal, text};
+    use super::{command, display, input, terminal, text};
 
     #[test]
     fn input_layouts_and_bounded_repeats() {
@@ -27,5 +28,10 @@ mod tests {
     #[test]
     fn text_layout_and_font_are_valid() {
         assert!(text::Service::self_check());
+    }
+
+    #[test]
+    fn command_resolution_splits_local_from_remote() {
+        assert!(command::self_check());
     }
 }

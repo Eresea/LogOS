@@ -39,7 +39,7 @@ mod time;
 mod trace;
 mod virtual_memory;
 
-use logos_terminal::{display, input, terminal, text};
+use logos_terminal::{command, display, input, terminal, text};
 use uefi::{boot, mem::memory_map::MemoryMap, prelude::*, proto::console::gop::GraphicsOutput};
 
 #[entry]
@@ -524,11 +524,11 @@ fn kernel_main(
             })
             && probe.render(display, &text)
             && commands::self_check()
+            && command::self_check()
     });
-    let mut terminal = terminal::Model::new();
     let coordinator = mode::Coordinator::new(normal_ready);
     check!(b"console mode", mode::Coordinator::self_check());
-    check!(b"command registry", commands::self_check());
+    check!(b"command registry", commands::self_check() && command::self_check());
     check!(b"formatters", format::self_check());
     check!(b"session", session::Context::self_check());
     check!(b"input normalization", input::Service::self_check());
@@ -577,7 +577,9 @@ fn kernel_main(
                             service_capability,
                             service: virtio_handle,
                         },
-                    ) && native_scheduler.wake(native_handle)
+                    )
+                    .ok()
+                        && native_scheduler.wake(native_handle)
                         && native_scheduler.run_next()))
         })
     });
@@ -616,16 +618,8 @@ fn kernel_main(
                         console_mode = mode::ConsoleMode::Recovery;
                         break;
                     }
-                    if native_command.submission().is_some_and(|request| {
-                        request.length == b"recovery".len()
-                            && &request.text[..request.length] == b"recovery"
-                    }) {
-                        debug::write_line(b"LogOS: recovery handoff requested");
-                        console_mode = mode::ConsoleMode::Recovery;
-                        break;
-                    }
                     if native_command.submission().is_some() {
-                        let _ = native_command_reply(
+                        match native_command_reply(
                             native_command,
                             NativeCommandContext {
                                 session: &session,
@@ -640,206 +634,19 @@ fn kernel_main(
                                 service_capability,
                                 service: virtio_handle,
                             },
-                        ) && native_scheduler.wake(native_handle)
-                            && native_scheduler.run_next();
-                    }
-                }
-            } else {
-                unsafe { core::arch::asm!("hlt") };
-            }
-        }
-    }
-    if legacy_normal_loop_enabled() && console_mode == mode::ConsoleMode::Normal {
-        debug::write_line(b"LogOS: normal terminal active");
-        let _ = terminal.write_output(b"LogOS terminal");
-        if !terminal.render(display.as_mut().unwrap(), &text) {
-            debug::write_line(b"LogOS: normal terminal initial redraw failed");
-            console_mode = mode::ConsoleMode::Recovery;
-        }
-        let mut blink_tick = interrupts::ticks();
-        while console_mode == mode::ConsoleMode::Normal {
-            let tick = interrupts::ticks();
-            if service_lifecycle.due(tick) {
-                let _ = channel.send(
-                    &capabilities,
-                    service_capability,
-                    session::Principal::LOCAL,
-                    virtio_handle,
-                    ipc::Message::Recover,
-                );
-            }
-            if platform::completion_pending() {
-                let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
-            }
-            if service_scheduler.run_next() {
-                let _ = service_health.beat(platform::NAME, tick);
-            }
-            if !service_health.healthy(platform::NAME, tick) {
-                debug::write_line(b"LogOS: service heartbeat overdue");
-                let _ = service_lifecycle.failed(tick);
-            }
-            if tick.wrapping_sub(blink_tick) >= 50 {
-                terminal.blink();
-                if !terminal.render_caret(display.as_mut().unwrap(), &text) {
-                    console_mode = mode::ConsoleMode::Recovery;
-                    break;
-                }
-                blink_tick = tick;
-            }
-            if let Some(event) = input.next(tick, keyboard::poll_scancode) {
-                if let Some(byte) = native_input_byte(event) {
-                    let _ = native_input.deliver(byte)
-                        && native_scheduler.wake(native_handle)
-                        && native_scheduler.run_next()
-                        && (native_command.submission().is_none()
-                            || (native_command_reply(
-                                native_command,
-                                NativeCommandContext {
-                                    session: &session,
-                                    capabilities: &capabilities,
-                                    tick,
-                                    input: &mut input,
-                                    lifecycle: &mut service_lifecycle,
-                                    service_healthy: service_health.healthy(platform::NAME, tick),
-                                    channel: &channel,
-                                    responses: &responses,
-                                    service_scheduler: &mut service_scheduler,
-                                    service_capability,
-                                    service: virtio_handle,
-                                },
-                            ) && native_scheduler.wake(native_handle)
-                                && native_scheduler.run_next()));
-                }
-                if event.is_enter() {
-                    let submission = terminal.submit();
-                    let _ = terminal.write_output(submission.as_bytes());
-                    match commands::pipeline(
-                        submission,
-                        &session,
-                        &capabilities,
-                        commands::Invocation::new(tick.wrapping_add(50)),
-                        tick,
-                    ) {
-                        commands::Outcome::Recovery => {
-                            debug::write_line(b"LogOS: recovery handoff requested");
-                            console_mode = mode::ConsoleMode::Recovery;
-                            break;
-                        }
-                        commands::Outcome::Reboot => {
-                            if !acpi::reset() {
-                                let _ = terminal.write_output(b"reboot unavailable");
+                        ) {
+                            CommandReply::Recovery => {
+                                debug::write_line(b"LogOS: recovery handoff requested");
+                                console_mode = mode::ConsoleMode::Recovery;
+                                break;
                             }
-                        }
-                        commands::Outcome::PowerOff => {
-                            if !acpi::power_off() {
-                                let _ = terminal.write_output(b"poweroff unavailable");
+                            CommandReply::Handled(ok) => {
+                                let _ = ok
+                                    && native_scheduler.wake(native_handle)
+                                    && native_scheduler.run_next();
                             }
-                        }
-                        commands::Outcome::Ping => {
-                            let _ = terminal.write_output(
-                                if channel
-                                    .send(
-                                        &capabilities,
-                                        service_capability,
-                                        session::Principal::LOCAL,
-                                        virtio_handle,
-                                        ipc::Message::Ping,
-                                    )
-                                    .is_some()
-                                {
-                                    b"ping sent"
-                                } else {
-                                    b"platform service unavailable"
-                                },
-                            );
-                        }
-                        commands::Outcome::Clear => terminal.clear_output(),
-                        commands::Outcome::Layout(layout) => {
-                            input.set_layout(layout);
-                            let _ = terminal.write_output(match layout {
-                                input::Layout::Qwerty => b"layout qwerty",
-                                input::Layout::Azerty => b"layout azerty",
-                            });
-                        }
-                        commands::Outcome::Tasks => {
-                            let _ = terminal.write_output(b"scheduler active");
-                        }
-                        commands::Outcome::Services => {
-                            let _ = terminal.write_output(platform::service_status(
-                                service_health.healthy(platform::NAME, tick),
-                            ));
-                        }
-                        commands::Outcome::Drivers => {
-                            let _ = terminal.write_output(platform::driver_status());
-                        }
-                        commands::Outcome::Trace => {
-                            let _ = terminal.write_output(trace::message(trace::latest()));
-                        }
-                        commands::Outcome::Inspect(resource) => {
-                            let _ = terminal.write_output(resource.as_bytes());
-                        }
-                        commands::Outcome::Restart(target) => {
-                            let _ = terminal.write_output(
-                                if platform::matches(target.as_bytes())
-                                    && service_lifecycle.restart(tick)
-                                {
-                                    b"restart scheduled"
-                                } else {
-                                    b"unknown or unavailable service"
-                                },
-                            );
-                        }
-                        commands::Outcome::Cancel(target) => {
-                            let _ = terminal.write_output(
-                                if platform::matches(target.as_bytes())
-                                    && channel
-                                        .send(
-                                            &capabilities,
-                                            service_capability,
-                                            session::Principal::LOCAL,
-                                            virtio_handle,
-                                            ipc::Message::Cancel,
-                                        )
-                                        .is_some()
-                                {
-                                    b"cancel requested"
-                                } else {
-                                    b"unknown or unavailable service"
-                                },
-                            );
-                        }
-                        commands::Outcome::CommandList => {
-                            for line in commands::COMMAND_LIST {
-                                let _ = terminal.write_output(line);
-                            }
-                        }
-                        commands::Outcome::Text(value) => {
-                            if let Some(value) = format::render(value, format::Style::Human) {
-                                let _ = terminal.write_output(value.as_bytes());
-                            }
-                        }
-                        commands::Outcome::Error(commands::Error::Denied) => {
-                            let _ = terminal.write_output(b"permission denied");
-                        }
-                        commands::Outcome::Error(commands::Error::UnknownCommand) => {
-                            let _ = terminal.write_output(b"unknown command");
-                        }
-                        commands::Outcome::Error(commands::Error::Cancelled) => {
-                            let _ = terminal.write_output(b"cancelled");
-                        }
-                        commands::Outcome::Error(commands::Error::TimedOut) => {
-                            let _ = terminal.write_output(b"timed out");
                         }
                     }
-                    if !terminal.render(display.as_mut().unwrap(), &text) {
-                        console_mode = mode::ConsoleMode::Recovery;
-                        break;
-                    }
-                } else if terminal.apply(event)
-                    && !terminal.render(display.as_mut().unwrap(), &text)
-                {
-                    console_mode = mode::ConsoleMode::Recovery;
-                    break;
                 }
             } else {
                 unsafe { core::arch::asm!("hlt") };
@@ -874,10 +681,6 @@ fn kernel_main(
     }
 }
 
-const fn legacy_normal_loop_enabled() -> bool {
-    false
-}
-
 fn native_input_byte(event: input::Event) -> Option<u8> {
     event.text().or_else(|| {
         event.pressed().and_then(|(key, _)| match key {
@@ -903,10 +706,50 @@ struct NativeCommandContext<'a, 'task> {
     service: services::ServiceHandle,
 }
 
+/// Result of handling one native-terminal command submission.
+///
+/// This exists so recovery hand-off is a real outcome the caller matches on,
+/// rather than the caller re-parsing the raw request bytes itself (as the
+/// old code did, comparing `request.text[..request.length]` against the
+/// literal string `b"recovery"` *before* the command was even dispatched).
+enum CommandReply {
+    /// The command was answered; `true` if the IPC reply itself was sent
+    /// successfully.
+    Handled(bool),
+    /// The command resolved to a recovery hand-off. The reply has already
+    /// been sent; the caller should switch console modes.
+    Recovery,
+}
+
+impl CommandReply {
+    /// For contexts (like the test-hooks harness) that only care whether the
+    /// step succeeded, not whether it happened to be a recovery hand-off.
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    fn ok(self) -> bool {
+        match self {
+            Self::Handled(ok) => ok,
+            Self::Recovery => true,
+        }
+    }
+}
+
+/// Answer one command submission from the native terminal task.
+///
+/// All command *parsing* lives in `logos_terminal::command` now -- this
+/// function never inspects command text or argument grammar. It only:
+/// - executes `Local::Layout`, because the kernel is what owns the physical
+///   keyboard scancode decoder (`input::Service`); the terminal payload has
+///   no way to act on a layout change itself.
+/// - relays every other `Local` resolution's reply text back down, since the
+///   terminal payload -- not the kernel -- interprets those replies (e.g.
+///   `clear` is acknowledged here but actually performed by the payload).
+/// - dispatches `Call` (tasks/services/drivers/trace/inspect/restart/cancel/
+///   recovery/reboot/poweroff/ping) through `commands::dispatch`, the one
+///   place capability checks happen.
 fn native_command_reply(
     endpoint: native_task::CommandEndpoint,
     context: NativeCommandContext<'_, '_>,
-) -> bool {
+) -> CommandReply {
     let NativeCommandContext {
         session,
         capabilities,
@@ -921,94 +764,118 @@ fn native_command_reply(
         service,
     } = context;
     let Some(request) = endpoint.submission() else {
-        return true;
+        return CommandReply::Handled(true);
     };
     let Some(submission) =
         logos_terminal::terminal::Submission::from_bytes(&request.text[..request.length])
     else {
-        return endpoint.reply(b"unknown command");
+        return CommandReply::Handled(endpoint.reply(b"unknown command"));
     };
-    match commands::pipeline(
-        submission,
-        session,
-        capabilities,
-        commands::Invocation::new(tick.wrapping_add(50)),
-        tick,
-    ) {
-        commands::Outcome::Text(value) => endpoint.reply(value.as_bytes()),
-        commands::Outcome::CommandList => command_list_reply(endpoint),
-        commands::Outcome::Tasks => endpoint.reply(b"scheduler active"),
-        commands::Outcome::Services => endpoint.reply(platform::service_status(service_healthy)),
-        commands::Outcome::Drivers => endpoint.reply(platform::driver_status()),
-        commands::Outcome::Trace => endpoint.reply(trace::message(trace::latest())),
-        commands::Outcome::Inspect(resource) => endpoint.reply(resource.as_bytes()),
-        commands::Outcome::Clear => endpoint.reply(b"clear handled by terminal"),
-        commands::Outcome::Layout(layout) => {
+    match command::pipeline(submission) {
+        command::Resolution::Local(command::Local::Text(value)) => {
+            CommandReply::Handled(endpoint.reply(value.as_bytes()))
+        }
+        command::Resolution::Local(command::Local::Clear) => {
+            CommandReply::Handled(endpoint.reply(b"clear handled by terminal"))
+        }
+        command::Resolution::Local(command::Local::CommandList) => {
+            CommandReply::Handled(command_list_reply(endpoint))
+        }
+        command::Resolution::Local(command::Local::Layout(layout)) => {
             input.set_layout(layout);
-            endpoint.reply(match layout {
+            CommandReply::Handled(endpoint.reply(match layout {
                 input::Layout::Qwerty => b"layout qwerty",
                 input::Layout::Azerty => b"layout azerty",
-            })
+            }))
         }
-        commands::Outcome::Restart(target) => {
-            endpoint.reply(if platform::matches(target.as_bytes()) && lifecycle.restart(tick) {
-                b"restart scheduled"
-            } else {
-                b"unknown or unavailable service"
-            })
-        }
-        commands::Outcome::Cancel(target) => endpoint.reply(
-            if platform::matches(target.as_bytes())
-                && channel
-                    .send(
-                        capabilities,
-                        service_capability,
-                        session::Principal::LOCAL,
-                        service,
-                        ipc::Message::Cancel,
-                    )
-                    .is_some()
-            {
-                b"cancel requested"
-            } else {
-                b"unknown or unavailable service"
-            },
-        ),
-        commands::Outcome::Recovery => endpoint.reply(b"recovery requested"),
-        commands::Outcome::Reboot => {
-            if acpi::reset() {
+        command::Resolution::Error(_) => CommandReply::Handled(endpoint.reply(b"unknown command")),
+        command::Resolution::Call(call) => match commands::dispatch(
+            call,
+            session,
+            capabilities,
+            commands::Invocation::new(tick.wrapping_add(50)),
+            tick,
+        ) {
+            commands::Outcome::Tasks => CommandReply::Handled(endpoint.reply(b"scheduler active")),
+            commands::Outcome::Services => {
+                CommandReply::Handled(endpoint.reply(platform::service_status(service_healthy)))
+            }
+            commands::Outcome::Drivers => {
+                CommandReply::Handled(endpoint.reply(platform::driver_status()))
+            }
+            commands::Outcome::Trace => {
+                CommandReply::Handled(endpoint.reply(trace::message(trace::latest())))
+            }
+            commands::Outcome::Inspect(resource) => {
+                CommandReply::Handled(endpoint.reply(resource.as_bytes()))
+            }
+            commands::Outcome::Restart(target) => CommandReply::Handled(endpoint.reply(
+                if platform::matches(target.as_bytes()) && lifecycle.restart(tick) {
+                    b"restart scheduled"
+                } else {
+                    b"unknown or unavailable service"
+                },
+            )),
+            commands::Outcome::Cancel(target) => CommandReply::Handled(
+                endpoint.reply(
+                    if platform::matches(target.as_bytes())
+                        && channel
+                            .send(
+                                capabilities,
+                                service_capability,
+                                session::Principal::LOCAL,
+                                service,
+                                ipc::Message::Cancel,
+                            )
+                            .is_some()
+                    {
+                        b"cancel requested"
+                    } else {
+                        b"unknown or unavailable service"
+                    },
+                ),
+            ),
+            commands::Outcome::Recovery => {
+                let _ = endpoint.reply(b"recovery requested");
+                CommandReply::Recovery
+            }
+            commands::Outcome::Reboot => CommandReply::Handled(if acpi::reset() {
                 true
             } else {
                 endpoint.reply(b"reboot unavailable")
-            }
-        }
-        commands::Outcome::PowerOff => {
-            if acpi::power_off() {
+            }),
+            commands::Outcome::PowerOff => CommandReply::Handled(if acpi::power_off() {
                 true
             } else {
                 endpoint.reply(b"poweroff unavailable")
+            }),
+            commands::Outcome::Ping => CommandReply::Handled(endpoint.reply(
+                if ping_platform(
+                    channel,
+                    responses,
+                    service_scheduler,
+                    capabilities,
+                    service_capability,
+                    service,
+                ) {
+                    b"pong"
+                } else {
+                    b"ping unavailable"
+                },
+            )),
+            commands::Outcome::Error(commands::Error::Denied) => {
+                CommandReply::Handled(endpoint.reply(b"permission denied"))
             }
-        }
-        commands::Outcome::Ping => endpoint.reply(
-            if ping_platform(
-                channel,
-                responses,
-                service_scheduler,
-                capabilities,
-                service_capability,
-                service,
-            ) {
-                b"pong"
-            } else {
-                b"ping unavailable"
-            },
-        ),
-        commands::Outcome::Error(commands::Error::Denied) => endpoint.reply(b"permission denied"),
-        commands::Outcome::Error(commands::Error::UnknownCommand) => {
-            endpoint.reply(b"unknown command")
-        }
-        commands::Outcome::Error(commands::Error::Cancelled) => endpoint.reply(b"cancelled"),
-        commands::Outcome::Error(commands::Error::TimedOut) => endpoint.reply(b"timed out"),
+            commands::Outcome::Error(commands::Error::UnknownCommand) => {
+                CommandReply::Handled(endpoint.reply(b"unknown command"))
+            }
+            commands::Outcome::Error(commands::Error::Cancelled) => {
+                CommandReply::Handled(endpoint.reply(b"cancelled"))
+            }
+            commands::Outcome::Error(commands::Error::TimedOut) => {
+                CommandReply::Handled(endpoint.reply(b"timed out"))
+            }
+        },
     }
 }
 
@@ -1042,7 +909,7 @@ fn ping_platform(
 fn command_list_reply(endpoint: native_task::CommandEndpoint) -> bool {
     let mut reply = [0; 256];
     let mut length = 0;
-    for line in commands::COMMAND_LIST {
+    for line in command::COMMAND_LIST {
         if length != 0 {
             reply[length] = b'\n';
             length += 1;
