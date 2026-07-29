@@ -3,6 +3,49 @@
 pub const ABI: u16 = 1;
 pub const MAX_TEXT: usize = 64;
 
+/// `foundation.session` v1 command request.  The transport stays bounded by
+/// `logos_core::native_service::Context`; this is the shared wire contract.
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(u32)]
+pub enum Syscall {
+    Recovery = 1,
+    Reboot,
+    PowerOff,
+    Ping,
+    Tasks,
+    Services,
+    Drivers,
+    Trace,
+    Inspect,
+    Restart,
+    Cancel,
+    SetInputLayout,
+}
+
+impl Syscall {
+    pub const fn from_wire(value: u32) -> Option<Self> {
+        match value {
+            1 => Some(Self::Recovery),
+            2 => Some(Self::Reboot),
+            3 => Some(Self::PowerOff),
+            4 => Some(Self::Ping),
+            5 => Some(Self::Tasks),
+            6 => Some(Self::Services),
+            7 => Some(Self::Drivers),
+            8 => Some(Self::Trace),
+            9 => Some(Self::Inspect),
+            10 => Some(Self::Restart),
+            11 => Some(Self::Cancel),
+            12 => Some(Self::SetInputLayout),
+            _ => None,
+        }
+    }
+
+    pub const fn takes_argument(self) -> bool {
+        matches!(self, Self::Inspect | Self::Restart | Self::Cancel | Self::SetInputLayout)
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct InputEvent(u8);
@@ -150,4 +193,7 @@ pub fn self_check() -> bool {
         && InputEvent::from_byte(0).is_none()
         && DisplayColor::from_wire(DisplayColor::GREEN.wire()) == Some(DisplayColor::GREEN)
         && DisplayColor::from_wire(0xff00_0000).is_none()
+        && Syscall::from_wire(Syscall::Restart as u32)
+            .is_some_and(|call| call == Syscall::Restart && call.takes_argument())
+        && Syscall::from_wire(0).is_none()
 }

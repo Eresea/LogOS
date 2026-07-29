@@ -10,50 +10,9 @@ pub const COMPLETE: u32 = 6;
 pub const SYSCALL: u32 = 7;
 pub const ACKNOWLEDGED: u32 = 1;
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-#[repr(u32)]
-pub enum Syscall {
-    Recovery = 1,
-    Reboot,
-    PowerOff,
-    Ping,
-    Tasks,
-    Services,
-    Drivers,
-    Trace,
-    Inspect,
-    Restart,
-    Cancel,
-    SetInputLayout,
-}
-
-impl Syscall {
-    const fn from_raw(value: u32) -> Option<Self> {
-        match value {
-            1 => Some(Self::Recovery),
-            2 => Some(Self::Reboot),
-            3 => Some(Self::PowerOff),
-            4 => Some(Self::Ping),
-            5 => Some(Self::Tasks),
-            6 => Some(Self::Services),
-            7 => Some(Self::Drivers),
-            8 => Some(Self::Trace),
-            9 => Some(Self::Inspect),
-            10 => Some(Self::Restart),
-            11 => Some(Self::Cancel),
-            12 => Some(Self::SetInputLayout),
-            _ => None,
-        }
-    }
-
-    const fn takes_argument(self) -> bool {
-        matches!(self, Self::Inspect | Self::Restart | Self::Cancel | Self::SetInputLayout)
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct SyscallRequest {
-    pub syscall: Syscall,
+    pub syscall: logos_abi::Syscall,
     pub argument: [u8; MAX_TEXT],
     pub length: usize,
 }
@@ -166,7 +125,7 @@ impl Context {
     pub unsafe fn syscall_at(address: u64) -> Option<SyscallRequest> {
         let context = unsafe { (address as *const Self).read_volatile() };
         let length = usize::try_from(context.text_length).ok()?;
-        let syscall = Syscall::from_raw(context.x)?;
+        let syscall = logos_abi::Syscall::from_wire(context.x)?;
         (context.abi == ABI
             && context.reserved == 0
             && context.operation == SYSCALL
@@ -305,14 +264,15 @@ pub fn self_check() -> bool {
     let mut syscall = Context::new();
     syscall.operation = SYSCALL;
     syscall.status = ACKNOWLEDGED;
-    syscall.x = Syscall::Inspect as u32;
+    syscall.x = logos_abi::Syscall::Inspect as u32;
     syscall.text[..4].copy_from_slice(b"name");
     syscall.text_length = 4;
-    let valid = unsafe { Context::syscall_at((&syscall as *const Context) as u64) }
-        .is_some_and(|request| request.syscall == Syscall::Inspect && request.length == 4);
+    let valid = unsafe { Context::syscall_at((&syscall as *const Context) as u64) }.is_some_and(
+        |request| request.syscall == logos_abi::Syscall::Inspect && request.length == 4,
+    );
     syscall.x = 0;
     let unknown = unsafe { Context::syscall_at((&syscall as *const Context) as u64) }.is_none();
-    syscall.x = Syscall::Reboot as u32;
+    syscall.x = logos_abi::Syscall::Reboot as u32;
     let malformed = unsafe { Context::syscall_at((&syscall as *const Context) as u64) }.is_none();
     Header::new(*b"terminal\0\0\0\0\0\0\0\0", self_check_entry).valid_for(b"terminal")
         && !Header::new(*b"terminal\0\0\0\0\0\0\0\0", self_check_entry).valid_for(b"other")

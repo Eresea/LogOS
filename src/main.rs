@@ -919,7 +919,7 @@ fn native_syscall_reply(
         return CommandReply::Handled(endpoint.reply(b"unknown command"));
     }
     match request.syscall {
-        logos_core::native_service::Syscall::SetInputLayout => {
+        logos_abi::Syscall::SetInputLayout => {
             let layout = argument
                 .filter(|argument| argument.as_bytes().len() == 1)
                 .and_then(|argument| logos_abi::InputLayout::from_wire(argument.as_bytes()[0]));

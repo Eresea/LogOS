@@ -2,9 +2,10 @@
 #![no_std]
 
 use core::arch::asm;
+use logos_abi::Syscall;
 use logos_core::native_service::{
     ACKNOWLEDGED, CLEAR_DISPLAY, COMPLETE, Context, Header, MAX_TEXT, PRESENT_TEXT, READ_INPUT,
-    READY, SYSCALL, Syscall,
+    READY, SYSCALL,
 };
 use logos_terminal::{
     command::{self, Call, Local, Resolution},

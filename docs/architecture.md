@@ -448,7 +448,8 @@ capability. A denial or malformed presentation stops the normal terminal and ent
 
 `foundation.session` v1 gates every typed terminal syscall with an explicit Session capability.
 Core keeps bootstrap command dispatch while it owns the privileged effects; a missing Session
-capability returns the bounded `permission denied` reply without dispatching the syscall.
+capability returns the bounded `permission denied` reply without dispatching the syscall. Its
+versioned syscall identifiers live in `logos-abi`, not Core.
 
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), and [ADR-0005](adr/0005-native-service-suspension.md).
 

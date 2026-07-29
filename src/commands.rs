@@ -6,8 +6,8 @@ use crate::{
     capabilities::{CapabilityKind, CapabilityManager},
     session,
 };
-use logos_core::native_service::Syscall;
-use logos_core::native_service::Syscall as Command;
+use logos_abi::Syscall;
+use logos_abi::Syscall as Command;
 use logos_terminal::terminal::Submission;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
