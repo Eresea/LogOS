@@ -439,6 +439,12 @@ event (`Text`, `Backspace`, `Enter`, or `Escape`) and accepts one typed layout r
 Input capability, and never exposes PS/2 ports or scancodes to the terminal. Display and Session
 remain bootstrap-gate operations until their own versioned contracts exist.
 
+### Platform v1 Display contract
+
+`foundation.display` v1 begins with typed RGB presentation values, bounded coordinates, and bounded
+text. Core owns framebuffer validation and writes; the terminal receives no framebuffer mapping.
+Display capability routing follows once the bootstrap context carries a service capability context.
+
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), and [ADR-0005](adr/0005-native-service-suspension.md).
 
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after the mode coordinator selects recovery.
