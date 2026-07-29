@@ -229,7 +229,7 @@ fn kernel_main(
                 == Some(cpu::EntryState::Returned)
         }) && service_address_space.release(&mut memory),
     );
-    let Some(mut terminal_task) = native_task::Terminal::load(&mut memory, payload, &privilege)
+    let Some(mut terminal_task) = native_task::Service::load(&mut memory, payload, &privilege)
     else {
         fail!(b"native service entry");
     };
@@ -515,7 +515,7 @@ fn kernel_main(
     let Some(mut virtio_service) = replacement else {
         fail!(b"service replacement");
     };
-    let Some(mut native_terminal) = native_task::Terminal::load(&mut memory, payload, &privilege)
+    let Some(mut native_terminal) = native_task::Service::load(&mut memory, payload, &privilege)
     else {
         fail!(b"native terminal task");
     };

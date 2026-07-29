@@ -6,7 +6,7 @@ use crate::{
     scheduler::{Event, Runnable, TaskState},
 };
 
-pub struct Terminal<'a> {
+pub struct Service<'a> {
     privilege: &'a Privilege,
     space: AddressSpace,
     entry: u64,
@@ -73,7 +73,7 @@ impl SyscallEndpoint {
     }
 }
 
-impl<'a> Terminal<'a> {
+impl<'a> Service<'a> {
     pub fn load(
         memory: &mut PhysicalMemory,
         payload: Payload,
@@ -157,7 +157,7 @@ impl<'a> Terminal<'a> {
     }
 }
 
-impl Runnable for Terminal<'_> {
+impl Runnable for Service<'_> {
     fn run(&mut self) -> TaskState {
         if self.complete {
             return TaskState::Complete;
