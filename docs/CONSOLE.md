@@ -1,6 +1,6 @@
 # Console
 
-> **Status:** Ring-3 native terminal active; capability-only service fan-out pending Platform v1
+> **Status:** Ring-3 native terminal active; command/session dispatch remains in Core for Platform v1
 > **Owner:** Sessions (normal terminal); Core (bootstrap gate and recovery console)
 
 Console is LogOS's local textual interface. The normal terminal consumes bounded command results; the kernel recovery console is an independent fallback.
@@ -40,7 +40,7 @@ Console is LogOS's local textual interface. The normal terminal consumes bounded
 ## Next required boundary
 
 - [x] Load `logos-terminal-service` as a native Sessions service rather than link it into `logos-uefi`.
-- [ ] Replace the bootstrap context gate with capability-only Input, Display, and Session client contracts.
+- [x] Gate the bootstrap context's input, display, and typed syscall operations with explicit Input, Display, and Session capabilities.
 - [ ] Keep command/session dispatch outside Core and preserve kernel-only recovery input/output.
 
 ## Later — Unplanned

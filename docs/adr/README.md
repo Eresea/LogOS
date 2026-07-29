@@ -15,3 +15,4 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0007](0007-typed-native-command-gate.md) | Accepted | Send typed terminal calls across the native command gate. |
 | [0008](0008-input-contract-v1.md) | Accepted | Introduce the typed `foundation.input` v1 contract first. |
 | [0009](0009-display-contract-v1.md) | Accepted | Introduce validated RGB display values before capability routing. |
+| [0010](0010-session-contract-v1.md) | Accepted | Gate typed terminal syscalls with an explicit Session capability. |

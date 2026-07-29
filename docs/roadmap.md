@@ -119,7 +119,7 @@ The current kernel remains independently bootable while its single crate is spli
 1. create a Cargo workspace and extract the no-std `logos-core` mechanisms;
 2. extract hardware-facing platform and driver crates;
 3. extract `logos-terminal` as the normal terminal model while retaining the kernel recovery path;
-4. stage and validate a versioned native-service boot payload, add per-service address spaces and Core-owned suspended task frames, then run `logos-terminal-service` as a separately loaded Ring-3 service; replace its bounded bootstrap gate with capability-only Input, Display, and Session contracts;
+4. stage and validate a versioned native-service boot payload, add per-service address spaces and Core-owned suspended task frames, then run `logos-terminal-service` as a separately loaded Ring-3 service; gate its bounded input, display, and syscall operations with Input, Display, and Session capabilities;
 5. retain `logos-uefi` as the UEFI boot binary throughout.
 
 Every extraction must retain the current QEMU proof. Add `logos-abi` only when an independently built native service needs a stable contract; do not create an empty ABI crate in advance.

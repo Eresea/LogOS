@@ -4,6 +4,7 @@ const CAPABILITIES: usize = 8;
 pub enum CapabilityKind {
     Input,
     Display,
+    Session,
     Debug,
     Service,
     Recovery,

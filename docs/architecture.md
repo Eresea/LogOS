@@ -413,8 +413,7 @@ frame and Core supplies one typed input byte before resuming it; `Complete` retu
 `SubmitCommand` copies at most 256 bytes into the same context page, suspends the service at a
 Core-owned frame, and resumes it only after Core has copied and replied to the request.
 `PresentPixel` supplies bounded coordinates and color only; Core validates them and writes the
-framebuffer. Display and session operations remain unmapped until their capability-scoped IPC
-contracts are added.
+framebuffer. Core defers display and syscall requests until their capability checks complete.
 
 A long-lived native service is suspended only at a Core gate. Core saves its registers and `iretq`
 frame on Core-owned memory, then later restores that frame on the service's supervisor stack. A
@@ -436,8 +435,7 @@ through the task's input endpoint before resuming Ring 3.
 The first bootstrap-gate replacement is `foundation.input` v1. It carries one bounded typed input
 event (`Text`, `Backspace`, `Enter`, or `Escape`) and accepts one typed layout request (`Qwerty` or
 `Azerty`). Core retains the PS/2 driver and recovery input path, enforces the terminal's explicit
-Input capability, and never exposes PS/2 ports or scancodes to the terminal. Display and Session
-remain bootstrap-gate operations until their own versioned contracts exist.
+Input capability, and never exposes PS/2 ports or scancodes to the terminal.
 
 ### Platform v1 Display contract
 
@@ -445,6 +443,12 @@ remain bootstrap-gate operations until their own versioned contracts exist.
 text. Core owns framebuffer validation and writes; the terminal receives no framebuffer mapping.
 Core defers each presentation request and authorizes it with the terminal session's explicit Display
 capability. A denial or malformed presentation stops the normal terminal and enters recovery.
+
+### Platform v1 Session contract
+
+`foundation.session` v1 gates every typed terminal syscall with an explicit Session capability.
+Core keeps bootstrap command dispatch while it owns the privileged effects; a missing Session
+capability returns the bounded `permission denied` reply without dispatching the syscall.
 
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), and [ADR-0005](adr/0005-native-service-suspension.md).
 

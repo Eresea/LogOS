@@ -23,6 +23,7 @@ const IMPLEMENTED: &[&str] = &[
     "console/capability-denied",
     "console/input-capability-denied",
     "console/display-capability-denied",
+    "console/session-capability-denied",
     "console/cancellation",
     "console/display-restart",
     "console/input-service-restart",

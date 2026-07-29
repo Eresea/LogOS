@@ -8,7 +8,7 @@
 
 LogOS is an experimental, capability-based operating system. It keeps the kernel focused on the work only the kernel can do: hardware, memory, scheduling, IPC, and capability enforcement. Everything else is intended to be a replaceable service, with sandboxed WebAssembly applications as the long-term application model.
 
-The normal terminal runs as a separately loaded Ring-3 payload behind a bounded Core gate; the recovery console remains kernel-owned. Platform v1 still needs capability-only Input, Display, and Session services to replace that bootstrap gate.
+The normal terminal runs as a separately loaded Ring-3 payload behind deferred, capability-gated Input, Display, and Session operations; the recovery console remains kernel-owned. Platform v1 still needs command/session dispatch to leave Core.
 
 ## Start here
 

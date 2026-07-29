@@ -331,6 +331,9 @@ fn kernel_main(
     else {
         fail!(b"capabilities");
     };
+    let Some(session_capability) = capabilities.grant(capabilities::CapabilityKind::Session) else {
+        fail!(b"capabilities");
+    };
     let Some(recovery_capability) = capabilities.grant(capabilities::CapabilityKind::Recovery)
     else {
         fail!(b"capabilities");
@@ -343,6 +346,7 @@ fn kernel_main(
             session_service_capability,
             session_input_capability,
             session_display_capability,
+            session_capability,
         ],
     ) else {
         fail!(b"session");
@@ -603,6 +607,8 @@ fn kernel_main(
             ("recovery", &denied_session, Some(b"permission denied" as &[u8]), false)
         } else if value == "deny-layout" {
             ("layout azerty", &denied_session, Some(b"permission denied" as &[u8]), true)
+        } else if value == "deny-session" {
+            ("tasks", &denied_session, Some(b"permission denied" as &[u8]), false)
         } else if deny_display {
             ("x", &session, None, false)
         } else {
@@ -904,6 +910,9 @@ fn native_syscall_reply(
     let Some(request) = endpoint.submission() else {
         return CommandReply::Handled(true);
     };
+    if !session.allows(capabilities, capabilities::CapabilityKind::Session) {
+        return CommandReply::Handled(endpoint.reply(b"permission denied"));
+    }
     let argument =
         logos_terminal::terminal::Submission::from_bytes(&request.argument[..request.length]);
     if request.length != 0 && argument.is_none() {

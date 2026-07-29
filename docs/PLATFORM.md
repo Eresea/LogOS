@@ -1,6 +1,6 @@
 # Platform
 
-> **Status:** Native Ring-3 terminal loading, suspension, and gate round trips implemented
+> **Status:** Native Ring-3 terminal loading, suspension, and capability-gated gate round trips implemented
 > **Owner:** Foundation and System
 
 Platform provides the bootstrap mechanisms for supervised native services: identities,
@@ -34,7 +34,7 @@ capabilities, health, versioned contracts, isolated address spaces, and Core-own
 - [x] `ping` completes a capability-gated IPC round trip to the platform service.
 - [x] `restart <target>` and `cancel <target>` preserve a typed target; Platform validates it.
 - [x] Load `logos-terminal-service` as a separately executable Ring-3 service with a bounded bootstrap context gate.
-- [ ] Replace that gate with only Input, Display, and Session capabilities.
+- [x] Gate terminal input, presentation, and typed syscalls with explicit Input, Display, and Session capabilities.
 
 ### Exit evidence
 
