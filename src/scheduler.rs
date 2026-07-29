@@ -14,6 +14,7 @@ impl Event {
     pub const VIRTIO: Self = Self(1);
     pub const INPUT: Self = Self(2);
     pub const COMMAND: Self = Self(4);
+    pub const DISPLAY: Self = Self(8);
     const SELF_CHECK: Self = Self(3);
 }
 

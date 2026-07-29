@@ -247,6 +247,14 @@ impl Context {
             && context.operation == CLEAR_DISPLAY
             && context.status == ACKNOWLEDGED
     }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn display_waiting_at(address: u64) -> bool {
+        unsafe { Self::pixel_at(address) }.is_some()
+            || unsafe { Self::text_at(address) }.is_some()
+            || unsafe { Self::clear_at(address) }
+    }
 }
 
 impl Default for Context {

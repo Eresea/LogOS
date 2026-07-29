@@ -1,6 +1,6 @@
 use crate::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
-const CAPABILITIES: usize = 3;
+const CAPABILITIES: usize = 4;
 const VARIABLES: usize = 4;
 const VARIABLE_NAME: usize = 16;
 const VARIABLE_VALUE: usize = 64;
@@ -132,7 +132,7 @@ impl Context {
             && !context.allows(&manager, CapabilityKind::Debug)
             && manager.revoke(recovery)
             && !context.allows(&manager, CapabilityKind::Recovery)
-            && Self::new(Id(2), Principal::LOCAL, &[debug, debug, debug, debug]).is_none()
+            && Self::new(Id(2), Principal::LOCAL, &[debug, debug, debug, debug, debug]).is_none()
             && context.set_variable(b"layout", b"qwerty")
             && context.variable(b"layout") == Some(b"qwerty" as &[u8])
     }

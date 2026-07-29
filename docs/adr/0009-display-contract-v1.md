@@ -10,11 +10,12 @@ The bootstrap terminal presents raw packed colors through Core-owned framebuffer
 ## Decision
 
 Define a shared, validated RGB display value first. Core continues to validate coordinates and own
-framebuffer writes. Display capability routing is deferred until the bootstrap context has an
-explicit service capability context.
+framebuffer writes. The terminal session receives an explicit Display capability; Core authorizes
+each deferred presentation request with it, then resumes the terminal only after rendering.
 
 ## Consequences
 
 - Invalid packed colors are rejected at the Core boundary.
 - The terminal still receives no framebuffer mapping.
+- Missing capability, malformed requests, and renderer failure stop the terminal and enter recovery.
 - No generic display RPC framework is introduced.

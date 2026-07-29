@@ -44,6 +44,7 @@ static USER_RETURNED: AtomicBool = AtomicBool::new(false);
 static USER_CONTEXT: AtomicU64 = AtomicU64::new(0);
 static USER_BLOCKED: AtomicBool = AtomicBool::new(false);
 static USER_COMMAND: AtomicBool = AtomicBool::new(false);
+static USER_DISPLAY: AtomicBool = AtomicBool::new(false);
 const USER_FRAME_WORDS: usize = 20;
 #[unsafe(no_mangle)]
 static mut USER_FRAME: [u64; USER_FRAME_WORDS] = [0; USER_FRAME_WORDS];
@@ -63,6 +64,7 @@ pub enum EntryState {
     Returned,
     Input,
     Command,
+    Display,
 }
 
 impl Privilege {
@@ -121,11 +123,14 @@ impl Privilege {
         USER_RETURNED.store(false, Ordering::Release);
         USER_BLOCKED.store(false, Ordering::Release);
         USER_COMMAND.store(false, Ordering::Release);
+        USER_DISPLAY.store(false, Ordering::Release);
         USER_CONTEXT.store(context, Ordering::Release);
         unsafe { enter_user(space.cr3(), entry, space.stack_top(), context) };
         unsafe { set_tss_stack(self.stack.address() + 4096) };
         if USER_BLOCKED.load(Ordering::Acquire) {
-            Some(if USER_COMMAND.load(Ordering::Acquire) {
+            Some(if USER_DISPLAY.load(Ordering::Acquire) {
+                EntryState::Display
+            } else if USER_COMMAND.load(Ordering::Acquire) {
                 EntryState::Command
             } else {
                 EntryState::Input
@@ -150,7 +155,9 @@ impl Privilege {
         unsafe { resume_user(space.cr3(), space.kernel_stack_top()) };
         unsafe { set_tss_stack(self.stack.address() + 4096) };
         if USER_BLOCKED.load(Ordering::Acquire) {
-            Some(if USER_COMMAND.load(Ordering::Acquire) {
+            Some(if USER_DISPLAY.load(Ordering::Acquire) {
+                EntryState::Display
+            } else if USER_COMMAND.load(Ordering::Acquire) {
                 EntryState::Command
             } else {
                 EntryState::Input
@@ -173,31 +180,28 @@ extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
     if context != 0 && unsafe { logos_core::native_service::Context::acknowledge_at(context) } {
         return 1;
     }
-    if context != 0 && crate::native_display::present(context) {
-        return 1;
-    }
-    if context != 0 && crate::native_display::present_text(context) {
-        return 1;
-    }
-    if context != 0 && crate::native_display::clear(context) {
-        return 1;
+    if context != 0
+        && unsafe { logos_core::native_service::Context::display_waiting_at(context) }
+        && save_user_frame(frame, false, true)
+    {
+        return 2;
     }
     if context != 0
         && unsafe { logos_core::native_service::Context::input_waiting_at(context) }
-        && save_user_frame(frame, false)
+        && save_user_frame(frame, false, false)
     {
         return 2;
     }
     if context != 0
         && unsafe { logos_core::native_service::Context::syscall_at(context) }.is_some()
-        && save_user_frame(frame, true)
+        && save_user_frame(frame, true, false)
     {
         return 2;
     }
     0
 }
 
-fn save_user_frame(frame: *const u64, command: bool) -> bool {
+fn save_user_frame(frame: *const u64, command: bool, display: bool) -> bool {
     if USER_BLOCKED.swap(true, Ordering::AcqRel) {
         return false;
     }
@@ -205,6 +209,7 @@ fn save_user_frame(frame: *const u64, command: bool) -> bool {
         ptr::copy_nonoverlapping(frame, ptr::addr_of_mut!(USER_FRAME).cast(), USER_FRAME_WORDS)
     };
     USER_COMMAND.store(command, Ordering::Release);
+    USER_DISPLAY.store(display, Ordering::Release);
     true
 }
 

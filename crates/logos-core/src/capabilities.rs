@@ -3,6 +3,7 @@ const CAPABILITIES: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CapabilityKind {
     Input,
+    Display,
     Debug,
     Service,
     Recovery,

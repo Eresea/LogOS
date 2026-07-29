@@ -39,6 +39,21 @@ pub struct SyscallEndpoint {
     context_physical: u64,
 }
 
+#[derive(Clone, Copy)]
+pub struct DisplayEndpoint {
+    context_physical: u64,
+}
+
+impl DisplayEndpoint {
+    pub fn pending(self) -> bool {
+        unsafe { logos_core::native_service::Context::display_waiting_at(self.context_physical) }
+    }
+
+    pub const fn context(self) -> u64 {
+        self.context_physical
+    }
+}
+
 impl SyscallEndpoint {
     pub fn submission(self) -> Option<logos_core::native_service::SyscallRequest> {
         self.request()
@@ -100,6 +115,10 @@ impl<'a> Terminal<'a> {
         SyscallEndpoint { context_physical: self.context_physical }
     }
 
+    pub const fn display_endpoint(&self) -> DisplayEndpoint {
+        DisplayEndpoint { context_physical: self.context_physical }
+    }
+
     pub fn resume(&mut self) -> bool {
         let state = self.privilege.resume_entry(&mut self.space);
         self.advance(state)
@@ -115,10 +134,15 @@ impl<'a> Terminal<'a> {
 
     fn advance(&mut self, state: Option<EntryState>) -> bool {
         match state {
-            Some(EntryState::Input) | Some(EntryState::Command) => {
+            Some(EntryState::Input) | Some(EntryState::Command) | Some(EntryState::Display) => {
                 self.blocked = true;
-                self.event =
-                    if state == Some(EntryState::Command) { Event::COMMAND } else { Event::INPUT };
+                self.event = if state == Some(EntryState::Command) {
+                    Event::COMMAND
+                } else if state == Some(EntryState::Display) {
+                    Event::DISPLAY
+                } else {
+                    Event::INPUT
+                };
                 true
             }
             Some(EntryState::Returned) => {

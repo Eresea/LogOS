@@ -443,7 +443,8 @@ remain bootstrap-gate operations until their own versioned contracts exist.
 
 `foundation.display` v1 begins with typed RGB presentation values, bounded coordinates, and bounded
 text. Core owns framebuffer validation and writes; the terminal receives no framebuffer mapping.
-Display capability routing follows once the bootstrap context carries a service capability context.
+Core defers each presentation request and authorizes it with the terminal session's explicit Display
+capability. A denial or malformed presentation stops the normal terminal and enters recovery.
 
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), and [ADR-0005](adr/0005-native-service-suspension.md).
 

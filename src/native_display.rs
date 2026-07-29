@@ -98,6 +98,10 @@ pub fn clear(context: u64) -> bool {
     true
 }
 
+pub fn handle(context: u64) -> bool {
+    present(context) || present_text(context) || clear(context)
+}
+
 pub fn matches(x: usize, y: usize, color: [u8; 3]) -> bool {
     if x >= WIDTH.load(Ordering::Acquire) || y >= HEIGHT.load(Ordering::Acquire) {
         return false;

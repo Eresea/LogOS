@@ -234,16 +234,27 @@ fn kernel_main(
         fail!(b"native service entry");
     };
     let terminal_input = terminal_task.input_endpoint();
+    let terminal_display = terminal_task.display_endpoint();
     let terminal_result = {
         let mut terminal_scheduler = scheduler::Scheduler::new();
         let terminal_handle = terminal_scheduler.spawn(&mut terminal_task);
         terminal_handle.is_some()
             && terminal_scheduler.run_next()
+            && resume_probe_display(
+                terminal_display,
+                &mut terminal_scheduler,
+                terminal_handle.unwrap(),
+            )
             && native_display::matches(33, 35, [0, 0xff, 0])
             && !terminal_scheduler.run_next()
             && terminal_input.deliver(logos_abi::InputEvent::from_byte(b'k').unwrap())
             && terminal_scheduler.wake(terminal_handle.unwrap())
             && terminal_scheduler.run_next()
+            && resume_probe_display(
+                terminal_display,
+                &mut terminal_scheduler,
+                terminal_handle.unwrap(),
+            )
             && !terminal_scheduler.run_next()
             && native_display::matches(33, 35, [0, 0xff, 0])
             && terminal_input.deliver(logos_abi::InputEvent::ESCAPE)
@@ -315,6 +326,11 @@ fn kernel_main(
     else {
         fail!(b"capabilities");
     };
+    let Some(session_display_capability) =
+        capabilities.grant(capabilities::CapabilityKind::Display)
+    else {
+        fail!(b"capabilities");
+    };
     let Some(recovery_capability) = capabilities.grant(capabilities::CapabilityKind::Recovery)
     else {
         fail!(b"capabilities");
@@ -322,7 +338,12 @@ fn kernel_main(
     let Some(session) = session::Context::new(
         session::Id(1),
         session::Principal::LOCAL,
-        &[recovery_capability, session_service_capability, session_input_capability],
+        &[
+            recovery_capability,
+            session_service_capability,
+            session_input_capability,
+            session_display_capability,
+        ],
     ) else {
         fail!(b"session");
     };
@@ -556,6 +577,7 @@ fn kernel_main(
     check!(b"trace", trace::self_check());
     let native_input = native_terminal.input_endpoint();
     let native_command = native_terminal.syscall_endpoint();
+    let native_display = native_terminal.display_endpoint();
     let mut native_scheduler = scheduler::Scheduler::new();
     let Some(native_handle) = native_scheduler.spawn(&mut native_terminal) else {
         fail!(b"native terminal task");
@@ -563,20 +585,60 @@ fn kernel_main(
     if !native_scheduler.run_next() {
         fail!(b"native terminal task");
     }
+    if !resume_display(
+        native_display,
+        &session,
+        &capabilities,
+        session_display_capability,
+        &mut native_scheduler,
+        native_handle,
+    ) {
+        fail!(b"native terminal display");
+    }
     health.finish();
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(|value| {
+        let deny_display = value == "deny-display";
         let (value, request_session, expected, expect_qwerty) = if value == "deny-recovery" {
             ("recovery", &denied_session, Some(b"permission denied" as &[u8]), false)
         } else if value == "deny-layout" {
             ("layout azerty", &denied_session, Some(b"permission denied" as &[u8]), true)
+        } else if deny_display {
+            ("x", &session, None, false)
         } else {
             (value, &session, None, false)
         };
+        if deny_display {
+            return logos_abi::InputEvent::from_byte(b'x').is_some_and(|event| {
+                native_input.deliver(event)
+                    && native_scheduler.wake(native_handle)
+                    && native_scheduler.run_next()
+                    && !resume_display(
+                        native_display,
+                        &denied_session,
+                        &capabilities,
+                        session_display_capability,
+                        &mut native_scheduler,
+                        native_handle,
+                    )
+            });
+        }
         value.bytes().chain(core::iter::once(b'\n')).all(|byte| {
             logos_abi::InputEvent::from_byte(byte).is_some_and(|event| native_input.deliver(event))
                 && native_scheduler.wake(native_handle)
                 && native_scheduler.run_next()
+                && (if native_display.pending() {
+                    resume_display(
+                        native_display,
+                        &session,
+                        &capabilities,
+                        session_display_capability,
+                        &mut native_scheduler,
+                        native_handle,
+                    )
+                } else {
+                    true
+                })
                 && (native_command.request().is_none()
                     || ({
                         let reply = native_syscall_reply(
@@ -632,11 +694,23 @@ fn kernel_main(
                 let _ = service_lifecycle.failed(tick);
             }
             if let Some(event) = input.next(tick, keyboard::poll_scancode) {
-                if native_input_event(event).is_some_and(|event| {
-                    native_input.deliver(event)
-                        && native_scheduler.wake(native_handle)
-                        && native_scheduler.run_next()
-                }) {
+                if let Some(native_event) = native_input_event(event) {
+                    if !native_input.deliver(native_event)
+                        || !native_scheduler.wake(native_handle)
+                        || !native_scheduler.run_next()
+                        || !resume_display(
+                            native_display,
+                            &session,
+                            &capabilities,
+                            session_display_capability,
+                            &mut native_scheduler,
+                            native_handle,
+                        )
+                    {
+                        debug::write_line(b"LogOS: native terminal display failed");
+                        console_mode = mode::ConsoleMode::Recovery;
+                        break;
+                    }
                     if event.pressed().is_some_and(|(key, _)| key == input::LogicalKey::Escape) {
                         debug::write_line(b"LogOS: recovery handoff requested");
                         console_mode = mode::ConsoleMode::Recovery;
@@ -717,6 +791,43 @@ fn native_input_event(event: input::Event) -> Option<logos_abi::InputEvent> {
             })
         })
         .and_then(logos_abi::InputEvent::from_byte)
+}
+
+fn resume_display(
+    endpoint: native_task::DisplayEndpoint,
+    session: &session::Context,
+    capabilities: &capabilities::CapabilityManager,
+    capability: capabilities::Capability,
+    scheduler: &mut scheduler::Scheduler<'_>,
+    handle: scheduler::TaskHandle,
+) -> bool {
+    while endpoint.pending() {
+        if !session.allows(capabilities, capabilities::CapabilityKind::Display)
+            || !capabilities.allows(capability, capabilities::CapabilityKind::Display)
+            || !native_display::handle(endpoint.context())
+            || !scheduler.wake(handle)
+            || !scheduler.run_next()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn resume_probe_display(
+    endpoint: native_task::DisplayEndpoint,
+    scheduler: &mut scheduler::Scheduler<'_>,
+    handle: scheduler::TaskHandle,
+) -> bool {
+    while endpoint.pending() {
+        if !native_display::handle(endpoint.context())
+            || !scheduler.wake(handle)
+            || !scheduler.run_next()
+        {
+            return false;
+        }
+    }
+    true
 }
 
 struct NativeCommandContext<'a, 'task> {
