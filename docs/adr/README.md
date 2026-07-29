@@ -16,3 +16,4 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0008](0008-input-contract-v1.md) | Accepted | Introduce the typed `foundation.input` v1 contract first. |
 | [0009](0009-display-contract-v1.md) | Accepted | Introduce validated RGB display values before capability routing. |
 | [0010](0010-session-contract-v1.md) | Accepted | Gate typed terminal syscalls with an explicit Session capability. |
+| [0011](0011-session-dispatch-service.md) | Accepted | Run normal command dispatch in a Sessions service. |
