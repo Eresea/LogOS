@@ -5,6 +5,7 @@ const BACKGROUND: [u8; 3] = [0; 3];
 const ORIGIN: (usize, usize) = (32, 32);
 const CELLS: usize = 64;
 const SCROLLBACK: usize = 8;
+pub const HISTORY_BYTES: usize = 1 + SCROLLBACK * (1 + CELLS);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
@@ -388,6 +389,39 @@ impl Model {
         true
     }
 
+    pub fn export_history(&self) -> [u8; HISTORY_BYTES] {
+        let mut bytes = [0; HISTORY_BYTES];
+        bytes[0] = self.scrollback_len as u8;
+        for offset in 0..self.scrollback_len {
+            let entry = self.history_entry(offset).unwrap();
+            let start = 1 + offset * (1 + CELLS);
+            bytes[start] = entry.length as u8;
+            bytes[start + 1..start + 1 + entry.length].copy_from_slice(entry.as_bytes());
+        }
+        bytes
+    }
+
+    pub fn restore_history_bytes(&mut self, bytes: &[u8]) -> bool {
+        if bytes.len() != HISTORY_BYTES || usize::from(bytes[0]) > SCROLLBACK {
+            return false;
+        }
+        let count = usize::from(bytes[0]);
+        let mut entries = [Submission::EMPTY; SCROLLBACK];
+        for (offset, entry) in entries[..count].iter_mut().enumerate() {
+            let start = 1 + offset * (1 + CELLS);
+            let length = usize::from(bytes[start]);
+            let Some(submission) = bytes
+                .get(start + 1..start + 1 + length)
+                .filter(|_| length <= CELLS)
+                .and_then(Submission::from_bytes)
+            else {
+                return false;
+            };
+            *entry = submission;
+        }
+        self.restore_history(&entries[..count])
+    }
+
     pub fn search(&self, query: &[u8]) -> Option<SearchMatch> {
         if query.is_empty() || core::str::from_utf8(query).is_err() {
             return None;
@@ -512,6 +546,11 @@ impl Model {
         let mut restored = Self::new();
         let restored_history = restored.restore_history(&[first, second])
             && restored.history_entry(0).is_some_and(|entry| entry.as_bytes() == b"first");
+        let encoded = restored.export_history();
+        let mut decoded = Self::new();
+        let encoded_history = decoded.restore_history_bytes(&encoded)
+            && decoded.history_entry(0).is_some_and(|entry| entry.as_bytes() == b"first")
+            && !decoded.restore_history_bytes(&encoded[..encoded.len() - 1]);
         let mut selection = Self::new();
         let selected = selection.insert_utf8(b"a\xc3\xa9")
             && selection.select(1, 3)
@@ -571,6 +610,7 @@ impl Model {
             && history
             && persisted_history
             && restored_history
+            && encoded_history
             && selected
             && selection.selected_bytes().is_none()
             && selection_invalidated

@@ -398,7 +398,28 @@ pub struct Metrics {
     pub advance: usize,
 }
 
-pub struct Service;
+pub const FONT_BYTES: usize = 95 * HEIGHT;
+
+pub struct Font {
+    glyphs: [[u8; HEIGHT]; 95],
+}
+
+impl Font {
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != FONT_BYTES {
+            return None;
+        }
+        let mut glyphs = [[0; HEIGHT]; 95];
+        for (glyph, source) in glyphs.iter_mut().zip(bytes.chunks_exact(HEIGHT)) {
+            glyph.copy_from_slice(source);
+        }
+        Some(Self { glyphs })
+    }
+}
+
+pub struct Service {
+    font: Option<Font>,
+}
 
 impl Default for Service {
     fn default() -> Self {
@@ -410,7 +431,15 @@ impl Service {
     pub const ADVANCE: usize = WIDTH;
 
     pub const fn new() -> Self {
-        Self
+        Self { font: None }
+    }
+
+    pub fn load_font(&mut self, bytes: &[u8]) -> bool {
+        let Some(font) = Font::from_bytes(bytes) else {
+            return false;
+        };
+        self.font = Some(font);
+        true
     }
 
     pub const fn metrics(&self) -> Metrics {
@@ -434,16 +463,26 @@ impl Service {
     }
 
     pub fn self_check() -> bool {
-        let service = Self::new();
-        service.metrics() == Metrics { width: 8, height: 20, advance: 8 }
+        let mut service = Self::new();
+        let fallback = service.metrics() == Metrics { width: 8, height: 20, advance: 8 }
             && service.glyph(b'G') != service.glyph(b'?')
             && service.glyph(b'a') != service.glyph(b'A')
             && service.glyph(b' ') == &SPACE
-            && service.glyph(0) == &UNKNOWN
+            && service.glyph(0) == &UNKNOWN;
+        fallback
+            && !service.load_font(&[0; 1])
+            && service.load_font(&[0; FONT_BYTES])
+            && service.glyph(b'G') == &[0; HEIGHT]
     }
 
-    fn glyph(&self, text: u8) -> &'static [u8; HEIGHT] {
-        glyph(text)
+    fn glyph(&self, text: u8) -> &[u8; HEIGHT] {
+        if (b' '..=b'~').contains(&text) {
+            self.font
+                .as_ref()
+                .map_or_else(|| glyph(text), |font| &font.glyphs[usize::from(text - b' ')])
+        } else {
+            &UNKNOWN
+        }
     }
 }
 
