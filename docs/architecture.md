@@ -603,7 +603,19 @@ Agent memory is a Store namespace with workspace visibility, retention, and reda
 
 ## 11. Storage model
 
-The native storage contract is based on objects, streams, versions, and transactions.
+The Persistence v1 native storage contract is based on capability-scoped namespaces containing
+named byte objects. Replacing an object creates an immutable version; callers may read the current
+or immediately previous version. Streams and general transactions remain future contracts.
+
+Core retains VirtIO block DMA, interrupts, timeout/reset, and generation-tagged shared-page
+ownership until Ring-1 driver isolation can enforce those resources directly. Shared pages are
+quota-bound, non-executable, owner-checked, temporarily lendable, and reclaimed on service exit.
+
+The restartable Ring-2 Storage service owns the on-disk policy. Two alternating checksummed
+superblocks select one of two append-only arenas. A replace becomes visible only after its payload,
+flush, commit sector, and final flush complete. Recovery ignores incomplete or corrupt records.
+Compaction copies live current/previous versions to the inactive arena before switching the
+superblock generation. See [ADR-0013](adr/0013-persistence-v1-boundary.md).
 
 A file view may provide:
 
