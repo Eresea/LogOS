@@ -13,6 +13,7 @@ const WRITABLE: u64 = 1 << 1;
 const USER: u64 = 1 << 2;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+const SHARED_PAGE: usize = 1;
 
 pub struct AddressSpace {
     pml4: Page,
@@ -22,6 +23,7 @@ pub struct AddressSpace {
     stack_lower: Page,
     stack: Page,
     mapped: [Option<Mapping>; MAPPED_PAGES],
+    borrowed: Option<u64>,
     base: u64,
 }
 
@@ -99,6 +101,7 @@ impl AddressSpace {
                 stack_lower,
                 stack,
                 mapped: [const { None }; MAPPED_PAGES],
+                borrowed: None,
                 base: canonical_address(slot),
             })
         }
@@ -176,6 +179,41 @@ impl AddressSpace {
             return None;
         }
         Some((address, self.base + PAGE_SIZE * CONTEXT_PAGE as u64))
+    }
+
+    pub fn map_shared_owned(&mut self, physical: &mut PhysicalMemory) -> Option<u64> {
+        if self.mapping(SHARED_PAGE).is_some() || self.borrowed.is_some() {
+            return None;
+        }
+        let page = physical.allocate_owned()?;
+        let address = page.address();
+        if let Err(page) = self.insert_mapping(SHARED_PAGE, page) {
+            let _ = physical.release_page(page);
+            return None;
+        }
+        unsafe {
+            (self.pt.address() as *mut u64)
+                .add(SHARED_PAGE)
+                .write_volatile(address | PRESENT | WRITABLE | USER | NO_EXECUTE);
+        }
+        Some(address)
+    }
+
+    pub fn map_shared_borrowed(&mut self, address: u64) -> bool {
+        if address == 0
+            || !address.is_multiple_of(PAGE_SIZE)
+            || self.mapping(SHARED_PAGE).is_some()
+            || self.borrowed.is_some()
+        {
+            return false;
+        }
+        self.borrowed = Some(address);
+        unsafe {
+            (self.pt.address() as *mut u64)
+                .add(SHARED_PAGE)
+                .write_volatile(address | PRESENT | WRITABLE | USER | NO_EXECUTE);
+        }
+        true
     }
 
     pub const fn cr3(&self) -> u64 {

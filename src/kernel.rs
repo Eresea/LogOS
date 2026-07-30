@@ -187,6 +187,20 @@ pub(crate) fn main(
                 == Some(cpu::EntryState::Returned)
         }) && service_address_space.release(&mut memory),
     );
+    let Some(mut shared_owner) = address_space::AddressSpace::new(&mut memory) else {
+        fail!(b"shared page owner");
+    };
+    let Some(mut shared_borrower) = address_space::AddressSpace::new(&mut memory) else {
+        fail!(b"shared page borrower");
+    };
+    check!(
+        b"shared page mapping",
+        shared_owner
+            .map_shared_owned(&mut memory)
+            .is_some_and(|page| shared_borrower.map_shared_borrowed(page))
+            && shared_borrower.release(&mut memory)
+            && shared_owner.release(&mut memory),
+    );
     let Some(mut terminal_task) = native_task::Task::load(&mut memory, payload, &privilege) else {
         fail!(b"native service entry");
     };
