@@ -11,6 +11,53 @@ const SUPER_MAGIC: &[u8; 4] = b"LGST";
 const RECORD_MAGIC: &[u8; 4] = b"RECD";
 const COMMIT_MAGIC: &[u8; 4] = b"CMIT";
 
+pub trait SectorBackend {
+    fn sectors(&self) -> usize;
+    fn read(&self, sector: usize, output: &mut [u8; SECTOR_SIZE]) -> Result<(), Error>;
+    fn write(&mut self, sector: usize, input: &[u8; SECTOR_SIZE]) -> Result<(), Error>;
+    fn flush(&mut self) -> Result<(), Error>;
+}
+
+pub struct MemoryBackend {
+    bytes: Vec<u8>,
+}
+
+impl MemoryBackend {
+    pub fn zeroed(sectors: usize) -> Result<Self, Error> {
+        (sectors >= 10)
+            .then(|| Self { bytes: vec![0; sectors * SECTOR_SIZE] })
+            .ok_or(Error::Invalid)
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl SectorBackend for MemoryBackend {
+    fn sectors(&self) -> usize {
+        self.bytes.len() / SECTOR_SIZE
+    }
+
+    fn read(&self, sector: usize, output: &mut [u8; SECTOR_SIZE]) -> Result<(), Error> {
+        let start = sector.checked_mul(SECTOR_SIZE).ok_or(Error::Invalid)?;
+        let bytes = self.bytes.get(start..start + SECTOR_SIZE).ok_or(Error::Invalid)?;
+        output.copy_from_slice(bytes);
+        Ok(())
+    }
+
+    fn write(&mut self, sector: usize, input: &[u8; SECTOR_SIZE]) -> Result<(), Error> {
+        let start = sector.checked_mul(SECTOR_SIZE).ok_or(Error::Invalid)?;
+        let bytes = self.bytes.get_mut(start..start + SECTOR_SIZE).ok_or(Error::Invalid)?;
+        bytes.copy_from_slice(input);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Invalid,
@@ -46,8 +93,9 @@ struct Versions {
     previous: Option<Location>,
 }
 
-pub struct Store {
+pub struct Store<B = MemoryBackend> {
     disk: Vec<u8>,
+    backend: B,
     arena: usize,
     generation: u64,
     tail: usize,
@@ -55,20 +103,40 @@ pub struct Store {
     recovery: Recovery,
 }
 
-impl Store {
+impl Store<MemoryBackend> {
     pub fn format(sectors: usize) -> Result<Self, Error> {
-        if sectors < 10 {
-            return Err(Error::Invalid);
-        }
-        let mut disk = vec![0; sectors * SECTOR_SIZE];
-        let superblock = encode_superblock(1, 0);
-        disk[..SECTOR_SIZE].copy_from_slice(&superblock);
-        Self::recover(disk)
+        Self::format_with_backend(MemoryBackend::zeroed(sectors)?)
     }
 
     pub fn recover(disk: Vec<u8>) -> Result<Self, Error> {
-        if disk.len() < 10 * SECTOR_SIZE || !disk.len().is_multiple_of(SECTOR_SIZE) {
+        let backend = MemoryBackend { bytes: disk };
+        Self::recover_backend(backend)
+    }
+
+    pub fn into_disk(self) -> Vec<u8> {
+        self.backend.into_bytes()
+    }
+}
+
+impl<B: SectorBackend> Store<B> {
+    pub fn format_with_backend(mut backend: B) -> Result<Self, Error> {
+        if backend.sectors() < 10 {
             return Err(Error::Invalid);
+        }
+        backend.write(0, &encode_superblock(1, 0))?;
+        backend.flush()?;
+        Self::recover_backend(backend)
+    }
+
+    pub fn recover_backend(backend: B) -> Result<Self, Error> {
+        if backend.sectors() < 10 {
+            return Err(Error::Invalid);
+        }
+        let mut disk = vec![0; backend.sectors() * SECTOR_SIZE];
+        for sector in 0..backend.sectors() {
+            let mut block = [0; SECTOR_SIZE];
+            backend.read(sector, &mut block)?;
+            disk[sector * SECTOR_SIZE..][..SECTOR_SIZE].copy_from_slice(&block);
         }
         let selected = (0..SUPERBLOCKS)
             .filter_map(|slot| decode_superblock(&disk[slot * SECTOR_SIZE..][..SECTOR_SIZE]))
@@ -77,6 +145,7 @@ impl Store {
         let (generation, arena) = selected;
         let mut store = Self {
             disk,
+            backend,
             arena,
             generation,
             tail: 0,
@@ -89,10 +158,6 @@ impl Store {
 
     pub fn disk(&self) -> &[u8] {
         &self.disk
-    }
-
-    pub fn into_disk(self) -> Vec<u8> {
-        self.disk
     }
 
     pub const fn recovery(&self) -> Recovery {
@@ -137,18 +202,20 @@ impl Store {
         let mut step = 0;
         let sectors = record.len() / SECTOR_SIZE;
         for (index, sector) in record.chunks_exact(SECTOR_SIZE).enumerate() {
-            self.disk[start + index * SECTOR_SIZE..][..SECTOR_SIZE].copy_from_slice(sector);
+            self.write_sector(start / SECTOR_SIZE + index, sector.try_into().unwrap())?;
             step += 1;
             if cut == Some(step) {
                 return Err(Error::Interrupted);
             }
             if index + 2 == sectors {
+                self.backend.flush()?;
                 step += 1; // payload flush
                 if cut == Some(step) {
                     return Err(Error::Interrupted);
                 }
             }
         }
+        self.backend.flush()?;
         step += 1; // commit flush
         if cut == Some(step) {
             return Err(Error::Interrupted);
@@ -178,7 +245,9 @@ impl Store {
         let target = 1 - self.arena;
         let target_start = self.arena_start_for(target);
         let arena_len = self.arena_len();
-        self.disk[target_start..target_start + arena_len].fill(0);
+        for sector in target_start / SECTOR_SIZE..(target_start + arena_len) / SECTOR_SIZE {
+            self.write_sector(sector, &[0; SECTOR_SIZE])?;
+        }
         let mut records = Vec::new();
         for (key, versions) in &self.versions {
             for location in [versions.previous, versions.current].into_iter().flatten() {
@@ -198,7 +267,7 @@ impl Store {
         let mut step = 0;
         for record in records {
             for sector in record.chunks_exact(SECTOR_SIZE) {
-                self.disk[cursor..cursor + SECTOR_SIZE].copy_from_slice(sector);
+                self.write_sector(cursor / SECTOR_SIZE, sector.try_into().unwrap())?;
                 cursor += SECTOR_SIZE;
                 step += 1;
                 if cut == Some(step) {
@@ -206,6 +275,7 @@ impl Store {
                 }
             }
         }
+        self.backend.flush()?;
         step += 1; // arena flush
         if cut == Some(step) {
             return Err(Error::Interrupted);
@@ -214,11 +284,12 @@ impl Store {
         let superblock = encode_superblock(generation, target);
         let slot = generation as usize % SUPERBLOCKS;
         let offset = slot * SECTOR_SIZE;
-        self.disk[offset..offset + SECTOR_SIZE].copy_from_slice(&superblock);
+        self.write_sector(offset / SECTOR_SIZE, &superblock)?;
         step += 1;
         if cut == Some(step) {
             return Err(Error::Interrupted);
         }
+        self.backend.flush()?;
         step += 1; // superblock flush
         if cut == Some(step) {
             return Err(Error::Interrupted);
@@ -297,6 +368,15 @@ impl Store {
 
     fn arena_len(&self) -> usize {
         ((self.disk.len() - SUPERBLOCKS * SECTOR_SIZE) / 2 / SECTOR_SIZE) * SECTOR_SIZE
+    }
+
+    fn write_sector(&mut self, sector: usize, block: &[u8; SECTOR_SIZE]) -> Result<(), Error> {
+        let offset = sector.checked_mul(SECTOR_SIZE).ok_or(Error::Invalid)?;
+        self.disk
+            .get_mut(offset..offset + SECTOR_SIZE)
+            .ok_or(Error::Invalid)?
+            .copy_from_slice(block);
+        self.backend.write(sector, block)
     }
 }
 
@@ -396,7 +476,7 @@ mod tests {
         let mut base = Store::format(32).unwrap();
         base.replace(NS, b"history", b"old").unwrap();
         let disk = base.into_disk();
-        for cut in 1..=Store::interruption_points(700) {
+        for cut in 1..=Store::<MemoryBackend>::interruption_points(700) {
             let mut store = Store::recover(disk.clone()).unwrap();
             assert_eq!(
                 store.replace_with_cut(NS, b"history", &vec![b'n'; 700], Some(cut)),
