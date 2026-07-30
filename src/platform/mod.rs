@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod balloon;
+pub mod block;
 pub mod entropy;
 pub mod health;
 pub mod identity;
@@ -10,5 +11,6 @@ pub mod pe;
 pub mod secrets;
 pub mod services;
 pub mod session;
+pub mod storage;
 pub mod time;
 pub mod trace;

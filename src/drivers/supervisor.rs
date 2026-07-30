@@ -5,6 +5,8 @@ const MAX_MANIFESTS: usize = 4;
 
 pub const SUPERVISOR: &[u8] = b"supervisor";
 pub const VIRTIO_BALLOON: &[u8] = b"virtio-balloon";
+pub const VIRTIO_BLOCK: &[u8] = b"virtio-block";
+pub const STORAGE: &[u8] = b"storage";
 
 #[derive(Clone, Copy)]
 pub enum Profile {
@@ -100,7 +102,29 @@ const VIRTIO_MANIFEST: Manifest = Manifest {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     profiles: Profiles::NORMAL_RECOVERY,
 };
-const BOOT_MANIFESTS: &[Manifest] = &[SUPERVISOR_MANIFEST, VIRTIO_MANIFEST];
+const BLOCK_MANIFEST: Manifest = Manifest {
+    name: VIRTIO_BLOCK,
+    dependencies: &[SUPERVISOR],
+    capabilities: &[CapabilityKind::Service, CapabilityKind::Block, CapabilityKind::Memory],
+    protocol: Protocol { abi: 1, version: 0 },
+    restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
+    profiles: Profiles::NORMAL_RECOVERY,
+};
+const STORAGE_MANIFEST: Manifest = Manifest {
+    name: STORAGE,
+    dependencies: &[VIRTIO_BLOCK],
+    capabilities: &[
+        CapabilityKind::Service,
+        CapabilityKind::Memory,
+        CapabilityKind::StoreRead,
+        CapabilityKind::StoreWrite,
+    ],
+    protocol: Protocol { abi: 1, version: 0 },
+    restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
+    profiles: Profiles::NORMAL_RECOVERY,
+};
+const BOOT_MANIFESTS: &[Manifest] =
+    &[SUPERVISOR_MANIFEST, VIRTIO_MANIFEST, BLOCK_MANIFEST, STORAGE_MANIFEST];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Error {

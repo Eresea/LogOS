@@ -6,12 +6,15 @@ const SERVICES: usize = 4;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Service {
     VirtioBalloon,
+    VirtioBlock,
+    Storage,
 }
 
 impl Service {
     pub const fn protocol(self) -> Protocol {
         match self {
             Self::VirtioBalloon => Protocol { abi: 1, version: 0 },
+            Self::VirtioBlock | Self::Storage => Protocol { abi: 1, version: 0 },
         }
     }
 }

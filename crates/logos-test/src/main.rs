@@ -49,6 +49,11 @@ const SCENARIOS: &[Scenario] = &[
     configured("console/input-service-restart", "console", &["assert-restart"]),
     configured("console/terminal-service-restart", "console", &["assert-terminal-service-restart"]),
     configured("console/sessions-service-restart", "console", &["assert-sessions-service-restart"]),
+    configured(
+        "persistence/storage-service-restart",
+        "persistence",
+        &["assert-storage-service-restart"],
+    ),
     scenario("console/recovery-handoff", "console"),
     scenario("platform/manifest-valid", "platform"),
     scenario("platform/manifest-invalid", "platform"),
@@ -248,10 +253,12 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
     fs::copy(&efi, esp.join("BOOTX64.EFI")).map_err(io_error)?;
     let payload = root.join("target/x86_64-unknown-uefi/debug/logos-terminal-service.efi");
     let sessions_payload = root.join("target/x86_64-unknown-uefi/debug/logos-sessions-service.efi");
+    let storage_payload = root.join("target/x86_64-unknown-uefi/debug/logos-storage-service.efi");
     let payload_dir = artifacts.join("esp/EFI/LOGOS");
     fs::create_dir_all(&payload_dir).map_err(io_error)?;
     fs::copy(payload, payload_dir.join("TERMINAL.EFI")).map_err(io_error)?;
     fs::copy(sessions_payload, payload_dir.join("SESSIONS.EFI")).map_err(io_error)?;
+    fs::copy(storage_payload, payload_dir.join("STORAGE.EFI")).map_err(io_error)?;
     fs::write(
         artifacts.join("image.hash"),
         format!("{:016x}\n", fnv(&fs::read(&efi).map_err(io_error)?)),
@@ -272,6 +279,8 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
     fs::write(artifacts.join("command.txt"), &command_line).map_err(io_error)?;
     fs::write(artifacts.join("profile.txt"), "profile=debug\nfeatures=test-hooks\n")
         .map_err(io_error)?;
+    let disk = artifacts.join("store.raw");
+    fs::File::create(&disk).and_then(|file| file.set_len(16 * 1024 * 1024)).map_err(io_error)?;
 
     let stderr = fs::File::create(artifacts.join("qemu.stderr.log")).map_err(io_error)?;
     let mut child = Command::new(&qemu)
@@ -286,6 +295,10 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
             &format!("format=raw,file=fat:rw:{}", artifacts.join("esp").display()),
             "-device",
             "virtio-balloon-pci,disable-modern=on,id=logos-virtio",
+            "-drive",
+            &format!("if=none,format=raw,cache=writeback,file={},id=logos-store", disk.display()),
+            "-device",
+            "virtio-blk-pci,disable-modern=on,drive=logos-store,id=logos-block",
             "-device",
             "isa-debug-exit,iobase=0xf4,iosize=0x04",
             "-display",
@@ -361,6 +374,14 @@ fn build(root: &Path) -> Result<(), String> {
         .map_err(io_error)?;
     if !status.success() {
         return Err("terminal service build failed".into());
+    }
+    let status = Command::new("cargo")
+        .current_dir(root)
+        .args(["build", "--package", "logos-storage-service", "--target", "x86_64-unknown-uefi"])
+        .status()
+        .map_err(io_error)?;
+    if !status.success() {
+        return Err("storage service build failed".into());
     }
     let status = Command::new("cargo")
         .current_dir(root)
@@ -567,12 +588,9 @@ fn io_error(error: std::io::Error) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn future_scenarios_never_pass() {
+    fn future_network_scenarios_never_pass() {
         assert!(
-            SCENARIOS
-                .iter()
-                .filter(|item| matches!(item.suite, "persistence" | "network"))
-                .all(|item| !item.implemented)
+            SCENARIOS.iter().filter(|item| item.suite == "network").all(|item| !item.implemented)
         );
     }
     #[test]

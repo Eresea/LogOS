@@ -1,11 +1,11 @@
 use crate::arch::{acpi, cpu, interrupts, pci};
 use crate::console::{native_display, recovery as console};
-use crate::drivers::{device, keyboard, resources, supervisor, virtio};
+use crate::drivers::{block as block_driver, device, keyboard, resources, supervisor, virtio};
 use crate::ipc::{self, approvals, effects};
 use crate::mm::{address_space, memory, virtual_memory};
 use crate::platform::{
-    audit, balloon, entropy, health, identity, inference, mode, payload, pe, secrets, services,
-    session, time, trace,
+    audit, balloon, block, entropy, health, identity, inference, mode, payload, pe, secrets,
+    services, session, storage, time, trace,
 };
 use crate::sched::{native_task, scheduler};
 #[cfg(feature = "test-hooks")]
@@ -63,7 +63,7 @@ pub(crate) fn main(
         b"machine identity",
         entropy::self_check() && identity::self_check() && machine.id() == machine.id(),
     );
-    check!(b"secret store", secrets::self_check());
+    check!(b"secret store", secrets::self_check(),);
     check!(b"audit", audit::self_check());
     check!(b"approvals", approvals::self_check());
     check!(b"inference", inference::self_check());
@@ -158,6 +158,16 @@ pub(crate) fn main(
             .is_some_and(|entry| entry != 0 && sessions_address_space.verifies_isolation())
             && sessions_address_space.release(&mut memory),
     );
+    let Some(mut storage_address_space) = address_space::AddressSpace::new(&mut memory) else {
+        fail!(b"storage image map");
+    };
+    check!(
+        b"storage image map",
+        storage_address_space
+            .map_image(&mut memory, payloads.storage)
+            .is_some_and(|entry| entry != 0 && storage_address_space.verifies_isolation())
+            && storage_address_space.release(&mut memory),
+    );
     let keyboard_interrupts = interrupts::install(madt);
     interrupts::enable();
     interrupts::wait_for_tick();
@@ -244,6 +254,25 @@ pub(crate) fn main(
     let Some(device) = balloon::discover(&devices) else {
         fail!(b"platform device");
     };
+    let Some(block_pci) = block::discover(&devices) else {
+        fail!(b"block device");
+    };
+    let Some(block_gsi) = acpi.and_then(|tables| {
+        let (bus, slot, _) = block_pci.location();
+        tables.pci_gsi(bus, slot, block_pci.interrupt_pin().checked_sub(1)?)
+    }) else {
+        fail!(b"block routing");
+    };
+    let Some(block_device) = block_driver::Device::bind(block_pci, block_gsi, &mut memory) else {
+        fail!(b"block bind");
+    };
+    check!(
+        b"block device",
+        block_driver::self_check()
+            && block::NAME == b"virtio-block"
+            && block_device.info().valid()
+            && block_device.diagnostics() == (0, 0, false),
+    );
     let Some(supervisor) = supervisor::boot_plan(supervisor::Profile::Normal).ok() else {
         fail!(b"supervisor manifest");
     };
@@ -312,6 +341,16 @@ pub(crate) fn main(
         supervisor::report_start_failure(balloon::NAME, supervisor::StartStage::Capability);
         fail!(b"service capability");
     };
+    let Some(block_service_capability) =
+        supervisor.grant(block::NAME, &mut capabilities, capabilities::CapabilityKind::Service)
+    else {
+        fail!(b"block capability");
+    };
+    let Some(storage_service_capability) =
+        supervisor.grant(storage::NAME, &mut capabilities, capabilities::CapabilityKind::Service)
+    else {
+        fail!(b"storage capability");
+    };
     check!(
         b"service capability",
         supervisor::grant_self_check()
@@ -335,7 +374,27 @@ pub(crate) fn main(
         supervisor::report_start_failure(balloon::NAME, supervisor::StartStage::Register);
         fail!(b"services");
     };
-    check!(b"services", services.resolve(balloon::SERVICE) == Some(virtio_handle),);
+    let Some(block_handle) =
+        services.register(&capabilities, block_service_capability, block::SERVICE)
+    else {
+        fail!(b"block register");
+    };
+    let Some(storage_service_handle) =
+        services.register(&capabilities, storage_service_capability, storage::SERVICE)
+    else {
+        fail!(b"storage register");
+    };
+    check!(
+        b"services",
+        services.resolve(balloon::SERVICE) == Some(virtio_handle)
+            && services.resolve(block::SERVICE) == Some(block_handle)
+            && services.resolve(storage::SERVICE) == Some(storage_service_handle),
+    );
+    check!(
+        b"storage namespaces",
+        storage::TERMINAL_NAMESPACE != storage::TEXT_NAMESPACE
+            && storage::AUDIT_NAMESPACE != storage::SECRETS_NAMESPACE,
+    );
     let Some(virtio_gsi) = acpi.and_then(|tables| {
         let (bus, slot, _) = device.location();
         tables.pci_gsi(bus, slot, device.interrupt_pin().checked_sub(1)?)
@@ -472,6 +531,11 @@ pub(crate) fn main(
     else {
         fail!(b"native sessions task");
     };
+    let Some(mut native_storage) =
+        native_task::Task::load(&mut memory, payloads.storage, &privilege)
+    else {
+        fail!(b"native storage task");
+    };
     let mut service_task = virtio::ServiceTask::new(
         &mut virtio_service,
         &channel,
@@ -558,11 +622,19 @@ pub(crate) fn main(
     if !native_scheduler.run_next() {
         fail!(b"native sessions ready");
     }
+    let Some(storage_handle) = native_scheduler.spawn(&mut native_storage) else {
+        fail!(b"native storage task");
+    };
+    if !native_scheduler.run_next() {
+        fail!(b"native storage ready");
+    }
+    let _ = storage_handle;
     health.finish();
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(|value| {
         let terminal_restart = value == "assert-terminal-service-restart";
         let sessions_restart = value == "assert-sessions-service-restart";
+        let storage_restart = value == "assert-storage-service-restart";
         if terminal_restart {
             let previous = native_handle;
             if !native_scheduler.fail(previous) || !startup.start() {
@@ -594,6 +666,19 @@ pub(crate) fn main(
                 return false;
             };
             sessions_handle = restarted;
+            if native_scheduler.wake(previous) {
+                return false;
+            }
+        }
+        if storage_restart {
+            let previous = storage_handle;
+            if !native_scheduler.fail(previous) || !startup.start() {
+                return false;
+            }
+            let Some(restarted) = restart_native_service(&mut native_scheduler, previous) else {
+                return false;
+            };
+            let _ = restarted;
             if native_scheduler.wake(previous) {
                 return false;
             }
