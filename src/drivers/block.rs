@@ -4,7 +4,7 @@ use core::{
 };
 
 use crate::{
-    memory::{Contiguous, Page, PhysicalMemory},
+    memory::{Page, PhysicalMemory},
     pci::PciDevice,
 };
 use logos_abi::{BlockInfo, BlockOperation, BlockRequest, PersistenceStatus};
@@ -17,8 +17,6 @@ const NEXT: u16 = 1;
 const DEVICE_WRITE: u16 = 2;
 const FEATURE_FLUSH: u32 = 1 << 9;
 const REQUEST_FLUSH: u32 = 4;
-const QUEUE_DEPTH: usize = 8;
-const QUEUE_PAGES: usize = 2;
 static ISR_PORT: AtomicU16 = AtomicU16::new(0);
 static COMPLETE: AtomicBool = AtomicBool::new(false);
 
@@ -40,10 +38,12 @@ struct Header {
 
 pub struct Device {
     base: u16,
-    queue: Contiguous,
+    queue: super::virtio::VirtQueue,
     queue_size: usize,
     info: BlockInfo,
     pending: Option<Page>,
+    available_index: u16,
+    used_index: u16,
     resets: u32,
     timeouts: u32,
     last_recovery_failed: bool,
@@ -55,6 +55,9 @@ impl Device {
         interrupt_gsi: u32,
         memory: &mut PhysicalMemory,
     ) -> Option<Self> {
+        if !device.enable_bus_master() {
+            return None;
+        }
         let bar = device.bar(0);
         if bar & 1 == 0 {
             return None;
@@ -63,19 +66,18 @@ impl Device {
         unsafe {
             outb(base + 0x12, 0);
             outb(base + 0x12, ACKNOWLEDGE);
+            outb(base + 0x12, ACKNOWLEDGE | DRIVER);
             if inl(base) & FEATURE_FLUSH == 0 {
                 return None;
             }
             outl(base + 0x04, FEATURE_FLUSH);
-            outb(base + 0x12, ACKNOWLEDGE | DRIVER);
             outw(base + 0x0e, 0);
         }
-        let queue_size = usize::from(unsafe { inw(base + 0x0c) }).min(QUEUE_DEPTH);
+        let queue_size = usize::from(unsafe { inw(base + 0x0c) });
         if queue_size < 3 {
             return None;
         }
-        let queue = memory.allocate_contiguous(QUEUE_PAGES)?;
-        unsafe { core::ptr::write_bytes(queue.address() as *mut u8, 0, QUEUE_PAGES * 4096) };
+        let queue = super::virtio::VirtQueue::allocate(memory, queue_size)?;
         let Ok(pfn) = u32::try_from(queue.address() >> 12) else {
             let _ = queue.release(memory);
             return None;
@@ -103,6 +105,8 @@ impl Device {
             queue_size,
             info,
             pending: None,
+            available_index: 0,
+            used_index: 0,
             resets: 0,
             timeouts: 0,
             last_recovery_failed: false,
@@ -186,9 +190,12 @@ impl Device {
                 });
             }
             let available = queue + (self.queue_size * core::mem::size_of::<Descriptor>()) as u64;
-            ((available + 4) as *mut u16).write_volatile(0);
+            let slot = usize::from(self.available_index) % self.queue_size;
+            ((available + 4 + (slot * core::mem::size_of::<u16>()) as u64) as *mut u16)
+                .write_volatile(0);
+            self.available_index = self.available_index.wrapping_add(1);
             compiler_fence(Ordering::Release);
-            ((available + 2) as *mut u16).write_volatile(1);
+            ((available + 2) as *mut u16).write_volatile(self.available_index);
             outw(self.base + 0x10, 0);
         }
         self.pending = Some(metadata);
@@ -196,9 +203,11 @@ impl Device {
     }
 
     pub fn complete(&mut self, memory: &mut PhysicalMemory) -> Option<PersistenceStatus> {
-        if !COMPLETE.swap(false, Ordering::AcqRel) {
+        let used = self.used_index();
+        if !COMPLETE.swap(false, Ordering::AcqRel) && used == self.used_index {
             return None;
         }
+        self.used_index = used;
         let page = self.pending.take()?;
         let status = unsafe { (page.address() as *const u8).add(16).read_volatile() };
         let released = memory.release_page(page);
@@ -227,6 +236,20 @@ impl Device {
         (self.resets, self.timeouts, self.last_recovery_failed)
     }
 
+    pub fn probe_state(&self) -> (u8, u16, u32, u16, u16) {
+        let available =
+            self.queue.address() + (self.queue_size * core::mem::size_of::<Descriptor>()) as u64;
+        unsafe {
+            (
+                inb(self.base + 0x12),
+                inw(self.base + 0x0c),
+                inl(self.base + 0x08),
+                ((available + 2) as *const u16).read_volatile(),
+                self.used_index(),
+            )
+        }
+    }
+
     fn reset(&mut self) -> bool {
         self.resets = self.resets.saturating_add(1);
         let Ok(pfn) = u32::try_from(self.queue.address() >> 12) else {
@@ -236,15 +259,22 @@ impl Device {
         unsafe {
             outb(self.base + 0x12, 0);
             outb(self.base + 0x12, ACKNOWLEDGE);
-            outl(self.base + 0x04, FEATURE_FLUSH);
             outb(self.base + 0x12, ACKNOWLEDGE | DRIVER);
+            outl(self.base + 0x04, FEATURE_FLUSH);
             outw(self.base + 0x0e, 0);
             outl(self.base + 0x08, pfn);
             outb(self.base + 0x12, ACKNOWLEDGE | DRIVER | DRIVER_OK);
         }
         self.last_recovery_failed =
             unsafe { inb(self.base + 0x12) } & (DRIVER_OK | FAILED) != DRIVER_OK;
+        self.used_index = self.used_index();
         !self.last_recovery_failed
+    }
+
+    fn used_index(&self) -> u16 {
+        let avail = self.queue_size * core::mem::size_of::<Descriptor>() + 6 + self.queue_size * 2;
+        let used = (avail + 4095) & !4095;
+        unsafe { ((self.queue.address() + used as u64 + 2) as *const u16).read_volatile() }
     }
 }
 
@@ -266,7 +296,7 @@ pub fn self_check() -> bool {
         Device::complete;
     let _timeout: fn(&mut Device, &mut PhysicalMemory) -> PersistenceStatus = Device::timeout;
     let _release: fn(Device, &mut PhysicalMemory) -> bool = Device::release;
-    QUEUE_DEPTH == logos_abi::MAX_PERSISTENCE_OPERATIONS && QUEUE_PAGES == 2
+    logos_abi::MAX_PERSISTENCE_OPERATIONS == 8
 }
 
 unsafe fn outb(port: u16, value: u8) {

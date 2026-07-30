@@ -62,6 +62,12 @@ impl PciDevice {
     pub fn interrupt_pin(self) -> u8 {
         (config_read(self.bus, self.device, self.function, 0x3c) >> 8) as u8
     }
+
+    pub fn enable_bus_master(self) -> bool {
+        let command = config_read(self.bus, self.device, self.function, 0x04) | 0x5;
+        config_write(self.bus, self.device, self.function, 0x04, command);
+        config_read(self.bus, self.device, self.function, 0x04) & 0x5 == 0x5
+    }
 }
 
 pub fn scan() -> PciDevices {
@@ -108,5 +114,17 @@ fn config_read(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
         let value: u32;
         asm!("in eax, dx", in("dx") 0xcfcu16, out("eax") value);
         value
+    }
+}
+
+fn config_write(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
+    let address = 0x8000_0000
+        | (u32::from(bus) << 16)
+        | (u32::from(device) << 11)
+        | (u32::from(function) << 8)
+        | u32::from(offset & 0xfc);
+    unsafe {
+        asm!("out dx, eax", in("dx") 0xcf8u16, in("eax") address);
+        asm!("out dx, eax", in("dx") 0xcfcu16, in("eax") value);
     }
 }

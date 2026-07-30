@@ -268,7 +268,8 @@ pub(crate) fn main(
     }) else {
         fail!(b"block routing");
     };
-    let Some(block_device) = block_driver::Device::bind(block_pci, block_gsi, &mut memory) else {
+    let Some(mut block_device) = block_driver::Device::bind(block_pci, block_gsi, &mut memory)
+    else {
         fail!(b"block bind");
     };
     check!(
@@ -278,6 +279,8 @@ pub(crate) fn main(
             && block_device.info().valid()
             && block_device.diagnostics() == (0, 0, false),
     );
+    #[cfg(feature = "block-probe")]
+    check!(b"block probe", block_probe(&mut block_device, &mut memory));
     let Some(supervisor) = supervisor::boot_plan(supervisor::Profile::Normal).ok() else {
         fail!(b"supervisor manifest");
     };
@@ -992,6 +995,83 @@ pub(crate) fn main(
     loop {
         unsafe { core::arch::asm!("cli", "hlt") };
     }
+}
+
+#[cfg(feature = "block-probe")]
+fn block_probe(device: &mut block_driver::Device, memory: &mut memory::PhysicalMemory) -> bool {
+    let Some(page) = memory.allocate_owned() else { return false };
+    let request = logos_abi::BlockRequest {
+        id: 0,
+        operation: logos_abi::BlockOperation::Read,
+        lba: 0,
+        blocks: 1,
+        page: logos_abi::PageHandle(0),
+        deadline: interrupts::ticks().saturating_add(10),
+    };
+    if device.submit(request, Some(page.address()), memory)
+        != logos_abi::PersistenceStatus::Complete
+    {
+        debug::write_line(b"LogOS: block probe submit rejected");
+        return memory.release_page(page);
+    }
+    debug_block_state(device.probe_state());
+    let status = loop {
+        if let Some(status) = device.complete(memory) {
+            break status;
+        }
+        if interrupts::ticks() >= request.deadline {
+            break device.timeout(memory);
+        }
+        interrupts::wait_for_tick();
+    };
+    let released = memory.release_page(page);
+    debug::write_line(match status {
+        logos_abi::PersistenceStatus::Complete => b"LogOS: block probe read complete",
+        logos_abi::PersistenceStatus::TimedOut => b"LogOS: block probe read timed out",
+        _ => b"LogOS: block probe read failed",
+    });
+    status == logos_abi::PersistenceStatus::Complete
+        && released
+        && block_probe_flush(device, memory, request)
+}
+
+#[cfg(feature = "block-probe")]
+fn block_probe_flush(
+    device: &mut block_driver::Device,
+    memory: &mut memory::PhysicalMemory,
+    request: logos_abi::BlockRequest,
+) -> bool {
+    let request = logos_abi::BlockRequest {
+        operation: logos_abi::BlockOperation::Flush,
+        deadline: interrupts::ticks().saturating_add(10),
+        ..request
+    };
+    if device.submit(request, None, memory) != logos_abi::PersistenceStatus::Complete {
+        return false;
+    }
+    loop {
+        if let Some(status) = device.complete(memory) {
+            return status == logos_abi::PersistenceStatus::Complete;
+        }
+        if interrupts::ticks() >= request.deadline {
+            let _ = device.timeout(memory);
+            return false;
+        }
+        interrupts::wait_for_tick();
+    }
+}
+
+#[cfg(feature = "block-probe")]
+fn debug_block_state((status, queue, pfn, available, used): (u8, u16, u32, u16, u16)) {
+    debug::write(b"LogOS: block state ");
+    for value in [u32::from(status), u32::from(queue), pfn, u32::from(available), u32::from(used)] {
+        for shift in [12, 8, 4, 0] {
+            let digit = ((value >> shift) & 15) as u8;
+            debug::write(&[if digit < 10 { b'0' + digit } else { b'a' + digit - 10 }]);
+        }
+        debug::write(b" ");
+    }
+    debug::write_line(b"");
 }
 
 fn native_input_event(event: input::Event) -> Option<logos_abi::InputEvent> {

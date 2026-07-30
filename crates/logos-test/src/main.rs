@@ -54,6 +54,7 @@ const SCENARIOS: &[Scenario] = &[
         "persistence",
         &["assert-storage-service-restart"],
     ),
+    scenario("persistence/block-read-flush", "persistence"),
     scenario("console/recovery-handoff", "console"),
     scenario("platform/manifest-valid", "platform"),
     scenario("platform/manifest-invalid", "platform"),
@@ -246,7 +247,7 @@ fn run_scenario(scenario: Scenario) -> Result<ResultRecord, String> {
 fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
     LOG_OFFSET.store(0, Ordering::Relaxed);
     let root = repo_root();
-    build(&root)?;
+    build(&root, scenario.id)?;
     let efi = root.join("target/x86_64-unknown-uefi/debug/logos-uefi.efi");
     let esp = artifacts.join("esp/EFI/BOOT");
     fs::create_dir_all(&esp).map_err(io_error)?;
@@ -350,7 +351,12 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
     result
 }
 
-fn build(root: &Path) -> Result<(), String> {
+fn build(root: &Path, scenario: &str) -> Result<(), String> {
+    let features = if scenario == "persistence/block-read-flush" {
+        "test-hooks,block-probe"
+    } else {
+        "test-hooks"
+    };
     let status = Command::new("cargo")
         .current_dir(root)
         .args([
@@ -360,7 +366,7 @@ fn build(root: &Path) -> Result<(), String> {
             "--target",
             "x86_64-unknown-uefi",
             "--features",
-            "test-hooks",
+            features,
         ])
         .status()
         .map_err(io_error)?;
@@ -450,7 +456,7 @@ fn wait_child(child: &mut Child, deadline: Instant) -> Result<(), String> {
 fn capture_qmp(port: u16, log: &Path, artifacts: &Path) {
     let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else { return };
     let commands = format!(
-        "{{\"execute\":\"qmp_capabilities\"}}\n{{\"execute\":\"query-status\"}}\n{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{}\"}}}}\n",
+        "{{\"execute\":\"qmp_capabilities\"}}\n{{\"execute\":\"query-status\"}}\n{{\"execute\":\"human-monitor-command\",\"arguments\":{{\"command-line\":\"info pci\"}}}}\n{{\"execute\":\"human-monitor-command\",\"arguments\":{{\"command-line\":\"info qtree\"}}}}\n{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{}\"}}}}\n",
         artifacts.join("framebuffer.ppm").display().to_string().replace('\\', "\\\\")
     );
     let _ = stream.write_all(commands.as_bytes());

@@ -30,6 +30,7 @@ const IMPLEMENTED: &[&str] = &[
     "console/terminal-service-restart",
     "console/sessions-service-restart",
     "persistence/storage-service-restart",
+    "persistence/block-read-flush",
     "console/recovery-handoff",
     "platform/manifest-valid",
     "platform/manifest-invalid",

@@ -16,3 +16,4 @@ uefi = { version = "0.35", features = ["panic_handler"] }
 
 [features]
 test-hooks = []
+block-probe = []
