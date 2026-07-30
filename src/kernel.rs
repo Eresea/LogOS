@@ -449,7 +449,7 @@ pub(crate) fn main(
             &capabilities,
             service_capability,
             virtio_handle.principal(),
-            &mut memory,
+            &mut memory as *mut _,
         );
         let mut service_scheduler = scheduler::Scheduler::new();
         if service_scheduler.spawn(&mut service_task).is_none() {
@@ -580,7 +580,7 @@ pub(crate) fn main(
         &capabilities,
         service_capability,
         virtio_handle.principal(),
-        &mut memory,
+        &mut memory as *mut _,
     );
     let mut service_scheduler = scheduler::Scheduler::new();
     if service_scheduler.spawn(&mut service_task).is_none() {

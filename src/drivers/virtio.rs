@@ -94,7 +94,7 @@ pub struct ServiceTask<'a> {
     capabilities: &'a CapabilityManager,
     capability: Capability,
     principal: Principal,
-    memory: &'a mut PhysicalMemory,
+    memory: *mut PhysicalMemory,
     pending: Option<(ServiceHandle, crate::ipc::RequestId)>,
 }
 
@@ -106,7 +106,7 @@ impl<'a> ServiceTask<'a> {
         capabilities: &'a CapabilityManager,
         capability: Capability,
         principal: Principal,
-        memory: &'a mut PhysicalMemory,
+        memory: *mut PhysicalMemory,
     ) -> Self {
         Self {
             service,
@@ -133,7 +133,8 @@ impl Runnable for ServiceTask<'_> {
                 crate::trace::record(crate::trace::Event::DriverFailed);
                 crate::health::driver_failure(b"virtio", self.service.recover());
             }
-            let reclaimed = self.service.reclaim_request(self.memory);
+            // SAFETY: Core runs scheduler tasks serially and owns this pointer for the task lifetime.
+            let reclaimed = self.service.reclaim_request(unsafe { &mut *self.memory });
             let _ = self.responses.reply(
                 self.capabilities,
                 self.capability,
@@ -148,7 +149,8 @@ impl Runnable for ServiceTask<'_> {
             let reply = match envelope.message {
                 Message::Ping => self.service.handle(envelope),
                 Message::Inflate if self.service.accepts(envelope) => {
-                    if self.service.submit_inflate_one_page(self.memory) {
+                    // SAFETY: Core runs scheduler tasks serially and owns this pointer for the task lifetime.
+                    if self.service.submit_inflate_one_page(unsafe { &mut *self.memory }) {
                         self.pending = Some((envelope.destination, envelope.request));
                         return TaskState::Blocked(crate::scheduler::Event::VIRTIO);
                     }
