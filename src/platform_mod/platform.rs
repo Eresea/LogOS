@@ -1,10 +1,10 @@
-#[path = "virtio.rs"]
-mod driver;
+pub use crate::drivers::virtio::{
+    ServiceTask as Task, VirtioService as Service, completion_pending, interrupt,
+};
 
-pub use driver::{ServiceTask as Task, VirtioService as Service, completion_pending, interrupt};
-
-pub const NAME: &[u8] = crate::supervisor::VIRTIO_BALLOON;
-pub const SERVICE: crate::services::Service = crate::services::Service::VirtioBalloon;
+pub const NAME: &[u8] = crate::drivers::supervisor::VIRTIO_BALLOON;
+pub const SERVICE: crate::platform_mod::services::Service =
+    crate::platform_mod::services::Service::VirtioBalloon;
 
 pub fn matches(name: &[u8]) -> bool {
     name == NAME

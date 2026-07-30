@@ -1,41 +1,32 @@
 #![no_main]
 #![no_std]
 
-mod acpi;
-mod address_space;
-mod approvals;
-mod audit;
-mod console;
-mod cpu;
-mod debug;
-mod device;
-mod effects;
-mod entropy;
-mod health;
-mod identity;
-mod inference;
-mod interrupts;
+// Subsystem modules
+mod arch;
+mod console_mod;
+mod drivers;
 mod ipc;
-mod keyboard;
-mod memory;
-mod mode;
-mod native_display;
-mod native_task;
-mod payload;
-mod pci;
-mod pe;
-mod platform;
-mod resources;
-mod scheduler;
-mod secrets;
-mod services;
-mod session;
-mod supervisor;
+mod mm;
+mod platform_mod;
+mod sched;
+
+// Remaining top-level modules
+mod debug;
 #[cfg(feature = "test-hooks")]
 mod test_hooks;
-mod time;
-mod trace;
-mod virtual_memory;
+
+// Flat aliases so all existing code in this file still compiles
+// without any path changes.
+use arch::{acpi, cpu, interrupts, pci};
+use console_mod::{console, native_display};
+use drivers::{device, keyboard, resources, supervisor};
+use ipc::{approvals, effects};
+use mm::{address_space, memory, virtual_memory};
+use platform_mod::{
+    audit, entropy, health, identity, inference, mode, payload, pe, platform, secrets, services,
+    session, time, trace,
+};
+use sched::{native_task, scheduler};
 
 use logos_core::capabilities;
 use logos_terminal::{command, display, input, terminal, text};
