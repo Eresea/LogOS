@@ -1,6 +1,6 @@
 # Persistence
 
-> **Status:** Persistence v1 next
+> **Status:** Persistence v1 in progress
 >
 > **Owner:** Foundation block service and System storage service
 
@@ -12,16 +12,17 @@ Prove that capability-scoped service state survives interrupted writes and reset
 
 ### Block boundary
 
-- [ ] Discover one dedicated raw VirtIO block device.
-- [ ] Provide bounded asynchronous read, write, flush, timeout, cancellation, and reset.
-- [ ] Report completion, integrity, and recovery diagnostics.
+- [x] Discover one dedicated raw VirtIO block device.
+- [x] Provide bounded read, write, flush, timeout, cancellation, and reset in the Core-owned VirtIO driver.
+- [x] Report block completion and recovery diagnostics.
+- [ ] Dispatch Storage service block requests through the Core gate and its owned transfer page.
 
 ### Storage boundary
 
-- [ ] Run one independently restartable System storage service.
+- [x] Run one independently restartable System storage payload.
 - [ ] Expose service-owned namespaces containing named byte objects.
-- [ ] Keep immutable object versions and atomically replace the current version.
-- [ ] Recover checksummed records through a small crash-safe commit log.
+- [x] Keep immutable object versions and atomically replace the current version in `logos-store`.
+- [x] Recover checksummed records through a small crash-safe commit log in `logos-store`.
 - [ ] Require explicit namespace read and write capabilities.
 
 ### First consumer
@@ -51,3 +52,9 @@ Do not split journals, objects, or other internal details into crates unless dep
 - Application workspaces and agent-memory policy.
 
 The on-disk commit format and block/storage ownership boundary require an [ADR](adr/README.md) before implementation. See [Architecture](ARCHITECTURE.md#11-storage-model) and [Security](security.md).
+
+## Current foundation
+
+`logos-store` is `no_std` and host-tested; every sector write and flush passes through its
+backend boundary. The native Storage payload starts and restarts, and the Core gate carries typed
+block requests. The payload does not yet issue those requests, so no QEMU durability claim is made.
