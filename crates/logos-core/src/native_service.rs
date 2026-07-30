@@ -14,6 +14,8 @@ pub const SESSION_REPLY: u32 = 8;
 pub const SESSION_EFFECT: u32 = 9;
 pub const STORE_REQUEST: u32 = 10;
 pub const STORE_REPLY: u32 = 11;
+pub const BLOCK_REQUEST: u32 = 12;
+pub const BLOCK_REPLY: u32 = 13;
 pub const ACKNOWLEDGED: u32 = 1;
 
 #[derive(Clone, Copy)]
@@ -311,6 +313,38 @@ impl Context {
             11 => Some(logos_abi::PersistenceStatus::NotFound),
             _ => None,
         }
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn block_at(address: u64) -> Option<logos_abi::BlockRequest> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != BLOCK_REQUEST
+            || context.status != ACKNOWLEDGED
+            || context.text_length as usize != core::mem::size_of::<logos_abi::BlockRequest>()
+        {
+            return None;
+        }
+        let request = unsafe {
+            core::ptr::read_unaligned(context.text.as_ptr().cast::<logos_abi::BlockRequest>())
+        };
+        (request.blocks <= (logos_abi::PAGE_SIZE / 512) as u32).then_some(request)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn reply_block_at(address: u64, status: logos_abi::PersistenceStatus) -> bool {
+        if unsafe { Self::block_at(address) }.is_none() {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        context.operation = BLOCK_REPLY;
+        context.x = status as u32;
+        context.text_length = 0;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
     }
 
     /// # Safety

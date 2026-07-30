@@ -46,6 +46,12 @@ pub struct StoreEndpoint {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub struct BlockEndpoint {
+    context_physical: u64,
+}
+
+#[derive(Clone, Copy)]
 pub struct SessionEndpoint {
     context_physical: u64,
 }
@@ -91,6 +97,20 @@ impl StoreEndpoint {
     pub fn deliver(self, request: logos_abi::StoreRequest) -> bool {
         unsafe {
             logos_core::native_service::Context::deliver_store_at(self.context_physical, request)
+        }
+    }
+}
+
+impl BlockEndpoint {
+    #[allow(dead_code)]
+    pub fn request(self) -> Option<logos_abi::BlockRequest> {
+        unsafe { logos_core::native_service::Context::block_at(self.context_physical) }
+    }
+
+    #[allow(dead_code)]
+    pub fn reply(self, status: logos_abi::PersistenceStatus) -> bool {
+        unsafe {
+            logos_core::native_service::Context::reply_block_at(self.context_physical, status)
         }
     }
 }
@@ -171,6 +191,11 @@ impl<'a> Task<'a> {
     #[allow(dead_code)]
     pub const fn store_endpoint(&self) -> StoreEndpoint {
         StoreEndpoint { context_physical: self.context_physical }
+    }
+
+    #[allow(dead_code)]
+    pub const fn block_endpoint(&self) -> BlockEndpoint {
+        BlockEndpoint { context_physical: self.context_physical }
     }
 
     pub fn map_shared_owned(&mut self, memory: &mut PhysicalMemory) -> Option<u64> {
