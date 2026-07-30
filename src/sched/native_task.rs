@@ -40,6 +40,12 @@ pub struct SyscallEndpoint {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub struct StoreEndpoint {
+    context_physical: u64,
+}
+
+#[derive(Clone, Copy)]
 pub struct SessionEndpoint {
     context_physical: u64,
 }
@@ -72,6 +78,20 @@ impl SyscallEndpoint {
     pub fn reply_matches(self, expected: &[u8]) -> bool {
         unsafe { logos_core::native_service::Context::response_at(self.context_physical) }
             .is_some_and(|response| response.text[..response.length] == *expected)
+    }
+}
+
+impl StoreEndpoint {
+    #[allow(dead_code)]
+    pub fn request(self) -> Option<logos_abi::StoreRequest> {
+        unsafe { logos_core::native_service::Context::store_at(self.context_physical) }
+    }
+
+    #[allow(dead_code)]
+    pub fn deliver(self, request: logos_abi::StoreRequest) -> bool {
+        unsafe {
+            logos_core::native_service::Context::deliver_store_at(self.context_physical, request)
+        }
     }
 }
 
@@ -148,12 +168,21 @@ impl<'a> Task<'a> {
         SessionEndpoint { context_physical: self.context_physical }
     }
 
+    #[allow(dead_code)]
+    pub const fn store_endpoint(&self) -> StoreEndpoint {
+        StoreEndpoint { context_physical: self.context_physical }
+    }
+
     pub fn map_shared_owned(&mut self, memory: &mut PhysicalMemory) -> Option<u64> {
         self.space.map_shared_owned(memory)
     }
 
     pub fn map_shared_borrowed(&mut self, address: u64) -> bool {
         self.space.map_shared_borrowed(address)
+    }
+
+    pub fn map_heap(&mut self, memory: &mut PhysicalMemory) -> Option<u64> {
+        self.space.map_heap(memory)
     }
 
     pub fn resume(&mut self) -> bool {

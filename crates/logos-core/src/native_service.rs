@@ -12,6 +12,8 @@ pub const COMPLETE: u32 = 6;
 pub const SYSCALL: u32 = 7;
 pub const SESSION_REPLY: u32 = 8;
 pub const SESSION_EFFECT: u32 = 9;
+pub const STORE_REQUEST: u32 = 10;
+pub const STORE_REPLY: u32 = 11;
 pub const ACKNOWLEDGED: u32 = 1;
 
 #[derive(Clone, Copy)]
@@ -223,6 +225,51 @@ impl Context {
             && context.status == ACKNOWLEDGED
             && request.valid())
         .then_some(request)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn store_at(address: u64) -> Option<logos_abi::StoreRequest> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != STORE_REQUEST
+            || context.status != ACKNOWLEDGED
+            || context.text_length as usize != core::mem::size_of::<logos_abi::StoreRequest>()
+        {
+            return None;
+        }
+        let request = unsafe {
+            core::ptr::read_unaligned(context.text.as_ptr().cast::<logos_abi::StoreRequest>())
+        };
+        request.valid().then_some(request)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn deliver_store_at(address: u64, request: logos_abi::StoreRequest) -> bool {
+        if !request.valid() {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != READ_INPUT
+            || context.status != ACKNOWLEDGED
+        {
+            return false;
+        }
+        context.text = [0; MAX_TEXT];
+        unsafe {
+            core::ptr::write_unaligned(
+                context.text.as_mut_ptr().cast::<logos_abi::StoreRequest>(),
+                request,
+            );
+        }
+        context.text_length = core::mem::size_of::<logos_abi::StoreRequest>() as u32;
+        context.operation = STORE_REQUEST;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
     }
 
     /// # Safety

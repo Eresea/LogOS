@@ -14,6 +14,8 @@ const USER: u64 = 1 << 2;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 const SHARED_PAGE: usize = ENTRIES - 5;
+const HEAP_PAGE: usize = ENTRIES - 9;
+const HEAP_PAGES: usize = 4;
 
 pub struct AddressSpace {
     pml4: Page,
@@ -197,6 +199,26 @@ impl AddressSpace {
                 .write_volatile(address | PRESENT | WRITABLE | USER | NO_EXECUTE);
         }
         Some(address)
+    }
+
+    pub fn map_heap(&mut self, physical: &mut PhysicalMemory) -> Option<u64> {
+        for index in HEAP_PAGE..HEAP_PAGE + HEAP_PAGES {
+            if self.mapping(index).is_some() {
+                return None;
+            }
+            let page = physical.allocate_owned()?;
+            let address = page.address();
+            if let Err(page) = self.insert_mapping(index, page) {
+                let _ = physical.release_page(page);
+                return None;
+            }
+            unsafe {
+                (self.pt.address() as *mut u64)
+                    .add(index)
+                    .write_volatile(address | PRESENT | WRITABLE | USER | NO_EXECUTE);
+            }
+        }
+        Some(self.base + PAGE_SIZE * HEAP_PAGE as u64)
     }
 
     pub fn map_shared_borrowed(&mut self, address: u64) -> bool {

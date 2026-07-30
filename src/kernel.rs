@@ -559,6 +559,7 @@ pub(crate) fn main(
     else {
         fail!(b"native storage task");
     };
+    check!(b"storage heap", native_storage.map_heap(&mut memory).is_some());
     let mut shared_pages = logos_core::shared_pages::SharedPages::new();
     let shared_history = native_terminal.map_shared_owned(&mut memory).and_then(|page| {
         shared_pages
