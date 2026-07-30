@@ -138,7 +138,12 @@ impl AddressSpace {
         }
         let address = page.address();
         self.mapped[0] = Some(page);
-        unsafe { (self.pt.address() as *mut u64).write_volatile(address | PRESENT | USER) };
+        unsafe {
+            (self.pt.address() as *mut u64).write_volatile(address | PRESENT | USER);
+            (self.pt.address() as *mut u64)
+                .add(1)
+                .write_volatile(address | PRESENT | WRITABLE | USER | NO_EXECUTE);
+        }
         Some(self.base)
     }
 
