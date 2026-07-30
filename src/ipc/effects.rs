@@ -1,4 +1,4 @@
-use crate::{acpi, ipc, platform, scheduler, services, session, supervisor, trace};
+use crate::{acpi, balloon, ipc, scheduler, services, session, supervisor, trace};
 use logos_abi::{Effect, EffectRequest, EffectResult, InputLayout};
 use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 use logos_terminal::input;
@@ -55,11 +55,11 @@ pub fn execute(request: EffectRequest, context: Context<'_, '_>) -> EffectResult
         Effect::ReadTrace => trace_result(trace::latest()),
         Effect::InspectResource => EffectResult::Inspected,
         Effect::RestartService => effect_result(
-            platform::matches(argument) && context.lifecycle.restart(context.tick),
+            balloon::matches(argument) && context.lifecycle.restart(context.tick),
             EffectResult::RestartScheduled,
         ),
         Effect::CancelService => effect_result(
-            platform::matches(argument)
+            balloon::matches(argument)
                 && context
                     .channel
                     .send(

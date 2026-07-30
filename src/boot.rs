@@ -1,6 +1,6 @@
 use uefi::{boot, prelude::*, proto::console::gop::GraphicsOutput};
 
-use crate::{acpi, debug, entropy, identity, kernel_main, payload, time};
+use crate::{acpi, debug, entropy, identity, kernel, payload, time};
 
 #[entry]
 fn main() -> Status {
@@ -23,7 +23,7 @@ fn main() -> Status {
 
     let payload = payload::stage();
     let memory_map = unsafe { boot::exit_boot_services(None) };
-    kernel_main(boot_info, memory_map, acpi, machine, wall_clock, payload)
+    kernel::main(boot_info, memory_map, acpi, machine, wall_clock, payload)
 }
 
 pub(crate) struct Info {

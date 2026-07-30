@@ -15,6 +15,10 @@ corresponding public contract is explicitly deprecated. See [ADR-0002](adr/0002-
 
 This document defines where responsibilities belong, how components depend on one another, and how LogOS preserves a small kernel while still becoming a complete operating system.
 
+Kernel source follows the same ownership boundaries: `arch`, `mm`, `sched`, `ipc`, `drivers`,
+`console`, and `platform`. `boot.rs` owns the UEFI handoff, `kernel.rs` owns bootstrap sequencing
+and the run loop, and `main.rs` declares modules and temporary flat compatibility exports only.
+
 The ring model is architectural, not a direct representation of CPU privilege levels.
 
 ## 2. Ring model
