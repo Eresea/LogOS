@@ -3,6 +3,7 @@
 
 // Subsystem modules
 mod arch;
+mod boot;
 mod console_mod;
 mod drivers;
 mod ipc;
@@ -30,56 +31,11 @@ use sched::{native_task, scheduler};
 
 use logos_core::capabilities;
 use logos_terminal::{command, display, input, terminal, text};
-use uefi::{boot, mem::memory_map::MemoryMap, prelude::*, proto::console::gop::GraphicsOutput};
-
-#[entry]
-fn main() -> Status {
-    debug::write_line(b"LogOS: kernel entered");
-    let entropy = entropy::load();
-    entropy::announce(entropy);
-    let machine = identity::load(entropy.as_ref());
-    identity::announce(&machine);
-    let wall_clock = time::wall_clock();
-    time::announce(wall_clock);
-    let boot_info = match boot_info() {
-        Ok(info) => info,
-        Err(_) => return Status::DEVICE_ERROR,
-    };
-    let acpi = acpi::discover();
-    if let Some(tables) = acpi {
-        tables.install_reset();
-    }
-    debug::write_line(b"LogOS: leaving UEFI boot services");
-
-    let payload = payload::stage();
-    let memory_map = unsafe { boot::exit_boot_services(None) };
-    kernel_main(boot_info, memory_map, acpi, machine, wall_clock, payload)
-}
-
-struct BootInfo {
-    framebuffer: *mut u8,
-    framebuffer_size: usize,
-    resolution: (usize, usize),
-    stride: usize,
-}
-
-fn boot_info() -> uefi::Result<BootInfo> {
-    let graphics_handle = boot::get_handle_for_protocol::<GraphicsOutput>()?;
-    let mut gop = boot::open_protocol_exclusive::<GraphicsOutput>(graphics_handle)?;
-    let mode = gop.current_mode_info();
-    let (width, height) = mode.resolution();
-    let mut framebuffer = gop.frame_buffer();
-    Ok(BootInfo {
-        framebuffer: framebuffer.as_mut_ptr(),
-        framebuffer_size: framebuffer.size(),
-        resolution: (width, height),
-        stride: mode.stride(),
-    })
-}
+use uefi::mem::memory_map::MemoryMap;
 
 #[cfg_attr(feature = "test-hooks", allow(unreachable_code, unused_mut, unused_variables))]
 fn kernel_main(
-    boot_info: BootInfo,
+    boot_info: boot::Info,
     memory_map: impl MemoryMap,
     acpi: Option<acpi::Tables>,
     machine: identity::Machine,

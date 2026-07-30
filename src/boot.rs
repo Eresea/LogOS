@@ -1,0 +1,48 @@
+use uefi::{boot, prelude::*, proto::console::gop::GraphicsOutput};
+
+use crate::{acpi, debug, entropy, identity, kernel_main, payload, time};
+
+#[entry]
+fn main() -> Status {
+    debug::write_line(b"LogOS: kernel entered");
+    let entropy = entropy::load();
+    entropy::announce(entropy);
+    let machine = identity::load(entropy.as_ref());
+    identity::announce(&machine);
+    let wall_clock = time::wall_clock();
+    time::announce(wall_clock);
+    let boot_info = match boot_info() {
+        Ok(info) => info,
+        Err(_) => return Status::DEVICE_ERROR,
+    };
+    let acpi = acpi::discover();
+    if let Some(tables) = acpi {
+        tables.install_reset();
+    }
+    debug::write_line(b"LogOS: leaving UEFI boot services");
+
+    let payload = payload::stage();
+    let memory_map = unsafe { boot::exit_boot_services(None) };
+    kernel_main(boot_info, memory_map, acpi, machine, wall_clock, payload)
+}
+
+pub(crate) struct Info {
+    pub framebuffer: *mut u8,
+    pub framebuffer_size: usize,
+    pub resolution: (usize, usize),
+    pub stride: usize,
+}
+
+fn boot_info() -> uefi::Result<Info> {
+    let graphics_handle = boot::get_handle_for_protocol::<GraphicsOutput>()?;
+    let mut gop = boot::open_protocol_exclusive::<GraphicsOutput>(graphics_handle)?;
+    let mode = gop.current_mode_info();
+    let (width, height) = mode.resolution();
+    let mut framebuffer = gop.frame_buffer();
+    Ok(Info {
+        framebuffer: framebuffer.as_mut_ptr(),
+        framebuffer_size: framebuffer.size(),
+        resolution: (width, height),
+        stride: mode.stride(),
+    })
+}
