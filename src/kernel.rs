@@ -268,6 +268,7 @@ pub(crate) fn main(
     }) else {
         fail!(b"block routing");
     };
+    #[cfg_attr(not(feature = "block-probe"), allow(unused_mut))]
     let Some(mut block_device) = block_driver::Device::bind(block_pci, block_gsi, &mut memory)
     else {
         fail!(b"block bind");
