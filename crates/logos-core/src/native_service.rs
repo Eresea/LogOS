@@ -274,6 +274,47 @@ impl Context {
 
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn reply_store_at(address: u64, status: logos_abi::PersistenceStatus) -> bool {
+        if unsafe { Self::store_at(address) }.is_none() {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        context.operation = STORE_REPLY;
+        context.x = status as u32;
+        context.text_length = 0;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn store_reply_at(address: u64) -> Option<logos_abi::PersistenceStatus> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != STORE_REPLY
+            || context.status != ACKNOWLEDGED
+        {
+            return None;
+        }
+        match context.x {
+            1 => Some(logos_abi::PersistenceStatus::Complete),
+            2 => Some(logos_abi::PersistenceStatus::Invalid),
+            3 => Some(logos_abi::PersistenceStatus::Denied),
+            4 => Some(logos_abi::PersistenceStatus::Cancelled),
+            5 => Some(logos_abi::PersistenceStatus::TimedOut),
+            6 => Some(logos_abi::PersistenceStatus::Io),
+            7 => Some(logos_abi::PersistenceStatus::Corrupt),
+            8 => Some(logos_abi::PersistenceStatus::Recovered),
+            9 => Some(logos_abi::PersistenceStatus::OutOfMemory),
+            10 => Some(logos_abi::PersistenceStatus::Full),
+            11 => Some(logos_abi::PersistenceStatus::NotFound),
+            _ => None,
+        }
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
     pub unsafe fn reply_effect_at(address: u64, reply: logos_abi::EffectResult) -> bool {
         if unsafe { Self::session_effect_at(address) }.is_none() {
             return false;
