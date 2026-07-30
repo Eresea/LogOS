@@ -54,7 +54,10 @@ pub(crate) fn main(
     check!(b"debug", true);
     check!(
         b"native payload",
-        payload.is_some() && logos_core::native_service::self_check() && pe::self_check(),
+        payload.is_some()
+            && logos_core::native_service::self_check()
+            && pe::self_check()
+            && payload::relocation_self_check(),
     );
     check!(
         b"machine identity",

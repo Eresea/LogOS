@@ -72,17 +72,10 @@ impl Payload {
         let mut block = 0;
         // ponytail: bounded native images are tiny; index relocations if payloads grow.
         while block < relocations.len() {
-            let Some(header) = relocations.get(block..block + 8) else {
+            let Some((target_page, entries, block_size)) = relocation_block(relocations, block)
+            else {
                 return false;
             };
-            let target_page = u32::from_le_bytes(header[..4].try_into().unwrap());
-            let block_size = u32::from_le_bytes(header[4..].try_into().unwrap()) as usize;
-            let Some(entries) = relocations.get(block + 8..block + block_size) else {
-                return false;
-            };
-            if block_size < 8 || !block_size.is_multiple_of(2) {
-                return false;
-            }
             for entry in entries.chunks_exact(2) {
                 let entry = u16::from_le_bytes([entry[0], entry[1]]);
                 if entry >> 12 == 0 {
@@ -97,7 +90,9 @@ impl Payload {
                 if target_rva / 4096 != page_rva / 4096 {
                     continue;
                 }
-                let offset = usize::try_from(target_rva - page_rva).unwrap();
+                let Ok(offset) = usize::try_from(target_rva - page_rva) else {
+                    return false;
+                };
                 if offset > 4096 - size_of::<u64>() {
                     return false;
                 }
@@ -114,6 +109,28 @@ impl Payload {
         }
         true
     }
+}
+
+fn relocation_block(bytes: &[u8], offset: usize) -> Option<(u32, &[u8], usize)> {
+    let header = bytes.get(offset..offset.checked_add(8)?)?;
+    let target_page = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+    let size =
+        usize::try_from(u32::from_le_bytes([header[4], header[5], header[6], header[7]])).ok()?;
+    if size < 8 || !size.is_multiple_of(2) {
+        return None;
+    }
+    let end = offset.checked_add(size)?;
+    Some((target_page, bytes.get(offset + 8..end)?, size))
+}
+
+pub fn relocation_self_check() -> bool {
+    let valid = [0, 16, 0, 0, 10, 0, 0, 0, 0, 0];
+    let short = [0, 0, 0, 0, 6, 0, 0, 0];
+    let odd = [0, 0, 0, 0, 9, 0, 0, 0, 0];
+    relocation_block(&valid, 0).is_some()
+        && relocation_block(&valid[..9], 0).is_none()
+        && relocation_block(&short, 0).is_none()
+        && relocation_block(&odd, 0).is_none()
 }
 
 pub fn stage() -> Option<Payloads> {

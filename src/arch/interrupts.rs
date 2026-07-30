@@ -1,3 +1,4 @@
+use super::writable::Writable;
 use core::{
     arch::{asm, global_asm},
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -15,7 +16,7 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 static LOCAL_APIC: AtomicUsize = AtomicUsize::new(0);
 static IO_APIC: AtomicUsize = AtomicUsize::new(0);
 static IO_APIC_GSI_BASE: AtomicUsize = AtomicUsize::new(0);
-static mut IDT: [IdtEntry; 256] = [IdtEntry::MISSING; 256];
+static IDT: Writable<[IdtEntry; 256]> = Writable::new([IdtEntry::MISSING; 256]);
 
 unsafe extern "C" {
     fn default_interrupt();
@@ -51,7 +52,7 @@ pub fn install(madt: crate::acpi::Madt) -> bool {
     IO_APIC.store(madt.io_apic, Ordering::Release);
     IO_APIC_GSI_BASE.store(madt.io_apic_gsi_base as usize, Ordering::Release);
     unsafe {
-        let idt = core::ptr::addr_of_mut!(IDT);
+        let idt = IDT.get();
         let selector = code_selector();
         for vector in 0..256 {
             (*idt)[vector] = IdtEntry::new(default_interrupt as *const () as usize, selector);

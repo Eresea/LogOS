@@ -5,6 +5,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+use super::writable::Writable;
 use crate::memory::{Page, PhysicalMemory};
 
 pub const KERNEL_CODE: u16 = 0x08;
@@ -29,9 +30,8 @@ struct DescriptorTablePointer {
     base: u64,
 }
 
-// ponytail: bootstrap CPU only; add per-CPU GDT/TSS when multicore support begins.
-static mut GDT: [u64; 7] = [0; 7];
-static mut TSS: Tss = Tss {
+static GDT: Writable<[u64; 7]> = Writable::new([0; 7]);
+static TSS: Writable<Tss> = Writable::new(Tss {
     reserved: 0,
     rsp: [0; 3],
     reserved2: 0,
@@ -39,7 +39,7 @@ static mut TSS: Tss = Tss {
     reserved3: 0,
     reserved4: 0,
     iomap_base: size_of::<Tss>() as u16,
-};
+});
 static USER_RETURNED: AtomicBool = AtomicBool::new(false);
 static USER_CONTEXT: AtomicU64 = AtomicU64::new(0);
 static USER_BLOCKED: AtomicBool = AtomicBool::new(false);
@@ -47,13 +47,13 @@ static USER_COMMAND: AtomicBool = AtomicBool::new(false);
 static USER_DISPLAY: AtomicBool = AtomicBool::new(false);
 const USER_FRAME_WORDS: usize = 20;
 #[unsafe(no_mangle)]
-static mut USER_FRAME: [u64; USER_FRAME_WORDS] = [0; USER_FRAME_WORDS];
+static USER_FRAME: Writable<[u64; USER_FRAME_WORDS]> = Writable::new([0; USER_FRAME_WORDS]);
 #[unsafe(no_mangle)]
-static mut USER_RETURN_RSP: u64 = 0;
+static USER_RETURN_RSP: Writable<u64> = Writable::new(0);
 #[unsafe(no_mangle)]
-static mut USER_RETURN_CR3: u64 = 0;
+static USER_RETURN_CR3: Writable<u64> = Writable::new(0);
 #[unsafe(no_mangle)]
-static mut USER_RETURN_FLAGS: u64 = 0;
+static USER_RETURN_FLAGS: Writable<u64> = Writable::new(0);
 
 pub struct Privilege {
     stack: Page,
@@ -85,10 +85,10 @@ impl Privilege {
         let stack = physical.allocate_owned()?;
         let stack_top = stack.address().checked_add(4096)?;
         unsafe {
-            let tss = ptr::addr_of_mut!(TSS);
+            let tss = TSS.get();
             (*tss).rsp[0] = stack_top;
             (*tss).iomap_base = size_of::<Tss>() as u16;
-            let gdt = ptr::addr_of_mut!(GDT);
+            let gdt = GDT.get();
             *gdt = [
                 0,
                 0x00af_9a00_0000_ffff,
@@ -165,11 +165,7 @@ impl Privilege {
 
     fn restore_gate(&self, gate: &GateState) {
         unsafe {
-            ptr::copy_nonoverlapping(
-                gate.frame.as_ptr(),
-                ptr::addr_of_mut!(USER_FRAME).cast(),
-                USER_FRAME_WORDS,
-            )
+            ptr::copy_nonoverlapping(gate.frame.as_ptr(), USER_FRAME.get().cast(), USER_FRAME_WORDS)
         };
         USER_BLOCKED.store(gate.blocked, Ordering::Release);
         USER_COMMAND.store(gate.command, Ordering::Release);
@@ -182,7 +178,7 @@ impl Privilege {
         gate.display = USER_DISPLAY.load(Ordering::Acquire);
         unsafe {
             ptr::copy_nonoverlapping(
-                ptr::addr_of!(USER_FRAME).cast(),
+                USER_FRAME.get().cast_const().cast(),
                 gate.frame.as_mut_ptr(),
                 USER_FRAME_WORDS,
             )
@@ -250,9 +246,7 @@ fn save_user_frame(frame: *const u64, command: bool, display: bool) -> bool {
     if USER_BLOCKED.swap(true, Ordering::AcqRel) {
         return false;
     }
-    unsafe {
-        ptr::copy_nonoverlapping(frame, ptr::addr_of_mut!(USER_FRAME).cast(), USER_FRAME_WORDS)
-    };
+    unsafe { ptr::copy_nonoverlapping(frame, USER_FRAME.get().cast(), USER_FRAME_WORDS) };
     USER_COMMAND.store(command, Ordering::Release);
     USER_DISPLAY.store(display, Ordering::Release);
     true
@@ -268,7 +262,7 @@ fn tss_low(base: u64) -> u64 {
 }
 
 unsafe fn set_tss_stack(stack_top: u64) {
-    unsafe { (*ptr::addr_of_mut!(TSS)).rsp[0] = stack_top };
+    unsafe { (*TSS.get()).rsp[0] = stack_top };
 }
 
 unsafe extern "C" {

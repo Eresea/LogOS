@@ -19,6 +19,10 @@ Kernel source follows the same ownership boundaries: `arch`, `mm`, `sched`, `ipc
 `console`, and `platform`. `boot.rs` owns the UEFI handoff, `kernel.rs` owns bootstrap sequencing
 and the run loop, and `main.rs` declares modules and temporary flat compatibility exports only.
 
+Assembly-visible GDT, TSS, IDT, and user-transition storage uses a layout-transparent writable
+cell. Access is restricted to raw pointers under the bootstrap single-CPU invariant; scalar state
+shared with interrupt paths uses atomics. SMP requires replacing these cells with per-CPU state.
+
 The ring model is architectural, not a direct representation of CPU privilege levels.
 
 ## 2. Ring model
