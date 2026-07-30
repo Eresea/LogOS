@@ -13,7 +13,7 @@ const WRITABLE: u64 = 1 << 1;
 const USER: u64 = 1 << 2;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
-const SHARED_PAGE: usize = 1;
+const SHARED_PAGE: usize = ENTRIES - 5;
 
 pub struct AddressSpace {
     pml4: Page,
@@ -120,7 +120,7 @@ impl AddressSpace {
             let end_rva = section.address.checked_add(section.size)?;
             let end = usize::try_from(end_rva.checked_add(PAGE_SIZE as u32 - 1)?).ok()?
                 / PAGE_SIZE as usize;
-            if end >= ENTRIES - 2 {
+            if end >= SHARED_PAGE {
                 self.unmap_image(physical);
                 return None;
             }

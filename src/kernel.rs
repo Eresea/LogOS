@@ -559,6 +559,19 @@ pub(crate) fn main(
     else {
         fail!(b"native storage task");
     };
+    let mut shared_pages = logos_core::shared_pages::SharedPages::new();
+    let shared_history = native_terminal.map_shared_owned(&mut memory).and_then(|page| {
+        shared_pages
+            .register(1, page, 1)
+            .filter(|handle| shared_pages.lend(1, *handle, 2))
+            .filter(|_| native_storage.map_shared_borrowed(page))
+    });
+    check!(
+        b"terminal storage page",
+        shared_history.is_some_and(|handle| {
+            shared_pages.address(1, handle).is_some() && shared_pages.address(2, handle).is_some()
+        }),
+    );
     let mut service_task = virtio::ServiceTask::new(
         &mut virtio_service,
         &channel,

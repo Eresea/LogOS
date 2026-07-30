@@ -148,6 +148,14 @@ impl<'a> Task<'a> {
         SessionEndpoint { context_physical: self.context_physical }
     }
 
+    pub fn map_shared_owned(&mut self, memory: &mut PhysicalMemory) -> Option<u64> {
+        self.space.map_shared_owned(memory)
+    }
+
+    pub fn map_shared_borrowed(&mut self, address: u64) -> bool {
+        self.space.map_shared_borrowed(address)
+    }
+
     pub fn resume(&mut self) -> bool {
         let state = self.privilege.resume_entry(&mut self.space, self.context, &mut self.gate);
         self.advance(state)
