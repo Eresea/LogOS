@@ -6,7 +6,7 @@ use logos_abi::{Effect, EffectResult, SessionRequest, Syscall};
 use logos_core::native_service::{
     ACKNOWLEDGED, Context, Header, MAX_TEXT, READ_INPUT, READY, SESSION_EFFECT, SESSION_REPLY,
 };
-use uefi::{Status, prelude::*};
+use logos_service_rt as _;
 
 #[used]
 #[unsafe(link_section = ".logos")]
@@ -104,9 +104,4 @@ fn format(request: &SessionRequest, result: EffectResult) -> &[u8] {
         EffectResult::Denied => b"permission denied",
         EffectResult::Unknown => b"unknown command",
     }
-}
-
-#[entry]
-fn main() -> Status {
-    Status::SUCCESS
 }

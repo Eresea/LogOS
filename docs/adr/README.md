@@ -17,3 +17,5 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0009](0009-display-contract-v1.md) | Accepted | Introduce validated RGB display values before capability routing. |
 | [0010](0010-session-contract-v1.md) | Accepted | Gate typed terminal syscalls with an explicit Session capability. |
 | [0011](0011-session-dispatch-service.md) | Accepted | Run normal command dispatch in a Sessions service. |
+| [0012](0012-service-runtime-boundary.md) | Accepted | Establish logos-service-rt as the runtime for Ring 1-3 services. |
+

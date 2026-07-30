@@ -38,12 +38,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos-service-rt"
+version = "0.1.0"
+
+[[package]]
 name = "logos-sessions-service"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
  "logos-core",
- "uefi",
+ "logos-service-rt",
 ]
 
 [[package]]
@@ -56,8 +60,8 @@ version = "0.1.0"
 dependencies = [
  "logos-abi",
  "logos-core",
+ "logos-service-rt",
  "logos-terminal",
- "uefi",
 ]
 
 [[package]]

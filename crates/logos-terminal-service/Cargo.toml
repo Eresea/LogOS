@@ -7,4 +7,4 @@ edition = "2024"
 logos-core = { path = "../logos-core" }
 logos-abi = { path = "../logos-abi" }
 logos-terminal = { path = "../logos-terminal" }
-uefi = { version = "0.35", features = ["panic_handler"] }
+logos-service-rt = { path = "../logos-service-rt" }

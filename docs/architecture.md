@@ -1,7 +1,7 @@
 # LogOS Architecture Annex
 
 > **Status:** Living architecture reference  
-> **Updated:** 2026-07-24
+> **Updated:** 2026-07-30
 
 ## Testing boundary
 
@@ -57,6 +57,10 @@ Core exposes mechanisms. It does not decide normal system policy.
 ## Ring 1 — Foundation
 
 Foundation contains trusted native Rust services closest to hardware.
+
+Native service binaries share the minimal `logos-service-rt` crate for their PE entry point and
+panic handler. The runtime has no firmware dependency; service protocols remain in `logos-abi`
+and portable policy types remain in `logos-core`. See [ADR-0012](adr/0012-service-runtime-boundary.md).
 
 ### Typical services
 

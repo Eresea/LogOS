@@ -7,11 +7,11 @@ use logos_core::native_service::{
     ACKNOWLEDGED, CLEAR_DISPLAY, COMPLETE, Context, Header, MAX_TEXT, PRESENT_TEXT, READ_INPUT,
     READY, SYSCALL,
 };
+use logos_service_rt as _;
 use logos_terminal::{
     command::{self, Call, Local, Resolution},
     terminal::Model,
 };
-use uefi::{Status, prelude::*};
 
 #[used]
 #[unsafe(link_section = ".logos")]
@@ -147,10 +147,4 @@ unsafe fn present(context: *mut Context, x: u32, y: u32, bytes: &[u8]) {
             asm!("int 0x80");
         }
     }
-}
-
-#[entry]
-fn main() -> Status {
-    let _ = logos_terminal::terminal::Model::new();
-    Status::SUCCESS
 }

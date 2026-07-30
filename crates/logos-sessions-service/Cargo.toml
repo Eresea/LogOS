@@ -6,4 +6,4 @@ edition = "2024"
 [dependencies]
 logos-abi = { path = "../logos-abi" }
 logos-core = { path = "../logos-core" }
-uefi = { version = "0.35", features = ["panic_handler"] }
+logos-service-rt = { path = "../logos-service-rt" }
