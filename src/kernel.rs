@@ -4,8 +4,8 @@ use crate::drivers::{block as block_driver, device, keyboard, resources, supervi
 use crate::ipc::{self, approvals, effects};
 use crate::mm::{address_space, memory, virtual_memory};
 use crate::platform::{
-    audit, balloon, block, entropy, health, identity, inference, mode, payload, pe, secrets,
-    services, session, storage, time, trace,
+    audit, balloon, block, entropy, health, identity, inference, mode, payload, pe, root_key,
+    secrets, services, session, storage, time, trace,
 };
 use crate::sched::{native_task, scheduler};
 #[cfg(feature = "test-hooks")]
@@ -22,6 +22,7 @@ pub(crate) fn main(
     memory_map: impl MemoryMap,
     acpi: Option<acpi::Tables>,
     machine: identity::Machine,
+    mut secret_root: Option<root_key::RootKey>,
     wall_clock: time::WallClock,
     payload: Option<payload::Payloads>,
 ) -> ! {
@@ -64,6 +65,10 @@ pub(crate) fn main(
         entropy::self_check() && identity::self_check() && machine.id() == machine.id(),
     );
     check!(b"secret store", secrets::self_check(),);
+    if let Some(key) = secret_root.as_mut() {
+        key.wipe();
+        check!(b"secret root wiped", key.is_wiped());
+    }
     check!(b"audit", audit::self_check());
     check!(b"approvals", approvals::self_check());
     check!(b"inference", inference::self_check());

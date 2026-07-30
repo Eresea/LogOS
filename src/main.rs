@@ -19,6 +19,7 @@ pub(crate) use drivers::{device, keyboard, supervisor};
 pub(crate) use ipc::approvals;
 pub(crate) use mm::{address_space, memory};
 pub(crate) use platform::{
-    audit, balloon, entropy, health, identity, payload, pe, services, session, time, trace,
+    audit, balloon, entropy, health, identity, payload, pe, root_key, services, session, time,
+    trace,
 };
 pub(crate) use sched::scheduler;

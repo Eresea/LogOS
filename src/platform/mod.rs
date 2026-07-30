@@ -8,6 +8,7 @@ pub mod inference;
 pub mod mode;
 pub mod payload;
 pub mod pe;
+pub mod root_key;
 pub mod secrets;
 pub mod services;
 pub mod session;
