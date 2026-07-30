@@ -25,7 +25,7 @@ See [Architecture](ARCHITECTURE.md), [security constraints](security.md), and [b
 | 2 | [Console v1](CONSOLE.md) | Complete | Normal terminal and independent recovery console work |
 | 3 | [Platform v1](PLATFORM.md) | Complete | Isolated native services negotiate, fail, and restart independently |
 | 4 | [Persistence v1](PERSISTENCE.md) | **Next** | Capability-scoped state survives interrupted writes and resets |
-| 5 | [Network v1](NETWORK.md) | Planned | Capability-controlled networking completes validated TLS |
+| 5 | [Network v1](NETWORK.md) | Planned | Capability-controlled ICMP and UDP survive denial and device reset |
 | 6 | [Remote v1](REMOTE.md) | Planned | The machine is operable without local input or display |
 | 7 | [Update v1](UPDATE.md) | Planned | Signed updates activate atomically and roll back after failure |
 | 8 | [Applications v1](APPLICATIONS.md) | Planned | Sandboxed WASM applications install, run, communicate, and persist |

@@ -6,53 +6,39 @@
 
 ## Goal
 
-Provide crash-safe, capability-scoped persistence without making a POSIX filesystem the native system model.
+Prove that capability-scoped service state survives interrupted writes and resets without making POSIX the native storage model.
 
 ## V1 scope
 
 ### Block boundary
 
-- [ ] VirtIO block discovery and stable device identity.
-- [ ] Bounded asynchronous read, write, flush, timeout, cancellation, and reset.
-- [ ] Completion, integrity, and recovery diagnostics.
+- [ ] Discover one dedicated raw VirtIO block device.
+- [ ] Provide bounded asynchronous read, write, flush, timeout, cancellation, and reset.
+- [ ] Report completion, integrity, and recovery diagnostics.
 
 ### Storage boundary
 
-- [ ] Versioned contract for service-owned namespaces, named objects, byte streams, and immutable versions.
-- [ ] Atomic replacement and crash-safe metadata commits.
-- [ ] Checksums, quotas, accounting, consistency checking, and recovery mode.
-- [ ] Memory-backed temporary namespaces using the same outward contract.
+- [ ] Run one independently restartable System storage service.
+- [ ] Expose service-owned namespaces containing named byte objects.
+- [ ] Keep immutable object versions and atomically replace the current version.
+- [ ] Recover checksummed records through a small crash-safe commit log.
+- [ ] Require explicit namespace read and write capabilities.
 
-### First consumers
+### First consumer
 
-- [ ] Service manifests and configuration.
-- [ ] Terminal history through its existing bounded export/restore contract.
-- [ ] Identity, trust, secret metadata, and audit export.
+- [ ] Persist terminal history through its existing bounded export/restore contract.
 
-## Exit criteria
+## Exit proof
 
-- State survives reset and controlled interruption at every write commit point.
-- A service cannot access another service's namespace without an explicit capability.
-- Corruption is detected and reported; nonessential indexes can be rebuilt.
-- Configuration can atomically replace and roll back a prior version.
-- Block or storage service failure is contained and recoverable without reboot.
-- Permanent QEMU proofs cover recovery, denial, corruption, and resource reclamation.
+For every commit interruption point, QEMU recovers either the complete old version or the complete new version, never partial data. State survives reset, cross-namespace access is denied, corruption is reported, and block/storage service failure is recoverable without reboot.
 
-## Non-goals
+## Deferred
 
-- POSIX as the native storage model.
-- Snapshots, revision-retention policy, discard, partitions, or a file compatibility API unless V1 consumers require them.
-- Application workspaces and agent-memory policy before Applications v1.
-- Durable secret encryption design without a concrete key-protection boundary.
+- General streams, partitions, discard, quotas, accounting, and file compatibility.
+- Memory-backed namespaces and a general consistency-checking tool.
+- Configuration manifests; the V1 primitive only keeps the prior object version readable.
+- Identity, trust, secrets, audit retention, and durable secret encryption.
+- Snapshots or retention policy beyond versions required for atomic replacement.
+- Application workspaces and agent-memory policy.
 
-## Deferred scope
-
-Retained from the original roadmap for later versions or when a V1 consumer proves the need:
-
-- discard and partition discovery;
-- snapshots or revision history and retention policy;
-- a conventional directory/file compatibility API;
-- persistent agent-memory namespaces with workspace visibility, retention, and redaction policy;
-- durable content checksums where metadata checksums do not suffice.
-
-Storage placement and the compatibility file view are described in [Architecture](ARCHITECTURE.md#11-storage-model). Security invariants remain governed by [Security](security.md); irreversible on-disk or cross-ring decisions require an [ADR](adr/README.md).
+The on-disk commit format and block/storage ownership boundary require an [ADR](adr/README.md) before implementation. See [Architecture](ARCHITECTURE.md#11-storage-model) and [Security](security.md).

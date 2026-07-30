@@ -1,29 +1,29 @@
 # Network
 
 > **Status:** Network v1 planned
+>
+> **Owner:** Foundation network driver and System network service
 
 ## Goal
 
-Provide asynchronous, capability-controlled networking as a service.
+Prove bounded, capability-controlled packet connectivity through a replaceable network service.
 
 ## V1 scope
 
-- [ ] VirtIO network driver; Ethernet, ARP, IPv4, ICMP, DHCP, UDP, TCP, and DNS.
-- [ ] Cancellation, timeout, backpressure, limits, lifecycle tracing, and driver recovery.
-- [ ] Capability-controlled connect, bind, and listen plus firewall policy and audit events.
-- [ ] TLS client/server, trust store, certificate validation, secure enrollment, and explicit TOFU or pinned-key workflows where appropriate.
+- [ ] Discover and drive one VirtIO network device.
+- [ ] Support Ethernet, ARP, IPv4, ICMP, DHCP, and UDP.
+- [ ] Expose bounded asynchronous datagram send/receive with cancellation, timeout, and backpressure.
+- [ ] Require scoped capabilities to send, bind, or receive.
+- [ ] Trace lifecycle and recover the driver/service after failure.
 
-## Exit criteria
+## Exit proof
 
-- LogOS obtains configuration, resolves DNS, and completes a validated TLS connection.
-- Unauthorized connect/listen operations are denied and driver failure is recoverable.
-- Application-facing APIs contain no IPv4-specific assumptions.
-- QEMU covers packet loss, timeout, reset, reconnect, and denial.
+In QEMU, LogOS obtains configuration, exchanges an ICMP echo and UDP datagram with the host, denies unauthorized send/bind/receive operations, and recovers from timeout, packet loss, and device reset without reboot or leaked resources.
 
-## Deferred scope
+## Deferred
 
-- IPv6 without redesigning outward APIs.
-- Unix-style socket compatibility.
-- SSH as an optional compatibility service.
+- TCP, DNS, TLS, trust stores, certificate validation, and secure enrollment.
+- Firewall policy beyond capability-scoped endpoints.
+- IPv6, Unix-style socket compatibility, and SSH.
 
-See [Architecture](ARCHITECTURE.md#12-networking-model) and [Security](security.md).
+TCP plus authenticated transport become prerequisites of Remote v1; they may form Network v2 or the first Remote slice when that milestone begins. The outward datagram contract and driver/service ownership boundary require an [ADR](adr/README.md) before implementation. See [Architecture](ARCHITECTURE.md#12-networking-model) and [Security](security.md).
