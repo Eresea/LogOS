@@ -21,6 +21,7 @@ struct Scenario {
     suite: &'static str,
     timeout: u64,
     implemented: bool,
+    setup: &'static [&'static str],
 }
 
 const SCENARIOS: &[Scenario] = &[
@@ -38,25 +39,25 @@ const SCENARIOS: &[Scenario] = &[
     scenario("console/input-azerty", "console"),
     scenario("console/editing-utf8", "console"),
     scenario("console/history", "console"),
-    scenario("console/structured-command", "console"),
-    scenario("console/capability-denied", "console"),
-    scenario("console/input-capability-denied", "console"),
-    scenario("console/display-capability-denied", "console"),
-    scenario("console/session-capability-denied", "console"),
-    scenario("console/cancellation", "console"),
+    configured("console/structured-command", "console", &["assert-tasks", "assert-sessions"]),
+    configured("console/capability-denied", "console", &["deny-recovery"]),
+    configured("console/input-capability-denied", "console", &["deny-layout"]),
+    configured("console/display-capability-denied", "console", &["deny-display"]),
+    configured("console/session-capability-denied", "console", &["deny-session"]),
+    configured("console/cancellation", "console", &["assert-cancel"]),
     scenario("console/display-restart", "console"),
-    scenario("console/input-service-restart", "console"),
-    scenario("console/terminal-service-restart", "console"),
-    scenario("console/sessions-service-restart", "console"),
+    configured("console/input-service-restart", "console", &["assert-restart"]),
+    configured("console/terminal-service-restart", "console", &["assert-terminal-service-restart"]),
+    configured("console/sessions-service-restart", "console", &["assert-sessions-service-restart"]),
     scenario("console/recovery-handoff", "console"),
     scenario("platform/manifest-valid", "platform"),
     scenario("platform/manifest-invalid", "platform"),
     scenario("platform/dependency-order", "platform"),
     scenario("platform/dependency-cycle-rejected", "platform"),
     scenario("platform/startup-failure", "platform"),
-    scenario("platform/runtime-crash-restart", "platform"),
+    configured("platform/runtime-crash-restart", "platform", &["assert-crash-restart"]),
     scenario("platform/dependency-loss", "platform"),
-    scenario("platform/restart-backoff", "platform"),
+    configured("platform/restart-backoff", "platform", &["assert-restart-backoff"]),
     scenario("platform/resource-reclamation", "platform"),
     scenario("platform/protocol-compatible", "platform"),
     scenario("platform/protocol-incompatible", "platform"),
@@ -67,7 +68,27 @@ const SCENARIOS: &[Scenario] = &[
     scenario("platform/native-image-mapped", "platform"),
     scenario("platform/service-privilege-setup", "platform"),
     scenario("platform/service-ring3-transition", "platform"),
-    scenario("platform/native-service-ready", "platform"),
+    configured(
+        "platform/native-service-ready",
+        "platform",
+        &[
+            "health",
+            "assert-ping",
+            "tasks",
+            "assert-services",
+            "assert-drivers",
+            "trace",
+            "assert-inspect",
+            "restart virtio-balloon",
+            "cancel virtio-balloon",
+            "layout azerty",
+            "layout qwerty",
+            "echo hello",
+            "help clear",
+            "commands",
+            "clear",
+        ],
+    ),
     future("persistence/write-interruption", "persistence"),
     future("persistence/recovery", "persistence"),
     future("persistence/capability-denied", "persistence"),
@@ -81,10 +102,17 @@ const SCENARIOS: &[Scenario] = &[
 static LOG_OFFSET: AtomicUsize = AtomicUsize::new(0);
 
 const fn scenario(id: &'static str, suite: &'static str) -> Scenario {
-    Scenario { id, suite, timeout: 20, implemented: true }
+    configured(id, suite, &[])
+}
+const fn configured(
+    id: &'static str,
+    suite: &'static str,
+    setup: &'static [&'static str],
+) -> Scenario {
+    Scenario { id, suite, timeout: 20, implemented: true, setup }
 }
 const fn future(id: &'static str, suite: &'static str) -> Scenario {
-    Scenario { id, suite, timeout: 20, implemented: false }
+    Scenario { id, suite, timeout: 20, implemented: false, setup: &[] }
 }
 
 struct ResultRecord {
@@ -202,6 +230,7 @@ fn run_scenario(scenario: Scenario) -> Result<ResultRecord, String> {
         status,
         duration_ms: started.elapsed().as_millis(),
         seed,
+
         failure,
         artifacts,
     };
@@ -288,80 +317,8 @@ fn launch(scenario: Scenario, artifacts: &Path) -> Result<(), String> {
         wait_file(&debug_log, deadline, "LOGOS/1 READY")?;
         send(&mut stream, &mut transcript_file, "LOGOS/1 HELLO\n")?;
         wait_file(&debug_log, deadline, "LOGOS/1 RESULT hello=ok")?;
-        if scenario.id == "platform/native-service-ready" {
-            for command in [
-                "health",
-                "assert-ping",
-                "tasks",
-                "assert-services",
-                "assert-drivers",
-                "trace",
-                "assert-inspect",
-                "restart virtio-balloon",
-                "cancel virtio-balloon",
-                "layout azerty",
-                "layout qwerty",
-                "echo hello",
-                "help clear",
-                "commands",
-                "clear",
-            ] {
-                send(&mut stream, &mut transcript_file, &format!("LOGOS/1 INPUT {command}\n"))?;
-                wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
-            }
-        }
-        if scenario.id == "console/capability-denied" {
-            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT deny-recovery\n")?;
-            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
-        }
-        if scenario.id == "console/input-capability-denied" {
-            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT deny-layout\n")?;
-            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
-        }
-        if scenario.id == "console/display-capability-denied" {
-            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT deny-display\n")?;
-            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
-        }
-        if scenario.id == "console/session-capability-denied" {
-            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT deny-session\n")?;
-            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
-        }
-        if scenario.id == "console/structured-command" {
-            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-tasks\n")?;
-            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
-            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-sessions\n")?;
-            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
-        }
-        if scenario.id == "console/input-service-restart" {
-            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-restart\n")?;
-            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
-        }
-        if scenario.id == "console/terminal-service-restart" {
-            send(
-                &mut stream,
-                &mut transcript_file,
-                "LOGOS/1 INPUT assert-terminal-service-restart\n",
-            )?;
-            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
-        }
-        if scenario.id == "console/sessions-service-restart" {
-            send(
-                &mut stream,
-                &mut transcript_file,
-                "LOGOS/1 INPUT assert-sessions-service-restart\n",
-            )?;
-            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
-        }
-        if scenario.id == "console/cancellation" {
-            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-cancel\n")?;
-            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
-        }
-        if scenario.id == "platform/runtime-crash-restart" {
-            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-crash-restart\n")?;
-            wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
-        }
-        if scenario.id == "platform/restart-backoff" {
-            send(&mut stream, &mut transcript_file, "LOGOS/1 INPUT assert-restart-backoff\n")?;
+        for command in scenario.setup {
+            send(&mut stream, &mut transcript_file, &format!("LOGOS/1 INPUT {command}\n"))?;
             wait_file(&debug_log, deadline, "LOGOS/1 RESULT input=accepted")?;
         }
         send(&mut stream, &mut transcript_file, &format!("LOGOS/1 RUN {}\n", scenario.id))?;
