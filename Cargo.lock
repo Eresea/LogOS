@@ -40,6 +40,9 @@ dependencies = [
 [[package]]
 name = "logos-service-rt"
 version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
 
 [[package]]
 name = "logos-sessions-service"
@@ -48,6 +51,13 @@ dependencies = [
  "logos-abi",
  "logos-core",
  "logos-service-rt",
+]
+
+[[package]]
+name = "logos-store"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
 ]
 
 [[package]]

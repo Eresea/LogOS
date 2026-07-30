@@ -1,6 +1,115 @@
 #![no_std]
 
 pub const MAX_SESSION_TEXT: usize = 256;
+pub const PAGE_SIZE: usize = 4096;
+pub const MAX_OBJECT_NAME: usize = 64;
+pub const MAX_PERSISTENCE_OPERATIONS: usize = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct PageHandle(pub u32);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct NamespaceId(pub u32);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct BlockInfo {
+    pub logical_block_size: u32,
+    pub blocks: u64,
+    pub max_transfer_blocks: u32,
+}
+
+impl BlockInfo {
+    pub const fn valid(self) -> bool {
+        self.logical_block_size == 512
+            && self.blocks > 0
+            && self.max_transfer_blocks > 0
+            && self.max_transfer_blocks <= (PAGE_SIZE / 512) as u32
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum BlockOperation {
+    Read = 1,
+    Write,
+    Flush,
+    Cancel,
+    Reset,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct BlockRequest {
+    pub id: u32,
+    pub operation: BlockOperation,
+    pub lba: u64,
+    pub blocks: u32,
+    pub page: PageHandle,
+    pub deadline: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PersistenceStatus {
+    Complete = 1,
+    Invalid,
+    Denied,
+    Cancelled,
+    TimedOut,
+    Io,
+    Corrupt,
+    Recovered,
+    OutOfMemory,
+    Full,
+    NotFound,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum VersionSelector {
+    Current = 1,
+    Previous,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StoreOperation {
+    OpenRead = 1,
+    ReadChunk,
+    BeginReplace,
+    WriteChunk,
+    Commit,
+    Abort,
+    Cancel,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct StoreRequest {
+    pub id: u32,
+    pub operation: StoreOperation,
+    pub namespace: NamespaceId,
+    pub name: [u8; MAX_OBJECT_NAME],
+    pub name_length: u8,
+    pub version: VersionSelector,
+    pub offset: u64,
+    pub length: u32,
+    pub page: PageHandle,
+    pub deadline: u64,
+}
+
+impl StoreRequest {
+    pub fn valid(self) -> bool {
+        let length = usize::from(self.name_length);
+        length > 0
+            && length <= self.name.len()
+            && self.length as usize <= PAGE_SIZE
+            && core::str::from_utf8(&self.name[..length]).is_ok()
+    }
+}
 
 /// `foundation.session` v1 command request.  The transport stays bounded by
 /// `logos_core::native_service::Context`; this is the shared wire contract.
@@ -315,7 +424,9 @@ impl DisplayColor {
 }
 
 pub fn self_check() -> bool {
-    InputEvent::from_byte(b'a').is_some_and(|event| event.byte() == b'a')
+    BlockInfo { logical_block_size: 512, blocks: 1, max_transfer_blocks: 8 }.valid()
+        && !BlockInfo { logical_block_size: 4096, blocks: 1, max_transfer_blocks: 1 }.valid()
+        && InputEvent::from_byte(b'a').is_some_and(|event| event.byte() == b'a')
         && InputEvent::from_byte(0).is_none()
         && DisplayColor::from_wire(DisplayColor::GREEN.wire()) == Some(DisplayColor::GREEN)
         && DisplayColor::from_wire(0xff00_0000).is_none()
