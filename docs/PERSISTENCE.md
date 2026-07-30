@@ -32,6 +32,15 @@ Prove that capability-scoped service state survives interrupted writes and reset
 
 For every commit interruption point, QEMU recovers either the complete old version or the complete new version, never partial data. State survives reset, cross-namespace access is denied, corruption is reported, and block/storage service failure is recoverable without reboot.
 
+## Planned crate boundary
+
+- `logos-abi`: Block and Store wire contracts.
+- `logos-store`: `no_std`, host-testable object, version, commit, and recovery logic.
+- `logos-storage-service`: independently restartable Ring-2 payload.
+- Existing kernel driver code: VirtIO block DMA and interrupt ownership until Ring-1 driver isolation is enforceable.
+
+Do not split journals, objects, or other internal details into crates unless dependency boundaries require it.
+
 ## Deferred
 
 - General streams, partitions, discard, quotas, accounting, and file compatibility.
