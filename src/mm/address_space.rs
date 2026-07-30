@@ -6,6 +6,7 @@ use core::{
 use crate::memory::{Page, PhysicalMemory};
 
 const ENTRIES: usize = 512;
+const MAPPED_PAGES: usize = 64;
 const PAGE_SIZE: u64 = 4096;
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
@@ -20,8 +21,13 @@ pub struct AddressSpace {
     pt: Page,
     stack_lower: Page,
     stack: Page,
-    mapped: [Option<Page>; ENTRIES],
+    mapped: [Option<Mapping>; MAPPED_PAGES],
     base: u64,
+}
+
+struct Mapping {
+    index: usize,
+    page: Page,
 }
 
 impl AddressSpace {
@@ -92,7 +98,7 @@ impl AddressSpace {
                 pt,
                 stack_lower,
                 stack,
-                mapped: [const { None }; ENTRIES],
+                mapped: [const { None }; MAPPED_PAGES],
                 base: canonical_address(slot),
             })
         }
@@ -127,7 +133,7 @@ impl AddressSpace {
     }
 
     pub fn map_probe(&mut self, physical: &mut PhysicalMemory) -> Option<u64> {
-        if self.mapped[0].is_some() {
+        if self.mapping(0).is_some() {
             return None;
         }
         let page = physical.allocate_owned()?;
@@ -137,7 +143,10 @@ impl AddressSpace {
             (page.address() as *mut u8).add(1).write_volatile(0x80);
         }
         let address = page.address();
-        self.mapped[0] = Some(page);
+        if let Err(page) = self.insert_mapping(0, page) {
+            let _ = physical.release_page(page);
+            return None;
+        }
         unsafe {
             (self.pt.address() as *mut u64).write_volatile(address | PRESENT | USER);
             (self.pt.address() as *mut u64)
@@ -149,7 +158,7 @@ impl AddressSpace {
 
     pub fn map_context(&mut self, physical: &mut PhysicalMemory) -> Option<(u64, u64)> {
         const CONTEXT_PAGE: usize = ENTRIES - 4;
-        if self.mapped[CONTEXT_PAGE].is_some() {
+        if self.mapping(CONTEXT_PAGE).is_some() {
             return None;
         }
         let page = physical.allocate_owned()?;
@@ -162,7 +171,10 @@ impl AddressSpace {
                 .write_volatile(page.address() | PRESENT | WRITABLE | USER | NO_EXECUTE);
         }
         let address = page.address();
-        self.mapped[CONTEXT_PAGE] = Some(page);
+        if let Err(page) = self.insert_mapping(CONTEXT_PAGE, page) {
+            let _ = physical.release_page(page);
+            return None;
+        }
         Some((address, self.base + PAGE_SIZE * CONTEXT_PAGE as u64))
     }
 
@@ -210,7 +222,7 @@ impl AddressSpace {
             .mapped
             .into_iter()
             .flatten()
-            .fold(true, |released, page| physical.release_page(page) && released);
+            .fold(true, |released, mapping| physical.release_page(mapping.page) && released);
         let stack = physical.release_page(self.stack);
         let stack_lower = physical.release_page(self.stack_lower);
         let pt = physical.release_page(self.pt);
@@ -230,7 +242,7 @@ impl AddressSpace {
     ) -> bool {
         let table = self.pt.address() as *mut u64;
         let entry = unsafe { table.add(index).read_volatile() };
-        if self.mapped[index].is_none() {
+        if self.mapping(index).is_none() {
             let rva = match u32::try_from(index * PAGE_SIZE as usize) {
                 Ok(rva) => rva,
                 Err(_) => return false,
@@ -242,9 +254,12 @@ impl AddressSpace {
                 let _ = physical.release_page(page);
                 return false;
             }
-            self.mapped[index] = Some(page);
+            if let Err(page) = self.insert_mapping(index, page) {
+                let _ = physical.release_page(page);
+                return false;
+            }
         }
-        let Some(page) = self.mapped[index].as_ref() else {
+        let Some(page) = self.mapping(index) else {
             return false;
         };
         let writable = writable || entry & WRITABLE != 0;
@@ -258,17 +273,33 @@ impl AddressSpace {
     }
 
     fn unmap_image(&mut self, physical: &mut PhysicalMemory) {
-        for (index, page) in self.mapped.iter_mut().enumerate() {
-            if let Some(page) = page.take() {
-                let _ = physical.release_page(page);
-                unsafe { (self.pt.address() as *mut u64).add(index).write_volatile(0) };
+        for mapping in &mut self.mapped {
+            if let Some(mapping) = mapping.take() {
+                let _ = physical.release_page(mapping.page);
+                unsafe { (self.pt.address() as *mut u64).add(mapping.index).write_volatile(0) };
             }
         }
     }
 
     fn image_maps(&self, entry: u64) -> bool {
         let index = ((entry - self.base) / PAGE_SIZE) as usize;
-        index < ENTRIES - 1 && self.mapped[index].is_some()
+        index < ENTRIES - 1 && self.mapping(index).is_some()
+    }
+
+    fn mapping(&self, index: usize) -> Option<&Page> {
+        self.mapped
+            .iter()
+            .flatten()
+            .find(|mapping| mapping.index == index)
+            .map(|mapping| &mapping.page)
+    }
+
+    fn insert_mapping(&mut self, index: usize, page: Page) -> Result<(), Page> {
+        let Some(slot) = self.mapped.iter_mut().find(|slot| slot.is_none()) else {
+            return Err(page);
+        };
+        *slot = Some(Mapping { index, page });
+        Ok(())
     }
 }
 
