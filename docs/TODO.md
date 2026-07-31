@@ -10,15 +10,15 @@
 - [x] Platform bootstrap code provides static manifests, lifecycle policy, capability grants, identities, time, entropy, secrets, audit, and driver binding.
 - [x] The kernel-owned recovery console remains a direct, independent fallback.
 
-## 2. Current milestone: Platform v1 service boundary
+## 2. Current milestone: Persistence v1
 
-The execution boundary and initial service contracts exist. Remaining work:
+The execution boundary and initial service contracts are complete. Persistence work lives in [PERSISTENCE.md](PERSISTENCE.md):
 
 1. [x] Define the minimal versioned Input, Display, and Session capability contracts required by `logos-terminal`.
 2. [x] Replace the bounded Core context gate with those contracts without granting raw framebuffer or PS/2 access.
 3. [x] Move normal command/session dispatch out of Core while keeping privileged execution capability-gated.
 4. [x] Prove Terminal and Sessions failure, restart, capability denial, and recovery handoff in headless QEMU.
-5. Only then move further bootstrap services out of `logos-uefi`; keep the recovery console kernel-owned.
+5. Keep the recovery console kernel-owned while persistence advances.
 
 ## 3. Documentation debt (cheap, should happen soon)
 

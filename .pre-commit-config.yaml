@@ -5,37 +5,21 @@ repos:
   - repo: local
     hooks:
       - id: cargo-fmt
-        name: cargo fmt --check
-        entry: cargo fmt --check --all
+        name: LogOS host gate
+        entry: powershell -NoProfile -File scripts/check.ps1 -Stage host
         language: system
         types: [rust]
         pass_filenames: false
         always_run: true
-      
-      - id: cargo-clippy
-        name: cargo clippy -- -D warnings
-        entry: cargo clippy --all-targets --all-features -- -D warnings
-        language: system
-        types: [rust]
-        pass_filenames: false
-        always_run: true
-      
-      - id: cargo-test-host
-        name: cargo test (host)
-        entry: cargo test -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-terminal -p logos-test --all-targets
+
+      - id: uefi-build
+        name: LogOS UEFI build gate
+        entry: powershell -NoProfile -File scripts/check.ps1 -Stage uefi
         language: system
         types: [rust]
         pass_filenames: false
         always_run: true
         stages: [pre-commit, pre-push]
-      
-      - id: arch-deps-check
-        name: Architecture dependency check
-        entry: python3 scripts/arch-deps.py --check
-        language: system
-        types: [rust]
-        pass_filenames: false
-        always_run: true
 
   - repo: https://github.com/igorshubovych/markdownlint-cli
     rev: v0.41.0

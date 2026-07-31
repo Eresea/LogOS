@@ -1,171 +1,96 @@
-# LogOS CI/CD Workflows
-
 name: Verify
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
-  RUSTFLAGS: "-D warnings"
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  RUSTUP_TOOLCHAIN: stable
 
 jobs:
-  host-tests:
-    name: Host Tests (no QEMU)
+  host:
+    name: Host checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          target: x86_64-unknown-uefi
-      
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-      
-      - name: Format check
-        run: cargo fmt --check --all
-      
-      - name: Clippy
-        run: cargo clippy -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-terminal -p logos-test --all-targets -- -D warnings
-      
-      - name: Host unit tests
-        run: cargo test -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-terminal -p logos-test --all-targets
-      
-      - name: Architecture validation
-        run: |
-          python3 scripts/arch-deps.py --check
-        continue-on-error: true
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install target
+        run: rustup target add x86_64-unknown-uefi
+      - name: Run host gate
+        shell: pwsh
+        run: ./scripts/check.ps1 -Stage host
 
-  uefi-builds:
-    name: UEFI Payload Builds
+  uefi:
+    name: UEFI payload builds
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: host-tests
+    needs: host
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: {target: x86_64-unknown-uefi}
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install target
+        run: rustup target add x86_64-unknown-uefi
+      - name: Build UEFI payloads
+        shell: pwsh
+        run: ./scripts/check.ps1 -Stage uefi -Release
+      - name: Upload payloads
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-      - name: Build standard UEFI images
-        run: |
-          cargo build -p logos-uefi --target x86_64-unknown-uefi --features test-hooks
-          cargo build -p logos-terminal-service --target x86_64-unknown-uefi
-          cargo build -p logos-sessions-service --target x86_64-unknown-uefi
-          cargo build -p logos-storage-service --target x86_64-unknown-uefi
-      - name: Build block-probe storage profile
-        run: cargo build -p logos-storage-service --target x86_64-unknown-uefi --features block-probe
+          name: logos-uefi-payloads
+          path: target/logos-check/uefi/release
 
-  qemu-verify:
-    name: QEMU Verification
+  qemu:
+    name: QEMU suite
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [host-tests, uefi-builds]
+    needs: [host, uefi]
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          target: x86_64-unknown-uefi
-      
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-      
-      - name: Install QEMU + OVMF
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install target and QEMU
         run: |
+          rustup target add x86_64-unknown-uefi
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf
-
-      - name: Run QEMU verification
+      - name: Run QEMU suite
         env:
           OVMF_CODE: /usr/share/OVMF/OVMF_CODE.fd
-        run: cargo run -p logos-test -- suite ${{ github.event_name == 'pull_request' && 'pr' || 'main' }}
-      
-      - name: Upload QEMU logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
+          LOGOS_TEST_ARTIFACTS: all
+        shell: pwsh
+        run: ./scripts/verify.ps1 -Suite ${{ github.event_name == 'pull_request' && 'pr' || 'main' }}
+      - name: Upload QEMU artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: logos-test
           path: target/logos-test
-          retention-days: 7
 
-  doc-check:
-    name: Documentation Check
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Check markdown links
-        uses: gaurav-nelson/github-action-markdown-link-check@v1
-        with:
-          folder-path: docs
-      
-      - name: Spell check
-        uses: streetsidesoftware/cspell-action@v6
-        with:
-          files: docs/**/*.md
-
-  adr-index:
-    name: ADR Index
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Generate ADR index
-        run: |
-          echo "# Architecture Decision Records" > ADR_INDEX.md
-          echo "" >> ADR_INDEX.md
-          for f in docs/adr/*.md; do
-            if [[ $(basename "$f") != "template.md" ]]; then
-              title=$(head -1 "$f" | sed 's/^# //')
-              status=$(grep -A1 '^## Status' "$f" | tail -1 | sed 's/^//')
-              echo "- [$title]($f) — $status" >> ADR_INDEX.md
-            fi
-          done
-          cat ADR_INDEX.md
-      
-      - name: Upload ADR index
-        uses: actions/upload-artifact@v4
-        with:
-          name: adr-index
-          path: ADR_INDEX.md
-
-  release-check:
-    name: Release Readiness
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  release:
+    name: Release readiness
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [host-tests, qemu-verify, doc-check]
+    runs-on: ubuntu-latest
+    needs: [host, uefi, qemu]
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install target
+        run: rustup target add x86_64-unknown-uefi
+      - name: Rebuild release payloads
+        shell: pwsh
+        run: ./scripts/check.ps1 -Stage uefi -Release
+      - name: Hash payloads
+        run: sha256sum target/logos-check/uefi/release/*.efi
+      - name: Upload release payloads
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          target: x86_64-unknown-uefi
-      
-      - name: Build release artifacts
-        run: |
-          cargo build --release --target x86_64-unknown-uefi
-          ls -la target/x86_64-unknown-uefi/release/logos.efi
-      
-      - name: Create release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: target/x86_64-unknown-uefi/release/logos.efi
-          generate_release_notes: true
+          name: logos-release-payloads
+          path: target/logos-check/uefi/release

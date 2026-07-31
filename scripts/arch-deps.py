@@ -1,269 +1,108 @@
 #!/usr/bin/env python3
-"""Generate GraphViz DOT of LogOS internal module dependencies.
+"""Validate Cargo package edges and service-boundary assembly use."""
 
-Usage:
-    python3 scripts/arch-deps.py | dot -Tsvg > arch.svg
-    python3 scripts/arch-deps.py --check  # Exit non-zero on ring violations
-"""
-
-import re
+import argparse
+import json
+import subprocess
 import sys
 from pathlib import Path
-from dataclasses import dataclass
-from typing import Dict, List, Set, Optional
-from enum import Enum
 
-class Ring(Enum):
-    CORE = 0
-    FOUNDATION = 1
-    SYSTEM = 2
-    SESSIONS = 3
-    RUNTIME = 4
-    EXPERIENCE = 5
-    UNKNOWN = 99
-
-# Module -> Ring mapping
-MODULE_RINGS: Dict[str, Ring] = {
-    # Ring 0 - Core
-    "main": Ring.CORE,
-    "scheduler": Ring.CORE,
-    "memory": Ring.CORE,
-    "capabilities": Ring.CORE,
-    "interrupts": Ring.CORE,
-    "ipc": Ring.CORE,
-    "virtual_memory": Ring.CORE,
-    "acpi": Ring.CORE,
-    "pci": Ring.CORE,
-    "health": Ring.CORE,
-    "trace": Ring.CORE,
-    "debug": Ring.CORE,
-    "services": Ring.CORE,  # registry only
-    "boot_info": Ring.CORE,
-    
-    # Ring 1 - Foundation
-    "display": Ring.FOUNDATION,
-    "input": Ring.FOUNDATION,
-    "text": Ring.FOUNDATION,
-    "virtio": Ring.FOUNDATION,
-    "keyboard": Ring.FOUNDATION,
-    "console": Ring.FOUNDATION,  # recovery console
-    
-    # Ring 2 - System (future)
-    # "supervisor": Ring.SYSTEM,
-    # "identity": Ring.SYSTEM,
-    # "secrets": Ring.SYSTEM,
-    # "time": Ring.SYSTEM,
-    # "store": Ring.SYSTEM,
-    # "network": Ring.SYSTEM,
-    # "audit": Ring.SYSTEM,
-    # "update": Ring.SYSTEM,
-    
-    # Ring 3 - Sessions
-    "terminal": Ring.SESSIONS,
-    "commands": Ring.SESSIONS,
-    "mode": Ring.SESSIONS,
-    
-    # Ring 4 - Runtime (future)
-    # "wasm": Ring.RUNTIME,
-    # "package": Ring.RUNTIME,
-    # "app": Ring.RUNTIME,
-    # "workspace": Ring.RUNTIME,
-    # "tools": Ring.RUNTIME,
-    
-    # Ring 5 - Experience (future)
-    # "compositor": Ring.EXPERIENCE,
-    # "shell": Ring.EXPERIENCE,
+ROOT = Path(__file__).resolve().parents[1]
+ROLES = {
+    "logos-abi": (0, "contracts"),
+    "logos-core": (0, "core"),
+    "logos-service-rt": (1, "service-rt"),
+    "logos-store": (2, "store"),
+    "logos-storage-service": (3, "storage"),
+    "logos-terminal": (3, "terminal"),
+    "logos-terminal-service": (3, "terminal-service"),
+    "logos-sessions-service": (3, "sessions-service"),
+    "logos-uefi": (0, "uefi-boot"),
+    "logos-test": (99, "test"),
 }
 
-# Known external crates (stdlib, uefi, etc.) - ignore in analysis
-EXTERNAL_CRATES = {
-    "core", "alloc", "compiler_builtins", "uefi", "x86_64", 
-    "bitflags", "log", "spin", "volatile", "raw_cpuid"
+ALLOWED = {
+    "logos-abi": set(),
+    "logos-core": {"logos-abi"},
+    "logos-service-rt": {"logos-abi", "logos-core"},
+    "logos-store": {"logos-abi"},
+    "logos-storage-service": {"logos-abi", "logos-core", "logos-service-rt", "logos-store"},
+    "logos-terminal": set(),
+    "logos-terminal-service": {"logos-abi", "logos-core", "logos-service-rt", "logos-terminal"},
+    "logos-sessions-service": {"logos-abi", "logos-core", "logos-service-rt"},
+    # The boot adapter is the documented temporary exception while terminal
+    # bootstrap remains statically linked.
+    "logos-uefi": {"logos-abi", "logos-core", "logos-terminal"},
+    "logos-test": set(),
 }
 
-@dataclass
-class ModuleInfo:
-    name: str
-    ring: Ring
-    submodules: List[str]
-    uses: List[str]  # crate::module::item references
 
-def extract_mods(content: str) -> List[str]:
-    """Extract `mod foo;` declarations."""
-    return re.findall(r'^\s*mod\s+(\w+)\s*;', content, re.MULTILINE)
-
-def extract_uses(content: str) -> List[str]:
-    """Extract `use crate::module::...` references."""
-    # Matches: use crate::module::... or crate::module::...
-    pattern = r'(?:use\s+)?crate::(\w+)::'
-    return list(set(re.findall(pattern, content)))
-
-def extract_external_uses(content: str) -> List[str]:
-    """Extract `use external_crate::...` references."""
-    pattern = r'use\s+([a-zA-Z_][a-zA-Z0-9_-]*)::'
-    return re.findall(pattern, content)
-
-def get_module_ring(module_name: str) -> Ring:
-    """Determine ring for a module."""
-    return MODULE_RINGS.get(module_name, Ring.UNKNOWN)
-
-def analyze_source(src_dir: Path) -> Dict[str, ModuleInfo]:
-    """Analyze all .rs files in src/."""
-    modules = {}
-    
-    for rs_file in src_dir.glob("*.rs"):
-        if rs_file.name == "main.rs":
-            module_name = "main"
-        else:
-            module_name = rs_file.stem
-        
-        content = rs_file.read_text()
-        submods = extract_mods(content)
-        uses = extract_uses(content)
-        
-        ring = get_module_ring(module_name)
-        
-        modules[module_name] = ModuleInfo(
-            name=module_name,
-            ring=ring,
-            submodules=submods,
-            uses=uses
+def metadata() -> dict:
+    return json.loads(
+        subprocess.check_output(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            cwd=ROOT,
+            text=True,
         )
-    
-    return modules
+    )
 
-def check_ring_violations(modules: Dict[str, ModuleInfo]) -> List[str]:
-    """Check for inward dependency violations."""
-    violations = []
-    
-    for mod_name, info in modules.items():
-        if info.ring == Ring.UNKNOWN:
-            continue
-            
-        for use_mod in info.uses:
-            if use_mod in EXTERNAL_CRATES:
-                continue
-            if use_mod not in modules:
-                continue
-                
-            used_info = modules[use_mod]
-            if used_info.ring == Ring.UNKNOWN:
-                continue
-            
-            # Violation: inner ring (lower number) depends on outer ring (higher number)
-            # Core(0) should not depend on Foundation(1), etc.
-            if used_info.ring.value > info.ring.value:
-                violations.append(
-                    f"RING VIOLATION: {mod_name} (Ring {info.ring.value}) "
-                    f"depends on {use_mod} (Ring {used_info.ring.value})"
-                )
-    
-    return violations
 
-def generate_dot(modules: Dict[str, ModuleInfo], show_external: bool = False) -> str:
-    """Generate GraphViz DOT output."""
-    lines = [
-        "digraph LogOS {",
-        "  rankdir=LR;",
-        "  node [fontname=\"JetBrains Mono\", fontsize=10];",
-        "  edge [fontname=\"JetBrains Mono\", fontsize=9];",
-        "",
-        "  // Ring subgraphs (visual grouping)",
-    ]
-    
-    # Group by ring
-    rings_order = [Ring.CORE, Ring.FOUNDATION, Ring.SYSTEM, Ring.SESSIONS, Ring.RUNTIME, Ring.EXPERIENCE]
-    ring_colors = {
-        Ring.CORE: "#1a1a2e",
-        Ring.FOUNDATION: "#16213e",
-        Ring.SYSTEM: "#0f3460",
-        Ring.SESSIONS: "#533483",
-        Ring.RUNTIME: "#e94560",
-        Ring.EXPERIENCE: "#ff6b6b",
-    }
-    
-    for ring in rings_order:
-        ring_modules = [m for m in modules.values() if m.ring == ring]
-        if not ring_modules:
-            continue
-        
-        color = ring_colors.get(ring, "#ffffff")
-        lines.append(f'  subgraph cluster_{ring.name.lower()} {{')
-        lines.append(f'    label = "Ring {ring.value} — {ring.name}";')
-        lines.append(f'    style = filled;')
-        lines.append(f'    color = "{color}";')
-        lines.append(f'    fontcolor = "#ffffff";')
-        for m in ring_modules:
-            lines.append(f'    "{m.name}";')
-        lines.append("  }")
-        lines.append("")
-    
-    # Module nodes with ring-based styling
-    for info in modules.values():
-        if info.ring == Ring.UNKNOWN:
-            lines.append(f'  "{info.name}" [shape=box, style=dashed, color=gray];')
-        else:
-            color = ring_colors.get(info.ring, "#ffffff")
-            lines.append(f'  "{info.name}" [shape=box, style=filled, fillcolor="{color}", fontcolor=white];')
-    
-    # Edges: submodule (dashed), uses (solid)
-    for info in modules.values():
-        for sub in info.submodules:
-            if sub in modules:
-                lines.append(f'  "{info.name}" -> "{sub}" [style=dashed, color=gray, label="mod"];')
-        
-        for use_mod in info.uses:
-            if use_mod in EXTERNAL_CRATES:
-                if show_external:
-                    lines.append(f'  "{info.name}" -> "{use_mod}" [style=dotted, color=blue, label="ext"];')
-            elif use_mod in modules:
-                used_ring = modules[use_mod].ring
-                # Color edges by violation status
-                if used_ring.value > info.ring.value:
-                    lines.append(f'  "{info.name}" -> "{use_mod}" [color=red, penwidth=2, label="VIOLATION"];')
-                elif used_ring.value < info.ring.value:
-                    lines.append(f'  "{info.name}" -> "{use_mod}" [color=green];')
-                else:
-                    lines.append(f'  "{info.name}" -> "{use_mod}" [color=yellow];')
-    
+def package_edges(data: dict) -> dict[str, set[str]]:
+    edges = {}
+    for package in data["packages"]:
+        edges[package["name"]] = {
+            dependency["name"]
+            for dependency in package["dependencies"]
+            if dependency.get("path") is not None and dependency["name"] in ROLES
+        }
+    return edges
+
+
+def violations(data: dict) -> list[str]:
+    edges = package_edges(data)
+    errors = []
+    for package, dependencies in edges.items():
+        unexpected = dependencies - ALLOWED.get(package, set())
+        for dependency in sorted(unexpected):
+            errors.append(f"{package} depends on unapproved internal package {dependency}")
+    for package in ("logos-terminal-service", "logos-sessions-service", "logos-storage-service"):
+        source = ROOT / "crates" / package / "src" / "main.rs"
+        text = source.read_text(encoding="utf-8")
+        if any(token in text for token in ("asm!", "core::arch", "int 0x80")):
+            errors.append(f"{source.relative_to(ROOT)} uses assembly outside logos-service-rt")
+    return errors
+
+
+def dot(data: dict) -> str:
+    edges = package_edges(data)
+    lines = ["digraph LogOS {", "  rankdir=LR;"]
+    for package in sorted(edges):
+        label = ROLES.get(package, (99, "unknown"))[1]
+        lines.append(f'  "{package}" [label="{package}\\n{label}"];')
+    for package, dependencies in sorted(edges.items()):
+        for dependency in sorted(dependencies):
+            lines.append(f'  "{package}" -> "{dependency}";')
     lines.append("}")
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"
 
-def main():
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="LogOS architecture dependency analyzer")
-    parser.add_argument("--src", default="src", help="Source directory")
-    parser.add_argument("--check", action="store_true", help="Exit non-zero on ring violations")
-    parser.add_argument("--show-external", action="store_true", help="Show external crate dependencies")
-    parser.add_argument("--output", "-o", help="Output file (default: stdout)")
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--check", action="store_true")
+    parser.add_argument("--output", "-o")
     args = parser.parse_args()
-    
-    src_dir = Path(args.src)
-    if not src_dir.exists():
-        print(f"Error: Source directory '{src_dir}' not found", file=sys.stderr)
-        sys.exit(1)
-    
-    modules = analyze_source(src_dir)
-    violations = check_ring_violations(modules)
-    
-    dot_output = generate_dot(modules, show_external=args.show_external)
-    
+    data = metadata()
+    errors = violations(data)
+    output = dot(data)
     if args.output:
-        Path(args.output).write_text(dot_output)
-    else:
-        print(dot_output)
-    
-    if violations:
-        print("\n# RING VIOLATIONS DETECTED:", file=sys.stderr)
-        for v in violations:
-            print(f"#   {v}", file=sys.stderr)
-    
-    if args.check and violations:
-        sys.exit(1)
-    
-    if violations:
-        sys.exit(2)  # Violations but not --check mode
+        Path(args.output).write_text(output, encoding="utf-8")
+    elif not args.check:
+        print(output, end="")
+    if errors:
+        print("\n".join(errors), file=sys.stderr)
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

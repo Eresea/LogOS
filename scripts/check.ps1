@@ -1,6 +1,53 @@
-$ErrorActionPreference = 'Stop'
+param(
+    [ValidateSet('all', 'host', 'uefi')]
+    [string]$Stage = 'all',
+    [switch]$Release
+)
 
-Set-Location (Split-Path $PSScriptRoot -Parent)
-cargo fmt --check
-cargo clippy --target x86_64-unknown-uefi -- -D warnings
-& "$PSScriptRoot\verify.ps1"
+$ErrorActionPreference = 'Stop'
+$repoRoot = Split-Path $PSScriptRoot -Parent
+Set-Location $repoRoot
+$env:RUSTFLAGS = '-D warnings'
+
+function Invoke-Checked([string]$Name, [scriptblock]$Command) {
+    Write-Host "== $Name =="
+    & $Command
+    if ($LASTEXITCODE -ne 0) { throw "$Name failed with exit code $LASTEXITCODE" }
+}
+
+if ($Stage -in @('all', 'host')) {
+    Invoke-Checked 'format' { cargo fmt --check --all }
+    Invoke-Checked 'host clippy' {
+        cargo clippy -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-storage-service -p logos-terminal --lib --all-features -- -D warnings
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        cargo clippy -p logos-test --bin logos-test --all-features -- -D warnings
+    }
+    Invoke-Checked 'host tests' {
+        cargo test -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-storage-service -p logos-terminal --lib --all-features
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        cargo test -p logos-test --bin logos-test
+    }
+    Invoke-Checked 'architecture' { python scripts/arch-deps.py --check }
+    Invoke-Checked 'documentation links' { python scripts/docs-check.py }
+}
+
+if ($Stage -in @('all', 'uefi')) {
+    $profile = if ($Release) { 'release' } else { 'debug' }
+    $artifactRoot = Join-Path $repoRoot "target/logos-check/uefi/$profile"
+    New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+    Get-ChildItem $artifactRoot -File |
+        Where-Object { $_.Extension -eq '.efi' -or $_.Name -eq 'SHA256SUMS.txt' } |
+        Remove-Item -Force
+    $payloads = @()
+    foreach ($package in @('logos-uefi', 'logos-terminal-service', 'logos-sessions-service', 'logos-storage-service')) {
+        $cargoArgs = @('build', '-p', $package, '--target', 'x86_64-unknown-uefi')
+        if ($Release) { $cargoArgs += '--release' }
+        Invoke-Checked "UEFI $package" { cargo @cargoArgs }
+        $payload = Get-Item "target/x86_64-unknown-uefi/$profile/$package.efi"
+        Copy-Item $payload -Destination $artifactRoot -Force
+        $payloads += Get-Item (Join-Path $artifactRoot $payload.Name)
+    }
+    $payloads | Sort-Object Name | ForEach-Object {
+        "{0}  {1}" -f (Get-FileHash $_ -Algorithm SHA256).Hash, $_.Name
+    } | Set-Content (Join-Path $artifactRoot 'SHA256SUMS.txt')
+}

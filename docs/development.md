@@ -12,12 +12,10 @@ Install QEMU and make `qemu-system-x86_64` available on `PATH`.
 ## Commands
 
 ```powershell
-cargo fmt --check
-cargo test -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-terminal -p logos-test --all-targets
-cargo clippy -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-terminal -p logos-test --all-targets -- -D warnings
+./scripts/check.ps1 -Stage host
+./scripts/check.ps1 -Stage uefi
 .\scripts\run.ps1
 .\scripts\verify.ps1
-.\scripts\check.ps1
 ```
 
 The kernel prints a pass/fail self-check for every initialized subsystem, followed by `LogOS: startup self check passed`. A healthy boot hands normal input, presentation, and commands to the loaded Ring-3 terminal; Escape or `recovery` returns to the kernel recovery console. PS/2 IRQ input is handled through the IDT.

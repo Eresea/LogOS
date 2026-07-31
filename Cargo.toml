@@ -3,10 +3,23 @@ members = ["crates/logos-abi", "crates/logos-core", "crates/logos-service-rt", "
 default-members = ["crates/logos-abi", "crates/logos-core", "crates/logos-service-rt", "crates/logos-store", "crates/logos-terminal", "crates/logos-test"]
 resolver = "3"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
 [package]
 name = "logos-uefi"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+
+[lints]
+workspace = true
 
 [dependencies]
 logos-core = { path = "crates/logos-core" }

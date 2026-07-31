@@ -3,6 +3,9 @@ name = "logos-sessions-service"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 logos-abi = { path = "../logos-abi" }
 logos-core = { path = "../logos-core" }

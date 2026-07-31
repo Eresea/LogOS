@@ -2,7 +2,7 @@
 
 ## Scope
 
-LogOS is an experimental Rust UEFI kernel. The current milestone is the Platform v1 service boundary.
+LogOS is an experimental Rust UEFI kernel. The current milestone is Persistence v1.
 
 ## Rules
 
@@ -10,7 +10,7 @@ LogOS is an experimental Rust UEFI kernel. The current milestone is the Platform
 - Prefer small, independently bootable changes. Preserve QEMU debug-console output.
 - Run `cargo fmt --check` and `cargo clippy -- -D warnings` after Rust changes.
 - Boot with `scripts/run.ps1` when touching boot, UEFI, or hardware-facing code.
-- Document a new subsystem in `docs/architecture.md` before expanding it across files.
+- Document a new subsystem in `docs/ARCHITECTURE.md` before expanding it across files.
 - Treat `docs/boot-sequence.md` and `docs/security.md` as architectural constraints, not implementation prompts.
 - Create an ADR in `docs/adr/` for irreversible or cross-ring decisions; update its index and the affected roadmap/architecture docs. Skip ADRs for routine, reversible implementation details.
 - Commit each independently bootable or documentation-only change separately; do not bundle unrelated work.
