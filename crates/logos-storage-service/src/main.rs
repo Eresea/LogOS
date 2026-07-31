@@ -1,6 +1,8 @@
 #![no_main]
 #![no_std]
 
+use core::mem::size_of;
+
 use logos_service_rt::{BlockClient, BlockError, Context, Header};
 use logos_store::{Error, Recovery, SECTOR_SIZE, SectorBackend, Store};
 
@@ -62,7 +64,8 @@ fn map_block_error(error: BlockError) -> Error {
         BlockError::Corrupt => Error::Corrupt,
         BlockError::Full => Error::Full,
         BlockError::NotFound => Error::NotFound,
-        BlockError::Invalid | BlockError::Io => Error::Io,
+        BlockError::Invalid => Error::Invalid,
+        BlockError::Io => Error::Io,
     }
 }
 
@@ -73,17 +76,22 @@ fn start(context: &mut Context) -> Result<(&'static mut DiskStore, bool), Error>
         return Err(Error::Io);
     }
     let blank = backend.superblocks_zero()?;
-    let store =
-        if blank { Store::format_with_backend(backend)? } else { Store::recover_backend(backend)? };
-    if core::mem::size_of::<DiskStore>() > STORE_MEMORY {
+    if size_of::<DiskStore>() > STORE_MEMORY {
         return Err(Error::Full);
     }
+    let slot = context.heap_slot::<DiskStore>().ok_or(Error::Invalid)?;
+    let store = if blank {
+        Store::format_with_backend_at(slot, backend)?
+    } else {
+        Store::recover_backend_at(slot, backend)?
+    };
     let recovery = store.recovery();
-    let store = context.place_storage(store).ok_or(Error::Invalid)?;
     context.set_storage_status(if blank {
         logos_service_rt::STORAGE_FORMATTED
     } else if recovery == Recovery::Incomplete {
         logos_service_rt::STORAGE_RECOVERED_INCOMPLETE
+    } else if recovery == Recovery::Corrupt {
+        logos_service_rt::STORAGE_CORRUPT
     } else {
         logos_service_rt::STORAGE_RECOVERED
     });
@@ -91,8 +99,8 @@ fn start(context: &mut Context) -> Result<(&'static mut DiskStore, bool), Error>
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn logos_service_entry(context: *mut logos_service_rt::RawContext) -> ! {
-    unsafe { logos_service_rt::entry(context, run) }
+extern "C" fn logos_service_entry(context: logos_service_rt::EntryContext) -> ! {
+    logos_service_rt::entry(context, run)
 }
 
 fn run(context: &mut Context) -> ! {

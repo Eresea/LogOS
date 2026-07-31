@@ -1,12 +1,14 @@
 #![no_std]
 
-use core::{arch::asm, ptr::NonNull};
+use core::{arch::asm, mem::MaybeUninit, ptr::NonNull};
 
 #[cfg(target_os = "uefi")]
 use core::panic::PanicInfo;
 
 use logos_core::native_service::{self};
 pub use logos_core::native_service::{BlockPage, Context as RawContext, Header, MAX_TEXT};
+
+pub type EntryContext = *mut RawContext;
 
 pub const ACKNOWLEDGED: u32 = native_service::ACKNOWLEDGED;
 pub const STORAGE_FORMATTED: u32 = native_service::STORAGE_FORMATTED;
@@ -37,7 +39,7 @@ pub struct Context {
 
 /// # Safety
 /// The pointer must be the aligned, live context supplied by the kernel entry ABI.
-pub unsafe fn entry(context: *mut RawContext, service: fn(&mut Context) -> !) -> ! {
+pub fn entry(context: EntryContext, service: fn(&mut Context) -> !) -> ! {
     let Some(raw) = NonNull::new(context) else { spin() };
     if !raw.as_ptr().is_aligned() {
         spin();
@@ -174,16 +176,13 @@ impl Context {
         self.raw_mut().x = status;
     }
 
-    pub fn place_storage<T>(&self, value: T) -> Option<&'static mut T> {
+    pub fn heap_slot<T>(&self) -> Option<&'static mut MaybeUninit<T>> {
         let address = (self.raw_address() as usize).checked_sub(5 * 4096)?;
         if !address.is_multiple_of(core::mem::align_of::<T>()) {
             return None;
         }
         // SAFETY: the kernel reserves the fixed storage area below the context mapping.
-        Some(unsafe {
-            (address as *mut T).write(value);
-            &mut *(address as *mut T)
-        })
+        Some(unsafe { &mut *(address as *mut MaybeUninit<T>) })
     }
 }
 
@@ -237,7 +236,7 @@ impl BlockClient {
             operation,
             lba,
             blocks,
-            page: page.then_some(self.page.handle).unwrap_or(logos_abi::PageHandle(0)),
+            page: if page { self.page.handle } else { logos_abi::PageHandle(0) },
             deadline: 1_000_000,
         };
         if !request.valid_shape() || unsafe { !RawContext::request_block_at(self.context, request) }

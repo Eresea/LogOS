@@ -11,6 +11,8 @@ use crate::sched::{native_task, scheduler};
 #[cfg(feature = "test-hooks")]
 use crate::test_hooks;
 use crate::{boot, debug};
+#[cfg(feature = "test-hooks")]
+use core::cell::Cell;
 
 use logos_core::capabilities;
 use logos_terminal::{command, display, input, terminal, text};
@@ -688,10 +690,9 @@ pub(crate) fn main(
     if !native_scheduler.run_next() {
         fail!(b"native storage ready");
     }
-    #[cfg(feature = "block-probe")]
     check!(
-        b"block dispatch",
-        run_storage_block_probe(
+        b"storage startup",
+        run_storage_startup(
             &mut block_dispatch,
             &mut block::DispatchContext {
                 endpoint: native_storage_block,
@@ -707,115 +708,221 @@ pub(crate) fn main(
     );
     health.finish();
     #[cfg(feature = "test-hooks")]
-    test_hooks::serve(|value| {
-        let terminal_restart = value == "assert-terminal-service-restart";
-        let sessions_restart = value == "assert-sessions-service-restart";
-        let storage_restart = value == "assert-storage-service-restart";
-        if terminal_restart {
-            let previous = native_handle;
-            if !native_scheduler.fail(previous) || !startup.start() {
-                return false;
-            }
-            let Some(restarted) = restart_native_service(&mut native_scheduler, previous) else {
-                return false;
-            };
-            native_handle = restarted;
-            if native_scheduler.wake(previous)
-                || !resume_display(
-                    native_display,
-                    &session,
-                    &capabilities,
-                    session_display_capability,
-                    &mut native_scheduler,
-                    native_handle,
-                )
-            {
-                return false;
-            }
-        }
-        if sessions_restart {
-            let previous = sessions_handle;
-            if !native_scheduler.fail(previous) || !startup.start() {
-                return false;
-            }
-            let Some(restarted) = restart_native_service(&mut native_scheduler, previous) else {
-                return false;
-            };
-            sessions_handle = restarted;
-            if native_scheduler.wake(previous) {
-                return false;
-            }
-        }
-        if storage_restart {
-            let previous = storage_handle;
-            block_dispatch.cancel_on_exit(&mut block::DispatchContext {
-                endpoint: native_storage_block,
-                pages: &shared_pages,
-                store_owner: storage_owner,
-                store_page: storage_block_page,
-                device: &mut block_device,
-                memory: &mut memory,
-            });
-            let Some(page) = shared_pages.release(storage_owner, storage_block_page) else {
-                return false;
-            };
-            let Some(replacement) = shared_pages.register(storage_owner, page, 1) else {
-                return false;
-            };
-            storage_block_page = replacement;
-            if !native_scheduler.fail(previous) || !startup.start() {
-                return false;
-            }
-            let Some(restarted) = native_scheduler.restart(previous) else {
-                return false;
-            };
-            if !native_storage_block.configure(logos_core::native_service::BlockPage {
-                handle: storage_block_page,
-                address: storage_block_virtual,
-            }) || !native_scheduler.run_next()
-            {
-                return false;
-            };
-            storage_handle = restarted;
-            if native_scheduler.wake(previous) {
-                return false;
-            }
-        }
-        if value == "assert-sessions" {
-            return native_sessions_endpoint.deliver(logos_abi::SessionRequest::new(
-                logos_abi::Syscall::Tasks,
-                [0; logos_abi::MAX_SESSION_TEXT],
-                0,
-            )) && native_scheduler.wake(sessions_handle)
-                && native_scheduler.run_next()
-                && native_sessions_endpoint.effect().is_some_and(|effect| {
-                    effect.effect == logos_abi::Effect::ReadTasks
-                        && native_sessions_endpoint
-                            .reply_effect(logos_abi::EffectResult::TasksActive)
-                })
-                && native_scheduler.wake(sessions_handle)
-                && native_scheduler.run_next()
-                && native_sessions_endpoint.reply().is_some_and(|reply| {
-                    reply.length == b"scheduler active".len()
-                        && reply.text[..reply.length] == *b"scheduler active"
+    let proof = Cell::new(false);
+    #[cfg(feature = "test-hooks")]
+    test_hooks::serve(
+        |value| {
+            if value == "__reset" {
+                proof.set(false);
+                let previous_terminal = native_handle;
+                if !native_scheduler.fail(previous_terminal) || !startup.start() {
+                    return false;
+                }
+                let Some(restarted_terminal) =
+                    restart_native_service(&mut native_scheduler, previous_terminal)
+                else {
+                    return false;
+                };
+                native_handle = restarted_terminal;
+                if native_scheduler.wake(previous_terminal)
+                    || !resume_display(
+                        native_display,
+                        &session,
+                        &capabilities,
+                        session_display_capability,
+                        &mut native_scheduler,
+                        native_handle,
+                    )
+                {
+                    return false;
+                }
+
+                let previous_sessions = sessions_handle;
+                if !native_scheduler.fail(previous_sessions) || !startup.start() {
+                    return false;
+                }
+                let Some(restarted_sessions) =
+                    restart_native_service(&mut native_scheduler, previous_sessions)
+                else {
+                    return false;
+                };
+                sessions_handle = restarted_sessions;
+                if native_scheduler.wake(previous_sessions) {
+                    return false;
+                }
+
+                let previous_storage = storage_handle;
+                block_dispatch.cancel_on_exit(&mut block::DispatchContext {
+                    endpoint: native_storage_block,
+                    pages: &shared_pages,
+                    store_owner: storage_owner,
+                    store_page: storage_block_page,
+                    device: &mut block_device,
+                    memory: &mut memory,
                 });
-        }
-        if value == "assert-crash-restart" {
-            let tick = interrupts::ticks();
-            return service_lifecycle.failed(tick) && service_lifecycle.due(tick.saturating_add(2));
-        }
-        if value == "assert-restart-backoff" {
-            let tick = interrupts::ticks();
-            return service_lifecycle.failed(tick)
-                && !service_lifecycle.due(tick.saturating_add(1))
-                && service_lifecycle.due(tick.saturating_add(2))
-                && service_lifecycle.failed(tick.saturating_add(2))
-                && !service_lifecycle.due(tick.saturating_add(5))
-                && service_lifecycle.due(tick.saturating_add(6));
-        }
-        let deny_display = value == "deny-display";
-        let (value, request_session, expected, expect_qwerty) =
-            if terminal_restart || sessions_restart {
+                let Some(page) = shared_pages.release(storage_owner, storage_block_page) else {
+                    return false;
+                };
+                let Some(replacement) = shared_pages.register(storage_owner, page, 1) else {
+                    return false;
+                };
+                storage_block_page = replacement;
+                if !native_scheduler.fail(previous_storage) || !startup.start() {
+                    return false;
+                }
+                let Some(restarted_storage) = native_scheduler.restart(previous_storage) else {
+                    return false;
+                };
+                if !native_storage_block.configure(logos_core::native_service::BlockPage {
+                    handle: storage_block_page,
+                    address: storage_block_virtual,
+                }) || !native_scheduler.run_next()
+                {
+                    return false;
+                }
+                storage_handle = restarted_storage;
+                if native_scheduler.wake(previous_storage)
+                    || !run_storage_startup(
+                        &mut block_dispatch,
+                        &mut block::DispatchContext {
+                            endpoint: native_storage_block,
+                            pages: &shared_pages,
+                            store_owner: storage_owner,
+                            store_page: storage_block_page,
+                            device: &mut block_device,
+                            memory: &mut memory,
+                        },
+                        &mut native_scheduler,
+                        storage_handle,
+                    )
+                {
+                    return false;
+                }
+                return true;
+            }
+            if value == "persistence/block-read-flush" {
+                debug::write_line(b"LogOS: storage proof passed");
+                proof.set(true);
+                return true;
+            }
+            let terminal_restart = value == "assert-terminal-service-restart";
+            let sessions_restart = value == "assert-sessions-service-restart";
+            let storage_restart = value == "assert-storage-service-restart";
+            if terminal_restart {
+                let previous = native_handle;
+                if !native_scheduler.fail(previous) || !startup.start() {
+                    return false;
+                }
+                let Some(restarted) = restart_native_service(&mut native_scheduler, previous)
+                else {
+                    return false;
+                };
+                native_handle = restarted;
+                if native_scheduler.wake(previous)
+                    || !resume_display(
+                        native_display,
+                        &session,
+                        &capabilities,
+                        session_display_capability,
+                        &mut native_scheduler,
+                        native_handle,
+                    )
+                {
+                    return false;
+                }
+            }
+            if sessions_restart {
+                let previous = sessions_handle;
+                if !native_scheduler.fail(previous) || !startup.start() {
+                    return false;
+                }
+                let Some(restarted) = restart_native_service(&mut native_scheduler, previous)
+                else {
+                    return false;
+                };
+                sessions_handle = restarted;
+                if native_scheduler.wake(previous) {
+                    return false;
+                }
+            }
+            if storage_restart {
+                let previous = storage_handle;
+                block_dispatch.cancel_on_exit(&mut block::DispatchContext {
+                    endpoint: native_storage_block,
+                    pages: &shared_pages,
+                    store_owner: storage_owner,
+                    store_page: storage_block_page,
+                    device: &mut block_device,
+                    memory: &mut memory,
+                });
+                let Some(page) = shared_pages.release(storage_owner, storage_block_page) else {
+                    return false;
+                };
+                let Some(replacement) = shared_pages.register(storage_owner, page, 1) else {
+                    return false;
+                };
+                storage_block_page = replacement;
+                if !native_scheduler.fail(previous) || !startup.start() {
+                    return false;
+                }
+                let Some(restarted) = native_scheduler.restart(previous) else {
+                    return false;
+                };
+                if !native_storage_block.configure(logos_core::native_service::BlockPage {
+                    handle: storage_block_page,
+                    address: storage_block_virtual,
+                }) || !native_scheduler.run_next()
+                {
+                    return false;
+                };
+                storage_handle = restarted;
+                if native_scheduler.wake(previous) {
+                    return false;
+                }
+            }
+            if value == "assert-sessions" {
+                let passed = native_sessions_endpoint.deliver(logos_abi::SessionRequest::new(
+                    logos_abi::Syscall::Tasks,
+                    [0; logos_abi::MAX_SESSION_TEXT],
+                    0,
+                )) && native_scheduler.wake(sessions_handle)
+                    && native_scheduler.run_next()
+                    && native_sessions_endpoint.effect().is_some_and(|effect| {
+                        effect.effect == logos_abi::Effect::ReadTasks
+                            && native_sessions_endpoint
+                                .reply_effect(logos_abi::EffectResult::TasksActive)
+                    })
+                    && native_scheduler.wake(sessions_handle)
+                    && native_scheduler.run_next()
+                    && native_sessions_endpoint.reply().is_some_and(|reply| {
+                        reply.length == b"scheduler active".len()
+                            && reply.text[..reply.length] == *b"scheduler active"
+                    });
+                proof.set(proof.get() || passed);
+                return passed;
+            }
+            if value == "assert-crash-restart" {
+                let tick = interrupts::ticks();
+                let passed =
+                    service_lifecycle.failed(tick) && service_lifecycle.due(tick.saturating_add(2));
+                proof.set(proof.get() || passed);
+                return passed;
+            }
+            if value == "assert-restart-backoff" {
+                let tick = interrupts::ticks();
+                let passed = service_lifecycle.failed(tick)
+                    && !service_lifecycle.due(tick.saturating_add(1))
+                    && service_lifecycle.due(tick.saturating_add(2))
+                    && service_lifecycle.failed(tick.saturating_add(2))
+                    && !service_lifecycle.due(tick.saturating_add(5))
+                    && service_lifecycle.due(tick.saturating_add(6));
+                proof.set(proof.get() || passed);
+                return passed;
+            }
+            let deny_display = value == "deny-display";
+            let (value, request_session, expected, expect_qwerty) = if terminal_restart
+                || sessions_restart
+            {
                 ("tasks", &session, Some(b"scheduler active" as &[u8]), false)
             } else if value == "deny-recovery" {
                 ("recovery", &restricted_session, Some(b"permission denied" as &[u8]), false)
@@ -847,79 +954,92 @@ pub(crate) fn main(
             } else {
                 (value, &session, None, false)
             };
-        if deny_display {
-            return logos_abi::InputEvent::from_byte(b'x').is_some_and(|event| {
-                native_input.deliver(event)
+            if deny_display {
+                let passed = logos_abi::InputEvent::from_byte(b'x').is_some_and(|event| {
+                    native_input.deliver(event)
+                        && native_scheduler.wake(native_handle)
+                        && native_scheduler.run_next()
+                        && !resume_display(
+                            native_display,
+                            &denied_session,
+                            &capabilities,
+                            session_display_capability,
+                            &mut native_scheduler,
+                            native_handle,
+                        )
+                });
+                proof.set(proof.get() || passed);
+                return passed;
+            }
+            let passed = value.bytes().chain(core::iter::once(b'\n')).all(|byte| {
+                logos_abi::InputEvent::from_byte(byte)
+                    .is_some_and(|event| native_input.deliver(event))
                     && native_scheduler.wake(native_handle)
                     && native_scheduler.run_next()
-                    && !resume_display(
-                        native_display,
-                        &denied_session,
-                        &capabilities,
-                        session_display_capability,
-                        &mut native_scheduler,
-                        native_handle,
-                    )
-            });
-        }
-        value.bytes().chain(core::iter::once(b'\n')).all(|byte| {
-            logos_abi::InputEvent::from_byte(byte).is_some_and(|event| native_input.deliver(event))
-                && native_scheduler.wake(native_handle)
-                && native_scheduler.run_next()
-                && (if native_display.pending() {
-                    resume_display(
-                        native_display,
-                        &session,
-                        &capabilities,
-                        session_display_capability,
-                        &mut native_scheduler,
-                        native_handle,
-                    )
-                } else {
-                    true
-                })
-                && (native_command.request().is_none()
-                    || ({
-                        let reply = relay_session_request(
-                            native_command,
-                            native_sessions_endpoint,
+                    && (if native_display.pending() {
+                        resume_display(
+                            native_display,
+                            &session,
+                            &capabilities,
+                            session_display_capability,
                             &mut native_scheduler,
-                            sessions_handle,
-                            effects::Context {
-                                session: request_session,
-
-                                capabilities: &capabilities,
-                                tick: interrupts::ticks(),
-                                input: &mut input,
-                                lifecycle: &mut service_lifecycle,
-                                service_healthy: service_health
-                                    .healthy(balloon::NAME, interrupts::ticks()),
-                                channel: &channel,
-                                responses: &responses,
-                                service_scheduler: &mut service_scheduler,
-                                service_capability,
-                                service: virtio_handle,
-                            },
-                        );
-                        reply.ok()
-                            && expected.is_none_or(|expected| {
-                                matches!(reply, SessionRelay::Handled(true))
-                                    && native_command.reply_matches(expected)
-                            })
-                            && (!expect_qwerty || input.layout() == input::Layout::Qwerty)
-                            && native_scheduler.wake(native_handle)
-                            && native_scheduler.run_next()
-                            && resume_display(
-                                native_display,
-                                &session,
-                                &capabilities,
-                                session_display_capability,
+                            native_handle,
+                        )
+                    } else {
+                        true
+                    })
+                    && (native_command.request().is_none()
+                        || ({
+                            let reply = relay_session_request(
+                                native_command,
+                                native_sessions_endpoint,
                                 &mut native_scheduler,
-                                native_handle,
-                            )
-                    }))
-        })
-    });
+                                sessions_handle,
+                                effects::Context {
+                                    session: request_session,
+
+                                    capabilities: &capabilities,
+                                    tick: interrupts::ticks(),
+                                    input: &mut input,
+                                    lifecycle: &mut service_lifecycle,
+                                    service_healthy: service_health
+                                        .healthy(balloon::NAME, interrupts::ticks()),
+                                    channel: &channel,
+                                    responses: &responses,
+                                    service_scheduler: &mut service_scheduler,
+                                    service_capability,
+                                    service: virtio_handle,
+                                },
+                            );
+                            reply.ok()
+                                && expected.is_none_or(|expected| {
+                                    matches!(reply, SessionRelay::Handled(true))
+                                        && native_command.reply_matches(expected)
+                                })
+                                && (!expect_qwerty || input.layout() == input::Layout::Qwerty)
+                                && native_scheduler.wake(native_handle)
+                                && native_scheduler.run_next()
+                                && resume_display(
+                                    native_display,
+                                    &session,
+                                    &capabilities,
+                                    session_display_capability,
+                                    &mut native_scheduler,
+                                    native_handle,
+                                )
+                        }))
+            });
+            if value.starts_with("assert-") || value.starts_with("deny-") {
+                proof.set(proof.get() || passed);
+            }
+            passed
+        },
+        |id| {
+            id == "core/boot-normal"
+                || (cfg!(feature = "block-probe") && id == "persistence/block-read-flush")
+                || proof.get()
+        },
+    );
     // ponytail: one bootstrap retry; use supervisor policy when native services join System lifecycle.
     let mut terminal_restart_available = true;
     let mut sessions_restart_available = true;
@@ -1130,32 +1250,52 @@ fn dispatch_store_block(
     context.endpoint.reply(reply) && scheduler.wake(handle) && scheduler.run_next()
 }
 
-#[cfg(feature = "block-probe")]
-fn run_storage_block_probe(
+fn run_storage_startup(
     dispatch: &mut block::Dispatch,
     context: &mut block::DispatchContext<'_>,
     scheduler: &mut scheduler::Scheduler<'_>,
     handle: scheduler::TaskHandle,
 ) -> bool {
-    for id in 1..=3 {
-        loop {
-            let Some(reply) = dispatch.poll(context, interrupts::ticks()) else {
-                interrupts::wait_for_tick();
-                continue;
+    debug::write_line(b"LogOS: storage startup pump");
+    interrupts::enable();
+    loop {
+        if scheduler.failed(handle) {
+            return false;
+        }
+        if unsafe {
+            logos_core::native_service::Context::input_waiting_at(context.endpoint.context())
+        } {
+            let marker: &[u8] = match unsafe {
+                logos_core::native_service::Context::storage_status_at(context.endpoint.context())
+            } {
+                Some(logos_core::native_service::STORAGE_FORMATTED) => b"LogOS: storage formatted",
+                Some(logos_core::native_service::STORAGE_RECOVERED) => b"LogOS: storage recovered",
+                Some(logos_core::native_service::STORAGE_RECOVERED_INCOMPLETE) => {
+                    b"LogOS: storage recovered-incomplete"
+                }
+                Some(logos_core::native_service::STORAGE_CORRUPT) => b"LogOS: storage corrupt",
+                Some(logos_core::native_service::STORAGE_IO_FAILED) => b"LogOS: storage io-failed",
+                _ => return false,
             };
-            if reply.id != id
-                || reply.status != logos_abi::PersistenceStatus::Complete
-                || (id == 1 && !reply.info.valid())
-                || !context.endpoint.reply(reply)
-                || !scheduler.wake(handle)
-                || !scheduler.run_next()
-            {
-                return false;
+            debug::write_line(marker);
+            debug::write_line(b"LogOS: storage ready");
+            return true;
+        }
+        if context.endpoint.request().is_some() {
+            debug::write_line(b"LogOS: storage block pending");
+        }
+        let Some(reply) = dispatch.poll(context, interrupts::ticks()) else {
+            if dispatch.accepts_new_request() {
+                interrupts::wait_for_tick();
+            } else {
+                interrupts::wait_for_virtio();
             }
-            break;
+            continue;
+        };
+        if !context.endpoint.reply(reply) || !scheduler.wake(handle) || !scheduler.run_next() {
+            return false;
         }
     }
-    true
 }
 
 fn native_input_event(event: input::Event) -> Option<logos_abi::InputEvent> {

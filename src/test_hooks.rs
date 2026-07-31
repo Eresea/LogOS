@@ -4,56 +4,10 @@ use logos_core::test_protocol::{self, Request};
 
 const COM2: u16 = 0x2f8;
 const DEBUG_EXIT: u16 = 0xf4;
-const IMPLEMENTED: &[&str] = &[
-    "core/boot-normal",
-    "core/boot-recovery",
-    "core/ipc-request-reply",
-    "core/ipc-cancellation",
-    "core/task-block-wake",
-    "core/capability-denied",
-    "core/capability-revoked",
-    "core/driver-reset-recovery",
-    "core/resource-reclamation",
-    "core/panic-diagnostics",
-    "console/input-qwerty",
-    "console/input-azerty",
-    "console/editing-utf8",
-    "console/history",
-    "console/structured-command",
-    "console/capability-denied",
-    "console/input-capability-denied",
-    "console/display-capability-denied",
-    "console/session-capability-denied",
-    "console/cancellation",
-    "console/display-restart",
-    "console/input-service-restart",
-    "console/terminal-service-restart",
-    "console/sessions-service-restart",
-    "persistence/storage-service-restart",
-    "persistence/block-read-flush",
-    "console/recovery-handoff",
-    "platform/manifest-valid",
-    "platform/manifest-invalid",
-    "platform/dependency-order",
-    "platform/dependency-cycle-rejected",
-    "platform/startup-failure",
-    "platform/runtime-crash-restart",
-    "platform/dependency-loss",
-    "platform/restart-backoff",
-    "platform/resource-reclamation",
-    "platform/protocol-compatible",
-    "platform/protocol-incompatible",
-    "platform/unauthorized-capability",
-    "platform/diagnostics",
-    "platform/native-payload-staged",
-    "platform/service-address-space",
-    "platform/native-image-mapped",
-    "platform/service-privilege-setup",
-    "platform/service-ring3-transition",
-    "platform/native-service-ready",
-];
-
-pub fn serve(mut native_input: impl FnMut(&str) -> bool) -> ! {
+pub fn serve(
+    mut native_input: impl FnMut(&str) -> bool,
+    mut run_scenario: impl FnMut(&str) -> bool,
+) -> ! {
     init();
     line(b"LOGOS/1 READY stage=session-ready");
     let mut frame = [0u8; test_protocol::MAX_FRAME];
@@ -61,7 +15,7 @@ pub fn serve(mut native_input: impl FnMut(&str) -> bool) -> ! {
         let length = read_frame(&mut frame);
         match test_protocol::parse(&frame[..length]) {
             Ok(Request::Hello) => line(b"LOGOS/1 RESULT hello=ok"),
-            Ok(Request::Run(id)) if IMPLEMENTED.contains(&id) => {
+            Ok(Request::Run(id)) if run_scenario(id) => {
                 debug::write(b"LOGOS/1 EVENT id=");
                 debug::write(id.as_bytes());
                 debug::write_line(b" state=passed");
@@ -74,13 +28,11 @@ pub fn serve(mut native_input: impl FnMut(&str) -> bool) -> ! {
                 write(b"LOGOS/1 RESULT scenario=");
                 write(id.as_bytes());
                 line(b" status=passed");
-                exit(0);
             }
             Ok(Request::Run(id)) => {
                 write(b"LOGOS/1 ERROR scenario=");
                 write(id.as_bytes());
                 line(b" reason=unavailable");
-                exit(1);
             }
             Ok(Request::Inject { point, action }) if fault_point(point) && valid_action(action) => {
                 line(b"LOGOS/1 RESULT inject=accepted")
@@ -91,7 +43,10 @@ pub fn serve(mut native_input: impl FnMut(&str) -> bool) -> ! {
                 line(b"LOGOS/1 RESULT input=accepted")
             }
             Ok(Request::Input(_)) => line(b"LOGOS/1 ERROR input=rejected"),
-            Ok(Request::Reset(_)) => line(b"LOGOS/1 RESULT reset=accepted"),
+            Ok(Request::Reset(_)) if native_input("__reset") => {
+                line(b"LOGOS/1 RESULT reset=accepted")
+            }
+            Ok(Request::Reset(_)) => line(b"LOGOS/1 ERROR reset=failed"),
             Ok(Request::Shutdown) => exit(0),
             Ok(_) => line(b"LOGOS/1 ERROR reason=unavailable"),
             Err(_) => line(b"LOGOS/1 ERROR reason=invalid-frame"),

@@ -79,6 +79,7 @@ impl Dispatch {
             return Some(reply(request, context.device.timeout(context.memory)));
         }
         let status = context.device.submit(request, page, context.memory);
+        crate::debug::write_line(b"LogOS: storage block submitted");
         if status == logos_abi::PersistenceStatus::Complete
             && matches!(
                 request.operation,

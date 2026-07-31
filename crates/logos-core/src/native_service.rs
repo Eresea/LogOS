@@ -17,6 +17,11 @@ pub const STORE_REPLY: u32 = 11;
 pub const BLOCK_REQUEST: u32 = 12;
 pub const BLOCK_REPLY: u32 = 13;
 pub const ACKNOWLEDGED: u32 = 1;
+pub const STORAGE_FORMATTED: u32 = 1;
+pub const STORAGE_RECOVERED: u32 = 2;
+pub const STORAGE_RECOVERED_INCOMPLETE: u32 = 3;
+pub const STORAGE_CORRUPT: u32 = 4;
+pub const STORAGE_IO_FAILED: u32 = 5;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -228,6 +233,16 @@ impl Context {
             && context.reserved == 0
             && context.operation == READ_INPUT
             && context.status == ACKNOWLEDGED
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn storage_status_at(address: u64) -> Option<u32> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI
+            && context.reserved == 0
+            && (STORAGE_FORMATTED..=STORAGE_IO_FAILED).contains(&context.x))
+        .then_some(context.x)
     }
 
     /// # Safety

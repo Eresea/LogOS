@@ -102,6 +102,10 @@ impl StoreEndpoint {
 }
 
 impl BlockEndpoint {
+    pub const fn context(self) -> u64 {
+        self.context_physical
+    }
+
     pub fn configure(self, page: logos_core::native_service::BlockPage) -> bool {
         unsafe {
             logos_core::native_service::Context::configure_block_page_at(

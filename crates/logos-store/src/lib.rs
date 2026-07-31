@@ -1,5 +1,7 @@
 #![no_std]
 
+use core::{mem::MaybeUninit, ptr};
+
 #[cfg(test)]
 extern crate alloc;
 
@@ -149,7 +151,16 @@ impl Store<MemoryBackend> {
 }
 
 impl<B: SectorBackend> Store<B> {
-    pub fn format_with_backend(mut backend: B) -> Result<Self, Error> {
+    pub fn format_with_backend(backend: B) -> Result<Self, Error> {
+        let mut slot = MaybeUninit::uninit();
+        Self::format_with_backend_at(&mut slot, backend)?;
+        Ok(unsafe { slot.assume_init_read() })
+    }
+
+    pub fn format_with_backend_at(
+        slot: &mut MaybeUninit<Self>,
+        mut backend: B,
+    ) -> Result<&mut Self, Error> {
         validate_sectors(backend.sectors())?;
         let mut first = [0; SECTOR_SIZE];
         let mut second = [0; SECTOR_SIZE];
@@ -160,32 +171,58 @@ impl<B: SectorBackend> Store<B> {
         }
         backend.write(0, &encode_superblock(1, 0))?;
         backend.flush()?;
-        Self::recover_backend(backend)
+        let sectors = backend.sectors();
+        Ok(unsafe { Self::initialize_at(slot, backend, sectors, 0, 1) })
     }
 
-    pub fn recover_backend(mut backend: B) -> Result<Self, Error> {
+    pub fn recover_backend(backend: B) -> Result<Self, Error> {
+        let mut slot = MaybeUninit::uninit();
+        Self::recover_backend_at(&mut slot, backend)?;
+        Ok(unsafe { slot.assume_init_read() })
+    }
+
+    pub fn recover_backend_at(
+        slot: &mut MaybeUninit<Self>,
+        mut backend: B,
+    ) -> Result<&mut Self, Error> {
         let sectors = backend.sectors();
         validate_sectors(sectors)?;
         let mut first = [0; SECTOR_SIZE];
         let mut second = [0; SECTOR_SIZE];
         backend.read(0, &mut first)?;
         backend.read(1, &mut second)?;
-        let selected = [first, second]
-            .iter()
-            .filter_map(decode_superblock)
-            .max_by_key(|(generation, _)| *generation)
-            .ok_or(Error::Corrupt)?;
-        let mut store = Self {
-            backend,
-            sectors,
-            arena: selected.1,
-            generation: selected.0,
-            tail: 0,
-            entries: [Entry::EMPTY; MAX_OBJECTS],
-            recovery: Recovery::Clean,
-        };
+        let selected = match (decode_superblock(&first), decode_superblock(&second)) {
+            (Some(first), Some(second)) => Some(if first.0 >= second.0 { first } else { second }),
+            (Some(first), None) => Some(first),
+            (None, Some(second)) => Some(second),
+            (None, None) => None,
+        }
+        .ok_or(Error::Corrupt)?;
+        let store = unsafe { Self::initialize_at(slot, backend, sectors, selected.1, selected.0) };
         store.scan()?;
         Ok(store)
+    }
+
+    unsafe fn initialize_at(
+        slot: &mut MaybeUninit<Self>,
+        backend: B,
+        sectors: usize,
+        arena: usize,
+        generation: u64,
+    ) -> &mut Self {
+        let pointer = slot.as_mut_ptr();
+        unsafe {
+            ptr::addr_of_mut!((*pointer).backend).write(backend);
+            ptr::addr_of_mut!((*pointer).sectors).write(sectors);
+            ptr::addr_of_mut!((*pointer).arena).write(arena);
+            ptr::addr_of_mut!((*pointer).generation).write(generation);
+            ptr::addr_of_mut!((*pointer).tail).write(0);
+            for index in 0..MAX_OBJECTS {
+                ptr::addr_of_mut!((*pointer).entries[index]).write(Entry::EMPTY);
+            }
+            ptr::addr_of_mut!((*pointer).recovery).write(Recovery::Clean);
+            &mut *pointer
+        }
     }
 
     pub const fn recovery(&self) -> Recovery {
@@ -370,7 +407,9 @@ impl<B: SectorBackend> Store<B> {
     }
 
     fn scan(&mut self) -> Result<(), Error> {
-        self.entries = [Entry::EMPTY; MAX_OBJECTS];
+        for entry in &mut self.entries {
+            *entry = Entry::EMPTY;
+        }
         self.tail = 0;
         self.recovery = Recovery::Clean;
         let start = self.arena_start(self.arena);
