@@ -96,41 +96,41 @@ shape before QEMU Store I/O.
 
 ### Phase 2: make `logos-store` safe for the real payload
 
-- [ ] Add an explicit on-disk format version to superblocks and records.
-- [ ] Reject an unsupported format version as `Corrupt`.
-- [ ] Keep the existing little-endian encoding and checksums.
-- [ ] Replace the production full-disk `Vec` with sector-by-sector backend access.
-- [ ] Replace the production `BTreeMap` with a fixed 32-entry object index.
-- [ ] Store namespace, name, current location, and previous location in each index entry.
-- [ ] Return `Full` when a new name needs a thirty-third index entry.
-- [ ] Read object bytes into a caller-provided bounded output buffer.
-- [ ] Write record sectors from a caller-provided payload slice.
-- [ ] Keep the record header and commit sector in fixed 512-byte buffers.
-- [ ] Keep object payloads at or below `PAGE_SIZE`.
-- [ ] Make backend reads take mutable backend access so request IDs and gate state need no interior
+- [x] Add an explicit on-disk format version to superblocks and records.
+- [x] Reject an unsupported format version as `Corrupt`.
+- [x] Keep the existing little-endian encoding and checksums.
+- [x] Replace the production full-disk `Vec` with sector-by-sector backend access.
+- [x] Replace the production `BTreeMap` with a fixed 32-entry object index.
+- [x] Store namespace, name, current location, and previous location in each index entry.
+- [x] Return `Full` when a new name needs a thirty-third index entry.
+- [x] Read object bytes into a caller-provided bounded output buffer.
+- [x] Write record sectors from a caller-provided payload slice.
+- [x] Keep the record header and commit sector in fixed 512-byte buffers.
+- [x] Keep object payloads at or below `PAGE_SIZE`.
+- [x] Make backend reads take mutable backend access so request IDs and gate state need no interior
       mutability.
-- [ ] Preserve `Io`, `TimedOut`, `Corrupt`, `Full`, `Invalid`, and `NotFound` as distinct errors.
-- [ ] Make Store memory usage independent of `SectorBackend::sectors()`.
-- [ ] Keep an allocation-backed memory backend only for host tests.
-- [ ] Scan only the superblocks and selected arena during recovery.
-- [ ] Treat an absent record magic after the last commit as the arena tail.
-- [ ] Treat a torn header or missing commit after a valid record as `Incomplete`.
-- [ ] Treat a bad checksum, impossible length, or unsupported version as `Corrupt`.
-- [ ] Never expose an incomplete or corrupt record through the index.
-- [ ] Preserve both current and previous versions during compaction.
-- [ ] Copy compaction records sector by sector into the inactive arena.
-- [ ] Flush the inactive arena before writing its selecting superblock.
-- [ ] Flush the selecting superblock before changing the active generation in memory.
-- [ ] Preserve the old arena and superblock until the final flush succeeds.
-- [ ] Keep the existing replace interruption test at every sector write and flush.
-- [ ] Keep the existing compaction interruption test at every sector write and flush.
-- [ ] Add a test for a blank disk.
-- [ ] Add a test that a non-blank corrupt disk is not reformatted.
-- [ ] Add a test for the 32-name limit.
-- [ ] Add a test for the `PAGE_SIZE` payload limit.
-- [ ] Add a backend test proving reads do not allocate memory proportional to disk size.
-- [ ] Run `cargo test -p logos-store`.
-- [ ] Commit the bounded Store engine.
+- [x] Preserve `Io`, `TimedOut`, `Corrupt`, `Full`, `Invalid`, and `NotFound` as distinct errors.
+- [x] Make Store memory usage independent of `SectorBackend::sectors()`.
+- [x] Keep an allocation-backed memory backend only for host tests.
+- [x] Scan only the superblocks and selected arena during recovery.
+- [x] Treat an absent record magic after the last commit as the arena tail.
+- [x] Treat a torn header or missing commit after a valid record as `Incomplete`.
+- [x] Treat a bad checksum, impossible length, or unsupported version as `Corrupt`.
+- [x] Never expose an incomplete or corrupt record through the index.
+- [x] Preserve both current and previous versions during compaction.
+- [x] Copy compaction records sector by sector into the inactive arena.
+- [x] Flush the inactive arena before writing its selecting superblock.
+- [x] Flush the selecting superblock before changing the active generation in memory.
+- [x] Preserve the old arena and superblock until the final flush succeeds.
+- [x] Keep the existing replace interruption test at every sector write and flush.
+- [x] Keep the existing compaction interruption test at every sector write and flush.
+- [x] Add a test for a blank disk.
+- [x] Add a test that a non-blank corrupt disk is not reformatted.
+- [x] Add a test for the 32-name limit.
+- [x] Add a test for the `PAGE_SIZE` payload limit.
+- [x] Add a backend test proving reads do not allocate memory proportional to disk size.
+- [x] Run `cargo test -p logos-store`.
+- [x] Commit the bounded Store engine.
 
 ### Phase 3: dispatch Store-owned Block requests through Core
 
