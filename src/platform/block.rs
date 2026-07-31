@@ -102,6 +102,8 @@ impl Dispatch {
     pub fn cancel_on_exit(&mut self, context: &mut DispatchContext<'_>) {
         if self.pending.take().is_some() {
             let _ = context.device.timeout(context.memory);
+        } else {
+            let _ = context.device.reset();
         }
     }
 }

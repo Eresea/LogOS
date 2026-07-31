@@ -229,7 +229,7 @@ impl Device {
         (self.resets, self.timeouts, self.last_recovery_failed)
     }
 
-    fn reset(&mut self) -> bool {
+    pub(crate) fn reset(&mut self) -> bool {
         self.resets = self.resets.saturating_add(1);
         let Ok(pfn) = u32::try_from(self.queue.address() >> 12) else {
             self.last_recovery_failed = true;
