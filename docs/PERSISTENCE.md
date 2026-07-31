@@ -222,22 +222,22 @@ shape before QEMU Store I/O.
 
 ### Phase 6: persist terminal history
 
-- [ ] Use the existing terminal-owned shared page; do not add another history buffer format.
-- [ ] Use `TERMINAL_NAMESPACE` and the fixed object name `history`.
-- [ ] On Terminal startup, request the current `history` object before accepting normal input.
-- [ ] Treat `NotFound` as empty history.
-- [ ] Validate the exact returned length before calling `restore_history_bytes`.
-- [ ] Treat invalid history bytes as reported corruption and continue with empty history.
-- [ ] After each non-empty submission, call the existing `export_history` contract.
-- [ ] Replace `history` with exactly `HISTORY_BYTES` bytes.
-- [ ] Keep the in-memory submission even when persistence fails.
-- [ ] Report one bounded diagnostic on persistence failure.
-- [ ] Keep the terminal interactive after Store failure or restart.
-- [ ] Retry only on the next history change; do not add a retry queue or timer in v1.
-- [ ] Add a test that missing history starts empty.
-- [ ] Add a test that valid persisted history restores Up/Down navigation.
-- [ ] Add a test that invalid persisted bytes do not replace live history.
-- [ ] Add a test that a failed save does not discard the submitted command.
+- [x] Use the existing terminal-owned shared page; do not add another history buffer format.
+- [x] Use `TERMINAL_NAMESPACE` and the fixed object name `history`.
+- [x] On Terminal startup, request the current `history` object before accepting normal input.
+- [x] Treat `NotFound` as empty history.
+- [x] Validate the exact returned length before calling `restore_history_bytes`.
+- [x] Treat invalid history bytes as reported corruption and continue with empty history.
+- [x] After each non-empty submission, call the existing `export_history` contract.
+- [x] Replace `history` with exactly `HISTORY_BYTES` bytes.
+- [x] Keep the in-memory submission even when persistence fails.
+- [x] Report one bounded diagnostic on persistence failure.
+- [x] Keep the terminal interactive after Store failure or restart.
+- [x] Retry only on the next history change; do not add a retry queue or timer in v1.
+- [x] Add a test that missing history starts empty.
+- [x] Add a test that valid persisted history restores Up/Down navigation.
+- [x] Add a test that invalid persisted bytes do not replace live history.
+- [x] Add a test that a failed save does not discard the submitted command.
 - [ ] Boot, enter two distinct commands, and stop QEMU.
 - [ ] Reboot the same disk and prove both commands are navigable in order.
 - [ ] Commit the first persistence consumer.

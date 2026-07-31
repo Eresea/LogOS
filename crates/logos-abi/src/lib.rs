@@ -13,6 +13,8 @@ pub struct PageHandle(pub u32);
 #[repr(transparent)]
 pub struct NamespaceId(pub u32);
 
+pub const TERMINAL_NAMESPACE: NamespaceId = NamespaceId(1);
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
 pub struct BlockInfo {
@@ -527,11 +529,17 @@ impl InputEvent {
     pub const BACKSPACE: Self = Self(0x08);
     pub const ENTER: Self = Self(b'\n');
     pub const ESCAPE: Self = Self(0x1b);
+    pub const UP: Self = Self(0x11);
+    pub const DOWN: Self = Self(0x12);
+    pub const STARTUP: Self = Self(0x13);
 
     pub const fn from_byte(byte: u8) -> Option<Self> {
         if byte == Self::BACKSPACE.0
             || byte == Self::ENTER.0
             || byte == Self::ESCAPE.0
+            || byte == Self::UP.0
+            || byte == Self::DOWN.0
+            || byte == Self::STARTUP.0
             || (byte >= 0x20 && byte <= 0x7e)
         {
             Some(Self(byte))

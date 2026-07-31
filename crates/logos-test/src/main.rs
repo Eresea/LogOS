@@ -79,6 +79,12 @@ const SCENARIOS: &[Scenario] = &[
     ),
     configured("persistence/block-read-flush", "persistence", &[], Fixture::Persistence),
     configured(
+        "persistence/terminal-history",
+        "persistence",
+        &["layout azerty", "layout qwerty", "persistence/terminal-history"],
+        Fixture::Persistence,
+    ),
+    configured(
         "persistence/capability-denied",
         "persistence",
         &["persistence/capability-denied"],

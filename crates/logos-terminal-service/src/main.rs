@@ -1,12 +1,169 @@
-#![no_main]
-#![no_std]
+#![cfg_attr(not(test), no_main)]
+#![cfg_attr(not(test), no_std)]
 
-use logos_abi::Syscall;
-use logos_service_rt::{Context, Header, MAX_TEXT};
+use logos_abi::{NamespaceId, PageHandle, StoreOperation, StoreRequest, Syscall, VersionSelector};
+use logos_service_rt::{Context, Header, MAX_TEXT, SharedPage};
 use logos_terminal::{
     command::{self, Local, Resolution},
-    terminal::Model,
+    input::{self, LogicalKey},
+    terminal::{HISTORY_BYTES, Model},
 };
+
+const HISTORY_NAME: &[u8] = b"history";
+
+fn next_id(next: &mut u32) -> u32 {
+    let id = (*next).max(1);
+    *next = id.wrapping_add(1).max(1);
+    id
+}
+
+fn request(
+    id: u32,
+    operation: StoreOperation,
+    version: VersionSelector,
+    offset: u64,
+    length: u32,
+    page: PageHandle,
+) -> StoreRequest {
+    let mut name = [0; logos_abi::MAX_OBJECT_NAME];
+    name[..HISTORY_NAME.len()].copy_from_slice(HISTORY_NAME);
+    let identifies = matches!(operation, StoreOperation::OpenRead | StoreOperation::BeginReplace);
+    StoreRequest {
+        id,
+        operation,
+        namespace: if identifies { logos_abi::TERMINAL_NAMESPACE } else { NamespaceId(0) },
+        name: if identifies { name } else { [0; logos_abi::MAX_OBJECT_NAME] },
+        name_length: if identifies { HISTORY_NAME.len() as u8 } else { 0 },
+        version: if identifies { version } else { VersionSelector::None },
+        offset,
+        length,
+        page,
+        deadline: 0,
+    }
+}
+
+fn page_bytes(page: SharedPage) -> &'static mut [u8; logos_abi::PAGE_SIZE] {
+    unsafe { &mut *(page.address as *mut [u8; logos_abi::PAGE_SIZE]) }
+}
+
+fn load_history_with(
+    terminal: &mut Model,
+    page: SharedPage,
+    next: &mut u32,
+    mut store: impl FnMut(StoreRequest) -> Option<logos_abi::StoreReply>,
+) {
+    let open = request(
+        next_id(next),
+        StoreOperation::OpenRead,
+        VersionSelector::Current,
+        0,
+        0,
+        PageHandle(0),
+    );
+    let Some(reply) = store(open) else {
+        let _ = terminal.write_output(b"history persistence failed");
+        return;
+    };
+    match reply.status {
+        logos_abi::PersistenceStatus::NotFound => {}
+        logos_abi::PersistenceStatus::Complete if reply.length as usize == HISTORY_BYTES => {
+            let read = request(
+                next_id(next),
+                StoreOperation::ReadChunk,
+                VersionSelector::None,
+                0,
+                HISTORY_BYTES as u32,
+                page.handle,
+            );
+            let Some(read_reply) = store(read) else {
+                let _ = terminal.write_output(b"history persistence failed");
+                return;
+            };
+            if read_reply.status != logos_abi::PersistenceStatus::Complete
+                || read_reply.length as usize != HISTORY_BYTES
+            {
+                let _ = terminal.write_output(b"history corrupt");
+                return;
+            }
+            if !terminal.restore_history_bytes(&page_bytes(page)[..HISTORY_BYTES]) {
+                let _ = terminal.write_output(b"history corrupt");
+            }
+        }
+        logos_abi::PersistenceStatus::Complete | logos_abi::PersistenceStatus::Corrupt => {
+            let _ = terminal.write_output(b"history corrupt");
+        }
+        _ => {
+            let _ = terminal.write_output(b"history persistence failed");
+        }
+    }
+}
+
+fn load_history(terminal: &mut Model, context: &mut Context, next: &mut u32) {
+    let Some(page) = context.shared_page() else {
+        let _ = terminal.write_output(b"history persistence failed");
+        return;
+    };
+    load_history_with(terminal, page, next, |request| context.store(request));
+}
+
+fn abort_replace(
+    next: &mut u32,
+    store: &mut impl FnMut(StoreRequest) -> Option<logos_abi::StoreReply>,
+) {
+    let _ = store(request(
+        next_id(next),
+        StoreOperation::Abort,
+        VersionSelector::None,
+        0,
+        0,
+        PageHandle(0),
+    ));
+}
+
+fn save_history_with(
+    terminal: &Model,
+    page: SharedPage,
+    next: &mut u32,
+    mut store: impl FnMut(StoreRequest) -> Option<logos_abi::StoreReply>,
+) -> bool {
+    let bytes = terminal.export_history();
+    page_bytes(page)[..HISTORY_BYTES].copy_from_slice(&bytes);
+    let begin = request(
+        next_id(next),
+        StoreOperation::BeginReplace,
+        VersionSelector::None,
+        0,
+        HISTORY_BYTES as u32,
+        PageHandle(0),
+    );
+    if !store(begin).is_some_and(|reply| reply.status == logos_abi::PersistenceStatus::Complete) {
+        return false;
+    }
+    let write = request(
+        next_id(next),
+        StoreOperation::WriteChunk,
+        VersionSelector::None,
+        0,
+        HISTORY_BYTES as u32,
+        page.handle,
+    );
+    if !store(write).is_some_and(|reply| reply.status == logos_abi::PersistenceStatus::Complete) {
+        abort_replace(next, &mut store);
+        return false;
+    }
+    let commit =
+        request(next_id(next), StoreOperation::Commit, VersionSelector::None, 0, 0, PageHandle(0));
+    if !store(commit).is_some_and(|reply| reply.status == logos_abi::PersistenceStatus::Complete) {
+        abort_replace(next, &mut store);
+        return false;
+    }
+    true
+}
+
+fn save_history(terminal: &Model, context: &mut Context, next: &mut u32) -> bool {
+    let Some(page) = context.shared_page() else { return false };
+    save_history_with(terminal, page, next, |request| context.store(request))
+}
 
 #[used]
 #[unsafe(link_section = ".logos")]
@@ -23,6 +180,8 @@ fn run(context: &mut Context) -> ! {
     }
     let mut terminal = Model::new();
     let _ = terminal.write_output(b"LOGOS RING3 TERMINAL");
+    let mut next_store_id = 1;
+    let mut history_started = false;
     while context.acknowledged() {
         render(&mut terminal, context);
         if !context.wait_for_input() {
@@ -32,15 +191,39 @@ fn run(context: &mut Context) -> ! {
             let _ = context.complete();
             spin();
         }
+        if !history_started {
+            history_started = true;
+            if context.input_byte() == Some(logos_abi::InputEvent::STARTUP.byte()) {
+                load_history(&mut terminal, context, &mut next_store_id);
+                continue;
+            }
+            load_history(&mut terminal, context, &mut next_store_id);
+        }
         let Some(input) = context.input_byte().and_then(logos_abi::InputEvent::from_byte) else {
             continue;
         };
         match input.byte() {
-            b'\n' => submit_line(&mut terminal, context),
+            b'\n' => submit_line(&mut terminal, context, &mut next_store_id),
             0x08 => {
                 let _ = terminal.backspace();
             }
             0x1b => {}
+            byte if byte == logos_abi::InputEvent::UP.byte() => {
+                let _ = terminal.apply(input::Event::Key {
+                    physical: input::PhysicalKey(0),
+                    logical: LogicalKey::Up,
+                    state: input::State::Press,
+                    modifiers: input::Modifiers::none(),
+                });
+            }
+            byte if byte == logos_abi::InputEvent::DOWN.byte() => {
+                let _ = terminal.apply(input::Event::Key {
+                    physical: input::PhysicalKey(0),
+                    logical: LogicalKey::Down,
+                    state: input::State::Press,
+                    modifiers: input::Modifiers::none(),
+                });
+            }
             byte => {
                 let _ = terminal.insert_utf8(&[byte]);
             }
@@ -49,9 +232,12 @@ fn run(context: &mut Context) -> ! {
     spin()
 }
 
-fn submit_line(terminal: &mut Model, context: &mut Context) {
+fn submit_line(terminal: &mut Model, context: &mut Context, next: &mut u32) {
     let submission = terminal.submit();
     let _ = terminal.write_output(submission.as_bytes());
+    if !submission.as_bytes().is_empty() && !save_history(terminal, context, next) {
+        let _ = terminal.write_output(b"history persistence failed");
+    }
     match command::pipeline(submission) {
         Resolution::Local(Local::Text(value)) => {
             let _ = terminal.write_output(value.as_bytes());
@@ -130,5 +316,119 @@ fn present(context: &mut Context, x: u32, y: u32, bytes: &[u8]) {
 fn spin() -> ! {
     loop {
         core::hint::spin_loop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use logos_abi::StoreReply;
+
+    fn page(bytes: &mut [u8; logos_abi::PAGE_SIZE]) -> SharedPage {
+        SharedPage { handle: PageHandle(7), address: bytes.as_mut_ptr() as u64 }
+    }
+
+    fn reply(
+        request: StoreRequest,
+        status: logos_abi::PersistenceStatus,
+        length: usize,
+    ) -> StoreReply {
+        StoreReply { id: request.id, status, version: 1, length: length as u32 }
+    }
+
+    fn key(logical: LogicalKey) -> input::Event {
+        input::Event::Key {
+            physical: input::PhysicalKey(0),
+            logical,
+            state: input::State::Press,
+            modifiers: input::Modifiers::none(),
+        }
+    }
+
+    #[test]
+    fn missing_history_starts_empty() {
+        let mut bytes = [0; logos_abi::PAGE_SIZE];
+        let mut model = Model::new();
+        let mut next = 1;
+        load_history_with(&mut model, page(&mut bytes), &mut next, |request| {
+            Some(reply(request, logos_abi::PersistenceStatus::NotFound, 0))
+        });
+        assert_eq!(model.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn valid_history_restores_navigation() {
+        let mut source = Model::new();
+        source.insert_utf8(b"azerty");
+        source.submit();
+        source.insert_utf8(b"qwerty");
+        source.submit();
+        let encoded = source.export_history();
+        let mut bytes = [0; logos_abi::PAGE_SIZE];
+        let page = page(&mut bytes);
+        let mut model = Model::new();
+        let mut next = 1;
+        load_history_with(&mut model, page, &mut next, |request| {
+            if request.operation == StoreOperation::ReadChunk {
+                bytes[..HISTORY_BYTES].copy_from_slice(&encoded);
+                Some(reply(request, logos_abi::PersistenceStatus::Complete, HISTORY_BYTES))
+            } else {
+                Some(reply(request, logos_abi::PersistenceStatus::Complete, HISTORY_BYTES))
+            }
+        });
+        assert!(model.apply(key(LogicalKey::Up)));
+        assert_eq!(model.input_line(), b"qwerty");
+        assert!(model.apply(key(LogicalKey::Up)));
+        assert_eq!(model.input_line(), b"azerty");
+        assert!(model.apply(key(LogicalKey::Down)));
+        assert_eq!(model.input_line(), b"qwerty");
+    }
+
+    #[test]
+    fn invalid_history_preserves_live_history() {
+        let mut bytes = [0; logos_abi::PAGE_SIZE];
+        bytes[0] = 1;
+        bytes[1] = 0xff;
+        let mut model = Model::new();
+        model.insert_utf8(b"live");
+        model.submit();
+        let mut next = 1;
+        load_history_with(&mut model, page(&mut bytes), &mut next, |request| {
+            Some(reply(request, logos_abi::PersistenceStatus::Complete, HISTORY_BYTES))
+        });
+        assert_eq!(model.history_entry(0).unwrap().as_bytes(), b"live");
+    }
+
+    #[test]
+    fn failed_save_keeps_submitted_command_and_aborts() {
+        let mut bytes = [0; logos_abi::PAGE_SIZE];
+        let mut model = Model::new();
+        model.insert_utf8(b"keep me");
+        model.submit();
+        let mut operations = [StoreOperation::Cancel; 4];
+        let mut count = 0;
+        let mut next = 1;
+        let saved = save_history_with(&model, page(&mut bytes), &mut next, |request| {
+            operations[count] = request.operation;
+            count += 1;
+            let status = if request.operation == StoreOperation::Commit {
+                logos_abi::PersistenceStatus::Io
+            } else {
+                logos_abi::PersistenceStatus::Complete
+            };
+            Some(reply(request, status, 0))
+        });
+        assert!(!saved);
+        assert_eq!(
+            &operations[..count],
+            &[
+                StoreOperation::BeginReplace,
+                StoreOperation::WriteChunk,
+                StoreOperation::Commit,
+                StoreOperation::Abort
+            ]
+        );
+        assert!(model.apply(key(LogicalKey::Up)));
+        assert_eq!(model.input_line(), b"keep me");
     }
 }
