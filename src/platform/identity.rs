@@ -30,8 +30,8 @@ pub struct Machine {
 }
 
 impl Machine {
-    pub const fn id(&self) -> MachineId {
-        self.id
+    pub fn valid(&self) -> bool {
+        self.id.0 != [0; 16]
     }
 
     pub const fn source(&self) -> Source {
@@ -73,6 +73,7 @@ pub fn self_check() -> bool {
     let one = MachineId::from_entropy(&crate::entropy::Seed::from_bytes([1; 32]));
     one == MachineId::from_entropy(&crate::entropy::Seed::from_bytes([1; 32]))
         && one != MachineId::from_entropy(&crate::entropy::Seed::from_bytes([2; 32]))
+        && Machine { id: one, source: Source::Volatile }.valid()
 }
 
 impl MachineId {

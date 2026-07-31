@@ -62,10 +62,7 @@ pub(crate) fn main(
             && pe::self_check()
             && payload::relocation_self_check(),
     );
-    check!(
-        b"machine identity",
-        entropy::self_check() && identity::self_check() && machine.id() == machine.id(),
-    );
+    check!(b"machine identity", entropy::self_check() && identity::self_check() && machine.valid(),);
     check!(b"secret store", secrets::self_check(),);
     if let Some(key) = secret_root.as_mut() {
         key.wipe();
@@ -76,7 +73,6 @@ pub(crate) fn main(
     check!(b"inference", inference::self_check());
     check!(b"resources", resources::self_check());
     check!(b"device interfaces", device::self_check());
-    check!(b"framebuffer", framebuffer_ok);
     check!(
         b"native display",
         native_display::install(
@@ -588,6 +584,9 @@ pub(crate) fn main(
             .register(terminal_owner, page, 1)
             .filter(|_| native_storage.map_shared_borrowed(page))
     });
+    let Some(shared_history) = shared_history else {
+        fail!(b"terminal storage page");
+    };
     let Some((storage_block_physical, storage_block_virtual)) =
         native_storage.map_block_owned(&mut memory)
     else {
@@ -601,7 +600,7 @@ pub(crate) fn main(
     };
     check!(
         b"terminal storage page",
-        shared_history.is_some_and(|handle| shared_pages.address(terminal_owner, handle).is_some()),
+        shared_pages.address(terminal_owner, shared_history).is_some()
     );
     check!(b"shared pages", logos_core::shared_pages::self_check());
     let mut service_task = virtio::ServiceTask::new(
@@ -651,15 +650,7 @@ pub(crate) fn main(
     check!(b"effect executor", effects::self_check());
     check!(b"session", session::Context::self_check());
     check!(b"input normalization", input::Service::self_check());
-    check!(b"terminal editing", terminal::Model::self_check());
-    check!(b"terminal navigation", terminal::Model::self_check());
-    check!(b"terminal layout", terminal::Model::self_check());
-    check!(b"terminal scrollback", terminal::Model::self_check());
-    check!(b"terminal history", terminal::Model::self_check());
-    check!(b"terminal selection", terminal::Model::self_check());
-    check!(b"terminal output", terminal::Model::self_check());
-    check!(b"terminal display restart", terminal::Model::self_check());
-    check!(b"terminal caret", terminal::Model::self_check());
+    check!(b"terminal model", terminal::Model::self_check());
     check!(b"text font", text::Service::self_check());
     console_mode.announce();
     check!(b"trace", trace::self_check());
@@ -672,10 +663,8 @@ pub(crate) fn main(
     let native_storage_store = native_storage.store_endpoint();
     check!(
         b"storage shared page",
-        shared_history.is_some_and(|handle| {
-            native_store.configure_shared_page(handle)
-                && native_storage_store.configure_shared_page(handle)
-        }),
+        native_store.configure_shared_page(shared_history)
+            && native_storage_store.configure_shared_page(shared_history),
     );
     check!(
         b"storage block page",
@@ -753,7 +742,7 @@ pub(crate) fn main(
         },
         terminal_owner,
         storage_owner,
-        shared_history.unwrap(),
+        shared_history,
         &mut native_scheduler,
         native_handle,
         storage_handle,
@@ -896,7 +885,7 @@ pub(crate) fn main(
                     },
                     terminal_owner,
                     storage_owner,
-                    shared_history.unwrap(),
+                    shared_history,
                     &mut native_scheduler,
                     native_handle,
                     storage_handle,
@@ -961,7 +950,7 @@ pub(crate) fn main(
                             },
                             terminal_owner,
                             storage_owner,
-                            shared_history.unwrap(),
+                            shared_history,
                             &mut native_scheduler,
                             native_handle,
                             storage_handle,
@@ -1052,7 +1041,7 @@ pub(crate) fn main(
                         },
                         terminal_owner,
                         storage_owner,
-                        shared_history.unwrap(),
+                        shared_history,
                         &mut native_scheduler,
                         native_handle,
                         storage_handle,
@@ -1124,7 +1113,7 @@ pub(crate) fn main(
                 }
             }
             if value == "persistence/capability-denied" {
-                let Some(history_page) = shared_history else { return false };
+                let history_page = shared_history;
                 let mut denied =
                     |request: logos_abi::StoreRequest, request_session: &session::Context| {
                         let delivered = unsafe {
@@ -1335,7 +1324,7 @@ pub(crate) fn main(
                         },
                         terminal_owner,
                         storage_owner,
-                        shared_history.unwrap(),
+                        shared_history,
                         &mut native_scheduler,
                         native_handle,
                         storage_handle,
@@ -1509,7 +1498,7 @@ pub(crate) fn main(
                             },
                             terminal_owner,
                             storage_owner,
-                            shared_history.unwrap(),
+                            shared_history,
                             &mut native_scheduler,
                             native_handle,
                             storage_handle,
