@@ -70,29 +70,29 @@ shape before QEMU Store I/O.
 
 ### Phase 1: finish the wire contract
 
-- [ ] Add `BlockOperation::Info` so Store can discover sector count without a hard-coded disk size.
-- [ ] Add a bounded `BlockReply` containing request ID, status, and `BlockInfo` for `Info`.
-- [ ] Add a bounded `StoreReply` containing request ID, status, object version, and returned length.
-- [ ] Add checked `from_wire` conversion for every persistence enum.
-- [ ] Decode context bytes into integer wire fields before converting enums.
-- [ ] Never `read_unaligned` untrusted bytes directly into a struct containing Rust enums.
-- [ ] Reject unknown enum discriminants before constructing a request.
-- [ ] Define the valid field combinations for every Block operation in one validator.
-- [ ] Require a nonzero block count and an authorized page for `Read` and `Write`.
-- [ ] Require zero LBA, zero blocks, and no page for `Info`, `Flush`, `Cancel`, and `Reset`.
-- [ ] Reject `lba + blocks` overflow and requests past `BlockInfo.blocks`.
-- [ ] Define the valid field combinations for every Store operation in one validator.
-- [ ] Require `offset + length <= PAGE_SIZE` for `ReadChunk` and `WriteChunk`.
-- [ ] Require `BeginReplace.length <= PAGE_SIZE`.
-- [ ] Require a valid object name only on operations that identify an object.
-- [ ] Keep each request and reply small enough for the existing native-service context payload.
-- [ ] Encode and decode Block replies in `logos-core::native_service::Context`.
-- [ ] Encode and decode Store replies in `logos-core::native_service::Context`.
-- [ ] Make reply parsing verify the matching request ID.
-- [ ] Add one `logos-abi` test covering every accepted operation shape.
-- [ ] Add one `logos-abi` test covering unknown enums, overflow, invalid lengths, and invalid names.
-- [ ] Run `cargo test -p logos-abi -p logos-core`.
-- [ ] Commit the wire contract.
+- [x] Add `BlockOperation::Info` so Store can discover sector count without a hard-coded disk size.
+- [x] Add a bounded `BlockReply` containing request ID, status, and `BlockInfo` for `Info`.
+- [x] Add a bounded `StoreReply` containing request ID, status, object version, and returned length.
+- [x] Add checked `from_wire` conversion for every persistence enum.
+- [x] Decode context bytes into integer wire fields before converting enums.
+- [x] Never `read_unaligned` untrusted bytes directly into a struct containing Rust enums.
+- [x] Reject unknown enum discriminants before constructing a request.
+- [x] Define the valid field combinations for every Block operation in one validator.
+- [x] Require a nonzero block count and an authorized page for `Read` and `Write`.
+- [x] Require zero LBA, zero blocks, and no page for `Info`, `Flush`, `Cancel`, and `Reset`.
+- [x] Reject `lba + blocks` overflow and requests past `BlockInfo.blocks`.
+- [x] Define the valid field combinations for every Store operation in one validator.
+- [x] Require `offset + length <= PAGE_SIZE` for `ReadChunk` and `WriteChunk`.
+- [x] Require `BeginReplace.length <= PAGE_SIZE`.
+- [x] Require a valid object name only on operations that identify an object.
+- [x] Keep each request and reply small enough for the existing native-service context payload.
+- [x] Encode and decode Block replies in `logos-core::native_service::Context`.
+- [x] Encode and decode Store replies in `logos-core::native_service::Context`.
+- [x] Make reply parsing verify the matching request ID.
+- [x] Add one `logos-abi` test covering every accepted operation shape.
+- [x] Add one `logos-abi` test covering unknown enums, overflow, invalid lengths, and invalid names.
+- [x] Run `cargo test -p logos-abi -p logos-core`.
+- [x] Commit the wire contract.
 
 ### Phase 2: make `logos-store` safe for the real payload
 

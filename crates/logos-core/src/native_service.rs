@@ -42,6 +42,117 @@ pub struct TextRequest {
     pub length: usize,
 }
 
+const BLOCK_REQUEST_BYTES: usize = 32;
+const STORE_REQUEST_BYTES: usize = 102;
+const BLOCK_REPLY_BYTES: usize = 21;
+const STORE_REPLY_BYTES: usize = 17;
+
+fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?))
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?))
+}
+
+fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn decode_block_request(bytes: &[u8]) -> Option<logos_abi::BlockRequest> {
+    Some(logos_abi::BlockRequest {
+        id: read_u32(bytes, 0)?,
+        operation: logos_abi::BlockOperation::from_wire(*bytes.get(4)?)?,
+        lba: read_u64(bytes, 8)?,
+        blocks: read_u32(bytes, 16)?,
+        page: logos_abi::PageHandle(read_u32(bytes, 20)?),
+        deadline: read_u64(bytes, 24)?,
+    })
+}
+
+#[cfg(test)]
+fn encode_block_request(bytes: &mut [u8; MAX_TEXT], request: logos_abi::BlockRequest) {
+    *bytes = [0; MAX_TEXT];
+    write_u32(bytes, 0, request.id);
+    bytes[4] = request.operation as u8;
+    write_u64(bytes, 8, request.lba);
+    write_u32(bytes, 16, request.blocks);
+    write_u32(bytes, 20, request.page.0);
+    write_u64(bytes, 24, request.deadline);
+}
+
+fn decode_store_request(bytes: &[u8]) -> Option<logos_abi::StoreRequest> {
+    let mut name = [0; logos_abi::MAX_OBJECT_NAME];
+    name.copy_from_slice(bytes.get(14..14 + logos_abi::MAX_OBJECT_NAME)?);
+    Some(logos_abi::StoreRequest {
+        id: read_u32(bytes, 0)?,
+        operation: logos_abi::StoreOperation::from_wire(*bytes.get(4)?)?,
+        namespace: logos_abi::NamespaceId(read_u32(bytes, 8)?),
+        name,
+        name_length: *bytes.get(12)?,
+        version: logos_abi::VersionSelector::from_wire(*bytes.get(13)?)?,
+        offset: read_u64(bytes, 78)?,
+        length: read_u32(bytes, 86)?,
+        page: logos_abi::PageHandle(read_u32(bytes, 90)?),
+        deadline: read_u64(bytes, 94)?,
+    })
+}
+
+fn encode_store_request(bytes: &mut [u8; MAX_TEXT], request: logos_abi::StoreRequest) {
+    *bytes = [0; MAX_TEXT];
+    write_u32(bytes, 0, request.id);
+    bytes[4] = request.operation as u8;
+    write_u32(bytes, 8, request.namespace.0);
+    bytes[12] = request.name_length;
+    bytes[13] = request.version as u8;
+    bytes[14..14 + logos_abi::MAX_OBJECT_NAME].copy_from_slice(&request.name);
+    write_u64(bytes, 78, request.offset);
+    write_u32(bytes, 86, request.length);
+    write_u32(bytes, 90, request.page.0);
+    write_u64(bytes, 94, request.deadline);
+}
+
+fn decode_block_reply(bytes: &[u8]) -> Option<logos_abi::BlockReply> {
+    Some(logos_abi::BlockReply {
+        id: read_u32(bytes, 0)?,
+        status: logos_abi::PersistenceStatus::from_wire(*bytes.get(4)?)?,
+        info: logos_abi::BlockInfo {
+            logical_block_size: read_u32(bytes, 5)?,
+            blocks: read_u64(bytes, 9)?,
+            max_transfer_blocks: read_u32(bytes, 17)?,
+        },
+    })
+}
+
+fn encode_block_reply(bytes: &mut [u8; MAX_TEXT], reply: logos_abi::BlockReply) {
+    *bytes = [0; MAX_TEXT];
+    write_u32(bytes, 0, reply.id);
+    bytes[4] = reply.status as u8;
+    write_u32(bytes, 5, reply.info.logical_block_size);
+    write_u64(bytes, 9, reply.info.blocks);
+    write_u32(bytes, 17, reply.info.max_transfer_blocks);
+}
+
+fn decode_store_reply(bytes: &[u8]) -> Option<logos_abi::StoreReply> {
+    Some(logos_abi::StoreReply {
+        id: read_u32(bytes, 0)?,
+        status: logos_abi::PersistenceStatus::from_wire(*bytes.get(4)?)?,
+        version: read_u64(bytes, 5)?,
+        length: read_u32(bytes, 13)?,
+    })
+}
+
+fn encode_store_reply(bytes: &mut [u8; MAX_TEXT], reply: logos_abi::StoreReply) {
+    *bytes = [0; MAX_TEXT];
+    write_u32(bytes, 0, reply.id);
+    bytes[4] = reply.status as u8;
+    write_u64(bytes, 5, reply.version);
+    write_u32(bytes, 13, reply.length);
+}
+
 impl Context {
     pub const fn new() -> Self {
         Self {
@@ -237,13 +348,11 @@ impl Context {
             || context.reserved != 0
             || context.operation != STORE_REQUEST
             || context.status != ACKNOWLEDGED
-            || context.text_length as usize != core::mem::size_of::<logos_abi::StoreRequest>()
+            || context.text_length != STORE_REQUEST_BYTES as u32
         {
             return None;
         }
-        let request = unsafe {
-            core::ptr::read_unaligned(context.text.as_ptr().cast::<logos_abi::StoreRequest>())
-        };
+        let request = decode_store_request(&context.text)?;
         request.valid().then_some(request)
     }
 
@@ -262,13 +371,8 @@ impl Context {
             return false;
         }
         context.text = [0; MAX_TEXT];
-        unsafe {
-            core::ptr::write_unaligned(
-                context.text.as_mut_ptr().cast::<logos_abi::StoreRequest>(),
-                request,
-            );
-        }
-        context.text_length = core::mem::size_of::<logos_abi::StoreRequest>() as u32;
+        encode_store_request(&mut context.text, request);
+        context.text_length = STORE_REQUEST_BYTES as u32;
         context.operation = STORE_REQUEST;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -276,43 +380,35 @@ impl Context {
 
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
-    pub unsafe fn reply_store_at(address: u64, status: logos_abi::PersistenceStatus) -> bool {
-        if unsafe { Self::store_at(address) }.is_none() {
+    pub unsafe fn reply_store_at(address: u64, reply: logos_abi::StoreReply) -> bool {
+        let Some(request) = (unsafe { Self::store_at(address) }) else {
+            return false;
+        };
+        if !reply.valid_for(request) {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
         context.operation = STORE_REPLY;
-        context.x = status as u32;
-        context.text_length = 0;
+        encode_store_reply(&mut context.text, reply);
+        context.text_length = STORE_REPLY_BYTES as u32;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
-    pub unsafe fn store_reply_at(address: u64) -> Option<logos_abi::PersistenceStatus> {
+    pub unsafe fn store_reply_at(address: u64, expected_id: u32) -> Option<logos_abi::StoreReply> {
         let context = unsafe { (address as *const Self).read_volatile() };
         if context.abi != ABI
             || context.reserved != 0
             || context.operation != STORE_REPLY
             || context.status != ACKNOWLEDGED
+            || context.text_length != STORE_REPLY_BYTES as u32
         {
             return None;
         }
-        match context.x {
-            1 => Some(logos_abi::PersistenceStatus::Complete),
-            2 => Some(logos_abi::PersistenceStatus::Invalid),
-            3 => Some(logos_abi::PersistenceStatus::Denied),
-            4 => Some(logos_abi::PersistenceStatus::Cancelled),
-            5 => Some(logos_abi::PersistenceStatus::TimedOut),
-            6 => Some(logos_abi::PersistenceStatus::Io),
-            7 => Some(logos_abi::PersistenceStatus::Corrupt),
-            8 => Some(logos_abi::PersistenceStatus::Recovered),
-            9 => Some(logos_abi::PersistenceStatus::OutOfMemory),
-            10 => Some(logos_abi::PersistenceStatus::Full),
-            11 => Some(logos_abi::PersistenceStatus::NotFound),
-            _ => None,
-        }
+        let reply = decode_store_reply(&context.text)?;
+        (reply.id == expected_id).then_some(reply)
     }
 
     /// # Safety
@@ -323,28 +419,45 @@ impl Context {
             || context.reserved != 0
             || context.operation != BLOCK_REQUEST
             || context.status != ACKNOWLEDGED
-            || context.text_length as usize != core::mem::size_of::<logos_abi::BlockRequest>()
+            || context.text_length != BLOCK_REQUEST_BYTES as u32
         {
             return None;
         }
-        let request = unsafe {
-            core::ptr::read_unaligned(context.text.as_ptr().cast::<logos_abi::BlockRequest>())
-        };
-        (request.blocks <= (logos_abi::PAGE_SIZE / 512) as u32).then_some(request)
+        let request = decode_block_request(&context.text)?;
+        request.valid_shape().then_some(request)
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
-    pub unsafe fn reply_block_at(address: u64, status: logos_abi::PersistenceStatus) -> bool {
-        if unsafe { Self::block_at(address) }.is_none() {
+    pub unsafe fn reply_block_at(address: u64, reply: logos_abi::BlockReply) -> bool {
+        let Some(request) = (unsafe { Self::block_at(address) }) else {
+            return false;
+        };
+        if !reply.valid_for(request) {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
         context.operation = BLOCK_REPLY;
-        context.x = status as u32;
-        context.text_length = 0;
+        encode_block_reply(&mut context.text, reply);
+        context.text_length = BLOCK_REPLY_BYTES as u32;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn block_reply_at(address: u64, expected_id: u32) -> Option<logos_abi::BlockReply> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != BLOCK_REPLY
+            || context.status != ACKNOWLEDGED
+            || context.text_length != BLOCK_REPLY_BYTES as u32
+        {
+            return None;
+        }
+        let reply = decode_block_reply(&context.text)?;
+        (reply.id == expected_id).then_some(reply)
     }
 
     /// # Safety
@@ -501,5 +614,63 @@ pub fn self_check() -> bool {
 extern "C" fn self_check_entry(_: *mut Context) -> ! {
     loop {
         core::hint::spin_loop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persistence_replies_round_trip_and_match_ids() {
+        let mut context = Context::new();
+        context.operation = READ_INPUT;
+        context.status = ACKNOWLEDGED;
+        let store = logos_abi::StoreRequest {
+            id: 7,
+            operation: logos_abi::StoreOperation::Commit,
+            namespace: logos_abi::NamespaceId(0),
+            name: [0; logos_abi::MAX_OBJECT_NAME],
+            name_length: 0,
+            version: logos_abi::VersionSelector::None,
+            offset: 0,
+            length: 0,
+            page: logos_abi::PageHandle(0),
+            deadline: 0,
+        };
+        let address = (&mut context as *mut Context) as u64;
+        assert!(unsafe { Context::deliver_store_at(address, store) });
+        let store_reply = logos_abi::StoreReply {
+            id: 7,
+            status: logos_abi::PersistenceStatus::Complete,
+            version: 3,
+            length: 0,
+        };
+        assert!(unsafe { Context::reply_store_at(address, store_reply) });
+        assert!(unsafe { Context::store_reply_at(address, 8) }.is_none());
+        assert_eq!(unsafe { Context::store_reply_at(address, 7) }, Some(store_reply));
+
+        context.operation = BLOCK_REQUEST;
+        context.status = ACKNOWLEDGED;
+        let block = logos_abi::BlockRequest {
+            id: 9,
+            operation: logos_abi::BlockOperation::Flush,
+            lba: 0,
+            blocks: 0,
+            page: logos_abi::PageHandle(0),
+            deadline: 0,
+        };
+        encode_block_request(&mut context.text, block);
+        context.text_length = BLOCK_REQUEST_BYTES as u32;
+        unsafe { (address as *mut Context).write_volatile(context) };
+        assert_eq!(unsafe { Context::block_at(address) }, Some(block));
+        let block_reply = logos_abi::BlockReply {
+            id: 9,
+            status: logos_abi::PersistenceStatus::Complete,
+            info: logos_abi::BlockInfo::default(),
+        };
+        assert!(unsafe { Context::reply_block_at(address, block_reply) });
+        assert!(unsafe { Context::block_reply_at(address, 10) }.is_none());
+        assert_eq!(unsafe { Context::block_reply_at(address, 9) }, Some(block_reply));
     }
 }

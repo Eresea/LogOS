@@ -234,6 +234,7 @@ impl<B: SectorBackend> Store<B> {
         let key = Key { namespace: namespace.0, name: name.into() };
         let versions = self.versions.get(&key).ok_or(Error::NotFound)?;
         let location = match selector {
+            VersionSelector::None => return Err(Error::Invalid),
             VersionSelector::Current => versions.current,
             VersionSelector::Previous => versions.previous,
         }

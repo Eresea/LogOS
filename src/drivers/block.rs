@@ -123,15 +123,10 @@ impl Device {
         page_address: Option<u64>,
         memory: &mut PhysicalMemory,
     ) -> PersistenceStatus {
-        if self.pending.is_some() || request.blocks > self.info.max_transfer_blocks {
+        if self.pending.is_some() || !request.valid(self.info) {
             return PersistenceStatus::Invalid;
         }
-        let Some(data_length) = request.blocks.checked_mul(512) else {
-            return PersistenceStatus::Invalid;
-        };
-        let Some(end) = request.lba.checked_add(u64::from(request.blocks)) else {
-            return PersistenceStatus::Invalid;
-        };
+        let data_length = request.blocks * 512;
         let kind = match request.operation {
             BlockOperation::Read => 0,
             BlockOperation::Write => 1,
@@ -144,11 +139,9 @@ impl Device {
                     PersistenceStatus::Io
                 };
             }
+            BlockOperation::Info => return PersistenceStatus::Invalid,
         };
-        if end > self.info.blocks
-            || (kind != REQUEST_FLUSH
-                && (request.blocks == 0 || page_address.is_none_or(|page| page == 0)))
-        {
+        if kind != REQUEST_FLUSH && page_address.is_none_or(|page| page == 0) {
             return PersistenceStatus::Invalid;
         }
         let Some(metadata) = memory.allocate_owned() else {

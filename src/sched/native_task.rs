@@ -108,10 +108,8 @@ impl BlockEndpoint {
     }
 
     #[allow(dead_code)]
-    pub fn reply(self, status: logos_abi::PersistenceStatus) -> bool {
-        unsafe {
-            logos_core::native_service::Context::reply_block_at(self.context_physical, status)
-        }
+    pub fn reply(self, reply: logos_abi::BlockReply) -> bool {
+        unsafe { logos_core::native_service::Context::reply_block_at(self.context_physical, reply) }
     }
 }
 

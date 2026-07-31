@@ -13,7 +13,7 @@ pub struct PageHandle(pub u32);
 #[repr(transparent)]
 pub struct NamespaceId(pub u32);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
 pub struct BlockInfo {
     pub logical_block_size: u32,
@@ -38,6 +38,21 @@ pub enum BlockOperation {
     Flush,
     Cancel,
     Reset,
+    Info,
+}
+
+impl BlockOperation {
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Read),
+            2 => Some(Self::Write),
+            3 => Some(Self::Flush),
+            4 => Some(Self::Cancel),
+            5 => Some(Self::Reset),
+            6 => Some(Self::Info),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +64,43 @@ pub struct BlockRequest {
     pub blocks: u32,
     pub page: PageHandle,
     pub deadline: u64,
+}
+
+impl BlockRequest {
+    pub fn valid(self, info: BlockInfo) -> bool {
+        if !info.valid() {
+            return false;
+        }
+        match self.operation {
+            BlockOperation::Read | BlockOperation::Write => {
+                self.blocks != 0
+                    && self.blocks <= info.max_transfer_blocks
+                    && self.page.0 != 0
+                    && self
+                        .lba
+                        .checked_add(self.blocks as u64)
+                        .is_some_and(|end| end <= info.blocks)
+            }
+            BlockOperation::Info
+            | BlockOperation::Flush
+            | BlockOperation::Cancel
+            | BlockOperation::Reset => self.lba == 0 && self.blocks == 0 && self.page.0 == 0,
+        }
+    }
+
+    pub fn valid_shape(self) -> bool {
+        match self.operation {
+            BlockOperation::Read | BlockOperation::Write => {
+                self.blocks != 0
+                    && self.page.0 != 0
+                    && self.lba.checked_add(self.blocks as u64).is_some()
+            }
+            BlockOperation::Info
+            | BlockOperation::Flush
+            | BlockOperation::Cancel
+            | BlockOperation::Reset => self.lba == 0 && self.blocks == 0 && self.page.0 == 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,11 +119,63 @@ pub enum PersistenceStatus {
     NotFound,
 }
 
+impl PersistenceStatus {
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Complete),
+            2 => Some(Self::Invalid),
+            3 => Some(Self::Denied),
+            4 => Some(Self::Cancelled),
+            5 => Some(Self::TimedOut),
+            6 => Some(Self::Io),
+            7 => Some(Self::Corrupt),
+            8 => Some(Self::Recovered),
+            9 => Some(Self::OutOfMemory),
+            10 => Some(Self::Full),
+            11 => Some(Self::NotFound),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct BlockReply {
+    pub id: u32,
+    pub status: PersistenceStatus,
+    pub info: BlockInfo,
+}
+
+impl BlockReply {
+    pub fn valid_for(self, request: BlockRequest) -> bool {
+        self.id == request.id
+            && match request.operation {
+                BlockOperation::Info if self.status == PersistenceStatus::Complete => {
+                    self.info.valid()
+                }
+                BlockOperation::Info => self.info == BlockInfo::default(),
+                _ => self.info == BlockInfo::default(),
+            }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum VersionSelector {
+    None = 0,
     Current = 1,
     Previous,
+}
+
+impl VersionSelector {
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::None),
+            1 => Some(Self::Current),
+            2 => Some(Self::Previous),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,6 +188,21 @@ pub enum StoreOperation {
     Commit,
     Abort,
     Cancel,
+}
+
+impl StoreOperation {
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::OpenRead),
+            2 => Some(Self::ReadChunk),
+            3 => Some(Self::BeginReplace),
+            4 => Some(Self::WriteChunk),
+            5 => Some(Self::Commit),
+            6 => Some(Self::Abort),
+            7 => Some(Self::Cancel),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -103,11 +222,59 @@ pub struct StoreRequest {
 
 impl StoreRequest {
     pub fn valid(self) -> bool {
-        let length = usize::from(self.name_length);
-        length > 0
-            && length <= self.name.len()
-            && self.length as usize <= PAGE_SIZE
-            && core::str::from_utf8(&self.name[..length]).is_ok()
+        let empty_identity =
+            self.namespace.0 == 0 && self.name_length == 0 && self.name == [0; MAX_OBJECT_NAME];
+        let identity = self.name_length != 0
+            && usize::from(self.name_length) <= self.name.len()
+            && self.name[usize::from(self.name_length)..].iter().all(|byte| *byte == 0)
+            && core::str::from_utf8(&self.name[..usize::from(self.name_length)]).is_ok();
+        match self.operation {
+            StoreOperation::OpenRead => {
+                identity
+                    && matches!(self.version, VersionSelector::Current | VersionSelector::Previous)
+                    && self.offset == 0
+                    && self.length == 0
+                    && self.page.0 == 0
+            }
+            StoreOperation::BeginReplace => {
+                identity
+                    && self.version == VersionSelector::None
+                    && self.offset == 0
+                    && self.length as usize <= PAGE_SIZE
+                    && self.page.0 == 0
+            }
+            StoreOperation::ReadChunk | StoreOperation::WriteChunk => {
+                empty_identity
+                    && self.version == VersionSelector::None
+                    && self.page.0 != 0
+                    && self
+                        .offset
+                        .checked_add(self.length as u64)
+                        .is_some_and(|end| end <= PAGE_SIZE as u64)
+            }
+            StoreOperation::Commit | StoreOperation::Abort | StoreOperation::Cancel => {
+                empty_identity
+                    && self.version == VersionSelector::None
+                    && self.offset == 0
+                    && self.length == 0
+                    && self.page.0 == 0
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct StoreReply {
+    pub id: u32,
+    pub status: PersistenceStatus,
+    pub version: u64,
+    pub length: u32,
+}
+
+impl StoreReply {
+    pub const fn valid_for(self, request: StoreRequest) -> bool {
+        self.id == request.id && self.length as usize <= PAGE_SIZE
     }
 }
 
@@ -444,4 +611,175 @@ pub fn self_check() -> bool {
         && EffectResult::from_wire(EffectResult::RestartScheduled as u32)
             == Some(EffectResult::RestartScheduled)
         && EffectResult::from_wire(0).is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INFO: BlockInfo =
+        BlockInfo { logical_block_size: 512, blocks: 16, max_transfer_blocks: 8 };
+
+    #[test]
+    fn accepts_each_persistence_operation_shape() {
+        for operation in [
+            BlockOperation::Info,
+            BlockOperation::Flush,
+            BlockOperation::Cancel,
+            BlockOperation::Reset,
+        ] {
+            assert!(
+                BlockRequest {
+                    id: 0,
+                    operation,
+                    lba: 0,
+                    blocks: 0,
+                    page: PageHandle(0),
+                    deadline: 0
+                }
+                .valid(INFO)
+            );
+        }
+        for operation in [BlockOperation::Read, BlockOperation::Write] {
+            assert!(
+                BlockRequest {
+                    id: 0,
+                    operation,
+                    lba: 8,
+                    blocks: 8,
+                    page: PageHandle(1),
+                    deadline: 0
+                }
+                .valid(INFO)
+            );
+        }
+        let mut name = [0; MAX_OBJECT_NAME];
+        name[..4].copy_from_slice(b"name");
+        assert!(
+            StoreRequest {
+                id: 0,
+                operation: StoreOperation::OpenRead,
+                namespace: NamespaceId(1),
+                name,
+                name_length: 4,
+                version: VersionSelector::Current,
+                offset: 0,
+                length: 0,
+                page: PageHandle(0),
+                deadline: 0
+            }
+            .valid()
+        );
+        assert!(
+            StoreRequest {
+                id: 0,
+                operation: StoreOperation::BeginReplace,
+                namespace: NamespaceId(1),
+                name,
+                name_length: 4,
+                version: VersionSelector::None,
+                offset: 0,
+                length: PAGE_SIZE as u32,
+                page: PageHandle(0),
+                deadline: 0
+            }
+            .valid()
+        );
+        for operation in [StoreOperation::ReadChunk, StoreOperation::WriteChunk] {
+            assert!(
+                StoreRequest {
+                    id: 0,
+                    operation,
+                    namespace: NamespaceId(0),
+                    name: [0; MAX_OBJECT_NAME],
+                    name_length: 0,
+                    version: VersionSelector::None,
+                    offset: 0,
+                    length: PAGE_SIZE as u32,
+                    page: PageHandle(1),
+                    deadline: 0
+                }
+                .valid()
+            );
+        }
+        for operation in [StoreOperation::Commit, StoreOperation::Abort, StoreOperation::Cancel] {
+            assert!(
+                StoreRequest {
+                    id: 0,
+                    operation,
+                    namespace: NamespaceId(0),
+                    name: [0; MAX_OBJECT_NAME],
+                    name_length: 0,
+                    version: VersionSelector::None,
+                    offset: 0,
+                    length: 0,
+                    page: PageHandle(0),
+                    deadline: 0
+                }
+                .valid()
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_and_malformed_persistence_wires() {
+        assert!(BlockOperation::from_wire(0).is_none());
+        assert!(StoreOperation::from_wire(0).is_none());
+        assert!(PersistenceStatus::from_wire(0).is_none());
+        assert!(VersionSelector::from_wire(3).is_none());
+        assert!(
+            !BlockRequest {
+                id: 0,
+                operation: BlockOperation::Read,
+                lba: u64::MAX,
+                blocks: 1,
+                page: PageHandle(1),
+                deadline: 0
+            }
+            .valid(INFO)
+        );
+        assert!(
+            !BlockRequest {
+                id: 0,
+                operation: BlockOperation::Info,
+                lba: 1,
+                blocks: 0,
+                page: PageHandle(0),
+                deadline: 0
+            }
+            .valid(INFO)
+        );
+        assert!(
+            !StoreRequest {
+                id: 0,
+                operation: StoreOperation::WriteChunk,
+                namespace: NamespaceId(0),
+                name: [0; MAX_OBJECT_NAME],
+                name_length: 0,
+                version: VersionSelector::None,
+                offset: PAGE_SIZE as u64,
+                length: 1,
+                page: PageHandle(1),
+                deadline: 0
+            }
+            .valid()
+        );
+        let mut invalid_name = [0; MAX_OBJECT_NAME];
+        invalid_name[0] = 0xff;
+        assert!(
+            !StoreRequest {
+                id: 0,
+                operation: StoreOperation::OpenRead,
+                namespace: NamespaceId(1),
+                name: invalid_name,
+                name_length: 1,
+                version: VersionSelector::Current,
+                offset: 0,
+                length: 0,
+                page: PageHandle(0),
+                deadline: 0
+            }
+            .valid()
+        );
+    }
 }
