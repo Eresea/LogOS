@@ -1256,7 +1256,6 @@ fn run_storage_startup(
     scheduler: &mut scheduler::Scheduler<'_>,
     handle: scheduler::TaskHandle,
 ) -> bool {
-    debug::write_line(b"LogOS: storage startup pump");
     interrupts::enable();
     loop {
         if scheduler.failed(handle) {
@@ -1280,9 +1279,6 @@ fn run_storage_startup(
             debug::write_line(marker);
             debug::write_line(b"LogOS: storage ready");
             return true;
-        }
-        if context.endpoint.request().is_some() {
-            debug::write_line(b"LogOS: storage block pending");
         }
         let Some(reply) = dispatch.poll(context, interrupts::ticks()) else {
             if dispatch.accepts_new_request() {

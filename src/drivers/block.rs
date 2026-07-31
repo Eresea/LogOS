@@ -196,9 +196,6 @@ impl Device {
     }
 
     pub fn complete(&mut self, memory: &mut PhysicalMemory) -> Option<PersistenceStatus> {
-        if COMPLETE.load(Ordering::Acquire) {
-            crate::debug::write_line(b"LogOS: storage block irq");
-        }
         let used = self.used_index();
         if !COMPLETE.swap(false, Ordering::AcqRel) && used == self.used_index {
             return None;

@@ -161,30 +161,30 @@ shape before QEMU Store I/O.
 
 ### Phase 4: run Store on the raw disk
 
-- [ ] Implement a `SectorBackend` in `logos-storage-service` using the Block request/reply gate.
-- [ ] Issue `Info` first and reject invalid or smaller-than-minimum devices.
-- [ ] Translate backend sector reads to one-page bounded Block reads.
-- [ ] Translate backend sector writes to one-page bounded Block writes.
-- [ ] Translate backend flush directly to Block flush.
-- [ ] Use monotonically increasing nonzero request IDs.
-- [ ] Give every Block request a finite deadline.
-- [ ] Map Block failure statuses to `logos_store::Error` without collapsing `TimedOut`, `Corrupt`,
+- [x] Implement a `SectorBackend` in `logos-storage-service` using the Block request/reply gate.
+- [x] Issue `Info` first and reject invalid or smaller-than-minimum devices.
+- [x] Translate backend sector reads to one-page bounded Block reads.
+- [x] Translate backend sector writes to one-page bounded Block writes.
+- [x] Translate backend flush directly to Block flush.
+- [x] Use monotonically increasing nonzero request IDs.
+- [x] Give every Block request a finite deadline.
+- [x] Map Block failure statuses to `logos_store::Error` without collapsing `TimedOut`, `Corrupt`,
       `Full`, or `Io` into success.
-- [ ] Read both superblocks on Store startup.
-- [ ] Complete the native-service handshake before issuing the first Block request.
-- [ ] Format only when both superblock sectors are entirely zero.
-- [ ] Flush the initial superblock before reporting Store ready.
-- [ ] Recover the highest valid superblock generation on later boots.
-- [ ] Report `Recovered` when an incomplete tail is ignored.
-- [ ] Report `Corrupt` and remain available for diagnostics when recovery finds corruption.
-- [ ] Do not overwrite a corrupt non-blank disk.
-- [ ] Mark Store healthy only after format or recovery reaches the idle request loop.
-- [ ] Remove the Store payload heap if the bounded engine no longer allocates.
-- [ ] Print one bounded debug marker for formatted, recovered, corrupt, and I/O-failed startup.
-- [ ] Add a headless boot marker proving Store read, write, flush, and recovery reached the real disk.
-- [ ] Run `cargo run -p logos-test -- run persistence/block-read-flush`.
-- [ ] Reboot the same raw disk and rerun the proof.
-- [ ] Commit the disk-backed Store startup.
+- [x] Read both superblocks on Store startup.
+- [x] Complete the native-service handshake before issuing the first Block request.
+- [x] Format only when both superblock sectors are entirely zero.
+- [x] Flush the initial superblock before reporting Store ready.
+- [x] Recover the highest valid superblock generation on later boots.
+- [x] Report `Recovered` when an incomplete tail is ignored.
+- [x] Report `Corrupt` and remain available for diagnostics when recovery finds corruption.
+- [x] Do not overwrite a corrupt non-blank disk.
+- [x] Mark Store healthy only after format or recovery reaches the idle request loop.
+- [x] Remove the Store payload heap if the bounded engine no longer allocates.
+- [x] Print one bounded debug marker for formatted, recovered, corrupt, and I/O-failed startup.
+- [x] Add a headless boot marker proving Store read, write, flush, and recovery reached the real disk.
+- [x] Run `cargo run -p logos-test -- run persistence/block-read-flush`.
+- [x] Reboot the same raw disk and rerun the proof.
+- [x] Commit the disk-backed Store startup.
 
 ### Phase 5: expose capability-scoped named objects
 
@@ -335,6 +335,7 @@ dependency boundary requires it.
 
 ## Deferred
 
+- Workspace-wide all-target clippy still mixes host tests with no-std UEFI binaries; targeted UEFI and host checks pass.
 - Objects larger than one transfer page.
 - More than 32 live object names.
 - Multiple concurrent Store or Block requests.
