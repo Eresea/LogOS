@@ -5,11 +5,11 @@
 
 ## Context
 
-Native services in Ring 1-3 (`logos-terminal-service`, `logos-sessions-service`) are PE binaries loaded into separate task address spaces. Previously, they depended directly on the firmware-facing `uefi` crate solely to obtain an entry point and panic handler. Relying on a firmware library for user-mode native services breaches layer boundaries.
+Native services in Ring 1-3 (`logos-terminal-service`, `logos-sessions-service`, and `logos-storage-service`) are PE binaries loaded into separate task address spaces. They also need one bounded context/trap boundary. Leaving raw context access and syscall assembly in each payload duplicates unsafe ABI code.
 
 ## Decision
 
-Introduce `crates/logos-service-rt` as the standard, lightweight `no_std` runtime library for native services in Ring 1-3. It provides the PE `efi_main` symbol required by the current build target and a panic handler that remains inside the task.
+Use `crates/logos-service-rt` as the standard, lightweight `no_std` runtime library for native services in Ring 1-3. It owns the PE entry adapter, panic handler, raw context access, bounds validation, typed operation clients, and syscall trap. Service implementation files use only typed wrappers.
 
 Native services MUST NOT depend on firmware crates (`uefi`).
 

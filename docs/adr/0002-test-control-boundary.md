@@ -13,8 +13,9 @@ Test builds expose the bounded `LOGOS/1` protocol over COM2 and terminate throug
 
 ## Consequences
 
-- Stable event IDs, not diagnostic prose, are the proof contract.
+- Stable event IDs and semantic `RUN` proofs, not diagnostic prose or scenario labels, are the proof contract.
 - The host harness owns timeouts, QMP, reports, and artifacts.
+- One QEMU fixture may serve several scenarios after a synchronous `RESET`; a failed reset invalidates that fixture.
 - Unsupported milestone scenarios are skipped rather than reported as passing.
 
 ## Alternatives considered

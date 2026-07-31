@@ -35,7 +35,7 @@ jobs:
         run: cargo fmt --check --all
       
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-terminal -p logos-test --all-targets -- -D warnings
       
       - name: Host unit tests
         run: cargo test -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-terminal -p logos-test --all-targets
@@ -45,11 +45,32 @@ jobs:
           python3 scripts/arch-deps.py --check
         continue-on-error: true
 
+  uefi-builds:
+    name: UEFI Payload Builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: host-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: {target: x86_64-unknown-uefi}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build standard UEFI images
+        run: |
+          cargo build -p logos-uefi --target x86_64-unknown-uefi --features test-hooks
+          cargo build -p logos-terminal-service --target x86_64-unknown-uefi
+          cargo build -p logos-sessions-service --target x86_64-unknown-uefi
+          cargo build -p logos-storage-service --target x86_64-unknown-uefi
+      - name: Build block-probe storage profile
+        run: cargo build -p logos-storage-service --target x86_64-unknown-uefi --features block-probe
+
   qemu-verify:
     name: QEMU Verification
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: host-tests
+    needs: [host-tests, uefi-builds]
     steps:
       - uses: actions/checkout@v4
       

@@ -7,9 +7,11 @@
 
 Repository testing is not an OS ring or runtime service. Host tests prove portable models; the
 `logos-test` harness proves assembled contracts in QEMU. Test builds alone expose `LOGOS/1` over
-COM2, semantic fault controls, virtual time, and debug-exit completion. Production builds expose
-none of that control surface. Completed milestone proof IDs remain regression contracts until the
-corresponding public contract is explicitly deprecated. See [ADR-0002](adr/0002-test-control-boundary.md).
+COM2, semantic fault controls, virtual time, deterministic `RESET`, and debug-exit completion.
+Production builds expose none of that control surface. Pure protocol/state-machine logic runs on
+the host; QEMU proves target boot, interrupts, memory, devices, isolation, and recovery. Completed
+milestone proof IDs remain regression contracts until the corresponding public contract is
+explicitly deprecated. See [ADR-0002](adr/0002-test-control-boundary.md).
 
 ## 1. Purpose
 

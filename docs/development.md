@@ -13,7 +13,8 @@ Install QEMU and make `qemu-system-x86_64` available on `PATH`.
 
 ```powershell
 cargo fmt --check
-cargo clippy -- -D warnings
+cargo test -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-terminal -p logos-test --all-targets
+cargo clippy -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-terminal -p logos-test --all-targets -- -D warnings
 .\scripts\run.ps1
 .\scripts\verify.ps1
 .\scripts\check.ps1
@@ -21,6 +22,8 @@ cargo clippy -- -D warnings
 
 The kernel prints a pass/fail self-check for every initialized subsystem, followed by `LogOS: startup self check passed`. A healthy boot hands normal input, presentation, and commands to the loaded Ring-3 terminal; Escape or `recovery` returns to the kernel recovery console. PS/2 IRQ input is handled through the IDT.
 
-`verify.ps1` runs QEMU headlessly and requires scheduler wake-up, IPC replies, persistent-service, VirtIO recovery, keyboard input, and final startup health markers within 15 seconds.
+`verify.ps1` delegates to the structured `logos-test` runner. Suite fixtures reuse one QEMU boot when
+reset is safe, while boot, privilege, address-space, malformed-image, and storage-recovery cases
+receive fresh boots. Use `LOGOS_TEST_ARTIFACTS=all` to retain successful fixture files.
 
 `check.ps1` runs formatting, linting, and the headless boot verifier.
