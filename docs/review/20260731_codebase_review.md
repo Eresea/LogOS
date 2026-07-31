@@ -6,10 +6,6 @@ This file keeps only work not completed by the 2026-07-31 gate/contract pass.
 
 ## P0
 
-### CI follow-up
-
-No active workflow uses unpinned third-party actions or swallows failures. Documentation link, spelling, and performance instrumentation remain outside the current gate where no corresponding workflow exists.
-
 ### Persistence vertical slice
 
 Finish malformed-input, full-storage, restart/recovery, power-loss, and QEMU proofs for the storage service. Keep `logos-store` as the host-testable format engine.
