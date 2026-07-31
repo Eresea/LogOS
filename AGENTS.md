@@ -18,3 +18,11 @@ LogOS is an experimental Rust UEFI kernel. The current milestone is the Platform
 ## Boundaries
 
 The kernel owns hardware, memory, scheduling, IPC, and capabilities. Higher-level functionality belongs in replaceable services; applications are future WASM modules.
+
+## Architecture
+
+The onion rings define ownership and dependency direction, not runtime boundaries. Each ring exposes a small typed API, hides its implementation, and translates higher-level intent into lower-level operations. Use function calls, IPC, or syscalls according to the required isolation—not because of the ring boundary itself.
+
+## Execution Policy
+
+Plan before coding. Complete the requested task end-to-end. If a prerequisite issue is found, fix it, verify it, and continue. Stop only when blocked by missing information or an architectural decision outside the documented design. Report implemented changes, prerequisite fixes, tests run, and remaining issues.
