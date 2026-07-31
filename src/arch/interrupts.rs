@@ -105,9 +105,7 @@ pub fn wait_for_tick() {
 }
 
 pub fn wait_for_virtio() {
-    while !crate::drivers::virtio::completion_pending() {
-        unsafe { asm!("hlt") };
-    }
+    wait_for_tick();
 }
 
 #[repr(C, packed)]

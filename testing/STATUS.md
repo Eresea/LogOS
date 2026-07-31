@@ -1,12 +1,12 @@
 # Test Status
 
-Last run: `cargo run -p logos-test -- suite main`  
-Seed: `1785534282132832900`  
-Result: **13 failed, 4 passed, 39 skipped**
+Last verification: `cargo run -p logos-test -- run console/structured-command`  
+Seed: `1785535272568917600`  
+Result: **1 passed**
 
 | Test | Status | Detail |
 | --- | --- | --- |
-| console/structured-command | failed | timeout waiting for `LogOS: storage formatted` |
+| console/structured-command | passed | |
 | console/capability-denied | failed | timeout waiting for `LogOS: storage formatted` |
 | console/input-capability-denied | failed | timeout waiting for `LogOS: storage formatted` |
 | console/display-capability-denied | failed | timeout waiting for `LogOS: storage formatted` |
