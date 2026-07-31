@@ -1,20 +1,20 @@
 # Test Status
 
-Last verification: `cargo run -p logos-test -- run console/structured-command`  
-Seed: `1785535272568917600`  
-Result: **1 passed**
+Last run: `cargo run -p logos-test -- suite main`  
+Seed: `1785535582782519200`  
+Result: **9 failed, 8 passed, 39 skipped**
 
 | Test | Status | Detail |
 | --- | --- | --- |
 | console/structured-command | passed | |
-| console/capability-denied | failed | timeout waiting for `LogOS: storage formatted` |
-| console/input-capability-denied | failed | timeout waiting for `LogOS: storage formatted` |
-| console/display-capability-denied | failed | timeout waiting for `LogOS: storage formatted` |
-| console/session-capability-denied | failed | timeout waiting for `LogOS: storage formatted` |
-| console/cancellation | failed | timeout waiting for `LogOS: storage formatted` |
-| console/input-service-restart | failed | timeout waiting for `LogOS: storage formatted` |
-| console/terminal-service-restart | failed | timeout waiting for `LogOS: storage formatted` |
-| console/sessions-service-restart | failed | timeout waiting for `LogOS: storage formatted` |
+| console/capability-denied | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
+| console/input-capability-denied | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
+| console/display-capability-denied | passed | |
+| console/session-capability-denied | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
+| console/cancellation | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
+| console/input-service-restart | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
+| console/terminal-service-restart | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
+| console/sessions-service-restart | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
 | core/boot-normal | passed | |
 | persistence/block-read-flush | passed | |
 | persistence/terminal-history | passed | |
@@ -50,17 +50,17 @@ Result: **1 passed**
 | platform/native-image-mapped | skipped | semantic proof unavailable |
 | platform/service-privilege-setup | skipped | semantic proof unavailable |
 | platform/service-ring3-transition | skipped | semantic proof unavailable |
-| platform/runtime-crash-restart | failed | timeout waiting for `LogOS: storage formatted` |
-| platform/restart-backoff | failed | timeout waiting for `LogOS: storage formatted` |
-| platform/native-service-ready | failed | timeout waiting for `LogOS: storage formatted` |
+| platform/runtime-crash-restart | passed | |
+| platform/restart-backoff | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
+| platform/native-service-ready | failed | timeout waiting for QEMU exit |
 | persistence/write-interruption | skipped | semantic proof unavailable |
 | persistence/recovery | skipped | semantic proof unavailable |
 | persistence/capability-denied | skipped | semantic proof unavailable |
 | persistence/corruption-detected | skipped | semantic proof unavailable |
-| persistence/storage-service-restart | failed | timeout waiting for `LogOS: storage formatted` |
+| persistence/storage-service-restart | passed | |
 | network/packet-loss | skipped | semantic proof unavailable |
 | network/timeout | skipped | semantic proof unavailable |
 | network/reset-reconnect | skipped | semantic proof unavailable |
 | network/unauthorized-operation | skipped | semantic proof unavailable |
 
-Artifacts: `target/logos-test/main-1785534282132602000`.
+Artifacts: `target/logos-test/main-1785535582782299500`.
