@@ -8,9 +8,7 @@ This file keeps only work not completed by the 2026-07-31 gate/contract pass.
 
 ### CI follow-up
 
-- Pin every remaining third-party action to a reviewed immutable reference.
-- Replace or remove stale documentation/spelling action configuration.
-- Repair the performance workflow so failures are not swallowed and boot timing is deterministic.
+No active workflow uses unpinned third-party actions or swallows failures. Documentation link, spelling, and performance instrumentation remain outside the current gate where no corresponding workflow exists.
 
 ### Persistence vertical slice
 
@@ -31,9 +29,6 @@ Finish malformed-input, full-storage, restart/recovery, power-loss, and QEMU pro
 ## P2 — development loop
 
 - Finish the workspace toolchain/target policy and package-role documentation.
-- Add ADR-index comparison and release ESP validation.
-- Reconcile architecture/console documentation and the test README’s polling claim.
 - Add the remaining boundary negative tests and QEMU proofs.
-- Add a review index linking active and archived reviews.
 
 Do not start the deferred crate-per-ring, IPC redesign, allocator rewrite, distributed transactions, graphics framework, higher-half, or SMP work without a concrete milestone.

@@ -24,6 +24,10 @@ The remaining items stay in [`../review/20260731_codebase_review.md`](../review/
 - Workspace metadata, Rust version, and inherited Rust lints were added to the manifests.
 - README, AGENTS, TODO, and roadmap milestone status now agree on Persistence v1.
 - Stale lowercase README links and absolute `file:///` links in the archived review were repaired.
+- Remaining workflow actions now use immutable references or local pinned tooling.
+- Missing documentation/performance workflow references were removed from the active backlog; no active workflow swallows failures.
+- ADR index comparison, ESP payload staging validation, and a review index were added.
+- README, architecture, console, development, and test-runner claims were reconciled.
 
 ## Verification
 

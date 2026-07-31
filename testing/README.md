@@ -13,7 +13,7 @@ Test builds use bounded ASCII `LOGOS/1` frames over COM2. Requests are `HELLO`, 
 ## Proof rules
 
 - Use `<module>/<behavior>` IDs and explicit readiness.
-- Use bounded timeouts, deterministic seeds, and semantic fault names; never sleeps.
+- Use bounded timeouts, deterministic seeds, semantic fault names, and bounded polling waits.
 - Register the roadmap criterion and retain completed v1 proofs until its contract is deprecated.
 - Future contracts must skip, never pass or expected-fail.
 

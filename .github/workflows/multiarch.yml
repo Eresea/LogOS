@@ -9,17 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          target: x86_64-unknown-uefi
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: cargo-${{ runner.os }}-uefi-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install Rust target
+        run: rustup target add x86_64-unknown-uefi
 
       - name: Build UEFI kernel
         run: cargo build --target x86_64-unknown-uefi
@@ -32,17 +25,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          target: wasm32-unknown-unknown
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: cargo-${{ runner.os }}-wasm-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install Rust target
+        run: rustup target add wasm32-unknown-unknown
 
       - name: Build terminal crate for WASM
         run: cargo build --target wasm32-unknown-unknown -p logos-terminal

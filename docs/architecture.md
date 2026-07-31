@@ -370,7 +370,7 @@ Console v1 has a bounded terminal model with scrollback, history, selection, sea
 
 The terminal model stores bounded UTF-8, edits only on character boundaries, and owns cursor position independently of rendering.
 
-The terminal model owns caret visibility. The current Ring-3 bootstrap renderer redraws through bounded presentation requests; dedicated text/display client contracts remain pending.
+The terminal model owns caret visibility. The Ring-3 renderer redraws through the implemented bounded `foundation.display` presentation contract.
 
 Terminal editing provides insert, delete, character-safe navigation, and Ctrl+left/right word navigation without giving the renderer ownership of the input buffer.
 
@@ -389,9 +389,8 @@ Terminal output is a separate bounded line model; rendering consumes that model 
 Terminal redraw retains no display-service state: rendering the same model on a replacement display service reproduces the output and editor.
 
 The normal terminal model lives in the no-std `logos-terminal` crate and is loaded from its staged
-native payload. Core's normal-mode loop is disabled; it routes the bootstrap gate only while the
-kernel retains its direct recovery-console code. Platform v1 still replaces that bootstrap gate
-with separate capability-only Input, Display, and Session services.
+native payload. Core's normal-mode loop is disabled; it routes the capability-only Input, Display,
+and Session contracts while retaining its direct recovery-console code.
 
 Each native service has its own Core-owned address space. Only service code, stack, IPC buffers,
 and granted endpoints are mapped there; raw devices and kernel memory are never service mappings.

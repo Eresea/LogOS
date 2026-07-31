@@ -24,4 +24,4 @@ The kernel prints a pass/fail self-check for every initialized subsystem, follow
 reset is safe, while boot, privilege, address-space, malformed-image, and storage-recovery cases
 receive fresh boots. Use `LOGOS_TEST_ARTIFACTS=all` to retain successful fixture files.
 
-`check.ps1` runs formatting, linting, and the headless boot verifier.
+`check.ps1` runs formatting, linting, architecture/docs checks, ADR validation, and host/UEFI artifact checks. `verify.ps1` runs the QEMU suite.

@@ -29,6 +29,7 @@ if ($Stage -in @('all', 'host')) {
     }
     Invoke-Checked 'architecture' { python scripts/arch-deps.py --check }
     Invoke-Checked 'documentation links' { python scripts/docs-check.py }
+    Invoke-Checked 'ADR index' { python scripts/adr-index.py --check }
 }
 
 if ($Stage -in @('all', 'uefi')) {
@@ -50,4 +51,26 @@ if ($Stage -in @('all', 'uefi')) {
     $payloads | Sort-Object Name | ForEach-Object {
         "{0}  {1}" -f (Get-FileHash $_ -Algorithm SHA256).Hash, $_.Name
     } | Set-Content (Join-Path $artifactRoot 'SHA256SUMS.txt')
+
+    $espRoot = Join-Path $repoRoot "target/logos-check/esp/$profile"
+    if (Test-Path $espRoot) {
+        Get-ChildItem $espRoot -Recurse -File | Remove-Item -Force
+    }
+    New-Item -ItemType Directory -Force -Path (Join-Path $espRoot 'EFI/BOOT') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $espRoot 'EFI/LOGOS') | Out-Null
+    $espFiles = @(
+        @{ source = 'logos-uefi.efi'; destination = 'EFI/BOOT/BOOTX64.EFI' },
+        @{ source = 'logos-terminal-service.efi'; destination = 'EFI/LOGOS/TERMINAL.EFI' },
+        @{ source = 'logos-sessions-service.efi'; destination = 'EFI/LOGOS/SESSIONS.EFI' },
+        @{ source = 'logos-storage-service.efi'; destination = 'EFI/LOGOS/STORAGE.EFI' }
+    )
+    foreach ($file in $espFiles) {
+        Copy-Item (Join-Path $artifactRoot $file.source) (Join-Path $espRoot $file.destination) -Force
+    }
+    $actual = @(Get-ChildItem $espRoot -Recurse -File | ForEach-Object {
+        $_.FullName.Substring($espRoot.Length + 1).Replace('\', '/')
+    } | Sort-Object)
+    $expected = @($espFiles | ForEach-Object { $_.destination } | Sort-Object)
+    if (@(Compare-Object $actual $expected).Count -ne 0) { throw 'ESP contents do not match the payload contract' }
+    $expected | Set-Content (Join-Path $artifactRoot 'ESP-MANIFEST.txt')
 }

@@ -13,18 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          targets: x86_64-unknown-uefi
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: cargo-${{ runner.os }}-terminal-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install Rust components
+        run: |
+          rustup component add rustfmt clippy
+          rustup target add x86_64-unknown-uefi
 
       - name: Format check (logos-terminal)
         run: cargo fmt --check -p logos-terminal
