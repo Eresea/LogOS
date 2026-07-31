@@ -1400,6 +1400,8 @@ pub(crate) fn main(
     let mut terminal_restart_available = true;
     let mut sessions_restart_available = true;
     if console_mode == mode::ConsoleMode::Normal {
+        while keyboard::poll_scancode().is_some() {}
+        input = input::Service::new();
         debug::write_line(b"LogOS: native terminal active");
         loop {
             let tick = interrupts::ticks();
