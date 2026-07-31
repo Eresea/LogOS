@@ -15,7 +15,7 @@ This file tracks sequence and status only. Milestone scope and evidence live in 
 - Use typed, capability-scoped contracts for local users, remote clients, applications, and agents.
 - End each milestone with permanent automated QEMU proofs.
 
-See [Architecture](ARCHITECTURE.md), [security constraints](security.md), and [boot constraints](boot-sequence.md).
+See [Architecture](architecture.md), [security constraints](security.md), and [boot constraints](boot-sequence.md).
 
 ## Milestones
 
@@ -31,7 +31,7 @@ See [Architecture](ARCHITECTURE.md), [security constraints](security.md), and [b
 | 8 | [Applications v1](APPLICATIONS.md) | Planned | Sandboxed WASM applications install, run, communicate, and persist |
 | 9 | [Experience v1](EXPERIENCE.md) | Planned | A replaceable graphical environment uses existing contracts |
 
-Detailed scope is lazy-loaded from each milestone document. Shared principles, completion rules, migration history, and roadmap maintenance live in [Milestone policy](MILESTONE-POLICY.md). Architectural intent remains in [Architecture](ARCHITECTURE.md).
+Detailed scope is lazy-loaded from each milestone document. Shared principles, completion rules, migration history, and roadmap maintenance live in [Milestone policy](MILESTONE-POLICY.md). Architectural intent remains in [Architecture](architecture.md).
 
 Core hardening continues when an outward contract or measurement requires it; see [Core](CORE.md). Working implementation notes belong in [TODO](TODO.md), not here.
 

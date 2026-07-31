@@ -19,4 +19,4 @@ Multiple isolated applications render without arbitrary input or surface access.
 
 GPU acceleration is deferred until the software compositor proves it necessary.
 
-See Experience placement in [Architecture](ARCHITECTURE.md#ring-5--experience).
+See Experience placement in [Architecture](architecture.md#ring-5--experience).

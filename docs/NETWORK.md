@@ -35,4 +35,4 @@ Do not create separate crates for Ethernet, DHCP, UDP, or other internal protoco
 - Firewall policy beyond capability-scoped endpoints.
 - IPv6, Unix-style socket compatibility, and SSH.
 
-TCP plus authenticated transport become prerequisites of Remote v1; they may form Network v2 or the first Remote slice when that milestone begins. The outward datagram contract and driver/service ownership boundary require an [ADR](adr/README.md) before implementation. See [Architecture](ARCHITECTURE.md#12-networking-model) and [Security](security.md).
+TCP plus authenticated transport become prerequisites of Remote v1; they may form Network v2 or the first Remote slice when that milestone begins. The outward datagram contract and driver/service ownership boundary require an [ADR](adr/README.md) before implementation. See [Architecture](architecture.md#12-networking-model) and [Security](security.md).

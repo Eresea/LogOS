@@ -16,7 +16,7 @@ This reference preserves roadmap-wide rules without loading them with every road
 
 Compatibility belongs at the edges. The system remains recoverable, observable, and updateable without treating reboot as the normal failure response.
 
-The architectural rings and placement rules live in [Architecture](ARCHITECTURE.md).
+The architectural rings and placement rules live in [Architecture](architecture.md).
 
 ## Repository migration history
 
@@ -43,6 +43,6 @@ Deferred Core candidates: APIC/HPET timing, MSI/MSI-X, SMP and per-CPU state, ar
 
 ## Maintenance
 
-Update the active milestone and exit criteria when implementation changes understanding. Update [Architecture](ARCHITECTURE.md) when ownership moves, [Naming](NAMING.md) when subsystem vocabulary changes, and add an [ADR](adr/README.md) for irreversible or cross-ring decisions. Preserve completed criteria as evidence; never rewrite past scope to disguise incomplete work.
+Update the active milestone and exit criteria when implementation changes understanding. Update [Architecture](architecture.md) when ownership moves, [Naming](NAMING.md) when subsystem vocabulary changes, and add an [ADR](adr/README.md) for irreversible or cross-ring decisions. Preserve completed criteria as evidence; never rewrite past scope to disguise incomplete work.
 
 Historical reviewed proposals remain under [`reviewed/`](reviewed/).

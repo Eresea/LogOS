@@ -24,4 +24,4 @@ Without local display or keyboard, an authenticated user can inspect the machine
 - Web, desktop, and mobile clients.
 - SSH compatibility gateway.
 
-See session placement in [Architecture](ARCHITECTURE.md#3-dependency-rules) and constraints in [Security](security.md).
+See session placement in [Architecture](architecture.md#3-dependency-rules) and constraints in [Security](security.md).

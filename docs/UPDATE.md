@@ -22,4 +22,4 @@ Evolve kernel, services, drivers, and applications independently without making 
 - Diagnostics explain what changed and why rollback occurred.
 - QEMU interrupts every phase and proves recovery.
 
-See the update state machine in [Architecture](ARCHITECTURE.md#13-update-model).
+See the update state machine in [Architecture](architecture.md#13-update-model).

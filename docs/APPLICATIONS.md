@@ -31,4 +31,4 @@ Run portable applications as capability-isolated WASM components without making 
 
 A WASM application can be remotely installed, run, communicate, persist, upgrade, roll back, and be removed using only granted interfaces. Failures remain isolated; workspaces remain portable; human and authorized agent clients use the same operations.
 
-See [Architecture](ARCHITECTURE.md#ring-4--runtime), [AI addressability](ARCHITECTURE.md#14-ai-addressability), and [Security](security.md).
+See [Architecture](architecture.md#ring-4--runtime), [AI addressability](architecture.md#14-ai-addressability), and [Security](security.md).

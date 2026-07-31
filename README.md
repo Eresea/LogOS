@@ -12,8 +12,8 @@ The normal terminal and Sessions service run as separate, restartable Ring-3 pay
 
 ## Start here
 
-- [Architecture](docs/ARCHITECTURE.md) — system boundaries, layers, and service model.
-- [Roadmap](docs/ROADMAP.md) — current progress and the path ahead.
+- [Architecture](docs/architecture.md) — system boundaries, layers, and service model.
+- [Roadmap](docs/roadmap.md) — current progress and the path ahead.
 - [Console](docs/CONSOLE.md) — normal terminal scope and versioned checklist.
 - [Development](docs/development.md) — prerequisites, build, checks, and QEMU commands.
 

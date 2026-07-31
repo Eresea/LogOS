@@ -4,7 +4,7 @@ Here is a comprehensive code review of **LogOS**, focusing on kernel code qualit
 
 ### Architectural & Design Strengths
 
-1. **Clean `no_std` Architecture**: Strict adherence to microkernel / minimal ring 0 principles as outlined in [ARCHITECTURE.md](../ARCHITECTURE.md).
+1. **Clean `no_std` Architecture**: Strict adherence to microkernel / minimal ring 0 principles as outlined in [architecture.md](../architecture.md).
 2. **Explicit Capability Enforcement**: Microkernel capability checks ([capabilities.rs](../../crates/logos-core/src/capabilities.rs)) gate IPC interactions ([ipc.rs](../../src/ipc/ipc.rs#L54-L78)).
 3. **Self-Check Diagnostics**: Built-in subsystem verification routines (`self_check()` in [scheduler.rs](../../src/sched/scheduler.rs#L130-L154), [memory.rs](../../src/mm/memory.rs#L93-L111), [ipc.rs](../../src/ipc/ipc.rs#L122-L129)) provide immediate boot-time feedback.
 

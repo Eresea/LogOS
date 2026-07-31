@@ -349,4 +349,4 @@ dependency boundary requires it.
   continue when it does not invalidate the current phase's proof.
 
 See [ADR-0013](adr/0013-persistence-v1-boundary.md),
-[Architecture](ARCHITECTURE.md#11-storage-model), and [Security](security.md).
+[Architecture](architecture.md#11-storage-model), and [Security](security.md).
