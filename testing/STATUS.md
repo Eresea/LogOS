@@ -1,15 +1,23 @@
 # Test Status
 
 Last run: `cargo run -p logos-test -- suite main`  
-Seed: `1785531673265228300`  
-Result: **4 failed, 1 passed, 39 skipped**
+Seed: `1785534282132832900`  
+Result: **13 failed, 4 passed, 39 skipped**
 
 | Test | Status | Detail |
 | --- | --- | --- |
-| console/structured-command | failed | initial reset failed: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
-| core/boot-normal | failed | initial reset failed: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
-| persistence/block-read-flush | failed | timeout waiting for `LogOS: storage formatted` |
-| persistence/terminal-history | failed | timeout waiting for `LogOS: storage formatted` |
+| console/structured-command | failed | timeout waiting for `LogOS: storage formatted` |
+| console/capability-denied | failed | timeout waiting for `LogOS: storage formatted` |
+| console/input-capability-denied | failed | timeout waiting for `LogOS: storage formatted` |
+| console/display-capability-denied | failed | timeout waiting for `LogOS: storage formatted` |
+| console/session-capability-denied | failed | timeout waiting for `LogOS: storage formatted` |
+| console/cancellation | failed | timeout waiting for `LogOS: storage formatted` |
+| console/input-service-restart | failed | timeout waiting for `LogOS: storage formatted` |
+| console/terminal-service-restart | failed | timeout waiting for `LogOS: storage formatted` |
+| console/sessions-service-restart | failed | timeout waiting for `LogOS: storage formatted` |
+| core/boot-normal | passed | |
+| persistence/block-read-flush | passed | |
+| persistence/terminal-history | passed | |
 | persistence/capability-denied | passed | |
 | core/boot-recovery | skipped | semantic proof unavailable |
 | core/ipc-request-reply | skipped | semantic proof unavailable |
@@ -42,13 +50,17 @@ Result: **4 failed, 1 passed, 39 skipped**
 | platform/native-image-mapped | skipped | semantic proof unavailable |
 | platform/service-privilege-setup | skipped | semantic proof unavailable |
 | platform/service-ring3-transition | skipped | semantic proof unavailable |
+| platform/runtime-crash-restart | failed | timeout waiting for `LogOS: storage formatted` |
+| platform/restart-backoff | failed | timeout waiting for `LogOS: storage formatted` |
+| platform/native-service-ready | failed | timeout waiting for `LogOS: storage formatted` |
 | persistence/write-interruption | skipped | semantic proof unavailable |
 | persistence/recovery | skipped | semantic proof unavailable |
 | persistence/capability-denied | skipped | semantic proof unavailable |
 | persistence/corruption-detected | skipped | semantic proof unavailable |
+| persistence/storage-service-restart | failed | timeout waiting for `LogOS: storage formatted` |
 | network/packet-loss | skipped | semantic proof unavailable |
 | network/timeout | skipped | semantic proof unavailable |
 | network/reset-reconnect | skipped | semantic proof unavailable |
 | network/unauthorized-operation | skipped | semantic proof unavailable |
 
-Artifacts: `target/logos-test/main-1785531673264947000`.
+Artifacts: `target/logos-test/main-1785534282132602000`.
