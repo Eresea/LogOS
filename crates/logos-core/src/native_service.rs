@@ -36,6 +36,7 @@ pub struct Context {
     pub color: u32,
     pub text_length: u32,
     pub text: [u8; MAX_TEXT],
+    pub shared_page: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -176,6 +177,7 @@ impl Context {
             color: 0,
             text_length: 0,
             text: [0; MAX_TEXT],
+            shared_page: 0,
         }
     }
 
@@ -377,6 +379,27 @@ impl Context {
     }
 
     /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by the caller.
+    pub unsafe fn request_store_at(address: u64, request: logos_abi::StoreRequest) -> bool {
+        if !request.valid() {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.status != ACKNOWLEDGED
+            || !matches!(context.operation, READY | STORE_REPLY)
+        {
+            return false;
+        }
+        encode_store_request(&mut context.text, request);
+        context.text_length = STORE_REQUEST_BYTES as u32;
+        context.operation = STORE_REQUEST;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
     pub unsafe fn deliver_store_at(address: u64, request: logos_abi::StoreRequest) -> bool {
         if !request.valid() {
@@ -469,6 +492,33 @@ impl Context {
         context.y = (page.address >> 32) as u32;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping before service startup.
+    pub unsafe fn configure_shared_page_at(address: u64, page: logos_abi::PageHandle) -> bool {
+        if page.0 == 0 {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != 0
+            || context.status != 0
+        {
+            return false;
+        }
+        context.shared_page = page.0;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn shared_page_at(address: u64) -> Option<logos_abi::PageHandle> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.shared_page != 0)
+            .then_some(logos_abi::PageHandle(context.shared_page))
     }
 
     /// # Safety
@@ -730,6 +780,24 @@ mod tests {
         assert!(unsafe { Context::reply_store_at(address, store_reply) });
         assert!(unsafe { Context::store_reply_at(address, 8) }.is_none());
         assert_eq!(unsafe { Context::store_reply_at(address, 7) }, Some(store_reply));
+
+        context.operation = 0;
+        context.status = 0;
+        assert!(unsafe {
+            Context::configure_shared_page_at(address, logos_abi::PageHandle(0x10001))
+        });
+        assert_eq!(
+            unsafe { Context::shared_page_at(address) },
+            Some(logos_abi::PageHandle(0x10001))
+        );
+        context.operation = READY;
+        context.status = ACKNOWLEDGED;
+        assert!(unsafe { Context::request_store_at(address, store) });
+        assert!(
+            unsafe { Context::store_at(address) }.is_some_and(
+                |request| request.id == store.id && request.operation == store.operation
+            )
+        );
 
         context.operation = BLOCK_REQUEST;
         context.status = ACKNOWLEDGED;

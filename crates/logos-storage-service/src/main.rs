@@ -1,15 +1,24 @@
 #![no_main]
 #![no_std]
 
+use core::mem::MaybeUninit;
 use core::mem::size_of;
 
 use logos_service_rt::{BlockClient, BlockError, Context, Header};
 use logos_store::{Error, Recovery, SECTOR_SIZE, SectorBackend, Store};
 
+use logos_storage_service::protocol::{ReadSelection, ReplaceTransaction};
+
 const MINIMUM_SECTORS: usize = 10;
-const STORE_MEMORY: usize = 4 * logos_abi::PAGE_SIZE;
 
 type DiskStore = Store<BlockBackend>;
+const STORE_MEMORY: usize = 4 * logos_abi::PAGE_SIZE;
+
+struct RuntimeState {
+    replace: Option<ReplaceTransaction>,
+    read: Option<ReadSelection>,
+    store: MaybeUninit<DiskStore>,
+}
 
 #[used]
 #[unsafe(link_section = ".logos")]
@@ -69,22 +78,26 @@ fn map_block_error(error: BlockError) -> Error {
     }
 }
 
-fn start(context: &mut Context) -> Result<(&'static mut DiskStore, bool), Error> {
+fn start(context: &mut Context) -> Result<(&'static mut RuntimeState, bool), Error> {
     let mut backend = BlockBackend::new(context)?;
     #[cfg(feature = "block-probe")]
     if !backend.client.probe() {
         return Err(Error::Io);
     }
     let blank = backend.superblocks_zero()?;
-    if size_of::<DiskStore>() > STORE_MEMORY {
+    if size_of::<RuntimeState>() > STORE_MEMORY {
         return Err(Error::Full);
     }
-    let slot = context.heap_slot::<DiskStore>().ok_or(Error::Invalid)?;
-    let store = if blank {
-        Store::format_with_backend_at(slot, backend)?
+    let slot = context.heap_slot::<RuntimeState>().ok_or(Error::Invalid)?;
+    let state = unsafe { &mut *slot.as_mut_ptr() };
+    state.replace = None;
+    state.read = None;
+    if blank {
+        Store::format_with_backend_at(&mut state.store, backend)?
     } else {
-        Store::recover_backend_at(slot, backend)?
+        Store::recover_backend_at(&mut state.store, backend)?
     };
+    let store = unsafe { state.store.assume_init_mut() };
     let recovery = store.recovery();
     context.set_storage_status(if blank {
         logos_service_rt::STORAGE_FORMATTED
@@ -95,7 +108,141 @@ fn start(context: &mut Context) -> Result<(&'static mut DiskStore, bool), Error>
     } else {
         logos_service_rt::STORAGE_RECOVERED
     });
-    Ok((store, blank))
+    Ok((state, blank))
+}
+
+fn map_error(error: Error) -> logos_abi::PersistenceStatus {
+    match error {
+        Error::Invalid => logos_abi::PersistenceStatus::Invalid,
+        Error::Io => logos_abi::PersistenceStatus::Io,
+        Error::TimedOut => logos_abi::PersistenceStatus::TimedOut,
+        Error::Corrupt => logos_abi::PersistenceStatus::Corrupt,
+        Error::Full => logos_abi::PersistenceStatus::Full,
+        Error::NotFound => logos_abi::PersistenceStatus::NotFound,
+        Error::Interrupted => logos_abi::PersistenceStatus::Cancelled,
+    }
+}
+
+fn reply(
+    request: logos_abi::StoreRequest,
+    status: logos_abi::PersistenceStatus,
+) -> logos_abi::StoreReply {
+    logos_abi::StoreReply { id: request.id, status, version: 0, length: 0 }
+}
+
+fn process(
+    context: &Context,
+    state: &mut RuntimeState,
+    request: logos_abi::StoreRequest,
+) -> logos_abi::StoreReply {
+    let Some(page) = context.shared_page() else {
+        return reply(request, logos_abi::PersistenceStatus::Invalid);
+    };
+    if matches!(
+        request.operation,
+        logos_abi::StoreOperation::ReadChunk | logos_abi::StoreOperation::WriteChunk
+    ) && request.page != page.handle
+    {
+        return reply(request, logos_abi::PersistenceStatus::Denied);
+    }
+    let store = unsafe { state.store.assume_init_mut() };
+    match request.operation {
+        logos_abi::StoreOperation::OpenRead => match store.metadata(
+            request.namespace,
+            &request.name[..request.name_length as usize],
+            request.version,
+        ) {
+            Ok((version, length)) => {
+                state.read = Some(ReadSelection::new(request, length));
+                logos_abi::StoreReply {
+                    id: request.id,
+                    status: logos_abi::PersistenceStatus::Complete,
+                    version,
+                    length: length as u32,
+                }
+            }
+            Err(error) => reply(request, map_error(error)),
+        },
+        logos_abi::StoreOperation::ReadChunk => {
+            let Some(selection) = state.read else {
+                return reply(request, logos_abi::PersistenceStatus::Invalid);
+            };
+            let mut output = unsafe {
+                core::slice::from_raw_parts_mut(page.address as *mut u8, logos_abi::PAGE_SIZE)
+            };
+            let result = store.read(
+                selection.namespace(),
+                selection.name(),
+                selection.version(),
+                &mut output,
+            );
+            let (version, length) = match result {
+                Ok(value) => value,
+                Err(error) => return reply(request, map_error(error)),
+            };
+            let offset = usize::try_from(request.offset).unwrap_or(usize::MAX);
+            let copied = length.saturating_sub(offset).min(request.length as usize);
+            if copied != 0 {
+                output.copy_within(offset..offset + copied, 0);
+            }
+            logos_abi::StoreReply {
+                id: request.id,
+                status: logos_abi::PersistenceStatus::Complete,
+                version,
+                length: copied as u32,
+            }
+        }
+        logos_abi::StoreOperation::BeginReplace => {
+            if state.replace.is_some() {
+                return reply(request, logos_abi::PersistenceStatus::Invalid);
+            }
+            state.replace = ReplaceTransaction::begin(request);
+            if state.replace.is_some() {
+                reply(request, logos_abi::PersistenceStatus::Complete)
+            } else {
+                reply(request, logos_abi::PersistenceStatus::Invalid)
+            }
+        }
+        logos_abi::StoreOperation::WriteChunk => {
+            let Some(replace) = state.replace.as_mut() else {
+                return reply(request, logos_abi::PersistenceStatus::Invalid);
+            };
+            let page = unsafe {
+                core::slice::from_raw_parts(page.address as *const u8, logos_abi::PAGE_SIZE)
+            };
+            if replace.write(request, page) {
+                reply(request, logos_abi::PersistenceStatus::Complete)
+            } else {
+                reply(request, logos_abi::PersistenceStatus::Invalid)
+            }
+        }
+        logos_abi::StoreOperation::Commit => {
+            let Some(replace) = state.replace.as_ref() else {
+                return reply(request, logos_abi::PersistenceStatus::Invalid);
+            };
+            if !replace.complete() {
+                return reply(request, logos_abi::PersistenceStatus::Invalid);
+            }
+            let result = store.replace(replace.namespace(), replace.name(), replace.bytes());
+            state.replace = None;
+            match result {
+                Ok(version) => logos_abi::StoreReply {
+                    id: request.id,
+                    status: logos_abi::PersistenceStatus::Complete,
+                    version,
+                    length: 0,
+                },
+                Err(error) => reply(request, map_error(error)),
+            }
+        }
+        logos_abi::StoreOperation::Abort | logos_abi::StoreOperation::Cancel => {
+            state.replace = None;
+            if request.operation == logos_abi::StoreOperation::Cancel {
+                state.read = None;
+            }
+            reply(request, logos_abi::PersistenceStatus::Complete)
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -107,8 +254,8 @@ fn run(context: &mut Context) -> ! {
     if !context.ready() {
         spin();
     }
-    let _store = match start(context) {
-        Ok((store, _)) => Some(store),
+    let state = match start(context) {
+        Ok((state, _)) => Some(state),
         Err(Error::Corrupt) => {
             context.set_storage_status(logos_service_rt::STORAGE_CORRUPT);
             None
@@ -118,9 +265,16 @@ fn run(context: &mut Context) -> ! {
             None
         }
     };
+    let Some(state) = state else { spin() };
     while context.acknowledged() {
         if !context.wait_for_input() {
             spin();
+        }
+        if let Some(request) = context.store_request() {
+            let response = process(context, state, request);
+            if !context.store_reply(response) {
+                spin();
+            }
         }
     }
     spin()

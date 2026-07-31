@@ -10,6 +10,12 @@ pub use logos_core::native_service::{BlockPage, Context as RawContext, Header, M
 
 pub type EntryContext = *mut RawContext;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SharedPage {
+    pub handle: logos_abi::PageHandle,
+    pub address: u64,
+}
+
 pub const ACKNOWLEDGED: u32 = native_service::ACKNOWLEDGED;
 pub const STORAGE_FORMATTED: u32 = native_service::STORAGE_FORMATTED;
 pub const STORAGE_RECOVERED: u32 = native_service::STORAGE_RECOVERED;
@@ -161,6 +167,30 @@ impl Context {
         raw.text[..reply.len()].copy_from_slice(reply);
         raw.text_length = reply.len() as u32;
         self.invoke(native_service::SESSION_REPLY)
+    }
+
+    pub fn store(&mut self, request: logos_abi::StoreRequest) -> Option<logos_abi::StoreReply> {
+        if !request.valid()
+            || unsafe { !RawContext::request_store_at(self.raw_address(), request) }
+            || !self.invoke(native_service::STORE_REQUEST)
+        {
+            return None;
+        }
+        unsafe { RawContext::store_reply_at(self.raw_address(), request.id) }
+    }
+
+    pub fn store_request(&self) -> Option<logos_abi::StoreRequest> {
+        unsafe { RawContext::store_at(self.raw_address()) }
+    }
+
+    pub fn store_reply(&mut self, reply: logos_abi::StoreReply) -> bool {
+        unsafe { RawContext::reply_store_at(self.raw_address(), reply) }
+    }
+
+    pub fn shared_page(&self) -> Option<SharedPage> {
+        let handle = unsafe { RawContext::shared_page_at(self.raw_address()) }?;
+        let address = self.raw_address().checked_sub(logos_abi::PAGE_SIZE as u64)?;
+        Some(SharedPage { handle, address })
     }
 
     pub fn block_client(&self) -> Option<BlockClient> {

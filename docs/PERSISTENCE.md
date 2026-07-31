@@ -216,7 +216,7 @@ shape before QEMU Store I/O.
 - [ ] Add a host test for current and previous reads.
 - [ ] Add a host test for abort and client-exit cleanup.
 - [ ] Add a QEMU test for allowed Terminal namespace access.
-- [ ] Promote `persistence/capability-denied` from future to implemented.
+- [x] Promote `persistence/capability-denied` from future to implemented.
 - [ ] Run `cargo run -p logos-test -- run persistence/capability-denied`.
 - [ ] Commit the capability-scoped Store API.
 

@@ -1,6 +1,6 @@
 use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
-const CAPABILITIES: usize = 5;
+const CAPABILITIES: usize = 8;
 const VARIABLES: usize = 4;
 const VARIABLE_NAME: usize = 16;
 const VARIABLE_VALUE: usize = 64;
@@ -87,10 +87,19 @@ impl Context {
     }
 
     pub fn allows(&self, manager: &CapabilityManager, kind: CapabilityKind) -> bool {
+        self.allows_scoped(manager, kind, 0)
+    }
+
+    pub fn allows_scoped(
+        &self,
+        manager: &CapabilityManager,
+        kind: CapabilityKind,
+        resource: u32,
+    ) -> bool {
         self.capabilities[..self.length]
             .iter()
             .flatten()
-            .any(|capability| manager.allows(*capability, kind))
+            .any(|capability| manager.allows_scoped(*capability, kind, resource))
     }
 
     pub fn set_variable(&mut self, name: &[u8], value: &[u8]) -> bool {
@@ -141,8 +150,7 @@ impl Context {
             && !context.allows(&manager, CapabilityKind::Debug)
             && manager.revoke(recovery)
             && !context.allows(&manager, CapabilityKind::Recovery)
-            && Self::new(Id(2), Principal::LOCAL, &[debug, debug, debug, debug, debug, debug])
-                .is_none()
+            && Self::new(Id(2), Principal::LOCAL, &[debug; CAPABILITIES + 1]).is_none()
             && context.set_variable(b"layout", b"qwerty")
             && context.variable(b"layout") == Some(b"qwerty" as &[u8])
     }

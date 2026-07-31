@@ -78,6 +78,7 @@ const SCENARIOS: &[Scenario] = &[
         Fixture::Shared,
     ),
     configured("persistence/block-read-flush", "persistence", &[], Fixture::Persistence),
+    configured("persistence/capability-denied", "persistence", &[], Fixture::Shared),
     scenario("console/recovery-handoff", "console", Fixture::Fresh),
     scenario("platform/manifest-valid", "platform", Fixture::Fresh),
     scenario("platform/manifest-invalid", "platform", Fixture::Fresh),
@@ -971,7 +972,12 @@ mod tests {
     fn label_only_scenarios_are_not_implemented() {
         assert!(SCENARIOS.iter().filter(|item| item.setup.is_empty()).all(|item| {
             !item.implemented
-                || matches!(item.id, "core/boot-normal" | "persistence/block-read-flush")
+                || matches!(
+                    item.id,
+                    "core/boot-normal"
+                        | "persistence/block-read-flush"
+                        | "persistence/capability-denied"
+                )
         }));
     }
 

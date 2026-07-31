@@ -88,15 +88,36 @@ impl SyscallEndpoint {
 }
 
 impl StoreEndpoint {
-    #[allow(dead_code)]
+    pub const fn context(self) -> u64 {
+        self.context_physical
+    }
+
     pub fn request(self) -> Option<logos_abi::StoreRequest> {
         unsafe { logos_core::native_service::Context::store_at(self.context_physical) }
     }
 
-    #[allow(dead_code)]
     pub fn deliver(self, request: logos_abi::StoreRequest) -> bool {
         unsafe {
             logos_core::native_service::Context::deliver_store_at(self.context_physical, request)
+        }
+    }
+
+    pub fn response(self, expected_id: u32) -> Option<logos_abi::StoreReply> {
+        unsafe {
+            logos_core::native_service::Context::store_reply_at(self.context_physical, expected_id)
+        }
+    }
+
+    pub fn reply(self, reply: logos_abi::StoreReply) -> bool {
+        unsafe { logos_core::native_service::Context::reply_store_at(self.context_physical, reply) }
+    }
+
+    pub fn configure_shared_page(self, page: logos_abi::PageHandle) -> bool {
+        unsafe {
+            logos_core::native_service::Context::configure_shared_page_at(
+                self.context_physical,
+                page,
+            )
         }
     }
 }
@@ -122,7 +143,12 @@ impl BlockEndpoint {
 
     #[allow(dead_code)]
     pub fn reply(self, reply: logos_abi::BlockReply) -> bool {
-        unsafe { logos_core::native_service::Context::reply_block_at(self.context_physical, reply) }
+        crate::debug::write_line(b"LogOS: block endpoint reply begin");
+        let result = unsafe {
+            logos_core::native_service::Context::reply_block_at(self.context_physical, reply)
+        };
+        crate::debug::write_line(b"LogOS: block endpoint reply end");
+        result
     }
 }
 

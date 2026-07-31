@@ -282,6 +282,27 @@ impl<B: SectorBackend> Store<B> {
         Ok((location.version, location.length))
     }
 
+    pub fn metadata(
+        &self,
+        namespace: NamespaceId,
+        name: &[u8],
+        selector: VersionSelector,
+    ) -> Result<(u64, usize), Error> {
+        validate_name(name)?;
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.matches(namespace.0, name))
+            .ok_or(Error::NotFound)?;
+        let location = match selector {
+            VersionSelector::None => return Err(Error::Invalid),
+            VersionSelector::Current => entry.versions.current,
+            VersionSelector::Previous => entry.versions.previous,
+        }
+        .ok_or(Error::NotFound)?;
+        Ok((location.version, location.length))
+    }
+
     pub fn compact(&mut self, cut: Option<usize>) -> Result<(), Error> {
         if self.recovery == Recovery::Corrupt {
             return Err(Error::Corrupt);
@@ -698,6 +719,16 @@ mod tests {
         store.compact(None).unwrap();
         assert_eq!(read_value(&mut store, b"history", VersionSelector::Current), b"two");
         assert_eq!(read_value(&mut store, b"history", VersionSelector::Previous), b"one");
+    }
+
+    #[test]
+    fn metadata_selects_version_without_copying_payload() {
+        let mut store = Store::format(32).unwrap();
+        store.replace(NS, b"object", b"one").unwrap();
+        store.replace(NS, b"object", b"two").unwrap();
+        assert_eq!(store.metadata(NS, b"object", VersionSelector::Current), Ok((2, 3)));
+        assert_eq!(store.metadata(NS, b"object", VersionSelector::Previous), Ok((1, 3)));
+        assert_eq!(store.metadata(NS, b"missing", VersionSelector::Current), Err(Error::NotFound));
     }
 
     #[test]
