@@ -38,7 +38,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       
       - name: Host unit tests
-        run: cargo test --features test,mock_hal --lib --all-targets
+        run: cargo test -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-terminal -p logos-test --all-targets
       
       - name: Architecture validation
         run: |
@@ -66,26 +66,19 @@ jobs:
       - name: Install QEMU + OVMF
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86_64 ovmf
-      
-      - name: Build UEFI kernel
-        run: cargo build --release --target x86_64-unknown-uefi
-      
+          sudo apt-get install -y qemu-system-x86 ovmf
+
       - name: Run QEMU verification
         env:
           OVMF_CODE: /usr/share/OVMF/OVMF_CODE.fd
-        run: |
-          timeout 60 ./scripts/verify.ps1 || {
-            echo "QEMU verification failed"
-            exit 1
-          }
+        run: cargo run -p logos-test -- suite ${{ github.event_name == 'pull_request' && 'pr' || 'main' }}
       
       - name: Upload QEMU logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: qemu-serial-log
-          path: target/qemu-verify.log
+          name: logos-test
+          path: target/logos-test
           retention-days: 7
 
   doc-check:
@@ -99,13 +92,11 @@ jobs:
         uses: gaurav-nelson/github-action-markdown-link-check@v1
         with:
           folder-path: docs
-          config-file: .markdown-link-check.json
       
       - name: Spell check
         uses: streetsidesoftware/cspell-action@v6
         with:
           files: docs/**/*.md
-          config: .cspell.json
 
   adr-index:
     name: ADR Index
