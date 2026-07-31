@@ -188,37 +188,37 @@ shape before QEMU Store I/O.
 
 ### Phase 5: expose capability-scoped named objects
 
-- [ ] Keep the Store service in `READ_INPUT` while idle.
-- [ ] Relay Store requests only to the Store task.
-- [ ] Preserve one caller request ID through Store and back to the caller.
-- [ ] Track one bounded replace transaction containing caller, namespace, name, length, and bytes.
-- [ ] Reject `WriteChunk` without a matching `BeginReplace`.
-- [ ] Reject overlapping, skipped, repeated, or out-of-range chunks.
-- [ ] Reject `Commit` until exactly the declared bytes were written.
-- [ ] Make `Abort`, `Cancel`, caller exit, and Store restart discard the transaction.
-- [ ] Make `Commit` call the Store engine once and reply only after its final flush.
-- [ ] Make `OpenRead` select current or previous immutable version.
-- [ ] Make `ReadChunk` copy only the requested available bytes to the caller's loaned page.
-- [ ] Return the exact copied length and selected version in `StoreReply`.
-- [ ] Return `NotFound` for a missing object or missing previous version.
-- [ ] Return `Invalid` for malformed state transitions.
-- [ ] Return `Full`, `Corrupt`, `TimedOut`, and `Io` without losing the distinction.
-- [ ] Grant Terminal `StoreRead` scoped to `TERMINAL_NAMESPACE`.
-- [ ] Grant Terminal `StoreWrite` scoped to `TERMINAL_NAMESPACE`.
-- [ ] Check read capability before `OpenRead` and `ReadChunk` reach Store.
-- [ ] Check write capability before replace, commit, abort, or cancel reach Store.
-- [ ] Deny Terminal access to `TEXT_NAMESPACE`, `AUDIT_NAMESPACE`, and `SECRETS_NAMESPACE`.
-- [ ] Deny a read-only capability on every write operation.
-- [ ] Deny a revoked or stale capability.
-- [ ] Return `Denied` without waking Store or touching the disk.
-- [ ] Return every client page loan after the reply or failure.
-- [ ] Add a host test for the complete replace state machine.
-- [ ] Add a host test for current and previous reads.
-- [ ] Add a host test for abort and client-exit cleanup.
-- [ ] Add a QEMU test for allowed Terminal namespace access.
+- [x] Keep the Store service in `READ_INPUT` while idle.
+- [x] Relay Store requests only to the Store task.
+- [x] Preserve one caller request ID through Store and back to the caller.
+- [x] Track one bounded replace transaction containing caller, namespace, name, length, and bytes.
+- [x] Reject `WriteChunk` without a matching `BeginReplace`.
+- [x] Reject overlapping, skipped, repeated, or out-of-range chunks.
+- [x] Reject `Commit` until exactly the declared bytes were written.
+- [x] Make `Abort`, `Cancel`, caller exit, and Store restart discard the transaction.
+- [x] Make `Commit` call the Store engine once and reply only after its final flush.
+- [x] Make `OpenRead` select current or previous immutable version.
+- [x] Make `ReadChunk` copy only the requested available bytes to the caller's loaned page.
+- [x] Return the exact copied length and selected version in `StoreReply`.
+- [x] Return `NotFound` for a missing object or missing previous version.
+- [x] Return `Invalid` for malformed state transitions.
+- [x] Return `Full`, `Corrupt`, `TimedOut`, and `Io` without losing the distinction.
+- [x] Grant Terminal `StoreRead` scoped to `TERMINAL_NAMESPACE`.
+- [x] Grant Terminal `StoreWrite` scoped to `TERMINAL_NAMESPACE`.
+- [x] Check read capability before `OpenRead` and `ReadChunk` reach Store.
+- [x] Check write capability before replace, commit, abort, or cancel reach Store.
+- [x] Deny Terminal access to `TEXT_NAMESPACE`, `AUDIT_NAMESPACE`, and `SECRETS_NAMESPACE`.
+- [x] Deny a read-only capability on every write operation.
+- [x] Deny a revoked or stale capability.
+- [x] Return `Denied` without waking Store or touching the disk.
+- [x] Return every client page loan after the reply or failure.
+- [x] Add a host test for the complete replace state machine.
+- [x] Add a host test for current and previous reads.
+- [x] Add a host test for abort and client-exit cleanup.
+- [x] Add a QEMU test for allowed Terminal namespace access.
 - [x] Promote `persistence/capability-denied` from future to implemented.
-- [ ] Run `cargo run -p logos-test -- run persistence/capability-denied`.
-- [ ] Commit the capability-scoped Store API.
+- [x] Run `cargo run -p logos-test -- run persistence/capability-denied`.
+- [x] Commit the capability-scoped Store API.
 
 ### Phase 6: persist terminal history
 

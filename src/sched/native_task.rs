@@ -143,12 +143,7 @@ impl BlockEndpoint {
 
     #[allow(dead_code)]
     pub fn reply(self, reply: logos_abi::BlockReply) -> bool {
-        crate::debug::write_line(b"LogOS: block endpoint reply begin");
-        let result = unsafe {
-            logos_core::native_service::Context::reply_block_at(self.context_physical, reply)
-        };
-        crate::debug::write_line(b"LogOS: block endpoint reply end");
-        result
+        unsafe { logos_core::native_service::Context::reply_block_at(self.context_physical, reply) }
     }
 }
 

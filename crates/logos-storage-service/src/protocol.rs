@@ -16,7 +16,7 @@ pub struct ReplaceTransaction {
 
 impl ReplaceTransaction {
     pub fn begin(request: StoreRequest) -> Option<Self> {
-        (request.length as usize <= PAGE_SIZE).then_some(Self {
+        (request.length != 0 && request.length as usize <= PAGE_SIZE).then_some(Self {
             caller: CALLER,
             namespace: request.namespace,
             name: request.name,
@@ -136,6 +136,12 @@ mod tests {
         assert!(replace.write(request(logos_abi::StoreOperation::WriteChunk, 2, 1), b"c"));
         assert!(replace.complete());
         assert_eq!(replace.bytes(), b"abc");
+    }
+
+    #[test]
+    fn replace_rejects_empty_payloads() {
+        let request = request(logos_abi::StoreOperation::BeginReplace, 0, 0);
+        assert!(ReplaceTransaction::begin(request).is_none());
     }
 
     #[test]

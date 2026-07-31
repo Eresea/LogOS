@@ -78,7 +78,12 @@ const SCENARIOS: &[Scenario] = &[
         Fixture::Shared,
     ),
     configured("persistence/block-read-flush", "persistence", &[], Fixture::Persistence),
-    configured("persistence/capability-denied", "persistence", &[], Fixture::Shared),
+    configured(
+        "persistence/capability-denied",
+        "persistence",
+        &["persistence/capability-denied"],
+        Fixture::Persistence,
+    ),
     scenario("console/recovery-handoff", "console", Fixture::Fresh),
     scenario("platform/manifest-valid", "platform", Fixture::Fresh),
     scenario("platform/manifest-invalid", "platform", Fixture::Fresh),

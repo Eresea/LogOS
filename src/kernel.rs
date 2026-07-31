@@ -673,10 +673,8 @@ pub(crate) fn main(
     check!(
         b"storage shared page",
         shared_history.is_some_and(|handle| {
-            native_store.configure_shared_page(handle) && {
-                let _ = native_storage_store;
-                true
-            }
+            native_store.configure_shared_page(handle)
+                && native_storage_store.configure_shared_page(handle)
         }),
     );
     check!(
@@ -688,15 +686,12 @@ pub(crate) fn main(
     );
     let mut block_dispatch = block::Dispatch::new();
     let mut native_scheduler = scheduler::Scheduler::new();
-    debug::write_line(b"LogOS: spawn terminal");
     let Some(mut native_handle) = native_scheduler.spawn(&mut native_terminal) else {
         fail!(b"native terminal task");
     };
-    debug::write_line(b"LogOS: run terminal");
     if !native_scheduler.run_next() {
         fail!(b"native terminal task");
     }
-    debug::write_line(b"LogOS: terminal ran");
     if !resume_display(
         native_display,
         &session,
@@ -707,25 +702,19 @@ pub(crate) fn main(
     ) {
         fail!(b"native terminal display");
     }
-    debug::write_line(b"LogOS: terminal display resumed");
     let Some(mut sessions_handle) = native_scheduler.spawn(&mut native_sessions) else {
         fail!(b"native sessions task");
     };
-    debug::write_line(b"LogOS: sessions spawned");
     if !native_scheduler.run_next() {
         fail!(b"native sessions ready");
     }
-    debug::write_line(b"LogOS: sessions ran");
     #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
     let Some(mut storage_handle) = native_scheduler.spawn(&mut native_storage) else {
         fail!(b"native storage task");
     };
-    debug::write_line(b"LogOS: storage spawned");
     if !native_scheduler.run_next() {
         fail!(b"native storage ready");
     }
-    debug::write_line(b"LogOS: storage ran");
-    debug::write_line(b"LogOS: storage startup begin");
     check!(
         b"storage startup",
         run_storage_startup(
@@ -848,7 +837,13 @@ pub(crate) fn main(
             let storage_restart = value == "assert-storage-service-restart";
             if terminal_restart {
                 let previous = native_handle;
-                if !native_scheduler.fail(previous) || !startup.start() {
+                if !cancel_store_transaction(
+                    native_storage_store,
+                    &mut native_scheduler,
+                    storage_handle,
+                ) || !native_scheduler.fail(previous)
+                    || !startup.start()
+                {
                     return false;
                 }
                 let Some(restarted) = restart_native_service(&mut native_scheduler, previous)
@@ -924,36 +919,62 @@ pub(crate) fn main(
                 let Some(history_page) = shared_history else { return false };
                 let mut denied =
                     |request: logos_abi::StoreRequest, request_session: &session::Context| {
-                        native_store.deliver(request)
-                            && relay_store_request(
-                                native_store,
-                                native_storage_store,
-                                &mut block_dispatch,
-                                &mut block::DispatchContext {
-                                    endpoint: native_storage_block,
-                                    pages: &mut shared_pages,
-                                    store_owner: storage_owner,
-                                    store_page: storage_block_page,
-                                    device: &mut block_device,
-                                    memory: &mut memory,
-                                },
-                                terminal_owner,
-                                storage_owner,
-                                history_page,
-                                &mut native_scheduler,
-                                storage_handle,
-                                request_session,
-                                &capabilities,
-                                &mut store_relay_state,
-                                interrupts::ticks(),
+                        let delivered = unsafe {
+                            logos_core::native_service::Context::request_store_at(
+                                native_store.context(),
+                                request,
                             )
-                            .ok()
-                            && native_store.response(request.id).is_some_and(|reply| {
-                                reply.id == request.id
-                                    && reply.status == logos_abi::PersistenceStatus::Denied
-                            })
-                            && native_scheduler.wake(native_handle)
-                            && native_scheduler.run_next()
+                        } || native_store.deliver(request);
+                        if !delivered {
+                            return false;
+                        }
+                        let relayed = relay_store_request(
+                            native_store,
+                            native_storage_store,
+                            &mut block_dispatch,
+                            &mut block::DispatchContext {
+                                endpoint: native_storage_block,
+                                pages: &mut shared_pages,
+                                store_owner: storage_owner,
+                                store_page: storage_block_page,
+                                device: &mut block_device,
+                                memory: &mut memory,
+                            },
+                            terminal_owner,
+                            storage_owner,
+                            history_page,
+                            &mut native_scheduler,
+                            storage_handle,
+                            request_session,
+                            &capabilities,
+                            &mut store_relay_state,
+                            interrupts::ticks(),
+                        )
+                        .ok();
+                        if !relayed {
+                            return false;
+                        }
+                        let response = native_store.response(request.id).is_some_and(|reply| {
+                            reply.id == request.id
+                                && reply.status == logos_abi::PersistenceStatus::Denied
+                        });
+                        if !response {
+                            return false;
+                        }
+                        if !native_scheduler.wake(native_handle)
+                            || !native_scheduler.run_next()
+                            || !resume_display(
+                                native_display,
+                                &session,
+                                &capabilities,
+                                session_display_capability,
+                                &mut native_scheduler,
+                                native_handle,
+                            )
+                        {
+                            return false;
+                        }
+                        true
                     };
                 let open = test_store_request(
                     0x51,
@@ -1202,6 +1223,14 @@ pub(crate) fn main(
                     {
                         if terminal_restart_available {
                             terminal_restart_available = false;
+                            if !cancel_store_transaction(
+                                native_storage_store,
+                                &mut native_scheduler,
+                                storage_handle,
+                            ) {
+                                console_mode = mode::ConsoleMode::Recovery;
+                                break;
+                            }
                             if let Some(restarted) =
                                 restart_native_service(&mut native_scheduler, native_handle)
                             {
@@ -1400,23 +1429,16 @@ fn run_storage_startup(
     scheduler: &mut scheduler::Scheduler<'_>,
     handle: scheduler::TaskHandle,
 ) -> bool {
-    debug::write_line(b"LogOS: storage startup entered");
     interrupts::enable();
     loop {
-        debug::write_line(b"LogOS: storage startup loop");
         if scheduler.failed(handle) {
-            debug::write_line(b"LogOS: storage scheduler failed");
             return false;
         }
         let waiting = unsafe {
             logos_core::native_service::Context::input_waiting_at(context.endpoint.context())
         };
-        debug::write_line(if waiting {
-            b"LogOS: storage input waiting"
-        } else {
-            b"LogOS: storage input pending"
-        });
         if waiting {
+            debug::write_line(b"LogOS: startup waiting");
             let marker: &[u8] = match unsafe {
                 logos_core::native_service::Context::storage_status_at(context.endpoint.context())
             } {
@@ -1428,42 +1450,29 @@ fn run_storage_startup(
                 Some(logos_core::native_service::STORAGE_CORRUPT) => b"LogOS: storage corrupt",
                 Some(logos_core::native_service::STORAGE_IO_FAILED) => b"LogOS: storage io-failed",
                 _ => {
-                    debug::write_line(b"LogOS: storage status missing");
                     return false;
                 }
             };
             debug::write_line(marker);
-            debug::write_line(b"LogOS: storage ready");
             return true;
         }
-        debug::write_line(b"LogOS: storage startup poll");
         let Some(reply) = dispatch.poll(context, interrupts::ticks()) else {
-            debug::write_line(b"LogOS: storage startup poll pending");
             if dispatch.accepts_new_request() {
-                debug::write_line(b"LogOS: storage startup wait tick");
                 interrupts::wait_for_tick();
             } else {
-                debug::write_line(b"LogOS: storage startup wait virtio");
                 interrupts::wait_for_virtio();
             }
             continue;
         };
-        debug::write_line(b"LogOS: storage startup replying");
         if !context.endpoint.reply(reply) {
-            debug::write_line(b"LogOS: storage endpoint reply failed");
             return false;
         }
-        debug::write_line(b"LogOS: storage endpoint replied");
         if !scheduler.wake(handle) {
-            debug::write_line(b"LogOS: storage wake failed");
             return false;
         }
-        debug::write_line(b"LogOS: storage woken");
         if !scheduler.run_next() {
-            debug::write_line(b"LogOS: storage startup reply failed");
             return false;
         }
-        debug::write_line(b"LogOS: storage startup reply delivered");
     }
 }
 
@@ -1642,7 +1651,7 @@ fn relay_store_request(
     let Some(namespace) = store_namespace(request, state) else {
         let _ = terminal.reply(logos_abi::StoreReply {
             id: request.id,
-            status: logos_abi::PersistenceStatus::Invalid,
+            status: logos_abi::PersistenceStatus::Denied,
             version: 0,
             length: 0,
         });
@@ -1727,6 +1736,31 @@ fn relay_store_request(
         }
         current_tick = interrupts::ticks();
     }
+}
+
+fn cancel_store_transaction(
+    storage: native_task::StoreEndpoint,
+    scheduler: &mut scheduler::Scheduler<'_>,
+    storage_handle: scheduler::TaskHandle,
+) -> bool {
+    let request = logos_abi::StoreRequest {
+        id: u32::MAX,
+        operation: logos_abi::StoreOperation::Cancel,
+        namespace: logos_abi::NamespaceId(0),
+        name: [0; logos_abi::MAX_OBJECT_NAME],
+        name_length: 0,
+        version: logos_abi::VersionSelector::None,
+        offset: 0,
+        length: 0,
+        page: logos_abi::PageHandle(0),
+        deadline: 0,
+    };
+    storage.deliver(request)
+        && scheduler.wake(storage_handle)
+        && scheduler.run_next()
+        && storage
+            .response(request.id)
+            .is_some_and(|reply| reply.status == logos_abi::PersistenceStatus::Complete)
 }
 
 impl SessionRelay {

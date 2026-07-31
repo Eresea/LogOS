@@ -41,7 +41,6 @@ impl Dispatch {
         tick: u64,
     ) -> Option<logos_abi::BlockReply> {
         if let Some(request) = self.pending {
-            crate::debug::write_line(b"LogOS: block pending poll");
             let status = context.device.complete(context.memory).or_else(|| {
                 (tick >= request.deadline).then(|| context.device.timeout(context.memory))
             })?;
@@ -50,14 +49,11 @@ impl Dispatch {
         }
 
         let request = context.endpoint.request()?;
-        crate::debug::write_line(b"LogOS: block request decoded");
         let info = context.device.info();
-        crate::debug::write_line(b"LogOS: block info read");
         if !request.valid(info) {
             return Some(reply(request, logos_abi::PersistenceStatus::Invalid));
         }
         if request.operation == logos_abi::BlockOperation::Info {
-            crate::debug::write_line(b"LogOS: block info reply");
             return Some(logos_abi::BlockReply {
                 id: request.id,
                 status: logos_abi::PersistenceStatus::Complete,
