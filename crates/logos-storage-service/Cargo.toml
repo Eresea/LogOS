@@ -9,6 +9,9 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[features]
+block-probe = []
+
 [dependencies]
 logos-core = { path = "../logos-core" }
 logos-abi = { path = "../logos-abi" }

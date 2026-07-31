@@ -381,11 +381,18 @@ fn build(root: &Path, scenario: &str) -> Result<(), String> {
     if !status.success() {
         return Err("terminal service build failed".into());
     }
-    let status = Command::new("cargo")
-        .current_dir(root)
-        .args(["build", "--package", "logos-storage-service", "--target", "x86_64-unknown-uefi"])
-        .status()
-        .map_err(io_error)?;
+    let mut storage = Command::new("cargo");
+    storage.current_dir(root).args([
+        "build",
+        "--package",
+        "logos-storage-service",
+        "--target",
+        "x86_64-unknown-uefi",
+    ]);
+    if scenario == "persistence/block-read-flush" {
+        storage.args(["--features", "block-probe"]);
+    }
+    let status = storage.status().map_err(io_error)?;
     if !status.success() {
         return Err("storage service build failed".into());
     }

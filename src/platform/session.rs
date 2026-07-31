@@ -25,6 +25,14 @@ impl Principal {
     pub const fn process(id: u32) -> Self {
         Self::Process(id)
     }
+
+    pub const fn page_owner(self) -> u64 {
+        match self {
+            Self::LocalUser(id) => id as u64,
+            Self::Service(id) => (1_u64 << 32) | id as u64,
+            Self::Process(id) => (2_u64 << 32) | id as u64,
+        }
+    }
 }
 
 pub struct Context {
@@ -128,6 +136,7 @@ impl Context {
         context.id() == Id(1)
             && context.principal() == Principal::LOCAL
             && Principal::service(1) != Principal::process(1)
+            && Principal::service(1).page_owner() != Principal::process(1).page_owner()
             && context.allows(&manager, CapabilityKind::Recovery)
             && !context.allows(&manager, CapabilityKind::Debug)
             && manager.revoke(recovery)

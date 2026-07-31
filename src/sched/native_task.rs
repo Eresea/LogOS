@@ -102,6 +102,15 @@ impl StoreEndpoint {
 }
 
 impl BlockEndpoint {
+    pub fn configure(self, page: logos_core::native_service::BlockPage) -> bool {
+        unsafe {
+            logos_core::native_service::Context::configure_block_page_at(
+                self.context_physical,
+                page,
+            )
+        }
+    }
+
     #[allow(dead_code)]
     pub fn request(self) -> Option<logos_abi::BlockRequest> {
         unsafe { logos_core::native_service::Context::block_at(self.context_physical) }
@@ -202,6 +211,10 @@ impl<'a> Task<'a> {
 
     pub fn map_shared_borrowed(&mut self, address: u64) -> bool {
         self.space.map_shared_borrowed(address)
+    }
+
+    pub fn map_block_owned(&mut self, memory: &mut PhysicalMemory) -> Option<(u64, u64)> {
+        self.space.map_block_owned(memory)
     }
 
     pub fn map_heap(&mut self, memory: &mut PhysicalMemory) -> Option<u64> {

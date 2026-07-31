@@ -42,6 +42,12 @@ pub struct TextRequest {
     pub length: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockPage {
+    pub handle: logos_abi::PageHandle,
+    pub address: u64,
+}
+
 const BLOCK_REQUEST_BYTES: usize = 32;
 const STORE_REQUEST_BYTES: usize = 102;
 const BLOCK_REPLY_BYTES: usize = 21;
@@ -73,7 +79,6 @@ fn decode_block_request(bytes: &[u8]) -> Option<logos_abi::BlockRequest> {
     })
 }
 
-#[cfg(test)]
 fn encode_block_request(bytes: &mut [u8; MAX_TEXT], request: logos_abi::BlockRequest) {
     *bytes = [0; MAX_TEXT];
     write_u32(bytes, 0, request.id);
@@ -428,6 +433,67 @@ impl Context {
     }
 
     /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping before service startup.
+    pub unsafe fn configure_block_page_at(address: u64, page: BlockPage) -> bool {
+        if page.handle.0 == 0
+            || page.address == 0
+            || !page.address.is_multiple_of(logos_abi::PAGE_SIZE as u64)
+        {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != 0
+            || context.status != 0
+        {
+            return false;
+        }
+        context.input = page.handle.0;
+        context.x = page.address as u32;
+        context.y = (page.address >> 32) as u32;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn block_page_at(address: u64) -> Option<BlockPage> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        let page = BlockPage {
+            handle: logos_abi::PageHandle(context.input),
+            address: u64::from(context.x) | (u64::from(context.y) << 32),
+        };
+        (context.abi == ABI
+            && context.reserved == 0
+            && page.handle.0 != 0
+            && page.address != 0
+            && page.address.is_multiple_of(logos_abi::PAGE_SIZE as u64))
+        .then_some(page)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by the caller.
+    pub unsafe fn request_block_at(address: u64, request: logos_abi::BlockRequest) -> bool {
+        if !request.valid_shape() {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.status != ACKNOWLEDGED
+            || !matches!(context.operation, READY | BLOCK_REPLY)
+        {
+            return false;
+        }
+        encode_block_request(&mut context.text, request);
+        context.text_length = BLOCK_REQUEST_BYTES as u32;
+        context.operation = BLOCK_REQUEST;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
     pub unsafe fn reply_block_at(address: u64, reply: logos_abi::BlockReply) -> bool {
         let Some(request) = (unsafe { Self::block_at(address) }) else {
@@ -672,5 +738,40 @@ mod tests {
         assert!(unsafe { Context::reply_block_at(address, block_reply) });
         assert!(unsafe { Context::block_reply_at(address, 10) }.is_none());
         assert_eq!(unsafe { Context::block_reply_at(address, 9) }, Some(block_reply));
+    }
+
+    #[test]
+    fn block_page_is_configured_and_reply_ids_are_checked() {
+        let mut context = Context::new();
+        let address = (&mut context as *mut Context) as u64;
+        let page = BlockPage { handle: logos_abi::PageHandle(7), address: 0x2000 };
+        assert!(unsafe { Context::configure_block_page_at(address, page) });
+        assert_eq!(unsafe { Context::block_page_at(address) }, Some(page));
+        context.operation = READY;
+        context.status = ACKNOWLEDGED;
+        unsafe { (address as *mut Context).write_volatile(context) };
+        let request = logos_abi::BlockRequest {
+            id: 3,
+            operation: logos_abi::BlockOperation::Info,
+            lba: 0,
+            blocks: 0,
+            page: logos_abi::PageHandle(0),
+            deadline: 1,
+        };
+        assert!(unsafe { Context::request_block_at(address, request) });
+        assert!(!unsafe {
+            Context::reply_block_at(
+                address,
+                logos_abi::BlockReply {
+                    id: 4,
+                    status: logos_abi::PersistenceStatus::Complete,
+                    info: logos_abi::BlockInfo {
+                        logical_block_size: 512,
+                        blocks: 1,
+                        max_transfer_blocks: 1,
+                    },
+                },
+            )
+        });
     }
 }

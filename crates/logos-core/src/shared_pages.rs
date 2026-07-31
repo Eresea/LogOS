@@ -5,8 +5,8 @@ const PAGES: usize = 32;
 #[derive(Clone, Copy)]
 struct Slot {
     address: u64,
-    owner: u32,
-    borrower: Option<u32>,
+    owner: u64,
+    borrower: Option<u64>,
     generation: u16,
     active: bool,
 }
@@ -22,7 +22,7 @@ impl SharedPages {
         Self { slots: [EMPTY; PAGES] }
     }
 
-    pub fn register(&mut self, owner: u32, address: u64, quota: usize) -> Option<PageHandle> {
+    pub fn register(&mut self, owner: u64, address: u64, quota: usize) -> Option<PageHandle> {
         if address == 0
             || !address.is_multiple_of(logos_abi::PAGE_SIZE as u64)
             || self.slots.iter().filter(|slot| slot.active && slot.owner == owner).count() >= quota
@@ -38,7 +38,7 @@ impl SharedPages {
         })
     }
 
-    pub fn lend(&mut self, owner: u32, handle: PageHandle, borrower: u32) -> bool {
+    pub fn lend(&mut self, owner: u64, handle: PageHandle, borrower: u64) -> bool {
         let Some(slot) = self.slot_mut(handle) else {
             return false;
         };
@@ -49,7 +49,7 @@ impl SharedPages {
         true
     }
 
-    pub fn return_loan(&mut self, borrower: u32, handle: PageHandle) -> bool {
+    pub fn return_loan(&mut self, borrower: u64, handle: PageHandle) -> bool {
         let Some(slot) = self.slot_mut(handle) else {
             return false;
         };
@@ -60,12 +60,12 @@ impl SharedPages {
         true
     }
 
-    pub fn address(&self, principal: u32, handle: PageHandle) -> Option<u64> {
+    pub fn address(&self, principal: u64, handle: PageHandle) -> Option<u64> {
         let slot = self.slot(handle)?;
         (slot.owner == principal || slot.borrower == Some(principal)).then_some(slot.address)
     }
 
-    pub fn release(&mut self, owner: u32, handle: PageHandle) -> Option<u64> {
+    pub fn release(&mut self, owner: u64, handle: PageHandle) -> Option<u64> {
         let slot = self.slot_mut(handle)?;
         if slot.owner != owner || slot.borrower.is_some() {
             return None;
@@ -76,7 +76,7 @@ impl SharedPages {
         Some(address)
     }
 
-    pub fn reclaim(&mut self, owner: u32, mut release: impl FnMut(u64)) -> usize {
+    pub fn reclaim(&mut self, owner: u64, mut release: impl FnMut(u64)) -> usize {
         let mut reclaimed = 0;
         for slot in &mut self.slots {
             if slot.active && slot.owner == owner {
@@ -107,6 +107,14 @@ impl Default for SharedPages {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub fn self_check() -> bool {
+    let mut pages = SharedPages::new();
+    let Some(page) = pages.register(1, 0x1000, 1) else { return false };
+    let unauthorized = pages.address(2, page).is_none();
+    let released = pages.release(1, page).is_some();
+    unauthorized && released && pages.address(1, page).is_none()
 }
 
 #[cfg(test)]

@@ -134,29 +134,29 @@ shape before QEMU Store I/O.
 
 ### Phase 3: dispatch Store-owned Block requests through Core
 
-- [ ] Give Store one owned transfer page for Block I/O.
-- [ ] Keep client transfer pages separate from Store's Block transfer page.
-- [ ] Extend the fixed address-space mapping only enough to map those two shared pages.
-- [ ] Register the Block page with Store's real principal; remove numeric owner literals.
-- [ ] Map the Block page writable and non-executable in Store.
-- [ ] Resolve every request page through `SharedPages::address` for Store's principal.
-- [ ] Deny stale, unowned, unloaned, or wrong-principal page handles.
-- [ ] Handle `Info` from `block_device.info()` without submitting a VirtIO descriptor.
-- [ ] Submit valid `Read`, `Write`, and `Flush` requests to the existing Block driver.
-- [ ] Return immediate validation, cancellation, reset, and allocation failures to Store.
-- [ ] Wait for the matching VirtIO completion without busy-spinning.
-- [ ] On deadline, call the existing timeout/reset path exactly once.
-- [ ] Return the matching request ID and final status to Store.
-- [ ] Wake Store only after its reply is complete in the context page.
-- [ ] Reject a second request while one request is pending.
-- [ ] Cancel or time out a pending request when Store exits.
-- [ ] Reclaim Store-owned pages when Store exits.
-- [ ] Keep the terminal, Sessions, and recovery console responsive after a failed Block request.
-- [ ] Add a Core self-check for an unauthorized Block page.
-- [ ] Add a Core self-check for a stale Block page generation.
-- [ ] Add a Core self-check for a mismatched Block reply ID.
-- [ ] Run `cargo test -p logos-core`.
-- [ ] Run `cargo run -p logos-test -- run persistence/block-read-flush`.
+- [x] Give Store one owned transfer page for Block I/O.
+- [x] Keep client transfer pages separate from Store's Block transfer page.
+- [x] Extend the fixed address-space mapping only enough to map those two shared pages.
+- [x] Register the Block page with Store's real principal; remove numeric owner literals.
+- [x] Map the Block page writable and non-executable in Store.
+- [x] Resolve every request page through `SharedPages::address` for Store's principal.
+- [x] Deny stale, unowned, unloaned, or wrong-principal page handles.
+- [x] Handle `Info` from `block_device.info()` without submitting a VirtIO descriptor.
+- [x] Submit valid `Read`, `Write`, and `Flush` requests to the existing Block driver.
+- [x] Return immediate validation, cancellation, reset, and allocation failures to Store.
+- [x] Wait for the matching VirtIO completion without busy-spinning.
+- [x] On deadline, call the existing timeout/reset path exactly once.
+- [x] Return the matching request ID and final status to Store.
+- [x] Wake Store only after its reply is complete in the context page.
+- [x] Reject a second request while one request is pending.
+- [x] Cancel or time out a pending request when Store exits.
+- [x] Reclaim Store-owned pages when Store exits.
+- [x] Keep the terminal, Sessions, and recovery console responsive after a failed Block request.
+- [x] Add a Core self-check for an unauthorized Block page.
+- [x] Add a Core self-check for a stale Block page generation.
+- [x] Add a Core self-check for a mismatched Block reply ID.
+- [x] Run `cargo test -p logos-core`.
+- [x] Run `cargo run -p logos-test -- run persistence/block-read-flush`.
 - [ ] Commit Core Block dispatch.
 
 ### Phase 4: run Store on the raw disk

@@ -14,6 +14,8 @@ const USER: u64 = 1 << 2;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 const SHARED_PAGE: usize = ENTRIES - 5;
+const BLOCK_PAGE: usize = ENTRIES - 10;
+const CONTEXT_PAGE: usize = ENTRIES - 4;
 const HEAP_PAGE: usize = ENTRIES - 9;
 const HEAP_PAGES: usize = 4;
 
@@ -162,7 +164,6 @@ impl AddressSpace {
     }
 
     pub fn map_context(&mut self, physical: &mut PhysicalMemory) -> Option<(u64, u64)> {
-        const CONTEXT_PAGE: usize = ENTRIES - 4;
         if self.mapping(CONTEXT_PAGE).is_some() {
             return None;
         }
@@ -199,6 +200,24 @@ impl AddressSpace {
                 .write_volatile(address | PRESENT | WRITABLE | USER | NO_EXECUTE);
         }
         Some(address)
+    }
+
+    pub fn map_block_owned(&mut self, physical: &mut PhysicalMemory) -> Option<(u64, u64)> {
+        if self.mapping(BLOCK_PAGE).is_some() {
+            return None;
+        }
+        let page = physical.allocate_owned()?;
+        let address = page.address();
+        if let Err(page) = self.insert_mapping(BLOCK_PAGE, page) {
+            let _ = physical.release_page(page);
+            return None;
+        }
+        unsafe {
+            (self.pt.address() as *mut u64)
+                .add(BLOCK_PAGE)
+                .write_volatile(address | PRESENT | WRITABLE | USER | NO_EXECUTE);
+        }
+        Some((address, self.base + PAGE_SIZE * BLOCK_PAGE as u64))
     }
 
     pub fn map_heap(&mut self, physical: &mut PhysicalMemory) -> Option<u64> {

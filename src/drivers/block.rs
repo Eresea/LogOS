@@ -229,21 +229,6 @@ impl Device {
         (self.resets, self.timeouts, self.last_recovery_failed)
     }
 
-    #[cfg(feature = "block-probe")]
-    pub fn probe_state(&self) -> (u8, u16, u32, u16, u16) {
-        let available =
-            self.queue.address() + (self.queue_size * core::mem::size_of::<Descriptor>()) as u64;
-        unsafe {
-            (
-                inb(self.base + 0x12),
-                inw(self.base + 0x0c),
-                inl(self.base + 0x08),
-                ((available + 2) as *const u16).read_volatile(),
-                self.used_index(),
-            )
-        }
-    }
-
     fn reset(&mut self) -> bool {
         self.resets = self.resets.saturating_add(1);
         let Ok(pfn) = u32::try_from(self.queue.address() >> 12) else {

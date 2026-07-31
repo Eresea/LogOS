@@ -282,7 +282,6 @@ pub(crate) fn main(
     }) else {
         fail!(b"block routing");
     };
-    #[cfg_attr(not(feature = "block-probe"), allow(unused_mut))]
     let Some(mut block_device) = block_driver::Device::bind(block_pci, block_gsi, &mut memory)
     else {
         fail!(b"block bind");
@@ -290,12 +289,11 @@ pub(crate) fn main(
     check!(
         b"block device",
         block_driver::self_check()
+            && block::self_check()
             && block::NAME == b"virtio-block"
             && block_device.info().valid()
             && block_device.diagnostics() == (0, 0, false),
     );
-    #[cfg(feature = "block-probe")]
-    check!(b"block probe", block_probe(&mut block_device, &mut memory));
     let Some(supervisor) = supervisor::boot_plan(supervisor::Profile::Normal).ok() else {
         fail!(b"supervisor manifest");
     };
@@ -561,18 +559,33 @@ pub(crate) fn main(
     };
     check!(b"storage heap", native_storage.map_heap(&mut memory).is_some());
     let mut shared_pages = logos_core::shared_pages::SharedPages::new();
+    let terminal_owner = session.principal().page_owner();
+    let storage_owner = storage_service_handle.principal().page_owner();
     let shared_history = native_terminal.map_shared_owned(&mut memory).and_then(|page| {
         shared_pages
-            .register(1, page, 1)
-            .filter(|handle| shared_pages.lend(1, *handle, 2))
+            .register(terminal_owner, page, 1)
+            .filter(|handle| shared_pages.lend(terminal_owner, *handle, storage_owner))
             .filter(|_| native_storage.map_shared_borrowed(page))
     });
+    let Some((storage_block_physical, storage_block_virtual)) =
+        native_storage.map_block_owned(&mut memory)
+    else {
+        fail!(b"storage block page");
+    };
+    #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
+    let Some(mut storage_block_page) =
+        shared_pages.register(storage_owner, storage_block_physical, 1)
+    else {
+        fail!(b"storage block page");
+    };
     check!(
         b"terminal storage page",
         shared_history.is_some_and(|handle| {
-            shared_pages.address(1, handle).is_some() && shared_pages.address(2, handle).is_some()
+            shared_pages.address(terminal_owner, handle).is_some()
+                && shared_pages.address(storage_owner, handle).is_some()
         }),
     );
+    check!(b"shared pages", logos_core::shared_pages::self_check());
     let mut service_task = virtio::ServiceTask::new(
         &mut virtio_service,
         &channel,
@@ -636,6 +649,15 @@ pub(crate) fn main(
     let native_command = native_terminal.syscall_endpoint();
     let native_display = native_terminal.display_endpoint();
     let native_sessions_endpoint = native_sessions.session_endpoint();
+    let native_storage_block = native_storage.block_endpoint();
+    check!(
+        b"storage block page",
+        native_storage_block.configure(logos_core::native_service::BlockPage {
+            handle: storage_block_page,
+            address: storage_block_virtual,
+        }),
+    );
+    let mut block_dispatch = block::Dispatch::new();
     let mut native_scheduler = scheduler::Scheduler::new();
     let Some(mut native_handle) = native_scheduler.spawn(&mut native_terminal) else {
         fail!(b"native terminal task");
@@ -659,13 +681,30 @@ pub(crate) fn main(
     if !native_scheduler.run_next() {
         fail!(b"native sessions ready");
     }
-    let Some(storage_handle) = native_scheduler.spawn(&mut native_storage) else {
+    #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
+    let Some(mut storage_handle) = native_scheduler.spawn(&mut native_storage) else {
         fail!(b"native storage task");
     };
     if !native_scheduler.run_next() {
         fail!(b"native storage ready");
     }
-    let _ = storage_handle;
+    #[cfg(feature = "block-probe")]
+    check!(
+        b"block dispatch",
+        run_storage_block_probe(
+            &mut block_dispatch,
+            &mut block::DispatchContext {
+                endpoint: native_storage_block,
+                pages: &shared_pages,
+                store_owner: storage_owner,
+                store_page: storage_block_page,
+                device: &mut block_device,
+                memory: &mut memory,
+            },
+            &mut native_scheduler,
+            storage_handle
+        ),
+    );
     health.finish();
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(|value| {
@@ -709,13 +748,35 @@ pub(crate) fn main(
         }
         if storage_restart {
             let previous = storage_handle;
+            block_dispatch.cancel_on_exit(&mut block::DispatchContext {
+                endpoint: native_storage_block,
+                pages: &shared_pages,
+                store_owner: storage_owner,
+                store_page: storage_block_page,
+                device: &mut block_device,
+                memory: &mut memory,
+            });
+            let Some(page) = shared_pages.release(storage_owner, storage_block_page) else {
+                return false;
+            };
+            let Some(replacement) = shared_pages.register(storage_owner, page, 1) else {
+                return false;
+            };
+            storage_block_page = replacement;
             if !native_scheduler.fail(previous) || !startup.start() {
                 return false;
             }
-            let Some(restarted) = restart_native_service(&mut native_scheduler, previous) else {
+            let Some(restarted) = native_scheduler.restart(previous) else {
                 return false;
             };
-            let _ = restarted;
+            if !native_storage_block.configure(logos_core::native_service::BlockPage {
+                handle: storage_block_page,
+                address: storage_block_virtual,
+            }) || !native_scheduler.run_next()
+            {
+                return false;
+            };
+            storage_handle = restarted;
             if native_scheduler.wake(previous) {
                 return false;
             }
@@ -885,6 +946,22 @@ pub(crate) fn main(
                 debug::write_line(b"LogOS: service heartbeat overdue");
                 let _ = service_lifecycle.failed(tick);
             }
+            if !dispatch_store_block(
+                &mut block_dispatch,
+                &mut block::DispatchContext {
+                    endpoint: native_storage_block,
+                    pages: &shared_pages,
+                    store_owner: storage_owner,
+                    store_page: storage_block_page,
+                    device: &mut block_device,
+                    memory: &mut memory,
+                },
+                &mut native_scheduler,
+                storage_handle,
+                tick,
+            ) {
+                debug::write_line(b"LogOS: storage block reply failed");
+            }
             if let Some(event) = input.next(tick, keyboard::poll_scancode) {
                 if let Some(native_event) = native_input_event(event) {
                     if !native_input.deliver(native_event)
@@ -1019,6 +1096,20 @@ pub(crate) fn main(
             if service_scheduler.run_next() {
                 let _ = service_health.beat(balloon::NAME, tick);
             }
+            let _ = dispatch_store_block(
+                &mut block_dispatch,
+                &mut block::DispatchContext {
+                    endpoint: native_storage_block,
+                    pages: &shared_pages,
+                    store_owner: storage_owner,
+                    store_page: storage_block_page,
+                    device: &mut block_device,
+                    memory: &mut memory,
+                },
+                &mut native_scheduler,
+                storage_handle,
+                tick,
+            );
         })
     }
     loop {
@@ -1026,81 +1117,45 @@ pub(crate) fn main(
     }
 }
 
-#[cfg(feature = "block-probe")]
-fn block_probe(device: &mut block_driver::Device, memory: &mut memory::PhysicalMemory) -> bool {
-    let Some(page) = memory.allocate_owned() else { return false };
-    let request = logos_abi::BlockRequest {
-        id: 0,
-        operation: logos_abi::BlockOperation::Read,
-        lba: 0,
-        blocks: 1,
-        page: logos_abi::PageHandle(0),
-        deadline: interrupts::ticks().saturating_add(10),
-    };
-    if device.submit(request, Some(page.address()), memory)
-        != logos_abi::PersistenceStatus::Complete
-    {
-        debug::write_line(b"LogOS: block probe submit rejected");
-        return memory.release_page(page);
-    }
-    debug_block_state(device.probe_state());
-    let status = loop {
-        if let Some(status) = device.complete(memory) {
-            break status;
-        }
-        if interrupts::ticks() >= request.deadline {
-            break device.timeout(memory);
-        }
-        interrupts::wait_for_tick();
-    };
-    let released = memory.release_page(page);
-    debug::write_line(match status {
-        logos_abi::PersistenceStatus::Complete => b"LogOS: block probe read complete",
-        logos_abi::PersistenceStatus::TimedOut => b"LogOS: block probe read timed out",
-        _ => b"LogOS: block probe read failed",
-    });
-    status == logos_abi::PersistenceStatus::Complete
-        && released
-        && block_probe_flush(device, memory, request)
-}
-
-#[cfg(feature = "block-probe")]
-fn block_probe_flush(
-    device: &mut block_driver::Device,
-    memory: &mut memory::PhysicalMemory,
-    request: logos_abi::BlockRequest,
+fn dispatch_store_block(
+    dispatch: &mut block::Dispatch,
+    context: &mut block::DispatchContext<'_>,
+    scheduler: &mut scheduler::Scheduler<'_>,
+    handle: scheduler::TaskHandle,
+    tick: u64,
 ) -> bool {
-    let request = logos_abi::BlockRequest {
-        operation: logos_abi::BlockOperation::Flush,
-        deadline: interrupts::ticks().saturating_add(10),
-        ..request
+    let Some(reply) = dispatch.poll(context, tick) else {
+        return true;
     };
-    if device.submit(request, None, memory) != logos_abi::PersistenceStatus::Complete {
-        return false;
-    }
-    loop {
-        if let Some(status) = device.complete(memory) {
-            return status == logos_abi::PersistenceStatus::Complete;
-        }
-        if interrupts::ticks() >= request.deadline {
-            let _ = device.timeout(memory);
-            return false;
-        }
-        interrupts::wait_for_tick();
-    }
+    context.endpoint.reply(reply) && scheduler.wake(handle) && scheduler.run_next()
 }
 
 #[cfg(feature = "block-probe")]
-fn debug_block_state((status, queue, pfn, available, used): (u8, u16, u32, u16, u16)) {
-    debug::write(b"LogOS: block state ");
-    for value in [u32::from(status), u32::from(queue), pfn, u32::from(available), u32::from(used)] {
-        for shift in [12, 8, 4, 0] {
-            let digit = ((value >> shift) & 15) as u8;
-            debug::write(&[if digit < 10 { b'0' + digit } else { b'a' + digit - 10 }]);
+fn run_storage_block_probe(
+    dispatch: &mut block::Dispatch,
+    context: &mut block::DispatchContext<'_>,
+    scheduler: &mut scheduler::Scheduler<'_>,
+    handle: scheduler::TaskHandle,
+) -> bool {
+    for id in 1..=3 {
+        loop {
+            let Some(reply) = dispatch.poll(context, interrupts::ticks()) else {
+                interrupts::wait_for_tick();
+                continue;
+            };
+            if reply.id != id
+                || reply.status != logos_abi::PersistenceStatus::Complete
+                || (id == 1 && !reply.info.valid())
+                || !context.endpoint.reply(reply)
+                || !scheduler.wake(handle)
+                || !scheduler.run_next()
+            {
+                return false;
+            }
+            break;
         }
-        debug::write(b" ");
     }
-    debug::write_line(b"");
+    true
 }
 
 fn native_input_event(event: input::Event) -> Option<logos_abi::InputEvent> {
