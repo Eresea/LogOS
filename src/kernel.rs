@@ -735,7 +735,7 @@ pub(crate) fn main(
     let mut store_relay_state = StoreRelayState::new();
     if !native_input.deliver(logos_abi::InputEvent::STARTUP)
         || !native_scheduler.wake(native_handle)
-        || !native_scheduler.run_next()
+        || !native_scheduler.run(native_handle)
     {
         fail!(b"terminal history startup");
     }
@@ -878,7 +878,7 @@ pub(crate) fn main(
                 }
                 if !native_input.deliver(logos_abi::InputEvent::STARTUP)
                     || !native_scheduler.wake(native_handle)
-                    || !native_scheduler.run_next()
+                    || !native_scheduler.run(native_handle)
                 {
                     return false;
                 }
@@ -938,7 +938,7 @@ pub(crate) fn main(
                 let mut send = |event: logos_abi::InputEvent, expected: Option<&[u8]>| {
                     if !native_input.deliver(event)
                         || !native_scheduler.wake(native_handle)
-                        || !native_scheduler.run_next()
+                        || !native_scheduler.run(native_handle)
                         || !resume_display(
                             native_display,
                             &session,
@@ -990,7 +990,7 @@ pub(crate) fn main(
                     });
                     native_command.reply(&[])
                         && native_scheduler.wake(native_handle)
-                        && native_scheduler.run_next()
+                        && native_scheduler.run(native_handle)
                         && resume_display(
                             native_display,
                             &session,
@@ -1037,7 +1037,7 @@ pub(crate) fn main(
                 if native_scheduler.wake(previous)
                     || !native_input.deliver(logos_abi::InputEvent::STARTUP)
                     || !native_scheduler.wake(native_handle)
-                    || !native_scheduler.run_next()
+                    || !native_scheduler.run(native_handle)
                     || !relay_terminal_store_requests(
                         native_store,
                         native_storage_store,
@@ -1170,7 +1170,7 @@ pub(crate) fn main(
                             return false;
                         }
                         if !native_scheduler.wake(native_handle)
-                            || !native_scheduler.run_next()
+                            || !native_scheduler.run(native_handle)
                             || !resume_display(
                                 native_display,
                                 &session,
@@ -1219,14 +1219,14 @@ pub(crate) fn main(
                     [0; logos_abi::MAX_SESSION_TEXT],
                     0,
                 )) && native_scheduler.wake(sessions_handle)
-                    && native_scheduler.run_next()
+                    && native_scheduler.run(sessions_handle)
                     && native_sessions_endpoint.effect().is_some_and(|effect| {
                         effect.effect == logos_abi::Effect::ReadTasks
                             && native_sessions_endpoint
                                 .reply_effect(logos_abi::EffectResult::TasksActive)
                     })
                     && native_scheduler.wake(sessions_handle)
-                    && native_scheduler.run_next()
+                    && native_scheduler.run(sessions_handle)
                     && native_sessions_endpoint.reply().is_some_and(|reply| {
                         reply.length == b"scheduler active".len()
                             && reply.text[..reply.length] == *b"scheduler active"
@@ -1291,7 +1291,7 @@ pub(crate) fn main(
                 let passed = logos_abi::InputEvent::from_byte(b'x').is_some_and(|event| {
                     native_input.deliver(event)
                         && native_scheduler.wake(native_handle)
-                        && native_scheduler.run_next()
+                        && native_scheduler.run(native_handle)
                         && !resume_display(
                             native_display,
                             &denied_session,
@@ -1308,7 +1308,7 @@ pub(crate) fn main(
                 logos_abi::InputEvent::from_byte(byte)
                     .is_some_and(|event| native_input.deliver(event))
                     && native_scheduler.wake(native_handle)
-                    && native_scheduler.run_next()
+                    && native_scheduler.run(native_handle)
                     && (if native_display.pending() {
                         resume_display(
                             native_display,
@@ -1374,7 +1374,7 @@ pub(crate) fn main(
                                 })
                                 && (!expect_qwerty || input.layout() == input::Layout::Qwerty)
                                 && native_scheduler.wake(native_handle)
-                                && native_scheduler.run_next()
+                                && native_scheduler.run(native_handle)
                                 && resume_display(
                                     native_display,
                                     &session,
@@ -1442,7 +1442,7 @@ pub(crate) fn main(
                 if let Some(native_event) = native_input_event(event) {
                     if !native_input.deliver(native_event)
                         || !native_scheduler.wake(native_handle)
-                        || !native_scheduler.run_next()
+                        || !native_scheduler.run(native_handle)
                         || !resume_display(
                             native_display,
                             &session,
@@ -1468,7 +1468,7 @@ pub(crate) fn main(
                                 native_handle = restarted;
                                 store_relay_state.clear();
                                 if native_scheduler.wake(native_handle)
-                                    && native_scheduler.run_next()
+                                    && native_scheduler.run(native_handle)
                                     && resume_display(
                                         native_display,
                                         &session,
@@ -1576,7 +1576,7 @@ pub(crate) fn main(
                             }
                             SessionRelay::Handled(true) => {
                                 if !native_scheduler.wake(native_handle)
-                                    || !native_scheduler.run_next()
+                                    || !native_scheduler.run(native_handle)
                                     || !resume_display(
                                         native_display,
                                         &session,
@@ -1651,7 +1651,7 @@ fn dispatch_store_block(
     let Some(reply) = dispatch.poll(context, tick) else {
         return true;
     };
-    context.endpoint.reply(reply) && scheduler.wake(handle) && scheduler.run_next()
+    context.endpoint.reply(reply) && scheduler.wake(handle) && scheduler.run(handle)
 }
 
 fn run_storage_startup(
@@ -1706,7 +1706,7 @@ fn run_storage_startup(
         if !scheduler.wake(handle) {
             return false;
         }
-        if !scheduler.run_next() {
+        if !scheduler.run(handle) {
             return false;
         }
     }
@@ -1768,7 +1768,7 @@ fn resume_display(
             || !capabilities.allows(capability, capabilities::CapabilityKind::Display)
             || !native_display::handle(endpoint.context())
             || !scheduler.wake(handle)
-            || !scheduler.run_next()
+            || !scheduler.run(handle)
         {
             return false;
         }
@@ -1784,7 +1784,7 @@ fn resume_probe_display(
     while endpoint.pending() {
         if !native_display::handle(endpoint.context())
             || !scheduler.wake(handle)
-            || !scheduler.run_next()
+            || !scheduler.run(handle)
         {
             return false;
         }
@@ -1942,7 +1942,7 @@ fn relay_store_request(
         }
         return SessionRelay::Handled(false);
     }
-    if !scheduler.wake(storage_handle) || !scheduler.run_next() {
+    if !scheduler.wake(storage_handle) || !scheduler.run(storage_handle) {
         if loaned {
             let _ = block_context.pages.return_loan(storage_owner, request.page);
         }
@@ -1969,7 +1969,7 @@ fn relay_store_request(
         if let Some(reply) = dispatch.poll(block_context, current_tick) {
             if !block_context.endpoint.reply(reply)
                 || !scheduler.wake(storage_handle)
-                || !scheduler.run_next()
+                || !scheduler.run(storage_handle)
             {
                 if loaned {
                     let _ = block_context.pages.return_loan(storage_owner, request.page);
@@ -2029,7 +2029,7 @@ fn relay_terminal_store_requests(
                 return false;
             }
         }
-        if !scheduler.wake(terminal_handle) || !scheduler.run_next() {
+        if !scheduler.wake(terminal_handle) || !scheduler.run(terminal_handle) {
             return false;
         }
     }
@@ -2055,7 +2055,7 @@ fn cancel_store_transaction(
     };
     storage.deliver(request)
         && scheduler.wake(storage_handle)
-        && scheduler.run_next()
+        && scheduler.run(storage_handle)
         && storage
             .response(request.id)
             .is_some_and(|reply| reply.status == logos_abi::PersistenceStatus::Complete)
@@ -2079,7 +2079,7 @@ fn restart_native_service(
         return None;
     }
     let restarted = scheduler.restart(handle)?;
-    (scheduler.run_next() && !scheduler.failed(restarted)).then_some(restarted)
+    (scheduler.run(restarted) && !scheduler.failed(restarted)).then_some(restarted)
 }
 
 fn relay_session_request(
@@ -2095,21 +2095,32 @@ fn relay_session_request(
     if !context.session.allows(context.capabilities, capabilities::CapabilityKind::Session) {
         return SessionRelay::Handled(terminal.reply(b"permission denied"));
     }
-    if !sessions.deliver(request) || !scheduler.wake(sessions_handle) || !scheduler.run_next() {
+    if !sessions.deliver(request)
+        || !scheduler.wake(sessions_handle)
+        || !scheduler.run(sessions_handle)
+    {
         return SessionRelay::Handled(false);
     }
     let Some(effect) = sessions.effect() else {
         return SessionRelay::Handled(false);
     };
     let result = effects::execute(effect, context);
-    if !sessions.reply_effect(result) || !scheduler.wake(sessions_handle) || !scheduler.run_next() {
+    if !sessions.reply_effect(result)
+        || !scheduler.wake(sessions_handle)
+        || !scheduler.run(sessions_handle)
+    {
         return SessionRelay::Handled(false);
     }
-    let forwarded = sessions.reply().is_some_and(|reply| {
-        terminal.reply(&reply.text[..reply.length])
-            && scheduler.wake(sessions_handle)
-            && scheduler.run_next()
-    });
+    let Some(reply) = sessions.reply() else {
+        return SessionRelay::Handled(false);
+    };
+    if !terminal.reply(&reply.text[..reply.length]) {
+        return SessionRelay::Handled(false);
+    }
+    if !scheduler.wake(sessions_handle) || !scheduler.run(sessions_handle) {
+        return SessionRelay::Handled(false);
+    }
+    let forwarded = true;
     if result == logos_abi::EffectResult::Recovery && forwarded {
         SessionRelay::Recovery
     } else {

@@ -90,31 +90,21 @@ impl<'a> Scheduler<'a> {
         for _ in 0..TASKS {
             let index = self.next;
             self.next = (self.next + 1) % TASKS;
-            if let Some(mut entry) = self.tasks[index].take() {
-                if entry.waiting.is_some() {
-                    self.tasks[index] = Some(entry);
-                    continue;
-                }
-                match entry.task.run() {
-                    TaskState::Ready => self.tasks[index] = Some(entry),
-                    TaskState::Blocked(event) => {
-                        entry.waiting = Some(event);
-                        self.tasks[index] = Some(entry);
-                        crate::trace::record(crate::trace::Event::TaskBlocked);
-                    }
-                    TaskState::Complete => {
-                        self.generations[index] = self.generations[index].wrapping_add(1);
-                    }
-                    TaskState::Failed => {
-                        entry.waiting = Some(Event::FAILURE);
-                        self.tasks[index] = Some(entry);
-                        crate::trace::record(crate::trace::Event::Fault);
-                    }
-                }
+            if self.run_index(index) {
                 return true;
             }
         }
         false
+    }
+
+    pub fn run(&mut self, handle: TaskHandle) -> bool {
+        let index = handle.0 as u16 as usize;
+        let generation = (handle.0 >> 16) as u16;
+        self.tasks
+            .get(index)
+            .and_then(Option::as_ref)
+            .is_some_and(|entry| entry.generation == generation)
+            && self.run_index(index)
     }
 
     pub fn wake(&mut self, handle: TaskHandle) -> bool {
@@ -181,6 +171,31 @@ impl<'a> Scheduler<'a> {
         let index = handle.0 as u16 as usize;
         let generation = (handle.0 >> 16) as u16;
         self.tasks.get_mut(index)?.as_mut().filter(|entry| entry.generation == generation)
+    }
+
+    fn run_index(&mut self, index: usize) -> bool {
+        let Some(mut entry) = self.tasks[index].take() else { return false };
+        if entry.waiting.is_some() {
+            self.tasks[index] = Some(entry);
+            return false;
+        }
+        match entry.task.run() {
+            TaskState::Ready => self.tasks[index] = Some(entry),
+            TaskState::Blocked(event) => {
+                entry.waiting = Some(event);
+                self.tasks[index] = Some(entry);
+                crate::trace::record(crate::trace::Event::TaskBlocked);
+            }
+            TaskState::Complete => {
+                self.generations[index] = self.generations[index].wrapping_add(1);
+            }
+            TaskState::Failed => {
+                entry.waiting = Some(Event::FAILURE);
+                self.tasks[index] = Some(entry);
+                crate::trace::record(crate::trace::Event::Fault);
+            }
+        }
+        true
     }
 }
 

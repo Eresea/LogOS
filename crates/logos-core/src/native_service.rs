@@ -282,6 +282,7 @@ impl Context {
         context.x = request.syscall as u32;
         context.text = request.argument;
         context.text_length = request.length as u32;
+        context.operation = SYSCALL;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -714,7 +715,8 @@ pub fn self_check() -> bool {
     let request = logos_abi::SessionRequest::new(logos_abi::Syscall::Tasks, [0; MAX_TEXT], 0);
     syscall.operation = READ_INPUT;
     let delivered =
-        unsafe { Context::deliver_session_at((&mut syscall as *mut Context) as u64, request) };
+        unsafe { Context::deliver_session_at((&mut syscall as *mut Context) as u64, request) }
+            && syscall.operation == SYSCALL;
     syscall.operation = SESSION_EFFECT;
     syscall.x = logos_abi::Effect::ReadTasks as u32;
     let effect = unsafe {
