@@ -13,8 +13,8 @@ use logos_terminal::{
 static HEADER: Header = Header::new(*b"terminal\0\0\0\0\0\0\0\0", logos_service_entry);
 
 #[unsafe(no_mangle)]
-extern "C" fn logos_service_entry(context: *mut logos_service_rt::RawContext) -> ! {
-    unsafe { logos_service_rt::entry(context, run) }
+extern "C" fn logos_service_entry(context: logos_service_rt::EntryContext) -> ! {
+    logos_service_rt::entry(context, run)
 }
 
 fn run(context: &mut Context) -> ! {
