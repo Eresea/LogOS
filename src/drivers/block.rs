@@ -242,11 +242,22 @@ impl Device {
             outl(self.base + 0x04, FEATURE_FLUSH);
             outw(self.base + 0x0e, 0);
             outl(self.base + 0x08, pfn);
-            outb(self.base + 0x12, ACKNOWLEDGE | DRIVER | DRIVER_OK);
         }
+        let available =
+            self.queue.address() + (self.queue_size * core::mem::size_of::<Descriptor>()) as u64;
+        let used = (available + 6 + self.queue_size as u64 * 2 + 4095) & !4095;
+        unsafe {
+            (available as *mut u16).write_volatile(0);
+            (available as *mut u16).add(1).write_volatile(0);
+            (used as *mut u16).write_volatile(0);
+            (used as *mut u16).add(1).write_volatile(0);
+        }
+        COMPLETE.store(false, Ordering::Release);
+        self.available_index = 0;
+        self.used_index = 0;
+        unsafe { outb(self.base + 0x12, ACKNOWLEDGE | DRIVER | DRIVER_OK) };
         self.last_recovery_failed =
             unsafe { inb(self.base + 0x12) } & (DRIVER_OK | FAILED) != DRIVER_OK;
-        self.used_index = self.used_index();
         !self.last_recovery_failed
     }
 
