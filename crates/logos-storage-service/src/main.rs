@@ -1,94 +1,125 @@
 #![no_main]
 #![no_std]
 
-use core::arch::asm;
-use logos_core::native_service::{ACKNOWLEDGED, Context, Header, READ_INPUT, READY};
-use logos_service_rt as _;
+use logos_service_rt::{BlockClient, BlockError, Context, Header};
+use logos_store::{Error, Recovery, SECTOR_SIZE, SectorBackend, Store};
 
-#[global_allocator]
-static HEAP: logos_service_rt::heap::PageArena = logos_service_rt::heap::PageArena::new();
+const MINIMUM_SECTORS: usize = 10;
+const STORE_MEMORY: usize = 4 * logos_abi::PAGE_SIZE;
+
+type DiskStore = Store<BlockBackend>;
 
 #[used]
 #[unsafe(link_section = ".logos")]
 static HEADER: Header = Header::new(*b"storage\0\0\0\0\0\0\0\0\0", logos_service_entry);
 
+struct BlockBackend {
+    client: BlockClient,
+    sectors: usize,
+}
+
+impl BlockBackend {
+    fn new(context: &Context) -> Result<Self, Error> {
+        let mut client = context.block_client().ok_or(Error::Invalid)?;
+        let info = client.info().map_err(map_block_error)?;
+        if !info.valid() || info.logical_block_size as usize != SECTOR_SIZE {
+            return Err(Error::Invalid);
+        }
+        let sectors = usize::try_from(info.blocks).map_err(|_| Error::Full)?;
+        (sectors >= MINIMUM_SECTORS).then_some(Self { client, sectors }).ok_or(Error::Invalid)
+    }
+
+    fn superblocks_zero(&mut self) -> Result<bool, Error> {
+        let mut first = [0; SECTOR_SIZE];
+        let mut second = [0; SECTOR_SIZE];
+        self.read(0, &mut first)?;
+        self.read(1, &mut second)?;
+        Ok(first.iter().all(|byte| *byte == 0) && second.iter().all(|byte| *byte == 0))
+    }
+}
+
+impl SectorBackend for BlockBackend {
+    fn sectors(&self) -> usize {
+        self.sectors
+    }
+
+    fn read(&mut self, sector: usize, output: &mut [u8; SECTOR_SIZE]) -> Result<(), Error> {
+        self.client.read_sector(sector, output).map_err(map_block_error)
+    }
+
+    fn write(&mut self, sector: usize, input: &[u8; SECTOR_SIZE]) -> Result<(), Error> {
+        self.client.write_sector(sector, input).map_err(map_block_error)
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        self.client.flush().map_err(map_block_error)
+    }
+}
+
+fn map_block_error(error: BlockError) -> Error {
+    match error {
+        BlockError::TimedOut => Error::TimedOut,
+        BlockError::Corrupt => Error::Corrupt,
+        BlockError::Full => Error::Full,
+        BlockError::NotFound => Error::NotFound,
+        BlockError::Invalid | BlockError::Io => Error::Io,
+    }
+}
+
+fn start(context: &mut Context) -> Result<(&'static mut DiskStore, bool), Error> {
+    let mut backend = BlockBackend::new(context)?;
+    #[cfg(feature = "block-probe")]
+    if !backend.client.probe() {
+        return Err(Error::Io);
+    }
+    let blank = backend.superblocks_zero()?;
+    let store =
+        if blank { Store::format_with_backend(backend)? } else { Store::recover_backend(backend)? };
+    if core::mem::size_of::<DiskStore>() > STORE_MEMORY {
+        return Err(Error::Full);
+    }
+    let recovery = store.recovery();
+    let store = context.place_storage(store).ok_or(Error::Invalid)?;
+    context.set_storage_status(if blank {
+        logos_service_rt::STORAGE_FORMATTED
+    } else if recovery == Recovery::Incomplete {
+        logos_service_rt::STORAGE_RECOVERED_INCOMPLETE
+    } else {
+        logos_service_rt::STORAGE_RECOVERED
+    });
+    Ok((store, blank))
+}
+
 #[unsafe(no_mangle)]
-extern "C" fn logos_service_entry(context: *mut Context) -> ! {
-    unsafe {
-        let heap = (context as usize).saturating_sub(5 * logos_abi::PAGE_SIZE);
-        if !HEAP.initialize(heap, 4 * logos_abi::PAGE_SIZE) {
-            loop {
-                core::hint::spin_loop();
-            }
+extern "C" fn logos_service_entry(context: *mut logos_service_rt::RawContext) -> ! {
+    unsafe { logos_service_rt::entry(context, run) }
+}
+
+fn run(context: &mut Context) -> ! {
+    if !context.ready() {
+        spin();
+    }
+    let _store = match start(context) {
+        Ok((store, _)) => Some(store),
+        Err(Error::Corrupt) => {
+            context.set_storage_status(logos_service_rt::STORAGE_CORRUPT);
+            None
         }
-        (*context).operation = READY;
-        asm!("int 0x80");
-        #[cfg(feature = "block-probe")]
-        if !block_probe(context) {
-            loop {
-                core::hint::spin_loop();
-            }
+        Err(_) => {
+            context.set_storage_status(logos_service_rt::STORAGE_IO_FAILED);
+            None
         }
-        while (*context).status == ACKNOWLEDGED {
-            (*context).operation = READ_INPUT;
-            asm!("int 0x80");
+    };
+    while context.acknowledged() {
+        if !context.wait_for_input() {
+            spin();
         }
     }
+    spin()
+}
+
+fn spin() -> ! {
     loop {
         core::hint::spin_loop();
     }
-}
-
-#[cfg(feature = "block-probe")]
-unsafe fn block_probe(context: *mut Context) -> bool {
-    const DEADLINE: u64 = 1_000_000;
-    let address = context as u64;
-    let Some(page) = (unsafe { Context::block_page_at(address) }) else { return false };
-    let info = logos_abi::BlockRequest {
-        id: 1,
-        operation: logos_abi::BlockOperation::Info,
-        lba: 0,
-        blocks: 0,
-        page: logos_abi::PageHandle(0),
-        deadline: DEADLINE,
-    };
-    let Some(reply) = (unsafe { request_block(address, info) }) else { return false };
-    if reply.status != logos_abi::PersistenceStatus::Complete || !reply.info.valid() {
-        return false;
-    }
-    let read = logos_abi::BlockRequest {
-        id: 2,
-        operation: logos_abi::BlockOperation::Read,
-        lba: 0,
-        blocks: 1,
-        page: page.handle,
-        deadline: DEADLINE,
-    };
-    if !unsafe { request_block(address, read) }
-        .is_some_and(|reply| reply.status == logos_abi::PersistenceStatus::Complete)
-    {
-        return false;
-    }
-    let flush = logos_abi::BlockRequest {
-        id: 3,
-        operation: logos_abi::BlockOperation::Flush,
-        lba: 0,
-        blocks: 0,
-        page: logos_abi::PageHandle(0),
-        deadline: DEADLINE,
-    };
-    unsafe { request_block(address, flush) }
-        .is_some_and(|reply| reply.status == logos_abi::PersistenceStatus::Complete)
-}
-
-#[cfg(feature = "block-probe")]
-unsafe fn request_block(
-    context: u64,
-    request: logos_abi::BlockRequest,
-) -> Option<logos_abi::BlockReply> {
-    if !unsafe { Context::request_block_at(context, request) } {
-        return None;
-    }
-    unsafe { asm!("int 0x80") };
-    unsafe { Context::block_reply_at(context, request.id) }
 }

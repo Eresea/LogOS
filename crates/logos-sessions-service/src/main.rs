@@ -1,50 +1,39 @@
 #![no_main]
 #![no_std]
 
-use core::arch::asm;
 use logos_abi::{Effect, EffectResult, SessionRequest, Syscall};
-use logos_core::native_service::{
-    ACKNOWLEDGED, Context, Header, MAX_TEXT, READ_INPUT, READY, SESSION_EFFECT, SESSION_REPLY,
-};
-use logos_service_rt as _;
+use logos_service_rt::{Context, Header};
 
 #[used]
 #[unsafe(link_section = ".logos")]
 static HEADER: Header = Header::new(*b"sessions\0\0\0\0\0\0\0\0", logos_service_entry);
 
 #[unsafe(no_mangle)]
-extern "C" fn logos_service_entry(context: *mut Context) -> ! {
-    unsafe {
-        (*context).operation = READY;
-        asm!("int 0x80");
-        while (*context).status == ACKNOWLEDGED {
-            (*context).operation = READ_INPUT;
-            asm!("int 0x80");
-            let request = Syscall::from_wire((*context).x).map(|syscall| {
-                SessionRequest::new(
-                    syscall,
-                    (*context).text,
-                    usize::try_from((*context).text_length).unwrap_or(MAX_TEXT + 1),
-                )
-            });
-            if (*context).input == 1 && request.is_some_and(SessionRequest::valid) {
-                let request = request.unwrap();
-                (*context).x = dispatch(request.syscall) as u32;
-                (*context).operation = SESSION_EFFECT;
-                asm!("int 0x80");
-                let result = EffectResult::from_wire((*context).x).unwrap_or(EffectResult::Unknown);
-                let reply = format(&request, result);
-                (*context).text = [0; MAX_TEXT];
-                (&mut (*context).text)[..reply.len()].copy_from_slice(reply);
-                (*context).text_length = reply.len() as u32;
-                (*context).operation = SESSION_REPLY;
-                asm!("int 0x80");
-            }
+extern "C" fn logos_service_entry(context: *mut logos_service_rt::RawContext) -> ! {
+    unsafe { logos_service_rt::entry(context, run) }
+}
+
+fn run(context: &mut Context) -> ! {
+    if !context.ready() {
+        spin();
+    }
+    while context.acknowledged() {
+        if !context.wait_for_input() {
+            spin();
+        }
+        let Some(request) = context.session_request() else { continue };
+        if context.input() != 1 || !request.valid() {
+            continue;
+        }
+        let Some(result) = context.session_effect(dispatch(request.syscall)) else {
+            spin();
+        };
+        let reply = format(&request, result);
+        if !context.session_reply(reply) {
+            spin();
         }
     }
-    loop {
-        core::hint::spin_loop();
-    }
+    spin()
 }
 
 fn dispatch(syscall: Syscall) -> Effect {
@@ -103,5 +92,11 @@ fn format(request: &SessionRequest, result: EffectResult) -> &[u8] {
         EffectResult::LayoutAzerty => b"layout azerty",
         EffectResult::Denied => b"permission denied",
         EffectResult::Unknown => b"unknown command",
+    }
+}
+
+fn spin() -> ! {
+    loop {
+        core::hint::spin_loop();
     }
 }

@@ -8,3 +8,4 @@ path = "src/lib.rs"
 
 [dependencies]
 logos-abi = { path = "../logos-abi" }
+logos-core = { path = "../logos-core" }

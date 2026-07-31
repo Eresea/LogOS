@@ -42,6 +42,7 @@ name = "logos-service-rt"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
+ "logos-core",
 ]
 
 [[package]]
