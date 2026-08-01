@@ -788,7 +788,9 @@ pub(crate) fn main(
                 native_handle = restarted_terminal;
                 store_relay_state.clear();
                 debug::write_line(b"LogOS: reset terminal ready");
-                if native_scheduler.wake(previous_terminal)
+                if !native_store.configure_shared_page(shared_history)
+                    || !native_scheduler.run(native_handle)
+                    || native_scheduler.wake(previous_terminal)
                     || !resume_display(
                         native_display,
                         &session,
@@ -812,7 +814,9 @@ pub(crate) fn main(
                 };
                 sessions_handle = restarted_sessions;
                 debug::write_line(b"LogOS: reset sessions ready");
-                if native_scheduler.wake(previous_sessions) {
+                if !native_scheduler.run(sessions_handle)
+                    || native_scheduler.wake(previous_sessions)
+                {
                     return false;
                 }
 
@@ -838,10 +842,12 @@ pub(crate) fn main(
                 let Some(restarted_storage) = native_scheduler.restart(previous_storage) else {
                     return false;
                 };
-                if !native_storage_block.configure(logos_core::native_service::BlockPage {
-                    handle: storage_block_page,
-                    address: storage_block_virtual,
-                }) || !native_scheduler.run_next()
+                if !native_storage_store.configure_shared_page(shared_history)
+                    || !native_storage_block.configure(logos_core::native_service::BlockPage {
+                        handle: storage_block_page,
+                        address: storage_block_virtual,
+                    })
+                    || !native_scheduler.run(restarted_storage)
                 {
                     return false;
                 }
@@ -2069,8 +2075,7 @@ fn restart_native_service(
     if !scheduler.failed(handle) && !scheduler.fail(handle) {
         return None;
     }
-    let restarted = scheduler.restart(handle)?;
-    (scheduler.run(restarted) && !scheduler.failed(restarted)).then_some(restarted)
+    scheduler.restart(handle)
 }
 
 fn relay_session_request(
