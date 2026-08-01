@@ -22,3 +22,13 @@ Store wake-up or disk access. Read-only, revoked, stale, malformed, and wrong-ow
 are rejected at the Core relay. Client transfer pages are generation-tagged and owner-checked,
 loaned only for the request, and returned on both success and failure. Store Block traffic uses its
 own transfer page and principal, so a client page cannot be substituted for the Store page.
+
+## Network endpoints
+
+Network bind, send, and receive use separate revocable capabilities. Each v1 grant authorizes one
+exact UDP local port or one exact IPv4 remote endpoint; ICMP echo authority names one exact remote
+IPv4 address. Core rejects wrong-kind, wrong-scope, stale, revoked, and wrong-owner requests before
+Network wake-up, page loan, protocol-state change, or NIC access. Endpoint handles are owner- and
+generation-bound. Reset, service restart, client exit, or revoked bind authority invalidates them
+and returns all page loans. Core-owned bounce buffers prevent the Network service from programming
+DMA, but IOMMU protection from a malicious physical device remains deferred.

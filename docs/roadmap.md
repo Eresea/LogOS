@@ -1,6 +1,6 @@
 # LogOS Roadmap
 
-> **Updated:** 2026-07-30
+> **Updated:** 2026-08-02
 >
 > **Current milestone:** [Network v1](NETWORK.md)
 >
