@@ -88,6 +88,11 @@ dependencies = [
 [[package]]
 name = "logos-test"
 version = "0.1.0"
+dependencies = [
+ "logos-abi",
+ "logos-store",
+ "logos-terminal",
+]
 
 [[package]]
 name = "logos-uefi"

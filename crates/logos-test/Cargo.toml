@@ -7,3 +7,6 @@ edition = "2024"
 workspace = true
 
 [dependencies]
+logos-abi = { path = "../logos-abi" }
+logos-store = { path = "../logos-store" }
+logos-terminal = { path = "../logos-terminal" }

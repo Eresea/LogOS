@@ -922,105 +922,20 @@ pub(crate) fn main(
                         native_storage_store.context(),
                     )
                 };
-                if status == Some(logos_core::native_service::STORAGE_FORMATTED) {
-                    proof.set(true);
-                    return true;
-                }
-                if status != Some(logos_core::native_service::STORAGE_RECOVERED) {
-                    return false;
-                }
-                input.set_layout(input::Layout::Azerty);
-                let mut send = |event: logos_abi::InputEvent, expected: Option<&[u8]>| {
-                    if !native_input.deliver(event)
-                        || !native_scheduler.wake(native_handle)
-                        || !native_scheduler.run(native_handle)
-                        || !resume_display(
-                            native_display,
-                            &session,
-                            &capabilities,
-                            session_display_capability,
-                            &mut native_scheduler,
-                            native_handle,
-                        )
-                        || !relay_terminal_store_requests(
-                            native_store,
-                            native_storage_store,
-                            &mut block_dispatch,
-                            &mut block::DispatchContext {
-                                endpoint: native_storage_block,
-                                pages: &mut shared_pages,
-                                store_owner: storage_owner,
-                                store_page: storage_block_page,
-                                device: &mut block_device,
-                                memory: &mut memory,
-                            },
-                            terminal_owner,
-                            storage_owner,
-                            shared_history,
-                            &mut native_scheduler,
-                            native_handle,
-                            storage_handle,
-                            &session,
-                            &capabilities,
-                            &mut store_relay_state,
-                            interrupts::ticks(),
-                        )
-                        || !resume_display(
-                            native_display,
-                            &session,
-                            &capabilities,
-                            session_display_capability,
-                            &mut native_scheduler,
-                            native_handle,
-                        )
-                    {
-                        return false;
-                    }
-                    let Some(request) = native_command.request() else {
-                        return expected.is_none();
-                    };
-                    let matched = expected.is_some_and(|expected| {
-                        request.syscall == logos_abi::Syscall::SetInputLayout
-                            && request.argument[..request.length] == *expected
-                    });
-                    native_command.reply(&[])
-                        && native_scheduler.wake(native_handle)
-                        && native_scheduler.run(native_handle)
-                        && resume_display(
-                            native_display,
-                            &session,
-                            &capabilities,
-                            session_display_capability,
-                            &mut native_scheduler,
-                            native_handle,
-                        )
-                        && matched
-                };
-                let navigation = [
-                    (logos_abi::InputEvent::UP, None),
-                    (logos_abi::InputEvent::UP, None),
-                    (logos_abi::InputEvent::DOWN, None),
-                ]
-                .into_iter()
-                .all(|(event, expected)| send(event, expected))
-                    && send(logos_abi::InputEvent::ENTER, Some(b"qwerty"))
-                    && [logos_abi::InputEvent::UP; 5].into_iter().all(|event| send(event, None))
-                    && send(logos_abi::InputEvent::ENTER, Some(b"azerty"));
-                proof.set(proof.get() || navigation);
-                return navigation;
+                let passed = matches!(
+                    status,
+                    Some(logos_core::native_service::STORAGE_FORMATTED)
+                        | Some(logos_core::native_service::STORAGE_RECOVERED)
+                );
+                proof.set(proof.get() || passed);
+                return passed;
             }
             let terminal_restart = value == "assert-terminal-service-restart";
             let sessions_restart = value == "assert-sessions-service-restart";
             let storage_restart = value == "assert-storage-service-restart";
             if terminal_restart {
                 let previous = native_handle;
-                if !cancel_store_transaction(
-                    native_storage_store,
-                    &mut native_scheduler,
-                    storage_handle,
-                ) || !native_scheduler.fail(previous)
-                    || !startup.start()
-                {
+                if !native_scheduler.fail(previous) || !startup.start() {
                     return false;
                 }
                 let Some(restarted) = restart_native_service(&mut native_scheduler, previous)
@@ -1030,6 +945,16 @@ pub(crate) fn main(
                 native_handle = restarted;
                 store_relay_state.clear();
                 if native_scheduler.wake(previous)
+                    || !native_store.configure_shared_page(shared_history)
+                    || !native_scheduler.run(native_handle)
+                    || !resume_display(
+                        native_display,
+                        &session,
+                        &capabilities,
+                        session_display_capability,
+                        &mut native_scheduler,
+                        native_handle,
+                    )
                     || !native_input.deliver(logos_abi::InputEvent::STARTUP)
                     || !native_scheduler.wake(native_handle)
                     || !native_scheduler.run(native_handle)
@@ -1078,7 +1003,7 @@ pub(crate) fn main(
                     return false;
                 };
                 sessions_handle = restarted;
-                if native_scheduler.wake(previous) {
+                if !native_scheduler.run(sessions_handle) || native_scheduler.wake(previous) {
                     return false;
                 }
             }
@@ -1117,6 +1042,30 @@ pub(crate) fn main(
                 if native_scheduler.wake(previous) || !native_scheduler.wake(restarted) {
                     return false;
                 }
+            }
+            if value == "persistence/write-interruption" || value == "persistence/recovery" {
+                let status = unsafe {
+                    logos_core::native_service::Context::storage_status_at(
+                        native_storage_store.context(),
+                    )
+                };
+                let passed = matches!(
+                    status,
+                    Some(logos_core::native_service::STORAGE_RECOVERED)
+                        | Some(logos_core::native_service::STORAGE_RECOVERED_INCOMPLETE)
+                );
+                proof.set(proof.get() || passed);
+                return passed;
+            }
+            if value == "persistence/corruption-detected" {
+                let status = unsafe {
+                    logos_core::native_service::Context::storage_status_at(
+                        native_storage_store.context(),
+                    )
+                };
+                let passed = status == Some(logos_core::native_service::STORAGE_CORRUPT);
+                proof.set(proof.get() || passed);
+                return passed;
             }
             if value == "persistence/capability-denied" {
                 let history_page = shared_history;

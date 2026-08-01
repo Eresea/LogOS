@@ -33,7 +33,7 @@ ALLOWED = {
     # The boot adapter is the documented temporary exception while terminal
     # bootstrap remains statically linked.
     "logos-uefi": {"logos-abi", "logos-core", "logos-terminal"},
-    "logos-test": set(),
+    "logos-test": {"logos-abi", "logos-store", "logos-terminal"},
 }
 
 

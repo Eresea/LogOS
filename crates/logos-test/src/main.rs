@@ -1,11 +1,17 @@
 use std::{
+    cell::Cell,
     env, fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    rc::Rc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+use logos_abi::{NamespaceId, TERMINAL_NAMESPACE};
+use logos_store::{Error as StoreError, SECTOR_SIZE, SectorBackend, Store};
+use logos_terminal::terminal::{HISTORY_BYTES, Model, Submission};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
@@ -141,10 +147,9 @@ const SCENARIOS: &[Scenario] = &[
         ],
         Fixture::Shared,
     ),
-    future("persistence/write-interruption", "persistence", Fixture::Fresh),
-    future("persistence/recovery", "persistence", Fixture::Fresh),
-    future("persistence/capability-denied", "persistence", Fixture::Fresh),
-    future("persistence/corruption-detected", "persistence", Fixture::Fresh),
+    persistence_scenario("persistence/write-interruption"),
+    persistence_scenario("persistence/recovery"),
+    persistence_scenario("persistence/corruption-detected"),
     future("network/packet-loss", "network", Fixture::Fresh),
     future("network/timeout", "network", Fixture::Fresh),
     future("network/reset-reconnect", "network", Fixture::Fresh),
@@ -168,6 +173,17 @@ const fn future(id: &'static str, suite: &'static str, fixture: Fixture) -> Scen
     Scenario { id, suite, timeout: 20, implemented: false, setup: &[], fixture }
 }
 
+const fn persistence_scenario(id: &'static str) -> Scenario {
+    Scenario {
+        id,
+        suite: "persistence",
+        timeout: 60,
+        implemented: true,
+        setup: &[],
+        fixture: Fixture::Persistence,
+    }
+}
+
 struct ResultRecord {
     id: String,
     status: Status,
@@ -184,6 +200,135 @@ struct ImageProfile {
     sessions: PathBuf,
     storage: PathBuf,
     block_probe: bool,
+}
+
+const DISK_SECTORS: usize = 16 * 1024 * 1024 / SECTOR_SIZE;
+const HISTORY_NAME: &[u8] = b"history";
+
+struct FaultCounter {
+    cut: Cell<Option<usize>>,
+    step: Cell<usize>,
+}
+
+impl FaultCounter {
+    fn reset(&self, cut: usize) {
+        self.cut.set(Some(cut));
+        self.step.set(0);
+    }
+
+    fn checkpoint(&self) -> Result<(), StoreError> {
+        let step = self.step.get() + 1;
+        self.step.set(step);
+        (self.cut.get() != Some(step)).then_some(()).ok_or(StoreError::Interrupted)
+    }
+}
+
+struct FileBackend {
+    file: fs::File,
+    sectors: usize,
+    fault: Rc<FaultCounter>,
+}
+
+impl FileBackend {
+    fn open(path: &Path, fault: Rc<FaultCounter>) -> Result<Self, String> {
+        let file = fs::OpenOptions::new().read(true).write(true).open(path).map_err(io_error)?;
+        Ok(Self { file, sectors: DISK_SECTORS, fault })
+    }
+}
+
+impl SectorBackend for FileBackend {
+    fn sectors(&self) -> usize {
+        self.sectors
+    }
+
+    fn read(&mut self, sector: usize, output: &mut [u8; SECTOR_SIZE]) -> Result<(), StoreError> {
+        self.file
+            .seek(SeekFrom::Start((sector * SECTOR_SIZE) as u64))
+            .map_err(|_| StoreError::Io)?;
+        self.file.read_exact(output).map_err(|_| StoreError::Io)
+    }
+
+    fn write(&mut self, sector: usize, input: &[u8; SECTOR_SIZE]) -> Result<(), StoreError> {
+        self.file
+            .seek(SeekFrom::Start((sector * SECTOR_SIZE) as u64))
+            .map_err(|_| StoreError::Io)?;
+        self.file.write_all(input).map_err(|_| StoreError::Io)?;
+        self.fault.checkpoint()
+    }
+
+    fn flush(&mut self) -> Result<(), StoreError> {
+        self.file.sync_all().map_err(|_| StoreError::Io)?;
+        self.fault.checkpoint()
+    }
+}
+
+fn history_fixture(entry: &[u8]) -> [u8; HISTORY_BYTES] {
+    let mut model = Model::new();
+    let submission = Submission::from_bytes(entry).expect("fixture entry");
+    assert!(model.restore_history(&[submission]));
+    model.export_history()
+}
+
+fn prepare_baseline(path: &Path) -> Result<([u8; HISTORY_BYTES], [u8; HISTORY_BYTES]), String> {
+    let old = history_fixture(b"old");
+    let new = history_fixture(b"new");
+    let file = fs::File::create(path).map_err(io_error)?;
+    file.set_len((DISK_SECTORS * SECTOR_SIZE) as u64).map_err(io_error)?;
+    drop(file);
+    let fault = Rc::new(FaultCounter { cut: Cell::new(None), step: Cell::new(0) });
+    let mut store = Store::format_with_backend(FileBackend::open(path, fault.clone())?)
+        .map_err(|error| format!("format baseline: {error:?}"))?;
+    store
+        .replace(NamespaceId(TERMINAL_NAMESPACE.0), HISTORY_NAME, &history_fixture(b"older"))
+        .map_err(|error| format!("write older: {error:?}"))?;
+    store
+        .replace(TERMINAL_NAMESPACE, HISTORY_NAME, &old)
+        .map_err(|error| format!("write old: {error:?}"))?;
+    Ok((old, new))
+}
+
+#[derive(Clone, Copy)]
+enum FaultOperation {
+    Replace,
+    Compact,
+}
+
+fn make_interrupted_case(
+    baseline: &Path,
+    case: &Path,
+    operation: FaultOperation,
+    cut: usize,
+    new: &[u8; HISTORY_BYTES],
+) -> Result<bool, String> {
+    fs::copy(baseline, case).map_err(io_error)?;
+    let fault = Rc::new(FaultCounter { cut: Cell::new(None), step: Cell::new(0) });
+    let mut store = Store::recover_backend(FileBackend::open(case, fault.clone())?)
+        .map_err(|error| format!("recover case {cut}: {error:?}"))?;
+    fault.reset(cut);
+    let result = match operation {
+        FaultOperation::Replace => store.replace(TERMINAL_NAMESPACE, HISTORY_NAME, new).map(|_| ()),
+        FaultOperation::Compact => store.compact(None),
+    };
+    match result {
+        Err(StoreError::Interrupted) => Ok(false),
+        Ok(()) => Ok(true),
+        Err(error) => Err(format!("fault case {cut}: {error:?}")),
+    }
+}
+
+fn validate_host_case(path: &Path, expected: &[[u8; HISTORY_BYTES]]) -> Result<(), String> {
+    let mut store = Store::recover_backend(FileBackend::open(
+        path,
+        Rc::new(FaultCounter { cut: Cell::new(None), step: Cell::new(0) }),
+    )?)
+    .map_err(|error| format!("recover generated case: {error:?}"))?;
+    let mut output = [0; HISTORY_BYTES];
+    let (_, length) = store
+        .read(TERMINAL_NAMESPACE, HISTORY_NAME, logos_abi::VersionSelector::Current, &mut output)
+        .map_err(|error| format!("read generated case: {error:?}"))?;
+    (expected.contains(&output) && length == HISTORY_BYTES)
+        .then_some(())
+        .ok_or_else(|| "generated case exposed a mixed history value".into())
 }
 
 struct Harness {
@@ -288,9 +433,18 @@ impl Harness {
             offset: 0,
             deadline,
         };
-        harness.wait(startup_marker)?;
-        harness.offset = 0;
         harness.wait("LOGOS/1 READY")?;
+        let log = fs::read_to_string(&harness.debug_log).map_err(io_error)?;
+        let startup_ok = if startup_marker == "LogOS: storage recovered" {
+            log.contains("LogOS: storage recovered")
+                || log.contains("LogOS: storage recovered-incomplete")
+        } else {
+            log.contains(startup_marker)
+        };
+        if !startup_ok {
+            return Err(format!("missing startup marker {startup_marker}"));
+        }
+        harness.offset = log.len();
         harness.send("LOGOS/1 HELLO\n")?;
         harness.wait("LOGOS/1 RESULT hello=ok")?;
         Ok(harness)
@@ -306,8 +460,18 @@ impl Harness {
             self.send(&format!("LOGOS/1 INPUT {command}\n"))?;
             self.wait("LOGOS/1 RESULT input=accepted")?;
         }
-        self.send(&format!("LOGOS/1 RUN {}\n", scenario.id))?;
-        self.wait(&format!("LOGOS/1 RESULT scenario={} status=passed", scenario.id))
+        self.run_id(scenario.id)
+    }
+
+    fn run_id(&mut self, id: &str) -> Result<(), String> {
+        self.send(&format!("LOGOS/1 RUN {id}\n"))?;
+        self.wait(&format!("LOGOS/1 RESULT scenario={id} status=passed"))
+    }
+
+    fn run_input(&mut self, id: &str) -> Result<(), String> {
+        self.send(&format!("LOGOS/1 INPUT {id}\n"))?;
+        self.wait("LOGOS/1 RESULT input=accepted")?;
+        self.run_id(id)
     }
 
     fn shutdown(&mut self) -> Result<(), String> {
@@ -422,15 +586,19 @@ fn run_suite(name: &str) -> i32 {
         } else {
             &profiles.standard
         };
-        run_fixture(
-            &root,
-            &run_dir,
-            profile,
-            item.id,
-            std::slice::from_ref(item),
-            seed,
-            &mut results,
-        );
+        if item.fixture == Fixture::Persistence {
+            results.push(run_persistence_proof(&root, &run_dir, profile, *item, seed));
+        } else {
+            run_fixture(
+                &root,
+                &run_dir,
+                profile,
+                item.id,
+                std::slice::from_ref(item),
+                seed,
+                &mut results,
+            );
+        }
     }
     for item in selected.iter().filter(|item| !item.implemented) {
         results.push(ResultRecord {
@@ -501,7 +669,7 @@ fn run_one(id: &str) -> i32 {
     };
     let mut results = Vec::new();
     if scenario.fixture == Fixture::Persistence {
-        run_persistence_fixture(&root, &run_dir, profile, scenario, seed, &mut results);
+        results.push(run_persistence_proof(&root, &run_dir, profile, scenario, seed));
     } else {
         run_fixture(
             &root,
@@ -516,6 +684,173 @@ fn run_one(id: &str) -> i32 {
     let _ = write_reports(&run_dir, &results);
     cleanup_bulk_artifacts(&run_dir);
     results.first().map_or(1, report)
+}
+
+fn run_persistence_proof(
+    root: &Path,
+    run_dir: &Path,
+    profile: &ImageProfile,
+    scenario: Scenario,
+    seed: u64,
+) -> ResultRecord {
+    let started = Instant::now();
+    let result = match scenario.id {
+        "persistence/write-interruption" => run_write_interruption(run_dir, profile, scenario),
+        "persistence/recovery" => run_recovery(run_dir, profile, scenario),
+        "persistence/corruption-detected" => run_corruption(run_dir, profile, scenario),
+        _ => {
+            let mut results = Vec::new();
+            run_persistence_fixture(root, run_dir, profile, scenario, 0, &mut results);
+            results.pop().map_or_else(
+                || Err("persistence runner returned no result".into()),
+                |result| result.failure.map_or(Ok(()), Err),
+            )
+        }
+    };
+    let failure = result.err();
+    ResultRecord {
+        id: scenario.id.into(),
+        status: if failure.is_none() { Status::Passed } else { Status::Failed },
+        duration_ms: started.elapsed().as_millis(),
+        seed,
+        failure,
+        artifacts: run_dir.to_path_buf(),
+    }
+}
+
+fn qemu_paths() -> Result<(String, String), String> {
+    Ok((
+        qemu_path().ok_or("qemu-system-x86_64 not found")?,
+        ovmf_path().ok_or("OVMF_CODE not found")?,
+    ))
+}
+
+fn boot_proof(
+    fixture_dir: &Path,
+    profile: &ImageProfile,
+    scenario: &str,
+    marker: &str,
+) -> Result<(), String> {
+    let (qemu, ovmf) = qemu_paths()?;
+    let mut harness = Harness::boot(&qemu, &ovmf, profile, fixture_dir, 60, marker)?;
+    harness.send(&format!("LOGOS/1 INPUT {scenario}\n"))?;
+    harness.wait("LOGOS/1 RESULT input=accepted")?;
+    let result = harness.run_id(scenario);
+    let shutdown = harness.shutdown();
+    result.and(shutdown)
+}
+
+fn run_write_interruption(
+    run_dir: &Path,
+    profile: &ImageProfile,
+    scenario: Scenario,
+) -> Result<(), String> {
+    let fixture_dir = run_dir.join("fixtures").join("persistence-write-interruption");
+    fs::create_dir_all(&fixture_dir).map_err(io_error)?;
+    let baseline = fixture_dir.join("baseline.raw");
+    let (old, new) = prepare_baseline(&baseline)?;
+    for (label, operation, expected) in [
+        ("replace", FaultOperation::Replace, vec![old, new]),
+        ("compact", FaultOperation::Compact, vec![old]),
+    ] {
+        for cut in 1..64 {
+            let case_dir = fixture_dir.join(format!("{label}-{cut:02}"));
+            fs::create_dir_all(&case_dir).map_err(io_error)?;
+            let disk = case_dir.join("store.raw");
+            if make_interrupted_case(&baseline, &disk, operation, cut, &new)? {
+                break;
+            }
+            validate_host_case(&disk, &expected)?;
+            boot_proof(&case_dir, profile, scenario.id, "LogOS: storage recovered")?;
+            if env::var("LOGOS_TEST_ARTIFACTS").as_deref() != Ok("all") {
+                let _ = fs::remove_dir_all(&case_dir);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_recovery(run_dir: &Path, profile: &ImageProfile, scenario: Scenario) -> Result<(), String> {
+    let fixture_dir = run_dir.join("fixtures").join("persistence-recovery");
+    fs::create_dir_all(&fixture_dir).map_err(io_error)?;
+    let baseline = fixture_dir.join("store.raw");
+    let _ = prepare_baseline(&baseline)?;
+    let (qemu, ovmf) = qemu_paths()?;
+    let mut first = Harness::boot(
+        &qemu,
+        &ovmf,
+        profile,
+        &fixture_dir,
+        scenario.timeout,
+        "LogOS: storage recovered",
+    )?;
+    first.send(&format!("LOGOS/1 INPUT {}\n", scenario.id))?;
+    first.wait("LOGOS/1 RESULT input=accepted")?;
+    first.run_id(scenario.id)?;
+    first.reset(scenario.id)?;
+    first.run_input(scenario.id)?;
+    first.shutdown()?;
+    let mut second = Harness::boot(
+        &qemu,
+        &ovmf,
+        profile,
+        &fixture_dir,
+        scenario.timeout,
+        "LogOS: storage recovered",
+    )?;
+    second.send(&format!("LOGOS/1 INPUT {}\n", scenario.id))?;
+    second.wait("LOGOS/1 RESULT input=accepted")?;
+    second.run_id(scenario.id)?;
+    second.shutdown()?;
+
+    let incomplete_dir = fixture_dir.join("incomplete");
+    fs::create_dir_all(&incomplete_dir).map_err(io_error)?;
+    let incomplete_disk = incomplete_dir.join("store.raw");
+    make_interrupted_case(
+        &baseline,
+        &incomplete_disk,
+        FaultOperation::Replace,
+        1,
+        &history_fixture(b"new"),
+    )?;
+    let (qemu, ovmf) = qemu_paths()?;
+    let mut harness = Harness::boot(
+        &qemu,
+        &ovmf,
+        profile,
+        &incomplete_dir,
+        scenario.timeout,
+        "LogOS: storage recovered",
+    )?;
+    harness.send("LOGOS/1 INPUT layout qwerty\n")?;
+    harness.wait("LOGOS/1 RESULT input=accepted")?;
+    harness.run_input(scenario.id)?;
+    harness.shutdown()
+}
+
+fn run_corruption(
+    run_dir: &Path,
+    profile: &ImageProfile,
+    scenario: Scenario,
+) -> Result<(), String> {
+    let fixture_dir = run_dir.join("fixtures").join("persistence-corruption-detected");
+    fs::create_dir_all(&fixture_dir).map_err(io_error)?;
+    let disk = fixture_dir.join("store.raw");
+    let _ = prepare_baseline(&disk)?;
+    let before = fs::read(&disk).map_err(io_error)?;
+    let mut file = fs::OpenOptions::new().read(true).write(true).open(&disk).map_err(io_error)?;
+    file.seek(SeekFrom::Start((3 * SECTOR_SIZE) as u64)).map_err(io_error)?;
+    let mut byte = [0; 1];
+    file.read_exact(&mut byte).map_err(io_error)?;
+    file.seek(SeekFrom::Start((3 * SECTOR_SIZE) as u64)).map_err(io_error)?;
+    file.write_all(&[byte[0] ^ 1]).map_err(io_error)?;
+    file.sync_all().map_err(io_error)?;
+    boot_proof(&fixture_dir, profile, scenario.id, "LogOS: storage corrupt")?;
+    let after = fs::read(&disk).map_err(io_error)?;
+    (before[..3 * SECTOR_SIZE] == after[..3 * SECTOR_SIZE]
+        && before[3 * SECTOR_SIZE + 1..] == after[3 * SECTOR_SIZE + 1..])
+        .then_some(())
+        .ok_or_else(|| "corrupt disk was rewritten".into())
 }
 
 fn run_persistence_fixture(
@@ -550,7 +885,7 @@ fn run_persistence_fixture(
             scenario.timeout,
             "LogOS: storage recovered",
         )?;
-        let second_outcome = second.run(scenario);
+        let second_outcome = second.run_input(scenario.id);
         let shutdown = second.shutdown();
         let failure =
             first_outcome.err().or_else(|| second_outcome.err()).or_else(|| shutdown.err());
@@ -988,6 +1323,9 @@ mod tests {
                     "core/boot-normal"
                         | "persistence/block-read-flush"
                         | "persistence/capability-denied"
+                        | "persistence/write-interruption"
+                        | "persistence/recovery"
+                        | "persistence/corruption-detected"
                 )
         }));
     }

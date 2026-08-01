@@ -244,36 +244,36 @@ shape before QEMU Store I/O.
 
 ### Phase 7: prove interruption, corruption, and restart behavior
 
-- [ ] Promote `persistence/write-interruption` from future to implemented.
-- [ ] Create one baseline disk containing an old complete `history` value.
-- [ ] Copy the baseline disk before every interruption case.
-- [ ] Interrupt after every record sector write and every flush boundary.
-- [ ] Reboot the interrupted disk.
-- [ ] Assert the recovered value is exactly old or exactly new.
-- [ ] Assert no prefix, suffix, zero-filled, or mixed value is exposed.
-- [ ] Repeat the interruption matrix for compaction.
-- [ ] Interrupt before and after the inactive-arena flush.
-- [ ] Interrupt before and after the selecting-superblock write.
-- [ ] Interrupt before and after the selecting-superblock flush.
-- [ ] Promote `persistence/recovery` from future to implemented.
-- [ ] Prove reset preserves a completed value on the same raw disk.
-- [ ] Prove an incomplete tail reports recovery and remains writable.
-- [ ] Promote `persistence/corruption-detected` from future to implemented.
-- [ ] Flip one committed payload byte on a copied disk.
-- [ ] Reboot and assert `Corrupt` is reported.
-- [ ] Assert the corrupt object is not returned.
-- [ ] Assert Store does not reformat the disk.
-- [ ] Restart Store with no request in flight and prove reads still work.
-- [ ] Restart Store during an uncommitted replace and prove the old value remains current.
-- [ ] Restart Store after commit completion and prove the new value remains current.
+- [x] Promote `persistence/write-interruption` from future to implemented.
+- [x] Create one baseline disk containing an old complete `history` value.
+- [x] Copy the baseline disk before every interruption case.
+- [x] Interrupt after every record sector write and every flush boundary.
+- [x] Reboot the interrupted disk.
+- [x] Assert the recovered value is exactly old or exactly new.
+- [x] Assert no prefix, suffix, zero-filled, or mixed value is exposed.
+- [x] Repeat the interruption matrix for compaction.
+- [x] Interrupt before and after the inactive-arena flush.
+- [x] Interrupt before and after the selecting-superblock write.
+- [x] Interrupt before and after the selecting-superblock flush.
+- [x] Promote `persistence/recovery` from future to implemented.
+- [x] Prove reset preserves a completed value on the same raw disk.
+- [x] Prove an incomplete tail reports recovery and remains writable.
+- [x] Promote `persistence/corruption-detected` from future to implemented.
+- [x] Flip one committed payload byte on a copied disk.
+- [x] Reboot and assert `Corrupt` is reported.
+- [x] Assert the corrupt object is not returned.
+- [x] Assert Store does not reformat the disk.
+- [x] Restart Store with no request in flight and prove reads still work.
+- [x] Restart Store during an uncommitted replace and prove the old value remains current.
+- [x] Restart Store after commit completion and prove the new value remains current.
 - [ ] Force a Block timeout and prove reset permits a later read without reboot.
-- [ ] Preserve the raw disk, debug log, control log, and QMP log for every failed case.
-- [ ] Run `cargo run -p logos-test -- suite persistence`.
-- [ ] Run `cargo fmt --check`.
-- [ ] Run `cargo clippy -- -D warnings`.
-- [ ] Run `scripts/run.ps1` and verify an interactive boot.
-- [ ] Run `scripts/check.ps1`.
-- [ ] Commit the Persistence v1 exit proof.
+- [x] Preserve the raw disk, debug log, control log, and QMP log for every failed case.
+- [x] Run `cargo run -p logos-test -- suite persistence`.
+- [x] Run `cargo fmt --check`.
+- [x] Run `cargo clippy -- -D warnings`.
+- [x] Run `scripts/run.ps1` and verify an interactive boot.
+- [x] Run `scripts/check.ps1`.
+- [x] Commit the Persistence v1 exit proof.
 
 ### Phase 8: close the milestone
 
