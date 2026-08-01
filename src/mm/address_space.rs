@@ -388,9 +388,9 @@ impl AddressSpace {
 }
 
 fn enable_nx() -> bool {
-    if unsafe { __cpuid(0x8000_0000) }.eax < 0x8000_0001
-        || unsafe { __cpuid(0x8000_0001) }.edx & (1 << 20) == 0
-    {
+    let (max_leaf, _) = cpuid(0x8000_0000);
+    let (_, features) = cpuid(0x8000_0001);
+    if max_leaf < 0x8000_0001 || features & (1 << 20) == 0 {
         return false;
     }
     let low: u32;
@@ -400,6 +400,12 @@ fn enable_nx() -> bool {
         asm!("wrmsr", in("ecx") 0xc000_0080u32, in("eax") low | (1 << 11), in("edx") high);
     }
     true
+}
+
+#[allow(unused_unsafe)]
+fn cpuid(leaf: u32) -> (u32, u32) {
+    let result = unsafe { __cpuid(leaf) };
+    (result.eax, result.edx)
 }
 
 unsafe fn read_cr3() -> u64 {
