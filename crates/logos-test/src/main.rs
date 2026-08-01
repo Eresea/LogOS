@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     cell::Cell,
     env, fs,
@@ -90,6 +91,7 @@ const SCENARIOS: &[Scenario] = &[
         &["layout azerty", "layout qwerty", "persistence/terminal-history"],
         Fixture::Persistence,
     ),
+    configured("persistence/block-timeout-reset", "persistence", &[], Fixture::Persistence),
     configured(
         "persistence/capability-denied",
         "persistence",
@@ -204,6 +206,103 @@ struct ImageProfile {
 
 const DISK_SECTORS: usize = 16 * 1024 * 1024 / SECTOR_SIZE;
 const HISTORY_NAME: &[u8] = b"history";
+static BOOT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BootReport {
+    session: u64,
+    storage: String,
+}
+
+fn parse_boot_report(line: &str) -> Result<BootReport, String> {
+    let mut words = line.split_whitespace();
+    (words.next() == Some("LOGOS/1") && words.next() == Some("BOOT"))
+        .then_some(())
+        .ok_or_else(|| format!("invalid boot report: {line}"))?;
+    let session = words
+        .next()
+        .and_then(|word| word.strip_prefix("session="))
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| format!("invalid boot report: {line}"))?;
+    let storage = words
+        .next()
+        .and_then(|word| word.strip_prefix("storage="))
+        .filter(|value| {
+            matches!(
+                *value,
+                "formatted" | "recovered" | "recovered-incomplete" | "corrupt" | "io-failed"
+            )
+        })
+        .ok_or_else(|| format!("invalid boot report: {line}"))?;
+    words
+        .next()
+        .is_none()
+        .then_some(BootReport { session, storage: storage.into() })
+        .ok_or_else(|| format!("invalid boot report: {line}"))
+}
+
+struct Qmp {
+    reader: BufReader<TcpStream>,
+    log: fs::File,
+}
+
+#[derive(Clone, Copy)]
+enum ShutdownPolicy {
+    Clean,
+    Interrupted,
+}
+
+impl ShutdownPolicy {
+    const fn flushes(self) -> bool {
+        matches!(self, Self::Clean)
+    }
+}
+
+fn parse_qmp_reply(reply: String) -> Result<String, String> {
+    if reply.contains("\"error\"") || reply.is_empty() { Err(reply) } else { Ok(reply) }
+}
+
+impl Qmp {
+    fn connect(port: u16, log: fs::File, deadline: Instant) -> Result<Self, String> {
+        while Instant::now() < deadline {
+            if let Ok(stream) = TcpStream::connect(("127.0.0.1", port)) {
+                stream.set_read_timeout(Some(Duration::from_secs(2))).map_err(io_error)?;
+                let mut qmp = Self { reader: BufReader::new(stream), log };
+                qmp.reply()?;
+                qmp.command("{\"execute\":\"qmp_capabilities\"}")?;
+                return Ok(qmp);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err("timeout waiting for QMP".into())
+    }
+
+    fn command(&mut self, command: &str) -> Result<String, String> {
+        writeln!(self.log, "> {command}").map_err(io_error)?;
+        self.reader.get_mut().write_all(command.as_bytes()).map_err(io_error)?;
+        self.reader.get_mut().write_all(b"\n").map_err(io_error)?;
+        loop {
+            let reply = self.reply()?;
+            if !reply.contains("\"event\"") {
+                return Ok(reply);
+            }
+        }
+    }
+
+    fn reply(&mut self) -> Result<String, String> {
+        let mut reply = String::new();
+        self.reader.read_line(&mut reply).map_err(io_error)?;
+        write!(self.log, "< {reply}").map_err(io_error)?;
+        parse_qmp_reply(reply)
+    }
+
+    fn flush(&mut self) -> Result<(), String> {
+        self.command(
+            "{\"execute\":\"human-monitor-command\",\"arguments\":{\"command-line\":\"flush\"}}",
+        )?;
+        Ok(())
+    }
+}
 
 struct FaultCounter {
     cut: Cell<Option<usize>>,
@@ -300,6 +399,7 @@ fn make_interrupted_case(
     cut: usize,
     new: &[u8; HISTORY_BYTES],
 ) -> Result<bool, String> {
+    debug_assert!(!ShutdownPolicy::Interrupted.flushes());
     fs::copy(baseline, case).map_err(io_error)?;
     let fault = Rc::new(FaultCounter { cut: Cell::new(None), step: Cell::new(0) });
     let mut store = Store::recover_backend(FileBackend::open(case, fault.clone())?)
@@ -331,23 +431,69 @@ fn validate_host_case(path: &Path, expected: &[[u8; HISTORY_BYTES]]) -> Result<(
         .ok_or_else(|| "generated case exposed a mixed history value".into())
 }
 
-fn validate_host_recovery(path: &Path) -> Result<(), String> {
-    Store::recover_backend(FileBackend::open(
+fn host_recovery(path: &Path) -> Result<String, String> {
+    match Store::recover_backend(FileBackend::open(
+        path,
+        Rc::new(FaultCounter { cut: Cell::new(None), step: Cell::new(0) }),
+    )?) {
+        Ok(store) => Ok(match store.recovery() {
+            logos_store::Recovery::Clean => "recovered".into(),
+            logos_store::Recovery::Incomplete => "recovered-incomplete".into(),
+            logos_store::Recovery::Corrupt => "corrupt".into(),
+        }),
+        Err(StoreError::Corrupt) => Ok("corrupt".into()),
+        Err(error) => Err(format!("host recovery: {error:?}")),
+    }
+}
+
+fn validate_terminal_history(path: &Path) -> Result<(), String> {
+    let mut store = Store::recover_backend(FileBackend::open(
         path,
         Rc::new(FaultCounter { cut: Cell::new(None), step: Cell::new(0) }),
     )?)
-    .map(|_| ())
-    .map_err(|error| format!("host recovery: {error:?}"))
+    .map_err(|error| format!("recover terminal history: {error:?}"))?;
+    let mut bytes = [0; HISTORY_BYTES];
+    let (_, length) = store
+        .read(TERMINAL_NAMESPACE, HISTORY_NAME, logos_abi::VersionSelector::Current, &mut bytes)
+        .map_err(|error| format!("read terminal history: {error:?}"))?;
+    let mut history = Model::new();
+    (length == HISTORY_BYTES && history.restore_history_bytes(&bytes))
+        .then_some(())
+        .ok_or("terminal history was not persisted")?;
+    (history.scrollback_len() == 2
+        && history.history_entry(0).is_some_and(|entry| entry.as_bytes() == b"layout qwerty")
+        && history.history_entry(1).is_some_and(|entry| entry.as_bytes() == b"layout azerty"))
+    .then_some(())
+    .ok_or_else(|| "terminal history commands differ after recovery".into())
+}
+
+fn superblocks(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(io_error)?;
+    (bytes.len() >= SECTOR_SIZE * 2).then_some(()).ok_or("raw disk is too small")?;
+    Ok((0..2)
+        .map(|index| {
+            let block = &bytes[index * SECTOR_SIZE..(index + 1) * SECTOR_SIZE];
+            format!(
+                "superblock{index}=magic:{:02x?} checksum:{:02x?}",
+                &block[..4],
+                &block[SECTOR_SIZE - 4..SECTOR_SIZE]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" "))
 }
 
 struct Harness {
     child: Child,
     stream: TcpStream,
     debug_log: PathBuf,
+    disk: PathBuf,
     qmp_port: u16,
+    qmp: Qmp,
     qmp_log: PathBuf,
     transcript: fs::File,
-    offset: usize,
+    report: BootReport,
+    serial: String,
     deadline: Instant,
 }
 
@@ -358,7 +504,7 @@ impl Harness {
         profile: &ImageProfile,
         fixture_dir: &Path,
         timeout: u64,
-        startup_marker: &str,
+        expected_storage: &str,
     ) -> Result<Self, String> {
         let esp = fixture_dir.join("esp/EFI/BOOT");
         fs::create_dir_all(&esp).map_err(io_error)?;
@@ -379,9 +525,10 @@ impl Harness {
         listener.set_nonblocking(true).map_err(io_error)?;
         let port = listener.local_addr().map_err(io_error)?.port();
         let qmp_port = free_port()?;
-        let debug_log = fixture_dir.join("debug.log");
-        let qmp_log = fixture_dir.join("qmp.log");
-        let stderr_log = fixture_dir.join("qemu.stderr.log");
+        let boot_id = BOOT_ID.fetch_add(1, Ordering::Relaxed);
+        let debug_log = fixture_dir.join(format!("debug-{boot_id}.log"));
+        let qmp_log = fixture_dir.join(format!("qmp-{boot_id}.log"));
+        let stderr_log = fixture_dir.join(format!("qemu-{boot_id}.stderr.log"));
         let stderr = fs::File::create(&stderr_log).map_err(io_error)?;
         let mut child = Command::new(qemu)
             .args([
@@ -432,28 +579,42 @@ impl Harness {
                 return Err(error);
             }
         };
+        let qmp =
+            match Qmp::connect(qmp_port, fs::File::create(&qmp_log).map_err(io_error)?, deadline) {
+                Ok(qmp) => qmp,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            };
         let mut harness = Self {
             child,
             stream,
             debug_log,
+            disk,
             qmp_port,
+            qmp,
             qmp_log,
-            transcript: fs::File::create(fixture_dir.join("control.log")).map_err(io_error)?,
-            offset: 0,
+            transcript: fs::File::create(fixture_dir.join(format!("control-{boot_id}.log")))
+                .map_err(io_error)?,
+            report: BootReport { session: 0, storage: String::new() },
+            serial: String::new(),
             deadline,
         };
-        harness.wait("LOGOS/1 READY")?;
-        let log = fs::read_to_string(&harness.debug_log).map_err(io_error)?;
-        let startup_ok = if startup_marker == "LogOS: storage recovered" {
-            log.contains("LogOS: storage recovered")
-                || log.contains("LogOS: storage recovered-incomplete")
-        } else {
-            log.contains(startup_marker)
-        };
-        if !startup_ok {
-            return Err(format!("missing startup marker {startup_marker}"));
+        let report = harness.wait_boot_report()?;
+        let expected_storage =
+            expected_storage.strip_prefix("LogOS: storage ").unwrap_or(expected_storage);
+        let accepted = report.storage == expected_storage
+            || expected_storage == "recovered" && report.storage == "recovered-incomplete";
+        if !accepted {
+            return Err(format!(
+                "boot report storage mismatch: expected {expected_storage}, got {}",
+                report.storage
+            ));
         }
-        harness.offset = log.len();
+        harness.report = report;
+        harness.wait("LOGOS/1 READY")?;
         harness.send("LOGOS/1 HELLO\n")?;
         harness.wait("LOGOS/1 RESULT hello=ok")?;
         Ok(harness)
@@ -484,39 +645,70 @@ impl Harness {
     }
 
     fn shutdown(&mut self) -> Result<(), String> {
-        flush_qemu(self.qmp_port)?;
+        if ShutdownPolicy::Clean.flushes() {
+            self.qmp.flush()?;
+        }
         self.send("LOGOS/1 SHUTDOWN\n")?;
-        wait_child(&mut self.child, self.deadline)
+        wait_child(&mut self.child, self.deadline)?;
+        wait_disk_available(&self.disk, self.deadline)
     }
 
     fn send(&mut self, value: &str) -> Result<(), String> {
+        self.drain_serial()?;
+        self.serial.clear();
         write!(self.transcript, "> {value}").map_err(io_error)?;
         self.stream.write_all(value.as_bytes()).map_err(io_error)
     }
 
     fn wait(&mut self, expected: &str) -> Result<(), String> {
-        wait_file(&self.debug_log, &mut self.offset, self.deadline, expected)
+        while Instant::now() < self.deadline {
+            self.drain_serial()?;
+            if self.serial.lines().any(|line| line.starts_with(expected)) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err(format!("timeout waiting for {expected}"))
     }
-}
 
-fn flush_qemu(port: u16) -> Result<(), String> {
-    let stream = TcpStream::connect(("127.0.0.1", port)).map_err(io_error)?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).map_err(io_error)?;
-    let mut reader = BufReader::new(stream);
-    let mut reply = String::new();
-    reader.read_line(&mut reply).map_err(io_error)?;
-    reader.get_mut().write_all(b"{\"execute\":\"qmp_capabilities\"}\n").map_err(io_error)?;
-    reply.clear();
-    reader.read_line(&mut reply).map_err(io_error)?;
-    reader
-        .get_mut()
-        .write_all(
-            b"{\"execute\":\"human-monitor-command\",\"arguments\":{\"command-line\":\"flush\"}}\n",
-        )
-        .map_err(io_error)?;
-    reply.clear();
-    reader.read_line(&mut reply).map_err(io_error)?;
-    (!reply.contains("\"error\"")).then_some(()).ok_or(reply)
+    fn drain_serial(&mut self) -> Result<(), String> {
+        self.stream.set_nonblocking(true).map_err(io_error)?;
+        let mut bytes = [0; 1024];
+        loop {
+            match self.stream.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(length) => {
+                    let text = String::from_utf8_lossy(&bytes[..length]);
+                    write!(self.transcript, "< {text}").map_err(io_error)?;
+                    self.serial.push_str(&text);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(io_error(error)),
+            }
+        }
+        Ok(())
+    }
+
+    fn wait_boot_report(&mut self) -> Result<BootReport, String> {
+        let mut report = None;
+        while Instant::now() < self.deadline {
+            if let Ok(contents) = fs::read_to_string(&self.debug_log) {
+                for line in contents.lines().filter(|line| line.starts_with("LOGOS/1 BOOT ")) {
+                    let parsed = parse_boot_report(line)?;
+                    if report.replace(parsed).is_some() {
+                        return Err("duplicate boot report/session ID".into());
+                    }
+                }
+                if let Some(report) = report {
+                    return (report.session == 1)
+                        .then_some(report)
+                        .ok_or_else(|| "mismatched boot/session ID".into());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err("timeout waiting for structured boot report".into())
+    }
 }
 
 impl Drop for Harness {
@@ -761,6 +953,14 @@ fn boot_proof(
     scenario: &str,
     marker: &str,
 ) -> Result<(), String> {
+    let expected = marker.strip_prefix("LogOS: storage ").unwrap_or(marker);
+    let host = host_recovery(&fixture_dir.join("store.raw"))?;
+    if host != expected && !(expected == "recovered" && host == "recovered-incomplete") {
+        return Err(format!(
+            "host {host}, expected guest {expected}; {}",
+            superblocks(&fixture_dir.join("store.raw"))?
+        ));
+    }
     let (qemu, ovmf) = qemu_paths()?;
     let mut harness = Harness::boot(&qemu, &ovmf, profile, fixture_dir, 60, marker)?;
     harness.send(&format!("LOGOS/1 INPUT {scenario}\n"))?;
@@ -768,6 +968,28 @@ fn boot_proof(
     let result = harness.run_id(scenario);
     let shutdown = harness.shutdown();
     result.and(shutdown)
+}
+
+fn clean_reboot(
+    mut first: Harness,
+    qemu: &str,
+    ovmf: &str,
+    profile: &ImageProfile,
+    fixture_dir: &Path,
+    timeout: u64,
+) -> Result<Harness, String> {
+    first.shutdown()?;
+    let host = host_recovery(&first.disk)?;
+    let second = Harness::boot(qemu, ovmf, profile, fixture_dir, timeout, &host)?;
+    if second.report.storage != host {
+        return Err(format!(
+            "host {}, guest {}; {}",
+            host,
+            second.report.storage,
+            superblocks(&first.disk)?
+        ));
+    }
+    Ok(second)
 }
 
 fn run_write_interruption(
@@ -819,15 +1041,7 @@ fn run_recovery(run_dir: &Path, profile: &ImageProfile, scenario: Scenario) -> R
     first.run_id(scenario.id)?;
     first.reset(scenario.id)?;
     first.run_input(scenario.id)?;
-    first.shutdown()?;
-    let mut second = Harness::boot(
-        &qemu,
-        &ovmf,
-        profile,
-        &fixture_dir,
-        scenario.timeout,
-        "LogOS: storage recovered",
-    )?;
+    let mut second = clean_reboot(first, &qemu, &ovmf, profile, &fixture_dir, scenario.timeout)?;
     second.send(&format!("LOGOS/1 INPUT {}\n", scenario.id))?;
     second.wait("LOGOS/1 RESULT input=accepted")?;
     second.run_id(scenario.id)?;
@@ -905,17 +1119,32 @@ fn run_persistence_fixture(
             scenario.timeout,
             "LogOS: storage formatted",
         )?;
-        let first_outcome = first.run(scenario);
-        first.shutdown()?;
-        validate_host_recovery(&fixture_dir.join("store.raw"))?;
-        let mut second = Harness::boot(
-            &qemu,
-            &ovmf,
-            profile,
-            &fixture_dir,
-            scenario.timeout,
-            "LogOS: storage recovered",
-        )?;
+        let first_outcome = if scenario.id == "persistence/block-timeout-reset" {
+            first.run_input(scenario.id)
+        } else {
+            first.run(scenario)
+        };
+        if scenario.id == "persistence/terminal-history" {
+            first.shutdown()?;
+            validate_terminal_history(&fixture_dir.join("store.raw"))?;
+            let host = host_recovery(&fixture_dir.join("store.raw"))?;
+            let mut second =
+                Harness::boot(&qemu, &ovmf, profile, &fixture_dir, scenario.timeout, &host)?;
+            let second_outcome = second.run_input(scenario.id);
+            let shutdown = second.shutdown();
+            let failure =
+                first_outcome.err().or_else(|| second_outcome.err()).or_else(|| shutdown.err());
+            return Ok(ResultRecord {
+                id: scenario.id.into(),
+                status: if failure.is_none() { Status::Passed } else { Status::Failed },
+                duration_ms: started.elapsed().as_millis(),
+                seed,
+                failure,
+                artifacts: run_dir.to_path_buf(),
+            });
+        }
+        let mut second =
+            clean_reboot(first, &qemu, &ovmf, profile, &fixture_dir, scenario.timeout)?;
         let second_outcome = second.run_input(scenario.id);
         let shutdown = second.shutdown();
         let failure =
@@ -1186,11 +1415,19 @@ fn capture_failure(_fixture: &Path, port: u16, log: &Path) {
 }
 
 fn artifact_dir(name: &str) -> Result<PathBuf, String> {
-    let path = repo_root().join("target/logos-test").join(format!(
-        "{}-{}",
-        name.replace('/', "-"),
-        test_seed()
-    ));
+    let root = repo_root().join("target/logos-test");
+    let base = root.join(format!("{}-{}", name.replace('/', "-"), test_seed()));
+    let path =
+        (0..)
+            .map(|attempt| {
+                if attempt == 0 {
+                    base.clone()
+                } else {
+                    base.with_extension(format!("run{attempt}"))
+                }
+            })
+            .find(|path| !path.exists())
+            .ok_or_else(|| "unable to allocate a unique test artifact directory".to_string())?;
     fs::create_dir_all(&path).map_err(io_error)?;
     Ok(path)
 }
@@ -1245,26 +1482,6 @@ fn accept_until(
     }
 }
 
-fn wait_file(
-    path: &Path,
-    offset: &mut usize,
-    deadline: Instant,
-    expected: &str,
-) -> Result<(), String> {
-    while Instant::now() < deadline {
-        if let Ok(contents) = fs::read_to_string(path) {
-            let start = (*offset).min(contents.len());
-            if contents[start..].lines().any(|line| line.starts_with(expected)) {
-                *offset = contents.len();
-                return Ok(());
-            }
-            *offset = contents.len();
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    Err(format!("timeout waiting for {expected}"))
-}
-
 fn wait_child(child: &mut Child, deadline: Instant) -> Result<(), String> {
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait().map_err(io_error)? {
@@ -1278,6 +1495,16 @@ fn wait_child(child: &mut Child, deadline: Instant) -> Result<(), String> {
     }
     let _ = child.kill();
     Err("timeout waiting for QEMU exit".into())
+}
+
+fn wait_disk_available(path: &Path, deadline: Instant) -> Result<(), String> {
+    while Instant::now() < deadline {
+        if fs::OpenOptions::new().read(true).write(true).open(path).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Err(format!("QEMU exited but Windows still holds raw disk {}", path.display()))
 }
 
 fn capture_qmp(port: u16, log: &Path, artifacts: &Path) {
@@ -1353,6 +1580,7 @@ mod tests {
                     item.id,
                     "core/boot-normal"
                         | "persistence/block-read-flush"
+                        | "persistence/block-timeout-reset"
                         | "persistence/capability-denied"
                         | "persistence/write-interruption"
                         | "persistence/recovery"
@@ -1371,5 +1599,22 @@ mod tests {
     fn report_escaping_is_valid() {
         assert_eq!(escape("a\n\"b"), "a\\n\\\"b");
         assert_eq!(xml("a&b"), "a&amp;b");
+    }
+
+    #[test]
+    fn boot_reports_and_qmp_replies_are_strict() {
+        assert_eq!(
+            parse_boot_report("LOGOS/1 BOOT session=1 storage=recovered").unwrap(),
+            BootReport { session: 1, storage: "recovered".into() }
+        );
+        assert!(parse_boot_report("LOGOS/1 BOOT session=1 storage=unknown").is_err());
+        assert!(parse_qmp_reply("{\"error\":{}}".into()).is_err());
+        assert!(parse_qmp_reply("{\"return\":{}}".into()).is_ok());
+    }
+
+    #[test]
+    fn only_clean_shutdowns_flush() {
+        assert!(ShutdownPolicy::Clean.flushes());
+        assert!(!ShutdownPolicy::Interrupted.flushes());
     }
 }

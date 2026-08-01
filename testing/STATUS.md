@@ -1,10 +1,10 @@
 # Test Status
 
-Last run: `cargo run -p logos-test -- suite main`  
-Seed: `1785572553847174100`  
-Result: **4 failed, 16 passed, 36 skipped**
+Last run: `cargo run -p logos-test -- suite main`
+Seed: `424242`
+Result: **21 passed, 36 skipped**
 
-Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `1785569747442919100`.
+Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `424242`.
 
 | Test | Status | Detail |
 | --- | --- | --- |
@@ -18,9 +18,10 @@ Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `
 | console/terminal-service-restart | passed | |
 | console/sessions-service-restart | passed | |
 | core/boot-normal | passed | |
-| persistence/block-read-flush | failed | missing startup marker `LogOS: storage recovered` |
-| persistence/terminal-history | failed | missing startup marker `LogOS: storage recovered` |
-| persistence/capability-denied | failed | missing startup marker `LogOS: storage recovered` |
+| persistence/block-read-flush | passed | |
+| persistence/terminal-history | passed | |
+| persistence/block-timeout-reset | passed | timeout reset followed by a real read without reboot |
+| persistence/capability-denied | passed | |
 | core/boot-recovery | skipped | semantic proof unavailable |
 | core/ipc-request-reply | skipped | semantic proof unavailable |
 | core/ipc-cancellation | skipped | semantic proof unavailable |
@@ -56,7 +57,7 @@ Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `
 | platform/restart-backoff | passed | |
 | platform/native-service-ready | passed | |
 | persistence/write-interruption | passed | replacement and compaction interruption matrix |
-| persistence/recovery | failed | timeout waiting for `LOGOS/1 RESULT hello=ok` |
+| persistence/recovery | passed | |
 | persistence/capability-denied | passed | |
 | persistence/corruption-detected | passed | corruption reported without reformat |
 | persistence/storage-service-restart | passed | |
@@ -65,4 +66,4 @@ Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `
 | network/reset-reconnect | skipped | semantic proof unavailable |
 | network/unauthorized-operation | skipped | semantic proof unavailable |
 
-Artifacts: `target/logos-test/main-1785572553846955400`.
+Artifacts: `target/logos-test/main-424242.run2` (same-seed reruns are isolated with suffixed directories).

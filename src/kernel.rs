@@ -722,10 +722,13 @@ pub(crate) fn main(
     );
     health.finish();
     let mut store_relay_state = StoreRelayState::new();
-    if !native_input.deliver(logos_abi::InputEvent::STARTUP)
-        || !native_scheduler.wake(native_handle)
-        || !native_scheduler.run(native_handle)
-    {
+    if !native_input.deliver(logos_abi::InputEvent::STARTUP) {
+        fail!(b"terminal history startup");
+    }
+    if !native_scheduler.wake(native_handle) {
+        fail!(b"terminal history startup");
+    }
+    if !native_scheduler.run(native_handle) {
         fail!(b"terminal history startup");
     }
     let terminal_history_startup = relay_terminal_store_requests(
@@ -772,6 +775,10 @@ pub(crate) fn main(
     let proof = Cell::new(false);
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(
+        unsafe {
+            logos_core::native_service::Context::storage_status_at(native_storage_store.context())
+        }
+        .unwrap_or(logos_core::native_service::STORAGE_IO_FAILED),
         |value| {
             let tick = interrupts::ticks();
             if service_scheduler.run_next() {
@@ -924,19 +931,215 @@ pub(crate) fn main(
                 proof.set(true);
                 return true;
             }
+            if value == "persistence/block-timeout-reset" {
+                let timeout_id = u32::MAX - 1;
+                let timeout_request = logos_abi::BlockRequest {
+                    id: timeout_id,
+                    operation: logos_abi::BlockOperation::Flush,
+                    lba: 0,
+                    blocks: 0,
+                    page: logos_abi::PageHandle(0),
+                    deadline: 0,
+                };
+                let before = block_device.diagnostics();
+                let timeout = unsafe {
+                    logos_core::native_service::Context::request_block_at(
+                        native_storage_block.context(),
+                        timeout_request,
+                    )
+                } && block_dispatch
+                    .poll(
+                        &mut block::DispatchContext {
+                            endpoint: native_storage_block,
+                            pages: &mut shared_pages,
+                            store_owner: storage_owner,
+                            store_page: storage_block_page,
+                            device: &mut block_device,
+                            memory: &mut memory,
+                        },
+                        interrupts::ticks(),
+                    )
+                    .is_some_and(|reply| {
+                        reply.id == timeout_id
+                            && reply.status == logos_abi::PersistenceStatus::TimedOut
+                            && native_storage_block.reply(reply)
+                            && unsafe {
+                                logos_core::native_service::Context::block_reply_at(
+                                    native_storage_block.context(),
+                                    timeout_id,
+                                )
+                                .is_some_and(|reply| {
+                                    reply.status == logos_abi::PersistenceStatus::TimedOut
+                                })
+                            }
+                    })
+                    && native_scheduler.wake(storage_handle)
+                    && native_scheduler.run(storage_handle);
+                let after = block_device.diagnostics();
+                if !timeout
+                    || after.0 != before.0.saturating_add(1)
+                    || after.1 != before.1.saturating_add(1)
+                {
+                    proof.set(false);
+                    return false;
+                }
+
+                let read_id = timeout_id - 1;
+                let read_request = logos_abi::BlockRequest {
+                    id: read_id,
+                    operation: logos_abi::BlockOperation::Read,
+                    lba: 0,
+                    blocks: 1,
+                    page: storage_block_page,
+                    deadline: interrupts::ticks().saturating_add(100_000),
+                };
+                let read = unsafe {
+                    logos_core::native_service::Context::request_block_at(
+                        native_storage_block.context(),
+                        read_request,
+                    )
+                };
+                let read = if read {
+                    loop {
+                        let Some(reply) = block_dispatch.poll(
+                            &mut block::DispatchContext {
+                                endpoint: native_storage_block,
+                                pages: &mut shared_pages,
+                                store_owner: storage_owner,
+                                store_page: storage_block_page,
+                                device: &mut block_device,
+                                memory: &mut memory,
+                            },
+                            interrupts::ticks(),
+                        ) else {
+                            interrupts::wait_for_virtio();
+                            continue;
+                        };
+                        break reply.id == read_id
+                            && reply.status == logos_abi::PersistenceStatus::Complete
+                            && native_storage_block.reply(reply)
+                            && unsafe {
+                                logos_core::native_service::Context::block_reply_at(
+                                    native_storage_block.context(),
+                                    read_id,
+                                )
+                                .is_some_and(|reply| {
+                                    reply.status == logos_abi::PersistenceStatus::Complete
+                                })
+                            }
+                            && native_scheduler.wake(storage_handle)
+                            && native_scheduler.run(storage_handle);
+                    }
+                } else {
+                    false
+                };
+                proof.set(read);
+                return read;
+            }
             if value == "persistence/terminal-history" {
                 let status = unsafe {
                     logos_core::native_service::Context::storage_status_at(
                         native_storage_store.context(),
                     )
                 };
-                let passed = matches!(
+                if status == Some(logos_core::native_service::STORAGE_FORMATTED) {
+                    proof.set(true);
+                    return true;
+                }
+                if !matches!(
                     status,
-                    Some(logos_core::native_service::STORAGE_FORMATTED)
-                        | Some(logos_core::native_service::STORAGE_RECOVERED)
-                );
-                proof.set(proof.get() || passed);
-                return passed;
+                    Some(logos_core::native_service::STORAGE_RECOVERED)
+                        | Some(logos_core::native_service::STORAGE_RECOVERED_INCOMPLETE)
+                ) {
+                    return false;
+                }
+                input.set_layout(input::Layout::Azerty);
+                let mut send = |event: logos_abi::InputEvent, expected: Option<&[u8]>| {
+                    if !native_input.deliver(event) {
+                        return false;
+                    }
+                    if !native_scheduler.wake(native_handle) || !native_scheduler.run(native_handle)
+                    {
+                        return false;
+                    }
+                    if !relay_terminal_store_requests(
+                        native_store,
+                        native_storage_store,
+                        &mut block_dispatch,
+                        &mut block::DispatchContext {
+                            endpoint: native_storage_block,
+                            pages: &mut shared_pages,
+                            store_owner: storage_owner,
+                            store_page: storage_block_page,
+                            device: &mut block_device,
+                            memory: &mut memory,
+                        },
+                        terminal_owner,
+                        storage_owner,
+                        shared_history,
+                        &mut native_scheduler,
+                        native_handle,
+                        storage_handle,
+                        &session,
+                        &capabilities,
+                        &mut store_relay_state,
+                        interrupts::ticks(),
+                    ) {
+                        return false;
+                    }
+                    if !resume_display(
+                        native_display,
+                        &session,
+                        &capabilities,
+                        session_display_capability,
+                        &mut native_scheduler,
+                        native_handle,
+                    ) {
+                        return false;
+                    }
+                    let Some(request) = native_command.request() else {
+                        return expected.is_none();
+                    };
+                    let matched = expected.is_some_and(|expected| {
+                        request.syscall == logos_abi::Syscall::SetInputLayout
+                            && request.argument[..request.length] == *expected
+                    });
+                    if !native_command.reply(&[]) {
+                        return false;
+                    }
+                    if !native_scheduler.wake(native_handle)
+                        || !native_scheduler.run(native_handle)
+                        || !resume_display(
+                            native_display,
+                            &session,
+                            &capabilities,
+                            session_display_capability,
+                            &mut native_scheduler,
+                            native_handle,
+                        )
+                    {
+                        return false;
+                    }
+                    matched
+                };
+                let navigation = [
+                    (logos_abi::InputEvent::UP, None),
+                    (logos_abi::InputEvent::UP, None),
+                    (logos_abi::InputEvent::DOWN, None),
+                ]
+                .into_iter()
+                .all(|(event, expected)| send(event, expected))
+                    && send(
+                        logos_abi::InputEvent::ENTER,
+                        Some(&[logos_abi::InputLayout::Qwerty.wire()]),
+                    )
+                    && [logos_abi::InputEvent::UP; 5].into_iter().all(|event| send(event, None))
+                    && send(
+                        logos_abi::InputEvent::ENTER,
+                        Some(&[logos_abi::InputLayout::Azerty.wire()]),
+                    );
+                proof.set(proof.get() || navigation);
+                return navigation;
             }
             let terminal_restart = value == "assert-terminal-service-restart";
             let sessions_restart = value == "assert-sessions-service-restart";
@@ -1262,18 +1465,6 @@ pub(crate) fn main(
                     .is_some_and(|event| native_input.deliver(event))
                     && native_scheduler.wake(native_handle)
                     && native_scheduler.run(native_handle)
-                    && (if native_display.pending() {
-                        resume_display(
-                            native_display,
-                            &session,
-                            &capabilities,
-                            session_display_capability,
-                            &mut native_scheduler,
-                            native_handle,
-                        )
-                    } else {
-                        true
-                    })
                     && relay_terminal_store_requests(
                         native_store,
                         native_storage_store,
@@ -1296,6 +1487,14 @@ pub(crate) fn main(
                         &capabilities,
                         &mut store_relay_state,
                         interrupts::ticks(),
+                    )
+                    && resume_display(
+                        native_display,
+                        &session,
+                        &capabilities,
+                        session_display_capability,
+                        &mut native_scheduler,
+                        native_handle,
                     )
                     && (native_command.request().is_none()
                         || ({
@@ -1910,7 +2109,11 @@ fn relay_store_request(
                 let _ = block_context.pages.return_loan(storage_owner, request.page);
             }
             update_store_state(state, request, reply.status);
-            return SessionRelay::Handled(terminal.reply(reply));
+            return SessionRelay::Handled(
+                scheduler.wake(storage_handle)
+                    && scheduler.run(storage_handle)
+                    && terminal.reply(reply),
+            );
         }
         if scheduler.run_next() {
             continue;

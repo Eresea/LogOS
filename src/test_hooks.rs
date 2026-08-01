@@ -5,10 +5,24 @@ use logos_core::test_protocol::{self, Request};
 const COM2: u16 = 0x2f8;
 const DEBUG_EXIT: u16 = 0xf4;
 pub fn serve(
+    storage: u32,
     mut native_input: impl FnMut(&str) -> bool,
     mut run_scenario: impl FnMut(&str) -> bool,
 ) -> ! {
     init();
+    line(match storage {
+        logos_core::native_service::STORAGE_FORMATTED => {
+            b"LOGOS/1 BOOT session=1 storage=formatted"
+        }
+        logos_core::native_service::STORAGE_RECOVERED => {
+            b"LOGOS/1 BOOT session=1 storage=recovered"
+        }
+        logos_core::native_service::STORAGE_RECOVERED_INCOMPLETE => {
+            b"LOGOS/1 BOOT session=1 storage=recovered-incomplete"
+        }
+        logos_core::native_service::STORAGE_CORRUPT => b"LOGOS/1 BOOT session=1 storage=corrupt",
+        _ => b"LOGOS/1 BOOT session=1 storage=io-failed",
+    });
     line(b"LOGOS/1 READY stage=session-ready");
     let mut frame = [0u8; test_protocol::MAX_FRAME];
     loop {
