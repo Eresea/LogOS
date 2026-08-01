@@ -1247,6 +1247,7 @@ pub(crate) fn main(
                 proof.set(proof.get() || passed);
                 return passed;
             }
+            let proof_input = value.starts_with("assert-") || value.starts_with("deny-");
             let deny_display = value == "deny-display";
             let (value, request_session, expected, expect_qwerty) = if terminal_restart
                 || sessions_restart
@@ -1380,7 +1381,7 @@ pub(crate) fn main(
                                 )
                         }))
             });
-            if value.starts_with("assert-") || value.starts_with("deny-") {
+            if proof_input {
                 proof.set(proof.get() || passed);
             }
             passed
