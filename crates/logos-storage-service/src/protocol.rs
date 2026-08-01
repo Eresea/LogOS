@@ -59,6 +59,30 @@ impl ReplaceTransaction {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes[..self.length]
     }
+
+    pub fn raw_parts(&self) -> (NamespaceId, *const u8, usize, *const u8, usize) {
+        (
+            self.namespace,
+            self.name.as_ptr(),
+            self.name_length as usize,
+            self.bytes.as_ptr(),
+            self.length,
+        )
+    }
+
+    /// # Safety
+    /// `pointer` must point to a live, aligned transaction in the Store context.
+    pub unsafe fn complete_at(pointer: *const Self) -> bool {
+        unsafe { (*pointer).written == (*pointer).length }
+    }
+
+    /// # Safety
+    /// `pointer` must point to a live, aligned transaction in the Store context.
+    pub unsafe fn raw_parts_at(
+        pointer: *const Self,
+    ) -> (NamespaceId, *const u8, usize, *const u8, usize) {
+        unsafe { (*pointer).raw_parts() }
+    }
 }
 
 #[derive(Clone, Copy)]

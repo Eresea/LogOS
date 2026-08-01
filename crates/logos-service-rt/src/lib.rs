@@ -184,7 +184,8 @@ impl Context {
     }
 
     pub fn store_reply(&mut self, reply: logos_abi::StoreReply) -> bool {
-        unsafe { RawContext::reply_store_at(self.raw_address(), reply) }
+        let valid = unsafe { RawContext::reply_store_at(self.raw_address(), reply) };
+        valid && self.invoke(native_service::STORE_REPLY)
     }
 
     pub fn shared_page(&self) -> Option<SharedPage> {

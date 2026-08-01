@@ -389,7 +389,7 @@ impl Context {
         if context.abi != ABI
             || context.reserved != 0
             || context.status != ACKNOWLEDGED
-            || !matches!(context.operation, READY | STORE_REPLY)
+            || !matches!(context.operation, READY | READ_INPUT | STORE_REPLY)
         {
             return false;
         }
@@ -425,14 +425,21 @@ impl Context {
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
     pub unsafe fn reply_store_at(address: u64, reply: logos_abi::StoreReply) -> bool {
-        let Some(request) = (unsafe { Self::store_at(address) }) else {
-            return false;
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        let valid = match context.operation {
+            STORE_REQUEST => {
+                decode_store_request(&context.text).is_some_and(|request| reply.valid_for(request))
+            }
+            BLOCK_REPLY => {
+                reply.length as usize <= logos_abi::PAGE_SIZE && context.color == reply.id
+            }
+            _ => false,
         };
-        if !reply.valid_for(request) {
+        if !valid {
             return false;
         }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
         context.operation = STORE_REPLY;
+        context.color = 0;
         encode_store_reply(&mut context.text, reply);
         context.text_length = STORE_REPLY_BYTES as u32;
         unsafe { (address as *mut Self).write_volatile(context) };
@@ -442,6 +449,13 @@ impl Context {
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
     pub unsafe fn store_reply_at(address: u64, expected_id: u32) -> Option<logos_abi::StoreReply> {
+        let reply = unsafe { Self::store_reply_pending_at(address) }?;
+        (reply.id == expected_id).then_some(reply)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn store_reply_pending_at(address: u64) -> Option<logos_abi::StoreReply> {
         let context = unsafe { (address as *const Self).read_volatile() };
         if context.abi != ABI
             || context.reserved != 0
@@ -451,8 +465,8 @@ impl Context {
         {
             return None;
         }
-        let reply = decode_store_reply(&context.text)?;
-        (reply.id == expected_id).then_some(reply)
+        decode_store_reply(&context.text)
+            .filter(|reply| reply.length as usize <= logos_abi::PAGE_SIZE)
     }
 
     /// # Safety
@@ -548,9 +562,24 @@ impl Context {
         if context.abi != ABI
             || context.reserved != 0
             || context.status != ACKNOWLEDGED
-            || !matches!(context.operation, READY | BLOCK_REPLY)
+            || !matches!(context.operation, READY | READ_INPUT | STORE_REQUEST | BLOCK_REPLY)
         {
             return false;
+        }
+        let parent_store_id = if context.operation == STORE_REQUEST {
+            let Some(parent) = decode_store_request(&context.text) else {
+                return false;
+            };
+            Some(parent.id)
+        } else {
+            None
+        };
+        if let Some(id) = parent_store_id {
+            // `color` is free while a Block request is active and preserves the
+            // Store request ID across the nested Block round trip.
+            context.color = id;
+        } else if context.operation != BLOCK_REPLY {
+            context.color = 0;
         }
         encode_block_request(&mut context.text, request);
         context.text_length = BLOCK_REQUEST_BYTES as u32;
@@ -772,7 +801,40 @@ mod tests {
             deadline: 0,
         };
         let address = (&mut context as *mut Context) as u64;
-        assert!(unsafe { Context::deliver_store_at(address, store) });
+        assert!(unsafe { Context::request_store_at(address, store) });
+        assert!(unsafe {
+            Context::store_at(address).is_some_and(|request| {
+                request.id == store.id && request.operation == store.operation
+            })
+        });
+        let block = logos_abi::BlockRequest {
+            id: 9,
+            operation: logos_abi::BlockOperation::Flush,
+            lba: 0,
+            blocks: 0,
+            page: logos_abi::PageHandle(0),
+            deadline: 0,
+        };
+        assert!(unsafe { Context::request_block_at(address, block) });
+        assert_eq!(unsafe { Context::block_at(address) }, Some(block));
+        let block_reply = logos_abi::BlockReply {
+            id: 9,
+            status: logos_abi::PersistenceStatus::Complete,
+            info: logos_abi::BlockInfo::default(),
+        };
+        assert!(unsafe { Context::reply_block_at(address, block_reply) });
+        assert!(unsafe { Context::block_reply_at(address, 9) }.is_some());
+        assert!(unsafe {
+            !Context::reply_store_at(
+                address,
+                logos_abi::StoreReply {
+                    id: 8,
+                    status: logos_abi::PersistenceStatus::Complete,
+                    version: 3,
+                    length: 0,
+                },
+            )
+        });
         let store_reply = logos_abi::StoreReply {
             id: 7,
             status: logos_abi::PersistenceStatus::Complete,
@@ -785,6 +847,7 @@ mod tests {
 
         context.operation = 0;
         context.status = 0;
+        unsafe { (address as *mut Context).write_volatile(context) };
         assert!(unsafe {
             Context::configure_shared_page_at(address, logos_abi::PageHandle(0x10001))
         });
@@ -794,6 +857,7 @@ mod tests {
         );
         context.operation = READY;
         context.status = ACKNOWLEDGED;
+        unsafe { (address as *mut Context).write_volatile(context) };
         assert!(unsafe { Context::request_store_at(address, store) });
         assert!(
             unsafe { Context::store_at(address) }.is_some_and(
@@ -801,8 +865,9 @@ mod tests {
             )
         );
 
-        context.operation = BLOCK_REQUEST;
+        context.operation = READ_INPUT;
         context.status = ACKNOWLEDGED;
+        unsafe { (address as *mut Context).write_volatile(context) };
         let block = logos_abi::BlockRequest {
             id: 9,
             operation: logos_abi::BlockOperation::Flush,
@@ -811,9 +876,7 @@ mod tests {
             page: logos_abi::PageHandle(0),
             deadline: 0,
         };
-        encode_block_request(&mut context.text, block);
-        context.text_length = BLOCK_REQUEST_BYTES as u32;
-        unsafe { (address as *mut Context).write_volatile(context) };
+        assert!(unsafe { Context::request_block_at(address, block) });
         assert_eq!(unsafe { Context::block_at(address) }, Some(block));
         let block_reply = logos_abi::BlockReply {
             id: 9,

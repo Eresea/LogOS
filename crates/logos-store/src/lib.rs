@@ -233,6 +233,7 @@ impl<B: SectorBackend> Store<B> {
         record_sectors(payload_length).unwrap_or(0) + 2
     }
 
+    #[inline(never)]
     pub fn replace(
         &mut self,
         namespace: NamespaceId,
@@ -350,6 +351,7 @@ impl<B: SectorBackend> Store<B> {
         self.scan()
     }
 
+    #[inline(never)]
     fn replace_inner(
         &mut self,
         namespace: NamespaceId,

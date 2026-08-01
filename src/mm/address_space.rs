@@ -3,7 +3,7 @@ use core::{
     ptr,
 };
 
-use crate::memory::{Page, PhysicalMemory};
+use crate::memory::{Contiguous, Page, PhysicalMemory};
 
 const ENTRIES: usize = 512;
 const MAPPED_PAGES: usize = 64;
@@ -15,6 +15,9 @@ const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 const SHARED_PAGE: usize = ENTRIES - 5;
 const BLOCK_PAGE: usize = ENTRIES - 10;
+const STACK_TOP: usize = BLOCK_PAGE;
+const STACK_PAGES: usize = 12;
+const STACK_BASE: usize = STACK_TOP - STACK_PAGES;
 const CONTEXT_PAGE: usize = ENTRIES - 4;
 const HEAP_PAGE: usize = ENTRIES - 9;
 const HEAP_PAGES: usize = 4;
@@ -25,7 +28,7 @@ pub struct AddressSpace {
     pd: Page,
     pt: Page,
     stack_lower: Page,
-    stack: Page,
+    stack: Contiguous,
     mapped: [Option<Mapping>; MAPPED_PAGES],
     borrowed: Option<u64>,
     base: u64,
@@ -61,7 +64,7 @@ impl AddressSpace {
             let _ = physical.release_page(pml4);
             return None;
         };
-        let Some(stack) = physical.allocate_owned() else {
+        let Some(stack) = physical.allocate_contiguous(STACK_PAGES) else {
             let _ = physical.release_page(stack_lower);
             let _ = physical.release_page(pt);
             let _ = physical.release_page(pd);
@@ -81,7 +84,7 @@ impl AddressSpace {
             ptr::write_bytes(pt_address as *mut u8, 0, PAGE_SIZE as usize);
             let pml4_table = pml4_address as *mut u64;
             let Some(slot) = (256..ENTRIES).find(|&index| pml4_table.add(index).read() == 0) else {
-                let _ = physical.release_page(stack);
+                let _ = stack.release(physical);
                 let _ = physical.release_page(pt);
                 let _ = physical.release_page(pd);
                 let _ = physical.release_page(pdpt);
@@ -91,12 +94,12 @@ impl AddressSpace {
             pml4_table.add(slot).write(pdpt_address | PRESENT | WRITABLE | USER);
             (pdpt_address as *mut u64).write(pd_address | PRESENT | WRITABLE | USER);
             (pd_address as *mut u64).write(pt_address | PRESENT | WRITABLE | USER);
-            (pt_address as *mut u64)
-                .add(ENTRIES - 2)
-                .write(stack_lower.address() | PRESENT | WRITABLE | USER | NO_EXECUTE);
-            (pt_address as *mut u64)
-                .add(ENTRIES - 1)
-                .write(stack_address | PRESENT | WRITABLE | USER | NO_EXECUTE);
+            for index in STACK_BASE..STACK_TOP {
+                let offset = u64::try_from(index - STACK_BASE).unwrap_or(0) * PAGE_SIZE;
+                (pt_address as *mut u64)
+                    .add(index)
+                    .write((stack_address + offset) | PRESENT | WRITABLE | USER | NO_EXECUTE);
+            }
             Some(Self {
                 pml4,
                 pdpt,
@@ -124,7 +127,7 @@ impl AddressSpace {
             let end_rva = section.address.checked_add(section.size)?;
             let end = usize::try_from(end_rva.checked_add(PAGE_SIZE as u32 - 1)?).ok()?
                 / PAGE_SIZE as usize;
-            if end >= SHARED_PAGE {
+            if end >= STACK_BASE {
                 self.unmap_image(physical);
                 return None;
             }
@@ -262,7 +265,7 @@ impl AddressSpace {
     }
 
     pub fn stack_top(&self) -> u64 {
-        self.base + PAGE_SIZE * ENTRIES as u64
+        self.base + PAGE_SIZE * STACK_TOP as u64
     }
 
     pub fn map_kernel_stack(&mut self, address: u64) -> bool {
@@ -287,9 +290,11 @@ impl AddressSpace {
             let slot = (self.base >> 39) as usize & 0x1ff;
             let entry = pml4.add(slot).read_volatile();
             entry & (PRESENT | USER) == PRESENT | USER
-                && (self.pt.address() as *const u64).add(ENTRIES - 1).read_volatile()
-                    & (PRESENT | WRITABLE | USER)
-                    == PRESENT | WRITABLE | USER
+                && (STACK_BASE..STACK_TOP).all(|index| {
+                    (self.pt.address() as *const u64).add(index).read_volatile()
+                        & (PRESENT | WRITABLE | USER)
+                        == PRESENT | WRITABLE | USER
+                })
                 && (0..ENTRIES)
                     .filter(|&index| index != slot)
                     .all(|index| pml4.add(index).read_volatile() & USER == 0)
@@ -302,7 +307,7 @@ impl AddressSpace {
             .into_iter()
             .flatten()
             .fold(true, |released, mapping| physical.release_page(mapping.page) && released);
-        let stack = physical.release_page(self.stack);
+        let stack = self.stack.release(physical);
         let stack_lower = physical.release_page(self.stack_lower);
         let pt = physical.release_page(self.pt);
         let pd = physical.release_page(self.pd);

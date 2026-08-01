@@ -147,105 +147,157 @@ fn process(
     {
         return reply(request, logos_abi::PersistenceStatus::Denied);
     }
-    let store = unsafe { state.store.assume_init_mut() };
     match request.operation {
-        logos_abi::StoreOperation::OpenRead => match store.metadata(
-            request.namespace,
-            &request.name[..request.name_length as usize],
-            request.version,
-        ) {
-            Ok((version, length)) => {
-                state.read.write(ReadSelection::new(request, length));
-                state.read_active = true;
-                logos_abi::StoreReply {
-                    id: request.id,
-                    status: logos_abi::PersistenceStatus::Complete,
-                    version,
-                    length: length as u32,
-                }
-            }
-            Err(error) => reply(request, map_error(error)),
-        },
-        logos_abi::StoreOperation::ReadChunk => {
-            if !state.read_active {
-                return reply(request, logos_abi::PersistenceStatus::Invalid);
-            }
-            let selection = unsafe { state.read.assume_init_ref() };
-            let output = unsafe {
-                core::slice::from_raw_parts_mut(page.address as *mut u8, logos_abi::PAGE_SIZE)
-            };
-            let result =
-                store.read(selection.namespace(), selection.name(), selection.version(), output);
-            let (version, length) = match result {
-                Ok(value) => value,
-                Err(error) => return reply(request, map_error(error)),
-            };
-            let offset = usize::try_from(request.offset).unwrap_or(usize::MAX);
-            let copied = length.saturating_sub(offset).min(request.length as usize);
-            if copied != 0 {
-                output.copy_within(offset..offset + copied, 0);
-            }
+        logos_abi::StoreOperation::OpenRead => process_open_read(state, request),
+        logos_abi::StoreOperation::ReadChunk => process_read_chunk(state, request, page),
+        logos_abi::StoreOperation::BeginReplace => process_begin_replace(state, request),
+        logos_abi::StoreOperation::WriteChunk => process_write_chunk(state, request, page),
+        logos_abi::StoreOperation::Commit => process_commit(state, request),
+        logos_abi::StoreOperation::Abort | logos_abi::StoreOperation::Cancel => {
+            process_abort(state, request)
+        }
+    }
+}
+
+#[inline(never)]
+fn process_open_read(
+    state: &mut RuntimeState,
+    request: logos_abi::StoreRequest,
+) -> logos_abi::StoreReply {
+    let store = unsafe { state.store.assume_init_mut() };
+    match store.metadata(
+        request.namespace,
+        &request.name[..request.name_length as usize],
+        request.version,
+    ) {
+        Ok((version, length)) => {
+            state.read.write(ReadSelection::new(request, length));
+            state.read_active = true;
             logos_abi::StoreReply {
                 id: request.id,
                 status: logos_abi::PersistenceStatus::Complete,
                 version,
-                length: copied as u32,
+                length: length as u32,
             }
         }
-        logos_abi::StoreOperation::BeginReplace => {
-            if state.replace_active {
-                return reply(request, logos_abi::PersistenceStatus::Invalid);
-            }
-            if let Some(replace) = ReplaceTransaction::begin(request) {
-                state.replace.write(replace);
-                state.replace_active = true;
-                reply(request, logos_abi::PersistenceStatus::Complete)
-            } else {
-                reply(request, logos_abi::PersistenceStatus::Invalid)
-            }
-        }
-        logos_abi::StoreOperation::WriteChunk => {
-            if !state.replace_active {
-                return reply(request, logos_abi::PersistenceStatus::Invalid);
-            }
-            let replace = unsafe { state.replace.assume_init_mut() };
-            let page = unsafe {
-                core::slice::from_raw_parts(page.address as *const u8, logos_abi::PAGE_SIZE)
-            };
-            if replace.write(request, page) {
-                reply(request, logos_abi::PersistenceStatus::Complete)
-            } else {
-                reply(request, logos_abi::PersistenceStatus::Invalid)
-            }
-        }
-        logos_abi::StoreOperation::Commit => {
-            if !state.replace_active {
-                return reply(request, logos_abi::PersistenceStatus::Invalid);
-            }
-            let replace = unsafe { state.replace.assume_init_ref() };
-            if !replace.complete() {
-                return reply(request, logos_abi::PersistenceStatus::Invalid);
-            }
-            let result = store.replace(replace.namespace(), replace.name(), replace.bytes());
-            state.replace_active = false;
-            match result {
-                Ok(version) => logos_abi::StoreReply {
-                    id: request.id,
-                    status: logos_abi::PersistenceStatus::Complete,
-                    version,
-                    length: 0,
-                },
-                Err(error) => reply(request, map_error(error)),
-            }
-        }
-        logos_abi::StoreOperation::Abort | logos_abi::StoreOperation::Cancel => {
-            state.replace_active = false;
-            if request.operation == logos_abi::StoreOperation::Cancel {
-                state.read_active = false;
-            }
-            reply(request, logos_abi::PersistenceStatus::Complete)
-        }
+        Err(error) => reply(request, map_error(error)),
     }
+}
+
+#[inline(never)]
+fn process_read_chunk(
+    state: &mut RuntimeState,
+    request: logos_abi::StoreRequest,
+    page: logos_service_rt::SharedPage,
+) -> logos_abi::StoreReply {
+    if !state.read_active {
+        return reply(request, logos_abi::PersistenceStatus::Invalid);
+    }
+    let selection = unsafe { state.read.assume_init_ref() };
+    let store = unsafe { state.store.assume_init_mut() };
+    let output =
+        unsafe { core::slice::from_raw_parts_mut(page.address as *mut u8, logos_abi::PAGE_SIZE) };
+    let (version, length) =
+        match store.read(selection.namespace(), selection.name(), selection.version(), output) {
+            Ok(value) => value,
+            Err(error) => return reply(request, map_error(error)),
+        };
+    let offset = usize::try_from(request.offset).unwrap_or(usize::MAX);
+    let copied = length.saturating_sub(offset).min(request.length as usize);
+    if copied != 0 {
+        output.copy_within(offset..offset + copied, 0);
+    }
+    logos_abi::StoreReply {
+        id: request.id,
+        status: logos_abi::PersistenceStatus::Complete,
+        version,
+        length: copied as u32,
+    }
+}
+
+#[inline(never)]
+fn process_begin_replace(
+    state: &mut RuntimeState,
+    request: logos_abi::StoreRequest,
+) -> logos_abi::StoreReply {
+    if state.replace_active {
+        return reply(request, logos_abi::PersistenceStatus::Invalid);
+    }
+    if let Some(replace) = ReplaceTransaction::begin(request) {
+        state.replace.write(replace);
+        state.replace_active = true;
+        reply(request, logos_abi::PersistenceStatus::Complete)
+    } else {
+        reply(request, logos_abi::PersistenceStatus::Invalid)
+    }
+}
+
+#[inline(never)]
+fn process_write_chunk(
+    state: &mut RuntimeState,
+    request: logos_abi::StoreRequest,
+    page: logos_service_rt::SharedPage,
+) -> logos_abi::StoreReply {
+    if !state.replace_active {
+        return reply(request, logos_abi::PersistenceStatus::Invalid);
+    }
+    let replace = unsafe { state.replace.assume_init_mut() };
+    let page =
+        unsafe { core::slice::from_raw_parts(page.address as *const u8, logos_abi::PAGE_SIZE) };
+    if replace.write(request, page) {
+        reply(request, logos_abi::PersistenceStatus::Complete)
+    } else {
+        reply(request, logos_abi::PersistenceStatus::Invalid)
+    }
+}
+
+#[inline(never)]
+fn process_commit(
+    state: &mut RuntimeState,
+    request: logos_abi::StoreRequest,
+) -> logos_abi::StoreReply {
+    if !state.replace_active {
+        return reply(request, logos_abi::PersistenceStatus::Invalid);
+    }
+    let replace = state.replace.as_ptr();
+    if !unsafe { ReplaceTransaction::complete_at(replace) } {
+        return reply(request, logos_abi::PersistenceStatus::Invalid);
+    }
+    let result = commit_store(state, replace);
+    state.replace_active = false;
+    match result {
+        Ok(version) => logos_abi::StoreReply {
+            id: request.id,
+            status: logos_abi::PersistenceStatus::Complete,
+            version,
+            length: 0,
+        },
+        Err(error) => reply(request, map_error(error)),
+    }
+}
+
+#[inline(never)]
+fn commit_store(
+    state: &mut RuntimeState,
+    replace: *const ReplaceTransaction,
+) -> Result<u64, Error> {
+    let (namespace, name_ptr, name_length, bytes_ptr, bytes_length) =
+        unsafe { ReplaceTransaction::raw_parts_at(replace) };
+    let name = unsafe { core::slice::from_raw_parts(name_ptr, name_length) };
+    let bytes = unsafe { core::slice::from_raw_parts(bytes_ptr, bytes_length) };
+    unsafe { state.store.assume_init_mut() }.replace(namespace, name, bytes)
+}
+
+#[inline(never)]
+fn process_abort(
+    state: &mut RuntimeState,
+    request: logos_abi::StoreRequest,
+) -> logos_abi::StoreReply {
+    state.replace_active = false;
+    if request.operation == logos_abi::StoreOperation::Cancel {
+        state.read_active = false;
+    }
+    reply(request, logos_abi::PersistenceStatus::Complete)
 }
 
 #[unsafe(no_mangle)]
