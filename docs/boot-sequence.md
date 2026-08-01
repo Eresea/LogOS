@@ -40,3 +40,14 @@ the terminal handles local redraw while Core delegates system operations to ACPI
 Escape or the authorized `recovery` command returns to the direct recovery console. A failed
 Terminal or Sessions task gets one reset-and-reentry attempt with a new generation-tagged handle;
 a failed restart enters the direct recovery console.
+
+## Persistence ordering and recovery
+
+After device discovery and Block-driver binding, Core starts the Ring-2 Store and completes its
+`Info`/format-or-recover handshake before Terminal accepts normal input. Store owns the raw
+`target/logos-store.raw` device through the Core Block gate and its transfer page; Terminal history
+is loaded only after Store reports ready. A blank device is formatted, while corruption or I/O
+failure is reported as a degraded Store status and never silently reformatted. The recovery
+console remains available for those statuses, and an incomplete committed tail is recovered using
+the last valid superblock. Store restart cancels in-flight Block work, reclaims its pages, and
+repeats this startup handshake before service traffic resumes.

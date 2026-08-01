@@ -1,6 +1,6 @@
 # Persistence
 
-> **Status:** Persistence v1 in progress
+> **Status:** Persistence v1 complete
 >
 > **Owner:** Foundation Block service and System Store service
 
@@ -157,7 +157,7 @@ shape before QEMU Store I/O.
 - [x] Add a Core self-check for a mismatched Block reply ID.
 - [x] Run `cargo test -p logos-core`.
 - [x] Run `cargo run -p logos-test -- run persistence/block-read-flush`.
-- [ ] Commit Core Block dispatch.
+- [x] Commit Core Block dispatch.
 
 ### Phase 4: run Store on the raw disk
 
@@ -238,9 +238,9 @@ shape before QEMU Store I/O.
 - [x] Add a test that valid persisted history restores Up/Down navigation.
 - [x] Add a test that invalid persisted bytes do not replace live history.
 - [x] Add a test that a failed save does not discard the submitted command.
-- [ ] Boot, enter two distinct commands, and stop QEMU.
-- [ ] Reboot the same disk and prove both commands are navigable in order.
-- [ ] Commit the first persistence consumer.
+- [x] Boot, enter two distinct commands, and stop QEMU.
+- [x] Reboot the same disk and prove both commands are navigable in order.
+- [x] Commit the first persistence consumer.
 
 ### Phase 7: prove interruption, corruption, and restart behavior
 
@@ -266,7 +266,7 @@ shape before QEMU Store I/O.
 - [x] Restart Store with no request in flight and prove reads still work.
 - [x] Restart Store during an uncommitted replace and prove the old value remains current.
 - [x] Restart Store after commit completion and prove the new value remains current.
-- [ ] Force a Block timeout and prove reset permits a later read without reboot.
+- [x] Force a Block timeout and prove reset permits a later read without reboot.
 - [x] Preserve the raw disk, debug log, control log, and QMP log for every failed case.
 - [x] Run `cargo run -p logos-test -- suite persistence`.
 - [x] Run `cargo fmt --check`.
@@ -277,13 +277,13 @@ shape before QEMU Store I/O.
 
 ### Phase 8: close the milestone
 
-- [ ] Check every v1 scope item below against a passing proof.
-- [ ] Update `docs/ARCHITECTURE.md` only if implementation differs from its current Store model.
-- [ ] Update `docs/boot-sequence.md` with Store dependencies, failure mode, and recovery path.
-- [ ] Update `docs/security.md` with namespace read/write capability enforcement.
-- [ ] Update `docs/ROADMAP.md` to mark Persistence v1 complete.
-- [ ] Change this document's status to complete.
-- [ ] Commit the documentation-only milestone close separately.
+- [x] Check every v1 scope item below against a passing proof.
+- [x] Confirm `docs/ARCHITECTURE.md` still matches the Store model; no change is needed.
+- [x] Update `docs/boot-sequence.md` with Store dependencies, failure mode, and recovery path.
+- [x] Update `docs/security.md` with namespace read/write capability enforcement.
+- [x] Update `docs/ROADMAP.md` to mark Persistence v1 complete.
+- [x] Change this document's status to complete.
+- [x] Commit the documentation-only milestone close separately.
 
 ## V1 scope
 
@@ -292,20 +292,20 @@ shape before QEMU Store I/O.
 - [x] Discover one dedicated raw VirtIO block device.
 - [x] Provide bounded read, write, flush, timeout, cancellation, and reset in Core.
 - [x] Report Block completion and recovery diagnostics.
-- [ ] Dispatch Store Block requests through the Core gate and Store-owned transfer page.
+- [x] Dispatch Store Block requests through the Core gate and Store-owned transfer page.
 
 ### Store boundary
 
 - [x] Run one independently restartable System Store payload.
-- [ ] Expose capability-scoped namespaces containing named byte objects.
+- [x] Expose capability-scoped namespaces containing named byte objects.
 - [x] Keep immutable versions and atomic replacement in the host-tested Store engine.
 - [x] Recover checksummed records through the host-tested crash-safe commit log.
-- [ ] Run the bounded Store engine against the real VirtIO disk.
-- [ ] Require explicit namespace read and write capabilities.
+- [x] Run the bounded Store engine against the real VirtIO disk.
+- [x] Require explicit namespace read and write capabilities.
 
 ### First consumer
 
-- [ ] Persist terminal history through its existing bounded export/restore contract.
+- [x] Persist terminal history through its existing bounded export/restore contract.
 
 ## Exit proof
 
