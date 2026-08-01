@@ -1,22 +1,22 @@
 # Test Status
 
 Last run: `cargo run -p logos-test -- suite main`  
-Seed: `1785535582782519200`  
-Result: **9 failed, 8 passed, 39 skipped**
+Seed: `1785571078024486000`  
+Result: **1 failed, 19 passed, 36 skipped**
 
 Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `1785569747442919100`.
 
 | Test | Status | Detail |
 | --- | --- | --- |
 | console/structured-command | passed | |
-| console/capability-denied | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
-| console/input-capability-denied | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
+| console/capability-denied | passed | |
+| console/input-capability-denied | passed | |
 | console/display-capability-denied | passed | |
-| console/session-capability-denied | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
-| console/cancellation | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
-| console/input-service-restart | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
-| console/terminal-service-restart | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
-| console/sessions-service-restart | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
+| console/session-capability-denied | passed | |
+| console/cancellation | passed | |
+| console/input-service-restart | passed | |
+| console/terminal-service-restart | passed | |
+| console/sessions-service-restart | passed | |
 | core/boot-normal | passed | |
 | persistence/block-read-flush | passed | |
 | persistence/terminal-history | passed | |
@@ -52,12 +52,12 @@ Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `
 | platform/native-image-mapped | skipped | semantic proof unavailable |
 | platform/service-privilege-setup | skipped | semantic proof unavailable |
 | platform/service-ring3-transition | skipped | semantic proof unavailable |
-| platform/runtime-crash-restart | passed | |
-| platform/restart-backoff | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
-| platform/native-service-ready | failed | timeout waiting for QEMU exit |
+| platform/runtime-crash-restart | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
+| platform/restart-backoff | passed | |
+| platform/native-service-ready | passed | |
 | persistence/write-interruption | passed | replacement and compaction interruption matrix |
 | persistence/recovery | passed | reset, reboot, and incomplete-tail recovery |
-| persistence/capability-denied | skipped | semantic proof unavailable |
+| persistence/capability-denied | passed | |
 | persistence/corruption-detected | passed | corruption reported without reformat |
 | persistence/storage-service-restart | passed | |
 | network/packet-loss | skipped | semantic proof unavailable |
@@ -65,4 +65,4 @@ Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `
 | network/reset-reconnect | skipped | semantic proof unavailable |
 | network/unauthorized-operation | skipped | semantic proof unavailable |
 
-Artifacts: `target/logos-test/main-1785535582782299500`.
+Artifacts: `target/logos-test/main-1785571078024285000`.

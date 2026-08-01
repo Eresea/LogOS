@@ -773,6 +773,10 @@ pub(crate) fn main(
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(
         |value| {
+            let tick = interrupts::ticks();
+            if service_scheduler.run_next() {
+                let _ = service_health.beat(balloon::NAME, tick);
+            }
             if value == "__reset" {
                 proof.set(false);
                 debug::write_line(b"LogOS: reset begin");
