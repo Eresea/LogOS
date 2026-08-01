@@ -331,6 +331,15 @@ fn validate_host_case(path: &Path, expected: &[[u8; HISTORY_BYTES]]) -> Result<(
         .ok_or_else(|| "generated case exposed a mixed history value".into())
 }
 
+fn validate_host_recovery(path: &Path) -> Result<(), String> {
+    Store::recover_backend(FileBackend::open(
+        path,
+        Rc::new(FaultCounter { cut: Cell::new(None), step: Cell::new(0) }),
+    )?)
+    .map(|_| ())
+    .map_err(|error| format!("host recovery: {error:?}"))
+}
+
 struct Harness {
     child: Child,
     stream: TcpStream,
@@ -475,6 +484,7 @@ impl Harness {
     }
 
     fn shutdown(&mut self) -> Result<(), String> {
+        flush_qemu(self.qmp_port)?;
         self.send("LOGOS/1 SHUTDOWN\n")?;
         wait_child(&mut self.child, self.deadline)
     }
@@ -487,6 +497,26 @@ impl Harness {
     fn wait(&mut self, expected: &str) -> Result<(), String> {
         wait_file(&self.debug_log, &mut self.offset, self.deadline, expected)
     }
+}
+
+fn flush_qemu(port: u16) -> Result<(), String> {
+    let stream = TcpStream::connect(("127.0.0.1", port)).map_err(io_error)?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).map_err(io_error)?;
+    let mut reader = BufReader::new(stream);
+    let mut reply = String::new();
+    reader.read_line(&mut reply).map_err(io_error)?;
+    reader.get_mut().write_all(b"{\"execute\":\"qmp_capabilities\"}\n").map_err(io_error)?;
+    reply.clear();
+    reader.read_line(&mut reply).map_err(io_error)?;
+    reader
+        .get_mut()
+        .write_all(
+            b"{\"execute\":\"human-monitor-command\",\"arguments\":{\"command-line\":\"flush\"}}\n",
+        )
+        .map_err(io_error)?;
+    reply.clear();
+    reader.read_line(&mut reply).map_err(io_error)?;
+    (!reply.contains("\"error\"")).then_some(()).ok_or(reply)
 }
 
 impl Drop for Harness {
@@ -877,6 +907,7 @@ fn run_persistence_fixture(
         )?;
         let first_outcome = first.run(scenario);
         first.shutdown()?;
+        validate_host_recovery(&fixture_dir.join("store.raw"))?;
         let mut second = Harness::boot(
             &qemu,
             &ovmf,

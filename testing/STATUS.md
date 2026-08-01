@@ -1,8 +1,8 @@
 # Test Status
 
 Last run: `cargo run -p logos-test -- suite main`  
-Seed: `1785571513093831200`  
-Result: **1 failed, 19 passed, 36 skipped**
+Seed: `1785572553847174100`  
+Result: **4 failed, 16 passed, 36 skipped**
 
 Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `1785569747442919100`.
 
@@ -18,9 +18,9 @@ Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `
 | console/terminal-service-restart | passed | |
 | console/sessions-service-restart | passed | |
 | core/boot-normal | passed | |
-| persistence/block-read-flush | passed | |
-| persistence/terminal-history | passed | |
-| persistence/capability-denied | passed | |
+| persistence/block-read-flush | failed | missing startup marker `LogOS: storage recovered` |
+| persistence/terminal-history | failed | missing startup marker `LogOS: storage recovered` |
+| persistence/capability-denied | failed | missing startup marker `LogOS: storage recovered` |
 | core/boot-recovery | skipped | semantic proof unavailable |
 | core/ipc-request-reply | skipped | semantic proof unavailable |
 | core/ipc-cancellation | skipped | semantic proof unavailable |
@@ -65,4 +65,4 @@ Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `
 | network/reset-reconnect | skipped | semantic proof unavailable |
 | network/unauthorized-operation | skipped | semantic proof unavailable |
 
-Artifacts: `target/logos-test/main-1785571513093551700`.
+Artifacts: `target/logos-test/main-1785572553846955400`.
