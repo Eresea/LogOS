@@ -779,6 +779,10 @@ pub(crate) fn main(
             }
             if value == "__reset" {
                 proof.set(false);
+                let Some(lifecycle) = supervisor::Lifecycle::new(&supervisor, balloon::NAME) else {
+                    return false;
+                };
+                service_lifecycle = lifecycle;
                 debug::write_line(b"LogOS: reset begin");
                 let previous_terminal = native_handle;
                 if !native_scheduler.fail(previous_terminal) || !startup.start() {

@@ -1,7 +1,7 @@
 # Test Status
 
 Last run: `cargo run -p logos-test -- suite main`  
-Seed: `1785571078024486000`  
+Seed: `1785571513093831200`  
 Result: **1 failed, 19 passed, 36 skipped**
 
 Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `1785569747442919100`.
@@ -52,11 +52,11 @@ Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `
 | platform/native-image-mapped | skipped | semantic proof unavailable |
 | platform/service-privilege-setup | skipped | semantic proof unavailable |
 | platform/service-ring3-transition | skipped | semantic proof unavailable |
-| platform/runtime-crash-restart | failed | reset failed before next scenario: timeout waiting for `LOGOS/1 RESULT reset=accepted` |
+| platform/runtime-crash-restart | passed | |
 | platform/restart-backoff | passed | |
 | platform/native-service-ready | passed | |
 | persistence/write-interruption | passed | replacement and compaction interruption matrix |
-| persistence/recovery | passed | reset, reboot, and incomplete-tail recovery |
+| persistence/recovery | failed | timeout waiting for `LOGOS/1 RESULT hello=ok` |
 | persistence/capability-denied | passed | |
 | persistence/corruption-detected | passed | corruption reported without reformat |
 | persistence/storage-service-restart | passed | |
@@ -65,4 +65,4 @@ Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `
 | network/reset-reconnect | skipped | semantic proof unavailable |
 | network/unauthorized-operation | skipped | semantic proof unavailable |
 
-Artifacts: `target/logos-test/main-1785571078024285000`.
+Artifacts: `target/logos-test/main-1785571513093551700`.
