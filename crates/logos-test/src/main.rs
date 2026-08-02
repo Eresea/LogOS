@@ -858,7 +858,12 @@ impl Harness {
         let mut report = None;
         while Instant::now() < self.deadline {
             if let Ok(contents) = fs::read_to_string(&self.debug_log) {
-                for line in contents.lines().filter(|line| line.starts_with("LOGOS/1 BOOT ")) {
+                for line in contents
+                    .split_inclusive('\n')
+                    .filter(|line| line.ends_with('\n'))
+                    .map(str::trim_end)
+                    .filter(|line| line.starts_with("LOGOS/1 BOOT "))
+                {
                     let parsed = parse_boot_report(line)?;
                     if report.replace(parsed).is_some() {
                         return Err("duplicate boot report/session ID".into());
