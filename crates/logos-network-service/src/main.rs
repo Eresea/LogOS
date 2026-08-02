@@ -84,6 +84,9 @@ fn run(context: &mut Context) -> ! {
                     info = reply.info;
                     state.reset();
                     state.dhcp_start(now, xid);
+                    waiting_receive = None;
+                    waiting_send = None;
+                    waiting_send_arp = false;
                 }
                 if let Some(request) = waiting_send {
                     if waiting_send_arp {
@@ -135,6 +138,45 @@ fn run(context: &mut Context) -> ! {
         }
 
         if let Some(request) = context.network_request() {
+            if matches!(request.operation, NetworkOperation::Cancel | NetworkOperation::Close) {
+                let endpoint = logos_net::EndpointId::from_wire(request.endpoint.0);
+                let cancels_receive = waiting_receive.is_some_and(|pending| {
+                    endpoint == logos_net::EndpointId::from_wire(pending.endpoint.0)
+                });
+                let cancels_send = waiting_send.is_some_and(|pending| {
+                    endpoint == logos_net::EndpointId::from_wire(pending.endpoint.0)
+                });
+                if cancels_receive || cancels_send {
+                    if let Some(pending) = waiting_receive.take() {
+                        let _ = state.cancel_pending(pending.id);
+                    }
+                    if let Some(pending) = waiting_send.take() {
+                        let _ = state.cancel_pending(pending.id);
+                    }
+                    waiting_send_arp = false;
+                }
+                let status = if request.operation == NetworkOperation::Close {
+                    endpoint
+                        .and_then(|endpoint| state.close(0, endpoint).ok())
+                        .map_or(NetworkStatus::Invalid, |_| NetworkStatus::Complete)
+                } else {
+                    NetworkStatus::Cancelled
+                };
+                if !context.network_reply(NetworkReply {
+                    id: request.id,
+                    status,
+                    endpoint: NetworkEndpoint(0),
+                    generation: info.generation,
+                    source_address: 0,
+                    source_port: 0,
+                    length: 0,
+                    info,
+                    counters: logos_abi::NetworkCounters::default(),
+                }) {
+                    spin();
+                }
+                continue;
+            }
             if request.operation == NetworkOperation::SendTo {
                 match submit_datagram(context, &mut state, info, request, now, next_id) {
                     Ok(SubmitDatagram::Sent) => {
@@ -376,7 +418,7 @@ fn submit_datagram(
     let remote = if let Some(mac) = state.resolve_arp(next_hop, now) {
         mac
     } else {
-        if !state.arp_target().is_some_and(|target| target == next_hop) {
+        let requested = if !state.arp_target().is_some_and(|target| target == next_hop) {
             let mut arp_bytes = [0; 64];
             let arp_length = encode_arp(
                 &mut arp_bytes,
@@ -403,8 +445,11 @@ fn submit_datagram(
             }) {
                 return Err(NetworkStatus::Io);
             }
-        }
-        return Ok(SubmitDatagram::Arp);
+            true
+        } else {
+            false
+        };
+        return if requested { Ok(SubmitDatagram::Arp) } else { Err(NetworkStatus::Busy) };
     };
     let payload = unsafe {
         core::slice::from_raw_parts(
