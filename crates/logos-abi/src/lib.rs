@@ -4,6 +4,10 @@ pub const MAX_SESSION_TEXT: usize = 256;
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_OBJECT_NAME: usize = 64;
 pub const MAX_PERSISTENCE_OPERATIONS: usize = 8;
+pub const MAX_NETWORK_PAYLOAD: usize = 1472;
+pub const NETWORK_MAX_ENDPOINTS: usize = 8;
+pub const NETWORK_MAX_ARP_ENTRIES: usize = 8;
+pub const NETWORK_MAX_DATAGRAMS: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
@@ -272,6 +276,291 @@ pub struct StoreReply {
     pub status: PersistenceStatus,
     pub version: u64,
     pub length: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetworkProtocol {
+    Udp = 1,
+    Icmp = 2,
+}
+
+impl NetworkProtocol {
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Udp),
+            2 => Some(Self::Icmp),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct NetworkScope(pub u64);
+
+impl NetworkScope {
+    pub fn new(protocol: NetworkProtocol, address: u32, port: u16) -> Self {
+        Self((u64::from(protocol as u8) << 56) | (u64::from(address) << 16) | u64::from(port))
+    }
+
+    pub const fn protocol(self) -> Option<NetworkProtocol> {
+        NetworkProtocol::from_wire((self.0 >> 56) as u8)
+    }
+
+    pub const fn address(self) -> u32 {
+        (self.0 >> 16) as u32
+    }
+
+    pub const fn port(self) -> u16 {
+        self.0 as u16
+    }
+
+    pub const fn valid(self) -> bool {
+        self.protocol().is_some() && self.port() != 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct NetworkEndpoint(pub u32);
+
+impl NetworkEndpoint {
+    pub fn new(slot: u16, generation: u16) -> Option<Self> {
+        if slot == 0 || generation == 0 {
+            None
+        } else {
+            Some(Self((u32::from(generation) << 16) | u32::from(slot)))
+        }
+    }
+
+    pub const fn slot(self) -> u16 {
+        self.0 as u16
+    }
+
+    pub const fn generation(self) -> u16 {
+        (self.0 >> 16) as u16
+    }
+
+    pub const fn valid(self) -> bool {
+        self.slot() != 0 && self.generation() != 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetworkOperation {
+    Status = 1,
+    Bind,
+    SendTo,
+    ReceiveFrom,
+    Echo,
+    Cancel,
+    Close,
+}
+
+impl NetworkOperation {
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Status),
+            2 => Some(Self::Bind),
+            3 => Some(Self::SendTo),
+            4 => Some(Self::ReceiveFrom),
+            5 => Some(Self::Echo),
+            6 => Some(Self::Cancel),
+            7 => Some(Self::Close),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetworkStatus {
+    Complete = 1,
+    Denied,
+    Invalid,
+    Busy,
+    Full,
+    Offline,
+    NoRoute,
+    AddressInUse,
+    MessageTooLarge,
+    TimedOut,
+    Cancelled,
+    Reset,
+    Io,
+}
+
+impl NetworkStatus {
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Complete),
+            2 => Some(Self::Denied),
+            3 => Some(Self::Invalid),
+            4 => Some(Self::Busy),
+            5 => Some(Self::Full),
+            6 => Some(Self::Offline),
+            7 => Some(Self::NoRoute),
+            8 => Some(Self::AddressInUse),
+            9 => Some(Self::MessageTooLarge),
+            10 => Some(Self::TimedOut),
+            11 => Some(Self::Cancelled),
+            12 => Some(Self::Reset),
+            13 => Some(Self::Io),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetworkCounters {
+    pub rx_frames: u64,
+    pub tx_frames: u64,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub malformed: u64,
+    pub unsupported: u64,
+    pub rx_dropped: u64,
+    pub udp_no_endpoint: u64,
+    pub udp_queue_dropped: u64,
+    pub timeouts: u64,
+    pub cancellations: u64,
+    pub resets: u64,
+    pub denied: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetworkInfo {
+    pub mac: [u8; 6],
+    pub mtu: u16,
+    pub generation: u16,
+    pub link_up: u8,
+    pub configuration: u8,
+    pub ipv4: u32,
+    pub subnet_mask: u32,
+    pub router: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetworkRequest {
+    pub id: u32,
+    pub operation: NetworkOperation,
+    pub endpoint: NetworkEndpoint,
+    pub peer: NetworkScope,
+    pub page: PageHandle,
+    pub length: u16,
+    pub generation: u16,
+    pub deadline: u64,
+}
+
+impl NetworkRequest {
+    pub fn valid_shape(self) -> bool {
+        if self.id == 0 || self.deadline == 0 || self.length as usize > MAX_NETWORK_PAYLOAD {
+            return false;
+        }
+        match self.operation {
+            NetworkOperation::Status => {
+                !self.endpoint.valid()
+                    && self.peer.0 == 0
+                    && self.page.0 == 0
+                    && self.length == 0
+                    && self.generation == 0
+            }
+            NetworkOperation::Bind => {
+                !self.endpoint.valid()
+                    && self.peer.valid()
+                    && self.peer.address() == 0
+                    && self.page.0 == 0
+                    && self.length == 0
+            }
+            NetworkOperation::SendTo => {
+                self.endpoint.valid()
+                    && self.peer.valid()
+                    && self.peer.address() != 0
+                    && self.page.0 != 0
+                    && (self.length as usize) <= MAX_NETWORK_PAYLOAD
+            }
+            NetworkOperation::ReceiveFrom => {
+                self.endpoint.valid()
+                    && self.peer.0 == 0
+                    && self.page.0 != 0
+                    && self.length as usize == MAX_NETWORK_PAYLOAD
+            }
+            NetworkOperation::Echo => {
+                self.endpoint.valid()
+                    && self.peer.protocol() == Some(NetworkProtocol::Icmp)
+                    && self.peer.address() != 0
+                    && self.page.0 == 0
+                    && self.length == 0
+            }
+            NetworkOperation::Cancel | NetworkOperation::Close => {
+                self.endpoint.valid() && self.peer.0 == 0 && self.page.0 == 0 && self.length == 0
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetworkReply {
+    pub id: u32,
+    pub status: NetworkStatus,
+    pub endpoint: NetworkEndpoint,
+    pub generation: u16,
+    pub source_address: u32,
+    pub source_port: u16,
+    pub length: u16,
+    pub info: NetworkInfo,
+    pub counters: NetworkCounters,
+}
+
+impl NetworkReply {
+    pub const fn valid_for(self, request: NetworkRequest) -> bool {
+        self.id == request.id && self.length as usize <= MAX_NETWORK_PAYLOAD
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetworkEventKind {
+    Frame = 1,
+    Timer,
+    Reset,
+    Cancel,
+}
+
+impl NetworkEventKind {
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Frame),
+            2 => Some(Self::Timer),
+            3 => Some(Self::Reset),
+            4 => Some(Self::Cancel),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetworkEvent {
+    pub id: u32,
+    pub kind: NetworkEventKind,
+    pub generation: u16,
+    pub length: u16,
+}
+
+impl NetworkEvent {
+    pub fn valid(self) -> bool {
+        self.id != 0
+            && self.kind as u8 != 0
+            && self.generation != 0
+            && self.length as usize <= PAGE_SIZE
+    }
 }
 
 impl StoreReply {
@@ -789,5 +1078,41 @@ mod tests {
             }
             .valid()
         );
+    }
+
+    #[test]
+    fn accepts_network_shapes_and_rejects_stale_fields() {
+        let bind = NetworkRequest {
+            id: 1,
+            operation: NetworkOperation::Bind,
+            endpoint: NetworkEndpoint(0),
+            peer: NetworkScope::new(NetworkProtocol::Udp, 0, 4000),
+            page: PageHandle(0),
+            length: 0,
+            generation: 0,
+            deadline: 1,
+        };
+        assert!(bind.valid_shape());
+        let send = NetworkRequest {
+            id: 2,
+            operation: NetworkOperation::SendTo,
+            endpoint: NetworkEndpoint::new(1, 1).unwrap(),
+            peer: NetworkScope::new(NetworkProtocol::Udp, 0xc000_0201, 4001),
+            page: PageHandle(1),
+            length: MAX_NETWORK_PAYLOAD as u16,
+            generation: 1,
+            deadline: 1,
+        };
+        assert!(send.valid_shape());
+        assert!(!NetworkRequest { id: 0, ..send }.valid_shape());
+        assert!(!NetworkRequest { deadline: 0, ..send }.valid_shape());
+        assert!(!NetworkRequest { page: PageHandle(0), ..send }.valid_shape());
+        assert_eq!(
+            NetworkScope::new(NetworkProtocol::Udp, 7, 8).protocol(),
+            Some(NetworkProtocol::Udp)
+        );
+        assert_eq!(NetworkScope::new(NetworkProtocol::Udp, 7, 8).address(), 7);
+        assert_eq!(NetworkScope::new(NetworkProtocol::Udp, 7, 8).port(), 8);
+        assert!(!NetworkScope::new(NetworkProtocol::Udp, 0, 0).valid());
     }
 }

@@ -199,6 +199,24 @@ impl Context {
         Some(BlockClient { context: self.raw_address(), page, next_id: 1 })
     }
 
+    pub fn network_wait(&mut self, deadline: u64) -> bool {
+        (unsafe { RawContext::network_wait_at(self.raw_address(), deadline) })
+            && self.invoke(native_service::NETWORK_WAIT)
+    }
+
+    pub fn network_request(&self) -> Option<logos_abi::NetworkRequest> {
+        unsafe { RawContext::network_at(self.raw_address()) }
+    }
+
+    pub fn network_reply(&mut self, reply: logos_abi::NetworkReply) -> bool {
+        (unsafe { RawContext::reply_network_at(self.raw_address(), reply) })
+            && self.invoke(native_service::NETWORK_REPLY)
+    }
+
+    pub fn network_event(&self) -> Option<logos_abi::NetworkEvent> {
+        unsafe { RawContext::network_event_at(self.raw_address()) }
+    }
+
     pub fn storage_status(&self) -> Option<u32> {
         unsafe { RawContext::storage_status_at(self.raw_address()) }
     }

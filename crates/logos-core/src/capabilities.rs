@@ -14,6 +14,9 @@ pub enum CapabilityKind {
     Block,
     StoreRead,
     StoreWrite,
+    NetworkBind,
+    NetworkSend,
+    NetworkReceive,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,7 +29,7 @@ pub struct CapabilityManager {
 #[derive(Clone, Copy)]
 struct Slot {
     kind: CapabilityKind,
-    resource: u32,
+    resource: u64,
     generation: u16,
     active: bool,
 }
@@ -43,6 +46,10 @@ impl CapabilityManager {
     }
 
     pub fn grant_scoped(&mut self, kind: CapabilityKind, resource: u32) -> Option<Capability> {
+        self.grant_scoped64(kind, u64::from(resource))
+    }
+
+    pub fn grant_scoped64(&mut self, kind: CapabilityKind, resource: u64) -> Option<Capability> {
         self.slots.iter_mut().enumerate().find(|(_, slot)| !slot.active).map(|(index, slot)| {
             slot.kind = kind;
             slot.resource = resource;
@@ -60,6 +67,15 @@ impl CapabilityManager {
         capability: Capability,
         kind: CapabilityKind,
         resource: u32,
+    ) -> bool {
+        self.allows_scoped64(capability, kind, u64::from(resource))
+    }
+
+    pub fn allows_scoped64(
+        &self,
+        capability: Capability,
+        kind: CapabilityKind,
+        resource: u64,
     ) -> bool {
         let index = capability.0 as u16 as usize;
         let generation = (capability.0 >> 16) as u16;
@@ -105,7 +121,11 @@ mod tests {
         let scoped = manager.grant_scoped(CapabilityKind::StoreRead, 7).unwrap();
         assert!(manager.allows_scoped(scoped, CapabilityKind::StoreRead, 7));
         assert!(!manager.allows_scoped(scoped, CapabilityKind::StoreRead, 8));
-        for _ in 0..CAPABILITIES - 1 {
+        let network_scope =
+            manager.grant_scoped64(CapabilityKind::NetworkSend, u64::MAX - 1).unwrap();
+        assert!(manager.allows_scoped64(network_scope, CapabilityKind::NetworkSend, u64::MAX - 1));
+        assert!(!manager.allows_scoped64(network_scope, CapabilityKind::NetworkSend, u64::MAX));
+        for _ in 0..CAPABILITIES - 2 {
             assert!(manager.grant(CapabilityKind::Debug).is_some());
         }
         assert!(manager.grant(CapabilityKind::Debug).is_none());

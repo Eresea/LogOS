@@ -16,6 +16,10 @@ pub const STORE_REQUEST: u32 = 10;
 pub const STORE_REPLY: u32 = 11;
 pub const BLOCK_REQUEST: u32 = 12;
 pub const BLOCK_REPLY: u32 = 13;
+pub const NETWORK_REQUEST: u32 = 14;
+pub const NETWORK_REPLY: u32 = 15;
+pub const NETWORK_WAIT: u32 = 16;
+pub const NETWORK_EVENT: u32 = 17;
 pub const ACKNOWLEDGED: u32 = 1;
 pub const STORAGE_FORMATTED: u32 = 1;
 pub const STORAGE_RECOVERED: u32 = 2;
@@ -58,6 +62,9 @@ const BLOCK_REQUEST_BYTES: usize = 32;
 const STORE_REQUEST_BYTES: usize = 102;
 const BLOCK_REPLY_BYTES: usize = 21;
 const STORE_REPLY_BYTES: usize = 17;
+const NETWORK_REQUEST_BYTES: usize = 34;
+const NETWORK_REPLY_BYTES: usize = 148;
+const NETWORK_EVENT_BYTES: usize = 10;
 
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?))
@@ -70,8 +77,15 @@ fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
 fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
+fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
 fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(bytes.get(offset..offset + 2)?.try_into().ok()?))
 }
 
 fn decode_block_request(bytes: &[u8]) -> Option<logos_abi::BlockRequest> {
@@ -162,6 +176,155 @@ fn encode_store_reply(bytes: &mut [u8; MAX_TEXT], reply: logos_abi::StoreReply) 
     bytes[4] = reply.status as u8;
     write_u64(bytes, 5, reply.version);
     write_u32(bytes, 13, reply.length);
+}
+
+fn decode_network_request(bytes: &[u8]) -> Option<logos_abi::NetworkRequest> {
+    if *bytes.get(5)? != 0 {
+        return None;
+    }
+    Some(logos_abi::NetworkRequest {
+        id: read_u32(bytes, 0)?,
+        operation: logos_abi::NetworkOperation::from_wire(*bytes.get(4)?)?,
+        endpoint: logos_abi::NetworkEndpoint(read_u32(bytes, 6)?),
+        peer: logos_abi::NetworkScope(read_u64(bytes, 10)?),
+        page: logos_abi::PageHandle(read_u32(bytes, 18)?),
+        length: read_u16(bytes, 22)?,
+        generation: read_u16(bytes, 24)?,
+        deadline: read_u64(bytes, 26)?,
+    })
+}
+
+fn encode_network_request(bytes: &mut [u8; MAX_TEXT], request: logos_abi::NetworkRequest) {
+    *bytes = [0; MAX_TEXT];
+    write_u32(bytes, 0, request.id);
+    bytes[4] = request.operation as u8;
+    write_u32(bytes, 6, request.endpoint.0);
+    write_u64(bytes, 10, request.peer.0);
+    write_u32(bytes, 18, request.page.0);
+    write_u16(bytes, 22, request.length);
+    write_u16(bytes, 24, request.generation);
+    write_u64(bytes, 26, request.deadline);
+}
+
+fn decode_network_reply(bytes: &[u8]) -> Option<logos_abi::NetworkReply> {
+    if *bytes.get(5)? != 0 {
+        return None;
+    }
+    Some(logos_abi::NetworkReply {
+        id: read_u32(bytes, 0)?,
+        status: logos_abi::NetworkStatus::from_wire(*bytes.get(4)?)?,
+        endpoint: logos_abi::NetworkEndpoint(read_u32(bytes, 6)?),
+        generation: read_u16(bytes, 10)?,
+        source_address: read_u32(bytes, 12)?,
+        source_port: read_u16(bytes, 16)?,
+        length: read_u16(bytes, 18)?,
+        info: decode_network_info(bytes, 20)?,
+        counters: decode_network_counters(bytes, 44)?,
+    })
+}
+
+fn encode_network_reply(bytes: &mut [u8; MAX_TEXT], reply: logos_abi::NetworkReply) {
+    *bytes = [0; MAX_TEXT];
+    write_u32(bytes, 0, reply.id);
+    bytes[4] = reply.status as u8;
+    write_u32(bytes, 6, reply.endpoint.0);
+    write_u16(bytes, 10, reply.generation);
+    write_u32(bytes, 12, reply.source_address);
+    write_u16(bytes, 16, reply.source_port);
+    write_u16(bytes, 18, reply.length);
+    encode_network_info(bytes, 20, reply.info);
+    encode_network_counters(bytes, 44, reply.counters);
+}
+
+fn decode_network_info(bytes: &[u8], offset: usize) -> Option<logos_abi::NetworkInfo> {
+    let mut mac = [0; 6];
+    mac.copy_from_slice(bytes.get(offset..offset + 6)?);
+    Some(logos_abi::NetworkInfo {
+        mac,
+        mtu: read_u16(bytes, offset + 6)?,
+        generation: read_u16(bytes, offset + 8)?,
+        link_up: *bytes.get(offset + 10)?,
+        configuration: *bytes.get(offset + 11)?,
+        ipv4: read_u32(bytes, offset + 12)?,
+        subnet_mask: read_u32(bytes, offset + 16)?,
+        router: read_u32(bytes, offset + 20)?,
+    })
+}
+
+fn encode_network_info(bytes: &mut [u8; MAX_TEXT], offset: usize, info: logos_abi::NetworkInfo) {
+    bytes[offset..offset + 6].copy_from_slice(&info.mac);
+    write_u16(bytes, offset + 6, info.mtu);
+    write_u16(bytes, offset + 8, info.generation);
+    bytes[offset + 10] = info.link_up;
+    bytes[offset + 11] = info.configuration;
+    write_u32(bytes, offset + 12, info.ipv4);
+    write_u32(bytes, offset + 16, info.subnet_mask);
+    write_u32(bytes, offset + 20, info.router);
+}
+
+fn decode_network_counters(bytes: &[u8], offset: usize) -> Option<logos_abi::NetworkCounters> {
+    Some(logos_abi::NetworkCounters {
+        rx_frames: read_u64(bytes, offset)?,
+        tx_frames: read_u64(bytes, offset + 8)?,
+        rx_bytes: read_u64(bytes, offset + 16)?,
+        tx_bytes: read_u64(bytes, offset + 24)?,
+        malformed: read_u64(bytes, offset + 32)?,
+        unsupported: read_u64(bytes, offset + 40)?,
+        rx_dropped: read_u64(bytes, offset + 48)?,
+        udp_no_endpoint: read_u64(bytes, offset + 56)?,
+        udp_queue_dropped: read_u64(bytes, offset + 64)?,
+        timeouts: read_u64(bytes, offset + 72)?,
+        cancellations: read_u64(bytes, offset + 80)?,
+        resets: read_u64(bytes, offset + 88)?,
+        denied: read_u64(bytes, offset + 96)?,
+    })
+}
+
+fn encode_network_counters(
+    bytes: &mut [u8; MAX_TEXT],
+    offset: usize,
+    counters: logos_abi::NetworkCounters,
+) {
+    for (index, value) in [
+        counters.rx_frames,
+        counters.tx_frames,
+        counters.rx_bytes,
+        counters.tx_bytes,
+        counters.malformed,
+        counters.unsupported,
+        counters.rx_dropped,
+        counters.udp_no_endpoint,
+        counters.udp_queue_dropped,
+        counters.timeouts,
+        counters.cancellations,
+        counters.resets,
+        counters.denied,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        write_u64(bytes, offset + index * 8, value);
+    }
+}
+
+fn decode_network_event(bytes: &[u8]) -> Option<logos_abi::NetworkEvent> {
+    if *bytes.get(5)? != 0 {
+        return None;
+    }
+    Some(logos_abi::NetworkEvent {
+        id: read_u32(bytes, 0)?,
+        kind: logos_abi::NetworkEventKind::from_wire(*bytes.get(4)?)?,
+        generation: read_u16(bytes, 6)?,
+        length: read_u16(bytes, 8)?,
+    })
+}
+
+fn encode_network_event(bytes: &mut [u8; MAX_TEXT], event: logos_abi::NetworkEvent) {
+    *bytes = [0; MAX_TEXT];
+    write_u32(bytes, 0, event.id);
+    bytes[4] = event.kind as u8;
+    write_u16(bytes, 6, event.generation);
+    write_u16(bytes, 8, event.length);
 }
 
 impl Context {
@@ -467,6 +630,170 @@ impl Context {
         }
         decode_store_reply(&context.text)
             .filter(|reply| reply.length as usize <= logos_abi::PAGE_SIZE)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn network_at(address: u64) -> Option<logos_abi::NetworkRequest> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != NETWORK_REQUEST
+            || context.status != ACKNOWLEDGED
+            || context.text_length != NETWORK_REQUEST_BYTES as u32
+        {
+            return None;
+        }
+        let request = decode_network_request(&context.text)?;
+        request.valid_shape().then_some(request)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by the caller.
+    pub unsafe fn request_network_at(address: u64, request: logos_abi::NetworkRequest) -> bool {
+        if !request.valid_shape() {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.status != ACKNOWLEDGED
+            || !matches!(context.operation, READY | READ_INPUT | NETWORK_REPLY)
+        {
+            return false;
+        }
+        encode_network_request(&mut context.text, request);
+        context.text_length = NETWORK_REQUEST_BYTES as u32;
+        context.operation = NETWORK_REQUEST;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by Core.
+    pub unsafe fn deliver_network_at(address: u64, request: logos_abi::NetworkRequest) -> bool {
+        if !request.valid_shape() {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || !matches!(context.operation, READ_INPUT | NETWORK_WAIT)
+            || context.status != ACKNOWLEDGED
+        {
+            return false;
+        }
+        encode_network_request(&mut context.text, request);
+        context.text_length = NETWORK_REQUEST_BYTES as u32;
+        context.operation = NETWORK_REQUEST;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by Core.
+    pub unsafe fn reply_network_at(address: u64, reply: logos_abi::NetworkReply) -> bool {
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        let valid = context.operation == NETWORK_REQUEST
+            && decode_network_request(&context.text)
+                .is_some_and(|request| reply.valid_for(request));
+        if !valid {
+            return false;
+        }
+        encode_network_reply(&mut context.text, reply);
+        context.text_length = NETWORK_REPLY_BYTES as u32;
+        context.operation = NETWORK_REPLY;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn network_reply_at(
+        address: u64,
+        expected_id: u32,
+    ) -> Option<logos_abi::NetworkReply> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != NETWORK_REPLY
+            || context.status != ACKNOWLEDGED
+            || context.text_length != NETWORK_REPLY_BYTES as u32
+        {
+            return None;
+        }
+        decode_network_reply(&context.text).filter(|reply| reply.id == expected_id)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by the caller.
+    pub unsafe fn network_wait_at(address: u64, deadline: u64) -> bool {
+        if deadline == 0 {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.status != ACKNOWLEDGED
+            || !matches!(context.operation, READY | READ_INPUT | NETWORK_REPLY | NETWORK_EVENT)
+        {
+            return false;
+        }
+        context.x = deadline as u32;
+        context.y = (deadline >> 32) as u32;
+        context.text = [0; MAX_TEXT];
+        context.text_length = 0;
+        context.operation = NETWORK_WAIT;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn network_waiting_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == NETWORK_WAIT
+            && context.status == ACKNOWLEDGED
+            && (u64::from(context.x) | (u64::from(context.y) << 32)) != 0
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by Core.
+    pub unsafe fn deliver_network_event_at(address: u64, event: logos_abi::NetworkEvent) -> bool {
+        if !event.valid() {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != NETWORK_WAIT
+            || context.status != ACKNOWLEDGED
+        {
+            return false;
+        }
+        encode_network_event(&mut context.text, event);
+        context.text_length = NETWORK_EVENT_BYTES as u32;
+        context.operation = NETWORK_EVENT;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn network_event_at(address: u64) -> Option<logos_abi::NetworkEvent> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != NETWORK_EVENT
+            || context.status != ACKNOWLEDGED
+            || context.text_length != NETWORK_EVENT_BYTES as u32
+        {
+            return None;
+        }
+        let event = decode_network_event(&context.text)?;
+        event.valid().then_some(event)
     }
 
     /// # Safety
@@ -921,5 +1248,50 @@ mod tests {
                 },
             )
         });
+    }
+
+    #[test]
+    fn network_request_reply_and_deadline_event_are_bounded() {
+        let mut context = Context::new();
+        context.operation = READ_INPUT;
+        context.status = ACKNOWLEDGED;
+        let request = logos_abi::NetworkRequest {
+            id: 11,
+            operation: logos_abi::NetworkOperation::Bind,
+            endpoint: logos_abi::NetworkEndpoint(0),
+            peer: logos_abi::NetworkScope::new(logos_abi::NetworkProtocol::Udp, 0, 4000),
+            page: logos_abi::PageHandle(0),
+            length: 0,
+            generation: 0,
+            deadline: 100,
+        };
+        let address = (&mut context as *mut Context) as u64;
+        assert!(unsafe { Context::request_network_at(address, request) });
+        assert_eq!(unsafe { Context::network_at(address) }, Some(request));
+        let reply = logos_abi::NetworkReply {
+            id: request.id,
+            status: logos_abi::NetworkStatus::Complete,
+            endpoint: logos_abi::NetworkEndpoint::new(1, 1).unwrap(),
+            generation: 1,
+            source_address: 0,
+            source_port: 0,
+            length: 0,
+            info: logos_abi::NetworkInfo::default(),
+            counters: logos_abi::NetworkCounters::default(),
+        };
+        assert!(unsafe { Context::reply_network_at(address, reply) });
+        assert_eq!(unsafe { Context::network_reply_at(address, request.id) }, Some(reply));
+        assert!(unsafe { Context::network_wait_at(address, 101) });
+        assert!(unsafe { Context::network_waiting_at(address) });
+        let event = logos_abi::NetworkEvent {
+            id: 12,
+            kind: logos_abi::NetworkEventKind::Timer,
+            generation: 1,
+            length: 0,
+        };
+        assert!(unsafe { Context::deliver_network_event_at(address, event) });
+        assert_eq!(unsafe { Context::network_event_at(address) }, Some(event));
+        assert!(unsafe { !Context::network_wait_at(address, 0) });
+        assert!(unsafe { Context::network_reply_at(address, request.id + 1) }.is_none());
     }
 }

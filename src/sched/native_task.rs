@@ -52,6 +52,12 @@ pub struct BlockEndpoint {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub struct NetworkEndpoint {
+    context_physical: u64,
+}
+
+#[derive(Clone, Copy)]
 pub struct SessionEndpoint {
     context_physical: u64,
 }
@@ -147,6 +153,51 @@ impl BlockEndpoint {
     }
 }
 
+#[allow(dead_code)]
+impl NetworkEndpoint {
+    pub const fn context(self) -> u64 {
+        self.context_physical
+    }
+
+    pub fn request(self) -> Option<logos_abi::NetworkRequest> {
+        unsafe { logos_core::native_service::Context::network_at(self.context_physical) }
+    }
+
+    pub fn deliver(self, request: logos_abi::NetworkRequest) -> bool {
+        unsafe {
+            logos_core::native_service::Context::deliver_network_at(self.context_physical, request)
+        }
+    }
+
+    pub fn reply(self, reply: logos_abi::NetworkReply) -> bool {
+        unsafe {
+            logos_core::native_service::Context::reply_network_at(self.context_physical, reply)
+        }
+    }
+
+    pub fn response(self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
+        unsafe {
+            logos_core::native_service::Context::network_reply_at(
+                self.context_physical,
+                expected_id,
+            )
+        }
+    }
+
+    pub fn deliver_event(self, event: logos_abi::NetworkEvent) -> bool {
+        unsafe {
+            logos_core::native_service::Context::deliver_network_event_at(
+                self.context_physical,
+                event,
+            )
+        }
+    }
+
+    pub fn event(self) -> Option<logos_abi::NetworkEvent> {
+        unsafe { logos_core::native_service::Context::network_event_at(self.context_physical) }
+    }
+}
+
 impl SessionEndpoint {
     pub fn deliver(self, request: logos_abi::SessionRequest) -> bool {
         unsafe {
@@ -228,6 +279,11 @@ impl<'a> Task<'a> {
     #[allow(dead_code)]
     pub const fn block_endpoint(&self) -> BlockEndpoint {
         BlockEndpoint { context_physical: self.context_physical }
+    }
+
+    #[allow(dead_code)]
+    pub const fn network_endpoint(&self) -> NetworkEndpoint {
+        NetworkEndpoint { context_physical: self.context_physical }
     }
 
     pub fn map_shared_owned(&mut self, memory: &mut PhysicalMemory) -> Option<u64> {
