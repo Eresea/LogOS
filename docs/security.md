@@ -30,8 +30,10 @@ exact UDP local port or one exact IPv4 remote endpoint; ICMP echo authority name
 IPv4 address. Core rejects wrong-kind, wrong-scope, stale, revoked, and wrong-owner requests before
 Network wake-up, page loan, protocol-state change, or NIC access. Endpoint handles are owner- and
 generation-bound. Reset, service restart, client exit, or revoked bind authority invalidates them
-and returns all page loans. Core-owned bounce buffers prevent the Network service from programming
-DMA, but IOMMU protection from a malicious physical device remains deferred.
+and returns all page loans. Replies are accepted only when their request ID, operation, endpoint
+generation, interface generation, lengths, and source metadata match the outstanding request. Core-owned
+bounce buffers prevent the Network service from programming DMA, but IOMMU protection from a malicious
+physical device remains deferred.
 
 ## Native-service fault containment
 

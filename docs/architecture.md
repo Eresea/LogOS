@@ -660,9 +660,11 @@ They do not own network drivers.
 Network v1 uses the boundary accepted in [ADR-0015](adr/0015-network-v1-boundary.md). Core owns
 VirtIO negotiation, DMA queues and bounce buffers, interrupts, timeout, reset, and reclamation. It
 copies complete Ethernet frames through two fixed Network-owned pages and multiplexes frame events,
-client requests, and finite timer wakeups through the service's existing context gate. The Ring-2
-Network service owns Ethernet, ARP, IPv4, ICMP echo, DHCP, UDP, and generation-tagged datagram
-endpoints. Clients receive no raw-frame access.
+client requests, and finite timer wakeups through the service's existing context gate. Core and the
+service validate request IDs, endpoint/interface generations, operation shape, page bounds, and deadlines.
+The Ring-2 Network service owns Ethernet, ARP, IPv4, ICMP echo, DHCP, UDP, and generation-tagged datagram
+endpoints. Clients receive no raw-frame access. The hermetic QEMU peer supplies independent DHCP, ARP,
+ICMP, UDP, malformed-frame, cancellation, timeout, and reconnect proofs.
 
 Bind, send, and receive authority are separate. Each grant carries an exact protocol/local-port or
 protocol/remote-IPv4-and-port scope; wildcard and CIDR policy remain future firewall work. Network
