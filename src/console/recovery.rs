@@ -22,6 +22,13 @@ pub struct Startup {
 }
 
 #[derive(Clone, Copy)]
+pub enum Action {
+    Poll,
+    RestartTerminal,
+    RestartSessions,
+}
+
+#[derive(Clone, Copy)]
 pub struct Endpoint<'a> {
     channel: &'a Channel,
     responses: &'a Channel,
@@ -101,14 +108,14 @@ impl<'a> Shell<'a> {
     }
 
     pub fn start(&mut self) -> bool {
-        self.console.write(b"LOGOS KERNEL CONSOLE\nTYPE HELP TRACE PING INFLATE RECOVER OR EXIT\n");
+        self.console.write(b"LOGOS KERNEL CONSOLE\nTYPE HELP TRACE TERMINAL SESSIONS OR EXIT\n");
         self.prompt();
         true
     }
 
-    pub fn run(mut self, mut schedule: impl FnMut()) -> ! {
+    pub fn run(mut self, mut handle: impl FnMut(Action) -> bool) -> Startup {
         loop {
-            schedule();
+            let _ = handle(Action::Poll);
             match self.endpoint.and_then(Endpoint::reply) {
                 Some(Message::Pong) => {
                     self.console.newline();
@@ -128,8 +135,10 @@ impl<'a> Shell<'a> {
                 _ => {}
             }
             if let Some(key) = keyboard::recovery_poll() {
-                self.key(key);
-                schedule();
+                if self.key(key).is_some_and(&mut handle) {
+                    return Startup { console: self.console };
+                }
+                let _ = handle(Action::Poll);
             } else {
                 unsafe { core::arch::asm!("hlt") };
             }
@@ -152,10 +161,10 @@ impl Startup {
 }
 
 impl<'a> Shell<'a> {
-    fn key(&mut self, key: u8) {
+    fn key(&mut self, key: u8) -> Option<Action> {
         match key {
             0x1b => self.exit(),
-            b'\n' => self.submit(),
+            b'\n' => return self.submit(),
             0x08 if self.length > 0 => {
                 self.length -= 1;
                 self.console.backspace();
@@ -170,35 +179,55 @@ impl<'a> Shell<'a> {
             }
             _ => {}
         }
+        None
     }
 
-    fn submit(&mut self) {
+    fn submit(&mut self) -> Option<Action> {
         self.console.newline();
-        match &self.command[..self.length] {
+        let action = match &self.command[..self.length] {
             b"help" => {
-                self.console.write(b"COMMANDS HELP TRACE CLEAR VERSION PING INFLATE RECOVER EXIT\n")
+                self.console.write(
+                    b"COMMANDS HELP TRACE CLEAR VERSION PING INFLATE RECOVER TERMINAL SESSIONS EXIT\n",
+                );
+                None
             }
-            b"clear" => self.console.reset(),
+            b"clear" => {
+                self.console.reset();
+                None
+            }
             b"trace" => {
                 for event in trace::snapshot().events() {
                     self.console.write(trace::message(*event));
                 }
+                None
             }
             b"ping" if self.endpoint.is_some_and(Endpoint::ping) => {
-                self.console.write(b"PING SENT\n")
+                self.console.write(b"PING SENT\n");
+                None
             }
             b"inflate" if self.endpoint.is_some_and(Endpoint::inflate) => {
-                self.console.write(b"INFLATE SENT\n")
+                self.console.write(b"INFLATE SENT\n");
+                None
             }
             b"recover" if self.endpoint.is_some_and(Endpoint::recover) => {
-                self.console.write(b"RECOVER SENT\n")
+                self.console.write(b"RECOVER SENT\n");
+                None
             }
-            b"version" => self.console.write(b"LOGOS 0 1 0\n"),
+            b"terminal" => Some(Action::RestartTerminal),
+            b"sessions" => Some(Action::RestartSessions),
+            b"version" => {
+                self.console.write(b"LOGOS 0 1 0\n");
+                None
+            }
             b"exit" => self.exit(),
-            _ => self.console.write(b"UNKNOWN COMMAND\n"),
-        }
+            _ => {
+                self.console.write(b"UNKNOWN COMMAND\n");
+                None
+            }
+        };
         self.length = 0;
         self.prompt();
+        action
     }
 
     fn prompt(&mut self) {

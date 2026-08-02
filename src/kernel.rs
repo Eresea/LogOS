@@ -153,7 +153,10 @@ pub(crate) fn main(
         {
             let mut shell = console::Shell::offline(startup);
             let _ = shell.start();
-            shell.run(|| {});
+            let _ = shell.run(|_| false);
+            loop {
+                unsafe { core::arch::asm!("hlt") };
+            }
         }
     };
     let Some(mut service_address_space) = address_space::AddressSpace::new(&mut memory) else {
@@ -2091,414 +2094,484 @@ pub(crate) fn main(
             }
         },
     );
-    if console_mode == mode::ConsoleMode::Normal {
-        while keyboard::poll_scancode().is_some() {}
-        input = input::Service::new();
-        debug::write_line(b"LogOS: native terminal active");
-        loop {
-            let tick = interrupts::ticks();
-            if service_lifecycle.due(tick) {
-                let _ = channel.send(
-                    &capabilities,
-                    service_capability,
-                    session::Principal::LOCAL,
-                    virtio_handle,
-                    ipc::Message::Recover,
-                );
-            }
-            if virtio::completion_pending() {
-                let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
-            }
-            if service_scheduler.run_next() {
-                let _ = service_health.beat(balloon::NAME, tick);
-            }
-            if !service_health.healthy(balloon::NAME, tick) {
-                debug::write_line(b"LogOS: service heartbeat overdue");
-                let _ = service_lifecycle.failed(tick);
-            }
-            if native_services.due(supervisor::NativeService::Sessions, tick)
-                && let Some(failed_sessions) = sessions_handle
-            {
-                if let Some(restarted) =
-                    restart_native_service(&mut native_scheduler, failed_sessions, &mut memory)
+    'console: loop {
+        if console_mode == mode::ConsoleMode::Normal {
+            while keyboard::poll_scancode().is_some() {}
+            input = input::Service::new();
+            debug::write_line(b"LogOS: native terminal active");
+            loop {
+                let tick = interrupts::ticks();
+                if service_lifecycle.due(tick) {
+                    let _ = channel.send(
+                        &capabilities,
+                        service_capability,
+                        session::Principal::LOCAL,
+                        virtio_handle,
+                        ipc::Message::Recover,
+                    );
+                }
+                if virtio::completion_pending() {
+                    let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
+                }
+                if service_scheduler.run_next() {
+                    let _ = service_health.beat(balloon::NAME, tick);
+                }
+                if !service_health.healthy(balloon::NAME, tick) {
+                    debug::write_line(b"LogOS: service heartbeat overdue");
+                    let _ = service_lifecycle.failed(tick);
+                }
+                if native_services.due(supervisor::NativeService::Sessions, tick)
+                    && let Some(failed_sessions) = sessions_handle
                 {
-                    sessions_handle = Some(restarted);
-                    native_sessions_endpoint = native_scheduler.session_endpoint(restarted);
-                    if native_scheduler.run(restarted) && native_sessions_endpoint.is_some() {
-                        native_services.ready(supervisor::NativeService::Sessions);
-                        debug::write_line(b"LogOS: native Sessions restarted");
+                    if let Some(restarted) =
+                        restart_native_service(&mut native_scheduler, failed_sessions, &mut memory)
+                    {
+                        sessions_handle = Some(restarted);
+                        native_sessions_endpoint = native_scheduler.session_endpoint(restarted);
+                        if native_scheduler.run(restarted) && native_sessions_endpoint.is_some() {
+                            native_services.ready(supervisor::NativeService::Sessions);
+                            debug::write_line(b"LogOS: native Sessions restarted");
+                        } else {
+                            let _ =
+                                native_services.failed(supervisor::NativeService::Sessions, tick);
+                        }
                     } else {
                         let _ = native_services.failed(supervisor::NativeService::Sessions, tick);
                     }
-                } else {
-                    let _ = native_services.failed(supervisor::NativeService::Sessions, tick);
                 }
-            }
-            if storage_handle.available() && native_scheduler.failed(storage_handle) {
-                let _ = native_services.failed(supervisor::NativeService::Store, tick);
-            }
-            if native_services.due(supervisor::NativeService::Store, tick)
-                && storage_handle.available()
-            {
-                block_dispatch.cancel_on_exit(&mut block::DispatchContext {
-                    endpoint: native_storage_block,
-                    pages: &mut shared_pages,
-                    store_owner: storage_owner,
-                    store_page: storage_block_page,
-                    device: &mut block_device,
-                    memory: &mut memory,
-                });
-                if let Some(history_address) = shared_pages.address(terminal_owner, shared_history)
-                    && let Some((restarted, store, block, block_page, block_virtual)) =
-                        replace_storage(
-                            &mut native_scheduler,
-                            storage_handle,
-                            &mut memory,
-                            &mut shared_pages,
-                            storage_owner,
-                            storage_block_page,
-                            history_address,
-                            shared_history,
-                        )
-                {
-                    storage_handle = restarted;
-                    native_storage_store = store;
-                    native_storage_block = block;
-                    storage_block_page = block_page;
-                    let _ = block_virtual;
-                    if native_scheduler.run(restarted)
-                        && run_storage_startup(
-                            &mut block_dispatch,
-                            &mut block::DispatchContext {
-                                endpoint: native_storage_block,
-                                pages: &mut shared_pages,
-                                store_owner: storage_owner,
-                                store_page: storage_block_page,
-                                device: &mut block_device,
-                                memory: &mut memory,
-                            },
-                            &mut native_scheduler,
-                            storage_handle,
-                        )
-                    {
-                        store_relay_state.clear();
-                        native_services.ready(supervisor::NativeService::Store);
-                        debug::write_line(b"LogOS: Store service restarted");
-                    } else {
-                        let _ = native_services.failed(supervisor::NativeService::Store, tick);
-                    }
-                } else {
+                if storage_handle.available() && native_scheduler.failed(storage_handle) {
                     let _ = native_services.failed(supervisor::NativeService::Store, tick);
                 }
-            }
-            if native_services.due(supervisor::NativeService::Network, tick)
-                && let (Some(failed_network), Some(resources)) = (network_handle, network_setup)
-            {
-                if let Some(pending) = network_client_pending.take() {
-                    let _ = native_terminal_network.reply(logos_abi::NetworkReply {
-                        id: pending.request.id,
-                        status: logos_abi::NetworkStatus::Reset,
-                        endpoint: logos_abi::NetworkEndpoint(0),
-                        generation: pending.request.generation,
-                        source_address: 0,
-                        source_port: 0,
-                        length: 0,
-                        info: logos_abi::NetworkInfo::default(),
-                        counters: logos_abi::NetworkCounters::default(),
+                if native_services.due(supervisor::NativeService::Store, tick)
+                    && storage_handle.available()
+                {
+                    block_dispatch.cancel_on_exit(&mut block::DispatchContext {
+                        endpoint: native_storage_block,
+                        pages: &mut shared_pages,
+                        store_owner: storage_owner,
+                        store_page: storage_block_page,
+                        device: &mut block_device,
+                        memory: &mut memory,
                     });
-                }
-                network_pending = None;
-                if let Some((restarted, endpoint, resources, dma)) = replace_network(
-                    &mut native_scheduler,
-                    failed_network,
-                    &mut memory,
-                    &mut shared_pages,
-                    resources,
-                ) {
-                    network_handle = Some(restarted);
-                    native_network_endpoint = Some(endpoint);
-                    network_setup = Some(resources);
-                    network_dma = Some(dma);
-                    network_probe = Some(0x8000_0001);
-                    network_probe_due = tick;
-                    network_reported = false;
-                    if let Some(device) = network_device.as_mut() {
-                        let _ = device.reset();
-                    }
-                    if native_scheduler.run(restarted) {
-                        native_services.ready(supervisor::NativeService::Network);
-                        debug::write_line(b"LogOS: Network service restarted");
-                    } else {
-                        let _ = native_services.failed(supervisor::NativeService::Network, tick);
-                    }
-                } else {
-                    let _ = native_services.failed(supervisor::NativeService::Network, tick);
-                }
-            }
-            if !dispatch_store_block(
-                &mut block_dispatch,
-                &mut block::DispatchContext {
-                    endpoint: native_storage_block,
-                    pages: &mut shared_pages,
-                    store_owner: storage_owner,
-                    store_page: storage_block_page,
-                    device: &mut block_device,
-                    memory: &mut memory,
-                },
-                &mut native_scheduler,
-                storage_handle,
-                tick,
-            ) {
-                debug::write_line(b"LogOS: storage block reply failed");
-            }
-            if !poll_network(
-                network_device.as_mut(),
-                native_network_endpoint,
-                network_handle,
-                network_dma,
-                &mut native_scheduler,
-                &mut network_pending,
-                &mut network_probe,
-                &mut network_probe_due,
-                &mut network_reported,
-                tick,
-                native_terminal_network,
-                &mut network_client_pending,
-                &session,
-                &capabilities,
-                &shared_pages,
-                terminal_owner,
-            ) {
-                debug::write_line(b"LogOS: network service unavailable");
-                if network_handle.is_some() {
-                    let _ = native_services.failed(supervisor::NativeService::Network, tick);
-                }
-            }
-            if let Some(event) = input.next(tick, keyboard::poll_scancode) {
-                if let Some(native_event) = native_input_event(event) {
-                    if !native_input.deliver(native_event)
-                        || !native_scheduler.wake(native_handle)
-                        || !native_scheduler.run(native_handle)
-                        || !resume_display(
-                            native_display,
-                            &session,
-                            &capabilities,
-                            session_display_capability,
-                            &mut native_scheduler,
-                            native_handle,
-                        )
-                    {
-                        if native_services.failed(supervisor::NativeService::Terminal, tick)
-                            == supervisor::FailureAction::Retry
-                            && native_services.due(supervisor::NativeService::Terminal, tick)
-                        {
-                            if !cancel_store_transaction(
-                                native_storage_store,
+                    if let Some(history_address) =
+                        shared_pages.address(terminal_owner, shared_history)
+                        && let Some((restarted, store, block, block_page, block_virtual)) =
+                            replace_storage(
                                 &mut native_scheduler,
-                                storage_handle,
-                            ) {
-                                console_mode = mode::ConsoleMode::Recovery;
-                                break;
-                            }
-                            if let Some((restarted, endpoints, history)) = replace_terminal(
-                                &mut native_scheduler,
-                                native_handle,
                                 storage_handle,
                                 &mut memory,
                                 &mut shared_pages,
-                                terminal_owner,
                                 storage_owner,
+                                storage_block_page,
+                                history_address,
                                 shared_history,
-                            ) {
-                                native_handle = restarted;
-                                (
-                                    native_input,
-                                    native_command,
-                                    native_display,
-                                    native_store,
-                                    native_terminal_network,
-                                ) = endpoints;
-                                shared_history = history;
-                                store_relay_state.clear();
-                                if native_scheduler.run(native_handle)
-                                    && resume_display(
-                                        native_display,
-                                        &session,
-                                        &capabilities,
-                                        session_display_capability,
-                                        &mut native_scheduler,
-                                        native_handle,
-                                    )
-                                {
-                                    native_services.ready(supervisor::NativeService::Terminal);
-                                    debug::write_line(b"LogOS: native terminal restarted");
-                                    continue;
-                                }
-                            }
-                        }
-                        debug::write_line(b"LogOS: native terminal display failed");
-                        console_mode = mode::ConsoleMode::Recovery;
-                        break;
-                    }
-                    if event.pressed().is_some_and(|(key, _)| key == input::LogicalKey::Escape) {
-                        debug::write_line(b"LogOS: recovery handoff requested");
-                        console_mode = mode::ConsoleMode::Recovery;
-                        break;
-                    }
-                    if native_store.request().is_some()
-                        && (!relay_terminal_store_requests(
-                            native_store,
-                            native_storage_store,
-                            &mut block_dispatch,
-                            &mut block::DispatchContext {
-                                endpoint: native_storage_block,
-                                pages: &mut shared_pages,
-                                store_owner: storage_owner,
-                                store_page: storage_block_page,
-                                device: &mut block_device,
-                                memory: &mut memory,
-                            },
-                            terminal_owner,
-                            storage_owner,
-                            shared_history,
-                            &mut native_scheduler,
-                            native_handle,
-                            storage_handle,
-                            &session,
-                            &capabilities,
-                            &mut store_relay_state,
-                            tick,
-                        ) || !resume_display(
-                            native_display,
-                            &session,
-                            &capabilities,
-                            session_display_capability,
-                            &mut native_scheduler,
-                            native_handle,
-                        ))
+                            )
                     {
-                        debug::write_line(b"LogOS: Store relay failed");
-                        console_mode = mode::ConsoleMode::Recovery;
-                        break;
-                    }
-                    if native_command.request().is_some() {
-                        let mut relay = relay_session_request(
-                            native_command,
-                            native_sessions_endpoint,
-                            &mut native_scheduler,
-                            sessions_handle,
-                            effects::Context {
-                                session: &session,
-                                capabilities: &capabilities,
-                                tick,
-                                input: &mut input,
-                                lifecycle: &mut service_lifecycle,
-                                service_healthy: service_health.healthy(balloon::NAME, tick),
-                                channel: &channel,
-                                responses: &responses,
-                                service_scheduler: &mut service_scheduler,
-                                service_capability,
-                                service: virtio_handle,
-                            },
-                        );
-
-                        if matches!(relay, SessionRelay::Handled(false)) {
-                            if sessions_handle.is_some() {
-                                let _ = native_services
-                                    .failed(supervisor::NativeService::Sessions, tick);
-                            }
-                            relay = SessionRelay::Handled(
-                                native_command.reply(b"session unavailable; retry command"),
-                            );
+                        storage_handle = restarted;
+                        native_storage_store = store;
+                        native_storage_block = block;
+                        storage_block_page = block_page;
+                        let _ = block_virtual;
+                        if native_scheduler.run(restarted)
+                            && run_storage_startup(
+                                &mut block_dispatch,
+                                &mut block::DispatchContext {
+                                    endpoint: native_storage_block,
+                                    pages: &mut shared_pages,
+                                    store_owner: storage_owner,
+                                    store_page: storage_block_page,
+                                    device: &mut block_device,
+                                    memory: &mut memory,
+                                },
+                                &mut native_scheduler,
+                                storage_handle,
+                            )
+                        {
+                            store_relay_state.clear();
+                            native_services.ready(supervisor::NativeService::Store);
+                            debug::write_line(b"LogOS: Store service restarted");
+                        } else {
+                            let _ = native_services.failed(supervisor::NativeService::Store, tick);
                         }
-                        match relay {
-                            SessionRelay::Recovery => {
-                                debug::write_line(b"LogOS: recovery handoff requested");
-                                console_mode = mode::ConsoleMode::Recovery;
-                                break;
-                            }
-                            SessionRelay::Handled(false) => {
-                                debug::write_line(b"LogOS: Sessions relay failed");
-                            }
-                            SessionRelay::Handled(true) => {
-                                if !native_scheduler.wake(native_handle)
-                                    || !native_scheduler.run(native_handle)
-                                    || !resume_display(
-                                        native_display,
-                                        &session,
-                                        &capabilities,
-                                        session_display_capability,
-                                        &mut native_scheduler,
-                                        native_handle,
-                                    )
-                                {
-                                    debug::write_line(b"LogOS: native terminal display failed");
+                    } else {
+                        let _ = native_services.failed(supervisor::NativeService::Store, tick);
+                    }
+                }
+                if native_services.due(supervisor::NativeService::Network, tick)
+                    && let (Some(failed_network), Some(resources)) = (network_handle, network_setup)
+                {
+                    if let Some(pending) = network_client_pending.take() {
+                        let _ = native_terminal_network.reply(logos_abi::NetworkReply {
+                            id: pending.request.id,
+                            status: logos_abi::NetworkStatus::Reset,
+                            endpoint: logos_abi::NetworkEndpoint(0),
+                            generation: pending.request.generation,
+                            source_address: 0,
+                            source_port: 0,
+                            length: 0,
+                            info: logos_abi::NetworkInfo::default(),
+                            counters: logos_abi::NetworkCounters::default(),
+                        });
+                    }
+                    network_pending = None;
+                    if let Some((restarted, endpoint, resources, dma)) = replace_network(
+                        &mut native_scheduler,
+                        failed_network,
+                        &mut memory,
+                        &mut shared_pages,
+                        resources,
+                    ) {
+                        network_handle = Some(restarted);
+                        native_network_endpoint = Some(endpoint);
+                        network_setup = Some(resources);
+                        network_dma = Some(dma);
+                        network_probe = Some(0x8000_0001);
+                        network_probe_due = tick;
+                        network_reported = false;
+                        if let Some(device) = network_device.as_mut() {
+                            let _ = device.reset();
+                        }
+                        if native_scheduler.run(restarted) {
+                            native_services.ready(supervisor::NativeService::Network);
+                            debug::write_line(b"LogOS: Network service restarted");
+                        } else {
+                            let _ =
+                                native_services.failed(supervisor::NativeService::Network, tick);
+                        }
+                    } else {
+                        let _ = native_services.failed(supervisor::NativeService::Network, tick);
+                    }
+                }
+                if !dispatch_store_block(
+                    &mut block_dispatch,
+                    &mut block::DispatchContext {
+                        endpoint: native_storage_block,
+                        pages: &mut shared_pages,
+                        store_owner: storage_owner,
+                        store_page: storage_block_page,
+                        device: &mut block_device,
+                        memory: &mut memory,
+                    },
+                    &mut native_scheduler,
+                    storage_handle,
+                    tick,
+                ) {
+                    debug::write_line(b"LogOS: storage block reply failed");
+                }
+                if !poll_network(
+                    network_device.as_mut(),
+                    native_network_endpoint,
+                    network_handle,
+                    network_dma,
+                    &mut native_scheduler,
+                    &mut network_pending,
+                    &mut network_probe,
+                    &mut network_probe_due,
+                    &mut network_reported,
+                    tick,
+                    native_terminal_network,
+                    &mut network_client_pending,
+                    &session,
+                    &capabilities,
+                    &shared_pages,
+                    terminal_owner,
+                ) {
+                    debug::write_line(b"LogOS: network service unavailable");
+                    if network_handle.is_some() {
+                        let _ = native_services.failed(supervisor::NativeService::Network, tick);
+                    }
+                }
+                if let Some(event) = input.next(tick, keyboard::poll_scancode) {
+                    if let Some(native_event) = native_input_event(event) {
+                        if !native_input.deliver(native_event)
+                            || !native_scheduler.wake(native_handle)
+                            || !native_scheduler.run(native_handle)
+                            || !resume_display(
+                                native_display,
+                                &session,
+                                &capabilities,
+                                session_display_capability,
+                                &mut native_scheduler,
+                                native_handle,
+                            )
+                        {
+                            if native_services.failed(supervisor::NativeService::Terminal, tick)
+                                == supervisor::FailureAction::Retry
+                                && native_services.due(supervisor::NativeService::Terminal, tick)
+                            {
+                                if !cancel_store_transaction(
+                                    native_storage_store,
+                                    &mut native_scheduler,
+                                    storage_handle,
+                                ) {
                                     console_mode = mode::ConsoleMode::Recovery;
                                     break;
                                 }
+                                if let Some((restarted, endpoints, history)) = replace_terminal(
+                                    &mut native_scheduler,
+                                    native_handle,
+                                    storage_handle,
+                                    &mut memory,
+                                    &mut shared_pages,
+                                    terminal_owner,
+                                    storage_owner,
+                                    shared_history,
+                                ) {
+                                    native_handle = restarted;
+                                    (
+                                        native_input,
+                                        native_command,
+                                        native_display,
+                                        native_store,
+                                        native_terminal_network,
+                                    ) = endpoints;
+                                    shared_history = history;
+                                    store_relay_state.clear();
+                                    if native_scheduler.run(native_handle)
+                                        && resume_display(
+                                            native_display,
+                                            &session,
+                                            &capabilities,
+                                            session_display_capability,
+                                            &mut native_scheduler,
+                                            native_handle,
+                                        )
+                                    {
+                                        native_services.ready(supervisor::NativeService::Terminal);
+                                        debug::write_line(b"LogOS: native terminal restarted");
+                                        continue;
+                                    }
+                                }
+                            }
+                            debug::write_line(b"LogOS: native terminal display failed");
+                            console_mode = mode::ConsoleMode::Recovery;
+                            break;
+                        }
+                        if event.pressed().is_some_and(|(key, _)| key == input::LogicalKey::Escape)
+                        {
+                            debug::write_line(b"LogOS: recovery handoff requested");
+                            console_mode = mode::ConsoleMode::Recovery;
+                            break;
+                        }
+                        if native_store.request().is_some()
+                            && (!relay_terminal_store_requests(
+                                native_store,
+                                native_storage_store,
+                                &mut block_dispatch,
+                                &mut block::DispatchContext {
+                                    endpoint: native_storage_block,
+                                    pages: &mut shared_pages,
+                                    store_owner: storage_owner,
+                                    store_page: storage_block_page,
+                                    device: &mut block_device,
+                                    memory: &mut memory,
+                                },
+                                terminal_owner,
+                                storage_owner,
+                                shared_history,
+                                &mut native_scheduler,
+                                native_handle,
+                                storage_handle,
+                                &session,
+                                &capabilities,
+                                &mut store_relay_state,
+                                tick,
+                            ) || !resume_display(
+                                native_display,
+                                &session,
+                                &capabilities,
+                                session_display_capability,
+                                &mut native_scheduler,
+                                native_handle,
+                            ))
+                        {
+                            debug::write_line(b"LogOS: Store relay failed");
+                            console_mode = mode::ConsoleMode::Recovery;
+                            break;
+                        }
+                        if native_command.request().is_some() {
+                            let mut relay = relay_session_request(
+                                native_command,
+                                native_sessions_endpoint,
+                                &mut native_scheduler,
+                                sessions_handle,
+                                effects::Context {
+                                    session: &session,
+                                    capabilities: &capabilities,
+                                    tick,
+                                    input: &mut input,
+                                    lifecycle: &mut service_lifecycle,
+                                    service_healthy: service_health.healthy(balloon::NAME, tick),
+                                    channel: &channel,
+                                    responses: &responses,
+                                    service_scheduler: &mut service_scheduler,
+                                    service_capability,
+                                    service: virtio_handle,
+                                },
+                            );
+
+                            if matches!(relay, SessionRelay::Handled(false)) {
+                                if sessions_handle.is_some() {
+                                    let _ = native_services
+                                        .failed(supervisor::NativeService::Sessions, tick);
+                                }
+                                relay = SessionRelay::Handled(
+                                    native_command.reply(b"session unavailable; retry command"),
+                                );
+                            }
+                            match relay {
+                                SessionRelay::Recovery => {
+                                    debug::write_line(b"LogOS: recovery handoff requested");
+                                    console_mode = mode::ConsoleMode::Recovery;
+                                    break;
+                                }
+                                SessionRelay::Handled(false) => {
+                                    debug::write_line(b"LogOS: Sessions relay failed");
+                                }
+                                SessionRelay::Handled(true) => {
+                                    if !native_scheduler.wake(native_handle)
+                                        || !native_scheduler.run(native_handle)
+                                        || !resume_display(
+                                            native_display,
+                                            &session,
+                                            &capabilities,
+                                            session_display_capability,
+                                            &mut native_scheduler,
+                                            native_handle,
+                                        )
+                                    {
+                                        debug::write_line(b"LogOS: native terminal display failed");
+                                        console_mode = mode::ConsoleMode::Recovery;
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
+                } else {
+                    unsafe { core::arch::asm!("hlt") };
                 }
-            } else {
-                unsafe { core::arch::asm!("hlt") };
             }
         }
-    }
-    if console_mode == mode::ConsoleMode::Recovery {
-        let _ = startup.start();
-        let mut console = console::Shell::from_startup(
-            startup,
-            console::Endpoint::new(
-                &channel,
-                &responses,
-                &capabilities,
-                service_capability,
-                virtio_handle,
-            ),
-        );
-        let _ = console.start();
-        console.run(|| {
-            let tick = interrupts::ticks();
-            if virtio::completion_pending() {
-                let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
-            }
-            if service_scheduler.run_next() {
-                let _ = service_health.beat(balloon::NAME, tick);
-            }
-            let _ = dispatch_store_block(
-                &mut block_dispatch,
-                &mut block::DispatchContext {
-                    endpoint: native_storage_block,
-                    pages: &mut shared_pages,
-                    store_owner: storage_owner,
-                    store_page: storage_block_page,
-                    device: &mut block_device,
-                    memory: &mut memory,
-                },
-                &mut native_scheduler,
-                storage_handle,
-                tick,
+        if console_mode == mode::ConsoleMode::Recovery {
+            let _ = startup.start();
+            let mut console = console::Shell::from_startup(
+                startup,
+                console::Endpoint::new(
+                    &channel,
+                    &responses,
+                    &capabilities,
+                    service_capability,
+                    virtio_handle,
+                ),
             );
-            let _ = poll_network(
-                network_device.as_mut(),
-                native_network_endpoint,
-                network_handle,
-                network_dma,
-                &mut native_scheduler,
-                &mut network_pending,
-                &mut network_probe,
-                &mut network_probe_due,
-                &mut network_reported,
-                tick,
-                native_terminal_network,
-                &mut network_client_pending,
-                &session,
-                &capabilities,
-                &shared_pages,
-                terminal_owner,
-            );
-        })
+            let _ = console.start();
+            startup = console.run(|action| {
+                let tick = interrupts::ticks();
+                if matches!(action, console::Action::RestartSessions) {
+                    native_services.manual_restart(supervisor::NativeService::Sessions);
+                    if let Some(failed) = sessions_handle
+                        && let Some(restarted) =
+                            restart_native_service(&mut native_scheduler, failed, &mut memory)
+                    {
+                        sessions_handle = Some(restarted);
+                        native_sessions_endpoint = native_scheduler.session_endpoint(restarted);
+                        if native_scheduler.run(restarted) && native_sessions_endpoint.is_some() {
+                            native_services.ready(supervisor::NativeService::Sessions);
+                            debug::write_line(b"LogOS: Sessions manually restarted");
+                        } else {
+                            let _ =
+                                native_services.failed(supervisor::NativeService::Sessions, tick);
+                        }
+                    }
+                }
+                if matches!(action, console::Action::RestartTerminal) {
+                    native_services.manual_restart(supervisor::NativeService::Terminal);
+                    if cancel_store_transaction(
+                        native_storage_store,
+                        &mut native_scheduler,
+                        storage_handle,
+                    ) && let Some((restarted, endpoints, history)) = replace_terminal(
+                        &mut native_scheduler,
+                        native_handle,
+                        storage_handle,
+                        &mut memory,
+                        &mut shared_pages,
+                        terminal_owner,
+                        storage_owner,
+                        shared_history,
+                    ) {
+                        native_handle = restarted;
+                        (
+                            native_input,
+                            native_command,
+                            native_display,
+                            native_store,
+                            native_terminal_network,
+                        ) = endpoints;
+                        shared_history = history;
+                        store_relay_state.clear();
+                        if native_scheduler.run(native_handle)
+                            && resume_display(
+                                native_display,
+                                &session,
+                                &capabilities,
+                                session_display_capability,
+                                &mut native_scheduler,
+                                native_handle,
+                            )
+                        {
+                            native_services.ready(supervisor::NativeService::Terminal);
+                            debug::write_line(b"LogOS: Terminal manually restarted");
+                            return true;
+                        }
+                    }
+                    let _ = native_services.failed(supervisor::NativeService::Terminal, tick);
+                }
+                if virtio::completion_pending() {
+                    let _ = service_scheduler.wake_event(scheduler::Event::VIRTIO);
+                }
+                if service_scheduler.run_next() {
+                    let _ = service_health.beat(balloon::NAME, tick);
+                }
+                let _ = dispatch_store_block(
+                    &mut block_dispatch,
+                    &mut block::DispatchContext {
+                        endpoint: native_storage_block,
+                        pages: &mut shared_pages,
+                        store_owner: storage_owner,
+                        store_page: storage_block_page,
+                        device: &mut block_device,
+                        memory: &mut memory,
+                    },
+                    &mut native_scheduler,
+                    storage_handle,
+                    tick,
+                );
+                let _ = poll_network(
+                    network_device.as_mut(),
+                    native_network_endpoint,
+                    network_handle,
+                    network_dma,
+                    &mut native_scheduler,
+                    &mut network_pending,
+                    &mut network_probe,
+                    &mut network_probe_due,
+                    &mut network_reported,
+                    tick,
+                    native_terminal_network,
+                    &mut network_client_pending,
+                    &session,
+                    &capabilities,
+                    &shared_pages,
+                    terminal_owner,
+                );
+                false
+            });
+            console_mode = mode::ConsoleMode::Normal;
+            continue 'console;
+        }
+        break;
     }
     loop {
         unsafe { core::arch::asm!("cli", "hlt") };
