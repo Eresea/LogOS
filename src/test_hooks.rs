@@ -24,6 +24,9 @@ pub fn serve(storage: u32, mut handle: impl FnMut(Action<'_>) -> bool) -> ! {
             b"LOGOS/1 BOOT session=1 storage=recovered-incomplete"
         }
         logos_core::native_service::STORAGE_CORRUPT => b"LOGOS/1 BOOT session=1 storage=corrupt",
+        logos_core::native_service::STORAGE_UNAVAILABLE => {
+            b"LOGOS/1 BOOT session=1 storage=unavailable"
+        }
         _ => b"LOGOS/1 BOOT session=1 storage=io-failed",
     });
     line(b"LOGOS/1 READY stage=session-ready");

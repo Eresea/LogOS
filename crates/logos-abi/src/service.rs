@@ -30,6 +30,7 @@ pub const STORAGE_RECOVERED: u32 = 2;
 pub const STORAGE_RECOVERED_INCOMPLETE: u32 = 3;
 pub const STORAGE_CORRUPT: u32 = 4;
 pub const STORAGE_IO_FAILED: u32 = 5;
+pub const STORAGE_UNAVAILABLE: u32 = 6;
 
 #[derive(Clone, Copy)]
 #[repr(C)]

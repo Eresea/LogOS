@@ -145,9 +145,16 @@ pub(crate) fn main(
     };
     let Some(payload) = payloads.terminal else {
         debug::write_line(b"LogOS: terminal payload unavailable; entering recovery");
-        let mut shell = console::Shell::offline(startup);
-        let _ = shell.start();
-        shell.run(|| {});
+        #[cfg(feature = "test-hooks")]
+        test_hooks::serve(logos_core::native_service::STORAGE_UNAVAILABLE, |action| {
+            matches!(action, test_hooks::Action::Run("platform/missing-terminal"))
+        });
+        #[cfg(not(feature = "test-hooks"))]
+        {
+            let mut shell = console::Shell::offline(startup);
+            let _ = shell.start();
+            shell.run(|| {});
+        }
     };
     let Some(mut service_address_space) = address_space::AddressSpace::new(&mut memory) else {
         fail!(b"native image map");
@@ -938,7 +945,7 @@ pub(crate) fn main(
             }
             .unwrap_or(logos_core::native_service::STORAGE_IO_FAILED)
         } else {
-            logos_core::native_service::STORAGE_IO_FAILED
+            logos_core::native_service::STORAGE_UNAVAILABLE
         },
         |action| match action {
             test_hooks::Action::Input(value) => {
@@ -2063,6 +2070,20 @@ pub(crate) fn main(
                     return false;
                 }
                 id == "core/boot-normal"
+                    || (matches!(
+                        id,
+                        "platform/missing-sessions" | "platform/incompatible-sessions"
+                    ) && native_services.state(supervisor::NativeService::Sessions)
+                        == supervisor::NativeState::Missing
+                        && sessions_handle.is_none())
+                    || (id == "platform/missing-store"
+                        && native_services.state(supervisor::NativeService::Store)
+                            == supervisor::NativeState::Missing
+                        && !storage_handle.available())
+                    || (id == "platform/missing-network"
+                        && native_services.state(supervisor::NativeService::Network)
+                            == supervisor::NativeState::Missing
+                        && network_handle.is_none())
                     || (cfg!(feature = "block-probe") && id == "persistence/block-read-flush")
                     || (id == "network/transport-dhcp" && network_reported)
                     || (id == "network/configuration" && network_reported)
@@ -2097,15 +2118,21 @@ pub(crate) fn main(
             }
             if native_services.due(supervisor::NativeService::Sessions, tick)
                 && let Some(failed_sessions) = sessions_handle
-                && let Some(restarted) =
-                    restart_native_service(&mut native_scheduler, failed_sessions, &mut memory)
-                && native_scheduler.run(restarted)
-                && let Some(endpoint) = native_scheduler.session_endpoint(restarted)
             {
-                sessions_handle = Some(restarted);
-                native_sessions_endpoint = Some(endpoint);
-                native_services.ready(supervisor::NativeService::Sessions);
-                debug::write_line(b"LogOS: native Sessions restarted");
+                if let Some(restarted) =
+                    restart_native_service(&mut native_scheduler, failed_sessions, &mut memory)
+                {
+                    sessions_handle = Some(restarted);
+                    native_sessions_endpoint = native_scheduler.session_endpoint(restarted);
+                    if native_scheduler.run(restarted) && native_sessions_endpoint.is_some() {
+                        native_services.ready(supervisor::NativeService::Sessions);
+                        debug::write_line(b"LogOS: native Sessions restarted");
+                    } else {
+                        let _ = native_services.failed(supervisor::NativeService::Sessions, tick);
+                    }
+                } else {
+                    let _ = native_services.failed(supervisor::NativeService::Sessions, tick);
+                }
             }
             if storage_handle.available() && native_scheduler.failed(storage_handle) {
                 let _ = native_services.failed(supervisor::NativeService::Store, tick);
@@ -2133,30 +2160,35 @@ pub(crate) fn main(
                             history_address,
                             shared_history,
                         )
-                    && native_scheduler.run(restarted)
                 {
                     storage_handle = restarted;
                     native_storage_store = store;
                     native_storage_block = block;
                     storage_block_page = block_page;
                     let _ = block_virtual;
-                    if run_storage_startup(
-                        &mut block_dispatch,
-                        &mut block::DispatchContext {
-                            endpoint: native_storage_block,
-                            pages: &mut shared_pages,
-                            store_owner: storage_owner,
-                            store_page: storage_block_page,
-                            device: &mut block_device,
-                            memory: &mut memory,
-                        },
-                        &mut native_scheduler,
-                        storage_handle,
-                    ) {
+                    if native_scheduler.run(restarted)
+                        && run_storage_startup(
+                            &mut block_dispatch,
+                            &mut block::DispatchContext {
+                                endpoint: native_storage_block,
+                                pages: &mut shared_pages,
+                                store_owner: storage_owner,
+                                store_page: storage_block_page,
+                                device: &mut block_device,
+                                memory: &mut memory,
+                            },
+                            &mut native_scheduler,
+                            storage_handle,
+                        )
+                    {
                         store_relay_state.clear();
                         native_services.ready(supervisor::NativeService::Store);
                         debug::write_line(b"LogOS: Store service restarted");
+                    } else {
+                        let _ = native_services.failed(supervisor::NativeService::Store, tick);
                     }
+                } else {
+                    let _ = native_services.failed(supervisor::NativeService::Store, tick);
                 }
             }
             if native_services.due(supervisor::NativeService::Network, tick)
@@ -2182,8 +2214,7 @@ pub(crate) fn main(
                     &mut memory,
                     &mut shared_pages,
                     resources,
-                ) && native_scheduler.run(restarted)
-                {
+                ) {
                     network_handle = Some(restarted);
                     native_network_endpoint = Some(endpoint);
                     network_setup = Some(resources);
@@ -2194,8 +2225,14 @@ pub(crate) fn main(
                     if let Some(device) = network_device.as_mut() {
                         let _ = device.reset();
                     }
-                    native_services.ready(supervisor::NativeService::Network);
-                    debug::write_line(b"LogOS: Network service restarted");
+                    if native_scheduler.run(restarted) {
+                        native_services.ready(supervisor::NativeService::Network);
+                        debug::write_line(b"LogOS: Network service restarted");
+                    } else {
+                        let _ = native_services.failed(supervisor::NativeService::Network, tick);
+                    }
+                } else {
+                    let _ = native_services.failed(supervisor::NativeService::Network, tick);
                 }
             }
             if !dispatch_store_block(

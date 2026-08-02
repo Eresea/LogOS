@@ -95,6 +95,7 @@ impl<'a> Shell<'a> {
         Self { console: startup.console, command: [0; 16], length: 0, endpoint: Some(endpoint) }
     }
 
+    #[cfg_attr(feature = "test-hooks", allow(dead_code))]
     pub fn offline(startup: Startup) -> Self {
         Self { console: startup.console, command: [0; 16], length: 0, endpoint: None }
     }

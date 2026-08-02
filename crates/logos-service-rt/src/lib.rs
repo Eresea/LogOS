@@ -30,6 +30,7 @@ pub const STORAGE_RECOVERED: u32 = native_service::STORAGE_RECOVERED;
 pub const STORAGE_RECOVERED_INCOMPLETE: u32 = native_service::STORAGE_RECOVERED_INCOMPLETE;
 pub const STORAGE_CORRUPT: u32 = native_service::STORAGE_CORRUPT;
 pub const STORAGE_IO_FAILED: u32 = native_service::STORAGE_IO_FAILED;
+pub const STORAGE_UNAVAILABLE: u32 = native_service::STORAGE_UNAVAILABLE;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockError {

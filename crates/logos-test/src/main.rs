@@ -29,6 +29,11 @@ enum Fixture {
     Shared,
     Fresh,
     Persistence,
+    MissingSessions,
+    MissingTerminal,
+    IncompatibleSessions,
+    MissingStore,
+    MissingNetwork,
 }
 
 #[derive(Clone, Copy)]
@@ -43,6 +48,11 @@ struct Scenario {
 
 const SCENARIOS: &[Scenario] = &[
     configured("core/boot-normal", "core", &[], Fixture::Fresh),
+    configured("platform/missing-sessions", "platform", &[], Fixture::MissingSessions),
+    configured("platform/missing-terminal", "platform", &[], Fixture::MissingTerminal),
+    configured("platform/incompatible-sessions", "platform", &[], Fixture::IncompatibleSessions),
+    configured("platform/missing-store", "platform", &[], Fixture::MissingStore),
+    configured("platform/missing-network", "platform", &[], Fixture::MissingNetwork),
     scenario("core/boot-recovery", "core", Fixture::Fresh),
     scenario("core/ipc-request-reply", "core", Fixture::Fresh),
     scenario("core/ipc-cancellation", "core", Fixture::Fresh),
@@ -256,11 +266,27 @@ struct ResultRecord {
 #[derive(Clone)]
 struct ImageProfile {
     efi: PathBuf,
-    terminal: PathBuf,
-    sessions: PathBuf,
-    storage: PathBuf,
-    network: PathBuf,
+    terminal: Option<PathBuf>,
+    sessions: Option<PathBuf>,
+    storage: Option<PathBuf>,
+    network: Option<PathBuf>,
+    incompatible_sessions: bool,
     block_probe: bool,
+}
+
+impl ImageProfile {
+    fn for_fixture(&self, fixture: Fixture) -> Self {
+        let mut profile = self.clone();
+        match fixture {
+            Fixture::MissingSessions => profile.sessions = None,
+            Fixture::MissingTerminal => profile.terminal = None,
+            Fixture::IncompatibleSessions => profile.incompatible_sessions = true,
+            Fixture::MissingStore => profile.storage = None,
+            Fixture::MissingNetwork => profile.network = None,
+            Fixture::Shared | Fixture::Fresh | Fixture::Persistence => {}
+        }
+        profile
+    }
 }
 
 const DISK_SECTORS: usize = 16 * 1024 * 1024 / SECTOR_SIZE;
@@ -289,7 +315,12 @@ fn parse_boot_report(line: &str) -> Result<BootReport, String> {
         .filter(|value| {
             matches!(
                 *value,
-                "formatted" | "recovered" | "recovered-incomplete" | "corrupt" | "io-failed"
+                "formatted"
+                    | "recovered"
+                    | "recovered-incomplete"
+                    | "corrupt"
+                    | "io-failed"
+                    | "unavailable"
             )
         })
         .ok_or_else(|| format!("invalid boot report: {line}"))?;
@@ -602,10 +633,19 @@ impl Harness {
         fs::copy(&profile.efi, esp.join("BOOTX64.EFI")).map_err(io_error)?;
         let payload_dir = fixture_dir.join("esp/EFI/LOGOS");
         fs::create_dir_all(&payload_dir).map_err(io_error)?;
-        fs::copy(&profile.terminal, payload_dir.join("TERMINAL.EFI")).map_err(io_error)?;
-        fs::copy(&profile.sessions, payload_dir.join("SESSIONS.EFI")).map_err(io_error)?;
-        fs::copy(&profile.storage, payload_dir.join("STORAGE.EFI")).map_err(io_error)?;
-        fs::copy(&profile.network, payload_dir.join("NETWORK.EFI")).map_err(io_error)?;
+        for (source, name) in [
+            (&profile.terminal, "TERMINAL.EFI"),
+            (&profile.sessions, "SESSIONS.EFI"),
+            (&profile.storage, "STORAGE.EFI"),
+            (&profile.network, "NETWORK.EFI"),
+        ] {
+            if let Some(source) = source {
+                fs::copy(source, payload_dir.join(name)).map_err(io_error)?;
+            }
+        }
+        if profile.incompatible_sessions {
+            make_protocol_incompatible(&payload_dir.join("SESSIONS.EFI"))?;
+        }
         let disk = fixture_dir.join("store.raw");
         if !disk.exists() {
             fs::File::create(&disk)
@@ -1337,6 +1377,13 @@ fn run_fixture(
     seed: u64,
     results: &mut Vec<ResultRecord>,
 ) {
+    let fixture = scenarios.first().map_or(Fixture::Fresh, |scenario| scenario.fixture);
+    let profile = profile.for_fixture(fixture);
+    let expected_storage = if matches!(fixture, Fixture::MissingStore | Fixture::MissingTerminal) {
+        "unavailable"
+    } else {
+        "LogOS: storage formatted"
+    };
     let fixture_dir = run_dir.join("fixtures").join(name.replace('/', "-"));
     if let Err(error) = fs::create_dir_all(&fixture_dir) {
         for scenario in scenarios {
@@ -1363,23 +1410,17 @@ fn run_fixture(
             return;
         }
     };
-    let mut harness = match Harness::boot(
-        &qemu,
-        &ovmf,
-        profile,
-        &fixture_dir,
-        timeout,
-        "LogOS: storage formatted",
-    ) {
-        Ok(harness) => harness,
-        Err(error) => {
-            capture_failure(&fixture_dir, 0, &PathBuf::new());
-            for scenario in scenarios {
-                results.push(failed(scenario, seed, run_dir, &error));
+    let mut harness =
+        match Harness::boot(&qemu, &ovmf, &profile, &fixture_dir, timeout, expected_storage) {
+            Ok(harness) => harness,
+            Err(error) => {
+                capture_failure(&fixture_dir, 0, &PathBuf::new());
+                for scenario in scenarios {
+                    results.push(failed(scenario, seed, run_dir, &error));
+                }
+                return;
             }
-            return;
-        }
-    };
+        };
     let mut last_result: Option<usize> = None;
     for scenario in scenarios {
         if let Some(index) = last_result.take() {
@@ -1395,10 +1436,10 @@ fn run_fixture(
                 harness = match Harness::boot(
                     &qemu,
                     &ovmf,
-                    profile,
+                    &profile,
                     &fixture_dir,
                     timeout,
-                    "LogOS: storage formatted",
+                    expected_storage,
                 ) {
                     Ok(harness) => harness,
                     Err(error) => {
@@ -1407,7 +1448,15 @@ fn run_fixture(
                     }
                 };
             }
-        } else if scenario.fixture == Fixture::Persistence {
+        } else if matches!(
+            scenario.fixture,
+            Fixture::Persistence
+                | Fixture::MissingSessions
+                | Fixture::MissingTerminal
+                | Fixture::IncompatibleSessions
+                | Fixture::MissingStore
+                | Fixture::MissingNetwork
+        ) {
             // The persistence fixture boots into the proof directly.
         } else if let Err(error) = harness.reset(scenario.id) {
             results.push(failed(
@@ -1529,10 +1578,11 @@ fn build_profile(
     };
     Ok(ImageProfile {
         efi: copy("logos-uefi.efi")?,
-        terminal: copy("logos-terminal-service.efi")?,
-        sessions: copy("logos-sessions-service.efi")?,
-        storage: copy("logos-storage-service.efi")?,
-        network: copy("logos-network-service.efi")?,
+        terminal: Some(copy("logos-terminal-service.efi")?),
+        sessions: Some(copy("logos-sessions-service.efi")?),
+        storage: Some(copy("logos-storage-service.efi")?),
+        network: Some(copy("logos-network-service.efi")?),
+        incompatible_sessions: false,
         block_probe,
     })
 }
@@ -1746,6 +1796,19 @@ fn io_error(error: std::io::Error) -> String {
     error.to_string()
 }
 
+fn make_protocol_incompatible(path: &Path) -> Result<(), String> {
+    let mut image = fs::read(path).map_err(io_error)?;
+    let mut changed = false;
+    for offset in 0..image.len().saturating_sub(28) {
+        if image[offset..offset + 4] == *b"LGSV" && image[offset + 8..offset + 16] == *b"sessions" {
+            image[offset + 24..offset + 26].copy_from_slice(&2u16.to_le_bytes());
+            changed = true;
+        }
+    }
+    changed.then_some(()).ok_or_else(|| "sessions service header not found".to_string())?;
+    fs::write(path, image).map_err(io_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1767,6 +1830,11 @@ mod tests {
                         | "network/device-bind"
                         | "network/configuration"
                         | "network/unauthorized-operation"
+                        | "platform/missing-sessions"
+                        | "platform/missing-terminal"
+                        | "platform/incompatible-sessions"
+                        | "platform/missing-store"
+                        | "platform/missing-network"
                 )
         }));
     }
