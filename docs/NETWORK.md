@@ -75,7 +75,8 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   capability scope and copies client payloads through the fixed Network TX page. Cancellation,
   close, reset, and ARP single-flight cleanup release pending client state.
 - QEMU uses deterministic user-mode DHCP for the transport proof. The independent DHCP/ARP peer
-  and packet-exchange proof remain deferred.
+  and packet-exchange proof remain deferred. `network/device-bind` now exercises a real Bind
+  request through the Core capability and service relay.
 
 ### Transport milestone: DHCP over Core-owned VirtIO
 
@@ -104,8 +105,9 @@ checklists therefore remain unchecked.
 ### Deferred work and next steps
 
 1. Add an independent DHCP/ARP host peer and promote `network/configuration`.
-2. Add deterministic loss, timeout, reset/reconnect, restart, and malformed-frame proofs for Phase 7.
-3. Close Phase 8 by updating the architecture, security, boot, and roadmap guides after those proofs pass.
+2. Extend the guest proof client for UDP, ICMP, denial, and backpressure/cancel scenarios.
+3. Add deterministic loss, timeout, reset/reconnect, restart, and malformed-frame proofs for Phase 7.
+4. Close Phase 8 by updating the architecture, security, boot, and roadmap guides after those proofs pass.
 
 ## Contract and invariants
 
@@ -363,7 +365,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
 
 ### Phase 6: expose capability-scoped datagrams and echo
 
-- [ ] Relay only Network requests to the Network task and preserve request IDs end to end.
+- [x] Relay only Network requests to the Network task and preserve request IDs end to end.
 - [ ] Check wire shape, capability kind, exact scope, owner, endpoint generation, page direction,
       and deadline before waking Network.
 - [ ] Implement bind, send, receive, echo, cancel, close, and status in the service.
