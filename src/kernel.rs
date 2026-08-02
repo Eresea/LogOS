@@ -3458,6 +3458,7 @@ fn poll_network(
     };
     match device.receive(frame) {
         Ok(Some(length)) => {
+            debug::write_line(b"LogOS: network RX frame");
             let event = logos_abi::NetworkEvent {
                 id: tick.try_into().unwrap_or(1).max(1),
                 kind: logos_abi::NetworkEventKind::Frame,
