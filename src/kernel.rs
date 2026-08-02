@@ -347,6 +347,23 @@ pub(crate) fn main(
     else {
         fail!(b"capabilities");
     };
+    let Some(network_bind_capability) = capabilities.grant_scoped64(
+        capabilities::CapabilityKind::NetworkBind,
+        logos_abi::NetworkScope::new(logos_abi::NetworkProtocol::Udp, 0, 4000).0,
+    ) else {
+        fail!(b"capabilities");
+    };
+    let Some(network_send_capability) = capabilities.grant_scoped64(
+        capabilities::CapabilityKind::NetworkSend,
+        logos_abi::NetworkScope::new(logos_abi::NetworkProtocol::Udp, 0x0a00_0202, 4001).0,
+    ) else {
+        fail!(b"capabilities");
+    };
+    let Some(network_receive_capability) =
+        capabilities.grant_scoped64(capabilities::CapabilityKind::NetworkReceive, 0)
+    else {
+        fail!(b"capabilities");
+    };
     let Some(recovery_capability) = capabilities.grant(capabilities::CapabilityKind::Recovery)
     else {
         fail!(b"capabilities");
@@ -362,6 +379,9 @@ pub(crate) fn main(
             session_capability,
             session_store_read_capability,
             session_store_write_capability,
+            network_bind_capability,
+            network_send_capability,
+            network_receive_capability,
         ],
     ) else {
         fail!(b"session");
@@ -698,6 +718,7 @@ pub(crate) fn main(
     let native_storage_block = native_storage.block_endpoint();
     let native_store = native_terminal.store_endpoint();
     let native_storage_store = native_storage.store_endpoint();
+    let native_terminal_network = native_terminal.network_endpoint();
     let native_network_endpoint = native_network.as_ref().map(native_task::Task::network_endpoint);
     check!(
         b"storage shared page",
@@ -729,6 +750,7 @@ pub(crate) fn main(
         network_device.is_none() || native_network_endpoint.is_none() || network_pages_ready
     );
     let mut block_dispatch = block::Dispatch::new();
+    let mut network_client_pending = None;
     let mut native_scheduler = scheduler::Scheduler::new();
     let Some(mut native_handle) = native_scheduler.spawn(&mut native_terminal) else {
         fail!(b"native terminal task");
@@ -1640,6 +1662,10 @@ pub(crate) fn main(
                 unsafe { &mut *network_probe_due_ptr },
                 unsafe { &mut *network_reported_ptr },
                 interrupts::ticks(),
+                native_terminal_network,
+                &mut network_client_pending,
+                &session,
+                &capabilities,
             );
         },
         |id| {
@@ -1704,6 +1730,10 @@ pub(crate) fn main(
                 &mut network_probe_due,
                 &mut network_reported,
                 tick,
+                native_terminal_network,
+                &mut network_client_pending,
+                &session,
+                &capabilities,
             ) {
                 debug::write_line(b"LogOS: network service unavailable");
             }
@@ -1914,6 +1944,10 @@ pub(crate) fn main(
                 &mut network_probe_due,
                 &mut network_reported,
                 tick,
+                native_terminal_network,
+                &mut network_client_pending,
+                &session,
+                &capabilities,
             );
         })
     }
@@ -1935,6 +1969,86 @@ fn dispatch_store_block(
     context.endpoint.reply(reply) && scheduler.wake(handle) && scheduler.run(handle)
 }
 
+#[derive(Clone, Copy)]
+struct PendingNetworkClient {
+    request: logos_abi::NetworkRequest,
+}
+
+fn relay_network_client(
+    terminal: native_task::NetworkEndpoint,
+    service: native_task::NetworkEndpoint,
+    handle: scheduler::TaskHandle,
+    scheduler: &mut scheduler::Scheduler<'_>,
+    pending: &mut Option<PendingNetworkClient>,
+    session: &session::Context,
+    capabilities: &capabilities::CapabilityManager,
+) -> bool {
+    if let Some(current) = *pending {
+        if let Some(reply) = service.response(current.request.id) {
+            *pending = None;
+            return terminal.reply(reply) && scheduler.wake(handle) && scheduler.run(handle);
+        }
+        return true;
+    }
+    let Some(request) = terminal.request() else {
+        return true;
+    };
+    if !request.valid_shape() {
+        return terminal.reply(logos_abi::NetworkReply {
+            id: request.id,
+            status: crate::platform::network::status_for(request, false),
+            endpoint: logos_abi::NetworkEndpoint(0),
+            generation: 0,
+            source_address: 0,
+            source_port: 0,
+            length: 0,
+            info: logos_abi::NetworkInfo::default(),
+            counters: logos_abi::NetworkCounters::default(),
+        }) && scheduler.wake(handle)
+            && scheduler.run(handle);
+    }
+    if let Some((kind, scope)) = crate::platform::network::capability(request)
+        && !session.allows_scoped64(capabilities, kind, scope)
+    {
+        return terminal.reply(logos_abi::NetworkReply {
+            id: request.id,
+            status: crate::platform::network::status_for(request, false),
+            endpoint: logos_abi::NetworkEndpoint(0),
+            generation: request.generation,
+            source_address: 0,
+            source_port: 0,
+            length: 0,
+            info: logos_abi::NetworkInfo::default(),
+            counters: logos_abi::NetworkCounters::default(),
+        }) && scheduler.wake(handle)
+            && scheduler.run(handle);
+    }
+    if matches!(
+        request.operation,
+        logos_abi::NetworkOperation::SendTo
+            | logos_abi::NetworkOperation::ReceiveFrom
+            | logos_abi::NetworkOperation::Echo
+    ) {
+        return terminal.reply(logos_abi::NetworkReply {
+            id: request.id,
+            status: logos_abi::NetworkStatus::Offline,
+            endpoint: logos_abi::NetworkEndpoint(0),
+            generation: request.generation,
+            source_address: 0,
+            source_port: 0,
+            length: 0,
+            info: logos_abi::NetworkInfo::default(),
+            counters: logos_abi::NetworkCounters::default(),
+        }) && scheduler.wake(handle)
+            && scheduler.run(handle);
+    }
+    if !service.deliver(request) {
+        return true;
+    }
+    *pending = Some(PendingNetworkClient { request });
+    scheduler.wake(handle) && scheduler.run(handle)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn poll_network(
     device: Option<&mut network_driver::Device>,
@@ -1947,10 +2061,25 @@ fn poll_network(
     probe_due: &mut u64,
     reported: &mut bool,
     tick: u64,
+    terminal: native_task::NetworkEndpoint,
+    client_pending: &mut Option<PendingNetworkClient>,
+    session: &session::Context,
+    capabilities: &capabilities::CapabilityManager,
 ) -> bool {
     let (Some(device), Some(endpoint), Some(handle)) = (device, endpoint, handle) else {
         return true;
     };
+    if !relay_network_client(
+        terminal,
+        endpoint,
+        handle,
+        scheduler,
+        client_pending,
+        session,
+        capabilities,
+    ) {
+        return false;
+    }
     if let Some(request) = pending.as_ref().copied() {
         if tick >= request.request.deadline {
             debug::write_line(b"LogOS: network TX timeout");

@@ -1,6 +1,6 @@
 use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
-const CAPABILITIES: usize = 8;
+const CAPABILITIES: usize = 12;
 const VARIABLES: usize = 4;
 const VARIABLE_NAME: usize = 16;
 const VARIABLE_VALUE: usize = 64;
@@ -96,10 +96,19 @@ impl Context {
         kind: CapabilityKind,
         resource: u32,
     ) -> bool {
+        self.allows_scoped64(manager, kind, u64::from(resource))
+    }
+
+    pub fn allows_scoped64(
+        &self,
+        manager: &CapabilityManager,
+        kind: CapabilityKind,
+        resource: u64,
+    ) -> bool {
         self.capabilities[..self.length]
             .iter()
             .flatten()
-            .any(|capability| manager.allows_scoped(*capability, kind, resource))
+            .any(|capability| manager.allows_scoped64(*capability, kind, resource))
     }
 
     pub fn set_variable(&mut self, name: &[u8], value: &[u8]) -> bool {

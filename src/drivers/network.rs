@@ -72,7 +72,9 @@ impl Device {
         if bar & 1 == 0 {
             return None;
         }
-        let base = (bar & !3) as u16;
+        let Some(base) = u16::try_from(bar & !3).ok() else {
+            return None;
+        };
         unsafe {
             outb(base + 0x12, 0);
             outb(base + 0x12, ACKNOWLEDGE);
@@ -123,10 +125,14 @@ impl Device {
             return None;
         };
         let mut mac = [0; 6];
+        let mut stable = [0; 6];
         for (index, byte) in mac.iter_mut().enumerate() {
             *byte = unsafe { inb(base + 0x14 + index as u16) };
         }
-        if mac == [0; 6] || mac == [0xff; 6] {
+        for (index, byte) in stable.iter_mut().enumerate() {
+            *byte = unsafe { inb(base + 0x14 + index as u16) };
+        }
+        if mac != stable || mac == [0; 6] || mac == [0xff; 6] {
             let _ = tx_queue.release(memory);
             let _ = rx_queue.release(memory);
             return None;
@@ -253,6 +259,18 @@ impl Device {
 
     pub fn reset(&mut self) -> bool {
         unsafe { outb(self.base + 0x12, 0) };
+        unsafe {
+            core::ptr::write_bytes(
+                self.rx_queue.address() as *mut u8,
+                0,
+                self.rx_queue_size_bytes(),
+            );
+            core::ptr::write_bytes(
+                self.tx_queue.address() as *mut u8,
+                0,
+                self.tx_queue_size_bytes(),
+            );
+        }
         self.rx_available = 0;
         self.rx_used = 0;
         self.tx_available = 0;
@@ -294,6 +312,14 @@ impl Device {
             }
         }
         true
+    }
+
+    fn rx_queue_size_bytes(&self) -> usize {
+        self.queue_size * core::mem::size_of::<Descriptor>() + 4096
+    }
+
+    fn tx_queue_size_bytes(&self) -> usize {
+        self.tx_queue_size * core::mem::size_of::<Descriptor>() + 4096
     }
 
     fn post_rx_buffer(&mut self, index: usize) -> Result<(), NetworkError> {

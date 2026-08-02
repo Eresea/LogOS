@@ -563,6 +563,7 @@ pub enum StateError {
     Stale,
     Owner,
     QueueFull,
+    NoRoute,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -610,6 +611,15 @@ pub struct Pending {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EchoMatch {
+    pub peer: Ipv4,
+    pub identifier: u16,
+    pub sequence: u16,
+    pub generation: u16,
+    pub deadline: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NetworkConfig {
     pub address: Ipv4,
     pub mask: Ipv4,
@@ -617,6 +627,22 @@ pub struct NetworkConfig {
     pub lease_until: u64,
     pub renew_at: u64,
     pub rebind_at: u64,
+}
+
+pub fn route_target(
+    local: Ipv4,
+    mask: Ipv4,
+    router: Option<Ipv4>,
+    destination: Ipv4,
+) -> Result<Ipv4, StateError> {
+    let local = u32::from_be_bytes(local.0);
+    let mask = u32::from_be_bytes(mask.0);
+    let destination_value = u32::from_be_bytes(destination.0);
+    if local & mask == destination_value & mask {
+        Ok(destination)
+    } else {
+        router.ok_or(StateError::NoRoute)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -798,6 +824,8 @@ pub struct NetworkState {
     datagrams: [Datagram; 4],
     arp: [ArpEntry; 8],
     pending: Option<Pending>,
+    echo: Option<EchoMatch>,
+    arp_target: Option<Ipv4>,
     dhcp: DhcpMachine,
 }
 
@@ -812,6 +840,8 @@ impl NetworkState {
             datagrams: [Datagram::EMPTY; 4],
             arp: [ARP; 8],
             pending: None,
+            echo: None,
+            arp_target: None,
             dhcp: DhcpMachine::new(),
         }
     }
@@ -822,6 +852,14 @@ impl NetworkState {
 
     pub const fn pending(&self) -> Option<Pending> {
         self.pending
+    }
+
+    pub const fn echo(&self) -> Option<EchoMatch> {
+        self.echo
+    }
+
+    pub const fn arp_target(&self) -> Option<Ipv4> {
+        self.arp_target
     }
 
     pub fn bind(&mut self, owner: u64, port: u16) -> Result<EndpointId, StateError> {
@@ -920,6 +958,48 @@ impl NetworkState {
         Ok(())
     }
 
+    pub fn begin_echo(&mut self, echo: EchoMatch) -> Result<(), StateError> {
+        if self.echo.is_some() || echo.peer.0 == [0; 4] || echo.generation != self.generation {
+            return Err(StateError::Busy);
+        }
+        if echo.identifier == 0 || echo.deadline == 0 {
+            return Err(StateError::Invalid);
+        }
+        self.echo = Some(echo);
+        Ok(())
+    }
+
+    pub fn finish_echo(&mut self, peer: Ipv4, identifier: u16, sequence: u16) -> bool {
+        if self.echo.is_some_and(|echo| {
+            echo.peer == peer
+                && echo.identifier == identifier
+                && echo.sequence == sequence
+                && echo.generation == self.generation
+        }) {
+            self.echo = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn expire_echo(&mut self, now: u64) -> bool {
+        if self.echo.is_some_and(|echo| now >= echo.deadline) {
+            self.echo = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn expect_arp(&mut self, ip: Ipv4) -> bool {
+        if ip.0 == [0; 4] || self.arp_target.is_some() {
+            return false;
+        }
+        self.arp_target = Some(ip);
+        true
+    }
+
     pub fn finish_pending(&mut self, id: u32) -> Result<Pending, StateError> {
         if self.pending.is_some_and(|pending| pending.id == id) {
             return self.pending.take().ok_or(StateError::NotFound);
@@ -940,6 +1020,15 @@ impl NetworkState {
             .unwrap_or(0);
         let entry = &mut self.arp[index];
         *entry = ArpEntry { ip, mac, expires: now.saturating_add(ttl), active: true };
+        self.arp_target = None;
+    }
+
+    pub fn learn_arp_reply(&mut self, ip: Ipv4, mac: Mac, now: u64, ttl: u64) -> bool {
+        if self.arp_target != Some(ip) {
+            return false;
+        }
+        self.learn_arp(ip, mac, now, ttl);
+        true
     }
 
     pub fn resolve_arp(&self, ip: Ipv4, now: u64) -> Option<Mac> {
@@ -961,6 +1050,8 @@ impl NetworkState {
             entry.active = false;
         }
         self.pending = None;
+        self.echo = None;
+        self.arp_target = None;
         self.dhcp = DhcpMachine::new();
     }
 
@@ -1016,6 +1107,8 @@ impl NetworkState {
             entry.active = false;
         }
         self.pending = None;
+        self.echo = None;
+        self.arp_target = None;
     }
 
     fn endpoint_slot(&self, owner: u64, endpoint: EndpointId) -> Result<usize, StateError> {
@@ -1165,6 +1258,45 @@ mod tests {
         state.reset();
         assert_eq!(state.generation(), 2);
         assert_eq!(state.receive(7, endpoint, &mut output), Err(StateError::Stale));
+    }
+
+    #[test]
+    fn routing_and_echo_matching_are_exact() {
+        assert_eq!(
+            route_target(LOCAL_IP, Ipv4([255, 255, 255, 0]), Some(PEER_IP), PEER_IP),
+            Ok(PEER_IP)
+        );
+        let off_subnet = Ipv4([198, 51, 100, 1]);
+        assert_eq!(
+            route_target(LOCAL_IP, Ipv4([255, 255, 255, 0]), None, off_subnet),
+            Err(StateError::NoRoute)
+        );
+        let mut state = NetworkState::new();
+        let endpoint = state.bind(7, 4000).unwrap();
+        assert!(
+            state
+                .begin_echo(EchoMatch {
+                    peer: PEER_IP,
+                    identifier: 1,
+                    sequence: 2,
+                    generation: state.generation(),
+                    deadline: 10,
+                })
+                .is_ok()
+        );
+        assert!(!state.finish_echo(PEER_IP, 1, 3));
+        assert!(state.finish_echo(PEER_IP, 1, 2));
+        assert!(
+            state
+                .begin_pending(Pending {
+                    id: 1,
+                    endpoint,
+                    kind: PendingKind::Receive,
+                    deadline: 10
+                })
+                .is_ok()
+        );
+        assert!(state.expire_echo(20) == false);
     }
 
     #[test]

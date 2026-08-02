@@ -352,7 +352,7 @@ fn handle_request(
         NetworkOperation::Status => {
             (config.map_or(NetworkStatus::Offline, |_| NetworkStatus::Complete), NetworkEndpoint(0))
         }
-        NetworkOperation::Bind if config.is_some() => match state.bind(1, request.peer.port()) {
+        NetworkOperation::Bind if config.is_some() => match state.bind(0, request.peer.port()) {
             Ok(endpoint) => (NetworkStatus::Complete, NetworkEndpoint(endpoint.wire())),
             Err(StateError::AddressInUse) => (NetworkStatus::AddressInUse, NetworkEndpoint(0)),
             Err(StateError::Full) => (NetworkStatus::Full, NetworkEndpoint(0)),
@@ -360,7 +360,7 @@ fn handle_request(
         },
         NetworkOperation::Bind => (NetworkStatus::Offline, NetworkEndpoint(0)),
         NetworkOperation::Close => match logos_net::EndpointId::from_wire(request.endpoint.0)
-            .and_then(|endpoint| state.close(1, endpoint).ok())
+            .and_then(|endpoint| state.close(0, endpoint).ok())
         {
             Some(()) => (NetworkStatus::Complete, NetworkEndpoint(0)),
             None => (NetworkStatus::Invalid, NetworkEndpoint(0)),

@@ -319,7 +319,11 @@ impl NetworkScope {
     }
 
     pub const fn valid(self) -> bool {
-        self.protocol().is_some() && self.port() != 0
+        match self.protocol() {
+            Some(NetworkProtocol::Udp) => self.port() != 0,
+            Some(NetworkProtocol::Icmp) => self.address() != 0 && self.port() == 0,
+            None => false,
+        }
     }
 }
 
@@ -546,6 +550,7 @@ impl NetworkRequest {
             }
             NetworkOperation::Bind => {
                 !self.endpoint.valid()
+                    && self.peer.protocol() == Some(NetworkProtocol::Udp)
                     && self.peer.valid()
                     && self.peer.address() == 0
                     && self.page.0 == 0
@@ -553,6 +558,7 @@ impl NetworkRequest {
             }
             NetworkOperation::SendTo => {
                 self.endpoint.valid()
+                    && self.peer.protocol() == Some(NetworkProtocol::Udp)
                     && self.peer.valid()
                     && self.peer.address() != 0
                     && self.page.0 != 0
@@ -565,8 +571,9 @@ impl NetworkRequest {
                     && self.length as usize == MAX_NETWORK_PAYLOAD
             }
             NetworkOperation::Echo => {
-                self.endpoint.valid()
+                !self.endpoint.valid()
                     && self.peer.protocol() == Some(NetworkProtocol::Icmp)
+                    && self.peer.valid()
                     && self.peer.address() != 0
                     && self.page.0 == 0
                     && self.length == 0
@@ -593,8 +600,12 @@ pub struct NetworkReply {
 }
 
 impl NetworkReply {
-    pub const fn valid_for(self, request: NetworkRequest) -> bool {
-        self.id == request.id && self.length as usize <= MAX_NETWORK_PAYLOAD
+    pub fn valid_for(self, request: NetworkRequest) -> bool {
+        self.id == request.id
+            && self.length as usize <= MAX_NETWORK_PAYLOAD
+            && (self.status != NetworkStatus::Complete
+                || request.generation == 0
+                || self.generation == request.generation)
     }
 }
 
@@ -1214,5 +1225,17 @@ mod tests {
         assert_eq!(NetworkScope::new(NetworkProtocol::Udp, 7, 8).address(), 7);
         assert_eq!(NetworkScope::new(NetworkProtocol::Udp, 7, 8).port(), 8);
         assert!(!NetworkScope::new(NetworkProtocol::Udp, 0, 0).valid());
+        assert!(NetworkScope::new(NetworkProtocol::Icmp, 0xc000_0201, 0).valid());
+        let echo = NetworkRequest {
+            id: 4,
+            operation: NetworkOperation::Echo,
+            endpoint: NetworkEndpoint(0),
+            peer: NetworkScope::new(NetworkProtocol::Icmp, 0xc000_0201, 0),
+            page: PageHandle(0),
+            length: 0,
+            generation: 0,
+            deadline: 1,
+        };
+        assert!(echo.valid_shape());
     }
 }
