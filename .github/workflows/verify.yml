@@ -67,7 +67,6 @@ jobs:
       - name: Run QEMU suite
         env:
           OVMF_CODE: /usr/share/OVMF/OVMF_CODE.fd
-          LOGOS_TEST_ARTIFACTS: all
         shell: pwsh
         run: ./scripts/verify.ps1 -Suite ${{ github.event_name == 'pull_request' && 'pr' || 'main' }}
       - name: Upload QEMU artifacts

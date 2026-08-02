@@ -22,6 +22,8 @@ The kernel prints a pass/fail self-check for every initialized subsystem, follow
 
 `verify.ps1` delegates to the structured `logos-test` runner. Suite fixtures reuse one QEMU boot when
 reset is safe, while boot, privilege, address-space, malformed-image, and storage-recovery cases
-receive fresh boots. Use `LOGOS_TEST_ARTIFACTS=all` to retain successful fixture files.
+receive fresh boots. Use `LOGOS_TEST_ARTIFACTS=all` to retain every fixture file.
+Without that flag, successful fixture directories are removed and failed fixtures keep logs but
+drop raw disks.
 
 `check.ps1` runs formatting, linting, architecture/docs checks, ADR validation, and host/UEFI artifact checks. `verify.ps1` runs the QEMU suite.

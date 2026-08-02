@@ -18,3 +18,5 @@ Test builds use bounded ASCII `LOGOS/1` frames over COM2. Requests are `HELLO`, 
 - Future contracts must skip, never pass or expected-fail.
 
 Artifacts live under `target/logos-test/<run-id>` with command, profile, image hash, debug/control/QMP logs, seed, JSON, JUnit, and failure diagnostics.
+Successful fixtures are removed by default; failed fixtures keep diagnostics without `.raw` disks.
+Set `LOGOS_TEST_ARTIFACTS=all` to retain every fixture file for forensic reruns.

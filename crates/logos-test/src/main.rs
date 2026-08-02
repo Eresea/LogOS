@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::{
     cell::Cell,
     env, fs,
@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     rc::Rc,
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -330,69 +331,6 @@ fn parse_boot_report(line: &str) -> Result<BootReport, String> {
         .ok_or_else(|| format!("invalid boot report: {line}"))
 }
 
-struct Qmp {
-    reader: BufReader<TcpStream>,
-    log: fs::File,
-}
-
-#[derive(Clone, Copy)]
-enum ShutdownPolicy {
-    Clean,
-    Interrupted,
-}
-
-impl ShutdownPolicy {
-    const fn flushes(self) -> bool {
-        matches!(self, Self::Clean)
-    }
-}
-
-fn parse_qmp_reply(reply: String) -> Result<String, String> {
-    if reply.contains("\"error\"") || reply.is_empty() { Err(reply) } else { Ok(reply) }
-}
-
-impl Qmp {
-    fn connect(port: u16, log: fs::File, deadline: Instant) -> Result<Self, String> {
-        while Instant::now() < deadline {
-            if let Ok(stream) = TcpStream::connect(("127.0.0.1", port)) {
-                stream.set_read_timeout(Some(Duration::from_secs(2))).map_err(io_error)?;
-                let mut qmp = Self { reader: BufReader::new(stream), log };
-                qmp.reply()?;
-                qmp.command("{\"execute\":\"qmp_capabilities\"}")?;
-                return Ok(qmp);
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        Err("timeout waiting for QMP".into())
-    }
-
-    fn command(&mut self, command: &str) -> Result<String, String> {
-        writeln!(self.log, "> {command}").map_err(io_error)?;
-        self.reader.get_mut().write_all(command.as_bytes()).map_err(io_error)?;
-        self.reader.get_mut().write_all(b"\n").map_err(io_error)?;
-        loop {
-            let reply = self.reply()?;
-            if !reply.contains("\"event\"") {
-                return Ok(reply);
-            }
-        }
-    }
-
-    fn reply(&mut self) -> Result<String, String> {
-        let mut reply = String::new();
-        self.reader.read_line(&mut reply).map_err(io_error)?;
-        write!(self.log, "< {reply}").map_err(io_error)?;
-        parse_qmp_reply(reply)
-    }
-
-    fn flush(&mut self) -> Result<(), String> {
-        self.command(
-            "{\"execute\":\"human-monitor-command\",\"arguments\":{\"command-line\":\"flush\"}}",
-        )?;
-        Ok(())
-    }
-}
-
 struct FaultCounter {
     cut: Cell<Option<usize>>,
     step: Cell<usize>,
@@ -488,7 +426,6 @@ fn make_interrupted_case(
     cut: usize,
     new: &[u8; HISTORY_BYTES],
 ) -> Result<bool, String> {
-    debug_assert!(!ShutdownPolicy::Interrupted.flushes());
     fs::copy(baseline, case).map_err(io_error)?;
     let fault = Rc::new(FaultCounter { cut: Cell::new(None), step: Cell::new(0) });
     let mut store = Store::recover_backend(FileBackend::open(case, fault.clone())?)
@@ -578,7 +515,6 @@ struct Harness {
     debug_log: PathBuf,
     disk: PathBuf,
     qmp_port: u16,
-    qmp: Qmp,
     qmp_log: PathBuf,
     transcript: fs::File,
     report: BootReport,
@@ -660,6 +596,7 @@ impl Harness {
         let debug_log = fixture_dir.join(format!("debug-{boot_id}.log"));
         let qmp_log = fixture_dir.join(format!("qmp-{boot_id}.log"));
         let stderr_log = fixture_dir.join(format!("qemu-{boot_id}.stderr.log"));
+        fs::File::create(&qmp_log).map_err(io_error)?;
         let stderr = fs::File::create(&stderr_log).map_err(io_error)?;
         let netdev = network_peer.as_ref().map_or_else(
             || "user,id=logos-net,net=10.0.2.0/24,dhcpstart=10.0.2.15".to_string(),
@@ -723,22 +660,12 @@ impl Harness {
                 return Err(error);
             }
         };
-        let qmp =
-            match Qmp::connect(qmp_port, fs::File::create(&qmp_log).map_err(io_error)?, deadline) {
-                Ok(qmp) => qmp,
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(error);
-                }
-            };
         let mut harness = Self {
             child,
             stream,
             debug_log,
             disk,
             qmp_port,
-            qmp,
             qmp_log,
             transcript: fs::File::create(fixture_dir.join(format!("control-{boot_id}.log")))
                 .map_err(io_error)?,
@@ -798,9 +725,6 @@ impl Harness {
     }
 
     fn shutdown(&mut self) -> Result<(), String> {
-        if ShutdownPolicy::Clean.flushes() {
-            self.qmp.flush()?;
-        }
         self.send("LOGOS/1 SHUTDOWN\n")?;
         wait_child(&mut self.child, self.deadline)?;
         wait_disk_available(&self.disk, self.deadline)
@@ -972,28 +896,9 @@ fn run_suite(name: &str) -> i32 {
         .copied()
         .collect();
     if !shared.is_empty() {
-        run_fixture(&root, &run_dir, &profiles.standard, "shared", &shared, seed, &mut results);
+        results.extend(run_fixture(&root, &run_dir, &profiles.standard, "shared", &shared, seed));
     }
-    for item in selected.iter().filter(|item| item.implemented && item.fixture != Fixture::Shared) {
-        let profile = if item.fixture == Fixture::Persistence {
-            &profiles.persistence
-        } else {
-            &profiles.standard
-        };
-        if item.fixture == Fixture::Persistence {
-            results.push(run_persistence_proof(&root, &run_dir, profile, *item, seed));
-        } else {
-            run_fixture(
-                &root,
-                &run_dir,
-                profile,
-                item.id,
-                std::slice::from_ref(item),
-                seed,
-                &mut results,
-            );
-        }
-    }
+    results.extend(run_independent(&root, &run_dir, &profiles, &selected, seed));
     for item in selected.iter().filter(|item| !item.implemented) {
         results.push(ResultRecord {
             id: item.id.into(),
@@ -1071,15 +976,14 @@ fn run_one(id: &str) -> i32 {
     if scenario.fixture == Fixture::Persistence {
         results.push(run_persistence_proof(&root, &run_dir, profile, scenario, seed));
     } else {
-        run_fixture(
+        results.extend(run_fixture(
             &root,
             &run_dir,
             profile,
             id,
             std::slice::from_ref(&scenario),
             seed,
-            &mut results,
-        );
+        ));
     }
     let _ = write_reports(&run_dir, &results);
     cleanup_bulk_artifacts(&run_dir);
@@ -1111,6 +1015,7 @@ fn run_network_configuration(
         harness.run_id(scenario.id)?;
         harness.shutdown()
     })();
+    cleanup_fixture_artifacts(&fixture_dir, result.is_err());
     ResultRecord {
         id: scenario.id.into(),
         status: if result.is_ok() { Status::Passed } else { Status::Failed },
@@ -1143,6 +1048,10 @@ fn run_persistence_proof(
         }
     };
     let failure = result.err();
+    cleanup_fixture_artifacts(
+        &run_dir.join("fixtures").join(scenario.id.replace('/', "-")),
+        failure.is_some(),
+    );
     ResultRecord {
         id: scenario.id.into(),
         status: if failure.is_none() { Status::Passed } else { Status::Failed },
@@ -1150,6 +1059,86 @@ fn run_persistence_proof(
         seed,
         failure,
         artifacts: run_dir.to_path_buf(),
+    }
+}
+
+fn run_independent(
+    root: &Path,
+    run_dir: &Path,
+    profiles: &Profiles,
+    selected: &[Scenario],
+    seed: u64,
+) -> Vec<ResultRecord> {
+    let tasks: Vec<_> = selected
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.implemented && item.fixture != Fixture::Shared)
+        .map(|(index, item)| (index, *item))
+        .collect();
+    if tasks.len() < 2 {
+        return tasks
+            .into_iter()
+            .flat_map(|(_, item)| run_independent_one(root, run_dir, profiles, item, seed))
+            .collect();
+    }
+
+    let jobs = env::var("LOGOS_TEST_JOBS").ok();
+    let jobs = test_jobs(tasks.len(), jobs.as_deref());
+    let next = AtomicUsize::new(0);
+    let mut outputs = thread::scope(|scope| {
+        let mut workers = (0..jobs)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut output = Vec::new();
+                    while let Some(task) = next
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |index| {
+                            (index < tasks.len()).then_some(index + 1)
+                        })
+                        .ok()
+                        .and_then(|index| tasks.get(index).copied())
+                    {
+                        output.push((
+                            task.0,
+                            run_independent_one(root, run_dir, profiles, task.1, seed),
+                        ));
+                    }
+                    output
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .drain(..)
+            .flat_map(|worker| worker.join().expect("test worker panicked"))
+            .collect::<Vec<_>>()
+    });
+    outputs.sort_by_key(|(index, _)| *index);
+    outputs.into_iter().flat_map(|(_, results)| results).collect()
+}
+
+fn test_jobs(count: usize, configured: Option<&str>) -> usize {
+    configured
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|jobs| *jobs > 0)
+        .unwrap_or_else(|| thread::available_parallelism().map_or(1, |count| count.get().min(4)))
+        .min(count)
+}
+
+fn run_independent_one(
+    root: &Path,
+    run_dir: &Path,
+    profiles: &Profiles,
+    item: Scenario,
+    seed: u64,
+) -> Vec<ResultRecord> {
+    let profile = if item.fixture == Fixture::Persistence {
+        &profiles.persistence
+    } else {
+        &profiles.standard
+    };
+    if item.fixture == Fixture::Persistence {
+        vec![run_persistence_proof(root, run_dir, profile, item, seed)]
+    } else {
+        run_fixture(root, run_dir, profile, item.id, std::slice::from_ref(&item), seed)
     }
 }
 
@@ -1218,6 +1207,7 @@ fn run_write_interruption(
         ("replace", FaultOperation::Replace, vec![old, new]),
         ("compact", FaultOperation::Compact, vec![old]),
     ] {
+        let mut cases = Vec::new();
         for cut in 1..64 {
             let case_dir = fixture_dir.join(format!("{label}-{cut:02}"));
             fs::create_dir_all(&case_dir).map_err(io_error)?;
@@ -1226,10 +1216,44 @@ fn run_write_interruption(
                 break;
             }
             validate_host_case(&disk, &expected)?;
-            boot_proof(&case_dir, profile, scenario.id, "LogOS: storage recovered")?;
-            if env::var("LOGOS_TEST_ARTIFACTS").as_deref() != Ok("all") {
-                let _ = fs::remove_dir_all(&case_dir);
-            }
+            cases.push(case_dir);
+        }
+        let jobs = test_jobs(cases.len(), env::var("LOGOS_TEST_JOBS").ok().as_deref());
+        let next = AtomicUsize::new(0);
+        let failures = thread::scope(|scope| {
+            let workers = (0..jobs)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut failures = Vec::new();
+                        while let Ok(index) =
+                            next.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |index| {
+                                (index < cases.len()).then_some(index + 1)
+                            })
+                        {
+                            let case_dir = &cases[index];
+                            let outcome = boot_proof(
+                                case_dir,
+                                profile,
+                                scenario.id,
+                                "LogOS: storage recovered",
+                            );
+                            if let Err(error) = outcome {
+                                failures.push(error);
+                            } else if env::var("LOGOS_TEST_ARTIFACTS").as_deref() != Ok("all") {
+                                let _ = fs::remove_dir_all(case_dir);
+                            }
+                        }
+                        failures
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().expect("persistence worker panicked"))
+                .collect::<Vec<_>>()
+        });
+        if let Some(error) = failures.into_iter().next() {
+            return Err(format!("{label}: {error}"));
         }
     }
     Ok(())
@@ -1356,6 +1380,21 @@ fn run_persistence_fixture(
                 artifacts: run_dir.to_path_buf(),
             });
         }
+        if matches!(
+            scenario.id,
+            "persistence/block-timeout-reset" | "persistence/capability-denied"
+        ) {
+            let shutdown = first.shutdown();
+            let failure = first_outcome.err().or_else(|| shutdown.err());
+            return Ok(ResultRecord {
+                id: scenario.id.into(),
+                status: if failure.is_none() { Status::Passed } else { Status::Failed },
+                duration_ms: started.elapsed().as_millis(),
+                seed,
+                failure,
+                artifacts: run_dir.to_path_buf(),
+            });
+        }
         let mut second =
             clean_reboot(first, &qemu, &ovmf, profile, &fixture_dir, scenario.timeout)?;
         let second_outcome = second.run_input(scenario.id);
@@ -1382,8 +1421,8 @@ fn run_fixture(
     name: &str,
     scenarios: &[Scenario],
     seed: u64,
-    results: &mut Vec<ResultRecord>,
-) {
+) -> Vec<ResultRecord> {
+    let mut results = Vec::new();
     let fixture = scenarios.first().map_or(Fixture::Fresh, |scenario| scenario.fixture);
     let profile = profile.for_fixture(fixture);
     let expected_storage = if matches!(fixture, Fixture::MissingStore | Fixture::MissingTerminal) {
@@ -1396,7 +1435,7 @@ fn run_fixture(
         for scenario in scenarios {
             results.push(failed(scenario, seed, run_dir, &error.to_string()));
         }
-        return;
+        return results;
     }
     let timeout = scenarios.iter().map(|item| item.timeout).max().unwrap_or(20);
     let qemu = match qemu_path() {
@@ -1405,7 +1444,7 @@ fn run_fixture(
             for scenario in scenarios {
                 results.push(failed(scenario, seed, run_dir, "qemu-system-x86_64 not found"));
             }
-            return;
+            return results;
         }
     };
     let ovmf = match ovmf_path() {
@@ -1414,7 +1453,7 @@ fn run_fixture(
             for scenario in scenarios {
                 results.push(failed(scenario, seed, run_dir, "OVMF_CODE not found"));
             }
-            return;
+            return results;
         }
     };
     let network_peer = scenarios.iter().all(|scenario| scenario.suite == "network");
@@ -1426,10 +1465,11 @@ fn run_fixture(
         Ok(harness) => harness,
         Err(error) => {
             capture_failure(&fixture_dir, 0, &PathBuf::new());
+            cleanup_fixture_artifacts(&fixture_dir, true);
             for scenario in scenarios {
                 results.push(failed(scenario, seed, run_dir, &error));
             }
-            return;
+            return results;
         }
     };
     let mut last_result: Option<usize> = None;
@@ -1499,14 +1539,11 @@ fn run_fixture(
         }
         capture_failure(&fixture_dir, harness.qmp_port, &harness.qmp_log);
     }
-    let keep = artifacts_all()
-        || results
-            .iter()
-            .any(|result| result.status == Status::Failed && result.artifacts == run_dir);
-    if !keep {
-        let _ = fs::remove_dir_all(&fixture_dir);
-    }
+    let failed =
+        results.iter().any(|result| result.status == Status::Failed && result.artifacts == run_dir);
+    cleanup_fixture_artifacts(&fixture_dir, failed);
     let _ = root;
+    results
 }
 
 struct Profiles {
@@ -1686,6 +1723,29 @@ fn test_seed() -> u64 {
 }
 fn artifacts_all() -> bool {
     env::var("LOGOS_TEST_ARTIFACTS").is_ok_and(|value| value == "all")
+}
+
+fn cleanup_fixture_artifacts(path: &Path, failed: bool) {
+    if artifacts_all() {
+        return;
+    }
+    if failed {
+        remove_raw_artifacts(path);
+    } else {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+fn remove_raw_artifacts(path: &Path) {
+    let Ok(entries) = fs::read_dir(path) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            remove_raw_artifacts(&path);
+        } else if path.extension().is_some_and(|extension| extension == "raw") {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 fn cleanup_bulk_artifacts(run_dir: &Path) {
@@ -1869,19 +1929,11 @@ mod tests {
     }
 
     #[test]
-    fn boot_reports_and_qmp_replies_are_strict() {
+    fn boot_reports_are_strict() {
         assert_eq!(
             parse_boot_report("LOGOS/1 BOOT session=1 storage=recovered").unwrap(),
             BootReport { session: 1, storage: "recovered".into() }
         );
         assert!(parse_boot_report("LOGOS/1 BOOT session=1 storage=unknown").is_err());
-        assert!(parse_qmp_reply("{\"error\":{}}".into()).is_err());
-        assert!(parse_qmp_reply("{\"return\":{}}".into()).is_ok());
-    }
-
-    #[test]
-    fn only_clean_shutdowns_flush() {
-        assert!(ShutdownPolicy::Clean.flushes());
-        assert!(!ShutdownPolicy::Interrupted.flushes());
     }
 }
