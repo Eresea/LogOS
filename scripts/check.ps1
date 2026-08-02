@@ -40,7 +40,7 @@ if ($Stage -in @('all', 'uefi')) {
         Where-Object { $_.Extension -eq '.efi' -or $_.Name -eq 'SHA256SUMS.txt' } |
         Remove-Item -Force
     $payloads = @()
-    foreach ($package in @('logos-uefi', 'logos-terminal-service', 'logos-sessions-service', 'logos-storage-service')) {
+    foreach ($package in @('logos-uefi', 'logos-terminal-service', 'logos-sessions-service', 'logos-storage-service', 'logos-network-service')) {
         $cargoArgs = @('build', '-p', $package, '--target', 'x86_64-unknown-uefi')
         if ($Release) { $cargoArgs += '--release' }
         Invoke-Checked "UEFI $package" { cargo @cargoArgs }
@@ -62,7 +62,8 @@ if ($Stage -in @('all', 'uefi')) {
         @{ source = 'logos-uefi.efi'; destination = 'EFI/BOOT/BOOTX64.EFI' },
         @{ source = 'logos-terminal-service.efi'; destination = 'EFI/LOGOS/TERMINAL.EFI' },
         @{ source = 'logos-sessions-service.efi'; destination = 'EFI/LOGOS/SESSIONS.EFI' },
-        @{ source = 'logos-storage-service.efi'; destination = 'EFI/LOGOS/STORAGE.EFI' }
+        @{ source = 'logos-storage-service.efi'; destination = 'EFI/LOGOS/STORAGE.EFI' },
+        @{ source = 'logos-network-service.efi'; destination = 'EFI/LOGOS/NETWORK.EFI' }
     )
     foreach ($file in $espFiles) {
         Copy-Item (Join-Path $artifactRoot $file.source) (Join-Path $espRoot $file.destination) -Force

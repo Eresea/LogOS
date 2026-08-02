@@ -15,12 +15,14 @@ cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-u
 cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-terminal-service --target x86_64-unknown-uefi $(if ($Release) { "--release" })
 cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-sessions-service --target x86_64-unknown-uefi $(if ($Release) { "--release" })
 cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-storage-service --target x86_64-unknown-uefi $(if ($Release) { "--release" })
+cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-network-service --target x86_64-unknown-uefi $(if ($Release) { "--release" })
 New-Item -ItemType Directory -Force "$esp\EFI\BOOT" | Out-Null
 New-Item -ItemType Directory -Force "$esp\EFI\LOGOS" | Out-Null
 Copy-Item $efi "$esp\EFI\BOOT\BOOTX64.EFI" -Force
 Copy-Item (Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-terminal-service.efi") "$esp\EFI\LOGOS\TERMINAL.EFI" -Force
 Copy-Item (Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-sessions-service.efi") "$esp\EFI\LOGOS\SESSIONS.EFI" -Force
 Copy-Item (Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-storage-service.efi") "$esp\EFI\LOGOS\STORAGE.EFI" -Force
+Copy-Item (Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-network-service.efi") "$esp\EFI\LOGOS\NETWORK.EFI" -Force
 $disk = Join-Path $repoRoot "target\logos-store.raw"
 if (-not (Test-Path $disk)) {
     $stream = [System.IO.File]::Create($disk)
@@ -32,6 +34,8 @@ $qemuArgs = @(
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
     '-drive', "format=raw,file=fat:rw:$((Resolve-Path $esp).Path)",
     '-device', 'virtio-balloon-pci,disable-modern=on,id=logos-virtio',
+    '-netdev', 'user,id=logos-net',
+    '-device', 'virtio-net-pci,disable-modern=on,netdev=logos-net,id=logos-network',
     '-drive', "if=none,format=raw,cache=writeback,file=$disk,id=logos-store",
     '-device', 'virtio-blk-pci,disable-modern=on,drive=logos-store,id=logos-block',
     '-debugcon', 'stdio', '-global', 'isa-debugcon.iobase=0xe9'

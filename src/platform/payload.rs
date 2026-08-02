@@ -15,6 +15,7 @@ unsafe impl Sync for Buffer {}
 static TERMINAL_PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
 static SESSIONS_PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
 static STORAGE_PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
+static NETWORK_PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
 
 #[derive(Clone, Copy)]
 pub struct Payload {
@@ -28,6 +29,8 @@ pub struct Payloads {
     pub terminal: Payload,
     pub sessions: Payload,
     pub storage: Payload,
+    #[allow(dead_code)]
+    pub network: Payload,
 }
 
 impl Payload {
@@ -160,7 +163,13 @@ pub fn stage() -> Option<Payloads> {
         .and_then(|file| file.into_regular_file())?;
     let storage_buffer = unsafe { &mut *STORAGE_PAYLOAD.0.get() };
     let storage = load(&mut storage, storage_buffer, b"storage")?;
-    Some(Payloads { terminal, sessions, storage })
+    let mut network = root
+        .open(cstr16!(r"\EFI\LOGOS\NETWORK.EFI"), FileMode::Read, FileAttribute::empty())
+        .ok()
+        .and_then(|file| file.into_regular_file())?;
+    let network_buffer = unsafe { &mut *NETWORK_PAYLOAD.0.get() };
+    let network = load(&mut network, network_buffer, b"network")?;
+    Some(Payloads { terminal, sessions, storage, network })
 }
 
 fn load(file: &mut RegularFile, buffer: &mut [u8; MAX_PAYLOAD], name: &[u8]) -> Option<Payload> {

@@ -1,6 +1,9 @@
 use crate::arch::{acpi, cpu, interrupts, pci};
 use crate::console::{native_display, recovery as console};
-use crate::drivers::{block as block_driver, device, keyboard, resources, supervisor, virtio};
+use crate::drivers::{
+    block as block_driver, device, keyboard, network as network_driver, resources, supervisor,
+    virtio,
+};
 use crate::ipc::{self, approvals, effects};
 use crate::mm::{address_space, memory, virtual_memory};
 use crate::platform::{
@@ -284,6 +287,13 @@ pub(crate) fn main(
     else {
         fail!(b"block bind");
     };
+    let _network_device = network_driver::discover(&devices).and_then(|network_pci| {
+        let (bus, slot, _) = network_pci.location();
+        acpi.and_then(|tables| {
+            tables.pci_gsi(bus, slot, network_pci.interrupt_pin().checked_sub(1)?)
+        })
+        .and_then(|gsi| network_driver::Device::bind(network_pci, gsi, &mut memory))
+    });
     check!(
         b"block device",
         block_driver::self_check()
@@ -292,6 +302,7 @@ pub(crate) fn main(
             && block_device.info().valid()
             && block_device.diagnostics() == (0, 0, false),
     );
+    check!(b"network driver", network_driver::self_check());
     let Some(supervisor) = supervisor::boot_plan(supervisor::Profile::Normal).ok() else {
         fail!(b"supervisor manifest");
     };

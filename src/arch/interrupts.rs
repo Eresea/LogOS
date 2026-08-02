@@ -36,6 +36,7 @@ extern "C" fn timer_tick() {
 extern "C" fn virtio_interrupt() {
     crate::drivers::virtio::interrupt();
     crate::drivers::block::interrupt();
+    crate::drivers::network::interrupt();
     let local_apic = LOCAL_APIC.load(Ordering::Acquire);
     unsafe { core::ptr::write_volatile((local_apic + 0xb0) as *mut u32, 0) };
 }

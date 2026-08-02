@@ -42,6 +42,15 @@ name = "logos-net"
 version = "0.1.0"
 
 [[package]]
+name = "logos-network-service"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+ "logos-net",
+ "logos-service-rt",
+]
+
+[[package]]
 name = "logos-service-rt"
 version = "0.1.0"
 dependencies = [
