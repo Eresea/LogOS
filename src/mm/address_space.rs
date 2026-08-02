@@ -247,9 +247,26 @@ impl AddressSpace {
 
     pub fn map_shared_borrowed(&mut self, address: u64) -> bool {
         if address == 0
-            || !address.is_multiple_of(PAGE_SIZE)
+            || address % PAGE_SIZE != 0
             || self.mapping(SHARED_PAGE).is_some()
             || self.borrowed.is_some()
+        {
+            return false;
+        }
+        self.borrowed = Some(address);
+        unsafe {
+            (self.pt.address() as *mut u64)
+                .add(SHARED_PAGE)
+                .write_volatile(address | PRESENT | WRITABLE | USER | NO_EXECUTE);
+        }
+        true
+    }
+
+    pub fn remap_shared_borrowed(&mut self, address: u64) -> bool {
+        if address == 0
+            || address % PAGE_SIZE != 0
+            || self.borrowed.is_none()
+            || self.mapping(SHARED_PAGE).is_some()
         {
             return false;
         }

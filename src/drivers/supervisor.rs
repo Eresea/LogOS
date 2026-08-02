@@ -75,7 +75,15 @@ pub struct Manifest {
     pub capabilities: &'static [CapabilityKind],
     pub protocol: Protocol,
     pub restart: RestartPolicy,
+    pub recovery: RecoveryClass,
     pub profiles: Profiles,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryClass {
+    Restartable,
+    Resettable,
+    Fatal,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -96,6 +104,7 @@ const SUPERVISOR_MANIFEST: Manifest = Manifest {
     capabilities: &[],
     protocol: Protocol { abi: 1, version: 0 },
     restart: RestartPolicy { retries: 0, backoff_ticks: 0 },
+    recovery: RecoveryClass::Fatal,
     profiles: Profiles::ALL,
 };
 const VIRTIO_MANIFEST: Manifest = Manifest {
@@ -104,6 +113,7 @@ const VIRTIO_MANIFEST: Manifest = Manifest {
     capabilities: &[CapabilityKind::Service],
     protocol: Protocol { abi: 1, version: 0 },
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
+    recovery: RecoveryClass::Resettable,
     profiles: Profiles::NORMAL_RECOVERY,
 };
 const BLOCK_MANIFEST: Manifest = Manifest {
@@ -112,6 +122,7 @@ const BLOCK_MANIFEST: Manifest = Manifest {
     capabilities: &[CapabilityKind::Service, CapabilityKind::Block, CapabilityKind::Memory],
     protocol: Protocol { abi: 1, version: 0 },
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
+    recovery: RecoveryClass::Resettable,
     profiles: Profiles::NORMAL_RECOVERY,
 };
 const STORAGE_MANIFEST: Manifest = Manifest {
@@ -125,6 +136,7 @@ const STORAGE_MANIFEST: Manifest = Manifest {
     ],
     protocol: Protocol { abi: 1, version: 0 },
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
+    recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_RECOVERY,
 };
 const TERMINAL_MANIFEST: Manifest = Manifest {
@@ -132,7 +144,8 @@ const TERMINAL_MANIFEST: Manifest = Manifest {
     dependencies: &[SUPERVISOR],
     capabilities: &[CapabilityKind::Service, CapabilityKind::Input, CapabilityKind::Display],
     protocol: Protocol { abi: 1, version: 0 },
-    restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+    restart: RestartPolicy { retries: 1, backoff_ticks: 0 },
+    recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
 };
 const SESSIONS_MANIFEST: Manifest = Manifest {
@@ -141,6 +154,7 @@ const SESSIONS_MANIFEST: Manifest = Manifest {
     capabilities: &[CapabilityKind::Service, CapabilityKind::Session],
     protocol: Protocol { abi: 1, version: 0 },
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
+    recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
 };
 const NETWORK_MANIFEST: Manifest = Manifest {
@@ -154,6 +168,7 @@ const NETWORK_MANIFEST: Manifest = Manifest {
     ],
     protocol: Protocol { abi: 1, version: 0 },
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
+    recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
 };
 const BOOT_MANIFESTS: &[Manifest] = &[
@@ -308,6 +323,10 @@ impl Plan {
         })
     }
 
+    pub fn recovery(&self, name: &[u8]) -> Option<RecoveryClass> {
+        Some(self.manifest(name)?.recovery)
+    }
+
     pub fn replace(&self, name: &[u8], action: impl FnOnce() -> bool) -> bool {
         self.manifest(name).is_some_and(|_| action())
     }
@@ -320,6 +339,7 @@ enum LifecycleState {
     Stopped,
 }
 
+#[derive(Clone, Copy)]
 pub struct Lifecycle {
     policy: RestartPolicy,
     retries: u8,
@@ -362,14 +382,129 @@ impl Lifecycle {
         self.state = LifecycleState::Stopped;
     }
 
+    pub fn ready(&mut self) {
+        self.retries = 0;
+        self.retry_at = 0;
+        self.state = LifecycleState::Running;
+    }
+
+    pub fn manual_restart(&mut self) {
+        self.ready();
+    }
+
     fn schedule(&mut self, tick: u64) -> bool {
-        if self.state != LifecycleState::Running || self.policy.backoff_ticks == 0 {
+        if self.state != LifecycleState::Running {
             return false;
         }
         let shift = self.retries.saturating_sub(1).min(3);
         self.retry_at = tick.saturating_add(self.policy.backoff_ticks << shift);
         self.state = LifecycleState::Backoff;
         true
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NativeService {
+    Terminal,
+    Sessions,
+    Store,
+    Network,
+}
+
+impl NativeService {
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NativeState {
+    Missing,
+    Starting,
+    Ready,
+    Backoff,
+    Stopped,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FailureAction {
+    Retry,
+    Degrade,
+    Recover,
+}
+
+#[derive(Clone, Copy)]
+struct NativeSlot {
+    lifecycle: Lifecycle,
+    state: NativeState,
+}
+
+pub struct NativeController {
+    slots: [NativeSlot; 4],
+}
+
+impl NativeController {
+    pub fn new(plan: &Plan) -> Option<Self> {
+        let terminal =
+            NativeSlot { lifecycle: Lifecycle::new(plan, TERMINAL)?, state: NativeState::Starting };
+        let sessions =
+            NativeSlot { lifecycle: Lifecycle::new(plan, SESSIONS)?, state: NativeState::Starting };
+        let store =
+            NativeSlot { lifecycle: Lifecycle::new(plan, STORAGE)?, state: NativeState::Starting };
+        let network =
+            NativeSlot { lifecycle: Lifecycle::new(plan, NETWORK)?, state: NativeState::Starting };
+        Some(Self { slots: [terminal, sessions, store, network] })
+    }
+
+    pub fn missing(&mut self, service: NativeService) -> FailureAction {
+        let slot = &mut self.slots[service.index()];
+        slot.lifecycle.shutdown();
+        slot.state = NativeState::Missing;
+        if service == NativeService::Terminal {
+            FailureAction::Recover
+        } else {
+            FailureAction::Degrade
+        }
+    }
+
+    pub fn ready(&mut self, service: NativeService) {
+        let slot = &mut self.slots[service.index()];
+        slot.lifecycle.ready();
+        slot.state = NativeState::Ready;
+    }
+
+    pub fn failed(&mut self, service: NativeService, tick: u64) -> FailureAction {
+        let slot = &mut self.slots[service.index()];
+        if slot.lifecycle.failed(tick) {
+            slot.state = NativeState::Backoff;
+            FailureAction::Retry
+        } else {
+            slot.state = NativeState::Stopped;
+            if service == NativeService::Terminal {
+                FailureAction::Recover
+            } else {
+                FailureAction::Degrade
+            }
+        }
+    }
+
+    pub fn due(&mut self, service: NativeService, tick: u64) -> bool {
+        let slot = &mut self.slots[service.index()];
+        if slot.state == NativeState::Backoff && slot.lifecycle.due(tick) {
+            slot.state = NativeState::Starting;
+            return true;
+        }
+        false
+    }
+
+    pub fn manual_restart(&mut self, service: NativeService) {
+        let slot = &mut self.slots[service.index()];
+        slot.lifecycle.manual_restart();
+        slot.state = NativeState::Starting;
+    }
+
+    pub const fn state(&self, service: NativeService) -> NativeState {
+        self.slots[service.index()].state
     }
 }
 
@@ -387,6 +522,7 @@ pub fn self_check() -> bool {
             capabilities: &[],
             protocol: Protocol { abi: 1, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+            recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
         },
         Manifest {
@@ -395,6 +531,7 @@ pub fn self_check() -> bool {
             capabilities: &[],
             protocol: Protocol { abi: 1, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+            recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
         },
     ];
@@ -404,6 +541,7 @@ pub fn self_check() -> bool {
         capabilities: &[],
         protocol: Protocol { abi: 1, version: 0 },
         restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+        recovery: RecoveryClass::Restartable,
         profiles: Profiles::ALL,
     }];
     const CYCLE: &[Manifest] = &[
@@ -413,6 +551,7 @@ pub fn self_check() -> bool {
             capabilities: &[],
             protocol: Protocol { abi: 1, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+            recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
         },
         Manifest {
@@ -421,6 +560,7 @@ pub fn self_check() -> bool {
             capabilities: &[],
             protocol: Protocol { abi: 1, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+            recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
         },
     ];
@@ -436,6 +576,9 @@ pub fn protocol_self_check() -> bool {
     plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 1, version: 2 })
         == Some(Protocol { abi: 1, version: 0 })
         && plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 2, version: 0 }).is_none()
+        && plan.recovery(SUPERVISOR) == Some(RecoveryClass::Fatal)
+        && plan.recovery(VIRTIO_BLOCK) == Some(RecoveryClass::Resettable)
+        && plan.recovery(TERMINAL) == Some(RecoveryClass::Restartable)
 }
 
 pub fn dependency_loss_self_check() -> bool {
@@ -445,6 +588,7 @@ pub fn dependency_loss_self_check() -> bool {
         capabilities: &[],
         protocol: Protocol { abi: 1, version: 0 },
         restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+        recovery: RecoveryClass::Restartable,
         profiles: Profiles::ALL,
     }];
     matches!(Plan::build(MISSING, Profile::Normal), Err(Error::MissingDependency))
@@ -509,6 +653,24 @@ pub fn lifecycle_self_check() -> bool {
             shutdown.shutdown();
             !shutdown.restart(1)
         }
+}
+
+pub fn native_lifecycle_self_check() -> bool {
+    let Ok(plan) = boot_plan(Profile::Normal) else { return false };
+    let Some(mut controller) = NativeController::new(&plan) else { return false };
+    controller.ready(NativeService::Terminal);
+    let terminal_retry = controller.failed(NativeService::Terminal, 10) == FailureAction::Retry
+        && controller.state(NativeService::Terminal) == NativeState::Backoff
+        && controller.due(NativeService::Terminal, 10)
+        && controller.failed(NativeService::Terminal, 10) == FailureAction::Recover;
+    controller.manual_restart(NativeService::Terminal);
+    controller.ready(NativeService::Terminal);
+    let budget_reset = controller.failed(NativeService::Terminal, 20) == FailureAction::Retry;
+    let optional = controller.missing(NativeService::Store) == FailureAction::Degrade
+        && controller.missing(NativeService::Sessions) == FailureAction::Degrade
+        && controller.missing(NativeService::Network) == FailureAction::Degrade
+        && controller.state(NativeService::Store) == NativeState::Missing;
+    terminal_retry && budget_reset && optional
 }
 
 pub fn profiles_self_check() -> bool {

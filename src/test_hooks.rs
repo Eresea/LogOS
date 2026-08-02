@@ -4,12 +4,14 @@ use logos_core::test_protocol::{self, Request};
 
 const COM2: u16 = 0x2f8;
 const DEBUG_EXIT: u16 = 0xf4;
-pub fn serve(
-    storage: u32,
-    mut native_input: impl FnMut(&str) -> bool,
-    mut poll: impl FnMut(),
-    mut run_scenario: impl FnMut(&str) -> bool,
-) -> ! {
+
+pub enum Action<'a> {
+    Input(&'a str),
+    Poll,
+    Run(&'a str),
+}
+
+pub fn serve(storage: u32, mut handle: impl FnMut(Action<'_>) -> bool) -> ! {
     init();
     line(match storage {
         logos_core::native_service::STORAGE_FORMATTED => {
@@ -27,10 +29,12 @@ pub fn serve(
     line(b"LOGOS/1 READY stage=session-ready");
     let mut frame = [0u8; test_protocol::MAX_FRAME];
     loop {
-        let length = read_frame(&mut frame, &mut poll);
+        let length = read_frame(&mut frame, &mut || {
+            let _ = handle(Action::Poll);
+        });
         match test_protocol::parse(&frame[..length]) {
             Ok(Request::Hello) => line(b"LOGOS/1 RESULT hello=ok"),
-            Ok(Request::Run(id)) if run_scenario(id) => {
+            Ok(Request::Run(id)) if handle(Action::Run(id)) => {
                 debug::write(b"LOGOS/1 EVENT id=");
                 debug::write(id.as_bytes());
                 debug::write_line(b" state=passed");
@@ -54,11 +58,11 @@ pub fn serve(
             }
             Ok(Request::Advance(_)) => line(b"LOGOS/1 RESULT advance=accepted"),
             Ok(Request::Query(_)) => line(b"LOGOS/1 RESULT query=available"),
-            Ok(Request::Input(value)) if native_input(value) => {
+            Ok(Request::Input(value)) if handle(Action::Input(value)) => {
                 line(b"LOGOS/1 RESULT input=accepted")
             }
             Ok(Request::Input(_)) => line(b"LOGOS/1 ERROR input=rejected"),
-            Ok(Request::Reset(_)) if native_input("__reset") => {
+            Ok(Request::Reset(_)) if handle(Action::Input("__reset")) => {
                 line(b"LOGOS/1 RESULT reset=accepted")
             }
             Ok(Request::Reset(_)) => line(b"LOGOS/1 ERROR reset=failed"),

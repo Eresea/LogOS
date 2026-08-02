@@ -45,6 +45,7 @@ static USER_CONTEXT: AtomicU64 = AtomicU64::new(0);
 static USER_BLOCKED: AtomicBool = AtomicBool::new(false);
 static USER_COMMAND: AtomicBool = AtomicBool::new(false);
 static USER_DISPLAY: AtomicBool = AtomicBool::new(false);
+static USER_PANICKED: AtomicBool = AtomicBool::new(false);
 const USER_FRAME_WORDS: usize = 20;
 #[unsafe(no_mangle)]
 static USER_FRAME: Writable<[u64; USER_FRAME_WORDS]> = Writable::new([0; USER_FRAME_WORDS]);
@@ -78,6 +79,7 @@ pub enum EntryState {
     Input,
     Command,
     Display,
+    Panic,
 }
 
 impl Privilege {
@@ -136,6 +138,7 @@ impl Privilege {
         unsafe { set_tss_stack(space.kernel_stack_top()) };
         self.restore_gate(gate);
         USER_RETURNED.store(false, Ordering::Release);
+        USER_PANICKED.store(false, Ordering::Release);
         USER_BLOCKED.store(false, Ordering::Release);
         USER_CONTEXT.store(context, Ordering::Release);
         unsafe { enter_user(space.cr3(), entry, space.stack_top(), context) };
@@ -157,6 +160,7 @@ impl Privilege {
         }
         unsafe { set_tss_stack(space.kernel_stack_top()) };
         USER_RETURNED.store(false, Ordering::Release);
+        USER_PANICKED.store(false, Ordering::Release);
         USER_CONTEXT.store(context, Ordering::Release);
         unsafe { resume_user(space.cr3(), space.kernel_stack_top()) };
         unsafe { set_tss_stack(self.stack.address() + 4096) };
@@ -183,7 +187,10 @@ impl Privilege {
                 USER_FRAME_WORDS,
             )
         };
-        if gate.blocked {
+        if USER_PANICKED.swap(false, Ordering::AcqRel) {
+            USER_CONTEXT.store(0, Ordering::Release);
+            Some(EntryState::Panic)
+        } else if gate.blocked {
             Some(if USER_DISPLAY.load(Ordering::Acquire) {
                 EntryState::Display
             } else if USER_COMMAND.load(Ordering::Acquire) {
@@ -206,6 +213,10 @@ extern "C" fn user_gate_returned() {
 #[unsafe(no_mangle)]
 extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
     let context = USER_CONTEXT.load(Ordering::Acquire);
+    if context != 0 && unsafe { logos_abi::service::Context::panicked_at(context) } {
+        USER_PANICKED.store(true, Ordering::Release);
+        return 0;
+    }
     if context != 0 && unsafe { logos_core::native_service::Context::acknowledge_at(context) } {
         return 1;
     }
@@ -227,12 +238,11 @@ extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
     {
         return 2;
     }
-    if context != 0 {
-        if unsafe { logos_core::native_service::Context::store_at(context) }.is_some() {
-            if save_user_frame(frame, true, false) {
-                return 2;
-            }
-        }
+    if context != 0
+        && unsafe { logos_core::native_service::Context::store_at(context) }.is_some()
+        && save_user_frame(frame, true, false)
+    {
+        return 2;
     }
     if context != 0
         && unsafe { logos_core::native_service::Context::store_reply_pending_at(context) }.is_some()

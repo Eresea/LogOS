@@ -6,8 +6,11 @@ use crate::{
     scheduler::{Event, Runnable, TaskState},
 };
 
+const TASKS: usize = 4;
+
 pub struct Task<'a> {
     privilege: &'a Privilege,
+    payload: Payload,
     space: AddressSpace,
     entry: u64,
     context_physical: u64,
@@ -231,6 +234,11 @@ impl NetworkEndpoint {
 }
 
 impl SessionEndpoint {
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    pub const fn context(self) -> u64 {
+        self.context_physical
+    }
+
     pub fn deliver(self, request: logos_abi::SessionRequest) -> bool {
         unsafe {
             logos_core::native_service::Context::deliver_session_at(self.context_physical, request)
@@ -269,6 +277,7 @@ impl<'a> Task<'a> {
         };
         Some(Self {
             privilege,
+            payload,
             space,
             entry,
             context_physical,
@@ -326,6 +335,10 @@ impl<'a> Task<'a> {
         self.space.map_shared_borrowed(address)
     }
 
+    pub fn remap_shared_borrowed(&mut self, address: u64) -> bool {
+        self.space.remap_shared_borrowed(address)
+    }
+
     pub fn map_block_owned(&mut self, memory: &mut PhysicalMemory) -> Option<(u64, u64)> {
         self.space.map_block_owned(memory)
     }
@@ -354,6 +367,20 @@ impl<'a> Task<'a> {
         self.space.release(memory)
     }
 
+    fn run_state(&mut self) -> TaskState {
+        if self.complete {
+            return TaskState::Complete;
+        }
+        if !self.started {
+            return if self.start() { TaskState::Blocked(self.event) } else { TaskState::Failed };
+        }
+        if self.resume() {
+            if self.complete { TaskState::Complete } else { TaskState::Blocked(self.event) }
+        } else {
+            TaskState::Failed
+        }
+    }
+
     fn advance(&mut self, state: Option<EntryState>) -> bool {
         match state {
             Some(EntryState::Input) | Some(EntryState::Command) | Some(EntryState::Display) => {
@@ -372,6 +399,7 @@ impl<'a> Task<'a> {
                 };
                 self.complete
             }
+            Some(EntryState::Panic) => false,
             None => false,
         }
     }
@@ -379,27 +407,191 @@ impl<'a> Task<'a> {
 
 impl Runnable for Task<'_> {
     fn run(&mut self) -> TaskState {
-        if self.complete {
-            return TaskState::Complete;
-        }
-        if !self.started {
-            return if self.start() { TaskState::Blocked(self.event) } else { TaskState::Failed };
-        }
-        if self.resume() {
-            if self.complete { TaskState::Complete } else { TaskState::Blocked(self.event) }
-        } else {
-            TaskState::Failed
-        }
+        self.run_state()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Handle(u32);
+
+impl Handle {
+    pub const fn generation(self) -> u16 {
+        (self.0 >> 16) as u16
     }
 
-    fn restart(&mut self) -> bool {
-        if !unsafe { logos_core::native_service::Context::reset_at(self.context_physical) } {
+    const fn index(self) -> usize {
+        self.0 as u16 as usize
+    }
+
+    const fn new(index: usize, generation: u16) -> Self {
+        Self((generation as u32) << 16 | index as u32)
+    }
+}
+
+struct Entry<'a> {
+    task: Task<'a>,
+    waiting: Option<Event>,
+    generation: u16,
+}
+
+pub struct Scheduler<'a> {
+    tasks: [Option<Entry<'a>>; TASKS],
+    generations: [u16; TASKS],
+    next: usize,
+}
+
+impl<'a> Scheduler<'a> {
+    pub const fn new() -> Self {
+        Self { tasks: [const { None }; TASKS], generations: [1; TASKS], next: 0 }
+    }
+
+    pub fn spawn(&mut self, task: Task<'a>) -> Option<Handle> {
+        for (index, slot) in self.tasks.iter_mut().enumerate() {
+            if slot.is_none() {
+                let generation = self.generations[index];
+                *slot = Some(Entry { task, waiting: None, generation });
+                return Some(Handle::new(index, generation));
+            }
+        }
+        None
+    }
+
+    pub fn input_endpoint(&self, handle: Handle) -> Option<InputEndpoint> {
+        Some(self.entry(handle)?.task.input_endpoint())
+    }
+
+    pub fn syscall_endpoint(&self, handle: Handle) -> Option<SyscallEndpoint> {
+        Some(self.entry(handle)?.task.syscall_endpoint())
+    }
+
+    pub fn display_endpoint(&self, handle: Handle) -> Option<DisplayEndpoint> {
+        Some(self.entry(handle)?.task.display_endpoint())
+    }
+
+    pub fn session_endpoint(&self, handle: Handle) -> Option<SessionEndpoint> {
+        Some(self.entry(handle)?.task.session_endpoint())
+    }
+
+    pub fn store_endpoint(&self, handle: Handle) -> Option<StoreEndpoint> {
+        Some(self.entry(handle)?.task.store_endpoint())
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn block_endpoint(&self, handle: Handle) -> Option<BlockEndpoint> {
+        Some(self.entry(handle)?.task.block_endpoint())
+    }
+
+    pub fn network_endpoint(&self, handle: Handle) -> Option<NetworkEndpoint> {
+        Some(self.entry(handle)?.task.network_endpoint())
+    }
+
+    pub fn task_mut(&mut self, handle: Handle) -> Option<&mut Task<'a>> {
+        let entry = self.entry_mut(handle)?;
+        Some(&mut entry.task)
+    }
+
+    pub fn run_next(&mut self) -> bool {
+        for _ in 0..TASKS {
+            let index = self.next;
+            self.next = (self.next + 1) % TASKS;
+            if self.run_index(index) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn run(&mut self, handle: Handle) -> bool {
+        self.entry(handle).is_some() && self.run_index(handle.index())
+    }
+
+    pub fn wake(&mut self, handle: Handle) -> bool {
+        let Some(entry) = self.entry_mut(handle) else { return false };
+        if entry.waiting.is_none() {
             return false;
         }
-        self.started = false;
-        self.event = Event::INPUT;
-        self.complete = false;
-        self.gate = crate::cpu::GateState::new();
+        entry.waiting = None;
+        crate::trace::record(crate::trace::Event::TaskWoken);
+        true
+    }
+
+    pub fn fail(&mut self, handle: Handle) -> bool {
+        let Some(entry) = self.entry_mut(handle) else { return false };
+        if entry.waiting == Some(Event::FAILURE) {
+            return false;
+        }
+        entry.waiting = Some(Event::FAILURE);
+        crate::trace::record(crate::trace::Event::Fault);
+        true
+    }
+
+    pub fn failed(&self, handle: Handle) -> bool {
+        self.entry(handle).is_some_and(|entry| entry.waiting == Some(Event::FAILURE))
+    }
+
+    pub fn replace(
+        &mut self,
+        handle: Handle,
+        memory: &mut PhysicalMemory,
+        configure: impl FnOnce(&mut Task<'a>, &mut PhysicalMemory) -> bool,
+    ) -> Option<Handle> {
+        let entry = self.entry(handle)?;
+        if entry.waiting != Some(Event::FAILURE) {
+            return None;
+        }
+        let mut replacement = Task::load(memory, entry.task.payload, entry.task.privilege)?;
+        if !configure(&mut replacement, memory) {
+            let _ = replacement.release(memory);
+            return None;
+        }
+        let index = handle.index();
+        let old = self.tasks[index].take()?;
+        if !old.task.release(memory) {
+            let _ = replacement.release(memory);
+            return None;
+        }
+        let generation = self.generations[index].wrapping_add(1).max(1);
+        self.generations[index] = generation;
+        self.tasks[index] = Some(Entry { task: replacement, waiting: None, generation });
+        Some(Handle::new(index, generation))
+    }
+
+    fn entry(&self, handle: Handle) -> Option<&Entry<'a>> {
+        self.tasks
+            .get(handle.index())?
+            .as_ref()
+            .filter(|entry| entry.generation == handle.generation())
+    }
+
+    fn entry_mut(&mut self, handle: Handle) -> Option<&mut Entry<'a>> {
+        self.tasks
+            .get_mut(handle.index())?
+            .as_mut()
+            .filter(|entry| entry.generation == handle.generation())
+    }
+
+    fn run_index(&mut self, index: usize) -> bool {
+        let Some(mut entry) = self.tasks[index].take() else { return false };
+        if entry.waiting.is_some() {
+            self.tasks[index] = Some(entry);
+            return false;
+        }
+        match entry.task.run_state() {
+            TaskState::Ready => self.tasks[index] = Some(entry),
+            TaskState::Blocked(event) => {
+                entry.waiting = Some(event);
+                self.tasks[index] = Some(entry);
+                crate::trace::record(crate::trace::Event::TaskBlocked);
+            }
+            TaskState::Complete => {
+                self.generations[index] = self.generations[index].wrapping_add(1).max(1);
+            }
+            TaskState::Failed => {
+                entry.waiting = Some(Event::FAILURE);
+                self.tasks[index] = Some(entry);
+                crate::trace::record(crate::trace::Event::Fault);
+            }
+        }
         true
     }
 }

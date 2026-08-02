@@ -120,7 +120,7 @@ fn relocation_block(bytes: &[u8], offset: usize) -> Option<(u32, &[u8], usize)> 
     let target_page = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
     let size =
         usize::try_from(u32::from_le_bytes([header[4], header[5], header[6], header[7]])).ok()?;
-    if size < 8 || !size.is_multiple_of(2) {
+    if size < 8 || size % 2 != 0 {
         return None;
     }
     let end = offset.checked_add(size)?;

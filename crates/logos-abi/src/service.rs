@@ -23,6 +23,7 @@ pub const NETWORK_WAIT: u32 = 16;
 pub const NETWORK_EVENT: u32 = 17;
 pub const NETWORK_DEVICE_REQUEST: u32 = 18;
 pub const NETWORK_DEVICE_REPLY: u32 = 19;
+pub const PANIC: u32 = 20;
 pub const ACKNOWLEDGED: u32 = 1;
 pub const STORAGE_FORMATTED: u32 = 1;
 pub const STORAGE_RECOVERED: u32 = 2;
@@ -406,6 +407,13 @@ impl Context {
             network_rx_page: 0,
             network_tx_page: 0,
         }
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn panicked_at(address: u64) -> bool {
+        let Some(context) = (unsafe { (address as *const Self).as_ref() }) else { return false };
+        context.abi == ABI && context.reserved == 0 && context.operation == PANIC
     }
 
     /// # Safety

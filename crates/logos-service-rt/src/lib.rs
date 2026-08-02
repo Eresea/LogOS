@@ -1,6 +1,11 @@
 #![no_std]
 
-use core::{arch::asm, mem::MaybeUninit, ptr::NonNull};
+use core::{
+    arch::asm,
+    mem::MaybeUninit,
+    ptr::NonNull,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 #[cfg(target_os = "uefi")]
 use core::panic::PanicInfo;
@@ -11,6 +16,7 @@ pub use logos_abi::service::{
 };
 
 pub type EntryContext = *mut RawContext;
+static ACTIVE_CONTEXT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SharedPage {
@@ -52,6 +58,7 @@ pub fn entry(context: EntryContext, service: fn(&mut Context) -> !) -> ! {
     if !raw.as_ptr().is_aligned() {
         spin();
     }
+    ACTIVE_CONTEXT.store(raw.as_ptr() as usize, Ordering::Release);
     let mut context = Context { raw };
     service(&mut context)
 }
@@ -406,6 +413,14 @@ pub mod heap {
 #[cfg(target_os = "uefi")]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
+    let address = ACTIVE_CONTEXT.load(Ordering::Acquire);
+    if address != 0 {
+        unsafe {
+            let raw = address as *mut RawContext;
+            (*raw).operation = native_service::PANIC;
+            asm!("int 0x80", options(nostack, preserves_flags));
+        }
+    }
     loop {
         core::hint::spin_loop();
     }

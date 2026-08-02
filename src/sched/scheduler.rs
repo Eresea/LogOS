@@ -16,7 +16,7 @@ impl Event {
     pub const INPUT: Self = Self(2);
     pub const COMMAND: Self = Self(4);
     pub const DISPLAY: Self = Self(8);
-    const FAILURE: Self = Self(16);
+    pub(crate) const FAILURE: Self = Self(16);
     const SELF_CHECK: Self = Self(3);
 }
 
