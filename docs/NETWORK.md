@@ -72,7 +72,8 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   loads the Ring-2 payload, and delivers one validated RX frame event at a time.
 - `logos-network-service` handles bounded device transport, DHCP acquisition, ARP resolution,
   `Status`, `Bind`, `SendTo`, `ReceiveFrom`, `Close`, and `Cancel` state operations. Core validates
-  capability scope and copies client payloads through the fixed Network TX page.
+  capability scope and copies client payloads through the fixed Network TX page. Cancellation,
+  close, reset, and ARP single-flight cleanup release pending client state.
 - QEMU uses deterministic user-mode DHCP for the transport proof. The independent DHCP/ARP peer
   and packet-exchange proof remain deferred.
 
