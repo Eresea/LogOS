@@ -43,10 +43,10 @@ extern "C" fn virtio_interrupt() {
 
 #[unsafe(no_mangle)]
 extern "C" fn fatal_fault() {
-    crate::trace::record(crate::trace::Event::Fault);
+    crate::platform::trace::record(crate::platform::trace::Event::Fault);
 }
 
-pub fn install(madt: crate::acpi::Madt) -> bool {
+pub fn install(madt: crate::arch::acpi::Madt) -> bool {
     if madt.local_apic == 0 || madt.io_apic == 0 {
         return false;
     }
@@ -71,7 +71,7 @@ pub fn install(madt: crate::acpi::Madt) -> bool {
         configure_pic();
         configure_pit();
     }
-    crate::keyboard::enable_interrupts()
+    crate::drivers::keyboard::enable_interrupts()
 }
 
 pub fn route_virtio(gsi: u32) -> bool {

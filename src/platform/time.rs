@@ -8,7 +8,7 @@ impl Monotonic {
 }
 
 pub fn now() -> Monotonic {
-    Monotonic(crate::interrupts::ticks())
+    Monotonic(crate::arch::interrupts::ticks())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

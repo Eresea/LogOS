@@ -1,7 +1,6 @@
 use crate::{
-    approvals::{Id as ApprovalId, Store as Approvals},
-    audit::Log,
-    session::Principal,
+    ipc::approvals::{Id as ApprovalId, Store as Approvals},
+    platform::{audit::Log, session::Principal},
 };
 use logos_core::capabilities::{CapabilityKind, CapabilityManager};
 

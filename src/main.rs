@@ -13,13 +13,3 @@ mod platform;
 mod sched;
 #[cfg(feature = "test-hooks")]
 mod test_hooks;
-
-pub(crate) use arch::{acpi, cpu, interrupts, pci};
-pub(crate) use drivers::{device, keyboard, supervisor};
-pub(crate) use ipc::approvals;
-pub(crate) use mm::{address_space, memory};
-pub(crate) use platform::{
-    audit, balloon, entropy, health, identity, payload, pe, root_key, services, session, time,
-    trace,
-};
-pub(crate) use sched::scheduler;

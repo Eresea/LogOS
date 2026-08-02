@@ -1,4 +1,4 @@
-use crate::session::Principal;
+use crate::platform::session::Principal;
 use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
 const SECRETS: usize = 4;
@@ -25,7 +25,7 @@ impl Store {
         capability: Capability,
         owner: Principal,
         bytes: &[u8],
-        audit: &mut crate::audit::Log,
+        audit: &mut crate::platform::audit::Log,
     ) -> bool {
         if bytes.is_empty()
             || bytes.len() > BYTES
@@ -40,7 +40,7 @@ impl Store {
         let mut secret = Secret { owner, bytes: [0; BYTES] };
         secret.bytes[..bytes.len()].copy_from_slice(bytes);
         *slot = Some(secret);
-        debug_assert!(audit.record(owner, crate::audit::Effect::SecretWrite));
+        debug_assert!(audit.record(owner, crate::platform::audit::Effect::SecretWrite));
         true
     }
 
@@ -67,14 +67,14 @@ pub fn self_check() -> bool {
     };
     let owner = Principal::service(1);
     let mut store = Store::new();
-    let mut audit = crate::audit::Log::new();
+    let mut audit = crate::platform::audit::Log::new();
     store.put(&capabilities, secret, owner, b"secret", &mut audit)
         && store.has_secret(&capabilities, secret, owner)
         && !store.has_secret(&capabilities, secret, Principal::service(2))
         && !store.has_secret(&capabilities, service, owner)
         && audit.latest().is_some_and(|event| event.principal == owner)
         && {
-            while audit.record(owner, crate::audit::Effect::SecretWrite) {}
+            while audit.record(owner, crate::platform::audit::Effect::SecretWrite) {}
             !store.put(&capabilities, secret, Principal::service(2), b"blocked", &mut audit)
                 && !store.has_secret(&capabilities, secret, Principal::service(2))
         }

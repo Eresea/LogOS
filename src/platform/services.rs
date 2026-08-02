@@ -1,4 +1,4 @@
-use crate::supervisor::Protocol;
+use crate::drivers::supervisor::Protocol;
 use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
 const SERVICES: usize = 5;
@@ -28,8 +28,8 @@ impl ServiceHandle {
         Self(0)
     }
 
-    pub const fn principal(self) -> crate::session::Principal {
-        crate::session::Principal::service(self.0 as u32)
+    pub const fn principal(self) -> crate::platform::session::Principal {
+        crate::platform::session::Principal::service(self.0 as u32)
     }
 }
 

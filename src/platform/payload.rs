@@ -20,7 +20,7 @@ static NETWORK_PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
 #[derive(Clone, Copy)]
 pub struct Payload {
     base: *const u8,
-    image: crate::pe::Image,
+    image: crate::platform::pe::Image,
     entry_rva: u32,
 }
 
@@ -37,7 +37,7 @@ impl Payload {
         self.entry_rva
     }
 
-    pub fn sections(self) -> impl Iterator<Item = crate::pe::Section> {
+    pub fn sections(self) -> impl Iterator<Item = crate::platform::pe::Section> {
         self.image.sections()
     }
 
@@ -211,7 +211,7 @@ fn load(
         return None;
     }
     let image = unsafe { slice::from_raw_parts(base.cast::<u8>(), size) };
-    let metadata = crate::pe::Image::parse(image)?;
+    let metadata = crate::platform::pe::Image::parse(image)?;
     let Ok(image_size) = usize::try_from(metadata.image_size()) else {
         return None;
     };

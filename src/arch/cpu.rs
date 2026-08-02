@@ -6,7 +6,7 @@ use core::{
 };
 
 use super::writable::Writable;
-use crate::memory::{Page, PhysicalMemory};
+use crate::mm::memory::{Page, PhysicalMemory};
 
 pub const KERNEL_CODE: u16 = 0x08;
 pub const USER_DATA: u16 = 0x1b;
@@ -141,7 +141,7 @@ impl Privilege {
 
     pub fn run_entry(
         &self,
-        space: &mut crate::address_space::AddressSpace,
+        space: &mut crate::mm::address_space::AddressSpace,
         entry: u64,
         context: u64,
         gate: &mut GateState,
@@ -163,7 +163,7 @@ impl Privilege {
 
     pub fn resume_entry(
         &self,
-        space: &mut crate::address_space::AddressSpace,
+        space: &mut crate::mm::address_space::AddressSpace,
         context: u64,
         gate: &mut GateState,
     ) -> Option<EntryState> {

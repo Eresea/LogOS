@@ -3,8 +3,8 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU16, Ordering},
 };
 
-use crate::services::ServiceHandle;
-use crate::session::Principal;
+use crate::platform::services::ServiceHandle;
+use crate::platform::session::Principal;
 use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
 const MESSAGES: usize = 4;

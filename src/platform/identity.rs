@@ -11,7 +11,7 @@ const NAME: &uefi::CStr16 = cstr16!("LogOSMachineId");
 pub struct MachineId([u8; 16]);
 
 impl MachineId {
-    fn from_entropy(seed: &crate::entropy::Seed) -> Self {
+    fn from_entropy(seed: &crate::platform::entropy::Seed) -> Self {
         let mut bytes = [0; 16];
         bytes.copy_from_slice(&seed.bytes()[..16]);
         Self(bytes)
@@ -39,7 +39,7 @@ impl Machine {
     }
 }
 
-pub fn load(entropy: Option<&crate::entropy::Seed>) -> Machine {
+pub fn load(entropy: Option<&crate::platform::entropy::Seed>) -> Machine {
     let mut bytes = [0; 16];
     if let Ok((stored, _)) =
         runtime::get_variable(NAME, &VariableVendor::GLOBAL_VARIABLE, &mut bytes)
@@ -70,9 +70,9 @@ pub fn announce(machine: &Machine) {
 }
 
 pub fn self_check() -> bool {
-    let one = MachineId::from_entropy(&crate::entropy::Seed::from_bytes([1; 32]));
-    one == MachineId::from_entropy(&crate::entropy::Seed::from_bytes([1; 32]))
-        && one != MachineId::from_entropy(&crate::entropy::Seed::from_bytes([2; 32]))
+    let one = MachineId::from_entropy(&crate::platform::entropy::Seed::from_bytes([1; 32]));
+    one == MachineId::from_entropy(&crate::platform::entropy::Seed::from_bytes([1; 32]))
+        && one != MachineId::from_entropy(&crate::platform::entropy::Seed::from_bytes([2; 32]))
         && Machine { id: one, source: Source::Volatile }.valid()
 }
 

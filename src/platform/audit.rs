@@ -1,4 +1,4 @@
-use crate::session::Principal;
+use crate::platform::session::Principal;
 
 const EVENTS: usize = 8;
 pub const AUDIT_BYTES: usize = 16 + EVENTS * 16;

@@ -8,8 +8,8 @@ use core::{
 use logos_core::capabilities::CapabilityKind;
 
 use crate::{
-    memory::{Page, PhysicalMemory},
-    pci::PciDevice,
+    arch::pci::PciDevice,
+    mm::memory::{Page, PhysicalMemory},
 };
 
 const ACKNOWLEDGE: u8 = 1;
@@ -24,15 +24,15 @@ const MAX_FRAME: usize = 1514;
 static ISR_PORT: AtomicU16 = AtomicU16::new(0);
 static COMPLETE: AtomicBool = AtomicBool::new(false);
 
-const NETWORK: crate::device::DriverManifest = crate::device::DriverManifest {
-    interface: crate::device::Interface::new(crate::device::Class::Network),
+const NETWORK: crate::drivers::device::DriverManifest = crate::drivers::device::DriverManifest {
+    interface: crate::drivers::device::Interface::new(crate::drivers::device::Class::Network),
     vendor_id: 0x1af4,
     device_id: 0x1000,
     capabilities: &[CapabilityKind::Memory],
 };
 
-pub fn discover(devices: &crate::pci::PciDevices) -> Option<PciDevice> {
-    crate::device::bind(&[NETWORK], NETWORK.vendor_id, NETWORK.device_id)
+pub fn discover(devices: &crate::arch::pci::PciDevices) -> Option<PciDevice> {
+    crate::drivers::device::bind(&[NETWORK], NETWORK.vendor_id, NETWORK.device_id)
         .and_then(|manifest| devices.find_class(manifest.vendor_id, manifest.device_id, 0x02, 0x00))
 }
 
@@ -154,7 +154,7 @@ impl Device {
         }
         unsafe { outb(base + 0x12, ACKNOWLEDGE | DRIVER | DRIVER_OK) };
         if unsafe { inb(base + 0x12) } & (DRIVER_OK | FAILED) != DRIVER_OK
-            || !crate::interrupts::route_virtio(interrupt_gsi)
+            || !crate::arch::interrupts::route_virtio(interrupt_gsi)
         {
             crate::debug::write_line(b"LogOS: network device activation failed");
             let _ = network.release(memory);
@@ -402,7 +402,7 @@ pub fn interrupt() {
 }
 
 pub fn self_check() -> bool {
-    NETWORK.interface.class() == crate::device::Class::Network
+    NETWORK.interface.class() == crate::drivers::device::Class::Network
         && NETWORK.vendor_id == 0x1af4
         && NETWORK.device_id == 0x1000
         && Info { mac: [0; 6], mtu: MTU as u16, generation: 1 }.mtu == 1500

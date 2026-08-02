@@ -4,12 +4,11 @@ use core::{
 };
 
 use crate::{
+    arch::pci::PciDevice,
     ipc::{Envelope, Message},
-    memory::{Page, PhysicalMemory},
-    pci::PciDevice,
-    scheduler::{Runnable, TaskState},
-    services::ServiceHandle,
-    session::Principal,
+    mm::memory::{Page, PhysicalMemory},
+    platform::{services::ServiceHandle, session::Principal},
+    sched::scheduler::{Runnable, TaskState},
 };
 use logos_core::capabilities::{Capability, CapabilityManager};
 
@@ -121,13 +120,13 @@ impl Runnable for ServiceTask<'_> {
     fn run(&mut self) -> TaskState {
         if let Some((destination, request)) = self.pending {
             if !take_completion() {
-                return TaskState::Blocked(crate::scheduler::Event::VIRTIO);
+                return TaskState::Blocked(crate::sched::scheduler::Event::VIRTIO);
             }
             self.pending = None;
             let failed = self.service.failed();
             if failed {
-                crate::trace::record(crate::trace::Event::DriverFailed);
-                crate::health::driver_failure(b"virtio", self.service.recover());
+                crate::platform::trace::record(crate::platform::trace::Event::DriverFailed);
+                crate::platform::health::driver_failure(b"virtio", self.service.recover());
             }
             // SAFETY: Core runs scheduler tasks serially and owns this pointer for the task lifetime.
             let reclaimed = self.service.reclaim_request(unsafe { &mut *self.memory });
@@ -148,7 +147,7 @@ impl Runnable for ServiceTask<'_> {
                     // SAFETY: Core runs scheduler tasks serially and owns this pointer for the task lifetime.
                     if self.service.submit_inflate_one_page(unsafe { &mut *self.memory }) {
                         self.pending = Some((envelope.destination, envelope.request));
-                        return TaskState::Blocked(crate::scheduler::Event::VIRTIO);
+                        return TaskState::Blocked(crate::sched::scheduler::Event::VIRTIO);
                     }
                     None
                 }
@@ -209,12 +208,12 @@ impl VirtioService {
         if !service.activate() {
             service.quiesce();
             let _ = service.queue.release(memory);
-            crate::trace::record(crate::trace::Event::DriverFailed);
-            crate::health::driver_failure(b"virtio", false);
+            crate::platform::trace::record(crate::platform::trace::Event::DriverFailed);
+            crate::platform::health::driver_failure(b"virtio", false);
             return None;
         }
         ISR_PORT.store(base + 0x13, Ordering::Release);
-        crate::trace::record(crate::trace::Event::DriverBound);
+        crate::platform::trace::record(crate::platform::trace::Event::DriverBound);
         Some(service)
     }
 
@@ -250,7 +249,7 @@ impl VirtioService {
     fn quiesce(&mut self) {
         unsafe { outb(self.status_port, 0) };
         self.state = DriverState::Quiesced;
-        crate::trace::record(crate::trace::Event::DriverQuiesced);
+        crate::platform::trace::record(crate::platform::trace::Event::DriverQuiesced);
     }
 
     pub fn release(mut self, memory: &mut PhysicalMemory) -> bool {
@@ -264,7 +263,7 @@ impl VirtioService {
         self.quiesce();
         let recovered = self.activate();
         if recovered {
-            crate::trace::record(crate::trace::Event::DriverRecovered);
+            crate::platform::trace::record(crate::platform::trace::Event::DriverRecovered);
         }
         recovered
     }
@@ -285,12 +284,12 @@ impl VirtioService {
             outb(self.status_port, ACKNOWLEDGE | DRIVER | DRIVER_OK);
         }
         let active = (unsafe { inb(self.status_port) } & DRIVER_OK) != 0
-            && crate::interrupts::route_virtio(self.interrupt_gsi);
+            && crate::arch::interrupts::route_virtio(self.interrupt_gsi);
         self.state = if active { DriverState::Bound } else { DriverState::Failed };
-        crate::trace::record(if active {
-            crate::trace::Event::DriverBound
+        crate::platform::trace::record(if active {
+            crate::platform::trace::Event::DriverBound
         } else {
-            crate::trace::Event::DriverFailed
+            crate::platform::trace::Event::DriverFailed
         });
         active
     }
@@ -321,7 +320,7 @@ impl VirtioService {
             outw(self.notify_port, 0);
         }
         self.pending_page = Some(page);
-        crate::trace::record(crate::trace::Event::VirtioSubmit);
+        crate::platform::trace::record(crate::platform::trace::Event::VirtioSubmit);
         true
     }
 
@@ -338,7 +337,7 @@ pub fn interrupt() {
     let port = ISR_PORT.load(Ordering::Acquire);
     if port != 0 && unsafe { inb(port) } & 1 != 0 {
         COMPLETE.store(true, Ordering::Release);
-        crate::trace::record(crate::trace::Event::VirtioComplete);
+        crate::platform::trace::record(crate::platform::trace::Event::VirtioComplete);
     }
 }
 

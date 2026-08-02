@@ -1,4 +1,4 @@
-use crate::session::Principal;
+use crate::platform::session::Principal;
 
 const RESOURCES: usize = 4;
 

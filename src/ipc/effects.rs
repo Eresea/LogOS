@@ -1,4 +1,10 @@
-use crate::{acpi, balloon, ipc, scheduler, services, session, supervisor, trace};
+use crate::{
+    arch::acpi,
+    drivers::supervisor,
+    ipc,
+    platform::{balloon, services, session, trace},
+    sched::scheduler,
+};
 use logos_abi::{Effect, EffectRequest, EffectResult, InputLayout};
 use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 use logos_terminal::input;

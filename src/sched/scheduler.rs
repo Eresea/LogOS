@@ -117,7 +117,7 @@ impl<'a> Scheduler<'a> {
             return false;
         }
         entry.waiting = None;
-        crate::trace::record(crate::trace::Event::TaskWoken);
+        crate::platform::trace::record(crate::platform::trace::Event::TaskWoken);
         true
     }
 
@@ -130,7 +130,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         if woken > 0 {
-            crate::trace::record(crate::trace::Event::TaskWoken);
+            crate::platform::trace::record(crate::platform::trace::Event::TaskWoken);
         }
         woken
     }
@@ -143,7 +143,7 @@ impl<'a> Scheduler<'a> {
             return false;
         }
         entry.waiting = Some(Event::FAILURE);
-        crate::trace::record(crate::trace::Event::Fault);
+        crate::platform::trace::record(crate::platform::trace::Event::Fault);
         true
     }
 
@@ -184,7 +184,7 @@ impl<'a> Scheduler<'a> {
             TaskState::Blocked(event) => {
                 entry.waiting = Some(event);
                 self.tasks[index] = Some(entry);
-                crate::trace::record(crate::trace::Event::TaskBlocked);
+                crate::platform::trace::record(crate::platform::trace::Event::TaskBlocked);
             }
             TaskState::Complete => {
                 self.generations[index] = self.generations[index].wrapping_add(1);
@@ -192,7 +192,7 @@ impl<'a> Scheduler<'a> {
             TaskState::Failed => {
                 entry.waiting = Some(Event::FAILURE);
                 self.tasks[index] = Some(entry);
-                crate::trace::record(crate::trace::Event::Fault);
+                crate::platform::trace::record(crate::platform::trace::Event::Fault);
             }
         }
         true

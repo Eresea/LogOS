@@ -3,7 +3,7 @@ use core::{
     ptr,
 };
 
-use crate::memory::{Contiguous, Page, PhysicalMemory};
+use crate::mm::memory::{Contiguous, Page, PhysicalMemory};
 
 const ENTRIES: usize = 512;
 const MAPPED_PAGES: usize = 64;
@@ -119,7 +119,7 @@ impl AddressSpace {
     pub fn map_image(
         &mut self,
         physical: &mut PhysicalMemory,
-        payload: crate::payload::Payload,
+        payload: crate::platform::payload::Payload,
     ) -> Option<u64> {
         if !enable_nx() {
             return None;
@@ -376,7 +376,7 @@ impl AddressSpace {
     fn map_page(
         &mut self,
         physical: &mut PhysicalMemory,
-        payload: crate::payload::Payload,
+        payload: crate::platform::payload::Payload,
         index: usize,
         writable: bool,
         executable: bool,

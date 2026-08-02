@@ -1,6 +1,10 @@
 use uefi::{boot, prelude::*, proto::console::gop::GraphicsOutput};
 
-use crate::{acpi, debug, entropy, identity, kernel, payload, root_key, time};
+use crate::{
+    arch::acpi,
+    debug, kernel,
+    platform::{entropy, identity, payload, root_key, time},
+};
 
 #[entry]
 fn main() -> Status {

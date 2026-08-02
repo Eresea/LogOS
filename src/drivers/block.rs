@@ -4,8 +4,8 @@ use core::{
 };
 
 use crate::{
-    memory::{Page, PhysicalMemory},
-    pci::PciDevice,
+    arch::pci::PciDevice,
+    mm::memory::{Page, PhysicalMemory},
 };
 use logos_abi::{BlockInfo, BlockOperation, BlockRequest, PersistenceStatus};
 
@@ -93,7 +93,7 @@ impl Device {
             blocks,
             max_transfer_blocks: (logos_abi::PAGE_SIZE / 512) as u32,
         };
-        if !info.valid() || !crate::interrupts::route_virtio(interrupt_gsi) {
+        if !info.valid() || !crate::arch::interrupts::route_virtio(interrupt_gsi) {
             unsafe { outb(base + 0x12, 0) };
             let _ = queue.release(memory);
             return None;

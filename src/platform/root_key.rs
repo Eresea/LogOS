@@ -25,7 +25,7 @@ pub fn announce(key: Option<&RootKey>) {
     });
 }
 
-pub fn load(entropy: Option<&crate::entropy::Seed>) -> Option<RootKey> {
+pub fn load(entropy: Option<&crate::platform::entropy::Seed>) -> Option<RootKey> {
     let mut bytes = [0; 32];
     if let Ok((stored, _)) =
         runtime::get_variable(NAME, &VariableVendor::GLOBAL_VARIABLE, &mut bytes)

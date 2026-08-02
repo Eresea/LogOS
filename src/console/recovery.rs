@@ -1,9 +1,7 @@
 use crate::{
+    drivers::keyboard,
     ipc::{Channel, Message},
-    keyboard,
-    services::ServiceHandle,
-    session::Principal,
-    trace,
+    platform::{services::ServiceHandle, session::Principal, trace},
 };
 use logos_core::capabilities::{Capability, CapabilityManager};
 
@@ -207,12 +205,12 @@ impl<'a> Shell<'a> {
     }
 
     fn exit(&self) -> ! {
-        if crate::acpi::power_off() {
+        if crate::arch::acpi::power_off() {
             loop {
                 unsafe { core::arch::asm!("hlt") };
             }
         }
-        if crate::acpi::reset() {
+        if crate::arch::acpi::reset() {
             loop {
                 unsafe { core::arch::asm!("hlt") };
             }

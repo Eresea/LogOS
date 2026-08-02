@@ -1,6 +1,6 @@
 use core::{arch::asm, ptr};
 
-use crate::memory::{Page, PhysicalMemory};
+use crate::mm::memory::{Page, PhysicalMemory};
 
 const ENTRIES: usize = 512;
 const PRESENT: u64 = 1;
