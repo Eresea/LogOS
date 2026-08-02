@@ -7,7 +7,6 @@ edition = "2024"
 workspace = true
 
 [dependencies]
-logos-core = { path = "../logos-core" }
 logos-abi = { path = "../logos-abi" }
 logos-terminal = { path = "../logos-terminal" }
 logos-service-rt = { path = "../logos-service-rt" }

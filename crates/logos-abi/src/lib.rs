@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod service;
+
 pub const MAX_SESSION_TEXT: usize = 256;
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_OBJECT_NAME: usize = 64;
@@ -125,6 +127,7 @@ pub enum PersistenceStatus {
     OutOfMemory,
     Full,
     NotFound,
+    Unavailable,
 }
 
 impl PersistenceStatus {
@@ -141,6 +144,7 @@ impl PersistenceStatus {
             9 => Some(Self::OutOfMemory),
             10 => Some(Self::Full),
             11 => Some(Self::NotFound),
+            12 => Some(Self::Unavailable),
             _ => None,
         }
     }

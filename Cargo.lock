@@ -55,7 +55,6 @@ name = "logos-service-rt"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
- "logos-core",
 ]
 
 [[package]]
@@ -63,7 +62,6 @@ name = "logos-sessions-service"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
- "logos-core",
  "logos-service-rt",
 ]
 
@@ -72,7 +70,6 @@ name = "logos-storage-service"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
- "logos-core",
  "logos-service-rt",
  "logos-store",
 ]
@@ -93,7 +90,6 @@ name = "logos-terminal-service"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
- "logos-core",
  "logos-service-rt",
  "logos-terminal",
 ]

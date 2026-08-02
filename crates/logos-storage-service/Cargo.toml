@@ -19,7 +19,6 @@ path = "src/lib.rs"
 block-probe = []
 
 [dependencies]
-logos-core = { path = "../logos-core" }
 logos-abi = { path = "../logos-abi" }
 logos-service-rt = { path = "../logos-service-rt" }
 logos-store = { path = "../logos-store" }

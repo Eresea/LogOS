@@ -28,12 +28,12 @@ ALLOWED = {
     "logos-core": {"logos-abi"},
     "logos-net": set(),
     "logos-network-service": {"logos-abi", "logos-net", "logos-service-rt"},
-    "logos-service-rt": {"logos-abi", "logos-core"},
+    "logos-service-rt": {"logos-abi"},
     "logos-store": {"logos-abi"},
-    "logos-storage-service": {"logos-abi", "logos-core", "logos-service-rt", "logos-store"},
+    "logos-storage-service": {"logos-abi", "logos-service-rt", "logos-store"},
     "logos-terminal": set(),
-    "logos-terminal-service": {"logos-abi", "logos-core", "logos-service-rt", "logos-terminal"},
-    "logos-sessions-service": {"logos-abi", "logos-core", "logos-service-rt"},
+    "logos-terminal-service": {"logos-abi", "logos-service-rt", "logos-terminal"},
+    "logos-sessions-service": {"logos-abi", "logos-service-rt"},
     # The boot adapter is the documented temporary exception while terminal
     # bootstrap remains statically linked.
     "logos-uefi": {"logos-abi", "logos-core", "logos-terminal"},

@@ -1,3 +1,4 @@
+use crate as logos_abi;
 use core::mem::align_of;
 
 pub const MAGIC: [u8; 4] = *b"LGSV";
@@ -1289,20 +1290,44 @@ pub struct Header {
     pub abi: u16,
     pub reserved: u16,
     pub name: [u8; 16],
+    pub protocol: ProtocolVersion,
     pub entry: extern "C" fn(*mut Context) -> !,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct ProtocolVersion {
+    pub major: u16,
+    pub minor: u16,
+}
+
+impl ProtocolVersion {
+    pub const V1: Self = Self { major: 1, minor: 0 };
+
+    pub const fn supports(self, required: Self) -> bool {
+        self.major == required.major && self.minor >= required.minor
+    }
+}
+
 impl Header {
-    pub const fn new(name: [u8; 16], entry: extern "C" fn(*mut Context) -> !) -> Self {
-        Self { magic: MAGIC, abi: ABI, reserved: 0, name, entry }
+    pub const fn new(
+        name: [u8; 16],
+        protocol: ProtocolVersion,
+        entry: extern "C" fn(*mut Context) -> !,
+    ) -> Self {
+        Self { magic: MAGIC, abi: ABI, reserved: 0, name, protocol, entry }
     }
 
     pub fn entry_address(&self) -> usize {
         self.entry as usize
     }
 
-    pub fn valid_for(&self, name: &[u8]) -> bool {
-        self.magic == MAGIC && self.abi == ABI && self.reserved == 0 && self.name_starts_with(name)
+    pub fn valid_for(&self, name: &[u8], protocol: ProtocolVersion) -> bool {
+        self.magic == MAGIC
+            && self.abi == ABI
+            && self.reserved == 0
+            && self.protocol.supports(protocol)
+            && self.name_starts_with(name)
     }
 
     fn name_starts_with(&self, name: &[u8]) -> bool {
@@ -1355,8 +1380,10 @@ pub fn self_check() -> bool {
     let reset = unsafe { Context::reset_at((&mut syscall as *mut Context) as u64) }
         && syscall.abi == ABI
         && syscall.operation == 0;
-    Header::new(*b"terminal\0\0\0\0\0\0\0\0", self_check_entry).valid_for(b"terminal")
-        && !Header::new(*b"terminal\0\0\0\0\0\0\0\0", self_check_entry).valid_for(b"other")
+    Header::new(*b"terminal\0\0\0\0\0\0\0\0", ProtocolVersion::V1, self_check_entry)
+        .valid_for(b"terminal", ProtocolVersion::V1)
+        && !Header::new(*b"terminal\0\0\0\0\0\0\0\0", ProtocolVersion::V1, self_check_entry)
+            .valid_for(b"other", ProtocolVersion::V1)
         && valid
         && unknown
         && malformed

@@ -1,5 +1,5 @@
 use core::{cell::UnsafeCell, mem::size_of, slice};
-use logos_core::native_service::Header;
+use logos_abi::service::{Header, ProtocolVersion};
 use uefi::{
     boot::{self, LoadImageSource},
     cstr16,
@@ -150,29 +150,34 @@ pub fn stage() -> Option<Payloads> {
         .ok()
         .and_then(|file| file.into_regular_file())?;
     let terminal_buffer = unsafe { &mut *TERMINAL_PAYLOAD.0.get() };
-    let terminal = load(&mut terminal, terminal_buffer, b"terminal")?;
+    let terminal = load(&mut terminal, terminal_buffer, b"terminal", ProtocolVersion::V1)?;
     let mut sessions = root
         .open(cstr16!(r"\EFI\LOGOS\SESSIONS.EFI"), FileMode::Read, FileAttribute::empty())
         .ok()
         .and_then(|file| file.into_regular_file())?;
     let sessions_buffer = unsafe { &mut *SESSIONS_PAYLOAD.0.get() };
-    let sessions = load(&mut sessions, sessions_buffer, b"sessions")?;
+    let sessions = load(&mut sessions, sessions_buffer, b"sessions", ProtocolVersion::V1)?;
     let mut storage = root
         .open(cstr16!(r"\EFI\LOGOS\STORAGE.EFI"), FileMode::Read, FileAttribute::empty())
         .ok()
         .and_then(|file| file.into_regular_file())?;
     let storage_buffer = unsafe { &mut *STORAGE_PAYLOAD.0.get() };
-    let storage = load(&mut storage, storage_buffer, b"storage")?;
+    let storage = load(&mut storage, storage_buffer, b"storage", ProtocolVersion::V1)?;
     let mut network = root
         .open(cstr16!(r"\EFI\LOGOS\NETWORK.EFI"), FileMode::Read, FileAttribute::empty())
         .ok()
         .and_then(|file| file.into_regular_file())?;
     let network_buffer = unsafe { &mut *NETWORK_PAYLOAD.0.get() };
-    let network = load(&mut network, network_buffer, b"network")?;
+    let network = load(&mut network, network_buffer, b"network", ProtocolVersion::V1)?;
     Some(Payloads { terminal, sessions, storage, network })
 }
 
-fn load(file: &mut RegularFile, buffer: &mut [u8; MAX_PAYLOAD], name: &[u8]) -> Option<Payload> {
+fn load(
+    file: &mut RegularFile,
+    buffer: &mut [u8; MAX_PAYLOAD],
+    name: &[u8],
+    protocol: ProtocolVersion,
+) -> Option<Payload> {
     let Ok(length) = file.read(buffer) else {
         return None;
     };
@@ -202,7 +207,7 @@ fn load(file: &mut RegularFile, buffer: &mut [u8; MAX_PAYLOAD], name: &[u8]) -> 
     };
     let header = image.windows(core::mem::size_of::<Header>()).find_map(|bytes| {
         let header = unsafe { (bytes.as_ptr().cast::<Header>()).read_unaligned() };
-        header.valid_for(name).then_some(header)
+        header.valid_for(name, protocol).then_some(header)
     })?;
     let entry = header.entry_address();
     let base_address = base as usize;

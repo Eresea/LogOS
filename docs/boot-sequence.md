@@ -38,8 +38,10 @@ The fourth stage starts the staged Ring-3 terminal through the service gate afte
 installed. Core routes normal input, presentation, and bounded command requests through that gate;
 the terminal handles local redraw while Core delegates system operations to ACPI or platform IPC.
 Escape or the authorized `recovery` command returns to the direct recovery console. A failed
-Terminal or Sessions task gets one reset-and-reentry attempt with a new generation-tagged handle;
-a failed restart enters the direct recovery console.
+Terminal task gets one clean address-space replacement with a new generation-tagged handle; a
+failed replacement enters the direct recovery console. Sessions, Store, and Network restart
+independently with bounded backoff; their exhaustion leaves the normal terminal usable in degraded
+mode. A replacement never reuses the failed service's mappings or context.
 
 ## Persistence ordering and recovery
 

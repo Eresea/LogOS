@@ -2,7 +2,7 @@
 #![cfg_attr(not(test), no_std)]
 
 use logos_abi::{NamespaceId, PageHandle, StoreOperation, StoreRequest, Syscall, VersionSelector};
-use logos_service_rt::{Context, Header, MAX_TEXT, SharedPage};
+use logos_service_rt::{Context, Header, MAX_TEXT, ProtocolVersion, SharedPage};
 use logos_terminal::{
     command::{self, Local, Resolution},
     input::{self, LogicalKey},
@@ -167,7 +167,8 @@ fn save_history(terminal: &Model, context: &mut Context, next: &mut u32) -> bool
 
 #[used]
 #[unsafe(link_section = ".logos")]
-static HEADER: Header = Header::new(*b"terminal\0\0\0\0\0\0\0\0", logos_service_entry);
+static HEADER: Header =
+    Header::new(*b"terminal\0\0\0\0\0\0\0\0", ProtocolVersion::V1, logos_service_entry);
 
 #[unsafe(no_mangle)]
 extern "C" fn logos_service_entry(context: logos_service_rt::EntryContext) -> ! {

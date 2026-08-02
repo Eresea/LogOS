@@ -5,9 +5,9 @@ use core::{arch::asm, mem::MaybeUninit, ptr::NonNull};
 #[cfg(target_os = "uefi")]
 use core::panic::PanicInfo;
 
-use logos_core::native_service::{self};
-pub use logos_core::native_service::{
-    BlockPage, Context as RawContext, Header, MAX_TEXT, NetworkPages,
+use logos_abi::service as native_service;
+pub use logos_abi::service::{
+    BlockPage, Context as RawContext, Header, MAX_TEXT, NetworkPages, ProtocolVersion,
 };
 
 pub type EntryContext = *mut RawContext;

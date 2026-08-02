@@ -4,7 +4,7 @@
 use core::mem::MaybeUninit;
 use core::mem::size_of;
 
-use logos_service_rt::{BlockClient, BlockError, Context, Header};
+use logos_service_rt::{BlockClient, BlockError, Context, Header, ProtocolVersion};
 use logos_store::{Error, Recovery, SECTOR_SIZE, SectorBackend, Store};
 
 use logos_storage_service::protocol::{ReadSelection, ReplaceTransaction};
@@ -24,7 +24,8 @@ struct RuntimeState {
 
 #[used]
 #[unsafe(link_section = ".logos")]
-static HEADER: Header = Header::new(*b"storage\0\0\0\0\0\0\0\0\0", logos_service_entry);
+static HEADER: Header =
+    Header::new(*b"storage\0\0\0\0\0\0\0\0\0", ProtocolVersion::V1, logos_service_entry);
 
 struct BlockBackend {
     client: BlockClient,

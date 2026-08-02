@@ -12,7 +12,7 @@ use logos_net::{
     encode_dhcp_discover, encode_dhcp_request, encode_ethernet, encode_ipv4, encode_udp, parse_arp,
     parse_dhcp, parse_ethernet, parse_ipv4, parse_udp,
 };
-use logos_service_rt::{Context, Header};
+use logos_service_rt::{Context, Header, ProtocolVersion};
 
 const DHCP_CLIENT: u16 = 68;
 const DHCP_SERVER: u16 = 67;
@@ -22,7 +22,8 @@ const CLIENT_PAYLOAD_OFFSET: usize = 2048;
 
 #[used]
 #[unsafe(link_section = ".logos")]
-static HEADER: Header = Header::new(*b"network\0\0\0\0\0\0\0\0\0", logos_service_entry);
+static HEADER: Header =
+    Header::new(*b"network\0\0\0\0\0\0\0\0\0", ProtocolVersion::V1, logos_service_entry);
 
 #[unsafe(no_mangle)]
 extern "C" fn logos_service_entry(context: logos_service_rt::EntryContext) -> ! {

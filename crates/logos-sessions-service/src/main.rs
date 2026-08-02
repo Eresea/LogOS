@@ -2,11 +2,12 @@
 #![no_std]
 
 use logos_abi::{Effect, EffectResult, SessionRequest, Syscall};
-use logos_service_rt::{Context, Header};
+use logos_service_rt::{Context, Header, ProtocolVersion};
 
 #[used]
 #[unsafe(link_section = ".logos")]
-static HEADER: Header = Header::new(*b"sessions\0\0\0\0\0\0\0\0", logos_service_entry);
+static HEADER: Header =
+    Header::new(*b"sessions\0\0\0\0\0\0\0\0", ProtocolVersion::V1, logos_service_entry);
 
 #[unsafe(no_mangle)]
 extern "C" fn logos_service_entry(context: logos_service_rt::EntryContext) -> ! {
