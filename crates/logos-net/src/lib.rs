@@ -1,0 +1,1007 @@
+#![no_std]
+
+pub const ETHERNET_MIN_FRAME: usize = 60;
+pub const ETHERNET_HEADER: usize = 14;
+pub const ETHERNET_MAX_FRAME: usize = 1514;
+pub const IPV4_HEADER: usize = 20;
+pub const UDP_HEADER: usize = 8;
+pub const MAX_UDP_PAYLOAD: usize = 1472;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Error {
+    Short,
+    Length,
+    Unsupported,
+    Checksum,
+    Fragmented,
+    Malformed,
+    Destination,
+    TooLarge,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Mac(pub [u8; 6]);
+
+impl Mac {
+    pub const BROADCAST: Self = Self([0xff; 6]);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Ipv4(pub [u8; 4]);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Ethernet<'a> {
+    pub destination: Mac,
+    pub source: Mac,
+    pub ether_type: u16,
+    pub payload: &'a [u8],
+}
+
+pub fn parse_ethernet<'a>(frame: &'a [u8], local: Mac) -> Result<Ethernet<'a>, Error> {
+    if frame.len() < ETHERNET_HEADER || frame.len() > ETHERNET_MAX_FRAME {
+        return Err(Error::Length);
+    }
+    let destination = Mac(frame[0..6].try_into().map_err(|_| Error::Short)?);
+    if destination != local && destination != Mac::BROADCAST {
+        return Err(Error::Destination);
+    }
+    let source = Mac(frame[6..12].try_into().map_err(|_| Error::Short)?);
+    let ether_type = u16::from_be_bytes([frame[12], frame[13]]);
+    if matches!(ether_type, 0x8100 | 0x88a8) {
+        return Err(Error::Unsupported);
+    }
+    if !matches!(ether_type, 0x0800 | 0x0806) {
+        return Err(Error::Unsupported);
+    }
+    Ok(Ethernet { destination, source, ether_type, payload: &frame[ETHERNET_HEADER..] })
+}
+
+pub fn encode_ethernet(
+    output: &mut [u8],
+    destination: Mac,
+    source: Mac,
+    ether_type: u16,
+    payload: &[u8],
+) -> Result<usize, Error> {
+    let length = ETHERNET_HEADER.checked_add(payload.len()).ok_or(Error::TooLarge)?;
+    if length > ETHERNET_MAX_FRAME || payload.is_empty() {
+        return Err(Error::Length);
+    }
+    let frame_length = length.max(ETHERNET_MIN_FRAME);
+    if output.len() < frame_length {
+        return Err(Error::Short);
+    }
+    output[..frame_length].fill(0);
+    output[0..6].copy_from_slice(&destination.0);
+    output[6..12].copy_from_slice(&source.0);
+    output[12..14].copy_from_slice(&ether_type.to_be_bytes());
+    output[14..length].copy_from_slice(payload);
+    Ok(frame_length)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Arp {
+    pub reply: bool,
+    pub sender_mac: Mac,
+    pub sender_ip: Ipv4,
+    pub target_mac: Mac,
+    pub target_ip: Ipv4,
+}
+
+pub fn parse_arp(bytes: &[u8]) -> Result<Arp, Error> {
+    if bytes.len() < 28 {
+        return Err(Error::Short);
+    }
+    if u16::from_be_bytes([bytes[0], bytes[1]]) != 1
+        || u16::from_be_bytes([bytes[2], bytes[3]]) != 0x0800
+        || bytes[4] != 6
+        || bytes[5] != 4
+    {
+        return Err(Error::Unsupported);
+    }
+    let opcode = u16::from_be_bytes([bytes[6], bytes[7]]);
+    if !matches!(opcode, 1 | 2) {
+        return Err(Error::Unsupported);
+    }
+    Ok(Arp {
+        reply: opcode == 2,
+        sender_mac: Mac(bytes[8..14].try_into().map_err(|_| Error::Short)?),
+        sender_ip: Ipv4(bytes[14..18].try_into().map_err(|_| Error::Short)?),
+        target_mac: Mac(bytes[18..24].try_into().map_err(|_| Error::Short)?),
+        target_ip: Ipv4(bytes[24..28].try_into().map_err(|_| Error::Short)?),
+    })
+}
+
+pub fn encode_arp(output: &mut [u8], packet: Arp) -> Result<usize, Error> {
+    if output.len() < 28 {
+        return Err(Error::Short);
+    }
+    output[..28].fill(0);
+    output[0..2].copy_from_slice(&1u16.to_be_bytes());
+    output[2..4].copy_from_slice(&0x0800u16.to_be_bytes());
+    output[4] = 6;
+    output[5] = 4;
+    output[6..8].copy_from_slice(&(if packet.reply { 2u16 } else { 1 }).to_be_bytes());
+    output[8..14].copy_from_slice(&packet.sender_mac.0);
+    output[14..18].copy_from_slice(&packet.sender_ip.0);
+    output[18..24].copy_from_slice(&packet.target_mac.0);
+    output[24..28].copy_from_slice(&packet.target_ip.0);
+    Ok(28)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Ipv4Packet<'a> {
+    pub source: Ipv4,
+    pub destination: Ipv4,
+    pub identification: u16,
+    pub ttl: u8,
+    pub protocol: u8,
+    pub payload: &'a [u8],
+}
+
+pub fn parse_ipv4<'a>(bytes: &'a [u8], local: Ipv4) -> Result<Ipv4Packet<'a>, Error> {
+    if bytes.len() < IPV4_HEADER {
+        return Err(Error::Short);
+    }
+    if bytes[0] >> 4 != 4 {
+        return Err(Error::Unsupported);
+    }
+    let header_length = usize::from(bytes[0] & 0x0f) * 4;
+    if header_length < IPV4_HEADER || bytes.len() < header_length {
+        return Err(Error::Length);
+    }
+    let total_length = usize::from(u16::from_be_bytes([bytes[2], bytes[3]]));
+    if total_length < header_length || total_length > bytes.len() {
+        return Err(Error::Length);
+    }
+    if u16::from_be_bytes([bytes[6], bytes[7]]) & 0x3fff != 0 {
+        return Err(Error::Fragmented);
+    }
+    if checksum(&bytes[..header_length]) != 0 {
+        return Err(Error::Checksum);
+    }
+    let destination = Ipv4(bytes[16..20].try_into().map_err(|_| Error::Short)?);
+    if destination != local {
+        return Err(Error::Destination);
+    }
+    Ok(Ipv4Packet {
+        source: Ipv4(bytes[12..16].try_into().map_err(|_| Error::Short)?),
+        destination,
+        identification: u16::from_be_bytes([bytes[4], bytes[5]]),
+        ttl: bytes[8],
+        protocol: bytes[9],
+        payload: &bytes[header_length..total_length],
+    })
+}
+
+pub fn encode_ipv4(
+    output: &mut [u8],
+    source: Ipv4,
+    destination: Ipv4,
+    identification: u16,
+    protocol: u8,
+    payload: &[u8],
+) -> Result<usize, Error> {
+    let length = IPV4_HEADER.checked_add(payload.len()).ok_or(Error::TooLarge)?;
+    if length > usize::from(u16::MAX) || output.len() < length {
+        return Err(Error::TooLarge);
+    }
+    output[..length].fill(0);
+    output[0] = 0x45;
+    output[2..4].copy_from_slice(&(length as u16).to_be_bytes());
+    output[4..6].copy_from_slice(&identification.to_be_bytes());
+    output[8] = 64;
+    output[9] = protocol;
+    output[12..16].copy_from_slice(&source.0);
+    output[16..20].copy_from_slice(&destination.0);
+    let header_checksum = checksum_bytes(&output[..IPV4_HEADER]);
+    output[10..12].copy_from_slice(&header_checksum);
+    output[IPV4_HEADER..length].copy_from_slice(payload);
+    Ok(length)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Udp<'a> {
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub payload: &'a [u8],
+}
+
+pub fn parse_udp<'a>(bytes: &'a [u8], source: Ipv4, destination: Ipv4) -> Result<Udp<'a>, Error> {
+    if bytes.len() < UDP_HEADER {
+        return Err(Error::Short);
+    }
+    let length = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+    if !(UDP_HEADER..=bytes.len()).contains(&length) {
+        return Err(Error::Length);
+    }
+    let checksum_value = u16::from_be_bytes([bytes[6], bytes[7]]);
+    if checksum_value != 0 && pseudo_checksum(source, destination, 17, &bytes[..length]) != 0 {
+        return Err(Error::Checksum);
+    }
+    Ok(Udp {
+        source_port: u16::from_be_bytes([bytes[0], bytes[1]]),
+        destination_port: u16::from_be_bytes([bytes[2], bytes[3]]),
+        payload: &bytes[UDP_HEADER..length],
+    })
+}
+
+pub fn encode_udp(
+    output: &mut [u8],
+    source: Ipv4,
+    destination: Ipv4,
+    source_port: u16,
+    destination_port: u16,
+    payload: &[u8],
+) -> Result<usize, Error> {
+    let length = UDP_HEADER.checked_add(payload.len()).ok_or(Error::TooLarge)?;
+    if length > usize::from(u16::MAX) || output.len() < length {
+        return Err(Error::TooLarge);
+    }
+    output[..length].fill(0);
+    output[0..2].copy_from_slice(&source_port.to_be_bytes());
+    output[2..4].copy_from_slice(&destination_port.to_be_bytes());
+    output[4..6].copy_from_slice(&(length as u16).to_be_bytes());
+    output[UDP_HEADER..length].copy_from_slice(payload);
+    let value = pseudo_checksum(source, destination, 17, &output[..length]);
+    output[6..8].copy_from_slice(&(if value == 0 { 0xffff } else { value }).to_be_bytes());
+    Ok(length)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IcmpEcho<'a> {
+    pub reply: bool,
+    pub identifier: u16,
+    pub sequence: u16,
+    pub payload: &'a [u8],
+}
+
+pub fn parse_icmp_echo<'a>(bytes: &'a [u8]) -> Result<IcmpEcho<'a>, Error> {
+    if bytes.len() < 8 || checksum(bytes) != 0 || bytes[1] != 0 {
+        return Err(Error::Malformed);
+    }
+    if !matches!(bytes[0], 0 | 8) {
+        return Err(Error::Unsupported);
+    }
+    Ok(IcmpEcho {
+        reply: bytes[0] == 0,
+        identifier: u16::from_be_bytes([bytes[4], bytes[5]]),
+        sequence: u16::from_be_bytes([bytes[6], bytes[7]]),
+        payload: &bytes[8..],
+    })
+}
+
+pub fn encode_icmp_echo(
+    output: &mut [u8],
+    reply: bool,
+    identifier: u16,
+    sequence: u16,
+    payload: &[u8],
+) -> Result<usize, Error> {
+    let length = 8usize.checked_add(payload.len()).ok_or(Error::TooLarge)?;
+    if output.len() < length {
+        return Err(Error::Short);
+    }
+    output[..length].fill(0);
+    output[0] = if reply { 0 } else { 8 };
+    output[4..6].copy_from_slice(&identifier.to_be_bytes());
+    output[6..8].copy_from_slice(&sequence.to_be_bytes());
+    output[8..length].copy_from_slice(payload);
+    let packet_checksum = checksum_bytes(&output[..length]);
+    output[2..4].copy_from_slice(&packet_checksum);
+    Ok(length)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Dhcp<'a> {
+    pub xid: u32,
+    pub offered: Ipv4,
+    pub client_mac: Mac,
+    options: &'a [u8],
+}
+
+impl<'a> Dhcp<'a> {
+    pub fn option(self, wanted: u8) -> Result<Option<&'a [u8]>, Error> {
+        let mut offset = 0;
+        let mut found = None;
+        while offset < self.options.len() {
+            let code = self.options[offset];
+            offset += 1;
+            if code == 255 {
+                break;
+            }
+            if code == 0 {
+                continue;
+            }
+            let length = usize::from(*self.options.get(offset).ok_or(Error::Short)?);
+            offset += 1;
+            let end = offset.checked_add(length).ok_or(Error::Length)?;
+            let value = self.options.get(offset..end).ok_or(Error::Short)?;
+            if code == wanted {
+                if found.is_some() {
+                    return Err(Error::Malformed);
+                }
+                found = Some(value);
+            }
+            offset = end;
+        }
+        Ok(found)
+    }
+}
+
+pub fn parse_dhcp<'a>(bytes: &'a [u8]) -> Result<Dhcp<'a>, Error> {
+    if bytes.len() < 240 || bytes[0] != 2 || bytes[1] != 1 || bytes[2] != 6 {
+        return Err(Error::Malformed);
+    }
+    if bytes[236..240] != [99, 130, 83, 99] {
+        return Err(Error::Malformed);
+    }
+    let mut client_mac = [0; 6];
+    client_mac.copy_from_slice(&bytes[28..34]);
+    let offered = Ipv4(bytes[16..20].try_into().map_err(|_| Error::Short)?);
+    let options = &bytes[240..];
+    let mut offset = 0;
+    let mut end = false;
+    while offset < options.len() {
+        let code = options[offset];
+        offset += 1;
+        if code == 255 {
+            end = true;
+            break;
+        }
+        if code == 0 {
+            continue;
+        }
+        let length = usize::from(*options.get(offset).ok_or(Error::Short)?);
+        offset += 1;
+        offset = offset.checked_add(length).ok_or(Error::Length)?;
+        if offset > options.len() {
+            return Err(Error::Short);
+        }
+    }
+    if !end {
+        return Err(Error::Malformed);
+    }
+    Ok(Dhcp {
+        xid: u32::from_be_bytes(bytes[4..8].try_into().map_err(|_| Error::Short)?),
+        offered,
+        client_mac: Mac(client_mac),
+        options,
+    })
+}
+
+pub const fn checksum(bytes: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        sum += u16::from_be_bytes([bytes[index], bytes[index + 1]]) as u32;
+        index += 2;
+    }
+    if index < bytes.len() {
+        sum += (bytes[index] as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+const fn checksum_bytes(bytes: &[u8]) -> [u8; 2] {
+    checksum(bytes).to_be_bytes()
+}
+
+fn pseudo_checksum(source: Ipv4, destination: Ipv4, protocol: u8, payload: &[u8]) -> u16 {
+    let mut sum = u32::from(u16::from_be_bytes([source.0[0], source.0[1]]))
+        + u32::from(u16::from_be_bytes([source.0[2], source.0[3]]))
+        + u32::from(u16::from_be_bytes([destination.0[0], destination.0[1]]))
+        + u32::from(u16::from_be_bytes([destination.0[2], destination.0[3]]))
+        + u32::from(protocol)
+        + u32::try_from(payload.len()).unwrap_or(u32::MAX);
+    let mut index = 0;
+    while index + 1 < payload.len() {
+        sum += u32::from(u16::from_be_bytes([payload[index], payload[index + 1]]));
+        index += 2;
+    }
+    if index < payload.len() {
+        sum += u32::from(payload[index]) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StateError {
+    Full,
+    AddressInUse,
+    Invalid,
+    Busy,
+    NotFound,
+    NoData,
+    MessageTooLarge,
+    Stale,
+    Owner,
+    QueueFull,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EndpointId(u32);
+
+impl EndpointId {
+    pub const fn slot(self) -> usize {
+        (self.0 as u16).wrapping_sub(1) as usize
+    }
+
+    pub const fn generation(self) -> u16 {
+        (self.0 >> 16) as u16
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Receive<'a> {
+    pub source: Ipv4,
+    pub source_port: u16,
+    pub payload: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PendingKind {
+    Send,
+    Receive,
+    Echo,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Pending {
+    pub id: u32,
+    pub endpoint: EndpointId,
+    pub kind: PendingKind,
+    pub deadline: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NetworkConfig {
+    pub address: Ipv4,
+    pub mask: Ipv4,
+    pub router: Option<Ipv4>,
+    pub lease_until: u64,
+    pub renew_at: u64,
+    pub rebind_at: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DhcpPhase {
+    Init,
+    Selecting,
+    Requesting,
+    Bound,
+    Renewing,
+    Rebinding,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DhcpAction {
+    None,
+    Discover,
+    Request,
+    Renew,
+    Rebind,
+    Expired,
+}
+
+#[derive(Clone, Copy)]
+struct DhcpMachine {
+    phase: DhcpPhase,
+    xid: u32,
+    deadline: u64,
+    retry: u8,
+    config: Option<NetworkConfig>,
+}
+
+impl DhcpMachine {
+    const fn new() -> Self {
+        Self { phase: DhcpPhase::Init, xid: 0, deadline: 0, retry: 0, config: None }
+    }
+
+    fn start(&mut self, now: u64, xid: u32) {
+        self.phase = DhcpPhase::Selecting;
+        self.xid = xid;
+        self.retry = 0;
+        self.deadline = now;
+        self.config = None;
+    }
+
+    fn offer(&mut self, now: u64, xid: u32) -> bool {
+        if self.phase != DhcpPhase::Selecting || self.xid != xid {
+            return false;
+        }
+        self.phase = DhcpPhase::Requesting;
+        self.retry = 0;
+        self.deadline = now;
+        true
+    }
+
+    fn acknowledge(&mut self, now: u64, xid: u32, config: NetworkConfig) -> bool {
+        if !matches!(self.phase, DhcpPhase::Requesting | DhcpPhase::Renewing | DhcpPhase::Rebinding)
+            || self.xid != xid
+            || config.address.0 == [0; 4]
+            || config.mask.0 == [0; 4]
+            || config.lease_until <= now
+        {
+            return false;
+        }
+        self.phase = DhcpPhase::Bound;
+        self.deadline = config.renew_at;
+        self.config = Some(config);
+        true
+    }
+
+    fn nak(&mut self) {
+        self.phase = DhcpPhase::Init;
+        self.deadline = 0;
+        self.retry = 0;
+        self.config = None;
+    }
+
+    fn tick(&mut self, now: u64) -> DhcpAction {
+        if now < self.deadline {
+            return DhcpAction::None;
+        }
+        match self.phase {
+            DhcpPhase::Init => DhcpAction::None,
+            DhcpPhase::Selecting => {
+                let action = DhcpAction::Discover;
+                self.retry = self.retry.saturating_add(1).min(4);
+                self.deadline = now.saturating_add(1u64 << self.retry.min(3));
+                action
+            }
+            DhcpPhase::Requesting => {
+                let action = DhcpAction::Request;
+                self.retry = self.retry.saturating_add(1).min(4);
+                self.deadline = now.saturating_add(1u64 << self.retry.min(3));
+                action
+            }
+            DhcpPhase::Bound => {
+                let config = self.config.expect("bound DHCP state has configuration");
+                if now >= config.lease_until {
+                    self.nak();
+                    DhcpAction::Expired
+                } else if now >= config.rebind_at {
+                    self.phase = DhcpPhase::Rebinding;
+                    self.deadline = now;
+                    DhcpAction::Rebind
+                } else if now >= config.renew_at {
+                    self.phase = DhcpPhase::Renewing;
+                    self.deadline = now;
+                    DhcpAction::Renew
+                } else {
+                    DhcpAction::None
+                }
+            }
+            DhcpPhase::Renewing => {
+                let config = self.config.expect("renewing DHCP state has configuration");
+                if now >= config.lease_until {
+                    self.nak();
+                    DhcpAction::Expired
+                } else if now >= config.rebind_at {
+                    self.phase = DhcpPhase::Rebinding;
+                    self.deadline = now;
+                    DhcpAction::Rebind
+                } else {
+                    self.deadline = now.saturating_add(1);
+                    DhcpAction::Renew
+                }
+            }
+            DhcpPhase::Rebinding => {
+                let config = self.config.expect("rebinding DHCP state has configuration");
+                if now >= config.lease_until {
+                    self.nak();
+                    DhcpAction::Expired
+                } else {
+                    self.deadline = now.saturating_add(1);
+                    DhcpAction::Rebind
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Endpoint {
+    owner: u64,
+    port: u16,
+    active: bool,
+}
+
+#[derive(Clone, Copy)]
+struct Datagram {
+    endpoint: EndpointId,
+    source: Ipv4,
+    source_port: u16,
+    length: u16,
+    bytes: [u8; MAX_UDP_PAYLOAD],
+    active: bool,
+}
+
+impl Datagram {
+    const EMPTY: Self = Self {
+        endpoint: EndpointId(0),
+        source: Ipv4([0; 4]),
+        source_port: 0,
+        length: 0,
+        bytes: [0; MAX_UDP_PAYLOAD],
+        active: false,
+    };
+}
+
+#[derive(Clone, Copy)]
+struct ArpEntry {
+    ip: Ipv4,
+    mac: Mac,
+    expires: u64,
+    active: bool,
+}
+
+pub struct NetworkState {
+    generation: u16,
+    endpoints: [Endpoint; 8],
+    datagrams: [Datagram; 4],
+    arp: [ArpEntry; 8],
+    pending: Option<Pending>,
+    dhcp: DhcpMachine,
+}
+
+impl NetworkState {
+    pub const fn new() -> Self {
+        const ENDPOINT: Endpoint = Endpoint { owner: 0, port: 0, active: false };
+        const ARP: ArpEntry =
+            ArpEntry { ip: Ipv4([0; 4]), mac: Mac([0; 6]), expires: 0, active: false };
+        Self {
+            generation: 1,
+            endpoints: [ENDPOINT; 8],
+            datagrams: [Datagram::EMPTY; 4],
+            arp: [ARP; 8],
+            pending: None,
+            dhcp: DhcpMachine::new(),
+        }
+    }
+
+    pub const fn generation(&self) -> u16 {
+        self.generation
+    }
+
+    pub const fn pending(&self) -> Option<Pending> {
+        self.pending
+    }
+
+    pub fn bind(&mut self, owner: u64, port: u16) -> Result<EndpointId, StateError> {
+        if port == 0 {
+            return Err(StateError::Invalid);
+        }
+        if self.endpoints.iter().any(|endpoint| endpoint.active && endpoint.port == port) {
+            return Err(StateError::AddressInUse);
+        }
+        let (slot, endpoint) = self
+            .endpoints
+            .iter_mut()
+            .enumerate()
+            .find(|(_, endpoint)| !endpoint.active)
+            .ok_or(StateError::Full)?;
+        endpoint.owner = owner;
+        endpoint.port = port;
+        endpoint.active = true;
+        Ok(EndpointId((u32::from(self.generation) << 16) | (slot as u32 + 1)))
+    }
+
+    pub fn close(&mut self, owner: u64, endpoint: EndpointId) -> Result<(), StateError> {
+        let slot = self.endpoint_slot(owner, endpoint)?;
+        self.endpoints[slot].active = false;
+        for datagram in &mut self.datagrams {
+            if datagram.active && datagram.endpoint == endpoint {
+                datagram.active = false;
+            }
+        }
+        if self.pending.is_some_and(|pending| pending.endpoint == endpoint) {
+            self.pending = None;
+        }
+        Ok(())
+    }
+
+    pub fn enqueue(
+        &mut self,
+        endpoint: EndpointId,
+        source: Ipv4,
+        source_port: u16,
+        payload: &[u8],
+    ) -> Result<(), StateError> {
+        if payload.len() > MAX_UDP_PAYLOAD {
+            return Err(StateError::MessageTooLarge);
+        }
+        self.endpoint_slot_any(endpoint)?;
+        let datagram = self
+            .datagrams
+            .iter_mut()
+            .find(|datagram| !datagram.active)
+            .ok_or(StateError::QueueFull)?;
+        datagram.endpoint = endpoint;
+        datagram.source = source;
+        datagram.source_port = source_port;
+        datagram.length = payload.len() as u16;
+        datagram.bytes[..payload.len()].copy_from_slice(payload);
+        datagram.active = true;
+        Ok(())
+    }
+
+    pub fn receive<'a>(
+        &'a mut self,
+        owner: u64,
+        endpoint: EndpointId,
+        output: &'a mut [u8],
+    ) -> Result<Receive<'a>, StateError> {
+        self.endpoint_slot(owner, endpoint)?;
+        let index = self
+            .datagrams
+            .iter()
+            .position(|datagram| datagram.active && datagram.endpoint == endpoint)
+            .ok_or(StateError::NoData)?;
+        let datagram = &mut self.datagrams[index];
+        let length = usize::from(datagram.length);
+        if output.len() < length {
+            return Err(StateError::MessageTooLarge);
+        }
+        output[..length].copy_from_slice(&datagram.bytes[..length]);
+        datagram.active = false;
+        Ok(Receive {
+            source: datagram.source,
+            source_port: datagram.source_port,
+            payload: &output[..length],
+        })
+    }
+
+    pub fn begin_pending(&mut self, pending: Pending) -> Result<(), StateError> {
+        if self.pending.is_some() || pending.endpoint.0 == 0 {
+            return Err(StateError::Busy);
+        }
+        self.endpoint_slot_any(pending.endpoint)?;
+        if pending.id == 0 || pending.deadline == 0 {
+            return Err(StateError::Invalid);
+        }
+        self.pending = Some(pending);
+        Ok(())
+    }
+
+    pub fn finish_pending(&mut self, id: u32) -> Result<Pending, StateError> {
+        if self.pending.is_some_and(|pending| pending.id == id) {
+            return self.pending.take().ok_or(StateError::NotFound);
+        }
+        Err(StateError::NotFound)
+    }
+
+    pub fn cancel_pending(&mut self, id: u32) -> Result<Pending, StateError> {
+        self.finish_pending(id)
+    }
+
+    pub fn learn_arp(&mut self, ip: Ipv4, mac: Mac, now: u64, ttl: u64) {
+        let index = self
+            .arp
+            .iter()
+            .position(|entry| entry.active && entry.ip == ip)
+            .or_else(|| self.arp.iter().position(|entry| !entry.active || entry.expires <= now))
+            .unwrap_or(0);
+        let entry = &mut self.arp[index];
+        *entry = ArpEntry { ip, mac, expires: now.saturating_add(ttl), active: true };
+    }
+
+    pub fn resolve_arp(&self, ip: Ipv4, now: u64) -> Option<Mac> {
+        self.arp
+            .iter()
+            .find(|entry| entry.active && entry.ip == ip && entry.expires > now)
+            .map(|entry| entry.mac)
+    }
+
+    pub fn reset(&mut self) {
+        self.generation = self.generation.wrapping_add(1).max(1);
+        for endpoint in &mut self.endpoints {
+            endpoint.active = false;
+        }
+        for datagram in &mut self.datagrams {
+            datagram.active = false;
+        }
+        for entry in &mut self.arp {
+            entry.active = false;
+        }
+        self.pending = None;
+        self.dhcp = DhcpMachine::new();
+    }
+
+    pub fn dhcp_start(&mut self, now: u64, xid: u32) {
+        self.dhcp.start(now, xid);
+    }
+
+    pub fn dhcp_offer(&mut self, now: u64, xid: u32) -> bool {
+        self.dhcp.offer(now, xid)
+    }
+
+    pub fn dhcp_acknowledge(&mut self, now: u64, xid: u32, config: NetworkConfig) -> bool {
+        self.dhcp.acknowledge(now, xid, config)
+    }
+
+    pub fn dhcp_nak(&mut self) {
+        self.dhcp.nak();
+        self.reset_protocol_state();
+    }
+
+    pub fn dhcp_tick(&mut self, now: u64) -> DhcpAction {
+        let action = self.dhcp.tick(now);
+        if action == DhcpAction::Expired {
+            self.reset_protocol_state();
+        }
+        action
+    }
+
+    fn reset_protocol_state(&mut self) {
+        for endpoint in &mut self.endpoints {
+            endpoint.active = false;
+        }
+        for datagram in &mut self.datagrams {
+            datagram.active = false;
+        }
+        for entry in &mut self.arp {
+            entry.active = false;
+        }
+        self.pending = None;
+    }
+
+    fn endpoint_slot(&self, owner: u64, endpoint: EndpointId) -> Result<usize, StateError> {
+        let slot = self.endpoint_slot_any(endpoint)?;
+        if self.endpoints[slot].owner != owner {
+            return Err(StateError::Owner);
+        }
+        Ok(slot)
+    }
+
+    fn endpoint_slot_any(&self, endpoint: EndpointId) -> Result<usize, StateError> {
+        if endpoint.generation() != self.generation || endpoint.slot() >= self.endpoints.len() {
+            return Err(StateError::Stale);
+        }
+        let slot = endpoint.slot();
+        self.endpoints[slot].active.then_some(slot).ok_or(StateError::NotFound)
+    }
+}
+
+impl Default for NetworkState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LOCAL_MAC: Mac = Mac([2, 0, 0, 0, 0, 1]);
+    const LOCAL_IP: Ipv4 = Ipv4([192, 0, 2, 2]);
+    const PEER_IP: Ipv4 = Ipv4([192, 0, 2, 1]);
+
+    #[test]
+    fn ethernet_and_arp_round_trip() {
+        let arp = Arp {
+            reply: true,
+            sender_mac: LOCAL_MAC,
+            sender_ip: LOCAL_IP,
+            target_mac: Mac::BROADCAST,
+            target_ip: PEER_IP,
+        };
+        let mut payload = [0; 28];
+        let length = encode_arp(&mut payload, arp).unwrap();
+        assert_eq!(parse_arp(&payload[..length]).unwrap(), arp);
+        let mut frame = [0; ETHERNET_MAX_FRAME];
+        let length = encode_ethernet(&mut frame, LOCAL_MAC, LOCAL_MAC, 0x0806, &payload).unwrap();
+        assert_eq!(parse_ethernet(&frame[..length], LOCAL_MAC).unwrap().ether_type, 0x0806);
+        assert_eq!(parse_ethernet(&frame[..length], Mac([9; 6])), Err(Error::Destination));
+    }
+
+    #[test]
+    fn ipv4_udp_and_icmp_round_trip() {
+        let mut udp = [0; UDP_HEADER + MAX_UDP_PAYLOAD];
+        let udp_length = encode_udp(&mut udp, LOCAL_IP, PEER_IP, 4000, 4001, b"hello").unwrap();
+        let mut ip = [0; IPV4_HEADER + UDP_HEADER + 5];
+        let ip_length = encode_ipv4(&mut ip, LOCAL_IP, PEER_IP, 7, 17, &udp[..udp_length]).unwrap();
+        assert_eq!(parse_ipv4(&ip[..ip_length], PEER_IP).unwrap().payload.len(), udp_length);
+        assert_eq!(parse_udp(&udp[..udp_length], LOCAL_IP, PEER_IP).unwrap().payload, b"hello");
+        let mut icmp = [0; 16];
+        let icmp_length = encode_icmp_echo(&mut icmp, false, 3, 4, b"ping").unwrap();
+        assert_eq!(parse_icmp_echo(&icmp[..icmp_length]).unwrap().sequence, 4);
+        assert_eq!(parse_icmp_echo(&icmp[..icmp_length]).unwrap().payload, b"ping");
+    }
+
+    #[test]
+    fn strict_prefixes_fail_and_bad_protocol_fields_do_not_parse() {
+        let mut udp = [0; UDP_HEADER + 5];
+        let length = encode_udp(&mut udp, LOCAL_IP, PEER_IP, 1, 2, b"hello").unwrap();
+        for prefix in 0..length {
+            assert!(parse_udp(&udp[..prefix], LOCAL_IP, PEER_IP).is_err());
+        }
+        let mut ip = [0; IPV4_HEADER + UDP_HEADER + 5];
+        let length = encode_ipv4(&mut ip, LOCAL_IP, PEER_IP, 1, 17, &udp[..]).unwrap();
+        for prefix in 0..length {
+            assert!(parse_ipv4(&ip[..prefix], PEER_IP).is_err());
+        }
+        ip[8] = 0;
+        assert_eq!(parse_ipv4(&ip, PEER_IP), Err(Error::Checksum));
+        udp[4..6].copy_from_slice(&3u16.to_be_bytes());
+        assert_eq!(parse_udp(&udp, LOCAL_IP, PEER_IP), Err(Error::Length));
+    }
+
+    #[test]
+    fn dhcp_options_are_bounded_and_duplicates_rejected() {
+        let mut packet = [0; 247];
+        packet[0] = 2;
+        packet[1] = 1;
+        packet[2] = 6;
+        packet[4..8].copy_from_slice(&7u32.to_be_bytes());
+        packet[28..34].copy_from_slice(&LOCAL_MAC.0);
+        packet[236..240].copy_from_slice(&[99, 130, 83, 99]);
+        packet[240..247].copy_from_slice(&[53, 1, 2, 53, 1, 2, 255]);
+        let dhcp = parse_dhcp(&packet).unwrap();
+        assert_eq!(dhcp.option(53), Err(Error::Malformed));
+        packet[240..247].copy_from_slice(&[53, 5, 2, 0, 255, 0, 0]);
+        assert_eq!(parse_dhcp(&packet[..245]), Err(Error::Short));
+    }
+
+    #[test]
+    fn bounded_endpoints_queue_pending_and_reset() {
+        let mut state = NetworkState::new();
+        let endpoint = state.bind(7, 4000).unwrap();
+        assert_eq!(state.bind(8, 4000), Err(StateError::AddressInUse));
+        assert_eq!(state.bind(7, 0), Err(StateError::Invalid));
+        state.enqueue(endpoint, PEER_IP, 4001, b"hello").unwrap();
+        let mut output = [0; 5];
+        let received = state.receive(7, endpoint, &mut output).unwrap();
+        assert_eq!(received.source, PEER_IP);
+        assert_eq!(received.payload, b"hello");
+        assert_eq!(state.receive(7, endpoint, &mut output), Err(StateError::NoData));
+        assert_eq!(
+            state.begin_pending(Pending {
+                id: 1,
+                endpoint,
+                kind: PendingKind::Receive,
+                deadline: 10
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            state.begin_pending(Pending { id: 2, endpoint, kind: PendingKind::Send, deadline: 10 }),
+            Err(StateError::Busy)
+        );
+        assert_eq!(state.cancel_pending(1).unwrap().kind, PendingKind::Receive);
+        state.learn_arp(PEER_IP, Mac([3; 6]), 1, 10);
+        assert_eq!(state.resolve_arp(PEER_IP, 2), Some(Mac([3; 6])));
+        state.reset();
+        assert_eq!(state.generation(), 2);
+        assert_eq!(state.receive(7, endpoint, &mut output), Err(StateError::Stale));
+    }
+
+    #[test]
+    fn dhcp_retries_and_lease_transitions_are_bounded() {
+        let mut state = NetworkState::new();
+        state.dhcp_start(0, 7);
+        assert_eq!(state.dhcp_tick(0), DhcpAction::Discover);
+        assert!(state.dhcp_offer(2, 7));
+        assert_eq!(state.dhcp_tick(2), DhcpAction::Request);
+        let config = NetworkConfig {
+            address: LOCAL_IP,
+            mask: Ipv4([255, 255, 255, 0]),
+            router: Some(PEER_IP),
+            lease_until: 20,
+            renew_at: 10,
+            rebind_at: 17,
+        };
+        assert!(state.dhcp_acknowledge(3, 7, config));
+        assert_eq!(state.dhcp_tick(9), DhcpAction::None);
+        assert_eq!(state.dhcp_tick(10), DhcpAction::Renew);
+        assert_eq!(state.dhcp_tick(17), DhcpAction::Rebind);
+        assert_eq!(state.dhcp_tick(20), DhcpAction::Expired);
+    }
+}
