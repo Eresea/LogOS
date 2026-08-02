@@ -3,6 +3,33 @@ pub const SERVICE: crate::platform::services::Service = crate::platform::service
 use logos_abi::{NetworkOperation, NetworkRequest};
 use logos_core::capabilities::CapabilityKind;
 
+#[derive(Clone, Copy)]
+pub struct PendingClient {
+    pub request: logos_abi::NetworkRequest,
+}
+
+#[derive(Clone, Copy)]
+pub struct PendingDevice {
+    pub request: logos_abi::NetworkDeviceRequest,
+}
+
+#[derive(Clone, Copy)]
+pub struct DmaPages {
+    pub rx_address: u64,
+    pub tx_address: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct Resources {
+    pub owner: u64,
+    pub rx: logos_abi::PageHandle,
+    pub rx_physical: u64,
+    pub rx_virtual: u64,
+    pub tx: logos_abi::PageHandle,
+    pub tx_physical: u64,
+    pub tx_virtual: u64,
+}
+
 pub fn capability(request: NetworkRequest) -> Option<(CapabilityKind, u64)> {
     match request.operation {
         NetworkOperation::Bind => Some((CapabilityKind::NetworkBind, request.peer.0)),

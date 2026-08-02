@@ -16,6 +16,10 @@ use crate::test_hooks;
 use crate::{boot, debug};
 #[cfg(feature = "test-hooks")]
 use core::cell::Cell;
+use network::{
+    DmaPages as NetworkDmaPages, PendingClient as PendingNetworkClient,
+    PendingDevice as PendingNetworkDevice, Resources as NetworkResources,
+};
 
 use logos_core::capabilities;
 use logos_terminal::{command, display, input, terminal, text};
@@ -885,7 +889,7 @@ pub(crate) fn main(
     let mut network_probe_due = 0;
     let mut network_reported = false;
     health.finish();
-    let mut store_relay_state = StoreRelayState::new();
+    let mut store_relay_state = storage::RelayState::new();
     if !native_input.deliver(logos_abi::InputEvent::STARTUP) {
         fail!(b"terminal history startup");
     }
@@ -1886,7 +1890,7 @@ pub(crate) fn main(
                         )
                         && (native_command.request().is_none()
                             || ({
-                                let reply = relay_session_request(
+                                let reply = session::relay_native(
                                     native_command,
                                     native_sessions_endpoint,
                                     &mut native_scheduler,
@@ -1909,7 +1913,7 @@ pub(crate) fn main(
                                 );
                                 reply.ok()
                                     && expected.is_none_or(|expected| {
-                                        matches!(reply, SessionRelay::Handled(true))
+                                        matches!(reply, session::Relay::Handled(true))
                                             && native_command.reply_matches(expected)
                                     })
                                     && (!expect_qwerty || input.layout() == input::Layout::Qwerty)
@@ -2390,7 +2394,7 @@ pub(crate) fn main(
                             break;
                         }
                         if native_command.request().is_some() {
-                            let mut relay = relay_session_request(
+                            let mut relay = session::relay_native(
                                 native_command,
                                 native_sessions_endpoint,
                                 &mut native_scheduler,
@@ -2410,25 +2414,25 @@ pub(crate) fn main(
                                 },
                             );
 
-                            if matches!(relay, SessionRelay::Handled(false)) {
+                            if matches!(relay, session::Relay::Handled(false)) {
                                 if sessions_handle.is_some() {
                                     let _ = native_services
                                         .failed(supervisor::NativeService::Sessions, tick);
                                 }
-                                relay = SessionRelay::Handled(
+                                relay = session::Relay::Handled(
                                     native_command.reply(b"session unavailable; retry command"),
                                 );
                             }
                             match relay {
-                                SessionRelay::Recovery => {
+                                session::Relay::Recovery => {
                                     debug::write_line(b"LogOS: recovery handoff requested");
                                     console_mode = mode::ConsoleMode::Recovery;
                                     break;
                                 }
-                                SessionRelay::Handled(false) => {
+                                session::Relay::Handled(false) => {
                                     debug::write_line(b"LogOS: Sessions relay failed");
                                 }
-                                SessionRelay::Handled(true) => {
+                                session::Relay::Handled(true) => {
                                     if !native_scheduler.wake(native_handle)
                                         || !native_scheduler.run(native_handle)
                                         || !resume_display(
@@ -2592,11 +2596,6 @@ fn dispatch_store_block(
         return true;
     };
     context.endpoint.reply(reply) && scheduler.wake(handle) && scheduler.run(handle)
-}
-
-#[derive(Clone, Copy)]
-struct PendingNetworkClient {
-    request: logos_abi::NetworkRequest,
 }
 
 const NETWORK_PAYLOAD_OFFSET: u64 = 2048;
@@ -2963,28 +2962,6 @@ fn poll_network(
     }
 }
 
-#[derive(Clone, Copy)]
-struct PendingNetworkDevice {
-    request: logos_abi::NetworkDeviceRequest,
-}
-
-#[derive(Clone, Copy)]
-struct NetworkDmaPages {
-    rx_address: u64,
-    tx_address: u64,
-}
-
-#[derive(Clone, Copy)]
-struct NetworkResources {
-    owner: u64,
-    rx: logos_abi::PageHandle,
-    rx_physical: u64,
-    rx_virtual: u64,
-    tx: logos_abi::PageHandle,
-    tx_physical: u64,
-    tx_virtual: u64,
-}
-
 fn network_info(info: network_driver::Info) -> logos_abi::NetworkInfo {
     logos_abi::NetworkInfo {
         mac: info.mac,
@@ -3133,31 +3110,9 @@ fn resume_probe_display(
     true
 }
 
-#[derive(Clone, Copy)]
-enum SessionRelay {
-    Handled(bool),
-    Recovery,
-}
-
-struct StoreRelayState {
-    read_namespace: Option<logos_abi::NamespaceId>,
-    replace_namespace: Option<logos_abi::NamespaceId>,
-}
-
-impl StoreRelayState {
-    const fn new() -> Self {
-        Self { read_namespace: None, replace_namespace: None }
-    }
-
-    fn clear(&mut self) {
-        self.read_namespace = None;
-        self.replace_namespace = None;
-    }
-}
-
 fn store_namespace(
     request: logos_abi::StoreRequest,
-    state: &StoreRelayState,
+    state: &storage::RelayState,
 ) -> Option<logos_abi::NamespaceId> {
     match request.operation {
         logos_abi::StoreOperation::OpenRead | logos_abi::StoreOperation::BeginReplace => {
@@ -3185,7 +3140,7 @@ fn store_capability(operation: logos_abi::StoreOperation) -> capabilities::Capab
 }
 
 fn update_store_state(
-    state: &mut StoreRelayState,
+    state: &mut storage::RelayState,
     request: logos_abi::StoreRequest,
     status: logos_abi::PersistenceStatus,
 ) {
@@ -3222,14 +3177,14 @@ fn relay_store_request(
     storage_handle: native_task::Handle,
     session: &session::Context,
     capabilities: &capabilities::CapabilityManager,
-    state: &mut StoreRelayState,
+    state: &mut storage::RelayState,
     tick: u64,
-) -> SessionRelay {
+) -> session::Relay {
     let Some(request) = terminal.request() else {
-        return SessionRelay::Handled(true);
+        return session::Relay::Handled(true);
     };
     if !storage.available() || !storage_handle.available() {
-        return SessionRelay::Handled(terminal.reply(logos_abi::StoreReply {
+        return session::Relay::Handled(terminal.reply(logos_abi::StoreReply {
             id: request.id,
             status: logos_abi::PersistenceStatus::Unavailable,
             version: 0,
@@ -3243,7 +3198,7 @@ fn relay_store_request(
             version: 0,
             length: 0,
         });
-        return SessionRelay::Handled(true);
+        return session::Relay::Handled(true);
     };
     if !session.allows_scoped(capabilities, store_capability(request.operation), namespace.0) {
         let replied = terminal.reply(logos_abi::StoreReply {
@@ -3252,7 +3207,7 @@ fn relay_store_request(
             version: 0,
             length: 0,
         });
-        return SessionRelay::Handled(replied);
+        return session::Relay::Handled(replied);
     }
     let needs_page = matches!(
         request.operation,
@@ -3269,7 +3224,7 @@ fn relay_store_request(
                 version: 0,
                 length: 0,
             });
-            return SessionRelay::Handled(true);
+            return session::Relay::Handled(true);
         };
         if page != history_page
             || block_context.pages.address(storage_owner, page).is_some()
@@ -3282,7 +3237,7 @@ fn relay_store_request(
                 version: 0,
                 length: 0,
             });
-            return SessionRelay::Handled(true);
+            return session::Relay::Handled(true);
         }
         loaned = true;
     }
@@ -3290,13 +3245,13 @@ fn relay_store_request(
         if loaned {
             let _ = block_context.pages.return_loan(storage_owner, request.page);
         }
-        return SessionRelay::Handled(false);
+        return session::Relay::Handled(false);
     }
     if !scheduler.wake(storage_handle) || !scheduler.run(storage_handle) {
         if loaned {
             let _ = block_context.pages.return_loan(storage_owner, request.page);
         }
-        return SessionRelay::Handled(false);
+        return session::Relay::Handled(false);
     }
     let mut current_tick = tick;
     loop {
@@ -3305,7 +3260,7 @@ fn relay_store_request(
                 let _ = block_context.pages.return_loan(storage_owner, request.page);
             }
             update_store_state(state, request, reply.status);
-            return SessionRelay::Handled(
+            return session::Relay::Handled(
                 scheduler.wake(storage_handle)
                     && scheduler.run(storage_handle)
                     && terminal.reply(reply),
@@ -3318,7 +3273,7 @@ fn relay_store_request(
             if loaned {
                 let _ = block_context.pages.return_loan(storage_owner, request.page);
             }
-            return SessionRelay::Handled(false);
+            return session::Relay::Handled(false);
         }
         if let Some(reply) = dispatch.poll(block_context, current_tick) {
             if !block_context.endpoint.reply(reply)
@@ -3328,7 +3283,7 @@ fn relay_store_request(
                 if loaned {
                     let _ = block_context.pages.return_loan(storage_owner, request.page);
                 }
-                return SessionRelay::Handled(false);
+                return session::Relay::Handled(false);
             }
         } else if dispatch.accepts_new_request() {
             interrupts::wait_for_tick();
@@ -3353,7 +3308,7 @@ fn relay_terminal_store_requests(
     storage_handle: native_task::Handle,
     session: &session::Context,
     capabilities: &capabilities::CapabilityManager,
-    state: &mut StoreRelayState,
+    state: &mut storage::RelayState,
     tick: u64,
 ) -> bool {
     while terminal.request().is_some() {
@@ -3417,16 +3372,6 @@ fn cancel_store_transaction(
         && storage
             .response(request.id)
             .is_some_and(|reply| reply.status == logos_abi::PersistenceStatus::Complete)
-}
-
-impl SessionRelay {
-    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
-    fn ok(self) -> bool {
-        match self {
-            Self::Handled(ok) => ok,
-            Self::Recovery => true,
-        }
-    }
 }
 
 type TerminalEndpoints = (
@@ -3617,55 +3562,6 @@ fn restart_native_service(
         return None;
     }
     scheduler.replace(handle, memory, |_, _| true)
-}
-
-fn relay_session_request(
-    terminal: native_task::SyscallEndpoint,
-    sessions: Option<native_task::SessionEndpoint>,
-    scheduler: &mut native_task::Scheduler<'_>,
-    sessions_handle: Option<native_task::Handle>,
-    context: effects::Context<'_, '_>,
-) -> SessionRelay {
-    let Some(request) = terminal.request() else {
-        return SessionRelay::Handled(true);
-    };
-    if !context.session.allows(context.capabilities, capabilities::CapabilityKind::Session) {
-        return SessionRelay::Handled(terminal.reply(b"permission denied"));
-    }
-    let (Some(sessions), Some(sessions_handle)) = (sessions, sessions_handle) else {
-        return SessionRelay::Handled(terminal.reply(b"session unavailable"));
-    };
-    if !sessions.deliver(request)
-        || !scheduler.wake(sessions_handle)
-        || !scheduler.run(sessions_handle)
-    {
-        return SessionRelay::Handled(false);
-    }
-    let Some(effect) = sessions.effect() else {
-        return SessionRelay::Handled(false);
-    };
-    let result = effects::execute(effect, context);
-    if !sessions.reply_effect(result)
-        || !scheduler.wake(sessions_handle)
-        || !scheduler.run(sessions_handle)
-    {
-        return SessionRelay::Handled(false);
-    }
-    let Some(reply) = sessions.reply() else {
-        return SessionRelay::Handled(false);
-    };
-    if !terminal.reply(&reply.text[..reply.length]) {
-        return SessionRelay::Handled(false);
-    }
-    if !scheduler.wake(sessions_handle) || !scheduler.run(sessions_handle) {
-        return SessionRelay::Handled(false);
-    }
-    let forwarded = true;
-    if result == logos_abi::EffectResult::Recovery && forwarded {
-        SessionRelay::Recovery
-    } else {
-        SessionRelay::Handled(forwarded)
-    }
 }
 
 fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {
