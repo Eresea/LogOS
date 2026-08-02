@@ -1962,6 +1962,31 @@ pub(crate) fn main(
                 );
                 true
             }
+            test_hooks::Action::Advance(ticks) => {
+                for step in 0..ticks.min(4096) {
+                    if !poll_network(
+                        network_device.as_mut(),
+                        native_network_endpoint,
+                        network_handle,
+                        network_dma,
+                        &mut native_scheduler,
+                        &mut network_pending,
+                        &mut network_probe,
+                        &mut network_probe_due,
+                        &mut network_reported,
+                        interrupts::ticks().saturating_add(step),
+                        native_terminal_network,
+                        &mut network_client_pending,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) {
+                        return false;
+                    }
+                }
+                true
+            }
             test_hooks::Action::Run(id) => {
                 if id == "network/unauthorized-operation" {
                     let (Some(network_endpoint), Some(network_task)) =
@@ -2036,10 +2061,10 @@ pub(crate) fn main(
                         ) {
                             return false;
                         }
-                        if native_terminal_network
-                            .response(request.id)
-                            .is_none_or(|reply| reply.status != logos_abi::NetworkStatus::Denied)
-                        {
+                        if native_terminal_network.response(request.id).is_none_or(|reply| {
+                            reply.status != logos_abi::NetworkStatus::Denied
+                                || reply.counters.denied != 1
+                        }) {
                             return false;
                         }
                     }
@@ -2215,6 +2240,8 @@ pub(crate) fn main(
                         && receive_reply.status == logos_abi::NetworkStatus::Complete
                         && receive_reply.source_address == 0x0a00_0202
                         && receive_reply.source_port == 4001
+                        && send_reply.counters.tx_frames > 0
+                        && receive_reply.counters.rx_frames > 0
                         && received == payload;
                 }
                 if id == "network/backpressure-cancel" {
@@ -2317,6 +2344,7 @@ pub(crate) fn main(
                     };
                     return bind_reply.status == logos_abi::NetworkStatus::Complete
                         && cancel_reply.status == logos_abi::NetworkStatus::Cancelled
+                        && cancel_reply.counters.cancellations > 0
                         && close_reply.status == logos_abi::NetworkStatus::Complete;
                 }
                 if id == "network/packet-loss" {
@@ -2383,7 +2411,9 @@ pub(crate) fn main(
                         return false;
                     };
                     return first_reply.status == logos_abi::NetworkStatus::Complete
-                        && second_reply.status == logos_abi::NetworkStatus::Complete;
+                        && second_reply.status == logos_abi::NetworkStatus::Complete
+                        && first_reply.counters.malformed > 0
+                        && second_reply.counters.rx_frames >= first_reply.counters.rx_frames;
                 }
                 if id == "network/timeout" {
                     if !network_reported {
@@ -2458,7 +2488,8 @@ pub(crate) fn main(
                         return false;
                     };
                     return bind_reply.status == logos_abi::NetworkStatus::Complete
-                        && reply.status == logos_abi::NetworkStatus::TimedOut;
+                        && reply.status == logos_abi::NetworkStatus::TimedOut
+                        && reply.counters.timeouts == 1;
                 }
                 if id == "network/reset-reconnect" {
                     if !network_reported {
@@ -3135,7 +3166,10 @@ fn relay_network_client(
             source_port: 0,
             length: 0,
             info: logos_abi::NetworkInfo::default(),
-            counters: logos_abi::NetworkCounters::default(),
+            counters: logos_abi::NetworkCounters {
+                denied: 1,
+                ..logos_abi::NetworkCounters::default()
+            },
         });
     }
     if matches!(

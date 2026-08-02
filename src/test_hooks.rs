@@ -7,6 +7,7 @@ const DEBUG_EXIT: u16 = 0xf4;
 
 pub enum Action<'a> {
     Input(&'a str),
+    Advance(u64),
     Poll,
     Run(&'a str),
 }
@@ -59,7 +60,10 @@ pub fn serve(storage: u32, mut handle: impl FnMut(Action<'_>) -> bool) -> ! {
             Ok(Request::Inject { point, action }) if fault_point(point) && valid_action(action) => {
                 line(b"LOGOS/1 RESULT inject=accepted")
             }
-            Ok(Request::Advance(_)) => line(b"LOGOS/1 RESULT advance=accepted"),
+            Ok(Request::Advance(ticks)) if handle(Action::Advance(ticks)) => {
+                line(b"LOGOS/1 RESULT advance=accepted")
+            }
+            Ok(Request::Advance(_)) => line(b"LOGOS/1 ERROR advance=rejected"),
             Ok(Request::Query(_)) => line(b"LOGOS/1 RESULT query=available"),
             Ok(Request::Input(value)) if handle(Action::Input(value)) => {
                 line(b"LOGOS/1 RESULT input=accepted")

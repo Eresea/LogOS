@@ -1,7 +1,10 @@
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::path::Path;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -12,13 +15,14 @@ const SERVER_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc];
 
 pub struct NetworkPeer {
     stop: Arc<AtomicBool>,
+    mode: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
     pub qemu_port: u16,
     pub peer_port: u16,
 }
 
 impl NetworkPeer {
-    pub fn start() -> Result<Self, String> {
+    pub fn start(capture_path: &Path) -> Result<Self, String> {
         let socket =
             UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|error| error.to_string())?;
         socket
@@ -33,34 +37,76 @@ impl NetworkPeer {
         let qemu = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), qemu_port);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
+        let mode = Arc::new(AtomicU8::new(0));
+        let worker_mode = Arc::clone(&mode);
+        let capture = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(capture_path)
+            .map_err(|error| error.to_string())?;
         let worker = thread::spawn(move || {
             let mut input = [0; 2048];
             let mut drop_first_discover = true;
             let mut drop_first_loss_echo = true;
+            let mut capture = Some(capture);
             while !worker_stop.load(Ordering::Relaxed) {
                 let Ok((length, _)) = socket.recv_from(&mut input) else { continue };
+                log_frame(&mut capture, "rx", &input[..length]);
+                let mut send = |frame: &[u8]| {
+                    log_frame(&mut capture, "tx", frame);
+                    let _ = socket.send_to(frame, qemu);
+                };
                 if drop_first_discover && dhcp_message_type(&input[..length]) == Some(1) {
                     drop_first_discover = false;
                     continue;
                 }
                 if let Some(frame) = dhcp_reply(&input[..length]) {
-                    let _ = socket.send_to(&frame, qemu);
+                    send(&frame);
                 } else if let Some(frame) = arp_reply(&input[..length]) {
-                    let _ = socket.send_to(&frame, qemu);
+                    send(&frame);
                 } else if let Some(frame) = icmp_reply(&input[..length]) {
-                    if drop_first_loss_echo
+                    let current_mode = worker_mode.load(Ordering::Relaxed);
+                    if current_mode == 2 {
+                        continue;
+                    }
+                    if current_mode == 1
+                        && drop_first_loss_echo
                         && icmp_identifier(&input[..length]).is_some_and(|id| id >= 2)
                     {
                         drop_first_loss_echo = false;
-                        let _ = socket.send_to(&[0; 60], qemu);
+                        send(&[0; 60]);
                     }
-                    let _ = socket.send_to(&frame, qemu);
+                    send(&frame);
+                    if current_mode == 1 {
+                        send(&frame);
+                    }
                 } else if let Some(frame) = udp_reply(&input[..length]) {
-                    let _ = socket.send_to(&frame, qemu);
+                    if worker_mode.load(Ordering::Relaxed) == 2 {
+                        continue;
+                    }
+                    send(&frame);
                 }
             }
         });
-        Ok(Self { stop, worker: Some(worker), qemu_port, peer_port })
+        Ok(Self { stop, mode, worker: Some(worker), qemu_port, peer_port })
+    }
+
+    pub fn set_scenario(&self, scenario: &str) {
+        self.mode.store(
+            match scenario {
+                "network/packet-loss" => 1,
+                "network/timeout" => 2,
+                _ => 0,
+            },
+            Ordering::Relaxed,
+        );
+    }
+}
+
+fn log_frame(file: &mut Option<File>, direction: &str, frame: &[u8]) {
+    let ether_type = frame.get(12..14).map_or(0, |bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
+    if let Some(file) = file {
+        let _ = writeln!(file, "{direction} len={} ether={ether_type:04x}", frame.len());
     }
 }
 

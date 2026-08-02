@@ -584,7 +584,7 @@ struct Harness {
     report: BootReport,
     serial: String,
     deadline: Instant,
-    _network_peer: Option<NetworkPeer>,
+    network_peer: Option<NetworkPeer>,
 }
 
 impl Harness {
@@ -614,7 +614,7 @@ impl Harness {
             fixture_dir,
             timeout,
             expected_storage,
-            Some(NetworkPeer::start()?),
+            Some(NetworkPeer::start(&fixture_dir.join("peer-frames.log"))?),
         )
     }
 
@@ -745,7 +745,7 @@ impl Harness {
             report: BootReport { session: 0, storage: String::new() },
             serial: String::new(),
             deadline,
-            _network_peer: network_peer,
+            network_peer,
         };
         let report = harness.wait_boot_report()?;
         let expected_storage =
@@ -771,6 +771,9 @@ impl Harness {
     }
 
     fn run(&mut self, scenario: Scenario) -> Result<(), String> {
+        if let Some(peer) = &self.network_peer {
+            peer.set_scenario(scenario.id);
+        }
         for command in scenario.setup {
             self.send(&format!("LOGOS/1 INPUT {command}\n"))?;
             self.wait("LOGOS/1 RESULT input=accepted")?;
