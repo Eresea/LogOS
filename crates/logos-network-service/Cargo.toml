@@ -11,6 +11,9 @@ logos-abi = { path = "../logos-abi" }
 logos-net = { path = "../logos-net" }
 logos-service-rt = { path = "../logos-service-rt" }
 
+[features]
+test-hooks = []
+
 [[bin]]
 name = "logos-network-service"
 path = "src/main.rs"

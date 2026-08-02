@@ -139,6 +139,8 @@ fn run(context: &mut Context) -> ! {
         }
 
         if let Some(request) = context.network_request() {
+            #[cfg(feature = "test-hooks")]
+            inject_failure(request.id);
             if matches!(request.operation, NetworkOperation::Cancel | NetworkOperation::Close) {
                 let endpoint = logos_net::EndpointId::from_wire(request.endpoint.0);
                 let cancels_receive = waiting_receive.is_some_and(|pending| {
@@ -369,6 +371,17 @@ fn run(context: &mut Context) -> ! {
         }
     }
     spin()
+}
+
+#[cfg(feature = "test-hooks")]
+fn inject_failure(id: u32) {
+    if id == u32::MAX - 1 {
+        panic!("test panic");
+    }
+    if id == u32::MAX - 2 {
+        let address = core::hint::black_box(1usize);
+        unsafe { (address as *mut u8).write_volatile(1) };
+    }
 }
 
 fn issue_info(context: &mut Context, id: u32) -> bool {

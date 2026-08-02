@@ -1337,13 +1337,41 @@ pub(crate) fn main(
                     proof.set(proof.get() || navigation);
                     return navigation;
                 }
-                let terminal_restart = value == "assert-terminal-service-restart";
-                let sessions_restart = value == "assert-sessions-service-restart";
-                let storage_restart = value == "assert-storage-service-restart";
+                let terminal_restart = matches!(
+                    value,
+                    "assert-terminal-service-restart"
+                        | "assert-terminal-service-panic"
+                        | "assert-terminal-service-fault"
+                );
+                let sessions_restart = matches!(
+                    value,
+                    "assert-sessions-service-restart"
+                        | "assert-sessions-service-panic"
+                        | "assert-sessions-service-fault"
+                );
+                let storage_restart = matches!(
+                    value,
+                    "assert-storage-service-restart"
+                        | "assert-storage-service-panic"
+                        | "assert-storage-service-fault"
+                );
                 if terminal_restart {
                     let previous = native_handle;
                     let previous_context = native_display.context();
-                    if !native_scheduler.fail(previous) || !startup.start() {
+                    let failed = if value == "assert-terminal-service-panic" {
+                        native_input.deliver_raw(0xfa)
+                            && native_scheduler.wake(previous)
+                            && native_scheduler.run(previous)
+                            && native_scheduler.failed(previous)
+                    } else if value == "assert-terminal-service-fault" {
+                        native_input.deliver_raw(0xfb)
+                            && native_scheduler.wake(previous)
+                            && native_scheduler.run(previous)
+                            && native_scheduler.failed(previous)
+                    } else {
+                        native_scheduler.fail(previous)
+                    };
+                    if !failed || !startup.start() {
                         return false;
                     }
                     let Some((restarted, endpoints, history)) = replace_terminal(
@@ -1426,7 +1454,28 @@ pub(crate) fn main(
                         return false;
                     };
                     let previous_context = previous_endpoint.context();
-                    if !native_scheduler.fail(previous) || !startup.start() {
+                    let failed = if matches!(
+                        value,
+                        "assert-sessions-service-panic" | "assert-sessions-service-fault"
+                    ) {
+                        let bytes = if value == "assert-sessions-service-panic" {
+                            b"__panic" as &[u8]
+                        } else {
+                            b"__fault"
+                        };
+                        let mut argument = [0; logos_abi::MAX_SESSION_TEXT];
+                        argument[..bytes.len()].copy_from_slice(bytes);
+                        previous_endpoint.deliver(logos_abi::SessionRequest::new(
+                            logos_abi::Syscall::Inspect,
+                            argument,
+                            bytes.len(),
+                        )) && native_scheduler.wake(previous)
+                            && native_scheduler.run(previous)
+                            && native_scheduler.failed(previous)
+                    } else {
+                        native_scheduler.fail(previous)
+                    };
+                    if !failed || !startup.start() {
                         return false;
                     }
                     let Some(restarted) =
@@ -1450,6 +1499,29 @@ pub(crate) fn main(
                 if storage_restart {
                     let previous = storage_handle;
                     let previous_context = native_storage_store.context();
+                    let failed = if matches!(
+                        value,
+                        "assert-storage-service-panic" | "assert-storage-service-fault"
+                    ) {
+                        let id = if value == "assert-storage-service-panic" {
+                            u32::MAX - 1
+                        } else {
+                            u32::MAX - 2
+                        };
+                        native_storage_store.deliver(test_store_request(
+                            id,
+                            logos_abi::StoreOperation::Cancel,
+                            logos_abi::NamespaceId(0),
+                            logos_abi::VersionSelector::None,
+                        )) && native_scheduler.wake(previous)
+                            && native_scheduler.run(previous)
+                            && native_scheduler.failed(previous)
+                    } else {
+                        native_scheduler.fail(previous)
+                    };
+                    if !failed {
+                        return false;
+                    }
                     block_dispatch.cancel_on_exit(&mut block::DispatchContext {
                         endpoint: native_storage_block,
                         pages: &mut shared_pages,
@@ -1495,6 +1567,61 @@ pub(crate) fn main(
                     if native_scheduler.wake(previous) || !native_scheduler.wake(restarted) {
                         return false;
                     }
+                }
+                if matches!(value, "assert-network-service-panic" | "assert-network-service-fault")
+                {
+                    let (Some(previous), Some(previous_endpoint), Some(resources)) =
+                        (network_handle, native_network_endpoint, network_setup)
+                    else {
+                        return false;
+                    };
+                    let id = if value == "assert-network-service-panic" {
+                        u32::MAX - 1
+                    } else {
+                        u32::MAX - 2
+                    };
+                    let request = logos_abi::NetworkRequest {
+                        id,
+                        operation: logos_abi::NetworkOperation::Status,
+                        endpoint: logos_abi::NetworkEndpoint(0),
+                        peer: logos_abi::NetworkScope(0),
+                        page: logos_abi::PageHandle(0),
+                        length: 0,
+                        generation: 0,
+                        deadline: u64::MAX / 2,
+                    };
+                    if !previous_endpoint.deliver(request)
+                        || !native_scheduler.wake(previous)
+                        || !native_scheduler.run(previous)
+                        || !native_scheduler.failed(previous)
+                    {
+                        return false;
+                    }
+                    let Some((restarted, endpoint, resources, dma)) = replace_network(
+                        &mut native_scheduler,
+                        previous,
+                        &mut memory,
+                        &mut shared_pages,
+                        resources,
+                    ) else {
+                        return false;
+                    };
+                    if restarted.generation() == previous.generation()
+                        || endpoint.context() == previous_endpoint.context()
+                        || !native_scheduler.run(restarted)
+                        || native_scheduler.wake(previous)
+                    {
+                        return false;
+                    }
+                    network_handle = Some(restarted);
+                    native_network_endpoint = Some(endpoint);
+                    network_setup = Some(resources);
+                    network_dma = Some(dma);
+                    network_pending = None;
+                    network_client_pending = None;
+                    network_probe = Some(0x8000_0001);
+                    network_probe_due = interrupts::ticks();
+                    network_reported = false;
                 }
                 if value == "persistence/write-interruption" || value == "persistence/recovery" {
                     let status = unsafe {
@@ -3225,11 +3352,15 @@ fn replace_terminal(
     history: logos_abi::PageHandle,
 ) -> Option<(native_task::Handle, TerminalEndpoints, logos_abi::PageHandle)> {
     if !scheduler.failed(handle) && !scheduler.fail(handle) {
+        debug::write_line(b"LogOS: terminal replacement quarantine failed");
         return None;
     }
-    let previous = pages.address(terminal_owner, history)?;
+    let Some(previous) = pages.address(terminal_owner, history) else {
+        debug::write_line(b"LogOS: terminal replacement history missing");
+        return None;
+    };
     let mut replacement_page = None;
-    let replacement = scheduler.replace(handle, memory, |task, memory| {
+    let Some(replacement) = scheduler.replace(handle, memory, |task, memory| {
         let Some(address) = task.map_shared_owned(memory) else { return false };
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -3240,22 +3371,36 @@ fn replace_terminal(
         }
         replacement_page = Some(address);
         true
-    })?;
+    }) else {
+        debug::write_line(b"LogOS: terminal replacement load failed");
+        return None;
+    };
     let address = replacement_page?;
-    pages.release(terminal_owner, history)?;
-    let new_history = pages.register(terminal_owner, address, 1)?;
-    let endpoints = terminal_endpoints(scheduler, replacement)?;
+    if pages.release(terminal_owner, history).is_none() {
+        debug::write_line(b"LogOS: terminal replacement history release failed");
+        return None;
+    }
+    let Some(new_history) = pages.register(terminal_owner, address, 1) else {
+        debug::write_line(b"LogOS: terminal replacement history register failed");
+        return None;
+    };
+    let Some(endpoints) = terminal_endpoints(scheduler, replacement) else {
+        debug::write_line(b"LogOS: terminal replacement endpoint failed");
+        return None;
+    };
     if !endpoints.3.configure_shared_page(new_history) {
         return None;
     }
     if storage_handle.available() {
         if !scheduler.task_mut(storage_handle)?.remap_shared_borrowed(address) {
+            debug::write_line(b"LogOS: terminal replacement Store remap failed");
             return None;
         }
         let storage = scheduler.store_endpoint(storage_handle)?;
-        if !storage.configure_shared_page(new_history)
+        if !storage.remap_shared_page(new_history)
             || pages.address(storage_owner, new_history).is_some()
         {
+            debug::write_line(b"LogOS: terminal replacement Store configure failed");
             return None;
         }
     }

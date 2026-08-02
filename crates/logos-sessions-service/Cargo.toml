@@ -9,3 +9,6 @@ workspace = true
 [dependencies]
 logos-abi = { path = "../logos-abi" }
 logos-service-rt = { path = "../logos-service-rt" }
+
+[features]
+test-hooks = []

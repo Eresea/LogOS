@@ -23,6 +23,8 @@ fn run(context: &mut Context) -> ! {
             spin();
         }
         let Some(request) = context.session_request() else { continue };
+        #[cfg(feature = "test-hooks")]
+        inject_failure(&request);
         if context.input() != 1 || !request.valid() {
             continue;
         }
@@ -35,6 +37,18 @@ fn run(context: &mut Context) -> ! {
         }
     }
     spin()
+}
+
+#[cfg(feature = "test-hooks")]
+fn inject_failure(request: &SessionRequest) {
+    let argument = &request.argument[..request.length];
+    if argument == b"__panic" {
+        panic!("test panic");
+    }
+    if argument == b"__fault" {
+        let address = core::hint::black_box(1usize);
+        unsafe { (address as *mut u8).write_volatile(1) };
+    }
 }
 
 fn dispatch(syscall: Syscall) -> Effect {

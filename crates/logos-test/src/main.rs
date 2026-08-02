@@ -87,6 +87,54 @@ const SCENARIOS: &[Scenario] = &[
         &["assert-storage-service-restart"],
         Fixture::Shared,
     ),
+    configured(
+        "platform/terminal-panic-containment",
+        "platform",
+        &["assert-terminal-service-panic"],
+        Fixture::Fresh,
+    ),
+    configured(
+        "platform/terminal-fault-containment",
+        "platform",
+        &["assert-terminal-service-fault"],
+        Fixture::Fresh,
+    ),
+    configured(
+        "platform/sessions-panic-containment",
+        "platform",
+        &["assert-sessions-service-panic"],
+        Fixture::Fresh,
+    ),
+    configured(
+        "platform/sessions-fault-containment",
+        "platform",
+        &["assert-sessions-service-fault"],
+        Fixture::Fresh,
+    ),
+    configured(
+        "platform/store-panic-containment",
+        "platform",
+        &["assert-storage-service-panic"],
+        Fixture::Fresh,
+    ),
+    configured(
+        "platform/store-fault-containment",
+        "platform",
+        &["assert-storage-service-fault"],
+        Fixture::Fresh,
+    ),
+    configured(
+        "platform/network-panic-containment",
+        "platform",
+        &["assert-network-service-panic"],
+        Fixture::Fresh,
+    ),
+    configured(
+        "platform/network-fault-containment",
+        "platform",
+        &["assert-network-service-fault"],
+        Fixture::Fresh,
+    ),
     configured("persistence/block-read-flush", "persistence", &[], Fixture::Persistence),
     configured(
         "persistence/terminal-history",
@@ -1444,7 +1492,15 @@ fn build_profile(
     for package in ["logos-terminal-service", "logos-sessions-service", "logos-network-service"] {
         let status = Command::new("cargo")
             .current_dir(root)
-            .args(["build", "-p", package, "--target", "x86_64-unknown-uefi"])
+            .args([
+                "build",
+                "-p",
+                package,
+                "--target",
+                "x86_64-unknown-uefi",
+                "--features",
+                "test-hooks",
+            ])
             .status()
             .map_err(io_error)?;
         if !status.success() {
@@ -1458,6 +1514,8 @@ fn build_profile(
         "logos-storage-service",
         "--target",
         "x86_64-unknown-uefi",
+        "--features",
+        "test-hooks",
     ]);
     if !storage.status().map_err(io_error)?.success() {
         return Err("storage service build failed".into());

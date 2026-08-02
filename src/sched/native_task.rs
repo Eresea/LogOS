@@ -35,6 +35,11 @@ impl InputEndpoint {
             )
         }
     }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn deliver_raw(self, input: u8) -> bool {
+        unsafe { logos_abi::service::Context::deliver_input_at(self.context_physical, input) }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -151,6 +156,13 @@ impl StoreEndpoint {
                 page,
             )
         }
+    }
+
+    pub fn remap_shared_page(self, page: logos_abi::PageHandle) -> bool {
+        if !self.available() {
+            return false;
+        }
+        unsafe { logos_abi::service::Context::remap_shared_page_at(self.context_physical, page) }
     }
 }
 
@@ -440,6 +452,7 @@ impl<'a> Task<'a> {
                 self.complete
             }
             Some(EntryState::Panic) => false,
+            Some(EntryState::Fault(_)) => false,
             None => false,
         }
     }

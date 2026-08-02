@@ -10,3 +10,6 @@ workspace = true
 logos-abi = { path = "../logos-abi" }
 logos-terminal = { path = "../logos-terminal" }
 logos-service-rt = { path = "../logos-service-rt" }
+
+[features]
+test-hooks = []

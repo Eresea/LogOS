@@ -46,6 +46,11 @@ static USER_BLOCKED: AtomicBool = AtomicBool::new(false);
 static USER_COMMAND: AtomicBool = AtomicBool::new(false);
 static USER_DISPLAY: AtomicBool = AtomicBool::new(false);
 static USER_PANICKED: AtomicBool = AtomicBool::new(false);
+static USER_FAULTED: AtomicBool = AtomicBool::new(false);
+static USER_FAULT_VECTOR: AtomicU64 = AtomicU64::new(0);
+static USER_FAULT_ERROR: AtomicU64 = AtomicU64::new(0);
+static USER_FAULT_RIP: AtomicU64 = AtomicU64::new(0);
+static USER_FAULT_CR2: AtomicU64 = AtomicU64::new(0);
 const USER_FRAME_WORDS: usize = 20;
 #[unsafe(no_mangle)]
 static USER_FRAME: Writable<[u64; USER_FRAME_WORDS]> = Writable::new([0; USER_FRAME_WORDS]);
@@ -80,6 +85,15 @@ pub enum EntryState {
     Command,
     Display,
     Panic,
+    Fault(FaultRecord),
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct FaultRecord {
+    pub vector: u8,
+    pub error: u64,
+    pub rip: u64,
+    pub cr2: u64,
 }
 
 impl Privilege {
@@ -139,6 +153,7 @@ impl Privilege {
         self.restore_gate(gate);
         USER_RETURNED.store(false, Ordering::Release);
         USER_PANICKED.store(false, Ordering::Release);
+        USER_FAULTED.store(false, Ordering::Release);
         USER_BLOCKED.store(false, Ordering::Release);
         USER_CONTEXT.store(context, Ordering::Release);
         unsafe { enter_user(space.cr3(), entry, space.stack_top(), context) };
@@ -161,6 +176,7 @@ impl Privilege {
         unsafe { set_tss_stack(space.kernel_stack_top()) };
         USER_RETURNED.store(false, Ordering::Release);
         USER_PANICKED.store(false, Ordering::Release);
+        USER_FAULTED.store(false, Ordering::Release);
         USER_CONTEXT.store(context, Ordering::Release);
         unsafe { resume_user(space.cr3(), space.kernel_stack_top()) };
         unsafe { set_tss_stack(self.stack.address() + 4096) };
@@ -187,7 +203,15 @@ impl Privilege {
                 USER_FRAME_WORDS,
             )
         };
-        if USER_PANICKED.swap(false, Ordering::AcqRel) {
+        if USER_FAULTED.swap(false, Ordering::AcqRel) {
+            USER_CONTEXT.store(0, Ordering::Release);
+            Some(EntryState::Fault(FaultRecord {
+                vector: USER_FAULT_VECTOR.load(Ordering::Acquire) as u8,
+                error: USER_FAULT_ERROR.load(Ordering::Acquire),
+                rip: USER_FAULT_RIP.load(Ordering::Acquire),
+                cr2: USER_FAULT_CR2.load(Ordering::Acquire),
+            }))
+        } else if USER_PANICKED.swap(false, Ordering::AcqRel) {
             USER_CONTEXT.store(0, Ordering::Release);
             Some(EntryState::Panic)
         } else if gate.blocked {
@@ -203,6 +227,15 @@ impl Privilege {
             USER_RETURNED.load(Ordering::Acquire).then_some(EntryState::Returned)
         }
     }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn user_fault(vector: u64, error: u64, rip: u64, cr2: u64) {
+    USER_FAULT_VECTOR.store(vector, Ordering::Release);
+    USER_FAULT_ERROR.store(error, Ordering::Release);
+    USER_FAULT_RIP.store(rip, Ordering::Release);
+    USER_FAULT_CR2.store(cr2, Ordering::Release);
+    USER_FAULTED.store(true, Ordering::Release);
 }
 
 #[unsafe(no_mangle)]
@@ -385,6 +418,8 @@ core::arch::global_asm!(
     "sub rsp, 40",
     "call user_gate_returned",
     "add rsp, 40",
+    ".global user_fault_exit",
+    "user_fault_exit:",
     "mov rax, [rip + USER_RETURN_CR3]",
     "mov cr3, rax",
     "mov rsp, [rip + USER_RETURN_RSP]",

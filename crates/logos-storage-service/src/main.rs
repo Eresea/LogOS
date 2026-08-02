@@ -327,6 +327,8 @@ fn run(context: &mut Context) -> ! {
             spin();
         }
         if let Some(request) = context.store_request() {
+            #[cfg(feature = "test-hooks")]
+            inject_failure(request.id);
             let response = process(context, state, request);
             if !context.store_reply(response) {
                 spin();
@@ -334,6 +336,17 @@ fn run(context: &mut Context) -> ! {
         }
     }
     spin()
+}
+
+#[cfg(feature = "test-hooks")]
+fn inject_failure(id: u32) {
+    if id == u32::MAX - 1 {
+        panic!("test panic");
+    }
+    if id == u32::MAX - 2 {
+        let address = core::hint::black_box(1usize);
+        unsafe { (address as *mut u8).write_volatile(1) };
+    }
 }
 
 fn spin() -> ! {

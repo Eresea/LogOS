@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [features]
 block-probe = []
+test-hooks = []
 
 [dependencies]
 logos-abi = { path = "../logos-abi" }

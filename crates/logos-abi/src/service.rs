@@ -1087,6 +1087,21 @@ impl Context {
     }
 
     /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by Core.
+    pub unsafe fn remap_shared_page_at(address: u64, page: logos_abi::PageHandle) -> bool {
+        if page.0 == 0 {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI || context.reserved != 0 || context.shared_page == 0 {
+            return false;
+        }
+        context.shared_page = page.0;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
     /// `address` must point to a live, aligned `Context` mapping before service startup.
     pub unsafe fn configure_network_pages_at(
         address: u64,

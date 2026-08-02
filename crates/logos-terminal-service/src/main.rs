@@ -188,6 +188,8 @@ fn run(context: &mut Context) -> ! {
         if !context.wait_for_input() {
             spin();
         }
+        #[cfg(feature = "test-hooks")]
+        inject_failure(context.input());
         if context.input() == 0x1b {
             let _ = context.complete();
             spin();
@@ -231,6 +233,17 @@ fn run(context: &mut Context) -> ! {
         }
     }
     spin()
+}
+
+#[cfg(feature = "test-hooks")]
+fn inject_failure(control: u32) {
+    if control == 0xfa {
+        panic!("test panic");
+    }
+    if control == 0xfb {
+        let address = core::hint::black_box(1usize);
+        unsafe { (address as *mut u8).write_volatile(1) };
+    }
 }
 
 fn submit_line(terminal: &mut Model, context: &mut Context, next: &mut u32) {
