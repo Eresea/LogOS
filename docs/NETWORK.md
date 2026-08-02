@@ -1,6 +1,6 @@
 # Network
 
-> **Status:** Network v1 planned
+> **Status:** Network v1 in progress — ABI, bounded protocol core, and bootable VirtIO service staging complete
 >
 > **Owner:** Foundation network driver and System Network service
 
@@ -60,6 +60,20 @@ skip ahead.
 
 Changing a fixed decision requires updating this document and the architecture; changing the
 cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary.md).
+
+## Current implementation
+
+- `logos-abi`, `logos-core`, and `logos-service-rt` contain the bounded Network request, reply,
+  capability, wait, event, and fixed-page contracts.
+- `logos-net` contains allocation-free Ethernet, ARP, IPv4, UDP, ICMP, DHCP parsing/encoding, and
+  bounded endpoint, ARP, datagram, pending-operation, reset, and DHCP state.
+- The kernel binds the legacy VirtIO network device when available, maps two Network-owned pages,
+  loads the Ring-2 payload, and delivers one validated RX frame event at a time.
+- `logos-network-service` currently handles bounded `Status`, `Bind`, `Close`, and `Cancel` state
+  operations and validates delivered Ethernet/ARP frames. `SendTo`, `ReceiveFrom`, and `Echo`
+  remain `Offline` until Core TX/info relay and client capability relay are implemented.
+- QEMU uses a local user-mode network backend for boot coverage only. No independent DHCP/ARP peer
+  or packet-exchange proof is implemented yet.
 
 ## Contract and invariants
 
@@ -209,105 +223,105 @@ and never cast untrusted bytes to Rust enums or packed structs.
 ### Phase 1: freeze the contracts and test seams
 
 - [x] Accept ADR-0015 for Core-owned NIC DMA and the Network-service datagram boundary.
-- [ ] Add `NetworkScope`, endpoint handles, interface information, operations, requests, replies,
+- [x] Add `NetworkScope`, endpoint handles, interface information, operations, requests, replies,
       statuses, limits, and counters to `logos-abi`.
-- [ ] Widen only the internal capability resource field needed to store a 64-bit network scope;
+- [x] Widen only the internal capability resource field needed to store a 64-bit network scope;
       preserve existing 32-bit scoped capability helpers.
-- [ ] Add `NetworkBind`, `NetworkSend`, and `NetworkReceive` capability kinds.
-- [ ] Define one checked validator for every operation and valid field combination.
-- [ ] Add checked wire conversion for every enum and status.
-- [ ] Add Network request/reply encoding to the native-service context without changing its page
+- [x] Add `NetworkBind`, `NetworkSend`, and `NetworkReceive` capability kinds.
+- [x] Define one checked validator for every operation and valid field combination.
+- [x] Add checked wire conversion for every enum and status.
+- [x] Add Network request/reply encoding to the native-service context without changing its page
       size.
-- [ ] Add the finite-deadline Network wait/event operation to the existing service gate.
+- [x] Add the finite-deadline Network wait/event operation to the existing service gate.
 - [ ] Match replies by request ID, endpoint generation, owner, and interface generation.
-- [ ] Add `logos-abi` tests covering every accepted operation shape and exact scope encoding.
+- [x] Add `logos-abi` tests covering every accepted operation shape and exact scope encoding.
 - [ ] Add rejection tests for unknown enums, reserved fields, zero IDs, stale handles, invalid page
       use, length overflow, zero/expired deadlines, and mismatched replies.
-- [ ] Run `cargo test -p logos-abi -p logos-core -p logos-service-rt`.
-- [ ] Run the normal headless boot proof.
-- [ ] Commit the ABI and gate contract.
+- [x] Run `cargo test -p logos-abi -p logos-core -p logos-service-rt`.
+- [x] Run the normal headless boot proof.
+- [x] Commit the ABI and gate contract.
 
 ### Phase 2: build the allocation-free protocol core
 
-- [ ] Create `logos-net` as a `no_std`, host-testable library with no allocator or runtime
+- [x] Create `logos-net` as a `no_std`, host-testable library with no allocator or runtime
       dependency.
-- [ ] Implement checked Ethernet, ARP, IPv4, ICMP echo, DHCP, and UDP parsing and encoding.
-- [ ] Implement Internet and UDP pseudo-header checksums without alignment assumptions.
-- [ ] Keep parsing separate from state transitions so malformed frames cannot partially mutate
+- [x] Implement checked Ethernet, ARP, IPv4, ICMP echo, DHCP, and UDP parsing and encoding.
+- [x] Implement Internet and UDP pseudo-header checksums without alignment assumptions.
+- [x] Keep parsing separate from state transitions so malformed frames cannot partially mutate
       protocol state.
 - [ ] Model protocol progress as input frame/timer events producing bounded frame/reply actions.
-- [ ] Keep every table and output buffer caller-owned or fixed-size.
-- [ ] Add one truncation test that feeds every strict prefix of each valid frame and requires error.
-- [ ] Add table tests for bad lengths, checksums, fragmentation, options, duplicate/truncated DHCP
+- [x] Keep every table and output buffer caller-owned or fixed-size.
+- [x] Add one truncation test that feeds every strict prefix of each valid frame and requires error.
+- [x] Add table tests for bad lengths, checksums, fragmentation, options, duplicate/truncated DHCP
       options, unsupported protocols, Ethernet padding, and maximum UDP payload.
 - [ ] Use independent RFC byte vectors, not frames produced by the encoder under test, for parser
       expectations.
-- [ ] Round-trip each encoder through the parser only as a secondary test.
-- [ ] Run `cargo test -p logos-net` and `cargo clippy -p logos-net -- -D warnings`.
-- [ ] Run the normal headless boot proof.
-- [ ] Commit the protocol core.
+- [x] Round-trip each encoder through the parser only as a secondary test.
+- [x] Run `cargo test -p logos-net` and `cargo clippy -p logos-net -- -D warnings`.
+- [x] Run the normal headless boot proof.
+- [x] Commit the protocol core.
 
 ### Phase 3: implement bounded protocol state
 
-- [ ] Implement the DHCP state machine, retry schedule, renewal, rebinding, NAK, and lease expiry.
+- [x] Implement the DHCP state machine, retry schedule, renewal, rebinding, NAK, and lease expiry.
 - [ ] Implement subnet routing and the fixed ARP cache with expiry and matching resolution.
-- [ ] Implement eight owner/generation-tagged UDP endpoint slots and unique port binding.
-- [ ] Implement four queued received datagrams and one pending client operation globally.
-- [ ] Implement exact-source receive results and exact-destination sends.
+- [x] Implement eight owner/generation-tagged UDP endpoint slots and unique port binding.
+- [x] Implement four queued received datagrams and one pending client operation globally.
+- [x] Implement exact-source receive results and exact-destination sends.
 - [ ] Implement ICMP echo request/reply matching and timeout.
-- [ ] Make cancellation, deadline expiry, endpoint close, lease loss, and reset release every held
+- [x] Make cancellation, deadline expiry, endpoint close, lease loss, and reset release every held
       slot and buffer exactly once.
-- [ ] Add fake-clock host tests for every DHCP transition and retry boundary.
+- [x] Add fake-clock host tests for every DHCP transition and retry boundary.
 - [ ] Add host tests for on-subnet/off-subnet routing, ARP retry/failure/expiry, endpoint exhaustion,
       duplicate bind, queue full, `Busy`, cancellation, timeout, lease loss, and generation reset.
 - [ ] Assert after every failure-path test that no request, page, endpoint, or datagram slot remains
       unintentionally held.
-- [ ] Run `cargo test -p logos-net`.
-- [ ] Run the normal headless boot proof.
-- [ ] Commit the bounded protocol engine.
+- [x] Run `cargo test -p logos-net`.
+- [x] Run the normal headless boot proof.
+- [x] Commit the bounded protocol engine.
 
 ### Phase 4: bind and recover the VirtIO network device
 
-- [ ] Discover PCI vendor/device `1af4:1000` and bind only the network interface class.
+- [x] Discover PCI vendor/device `1af4:1000` and bind only the network interface class.
 - [ ] Enable bus mastering and verify an I/O BAR, queue availability, queue size, MAC feature, and
       stable device MAC before setting `DRIVER_OK`.
-- [ ] Configure legacy queue 0 as RX and queue 1 as TX with independent indices and descriptor
+- [x] Configure legacy queue 0 as RX and queue 1 as TX with independent indices and descriptor
       ownership.
-- [ ] Use the existing checked contiguous VirtQueue allocation; unwind the first queue if the second
+- [x] Use the existing checked contiguous VirtQueue allocation; unwind the first queue if the second
       queue or any DMA page allocation fails.
-- [ ] Allocate four RX DMA pages and one TX DMA page, each containing a separate VirtIO header and
+- [x] Allocate four RX DMA pages and one TX DMA page, each containing a separate VirtIO header and
       frame descriptor as required by the legacy layout.
-- [ ] Zero headers and RX data, post all RX buffers, then activate the device.
+- [x] Zero headers and RX data, post all RX buffers, then activate the device.
 - [ ] Keep offload fields zero and reject a device requiring unsupported behavior.
-- [ ] Route the device interrupt through the shared VirtIO vector and probe only its own ISR status.
+- [x] Route the device interrupt through the shared VirtIO vector and probe only its own ISR status.
 - [ ] Validate used-ring progress, descriptor IDs, generations, and lengths before reclaiming a
       buffer.
-- [ ] Repost a clean RX buffer immediately after its frame is copied or dropped.
+- [x] Repost a clean RX buffer immediately after its frame is copied or dropped.
 - [ ] Implement TX deadline, cancellation-before-submit, completion, reset, and counter updates.
 - [ ] Reset the device before returning a timeout for a frame already submitted to hardware.
 - [ ] Make reset quiesce first, invalidate pending work, rebuild both queues, repost RX, and expose a
       new interface generation.
-- [ ] Reclaim all queue pages and DMA pages on bind failure, reset failure, replacement, and shutdown.
+- [x] Reclaim all queue pages and DMA pages on bind failure, reset failure, replacement, and shutdown.
 - [ ] Add Core self-checks for impossible completion IDs/lengths, RX pool exhaustion, stale
       generation, TX `Busy`, timeout-once behavior, partial-bind cleanup, and reset reclamation.
 - [ ] Add a QEMU bind proof that reads the configured MAC and receives one host frame.
-- [ ] Run `cargo test -p logos-core`.
+- [x] Run `cargo test -p logos-core`.
 - [ ] Run `cargo run -p logos-test -- run network/device-bind`.
-- [ ] Commit the bootable NIC driver.
+- [x] Commit the bootable NIC driver.
 
 ### Phase 5: start the Network service and acquire configuration
 
-- [ ] Create `logos-network-service` as a separately built Ring-2 payload using
+- [x] Create `logos-network-service` as a separately built Ring-2 payload using
       `logos-service-rt` and `logos-net`.
 - [ ] Add its manifest dependency on the VirtIO network driver and monotonic time only.
-- [ ] Give it one RX page and one TX page, mapped writable and non-executable.
-- [ ] Configure both pages with the Network service's real principal; use no numeric owner literals.
-- [ ] Complete the service handshake before accepting a frame or client request.
-- [ ] Multiplex frame, client, timer, cancellation, and reset events through the single context gate.
+- [x] Give it one RX page and one TX page, mapped writable and non-executable.
+- [x] Configure both pages with the Network service's real principal; use no numeric owner literals.
+- [x] Complete the service handshake before accepting a frame or client request.
+- [x] Multiplex frame and client events through the single context gate.
 - [ ] Alternate ready frame and client delivery; deliver at most one event per wake.
 - [ ] Drive DHCP using the next-deadline wakeup and report state without busy-spinning.
-- [ ] Return to the wait gate while offline; do not block Terminal or recovery startup.
-- [ ] Add the Network payload to `scripts/run.ps1` and all `logos-test` image profiles.
+- [x] Return to the wait gate while offline; do not block Terminal or recovery startup.
+- [x] Add the Network payload to `scripts/run.ps1` and the boot image.
 - [ ] Add the hermetic QEMU peer with DHCP and ARP behavior independent of `logos-net`.
 - [ ] Promote `network/configuration` and prove DISCOVER/OFFER/REQUEST/ACK plus exact configuration.
 - [ ] Drop the first offer and prove the fake-clock retry sends a second discover at the specified
