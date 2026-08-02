@@ -158,6 +158,7 @@ const SCENARIOS: &[Scenario] = &[
     configured("network/transport-dhcp", "network", &[], Fixture::Fresh),
     configured("network/device-bind", "network", &[], Fixture::Fresh),
     configured("network/configuration", "network", &[], Fixture::Fresh),
+    configured("network/unauthorized-operation", "network", &[], Fixture::Fresh),
     future("network/icmp-echo", "network", Fixture::Fresh),
     future("network/udp-round-trip", "network", Fixture::Fresh),
     future("network/backpressure-cancel", "network", Fixture::Fresh),
@@ -1707,6 +1708,7 @@ mod tests {
                         | "network/transport-dhcp"
                         | "network/device-bind"
                         | "network/configuration"
+                        | "network/unauthorized-operation"
                 )
         }));
     }

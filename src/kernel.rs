@@ -1677,6 +1677,82 @@ pub(crate) fn main(
             );
         },
         |id| {
+            if id == "network/unauthorized-operation" {
+                let (Some(network_endpoint), Some(network_task)) =
+                    (native_network_endpoint, network_handle)
+                else {
+                    return false;
+                };
+                let endpoint = logos_abi::NetworkEndpoint(0x0001_0001);
+                let requests = [
+                    logos_abi::NetworkRequest {
+                        id: 0x9000_0020,
+                        operation: logos_abi::NetworkOperation::Bind,
+                        endpoint: logos_abi::NetworkEndpoint(0),
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Udp,
+                            0,
+                            4000,
+                        ),
+                        page: logos_abi::PageHandle(0),
+                        length: 0,
+                        generation: 0,
+                        deadline: u64::MAX / 2,
+                    },
+                    logos_abi::NetworkRequest {
+                        id: 0x9000_0021,
+                        operation: logos_abi::NetworkOperation::SendTo,
+                        endpoint,
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Udp,
+                            0x0a00_0202,
+                            4001,
+                        ),
+                        page: logos_abi::PageHandle(1),
+                        length: 1,
+                        generation: 1,
+                        deadline: u64::MAX / 2,
+                    },
+                    logos_abi::NetworkRequest {
+                        id: 0x9000_0022,
+                        operation: logos_abi::NetworkOperation::ReceiveFrom,
+                        endpoint,
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Udp,
+                            0,
+                            4000,
+                        ),
+                        page: logos_abi::PageHandle(1),
+                        length: logos_abi::MAX_NETWORK_PAYLOAD as u16,
+                        generation: 1,
+                        deadline: u64::MAX / 2,
+                    },
+                ];
+                for request in requests {
+                    if !unsafe {
+                        logos_core::native_service::Context::request_network_at(
+                            native_terminal_network.context(),
+                            request,
+                        )
+                    } || !relay_network_client(
+                        native_terminal_network,
+                        network_endpoint,
+                        network_task,
+                        unsafe { &mut *native_scheduler_ptr },
+                        unsafe { &mut *network_client_pending_ptr },
+                        &denied_session,
+                        &capabilities,
+                        unsafe { &*shared_pages_ptr },
+                        terminal_owner,
+                    ) || native_terminal_network
+                        .response(request.id)
+                        .is_none_or(|reply| reply.status != logos_abi::NetworkStatus::Denied)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
             if id == "network/device-bind" {
                 let request = logos_abi::NetworkRequest {
                     id: 0x9000_0001,
@@ -2079,8 +2155,7 @@ fn relay_network_client(
             length: 0,
             info: logos_abi::NetworkInfo::default(),
             counters: logos_abi::NetworkCounters::default(),
-        }) && scheduler.wake(handle)
-            && scheduler.run(handle);
+        });
     }
     if let Some((kind, scope)) = crate::platform::network::capability(request)
         && !session.allows_scoped64(capabilities, kind, scope)
@@ -2095,8 +2170,7 @@ fn relay_network_client(
             length: 0,
             info: logos_abi::NetworkInfo::default(),
             counters: logos_abi::NetworkCounters::default(),
-        }) && scheduler.wake(handle)
-            && scheduler.run(handle);
+        });
     }
     if matches!(
         request.operation,

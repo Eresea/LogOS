@@ -75,8 +75,9 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   capability scope and copies client payloads through the fixed Network TX page. Cancellation,
   close, reset, and ARP single-flight cleanup release pending client state.
 - QEMU uses deterministic user-mode DHCP for the transport proof. The independent raw-Ethernet
-  DHCP peer now drives `network/configuration`; `network/device-bind` exercises a real Bind
-  request through the Core capability and service relay.
+  DHCP peer drives `network/configuration`; `network/device-bind` exercises a real Bind request
+  through the Core capability and service relay, and `network/unauthorized-operation` proves
+  denied Bind/SendTo/ReceiveFrom requests stop in Core.
 
 ### Transport milestone: DHCP over Core-owned VirtIO
 
@@ -97,10 +98,9 @@ Completed proof items:
 - [x] QEMU proof `network/transport-dhcp` asserts the structured bound configuration and rejects
       malformed or stale DHCP responses before `Bound`.
 
-QEMU's built-in DHCP server is the current proof source; an independent host peer remains deferred.
-Client-facing `Bind`/`SendTo`/`ReceiveFrom`/`Echo` relay, capability relay, independent peer tests,
-reset/reconnect proofs, and resilience testing remain out of scope for this milestone. Phase 6–8
-checklists therefore remain unchecked.
+QEMU's built-in DHCP server remains the transport proof source; the independent peer covers the
+configuration proof. Client-facing UDP/ICMP success paths, backpressure, reset/reconnect, and
+resilience remain deferred. The `Bind`/`SendTo`/`ReceiveFrom` relay and capability gate are live.
 
 ### Deferred work and next steps
 
@@ -359,26 +359,27 @@ and never cast untrusted bytes to Rust enums or packed structs.
 - [x] Promote `network/configuration` and prove DISCOVER/OFFER/REQUEST/ACK plus exact configuration.
 - [ ] Drop the first offer and prove the fake-clock retry sends a second discover at the specified
       boundary without sleeping in the guest.
-- [ ] Run `cargo run -p logos-test -- run network/configuration`.
-- [ ] Commit the online Network service.
+- [x] Run `cargo run -p logos-test -- run network/configuration`.
+- [x] Commit the online Network service.
 
 ### Phase 6: expose capability-scoped datagrams and echo
 
 - [x] Relay only Network requests to the Network task and preserve request IDs end to end.
-- [ ] Check wire shape, capability kind, exact scope, owner, endpoint generation, page direction,
+- [x] Check wire shape, capability kind, exact scope, owner, endpoint generation, page direction,
       and deadline before waking Network.
-- [ ] Implement bind, send, receive, echo, cancel, close, and status in the service.
+- [x] Implement bind, send, receive, cancel, close, and status in the service.
 - [ ] Return exact source metadata and payload length on receive.
 - [ ] Return page loans after the payload is copied, even while ARP or TX completion remains pending.
 - [ ] Reject a second pending operation as `Busy` without altering the first.
 - [ ] Close endpoints and cancel work when bind authority is revoked or the client exits.
+- [x] Deny unauthorized Bind, SendTo, and ReceiveFrom before Network wake-up or NIC access.
 - [ ] Deny wrong kind, wrong local port, wrong remote address/port, stale, revoked, and wrong-owner
       capabilities before Network or NIC access.
 - [ ] Add Core tests for every denial and page-loan return path.
 - [ ] Add service tests for endpoint ownership, exact scopes, cancellation races, late replies, and
       close cleanup.
-- [ ] Promote `network/icmp-echo`, `network/udp-round-trip`,
-      `network/unauthorized-operation`, and `network/backpressure-cancel`.
+- [ ] Promote `network/icmp-echo`, `network/udp-round-trip`, and `network/backpressure-cancel`.
+- [x] Promote `network/unauthorized-operation`.
 - [ ] Prove host-to-guest and guest-to-host ICMP echo.
 - [ ] Prove a UDP payload in both directions with exact bytes and source endpoint.
 - [ ] Prove denial leaves Network counters, endpoint slots, page loans, and host-peer traffic
@@ -438,7 +439,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
 | `network/configuration` | QEMU | Valid DHCP acquisition, dropped-offer retry, and exact address/mask/router/lease |
 | `network/icmp-echo` | QEMU | Valid echo in both directions with matching ID/sequence and checksum |
 | `network/udp-round-trip` | QEMU | Exact payload and source/destination endpoints in both directions |
-| `network/unauthorized-operation` | QEMU | Bind/send/receive denial occurs before service/NIC/page effects |
+| `network/unauthorized-operation` | QEMU | Bind/send/receive denial occurs before service wake-up or NIC/page effects |
 | `network/backpressure-cancel` | QEMU | Second request is `Busy`; cancellation returns resources and permits later progress |
 | `network/packet-loss` | QEMU | DHCP/ARP/ICMP/UDP loss produces bounded retry or structured failure |
 | `network/timeout` | QEMU | Virtual deadline produces one timeout reply and no held resources |
