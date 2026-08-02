@@ -426,7 +426,9 @@ The first transition proof switches to the service CR3, enters a user-mapped pro
 and returns only through a DPL-3 gate on the TSS stack. Core restores its original CR3 and stack
 before resuming. A native terminal entry may use that path only after it has an explicit IPC ABI.
 
-Native service headers carry the ABI version, service name, and native entry function. The loader
+Native service headers carry the transport ABI, service name, protocol major/minor, and native
+entry function. The loader requires an exact transport ABI and protocol major, and accepts a
+payload minor version only when it supports the manifest's required minor. The loader
 derives that entry's RVA after firmware relocation and accepts it only when it lies in an executable
 PE section. Core maps a versioned service-context page and passes its user virtual address to the
 entry. `Ready` resumes Ring 3 after Core acknowledges it; `ReadInput` captures a Core-owned service
@@ -474,10 +476,10 @@ bounded reply, and returns it to the terminal. A missing Session capability is r
 dispatch. Versioned requests and effect results live in `logos-abi`; Core retains no normal-command
 registry or terminal reply switch. Recovery remains a direct Core path.
 
-Core retains a failed native task so its supervisor can reset the Core-owned context and saved
-frame, invalidate the stale generation-tagged handle, and re-enter the service. The bootstrap path
-allows one Terminal or Sessions restart before falling back to the direct recovery console; later
-native-service policies belong in the System supervisor.
+Core's fixed four-slot native scheduler owns Terminal, Sessions, Store, and Network task instances
+and keeps their immutable boot-staged images separate. Replacement quarantines the failed task,
+builds a fresh address space, atomically installs it with a new generation, then releases the old
+space. The generic scheduler remains responsible for Core and driver work.
 
 Native-service restart replaces the whole service address space; it never reuses potentially
 corrupted code, stack, heap, context, or mapped pages. Ring-3 faults and explicit service panics
@@ -486,7 +488,12 @@ restart according to the service manifest. Terminal gets one immediate retry bef
 Sessions, Store, and Network degrade after bounded retries while local terminal operations remain
 available. Core faults and uncooperative service loops remain fatal and deferred respectively.
 
-See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), and [ADR-0005](adr/0005-native-service-suspension.md).
+The recovery console can manually reset the retry budget and replace Terminal or Sessions; normal
+mode resumes only after Terminal completes its ready handshake. Missing or incompatible Terminal
+enters recovery. Missing Sessions, Store, or Network leaves local terminal operation available with
+commands unavailable, in-memory history, or offline networking respectively.
+
+See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), [ADR-0005](adr/0005-native-service-suspension.md), and [ADR-0017](adr/0017-native-service-fault-restart.md).
 
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after startup selects recovery mode.
 

@@ -21,7 +21,7 @@ UEFI firmware
 
 ## Current point
 
-Core v1 is complete. The kernel exits UEFI boot services, initializes physical memory and reversible virtual mappings, receives PS/2 and ACPI-routed VirtIO interrupts through its IDT, runs cooperative ready/blocked tasks, enforces capability-gated IPC, and reclaims service-owned resources. It then stages, relocates, maps, and starts separate Ring-3 Terminal and Sessions payloads; keyboard, presentation, session requests, and typed effects cross bounded Core gates. Recovery framebuffer output remains dormant unless normal-service startup fails or an authorized handoff requests it. Every stage added later must state its dependencies, failure mode, and recovery path.
+Core v1 is complete. The kernel exits UEFI boot services, initializes physical memory and reversible virtual mappings, receives PS/2 and ACPI-routed VirtIO interrupts through its IDT, runs cooperative ready/blocked tasks, enforces capability-gated IPC, and reclaims service-owned resources. It independently stages, validates, relocates, maps, and starts Ring-3 Terminal, Sessions, Store, and Network payloads; keyboard, presentation, session, persistence, network, and typed-effect requests cross bounded Core gates. Recovery framebuffer output remains dormant unless Terminal startup fails or an authorized handoff requests it. Missing optional services select a degraded local mode rather than failing Core. Every stage added later must state its dependencies, failure mode, and recovery path.
 
 The first Platform v1 loader stage creates a separate service PML4 after physical memory is ready
 and before service startup. It depends on the existing kernel map and allocator; an allocation or
@@ -42,6 +42,10 @@ Terminal task gets one clean address-space replacement with a new generation-tag
 failed replacement enters the direct recovery console. Sessions, Store, and Network restart
 independently with bounded backoff; their exhaustion leaves the normal terminal usable in degraded
 mode. A replacement never reuses the failed service's mappings or context.
+The payload header transport ABI must match exactly; protocol major must match and the payload minor
+must support the manifest requirement. Ring-3 exception stubs normalize CPU frames and return fault
+metadata to Core. Service panics use the same typed failure gate. Cleanup and replacement begin only
+after Core has restored its own address space and stack.
 
 ## Persistence ordering and recovery
 

@@ -44,6 +44,9 @@ capabilities, health, versioned contracts, isolated address spaces, Core-owned s
 - [x] QEMU verifies bootstrap normal boot, startup rejection, dependency loss, runtime recovery, and replacement.
 - [x] QEMU proves an independently loaded terminal service can start, redraw, and execute bounded commands.
 - [x] QEMU proves Terminal and Sessions failure, restart, capability denial, and direct recovery availability without compromising Core.
+- [x] QEMU proves real faults and panics in Terminal, Sessions, Store, and Network are contained and replaced from clean images.
+- [x] QEMU proves missing optional payloads preserve local terminal operation, while missing Terminal enters recovery.
+- [x] QEMU rejects an incompatible service protocol without failing Core.
 
 ## V2 — Trust and control plane
 

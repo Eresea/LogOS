@@ -32,3 +32,10 @@ Network wake-up, page loan, protocol-state change, or NIC access. Endpoint handl
 generation-bound. Reset, service restart, client exit, or revoked bind authority invalidates them
 and returns all page loans. Core-owned bounce buffers prevent the Network service from programming
 DMA, but IOMMU protection from a malicious physical device remains deferred.
+
+## Native-service fault containment
+
+Ring-3 CPU faults and typed service panics return to Core with a normalized failure record. Core
+invalidates task, endpoint, request, and page-loan generations before constructing a replacement
+from immutable staged bytes. Replacement maps only declared service resources. A fault in Core
+retains the fatal halt path; timer preemption of an uncooperative service remains deferred.
