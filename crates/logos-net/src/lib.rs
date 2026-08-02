@@ -1312,6 +1312,19 @@ mod tests {
     }
 
     #[test]
+    fn arp_resolution_is_single_flight_and_generation_scoped() {
+        let mut state = NetworkState::new();
+        assert!(state.expect_arp(PEER_IP));
+        assert!(!state.expect_arp(Ipv4([198, 51, 100, 1])));
+        assert!(!state.learn_arp_reply(Ipv4([198, 51, 100, 1]), Mac([4; 6]), 1, 10));
+        assert!(state.learn_arp_reply(PEER_IP, Mac([4; 6]), 1, 10));
+        assert_eq!(state.resolve_arp(PEER_IP, 2), Some(Mac([4; 6])));
+        state.reset();
+        assert_eq!(state.resolve_arp(PEER_IP, 2), None);
+        assert!(state.expect_arp(PEER_IP));
+    }
+
+    #[test]
     fn dhcp_retries_and_lease_transitions_are_bounded() {
         let mut state = NetworkState::new();
         state.dhcp_start(0, 7);
