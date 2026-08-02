@@ -611,9 +611,11 @@ pub(crate) fn main(
     else {
         fail!(b"native storage task");
     };
-    let mut native_network = (network_device.is_some() && network_service_handle.is_some())
-        .then(|| native_task::Task::load(&mut memory, payloads.network, &privilege))
-        .flatten();
+    let mut native_network = payloads.network.and_then(|payload| {
+        (network_device.is_some() && network_service_handle.is_some())
+            .then(|| native_task::Task::load(&mut memory, payload, &privilege))
+            .flatten()
+    });
     check!(b"storage heap", native_storage.map_heap(&mut memory).is_some());
     let mut shared_pages = logos_core::shared_pages::SharedPages::new();
     let terminal_owner = session.principal().page_owner();
@@ -660,7 +662,10 @@ pub(crate) fn main(
             let _ = task.release(&mut memory);
         }
     }
-    check!(b"network service pages", network_device.is_none() || network_setup.is_some());
+    check!(
+        b"network service pages",
+        network_device.is_none() || native_network.is_none() || network_setup.is_some()
+    );
     let mut service_task = virtio::ServiceTask::new(
         &mut virtio_service,
         &channel,

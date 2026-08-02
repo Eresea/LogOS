@@ -29,8 +29,7 @@ pub struct Payloads {
     pub terminal: Payload,
     pub sessions: Payload,
     pub storage: Payload,
-    #[allow(dead_code)]
-    pub network: Payload,
+    pub network: Option<Payload>,
 }
 
 impl Payload {
@@ -163,12 +162,18 @@ pub fn stage() -> Option<Payloads> {
         .and_then(|file| file.into_regular_file())?;
     let storage_buffer = unsafe { &mut *STORAGE_PAYLOAD.0.get() };
     let storage = load(&mut storage, storage_buffer, b"storage", ProtocolVersion::V1)?;
-    let mut network = root
+    let network = root
         .open(cstr16!(r"\EFI\LOGOS\NETWORK.EFI"), FileMode::Read, FileAttribute::empty())
         .ok()
-        .and_then(|file| file.into_regular_file())?;
-    let network_buffer = unsafe { &mut *NETWORK_PAYLOAD.0.get() };
-    let network = load(&mut network, network_buffer, b"network", ProtocolVersion::V1)?;
+        .and_then(|file| file.into_regular_file())
+        .and_then(|mut file| {
+            load(
+                &mut file,
+                unsafe { &mut *NETWORK_PAYLOAD.0.get() },
+                b"network",
+                ProtocolVersion::V1,
+            )
+        });
     Some(Payloads { terminal, sessions, storage, network })
 }
 
