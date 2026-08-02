@@ -1,20 +1,21 @@
 use crate::supervisor::Protocol;
 use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
-const SERVICES: usize = 4;
+const SERVICES: usize = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Service {
     VirtioBalloon,
     VirtioBlock,
     Storage,
+    Network,
 }
 
 impl Service {
     pub const fn protocol(self) -> Protocol {
         match self {
             Self::VirtioBalloon => Protocol { abi: 1, version: 0 },
-            Self::VirtioBlock | Self::Storage => Protocol { abi: 1, version: 0 },
+            Self::VirtioBlock | Self::Storage | Self::Network => Protocol { abi: 1, version: 0 },
         }
     }
 }

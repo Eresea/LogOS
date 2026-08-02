@@ -41,6 +41,8 @@ pub struct Context {
     pub text_length: u32,
     pub text: [u8; MAX_TEXT],
     pub shared_page: u32,
+    pub network_rx_page: u32,
+    pub network_tx_page: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -56,6 +58,14 @@ pub struct TextRequest {
 pub struct BlockPage {
     pub handle: logos_abi::PageHandle,
     pub address: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NetworkPages {
+    pub rx_handle: logos_abi::PageHandle,
+    pub rx_address: u64,
+    pub tx_handle: logos_abi::PageHandle,
+    pub tx_address: u64,
 }
 
 const BLOCK_REQUEST_BYTES: usize = 32;
@@ -341,6 +351,8 @@ impl Context {
             text_length: 0,
             text: [0; MAX_TEXT],
             shared_page: 0,
+            network_rx_page: 0,
+            network_tx_page: 0,
         }
     }
 
@@ -856,11 +868,55 @@ impl Context {
     }
 
     /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping before service startup.
+    pub unsafe fn configure_network_pages_at(
+        address: u64,
+        rx: logos_abi::PageHandle,
+        tx: logos_abi::PageHandle,
+    ) -> bool {
+        if rx.0 == 0 || tx.0 == 0 || rx == tx {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != 0
+            || context.status != 0
+        {
+            return false;
+        }
+        context.network_rx_page = rx.0;
+        context.network_tx_page = tx.0;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
     pub unsafe fn shared_page_at(address: u64) -> Option<logos_abi::PageHandle> {
         let context = unsafe { (address as *const Self).read_volatile() };
         (context.abi == ABI && context.reserved == 0 && context.shared_page != 0)
             .then_some(logos_abi::PageHandle(context.shared_page))
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn network_pages_at(address: u64) -> Option<NetworkPages> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.network_rx_page == 0
+            || context.network_tx_page == 0
+        {
+            return None;
+        }
+        let rx_address = address.checked_sub(logos_abi::PAGE_SIZE as u64 * 19)?;
+        Some(NetworkPages {
+            rx_handle: logos_abi::PageHandle(context.network_rx_page),
+            rx_address,
+            tx_handle: logos_abi::PageHandle(context.network_tx_page),
+            tx_address: rx_address.checked_sub(logos_abi::PAGE_SIZE as u64)?,
+        })
     }
 
     /// # Safety
@@ -1293,5 +1349,17 @@ mod tests {
         assert_eq!(unsafe { Context::network_event_at(address) }, Some(event));
         assert!(unsafe { !Context::network_wait_at(address, 0) });
         assert!(unsafe { Context::network_reply_at(address, request.id + 1) }.is_none());
+
+        let mut pages_context = Context::new();
+        let pages_address = (&mut pages_context as *mut Context) as u64;
+        assert!(unsafe {
+            Context::configure_network_pages_at(
+                pages_address,
+                logos_abi::PageHandle(1),
+                logos_abi::PageHandle(2),
+            )
+        });
+        let pages = unsafe { Context::network_pages_at(pages_address) }.unwrap();
+        assert_eq!(pages.tx_address, pages.rx_address - 4096);
     }
 }

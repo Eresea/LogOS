@@ -15,6 +15,8 @@ const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 const SHARED_PAGE: usize = ENTRIES - 5;
 const BLOCK_PAGE: usize = ENTRIES - 10;
+const NETWORK_RX_PAGE: usize = ENTRIES - 23;
+const NETWORK_TX_PAGE: usize = ENTRIES - 24;
 const STACK_TOP: usize = BLOCK_PAGE;
 const STACK_PAGES: usize = 12;
 const STACK_BASE: usize = STACK_TOP - STACK_PAGES;
@@ -260,6 +262,44 @@ impl AddressSpace {
         true
     }
 
+    pub fn map_network_owned(
+        &mut self,
+        physical: &mut PhysicalMemory,
+    ) -> Option<((u64, u64), (u64, u64))> {
+        if self.mapping(NETWORK_RX_PAGE).is_some() || self.mapping(NETWORK_TX_PAGE).is_some() {
+            return None;
+        }
+        let rx = physical.allocate_owned()?;
+        let Some(tx) = physical.allocate_owned() else {
+            let _ = physical.release_page(rx);
+            return None;
+        };
+        let rx_address = rx.address();
+        let tx_address = tx.address();
+        if let Err(rx) = self.insert_mapping(NETWORK_RX_PAGE, rx) {
+            let _ = physical.release_page(rx);
+            let _ = physical.release_page(tx);
+            return None;
+        }
+        if let Err(tx) = self.insert_mapping(NETWORK_TX_PAGE, tx) {
+            self.unmap_index(NETWORK_RX_PAGE, physical);
+            let _ = physical.release_page(tx);
+            return None;
+        }
+        unsafe {
+            (self.pt.address() as *mut u64)
+                .add(NETWORK_RX_PAGE)
+                .write_volatile(rx_address | PRESENT | WRITABLE | USER | NO_EXECUTE);
+            (self.pt.address() as *mut u64)
+                .add(NETWORK_TX_PAGE)
+                .write_volatile(tx_address | PRESENT | WRITABLE | USER | NO_EXECUTE);
+        }
+        Some((
+            (rx_address, self.base + PAGE_SIZE * NETWORK_RX_PAGE as u64),
+            (tx_address, self.base + PAGE_SIZE * NETWORK_TX_PAGE as u64),
+        ))
+    }
+
     pub const fn cr3(&self) -> u64 {
         self.pml4.address()
     }
@@ -361,6 +401,19 @@ impl AddressSpace {
             if let Some(mapping) = mapping.take() {
                 let _ = physical.release_page(mapping.page);
                 unsafe { (self.pt.address() as *mut u64).add(mapping.index).write_volatile(0) };
+            }
+        }
+    }
+
+    fn unmap_index(&mut self, index: usize, physical: &mut PhysicalMemory) {
+        if let Some(slot) = self
+            .mapped
+            .iter_mut()
+            .find(|slot| slot.as_ref().is_some_and(|mapping| mapping.index == index))
+        {
+            if let Some(mapping) = slot.take() {
+                let _ = physical.release_page(mapping.page);
+                unsafe { (self.pt.address() as *mut u64).add(index).write_volatile(0) };
             }
         }
     }

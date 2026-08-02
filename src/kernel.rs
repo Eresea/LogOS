@@ -7,8 +7,8 @@ use crate::drivers::{
 use crate::ipc::{self, approvals, effects};
 use crate::mm::{address_space, memory, virtual_memory};
 use crate::platform::{
-    audit, balloon, block, entropy, health, identity, inference, mode, payload, pe, root_key,
-    secrets, services, session, storage, time, trace,
+    audit, balloon, block, entropy, health, identity, inference, mode, network, payload, pe,
+    root_key, secrets, services, session, storage, time, trace,
 };
 use crate::sched::{native_task, scheduler};
 #[cfg(feature = "test-hooks")]
@@ -287,7 +287,7 @@ pub(crate) fn main(
     else {
         fail!(b"block bind");
     };
-    let _network_device = network_driver::discover(&devices).and_then(|network_pci| {
+    let mut network_device = network_driver::discover(&devices).and_then(|network_pci| {
         let (bus, slot, _) = network_pci.location();
         acpi.and_then(|tables| {
             tables.pci_gsi(bus, slot, network_pci.interrupt_pin().checked_sub(1)?)
@@ -401,6 +401,7 @@ pub(crate) fn main(
     else {
         fail!(b"storage capability");
     };
+    let network_service_capability = capabilities.grant(capabilities::CapabilityKind::Service);
     check!(
         b"service capability",
         supervisor::grant_self_check()
@@ -434,6 +435,8 @@ pub(crate) fn main(
     else {
         fail!(b"storage register");
     };
+    let network_service_handle = network_service_capability
+        .and_then(|capability| services.register(&capabilities, capability, network::SERVICE));
     check!(
         b"services",
         services.resolve(balloon::SERVICE) == Some(virtio_handle)
@@ -586,10 +589,14 @@ pub(crate) fn main(
     else {
         fail!(b"native storage task");
     };
+    let mut native_network = (network_device.is_some() && network_service_handle.is_some())
+        .then(|| native_task::Task::load(&mut memory, payloads.network, &privilege))
+        .flatten();
     check!(b"storage heap", native_storage.map_heap(&mut memory).is_some());
     let mut shared_pages = logos_core::shared_pages::SharedPages::new();
     let terminal_owner = session.principal().page_owner();
     let storage_owner = storage_service_handle.principal().page_owner();
+    let network_owner = network_service_handle.map(|handle| handle.principal().page_owner());
     let shared_history = native_terminal.map_shared_owned(&mut memory).and_then(|page| {
         shared_pages
             .register(terminal_owner, page, 1)
@@ -614,6 +621,24 @@ pub(crate) fn main(
         shared_pages.address(terminal_owner, shared_history).is_some()
     );
     check!(b"shared pages", logos_core::shared_pages::self_check());
+    let network_setup = native_network
+        .as_mut()
+        .and_then(|task| task.map_network_owned(&mut memory))
+        .and_then(|((rx_physical, rx_virtual), (tx_physical, tx_virtual))| {
+            let owner = network_owner?;
+            let rx = shared_pages.register(owner, rx_physical, 2)?;
+            let Some(tx) = shared_pages.register(owner, tx_physical, 2) else {
+                let _ = shared_pages.release(owner, rx);
+                return None;
+            };
+            Some((owner, rx, rx_virtual, tx, tx_virtual))
+        });
+    if network_setup.is_none() {
+        if let Some(task) = native_network.take() {
+            let _ = task.release(&mut memory);
+        }
+    }
+    check!(b"network service pages", network_device.is_none() || network_setup.is_some());
     let mut service_task = virtio::ServiceTask::new(
         &mut virtio_service,
         &channel,
@@ -672,6 +697,7 @@ pub(crate) fn main(
     let native_storage_block = native_storage.block_endpoint();
     let native_store = native_terminal.store_endpoint();
     let native_storage_store = native_storage.store_endpoint();
+    let native_network_endpoint = native_network.as_ref().map(native_task::Task::network_endpoint);
     check!(
         b"storage shared page",
         native_store.configure_shared_page(shared_history)
@@ -683,6 +709,20 @@ pub(crate) fn main(
             handle: storage_block_page,
             address: storage_block_virtual,
         }),
+    );
+    let network_pages_ready = native_network_endpoint.zip(network_setup).is_some_and(
+        |(endpoint, (_, rx, rx_address, tx, tx_address))| {
+            endpoint.configure(logos_core::native_service::NetworkPages {
+                rx_handle: rx,
+                rx_address,
+                tx_handle: tx,
+                tx_address,
+            })
+        },
+    );
+    check!(
+        b"network page configuration",
+        network_device.is_none() || native_network_endpoint.is_none() || network_pages_ready
     );
     let mut block_dispatch = block::Dispatch::new();
     let mut native_scheduler = scheduler::Scheduler::new();
@@ -731,6 +771,16 @@ pub(crate) fn main(
             storage_handle
         ),
     );
+    let mut network_handle = None;
+    if let Some(network_task) = native_network.as_mut()
+        && let Some(handle) = native_scheduler.spawn(network_task)
+    {
+        network_handle = Some(handle);
+        if !native_scheduler.run_next() {
+            debug::write_line(b"LogOS: network service unavailable");
+            network_handle = None;
+        }
+    }
     health.finish();
     let mut store_relay_state = StoreRelayState::new();
     if !native_input.deliver(logos_abi::InputEvent::STARTUP) {
@@ -1603,6 +1653,14 @@ pub(crate) fn main(
             ) {
                 debug::write_line(b"LogOS: storage block reply failed");
             }
+            if !poll_network(
+                network_device.as_mut(),
+                native_network_endpoint,
+                network_handle,
+                &mut native_scheduler,
+            ) {
+                debug::write_line(b"LogOS: network service unavailable");
+            }
             if let Some(event) = input.next(tick, keyboard::poll_scancode) {
                 if let Some(native_event) = native_input_event(event) {
                     if !native_input.deliver(native_event)
@@ -1799,6 +1857,12 @@ pub(crate) fn main(
                 storage_handle,
                 tick,
             );
+            let _ = poll_network(
+                network_device.as_mut(),
+                native_network_endpoint,
+                network_handle,
+                &mut native_scheduler,
+            );
         })
     }
     loop {
@@ -1817,6 +1881,41 @@ fn dispatch_store_block(
         return true;
     };
     context.endpoint.reply(reply) && scheduler.wake(handle) && scheduler.run(handle)
+}
+
+fn poll_network(
+    device: Option<&mut network_driver::Device>,
+    endpoint: Option<native_task::NetworkEndpoint>,
+    handle: Option<scheduler::TaskHandle>,
+    scheduler: &mut scheduler::Scheduler<'_>,
+) -> bool {
+    let (Some(device), Some(endpoint), Some(handle)) = (device, endpoint, handle) else {
+        return true;
+    };
+    if !unsafe { logos_core::native_service::Context::network_waiting_at(endpoint.context()) } {
+        return true;
+    }
+    let Some(pages) =
+        (unsafe { logos_core::native_service::Context::network_pages_at(endpoint.context()) })
+    else {
+        return false;
+    };
+    let frame = unsafe {
+        core::slice::from_raw_parts_mut(pages.rx_address as *mut u8, logos_net::ETHERNET_MAX_FRAME)
+    };
+    match device.receive(frame) {
+        Ok(Some(length)) => {
+            let event = logos_abi::NetworkEvent {
+                id: interrupts::ticks().try_into().unwrap_or(1).max(1),
+                kind: logos_abi::NetworkEventKind::Frame,
+                generation: device.info().generation,
+                length: length as u16,
+            };
+            endpoint.deliver_event(event) && scheduler.wake(handle) && scheduler.run(handle)
+        }
+        Ok(None) => true,
+        Err(_) => device.reset(),
+    }
 }
 
 fn run_storage_startup(

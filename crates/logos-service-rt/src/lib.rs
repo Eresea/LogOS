@@ -6,7 +6,9 @@ use core::{arch::asm, mem::MaybeUninit, ptr::NonNull};
 use core::panic::PanicInfo;
 
 use logos_core::native_service::{self};
-pub use logos_core::native_service::{BlockPage, Context as RawContext, Header, MAX_TEXT};
+pub use logos_core::native_service::{
+    BlockPage, Context as RawContext, Header, MAX_TEXT, NetworkPages,
+};
 
 pub type EntryContext = *mut RawContext;
 
@@ -202,6 +204,10 @@ impl Context {
     pub fn network_wait(&mut self, deadline: u64) -> bool {
         (unsafe { RawContext::network_wait_at(self.raw_address(), deadline) })
             && self.invoke(native_service::NETWORK_WAIT)
+    }
+
+    pub fn network_pages(&self) -> Option<NetworkPages> {
+        unsafe { RawContext::network_pages_at(self.raw_address()) }
     }
 
     pub fn network_request(&self) -> Option<logos_abi::NetworkRequest> {

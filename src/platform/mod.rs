@@ -6,6 +6,7 @@ pub mod health;
 pub mod identity;
 pub mod inference;
 pub mod mode;
+pub mod network;
 pub mod payload;
 pub mod pe;
 pub mod root_key;

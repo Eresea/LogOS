@@ -159,6 +159,16 @@ impl NetworkEndpoint {
         self.context_physical
     }
 
+    pub fn configure(self, pages: logos_core::native_service::NetworkPages) -> bool {
+        unsafe {
+            logos_core::native_service::Context::configure_network_pages_at(
+                self.context_physical,
+                pages.rx_handle,
+                pages.tx_handle,
+            )
+        }
+    }
+
     pub fn request(self) -> Option<logos_abi::NetworkRequest> {
         unsafe { logos_core::native_service::Context::network_at(self.context_physical) }
     }
@@ -296,6 +306,13 @@ impl<'a> Task<'a> {
 
     pub fn map_block_owned(&mut self, memory: &mut PhysicalMemory) -> Option<(u64, u64)> {
         self.space.map_block_owned(memory)
+    }
+
+    pub fn map_network_owned(
+        &mut self,
+        memory: &mut PhysicalMemory,
+    ) -> Option<((u64, u64), (u64, u64))> {
+        self.space.map_network_owned(memory)
     }
 
     pub fn map_heap(&mut self, memory: &mut PhysicalMemory) -> Option<u64> {

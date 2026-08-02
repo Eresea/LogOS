@@ -24,6 +24,7 @@ workspace = true
 [dependencies]
 logos-core = { path = "crates/logos-core" }
 logos-abi = { path = "crates/logos-abi" }
+logos-net = { path = "crates/logos-net" }
 logos-terminal = { path = "crates/logos-terminal" }
 uefi = { version = "0.35", features = ["panic_handler"] }
 
