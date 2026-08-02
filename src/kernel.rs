@@ -968,16 +968,21 @@ pub(crate) fn main(
                     let _ = service_health.beat(balloon::NAME, tick);
                 }
                 if value == "__reset" {
+                    let reset_failed = |stage: &[u8]| {
+                        debug::write(b"LogOS: reset failed stage=");
+                        debug::write_line(stage);
+                        false
+                    };
                     proof.set(false);
                     let Some(lifecycle) = supervisor::Lifecycle::new(&supervisor, balloon::NAME)
                     else {
-                        return false;
+                        return reset_failed(b"lifecycle");
                     };
                     service_lifecycle = lifecycle;
                     debug::write_line(b"LogOS: reset begin");
                     let previous_terminal = native_handle;
                     if !native_scheduler.fail(previous_terminal) || !startup.start() {
-                        return false;
+                        return reset_failed(b"terminal-quiesce");
                     }
                     let Some((restarted_terminal, endpoints, history)) = replace_terminal(
                         &mut native_scheduler,
@@ -989,7 +994,7 @@ pub(crate) fn main(
                         storage_owner,
                         shared_history,
                     ) else {
-                        return false;
+                        return reset_failed(b"terminal-replace");
                     };
                     native_handle = restarted_terminal;
                     (
@@ -1014,31 +1019,31 @@ pub(crate) fn main(
                             native_handle,
                         )
                     {
-                        return false;
+                        return reset_failed(b"terminal-resume");
                     }
 
                     if let Some(previous_sessions) = sessions_handle {
                         if !native_scheduler.fail(previous_sessions) || !startup.start() {
-                            return false;
+                            return reset_failed(b"sessions-quiesce");
                         }
                         let Some(restarted_sessions) = restart_native_service(
                             &mut native_scheduler,
                             previous_sessions,
                             &mut memory,
                         ) else {
-                            return false;
+                            return reset_failed(b"sessions-replace");
                         };
                         sessions_handle = Some(restarted_sessions);
                         let Some(endpoint) = native_scheduler.session_endpoint(restarted_sessions)
                         else {
-                            return false;
+                            return reset_failed(b"sessions-endpoint");
                         };
                         native_sessions_endpoint = Some(endpoint);
                         debug::write_line(b"LogOS: reset sessions ready");
                         if !native_scheduler.run(restarted_sessions)
                             || native_scheduler.wake(previous_sessions)
                         {
-                            return false;
+                            return reset_failed(b"sessions-resume");
                         }
                     }
 
@@ -1054,10 +1059,10 @@ pub(crate) fn main(
                     let Some(history_address) =
                         shared_pages.address(terminal_owner, shared_history)
                     else {
-                        return false;
+                        return reset_failed(b"history-address");
                     };
                     if !startup.start() {
-                        return false;
+                        return reset_failed(b"storage-start");
                     }
                     let Some((restarted_storage, store, block, block_page, block_virtual)) =
                         replace_storage(
@@ -1071,19 +1076,19 @@ pub(crate) fn main(
                             shared_history,
                         )
                     else {
-                        return false;
+                        return reset_failed(b"storage-replace");
                     };
                     native_storage_store = store;
                     native_storage_block = block;
                     storage_block_page = block_page;
                     storage_block_virtual = block_virtual;
                     if !native_scheduler.run(restarted_storage) {
-                        return false;
+                        return reset_failed(b"storage-run");
                     }
                     storage_handle = restarted_storage;
                     debug::write_line(b"LogOS: reset storage ready");
                     if native_scheduler.wake(previous_storage) {
-                        return false;
+                        return reset_failed(b"storage-quiesce");
                     }
                     if !run_storage_startup(
                         &mut block_dispatch,
@@ -1098,13 +1103,13 @@ pub(crate) fn main(
                         &mut native_scheduler,
                         storage_handle,
                     ) {
-                        return false;
+                        return reset_failed(b"storage-startup");
                     }
                     if !native_input.deliver(logos_abi::InputEvent::STARTUP)
                         || !native_scheduler.wake(native_handle)
                         || !native_scheduler.run(native_handle)
                     {
-                        return false;
+                        return reset_failed(b"terminal-startup");
                     }
                     if !relay_terminal_store_requests(
                         native_store,
@@ -3490,6 +3495,7 @@ fn run_network_request(
     if !unsafe {
         logos_core::native_service::Context::request_network_at(terminal.context(), request)
     } {
+        debug::write_line(b"LogOS: network request failed stage=dispatch");
         return None;
     }
     let endpoint = service?;
@@ -3513,12 +3519,14 @@ fn run_network_request(
             shared_pages,
             terminal_owner,
         ) {
+            debug::write_line(b"LogOS: network request failed stage=poll");
             return None;
         }
         if let Some(reply) = terminal.response(request.id) {
             return Some(reply);
         }
     }
+    debug::write_line(b"LogOS: network request failed stage=timeout");
     None
 }
 
