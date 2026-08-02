@@ -6,19 +6,21 @@
 
 Run portable applications as capability-isolated WASM components without making the runtime part of kernel correctness.
 
-## Runtime and packages
+## V1 — WASM execution
 
 - [ ] Validate/load WASM components through versioned native LogOS WIT interfaces; WASI remains compatibility-only.
 - [ ] Capability-scoped imports; memory, CPU, storage, and network quotas; cancellation and asynchronous host operations.
-- [ ] Health, lifecycle, crash isolation, restart policy, restricted execution where useful, and runtime rollback.
-- [ ] Signed packages with application identity, declared interfaces/capabilities, state migration, atomic update/rollback, and a Rust SDK first.
+- [ ] Application identity, health, lifecycle, crash isolation, and restart policy.
+- [ ] Basic install, run, persist, stop, and remove operations plus a Rust SDK.
 
-## Workspaces
+## V2 — Packages and workspaces
 
-- [ ] Workspace identity, metadata, resources, applications, services, sessions, and scoped capability grants.
+- [ ] Signed packages, atomic application update/rollback, state migration, and typed inter-application interfaces.
+- [ ] Workspace identity, metadata, resources, applications, sessions, and scoped capability grants.
 - [ ] Export, import, snapshot, and recovery without granting machine-wide authority.
+- [ ] Package and state garbage collection.
 
-## AI-addressable operation
+## V3 — AI-addressable applications
 
 - [ ] Typed tool descriptors expose schemas, capabilities, side effects, and approval policy.
 - [ ] Human approval for sensitive effects; no implicit agent privilege.
@@ -29,6 +31,6 @@ Run portable applications as capability-isolated WASM components without making 
 
 ## Exit criteria
 
-A WASM application can be remotely installed, run, communicate, persist, upgrade, roll back, and be removed using only granted interfaces. Failures remain isolated; workspaces remain portable; human and authorized agent clients use the same operations.
+A WASM application can be installed, run, communicate, persist, stop, and be removed using only granted interfaces. Failure remains isolated and resource limits remain enforceable.
 
 See [Architecture](architecture.md#ring-4--runtime), [AI addressability](architecture.md#14-ai-addressability), and [Security](security.md).

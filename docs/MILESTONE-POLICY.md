@@ -13,6 +13,7 @@ This reference preserves roadmap-wide rules without loading them with every road
 7. WASM is the default application sandbox; trusted native Rust is for hardware, boot, security policy, or measured latency needs.
 8. Names communicate scope without binding implementation.
 9. Every milestone ends with permanent automated QEMU proofs.
+10. System capabilities compose independently releasable module slices; module versions do not advance in lockstep.
 
 Compatibility belongs at the edges. The system remains recoverable, observable, and updateable without treating reboot as the normal failure response.
 
@@ -27,6 +28,18 @@ The kernel remained independently bootable while the workspace extracted `logos-
 Every milestone defines and tests ownership/reclamation, capabilities, cancellation, bounded resources, timeouts, versioning, structured errors, health, restart/recovery, privileged audit events, QEMU coverage, and non-goals.
 
 A feature is complete only when its owner and versioned boundary are documented; every completion path reclaims resources; denial and failure are tested; diagnostics are actionable; and integration proofs cover exit criteria.
+
+## Module independence
+
+- Consumers depend on published contracts, never another module's implementation crate or private state.
+- A module version names a contract and its guarantees, not a branch, crate revision, or implementation rewrite.
+- Compatible implementation changes preserve the protocol identifier and version and must keep its contract proofs passing.
+- An incompatible contract change introduces a new version. Consumers declare accepted versions and negotiate at discovery; adapters, when needed, live at the providing edge.
+- Old and new implementations need coexist only for a documented migration or rollback proof.
+- A capability milestone pins the required module slices and adds one composition proof. It does not merge their ownership, repositories, or release cadence.
+- Each slice has its own owner, prerequisites, non-goals, host proof where practical, and QEMU proof at the hardware or isolation boundary.
+
+See [ADR-0016](adr/0016-capability-slices.md).
 
 ## Continuous Core rule
 

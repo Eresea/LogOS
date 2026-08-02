@@ -43,9 +43,9 @@ Console is LogOS's local textual interface. The normal terminal consumes bounded
 - [x] Gate the bootstrap context's input, display, and typed syscall operations with explicit Input, Display, and Session capabilities.
 - [x] Keep command/session dispatch outside Core and preserve kernel-only recovery input/output.
 
-## Later — Unplanned
+## Frozen boundary
 
-Record future console scope here before adding it to the roadmap. Do not infer V2 work from V1 implementation details.
+Console v1 remains complete. The framebuffer recovery console stays deliberately small; normal command and attachment work belongs to [Sessions](SESSIONS.md), not Console v2.
 
 ### Demonstrated
 

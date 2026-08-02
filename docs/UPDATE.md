@@ -4,22 +4,32 @@
 
 ## Goal
 
-Evolve kernel, services, drivers, and applications independently without making failed updates fatal.
+Replace a signed system bundle without making failed updates fatal.
 
 ## V1 scope
 
-- [ ] Signed packages/manifests, reproducible metadata, dependency and compatibility resolution, and signing-identity revocation.
-- [ ] Staging, atomic activation, health-gated commit, automatic rollback, and recovery boot profile.
-- [ ] Persistent update journal and rollback-safe configuration migration.
+- [ ] Signed boot/system bundle containing the kernel and trusted native services.
+- [ ] Staging, A/B-style atomic activation, health-gated commit, automatic rollback, and recovery profile.
+- [ ] Persistent update journal.
 - [ ] Remote inspect, apply, cancel, and rollback operations.
-- [ ] Separate policy for kernel, trusted services, drivers, and WASM applications.
 
 ## Exit criteria
 
 - Power loss during staging or activation leaves a bootable system.
 - Failed health checks roll back deterministically.
-- Independently updated kernel and services negotiate compatibility.
 - Diagnostics explain what changed and why rollback occurred.
 - QEMU interrupts every phase and proves recovery.
+
+## V2 — Independent components
+
+- Independent service and driver packages, dependency resolution, and configuration migrations.
+- Signing-key revocation, application package integration, delta downloads, and storage cleanup.
+
+## V3 — Continuous evolution
+
+- Live service handoff, snapshot-integrated rollback, and compatibility windows.
+- Staged deployment policy and multi-machine rollout.
+
+Application updates are not part of V1.
 
 See the update state machine in [Architecture](architecture.md#13-update-model).

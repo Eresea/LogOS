@@ -1,7 +1,7 @@
 # Core
 
 > **Status:** Core v1 complete
-> **Owner:**
+> **Owner:** Core
 
 Core v1 is a dependable, event-driven kernel foundation. It is not a desktop OS, userspace, network stack, filesystem, or WASM runtime.
 
@@ -38,3 +38,11 @@ It remains:
 - limited to health, diagnostics, service recovery, trace export, reset, and power-off.
 
 It should not grow into the normal user environment.
+
+## V2 — Demand-driven resource control
+
+Only Runtime or Experience requirements may pull forward enforceable CPU/resource accounting, a starvation boundary, scalable shared-memory/request primitives, stronger driver isolation, or persistent crash diagnostics.
+
+## V3 — Hardware scale
+
+Only committed hardware targets may pull forward SMP, IOMMU, MSI-X, hotplug, or broader power management. Core versions do not advance merely to match outer modules.

@@ -282,6 +282,14 @@ The machine must remain manageable when this entire ring is absent or failed.
 6. Runtime discovery may be dynamic, but required boot dependencies must remain explicit.
 7. Resource ownership is never inferred from reachability alone.
 
+### Versioned module boundaries
+
+Modules expose goal-oriented operations through published contracts. Consumers bind to a protocol identifier and supported version range, not to an implementation crate, concrete service type, or module milestone label.
+
+An implementation may be replaced without coordinated consumer changes while it preserves the selected contract and its behavioral proofs. An incompatible contract is a new version discovered and negotiated at the provider boundary. Temporary adapters or parallel versions are required only when a documented migration or rollback needs them.
+
+System capability milestones compose exact module slices and add integration proofs; they do not make those modules share ownership or advance versions together. This permits work such as Sessions v2, Platform v3, and Persistence v2 to proceed independently until a published contract changes. See [ADR-0016](adr/0016-capability-slices.md).
+
 ## 4. Boot sequence
 
 A target boot flow is:

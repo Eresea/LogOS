@@ -9,19 +9,26 @@ Make remote operation the first complete LogOS user experience. SSH may be suppo
 ## V1 scope
 
 - [ ] Authenticated machine enrollment and public/device-key authentication.
-- [ ] Multiplexed, resumable sessions with explicit capability grants.
-- [ ] Structured commands/results; file/object transfer; health, log, and trace streaming.
-- [ ] Service control, updates, reset, and power-off.
-- [ ] Version negotiation, compression, bounded flow control, and complete audit trails.
-- [ ] One minimal client using the same contracts as later web, desktop, mobile, and SSH surfaces.
+- [ ] One minimal client using existing typed Session contracts.
+- [ ] Structured commands/results plus health, log, and trace streaming.
+- [ ] Service control, reset, and power-off.
+- [ ] Bounded reconnect, explicit session capabilities, version negotiation, flow control, and audit.
 
 ## Exit criteria
 
-Without local display or keyboard, an authenticated user can inspect the machine, execute commands, reconnect, transfer data, follow diagnostics, control services, update, reset, and power off.
+Without local display or keyboard, an authenticated user can inspect the machine, execute commands, reconnect, follow diagnostics, control services, reset, and power off.
 
-## Deferred clients
+## V2 — Complete remote environment
 
-- Web, desktop, and mobile clients.
-- SSH compatibility gateway.
+- Multiplexed persistent sessions and robust resume across service and connection restart.
+- Large object/package transfer and Update inspect/apply/cancel/rollback.
+- Delegated and expiring capability grants; web, desktop, and mobile clients.
+
+## V3 — Fleet and compatibility
+
+- Multi-machine administration, relays, discovery, and coordinated rollout policy.
+- Remote graphical streaming and an SSH gateway.
+
+Update execution and general large-file transfer are not part of V1.
 
 See session placement in [Architecture](architecture.md#3-dependency-rules) and constraints in [Security](security.md).

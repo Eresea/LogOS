@@ -21,4 +21,5 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0013](0013-persistence-v1-boundary.md) | Accepted | Use scoped shared pages and a two-arena object Store for Persistence v1. |
 | [0014](0014-secret-root-key.md) | Accepted | Keep the bootstrap durable-secret key in a random UEFI variable. |
 | [0015](0015-network-v1-boundary.md) | Accepted | Keep NIC DMA in Core and expose exact capability-scoped datagram endpoints. |
+| [0016](0016-capability-slices.md) | Accepted | Compose system capabilities from independently versioned module contracts. |
 

@@ -45,8 +45,20 @@ capabilities, health, versioned contracts, isolated address spaces, Core-owned s
 - [x] QEMU proves an independently loaded terminal service can start, redraw, and execute bounded commands.
 - [x] QEMU proves Terminal and Sessions failure, restart, capability denial, and direct recovery availability without compromising Core.
 
-## V2 — Unplanned
+## V2 — Trust and control plane
 
-Record future Platform scope here before adding it to the roadmap. Candidate work includes a
-platform controller that owns lifecycle wiring, host-side tests for policy modules, richer audit
-metadata, broker operations for secrets, and proof with multiple drivers.
+- Durable machine and device identity, enrollment, and trust policy.
+- Secret broker operations instead of direct secret access.
+- Durable structured audit records.
+- Host-testable authorization and lifecycle policy.
+- A platform controller that owns service lifecycle wiring.
+- Replacement proof with multiple interchangeable drivers.
+
+Remote Foundation may consume the identity, enrollment, secret-broker, and audit slices before V2 is complete.
+
+## V3 — Dynamic system composition
+
+- Dynamic manifests and dependency changes.
+- Zero-downtime service handoff and versioned state migration.
+- Driver hotplug and replacement policy.
+- Policy-controlled service placement and resource allocation.

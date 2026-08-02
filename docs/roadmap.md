@@ -6,7 +6,7 @@
 >
 > **Target:** A remotely operable, capability-based Rust OS with replaceable native services and sandboxed WASM applications.
 
-This file tracks sequence and status only. Milestone scope and evidence live in linked documents so they are loaded only when needed.
+This file tracks system capabilities and their required module slices. Module scope and evidence live in linked documents.
 
 ## Direction
 
@@ -17,21 +17,29 @@ This file tracks sequence and status only. Milestone scope and evidence live in 
 
 See [Architecture](architecture.md), [security constraints](security.md), and [boot constraints](boot-sequence.md).
 
-## Milestones
+## Capability roadmap
 
-| Order | Milestone | Status | Exit proof |
+| Order | System capability | Required module slices | Status / exit proof |
 | ---: | --- | --- | --- |
-| 1 | [Core v1](CORE.md) | Complete | Privileged mechanisms boot and recover under QEMU |
-| 2 | [Console v1](CONSOLE.md) | Complete | Normal terminal and independent recovery console work |
-| 3 | [Platform v1](PLATFORM.md) | Complete | Isolated native services negotiate, fail, and restart independently |
-| 4 | [Persistence v1](PERSISTENCE.md) | Complete | Capability-scoped state survives interrupted writes and resets |
-| 5 | [Network v1](NETWORK.md) | **Current** | Capability-controlled ICMP and UDP survive denial and device reset |
-| 6 | [Remote v1](REMOTE.md) | Planned | The machine is operable without local input or display |
-| 7 | [Update v1](UPDATE.md) | Planned | Signed updates activate atomically and roll back after failure |
-| 8 | [Applications v1](APPLICATIONS.md) | Planned | Sandboxed WASM applications install, run, communicate, and persist |
-| 9 | [Experience v1](EXPERIENCE.md) | Planned | A replaceable graphical environment uses existing contracts |
+| 1 | Bootable core | [Core v1](CORE.md) | Complete: privileged mechanisms boot and recover |
+| 2 | Local typed operation | [Console v1](CONSOLE.md), [Sessions v1](SESSIONS.md) | Complete: normal terminal and recovery console are independent |
+| 3 | Replaceable services | [Platform v1](PLATFORM.md) | Complete: services negotiate, fail, and restart independently |
+| 4 | Durable bounded state | [Persistence v1](PERSISTENCE.md) | Complete: scoped state survives interrupted writes and resets |
+| 5 | Bounded packet connectivity | [Network v1](NETWORK.md) | **Current:** ICMP and UDP survive denial and device reset |
+| 6 | Remote foundation | Network v2 transport slice, [Platform v2](PLATFORM.md) trust slice, [Persistence v2](PERSISTENCE.md) protected-state slice, [Sessions v2](SESSIONS.md) attachment slice | Enrolled client reconnects and invokes an existing typed command |
+| 7 | Remote administration | [Remote v1](REMOTE.md) | Headless authenticated administration works through existing contracts |
+| 8 | Safe system artifacts | Complete Persistence v2 | Large signed artifacts and durable configuration are safe to stage |
+| 9 | Atomic system evolution | [Update v1](UPDATE.md) | A signed system bundle activates or rolls back atomically |
+| 10 | Sandboxed execution | Required [Core v2](CORE.md) resource slice, [Applications v1](APPLICATIONS.md) | A bounded WASM component runs and persists without joining kernel correctness |
+| 11 | Local graphical operation | [Experience v1](EXPERIENCE.md) | A replaceable compositor and graphical terminal use published contracts |
+| 12 | Workspaces and objects | Persistence v3, Applications v2 | Portable application workspaces survive upgrade and restore |
+| 13 | Operational maturity | Remote v2, Update v2, Platform v3 | Components migrate, hand off, and update independently |
+| 14 | AI-native operation and rich UX | Applications v3, Sessions v3, Experience v2 | Typed agent and human clients share audited operations |
+| 15 | Hardware scale | Core v3, Network v3, Experience v3 | Added hardware is justified by a target and permanent proof |
 
-Detailed scope is lazy-loaded from each milestone document. Shared principles, completion rules, migration history, and roadmap maintenance live in [Milestone policy](MILESTONE-POLICY.md). Architectural intent remains in [Architecture](architecture.md).
+Each row is an integration target, not a lockstep release train. A module slice may land and be proven independently before the capability that consumes it. Module versions change only when their published contract or guaranteed behavior changes; implementation-only changes retain the existing version. See [ADR-0016](adr/0016-capability-slices.md).
+
+Detailed scope lives in each module document. Shared principles, completion rules, migration history, and roadmap maintenance live in [Milestone policy](MILESTONE-POLICY.md). Architectural intent remains in [Architecture](architecture.md).
 
 Core hardening continues when an outward contract or measurement requires it; see [Core](CORE.md). Working implementation notes belong in [TODO](TODO.md), not here.
 

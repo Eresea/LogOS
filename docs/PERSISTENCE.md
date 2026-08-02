@@ -348,5 +348,20 @@ dependency boundary requires it.
 - Any unrelated issue discovered while executing a phase; record the issue here in one line and
   continue when it does not invalidate the current phase's proof.
 
+## Later versions
+
+### V2 — System state and artifacts
+
+- Multi-page objects or bounded streams, more names, concurrent requests, quotas, and accounting.
+- Typed configuration manifests and durable encrypted secret and trust storage.
+- Audit retention, explicit snapshots, integrity inspection, and repair tooling.
+
+Remote Foundation may consume protected trust and configuration records before V2 is complete. Update v1 requires the artifact and journal slices.
+
+### V3 — Objects and workspaces
+
+- Stable object identities independent of paths, typed metadata, relationships, aliases, and views.
+- Workspace export, import, snapshot, application-owned state, larger collections, and garbage collection.
+
 See [ADR-0013](adr/0013-persistence-v1-boundary.md),
 [Architecture](architecture.md#11-storage-model), and [Security](security.md).

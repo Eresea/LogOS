@@ -11,8 +11,9 @@ without making sockets, raw packets, or a general firewall part of the native v1
 
 ## Delivery rules
 
-This checklist is the implementation order. Start with the first unchecked phase item and do not
-skip ahead.
+Completed items preserve evidence even when enabling work landed out of phase. Continue from
+**Current implementation → Deferred work and next steps**, then close the remaining checklist
+items in dependency order.
 
 - Read the whole current phase before editing code.
 - Read every caller of code changed in the phase.
@@ -248,7 +249,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
 - If Network startup or restart fails, mark it unavailable and leave local services and the direct
   recovery console operational.
 
-## Ordered implementation checklist
+## V1 implementation checklist
 
 ### Phase 1: freeze the contracts and test seams
 
@@ -509,9 +510,24 @@ crates unless a real dependency boundary requires it.
 - DHCP persistence, static configuration, link-local fallback, DHCPv6, and DNS option consumption.
 - Public network reachability and internet-dependent tests.
 
-TCP plus authenticated transport become prerequisites of Remote v1; they may form Network v2 or
-the first Remote slice when that milestone begins. See [Architecture](architecture.md#12-networking-model),
+See [Architecture](architecture.md#12-networking-model),
 [Security](security.md), and the [Network boundary ADR](adr/0015-network-v1-boundary.md).
+
+## Later versions
+
+### V2 — Stream connectivity
+
+- Capability-scoped TCP connect, listen, accept, close, and bounded stream I/O.
+- Concurrent operations, ephemeral ports, connected endpoint state, and DNS resolution.
+- Authenticated-transport integration; identity, trust policy, and key ownership stay in their System services.
+- Public-network and longer-duration recovery proofs.
+
+Remote Foundation may consume the smallest V2 slice first: TCP plus bounded streams to an enrolled address.
+
+### V3 — Production networking
+
+- IPv6, multiple NICs, routing policy, firewall service, and broader capability scopes and quotas.
+- Modern VirtIO, MSI-X, multiqueue, justified offloads, physical hardware, hotplug, and IOMMU-backed isolation.
 
 ## Protocol references
 
