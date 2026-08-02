@@ -1308,7 +1308,7 @@ mod tests {
                 })
                 .is_ok()
         );
-        assert!(state.expire_echo(20) == false);
+        assert!(!state.expire_echo(20));
     }
 
     #[test]
