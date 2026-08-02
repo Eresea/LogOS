@@ -214,6 +214,11 @@ impl Context {
         unsafe { RawContext::network_at(self.raw_address()) }
     }
 
+    pub fn request_network(&mut self, request: logos_abi::NetworkRequest) -> bool {
+        (unsafe { RawContext::request_network_at(self.raw_address(), request) })
+            && self.invoke(native_service::NETWORK_REQUEST)
+    }
+
     pub fn network_reply(&mut self, reply: logos_abi::NetworkReply) -> bool {
         (unsafe { RawContext::reply_network_at(self.raw_address(), reply) })
             && self.invoke(native_service::NETWORK_REPLY)

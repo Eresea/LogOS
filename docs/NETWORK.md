@@ -1,6 +1,6 @@
 # Network
 
-> **Status:** Network v1 in progress — ABI, bounded protocol core, and bootable VirtIO service staging complete
+> **Status:** Network v1 in progress — bounded protocol core, DHCP/ARP/UDP service path, and Core relay complete
 >
 > **Owner:** Foundation network driver and System Network service
 
@@ -70,8 +70,9 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   bounded endpoint, ARP, datagram, pending-operation, reset, and DHCP state.
 - The kernel binds the legacy VirtIO network device when available, maps two Network-owned pages,
   loads the Ring-2 payload, and delivers one validated RX frame event at a time.
-- `logos-network-service` handles bounded device transport, DHCP acquisition, `Status`, `Bind`,
-  `Close`, and `Cancel` state operations. Client datagram operations remain `Offline`.
+- `logos-network-service` handles bounded device transport, DHCP acquisition, ARP resolution,
+  `Status`, `Bind`, `SendTo`, `ReceiveFrom`, `Close`, and `Cancel` state operations. Core validates
+  capability scope and copies client payloads through the fixed Network TX page.
 - QEMU uses deterministic user-mode DHCP for the transport proof. The independent DHCP/ARP peer
   and packet-exchange proof remain deferred.
 
@@ -102,9 +103,8 @@ checklists therefore remain unchecked.
 ### Deferred work and next steps
 
 1. Add an independent DHCP/ARP host peer and promote `network/configuration`.
-2. Implement the capability-scoped datagram API and promote the Phase 6 client proofs.
-3. Add deterministic loss, timeout, reset/reconnect, restart, and malformed-frame proofs for Phase 7.
-4. Close Phase 8 by updating the architecture, security, boot, and roadmap guides after those proofs pass.
+2. Add deterministic loss, timeout, reset/reconnect, restart, and malformed-frame proofs for Phase 7.
+3. Close Phase 8 by updating the architecture, security, boot, and roadmap guides after those proofs pass.
 
 ## Contract and invariants
 

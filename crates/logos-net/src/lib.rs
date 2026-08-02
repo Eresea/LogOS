@@ -663,6 +663,7 @@ pub enum DhcpAction {
     Renew,
     Rebind,
     Expired,
+    ArpReply,
 }
 
 #[derive(Clone, Copy)]
@@ -879,6 +880,17 @@ impl NetworkState {
         endpoint.port = port;
         endpoint.active = true;
         Ok(EndpointId((u32::from(self.generation) << 16) | (slot as u32 + 1)))
+    }
+
+    pub fn endpoint_for_port(&self, port: u16) -> Option<EndpointId> {
+        self.endpoints.iter().enumerate().find_map(|(slot, endpoint)| {
+            (endpoint.active && endpoint.port == port)
+                .then(|| EndpointId((u32::from(self.generation) << 16) | (slot as u32 + 1)))
+        })
+    }
+
+    pub fn endpoint_port(&self, owner: u64, endpoint: EndpointId) -> Result<u16, StateError> {
+        Ok(self.endpoints[self.endpoint_slot(owner, endpoint)?].port)
     }
 
     pub fn close(&mut self, owner: u64, endpoint: EndpointId) -> Result<(), StateError> {

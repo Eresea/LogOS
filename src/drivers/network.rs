@@ -72,9 +72,7 @@ impl Device {
         if bar & 1 == 0 {
             return None;
         }
-        let Some(base) = u16::try_from(bar & !3).ok() else {
-            return None;
-        };
+        let base = u16::try_from(bar & !3).ok()?;
         unsafe {
             outb(base + 0x12, 0);
             outb(base + 0x12, ACKNOWLEDGE);
@@ -90,9 +88,7 @@ impl Device {
         if !(RX_BUFFERS..=256).contains(&rx_queue_size) {
             return None;
         }
-        let Some(rx_queue) = super::virtio::VirtQueue::allocate(memory, rx_queue_size) else {
-            return None;
-        };
+        let rx_queue = super::virtio::VirtQueue::allocate(memory, rx_queue_size)?;
         unsafe { outl(base + 0x08, u32::try_from(rx_queue.address() >> 12).ok()?) };
         unsafe { outw(base + 0x0e, 1) };
         let tx_queue_size = usize::from(unsafe { inw(base + 0x0c) });

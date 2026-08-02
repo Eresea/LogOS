@@ -359,9 +359,10 @@ pub(crate) fn main(
     ) else {
         fail!(b"capabilities");
     };
-    let Some(network_receive_capability) =
-        capabilities.grant_scoped64(capabilities::CapabilityKind::NetworkReceive, 0)
-    else {
+    let Some(network_receive_capability) = capabilities.grant_scoped64(
+        capabilities::CapabilityKind::NetworkReceive,
+        logos_abi::NetworkScope::new(logos_abi::NetworkProtocol::Udp, 0, 4000).0,
+    ) else {
         fail!(b"capabilities");
     };
     let Some(recovery_capability) = capabilities.grant(capabilities::CapabilityKind::Recovery)
@@ -878,6 +879,8 @@ pub(crate) fn main(
     let network_probe_due_ptr = &mut network_probe_due as *mut u64;
     #[cfg(feature = "test-hooks")]
     let network_reported_ptr = &mut network_reported as *mut bool;
+    #[cfg(feature = "test-hooks")]
+    let shared_pages_ptr = &shared_pages as *const logos_core::shared_pages::SharedPages;
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(
         unsafe {
@@ -1666,6 +1669,8 @@ pub(crate) fn main(
                 &mut network_client_pending,
                 &session,
                 &capabilities,
+                unsafe { &*shared_pages_ptr },
+                terminal_owner,
             );
         },
         |id| {
@@ -1734,6 +1739,8 @@ pub(crate) fn main(
                 &mut network_client_pending,
                 &session,
                 &capabilities,
+                &shared_pages,
+                terminal_owner,
             ) {
                 debug::write_line(b"LogOS: network service unavailable");
             }
@@ -1948,6 +1955,8 @@ pub(crate) fn main(
                 &mut network_client_pending,
                 &session,
                 &capabilities,
+                &shared_pages,
+                terminal_owner,
             );
         })
     }
@@ -1974,6 +1983,9 @@ struct PendingNetworkClient {
     request: logos_abi::NetworkRequest,
 }
 
+const NETWORK_PAYLOAD_OFFSET: u64 = 2048;
+
+#[allow(clippy::too_many_arguments)]
 fn relay_network_client(
     terminal: native_task::NetworkEndpoint,
     service: native_task::NetworkEndpoint,
@@ -1982,10 +1994,29 @@ fn relay_network_client(
     pending: &mut Option<PendingNetworkClient>,
     session: &session::Context,
     capabilities: &capabilities::CapabilityManager,
+    shared_pages: &logos_core::shared_pages::SharedPages,
+    terminal_owner: u64,
 ) -> bool {
     if let Some(current) = *pending {
         if let Some(reply) = service.response(current.request.id) {
             *pending = None;
+            if current.request.operation == logos_abi::NetworkOperation::ReceiveFrom
+                && reply.status == logos_abi::NetworkStatus::Complete
+                && let (Some(source), Some(network_pages)) =
+                    (shared_pages.address(terminal_owner, current.request.page), unsafe {
+                        logos_core::native_service::Context::network_pages_at(service.context())
+                    })
+            {
+                let source = source as *const u8;
+                let target = (network_pages.tx_address + NETWORK_PAYLOAD_OFFSET) as *const u8;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        target,
+                        source as *mut u8,
+                        reply.length as usize,
+                    );
+                }
+            }
             return terminal.reply(reply) && scheduler.wake(handle) && scheduler.run(handle);
         }
         return true;
@@ -2025,22 +2056,36 @@ fn relay_network_client(
     }
     if matches!(
         request.operation,
-        logos_abi::NetworkOperation::SendTo
-            | logos_abi::NetworkOperation::ReceiveFrom
-            | logos_abi::NetworkOperation::Echo
+        logos_abi::NetworkOperation::SendTo | logos_abi::NetworkOperation::ReceiveFrom
     ) {
-        return terminal.reply(logos_abi::NetworkReply {
-            id: request.id,
-            status: logos_abi::NetworkStatus::Offline,
-            endpoint: logos_abi::NetworkEndpoint(0),
-            generation: request.generation,
-            source_address: 0,
-            source_port: 0,
-            length: 0,
-            info: logos_abi::NetworkInfo::default(),
-            counters: logos_abi::NetworkCounters::default(),
-        }) && scheduler.wake(handle)
-            && scheduler.run(handle);
+        let Some(client) = shared_pages.address(terminal_owner, request.page) else {
+            return terminal.reply(logos_abi::NetworkReply {
+                id: request.id,
+                status: logos_abi::NetworkStatus::Invalid,
+                endpoint: logos_abi::NetworkEndpoint(0),
+                generation: request.generation,
+                source_address: 0,
+                source_port: 0,
+                length: 0,
+                info: logos_abi::NetworkInfo::default(),
+                counters: logos_abi::NetworkCounters::default(),
+            }) && scheduler.wake(handle)
+                && scheduler.run(handle);
+        };
+        if request.operation == logos_abi::NetworkOperation::SendTo {
+            let Some(network_pages) = (unsafe {
+                logos_core::native_service::Context::network_pages_at(service.context())
+            }) else {
+                return true;
+            };
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    client as *const u8,
+                    (network_pages.tx_address + NETWORK_PAYLOAD_OFFSET) as *mut u8,
+                    request.length as usize,
+                );
+            }
+        }
     }
     if !service.deliver(request) {
         return true;
@@ -2065,6 +2110,8 @@ fn poll_network(
     client_pending: &mut Option<PendingNetworkClient>,
     session: &session::Context,
     capabilities: &capabilities::CapabilityManager,
+    shared_pages: &logos_core::shared_pages::SharedPages,
+    terminal_owner: u64,
 ) -> bool {
     let (Some(device), Some(endpoint), Some(handle)) = (device, endpoint, handle) else {
         return true;
@@ -2077,6 +2124,8 @@ fn poll_network(
         client_pending,
         session,
         capabilities,
+        shared_pages,
+        terminal_owner,
     ) {
         return false;
     }

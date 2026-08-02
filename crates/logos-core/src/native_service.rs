@@ -721,7 +721,16 @@ impl Context {
         if context.abi != ABI
             || context.reserved != 0
             || context.status != ACKNOWLEDGED
-            || !matches!(context.operation, READY | READ_INPUT | NETWORK_REPLY)
+            || !matches!(
+                context.operation,
+                READY
+                    | READ_INPUT
+                    | NETWORK_REPLY
+                    | NETWORK_EVENT
+                    | NETWORK_DEVICE_REPLY
+                    | NETWORK_WAIT
+                    | NETWORK_REQUEST
+            )
         {
             return false;
         }
@@ -841,7 +850,12 @@ impl Context {
             || context.status != ACKNOWLEDGED
             || !matches!(
                 context.operation,
-                READY | READ_INPUT | NETWORK_REPLY | NETWORK_EVENT | NETWORK_DEVICE_REPLY
+                READY
+                    | READ_INPUT
+                    | NETWORK_REQUEST
+                    | NETWORK_REPLY
+                    | NETWORK_EVENT
+                    | NETWORK_DEVICE_REPLY
             )
         {
             return false;
@@ -926,6 +940,7 @@ impl Context {
                 context.operation,
                 READY
                     | READ_INPUT
+                    | NETWORK_REQUEST
                     | NETWORK_REPLY
                     | NETWORK_EVENT
                     | NETWORK_DEVICE_REQUEST

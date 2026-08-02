@@ -566,7 +566,9 @@ impl NetworkRequest {
             }
             NetworkOperation::ReceiveFrom => {
                 self.endpoint.valid()
-                    && self.peer.0 == 0
+                    && self.peer.protocol() == Some(NetworkProtocol::Udp)
+                    && self.peer.valid()
+                    && self.peer.address() == 0
                     && self.page.0 != 0
                     && self.length as usize == MAX_NETWORK_PAYLOAD
             }
