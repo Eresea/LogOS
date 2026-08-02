@@ -479,6 +479,13 @@ frame, invalidate the stale generation-tagged handle, and re-enter the service. 
 allows one Terminal or Sessions restart before falling back to the direct recovery console; later
 native-service policies belong in the System supervisor.
 
+Native-service restart replaces the whole service address space; it never reuses potentially
+corrupted code, stack, heap, context, or mapped pages. Ring-3 faults and explicit service panics
+are contained at the Core gate, cancel outstanding work, invalidate the instance generation, and
+restart according to the service manifest. Terminal gets one immediate retry before recovery;
+Sessions, Store, and Network degrade after bounded retries while local terminal operations remain
+available. Core faults and uncooperative service loops remain fatal and deferred respectively.
+
 See [ADR-0001](adr/0001-terminal-service-boundary.md), [ADR-0003](adr/0003-native-service-payload-contract.md), [ADR-0004](adr/0004-native-service-address-spaces.md), and [ADR-0005](adr/0005-native-service-suspension.md).
 
 In normal mode, the terminal is the sole PS/2 input consumer. Recovery input is activated only after startup selects recovery mode.
