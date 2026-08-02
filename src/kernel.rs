@@ -1302,10 +1302,12 @@ pub(crate) fn main(
                 let Some(restarted) = native_scheduler.restart(previous) else {
                     return false;
                 };
-                if !native_storage_block.configure(logos_core::native_service::BlockPage {
-                    handle: storage_block_page,
-                    address: storage_block_virtual,
-                }) || !native_scheduler.run_next()
+                if !native_storage_store.configure_shared_page(shared_history)
+                    || !native_storage_block.configure(logos_core::native_service::BlockPage {
+                        handle: storage_block_page,
+                        address: storage_block_virtual,
+                    })
+                    || !native_scheduler.run(restarted)
                 {
                     return false;
                 };
