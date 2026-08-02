@@ -20,6 +20,8 @@ pub const NETWORK_REQUEST: u32 = 14;
 pub const NETWORK_REPLY: u32 = 15;
 pub const NETWORK_WAIT: u32 = 16;
 pub const NETWORK_EVENT: u32 = 17;
+pub const NETWORK_DEVICE_REQUEST: u32 = 18;
+pub const NETWORK_DEVICE_REPLY: u32 = 19;
 pub const ACKNOWLEDGED: u32 = 1;
 pub const STORAGE_FORMATTED: u32 = 1;
 pub const STORAGE_RECOVERED: u32 = 2;
@@ -74,7 +76,9 @@ const BLOCK_REPLY_BYTES: usize = 21;
 const STORE_REPLY_BYTES: usize = 17;
 const NETWORK_REQUEST_BYTES: usize = 34;
 const NETWORK_REPLY_BYTES: usize = 148;
-const NETWORK_EVENT_BYTES: usize = 10;
+const NETWORK_DEVICE_REQUEST_BYTES: usize = 18;
+const NETWORK_DEVICE_REPLY_BYTES: usize = 34;
+const NETWORK_EVENT_BYTES: usize = 18;
 
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?))
@@ -246,6 +250,51 @@ fn encode_network_reply(bytes: &mut [u8; MAX_TEXT], reply: logos_abi::NetworkRep
     encode_network_counters(bytes, 44, reply.counters);
 }
 
+fn decode_network_device_request(bytes: &[u8]) -> Option<logos_abi::NetworkDeviceRequest> {
+    if *bytes.get(5)? != 0 {
+        return None;
+    }
+    Some(logos_abi::NetworkDeviceRequest {
+        id: read_u32(bytes, 0)?,
+        operation: logos_abi::NetworkDeviceOperation::from_wire(*bytes.get(4)?)?,
+        length: read_u16(bytes, 6)?,
+        generation: read_u16(bytes, 8)?,
+        deadline: read_u64(bytes, 10)?,
+    })
+}
+
+fn encode_network_device_request(
+    bytes: &mut [u8; MAX_TEXT],
+    request: logos_abi::NetworkDeviceRequest,
+) {
+    *bytes = [0; MAX_TEXT];
+    write_u32(bytes, 0, request.id);
+    bytes[4] = request.operation as u8;
+    write_u16(bytes, 6, request.length);
+    write_u16(bytes, 8, request.generation);
+    write_u64(bytes, 10, request.deadline);
+}
+
+fn decode_network_device_reply(bytes: &[u8]) -> Option<logos_abi::NetworkDeviceReply> {
+    if *bytes.get(5)? != 0 {
+        return None;
+    }
+    Some(logos_abi::NetworkDeviceReply {
+        id: read_u32(bytes, 0)?,
+        status: logos_abi::NetworkStatus::from_wire(*bytes.get(4)?)?,
+        generation: read_u16(bytes, 6)?,
+        info: decode_network_info(bytes, 8)?,
+    })
+}
+
+fn encode_network_device_reply(bytes: &mut [u8; MAX_TEXT], reply: logos_abi::NetworkDeviceReply) {
+    *bytes = [0; MAX_TEXT];
+    write_u32(bytes, 0, reply.id);
+    bytes[4] = reply.status as u8;
+    write_u16(bytes, 6, reply.generation);
+    encode_network_info(bytes, 8, reply.info);
+}
+
 fn decode_network_info(bytes: &[u8], offset: usize) -> Option<logos_abi::NetworkInfo> {
     let mut mac = [0; 6];
     mac.copy_from_slice(bytes.get(offset..offset + 6)?);
@@ -326,6 +375,7 @@ fn decode_network_event(bytes: &[u8]) -> Option<logos_abi::NetworkEvent> {
         kind: logos_abi::NetworkEventKind::from_wire(*bytes.get(4)?)?,
         generation: read_u16(bytes, 6)?,
         length: read_u16(bytes, 8)?,
+        now: read_u64(bytes, 10)?,
     })
 }
 
@@ -335,6 +385,7 @@ fn encode_network_event(bytes: &mut [u8; MAX_TEXT], event: logos_abi::NetworkEve
     bytes[4] = event.kind as u8;
     write_u16(bytes, 6, event.generation);
     write_u16(bytes, 8, event.length);
+    write_u64(bytes, 10, event.now);
 }
 
 impl Context {
@@ -738,6 +789,130 @@ impl Context {
     }
 
     /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn network_reply_pending_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == NETWORK_REPLY
+            && context.status == ACKNOWLEDGED
+            && context.text_length == NETWORK_REPLY_BYTES as u32
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by the caller.
+    pub unsafe fn network_device_at(address: u64) -> Option<logos_abi::NetworkDeviceRequest> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != NETWORK_DEVICE_REQUEST
+            || context.status != ACKNOWLEDGED
+            || context.text_length != NETWORK_DEVICE_REQUEST_BYTES as u32
+        {
+            return None;
+        }
+        let request = decode_network_device_request(&context.text)?;
+        request.valid_shape().then_some(request)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn network_device_pending_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == NETWORK_DEVICE_REQUEST
+            && context.status == ACKNOWLEDGED
+            && context.text_length == NETWORK_DEVICE_REQUEST_BYTES as u32
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by the caller.
+    pub unsafe fn request_network_device_at(
+        address: u64,
+        request: logos_abi::NetworkDeviceRequest,
+    ) -> bool {
+        if !request.valid_shape() {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.status != ACKNOWLEDGED
+            || !matches!(
+                context.operation,
+                READY | READ_INPUT | NETWORK_REPLY | NETWORK_EVENT | NETWORK_DEVICE_REPLY
+            )
+        {
+            return false;
+        }
+        encode_network_device_request(&mut context.text, request);
+        context.text_length = NETWORK_DEVICE_REQUEST_BYTES as u32;
+        context.operation = NETWORK_DEVICE_REQUEST;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by Core.
+    pub unsafe fn reply_network_device_at(
+        address: u64,
+        reply: logos_abi::NetworkDeviceReply,
+    ) -> bool {
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        let valid = context.operation == NETWORK_DEVICE_REQUEST
+            && decode_network_device_request(&context.text)
+                .is_some_and(|request| reply.valid_for(request));
+        if !valid {
+            return false;
+        }
+        encode_network_device_reply(&mut context.text, reply);
+        context.text_length = NETWORK_DEVICE_REPLY_BYTES as u32;
+        context.operation = NETWORK_DEVICE_REPLY;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn network_device_reply_at(
+        address: u64,
+        expected_id: u32,
+    ) -> Option<logos_abi::NetworkDeviceReply> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != NETWORK_DEVICE_REPLY
+            || context.status != ACKNOWLEDGED
+            || context.text_length != NETWORK_DEVICE_REPLY_BYTES as u32
+        {
+            return None;
+        }
+        decode_network_device_reply(&context.text).filter(|reply| reply.id == expected_id)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by Core.
+    pub unsafe fn deliver_network_device_reply_at(
+        address: u64,
+        reply: logos_abi::NetworkDeviceReply,
+    ) -> bool {
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != NETWORK_WAIT
+            || context.status != ACKNOWLEDGED
+        {
+            return false;
+        }
+        encode_network_device_reply(&mut context.text, reply);
+        context.text_length = NETWORK_DEVICE_REPLY_BYTES as u32;
+        context.operation = NETWORK_DEVICE_REPLY;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
     /// `address` must point to a live, aligned `Context` mapping owned by the caller.
     pub unsafe fn network_wait_at(address: u64, deadline: u64) -> bool {
         if deadline == 0 {
@@ -747,7 +922,15 @@ impl Context {
         if context.abi != ABI
             || context.reserved != 0
             || context.status != ACKNOWLEDGED
-            || !matches!(context.operation, READY | READ_INPUT | NETWORK_REPLY | NETWORK_EVENT)
+            || !matches!(
+                context.operation,
+                READY
+                    | READ_INPUT
+                    | NETWORK_REPLY
+                    | NETWORK_EVENT
+                    | NETWORK_DEVICE_REQUEST
+                    | NETWORK_DEVICE_REPLY
+            )
         {
             return false;
         }
@@ -769,6 +952,18 @@ impl Context {
             && context.operation == NETWORK_WAIT
             && context.status == ACKNOWLEDGED
             && (u64::from(context.x) | (u64::from(context.y) << 32)) != 0
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn network_deadline_at(address: u64) -> Option<u64> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI
+            && context.reserved == 0
+            && context.operation == NETWORK_WAIT
+            && context.status == ACKNOWLEDGED)
+            .then_some(u64::from(context.x) | (u64::from(context.y) << 32))
+            .filter(|deadline| *deadline != 0)
     }
 
     /// # Safety
@@ -1344,6 +1539,7 @@ mod tests {
             kind: logos_abi::NetworkEventKind::Timer,
             generation: 1,
             length: 0,
+            now: 101,
         };
         assert!(unsafe { Context::deliver_network_event_at(address, event) });
         assert_eq!(unsafe { Context::network_event_at(address) }, Some(event));
@@ -1361,5 +1557,38 @@ mod tests {
         });
         let pages = unsafe { Context::network_pages_at(pages_address) }.unwrap();
         assert_eq!(pages.tx_address, pages.rx_address - 4096);
+    }
+
+    #[test]
+    fn network_device_gate_rejects_mismatch_and_delivers_async_completion() {
+        let mut context = Context::new();
+        context.operation = READ_INPUT;
+        context.status = ACKNOWLEDGED;
+        let address = (&mut context as *mut Context) as u64;
+        let request = logos_abi::NetworkDeviceRequest {
+            id: 9,
+            operation: logos_abi::NetworkDeviceOperation::Info,
+            length: 0,
+            generation: 0,
+            deadline: 1,
+        };
+        assert!(unsafe { Context::request_network_device_at(address, request) });
+        let reply = logos_abi::NetworkDeviceReply {
+            id: request.id,
+            status: logos_abi::NetworkStatus::Complete,
+            generation: 1,
+            info: logos_abi::NetworkInfo { generation: 1, ..Default::default() },
+        };
+        assert!(!unsafe {
+            Context::reply_network_device_at(
+                address,
+                logos_abi::NetworkDeviceReply { id: 8, ..reply },
+            )
+        });
+        assert!(unsafe { Context::reply_network_device_at(address, reply) });
+        assert!(unsafe { Context::network_wait_at(address, 2) });
+        assert!(unsafe { Context::deliver_network_device_reply_at(address, reply) });
+        assert_eq!(unsafe { Context::network_device_reply_at(address, request.id) }, Some(reply));
+        assert!(unsafe { Context::network_device_reply_at(address, request.id + 1) }.is_none());
     }
 }

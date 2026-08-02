@@ -206,6 +206,28 @@ impl NetworkEndpoint {
     pub fn event(self) -> Option<logos_abi::NetworkEvent> {
         unsafe { logos_core::native_service::Context::network_event_at(self.context_physical) }
     }
+
+    pub fn device_request(self) -> Option<logos_abi::NetworkDeviceRequest> {
+        unsafe { logos_core::native_service::Context::network_device_at(self.context_physical) }
+    }
+
+    pub fn reply_device(self, reply: logos_abi::NetworkDeviceReply) -> bool {
+        unsafe {
+            logos_core::native_service::Context::reply_network_device_at(
+                self.context_physical,
+                reply,
+            )
+        }
+    }
+
+    pub fn deliver_device_reply(self, reply: logos_abi::NetworkDeviceReply) -> bool {
+        unsafe {
+            logos_core::native_service::Context::deliver_network_device_reply_at(
+                self.context_physical,
+                reply,
+            )
+        }
+    }
 }
 
 impl SessionEndpoint {

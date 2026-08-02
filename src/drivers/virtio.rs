@@ -57,21 +57,17 @@ pub struct VirtQueue {
 impl VirtQueue {
     pub fn allocate(memory: &mut PhysicalMemory, queue_size: usize) -> Option<Self> {
         let bytes = queue_size.checked_mul(16)?.checked_add(6 + queue_size * 2)?;
-        let bytes = bytes.checked_add(PAGE_SIZE - 1)? / PAGE_SIZE * PAGE_SIZE;
-        let bytes = bytes.checked_add(6 + queue_size * 8)?;
+        let avail_end = bytes.checked_add(PAGE_SIZE - 1)? / PAGE_SIZE * PAGE_SIZE;
+        let used_start = avail_end.checked_add(PAGE_SIZE - 1)? / PAGE_SIZE * PAGE_SIZE;
+        let bytes = used_start.checked_add(6 + queue_size * 8)?;
         let pages = bytes.div_ceil(PAGE_SIZE);
         if pages > QUEUE_PAGES {
             return None;
         }
+        let contiguous = memory.allocate_contiguous(pages)?;
         let mut queue = Self { pages: [const { None }; QUEUE_PAGES] };
         for index in 0..pages {
-            let page = memory.allocate_owned()?;
-            if index > 0 && page.address() != queue.address() + (index * PAGE_SIZE) as u64 {
-                let _ = memory.release_page(page);
-                let _ = queue.release(memory);
-                return None;
-            }
-            queue.pages[index] = Some(page);
+            queue.pages[index] = contiguous.page(index);
         }
         unsafe { core::ptr::write_bytes(queue.address() as *mut u8, 0, pages * PAGE_SIZE) };
         Some(queue)

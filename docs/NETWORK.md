@@ -69,11 +69,41 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   bounded endpoint, ARP, datagram, pending-operation, reset, and DHCP state.
 - The kernel binds the legacy VirtIO network device when available, maps two Network-owned pages,
   loads the Ring-2 payload, and delivers one validated RX frame event at a time.
-- `logos-network-service` currently handles bounded `Status`, `Bind`, `Close`, and `Cancel` state
-  operations and validates delivered Ethernet/ARP frames. `SendTo`, `ReceiveFrom`, and `Echo`
-  remain `Offline` until Core TX/info relay and client capability relay are implemented.
-- QEMU uses a local user-mode network backend for boot coverage only. No independent DHCP/ARP peer
-  or packet-exchange proof is implemented yet.
+- `logos-network-service` handles bounded device transport, DHCP acquisition, `Status`, `Bind`,
+  `Close`, and `Cancel` state operations. Client datagram operations remain `Offline`.
+- QEMU uses deterministic user-mode DHCP for the transport proof. The independent DHCP/ARP peer
+  and packet-exchange proof remain deferred.
+
+### Transport milestone: DHCP over Core-owned VirtIO
+
+This milestone completes transport only. The native service gate now carries bounded `Info`,
+`Transmit`, and `Reset` requests/replies, timestamped timer events, fixed-page RX/TX frames, and
+one in-flight TX completion. The Network service encodes Discover/Request frames, strictly checks
+Offer/Ack responses, and reports `Offline` until DHCP binds.
+
+Completed proof items:
+
+- [x] Core-owned NIC info, generation validation, TX submission/completion, reset, and finite
+      deadlines.
+- [x] One timestamped RX, TX-completion, or timer delivery per Network wake.
+- [x] Fixed Network RX/TX pages used for DHCP frames without allocation.
+- [x] DHCP Discover/Request encoding, Offer/Ack validation, retry, renewal, rebinding, NAK, and
+      lease-expiry state transitions.
+- [x] Deterministic QEMU user-mode DHCP: `10.0.2.0/24`, guest `10.0.2.15`, gateway `10.0.2.2`.
+- [x] QEMU proof `network/transport-dhcp` asserts the structured bound configuration and rejects
+      malformed or stale DHCP responses before `Bound`.
+
+QEMU's built-in DHCP server is the current proof source; an independent host peer remains deferred.
+Client-facing `Bind`/`SendTo`/`ReceiveFrom`/`Echo` relay, capability relay, independent peer tests,
+reset/reconnect proofs, and resilience testing remain out of scope for this milestone. Phase 6–8
+checklists therefore remain unchecked.
+
+### Deferred work and next steps
+
+1. Add an independent DHCP/ARP host peer and promote `network/configuration`.
+2. Implement the capability-scoped datagram API and promote the Phase 6 client proofs.
+3. Add deterministic loss, timeout, reset/reconnect, restart, and malformed-frame proofs for Phase 7.
+4. Close Phase 8 by updating the architecture, security, boot, and roadmap guides after those proofs pass.
 
 ## Contract and invariants
 
@@ -319,7 +349,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
 - [x] Complete the service handshake before accepting a frame or client request.
 - [x] Multiplex frame and client events through the single context gate.
 - [ ] Alternate ready frame and client delivery; deliver at most one event per wake.
-- [ ] Drive DHCP using the next-deadline wakeup and report state without busy-spinning.
+- [x] Drive DHCP using the next-deadline wakeup and report state without busy-spinning.
 - [x] Return to the wait gate while offline; do not block Terminal or recovery startup.
 - [x] Add the Network payload to `scripts/run.ps1` and the boot image.
 - [ ] Add the hermetic QEMU peer with DHCP and ARP behavior independent of `logos-net`.
@@ -400,6 +430,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
 
 | Proof ID | Layer | Required semantic assertion |
 | --- | --- | --- |
+| `network/transport-dhcp` | QEMU | Core TX submits Discover/Request; RX delivers Offer/Ack; final configuration is `10.0.2.15/24` via `10.0.2.2`; malformed/stale DHCP is not bound |
 | `network/device-bind` | QEMU | Exact NIC class/MAC, four posted RX buffers, and one received host frame |
 | `network/configuration` | QEMU | Valid DHCP acquisition, dropped-offer retry, and exact address/mask/router/lease |
 | `network/icmp-echo` | QEMU | Valid echo in both directions with matching ID/sequence and checksum |

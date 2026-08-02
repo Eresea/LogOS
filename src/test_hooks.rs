@@ -7,6 +7,7 @@ const DEBUG_EXIT: u16 = 0xf4;
 pub fn serve(
     storage: u32,
     mut native_input: impl FnMut(&str) -> bool,
+    mut poll: impl FnMut(),
     mut run_scenario: impl FnMut(&str) -> bool,
 ) -> ! {
     init();
@@ -26,7 +27,7 @@ pub fn serve(
     line(b"LOGOS/1 READY stage=session-ready");
     let mut frame = [0u8; test_protocol::MAX_FRAME];
     loop {
-        let length = read_frame(&mut frame);
+        let length = read_frame(&mut frame, &mut poll);
         match test_protocol::parse(&frame[..length]) {
             Ok(Request::Hello) => line(b"LOGOS/1 RESULT hello=ok"),
             Ok(Request::Run(id)) if run_scenario(id) => {
@@ -86,10 +87,11 @@ fn init() {
     out(COM2 + 2, 0xc7);
     out(COM2 + 4, 0x0b);
 }
-fn read_frame(frame: &mut [u8]) -> usize {
+fn read_frame(frame: &mut [u8], poll: &mut impl FnMut()) -> usize {
     let mut length = 0;
     loop {
         while input(COM2 + 5) & 1 == 0 {
+            poll();
             core::hint::spin_loop();
         }
         let byte = input(COM2);

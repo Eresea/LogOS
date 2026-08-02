@@ -260,6 +260,8 @@ extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
     }
     if context != 0
         && (unsafe { logos_core::native_service::Context::network_at(context) }.is_some()
+            || unsafe { logos_core::native_service::Context::network_reply_pending_at(context) }
+            || unsafe { logos_core::native_service::Context::network_device_pending_at(context) }
             || unsafe { logos_core::native_service::Context::network_waiting_at(context) }
             || unsafe { logos_core::native_service::Context::network_event_at(context) }.is_some())
         && save_user_frame(frame, true, false)

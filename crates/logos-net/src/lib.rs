@@ -300,6 +300,22 @@ pub struct Dhcp<'a> {
     options: &'a [u8],
 }
 
+pub const DHCP_DISCOVER: u8 = 1;
+pub const DHCP_OFFER: u8 = 2;
+pub const DHCP_REQUEST: u8 = 3;
+pub const DHCP_ACK: u8 = 5;
+pub const DHCP_NAK: u8 = 6;
+pub const DHCP_OPTION_MESSAGE_TYPE: u8 = 53;
+pub const DHCP_OPTION_REQUESTED_IP: u8 = 50;
+pub const DHCP_OPTION_SERVER_ID: u8 = 54;
+pub const DHCP_OPTION_SUBNET_MASK: u8 = 1;
+pub const DHCP_OPTION_ROUTER: u8 = 3;
+pub const DHCP_OPTION_LEASE_TIME: u8 = 51;
+pub const DHCP_OPTION_T1: u8 = 58;
+pub const DHCP_OPTION_T2: u8 = 59;
+pub const DHCP_OPTION_CLIENT_ID: u8 = 61;
+pub const DHCP_OPTION_PARAMETER_REQUEST: u8 = 55;
+
 impl<'a> Dhcp<'a> {
     pub fn option(self, wanted: u8) -> Result<Option<&'a [u8]>, Error> {
         let mut offset = 0;
@@ -368,6 +384,130 @@ pub fn parse_dhcp<'a>(bytes: &'a [u8]) -> Result<Dhcp<'a>, Error> {
         client_mac: Mac(client_mac),
         options,
     })
+}
+
+pub fn encode_dhcp_discover(output: &mut [u8], xid: u32, client_mac: Mac) -> Result<usize, Error> {
+    let mut packet = [0; 300];
+    encode_dhcp_header(&mut packet, xid, client_mac);
+    let mut offset = 240;
+    write_option(&mut packet, &mut offset, DHCP_OPTION_MESSAGE_TYPE, &[DHCP_DISCOVER])?;
+    write_option(
+        &mut packet,
+        &mut offset,
+        DHCP_OPTION_CLIENT_ID,
+        &[
+            1,
+            client_mac.0[0],
+            client_mac.0[1],
+            client_mac.0[2],
+            client_mac.0[3],
+            client_mac.0[4],
+            client_mac.0[5],
+        ],
+    )?;
+    write_option(
+        &mut packet,
+        &mut offset,
+        DHCP_OPTION_PARAMETER_REQUEST,
+        &[
+            DHCP_OPTION_SUBNET_MASK,
+            DHCP_OPTION_ROUTER,
+            6,
+            DHCP_OPTION_LEASE_TIME,
+            DHCP_OPTION_T1,
+            DHCP_OPTION_T2,
+        ],
+    )?;
+    packet[offset] = 255;
+    offset += 1;
+    if output.len() < offset {
+        return Err(Error::Short);
+    }
+    output[..offset].copy_from_slice(&packet[..offset]);
+    Ok(offset)
+}
+
+pub fn encode_dhcp_request(
+    output: &mut [u8],
+    xid: u32,
+    client_mac: Mac,
+    requested: Ipv4,
+    server: Ipv4,
+) -> Result<usize, Error> {
+    let mut packet = [0; 300];
+    encode_dhcp_header(&mut packet, xid, client_mac);
+    let mut offset = 240;
+    write_option(&mut packet, &mut offset, DHCP_OPTION_MESSAGE_TYPE, &[DHCP_REQUEST])?;
+    write_option(&mut packet, &mut offset, DHCP_OPTION_REQUESTED_IP, &requested.0)?;
+    write_option(&mut packet, &mut offset, DHCP_OPTION_SERVER_ID, &server.0)?;
+    write_option(
+        &mut packet,
+        &mut offset,
+        DHCP_OPTION_CLIENT_ID,
+        &[
+            1,
+            client_mac.0[0],
+            client_mac.0[1],
+            client_mac.0[2],
+            client_mac.0[3],
+            client_mac.0[4],
+            client_mac.0[5],
+        ],
+    )?;
+    write_option(
+        &mut packet,
+        &mut offset,
+        DHCP_OPTION_PARAMETER_REQUEST,
+        &[
+            DHCP_OPTION_SUBNET_MASK,
+            DHCP_OPTION_ROUTER,
+            6,
+            DHCP_OPTION_LEASE_TIME,
+            DHCP_OPTION_T1,
+            DHCP_OPTION_T2,
+        ],
+    )?;
+    packet[offset] = 255;
+    offset += 1;
+    if output.len() < offset {
+        return Err(Error::Short);
+    }
+    output[..offset].copy_from_slice(&packet[..offset]);
+    Ok(offset)
+}
+
+fn encode_dhcp_header(packet: &mut [u8; 300], xid: u32, client_mac: Mac) {
+    packet.fill(0);
+    packet[0] = 1;
+    packet[1] = 1;
+    packet[2] = 6;
+    packet[4..8].copy_from_slice(&xid.to_be_bytes());
+    packet[10..12].copy_from_slice(&0x8000u16.to_be_bytes());
+    packet[28..34].copy_from_slice(&client_mac.0);
+    packet[236..240].copy_from_slice(&[99, 130, 83, 99]);
+}
+
+fn write_option(
+    packet: &mut [u8; 300],
+    offset: &mut usize,
+    code: u8,
+    value: &[u8],
+) -> Result<(), Error> {
+    if value.len() > 255 {
+        return Err(Error::TooLarge);
+    }
+    let end = offset
+        .checked_add(2)
+        .and_then(|end| end.checked_add(value.len()))
+        .ok_or(Error::TooLarge)?;
+    if end > packet.len() {
+        return Err(Error::TooLarge);
+    }
+    packet[*offset] = code;
+    packet[*offset + 1] = value.len() as u8;
+    packet[*offset + 2..end].copy_from_slice(value);
+    *offset = end;
+    Ok(())
 }
 
 pub const fn checksum(bytes: &[u8]) -> u16 {
@@ -828,6 +968,22 @@ impl NetworkState {
         self.dhcp.start(now, xid);
     }
 
+    pub const fn dhcp_phase(&self) -> DhcpPhase {
+        self.dhcp.phase
+    }
+
+    pub const fn dhcp_xid(&self) -> u32 {
+        self.dhcp.xid
+    }
+
+    pub const fn dhcp_config(&self) -> Option<NetworkConfig> {
+        self.dhcp.config
+    }
+
+    pub const fn dhcp_deadline(&self) -> u64 {
+        self.dhcp.deadline
+    }
+
     pub fn dhcp_offer(&mut self, now: u64, xid: u32) -> bool {
         self.dhcp.offer(now, xid)
     }
@@ -957,6 +1113,25 @@ mod tests {
         assert_eq!(dhcp.option(53), Err(Error::Malformed));
         packet[240..247].copy_from_slice(&[53, 5, 2, 0, 255, 0, 0]);
         assert_eq!(parse_dhcp(&packet[..245]), Err(Error::Short));
+    }
+
+    #[test]
+    fn dhcp_discover_and_request_encoders_are_bounded() {
+        let mut output = [0; 300];
+        let discover = encode_dhcp_discover(&mut output, 7, LOCAL_MAC).unwrap();
+        assert!(discover > 240);
+        assert_eq!(&output[..4], &[1, 1, 6, 0]);
+        assert_eq!(&output[4..8], &7u32.to_be_bytes());
+        assert_eq!(&output[28..34], &LOCAL_MAC.0);
+        assert_eq!(output[240..243], [53, 1, DHCP_DISCOVER]);
+        let request = encode_dhcp_request(&mut output, 7, LOCAL_MAC, LOCAL_IP, PEER_IP).unwrap();
+        assert!(request > discover);
+        assert!(
+            output[..request]
+                .windows(3)
+                .any(|window| { window == [DHCP_OPTION_MESSAGE_TYPE, 1, DHCP_REQUEST] })
+        );
+        assert_eq!(encode_dhcp_discover(&mut output[..240], 7, LOCAL_MAC), Err(Error::Short));
     }
 
     #[test]

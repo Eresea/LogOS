@@ -33,6 +33,21 @@ impl PciDevices {
             .find(|device| device.vendor_id == vendor_id && device.device_id == device_id)
     }
 
+    pub fn find_class(
+        &self,
+        vendor_id: u16,
+        device_id: u16,
+        class: u8,
+        subclass: u8,
+    ) -> Option<PciDevice> {
+        self.devices[..self.len].iter().flatten().copied().find(|device| {
+            device.vendor_id == vendor_id
+                && device.device_id == device_id
+                && device.class_code() == class
+                && device.subclass() == subclass
+        })
+    }
+
     fn push(&mut self, device: PciDevice) {
         if self.len < DEVICES {
             // ponytail: retain eight devices; add dynamic storage when drivers need more.
@@ -61,6 +76,14 @@ impl PciDevice {
 
     pub fn interrupt_pin(self) -> u8 {
         (config_read(self.bus, self.device, self.function, 0x3c) >> 8) as u8
+    }
+
+    pub fn class_code(self) -> u8 {
+        (config_read(self.bus, self.device, self.function, 0x08) >> 24) as u8
+    }
+
+    pub fn subclass(self) -> u8 {
+        (config_read(self.bus, self.device, self.function, 0x08) >> 16) as u8
     }
 
     pub fn enable_bus_master(self) -> bool {

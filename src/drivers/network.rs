@@ -33,7 +33,7 @@ const NETWORK: crate::device::DriverManifest = crate::device::DriverManifest {
 
 pub fn discover(devices: &crate::pci::PciDevices) -> Option<PciDevice> {
     crate::device::bind(&[NETWORK], NETWORK.vendor_id, NETWORK.device_id)
-        .and_then(|manifest| devices.find(manifest.vendor_id, manifest.device_id))
+        .and_then(|manifest| devices.find_class(manifest.vendor_id, manifest.device_id, 0x02, 0x00))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,14 +85,16 @@ impl Device {
             outw(base + 0x0e, 0);
         }
         let rx_queue_size = usize::from(unsafe { inw(base + 0x0c) });
-        if rx_queue_size < RX_BUFFERS {
+        if !(RX_BUFFERS..=256).contains(&rx_queue_size) {
             return None;
         }
-        let rx_queue = super::virtio::VirtQueue::allocate(memory, rx_queue_size)?;
+        let Some(rx_queue) = super::virtio::VirtQueue::allocate(memory, rx_queue_size) else {
+            return None;
+        };
         unsafe { outl(base + 0x08, u32::try_from(rx_queue.address() >> 12).ok()?) };
         unsafe { outw(base + 0x0e, 1) };
         let tx_queue_size = usize::from(unsafe { inw(base + 0x0c) });
-        if tx_queue_size < 1 {
+        if !(1..=256).contains(&tx_queue_size) {
             let _ = rx_queue.release(memory);
             return None;
         }
@@ -124,6 +126,11 @@ impl Device {
         for (index, byte) in mac.iter_mut().enumerate() {
             *byte = unsafe { inb(base + 0x14 + index as u16) };
         }
+        if mac == [0; 6] || mac == [0xff; 6] {
+            let _ = tx_queue.release(memory);
+            let _ = rx_queue.release(memory);
+            return None;
+        }
         let mut network = Self {
             base,
             rx_queue,
@@ -147,6 +154,7 @@ impl Device {
         if unsafe { inb(base + 0x12) } & (DRIVER_OK | FAILED) != DRIVER_OK
             || !crate::interrupts::route_virtio(interrupt_gsi)
         {
+            crate::debug::write_line(b"LogOS: network device activation failed");
             let _ = network.release(memory);
             return None;
         }
@@ -198,6 +206,9 @@ impl Device {
         if used == self.tx_used && !COMPLETE.swap(false, Ordering::AcqRel) {
             return Ok(None);
         }
+        if used.wrapping_sub(self.tx_used) != 1 {
+            return Err(NetworkError::Device);
+        }
         let entry = used_entry(self.tx_queue.address(), self.tx_queue_size, self.tx_used);
         let id = unsafe { (entry as *const u32).read_volatile() };
         if id != 0 {
@@ -210,8 +221,13 @@ impl Device {
 
     pub fn receive(&mut self, output: &mut [u8]) -> Result<Option<usize>, NetworkError> {
         let used = self.used_index(self.rx_queue.address(), self.queue_size);
-        if used == self.rx_used && !COMPLETE.swap(false, Ordering::AcqRel) {
+        if used == self.rx_used {
+            COMPLETE.swap(false, Ordering::AcqRel);
             return Ok(None);
+        }
+        let progress = used.wrapping_sub(self.rx_used);
+        if progress == 0 || progress > RX_BUFFERS as u16 {
+            return Err(NetworkError::Device);
         }
         let entry = used_entry(self.rx_queue.address(), self.queue_size, self.rx_used);
         let id = unsafe { (entry as *const u32).read_volatile() } as usize;
@@ -285,6 +301,7 @@ impl Device {
             return Err(NetworkError::Device);
         }
         unsafe {
+            outw(self.base + 0x0e, 0);
             core::ptr::write_bytes(self.rx_pages[index].address() as *mut u8, 0, 4096);
             let descriptor = self.rx_queue.address() as *mut Descriptor;
             descriptor.add(index).write_volatile(Descriptor {

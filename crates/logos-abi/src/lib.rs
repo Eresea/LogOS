@@ -8,6 +8,8 @@ pub const MAX_NETWORK_PAYLOAD: usize = 1472;
 pub const NETWORK_MAX_ENDPOINTS: usize = 8;
 pub const NETWORK_MAX_ARP_ENTRIES: usize = 8;
 pub const NETWORK_MAX_DATAGRAMS: usize = 4;
+pub const NETWORK_MIN_FRAME: usize = 60;
+pub const NETWORK_MAX_FRAME: usize = 1514;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
@@ -413,6 +415,25 @@ impl NetworkStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetworkDeviceOperation {
+    Info = 1,
+    Transmit,
+    Reset,
+}
+
+impl NetworkDeviceOperation {
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Info),
+            2 => Some(Self::Transmit),
+            3 => Some(Self::Reset),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
 pub struct NetworkCounters {
@@ -442,6 +463,59 @@ pub struct NetworkInfo {
     pub ipv4: u32,
     pub subnet_mask: u32,
     pub router: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetworkDeviceRequest {
+    pub id: u32,
+    pub operation: NetworkDeviceOperation,
+    pub length: u16,
+    pub generation: u16,
+    pub deadline: u64,
+}
+
+impl NetworkDeviceRequest {
+    pub fn valid_shape(self) -> bool {
+        if self.id == 0 || self.deadline == 0 {
+            return false;
+        }
+        match self.operation {
+            NetworkDeviceOperation::Info => self.length == 0 && self.generation == 0,
+            NetworkDeviceOperation::Transmit => {
+                (NETWORK_MIN_FRAME..=NETWORK_MAX_FRAME).contains(&(self.length as usize))
+                    && self.generation != 0
+            }
+            NetworkDeviceOperation::Reset => self.length == 0 && self.generation != 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetworkDeviceReply {
+    pub id: u32,
+    pub status: NetworkStatus,
+    pub generation: u16,
+    pub info: NetworkInfo,
+}
+
+impl NetworkDeviceReply {
+    pub fn valid_for(self, request: NetworkDeviceRequest) -> bool {
+        if self.id != request.id {
+            return false;
+        }
+        if self.status != NetworkStatus::Complete {
+            return true;
+        }
+        match request.operation {
+            NetworkDeviceOperation::Info => self.generation != 0,
+            NetworkDeviceOperation::Transmit => self.generation == request.generation,
+            NetworkDeviceOperation::Reset => {
+                self.generation != 0 && self.generation != request.generation
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -552,6 +626,7 @@ pub struct NetworkEvent {
     pub kind: NetworkEventKind,
     pub generation: u16,
     pub length: u16,
+    pub now: u64,
 }
 
 impl NetworkEvent {
@@ -560,6 +635,7 @@ impl NetworkEvent {
             && self.kind as u8 != 0
             && self.generation != 0
             && self.length as usize <= PAGE_SIZE
+            && self.now != 0
     }
 }
 
@@ -1107,6 +1183,30 @@ mod tests {
         assert!(!NetworkRequest { id: 0, ..send }.valid_shape());
         assert!(!NetworkRequest { deadline: 0, ..send }.valid_shape());
         assert!(!NetworkRequest { page: PageHandle(0), ..send }.valid_shape());
+        let transmit = NetworkDeviceRequest {
+            id: 3,
+            operation: NetworkDeviceOperation::Transmit,
+            length: NETWORK_MIN_FRAME as u16,
+            generation: 1,
+            deadline: 1,
+        };
+        assert!(transmit.valid_shape());
+        assert!(!NetworkDeviceRequest { id: 0, ..transmit }.valid_shape());
+        assert!(!NetworkDeviceRequest { deadline: 0, ..transmit }.valid_shape());
+        assert!(!NetworkDeviceRequest { length: 59, ..transmit }.valid_shape());
+        assert!(
+            !NetworkDeviceRequest { operation: NetworkDeviceOperation::Info, ..transmit }
+                .valid_shape()
+        );
+        let complete = NetworkDeviceReply {
+            id: 3,
+            status: NetworkStatus::Complete,
+            generation: 1,
+            info: NetworkInfo { generation: 1, ..NetworkInfo::default() },
+        };
+        assert!(complete.valid_for(transmit));
+        assert!(!NetworkDeviceReply { id: 4, ..complete }.valid_for(transmit));
+        assert!(!NetworkDeviceReply { generation: 2, ..complete }.valid_for(transmit));
         assert_eq!(
             NetworkScope::new(NetworkProtocol::Udp, 7, 8).protocol(),
             Some(NetworkProtocol::Udp)

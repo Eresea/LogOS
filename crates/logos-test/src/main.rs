@@ -152,6 +152,7 @@ const SCENARIOS: &[Scenario] = &[
     persistence_scenario("persistence/write-interruption"),
     persistence_scenario("persistence/recovery"),
     persistence_scenario("persistence/corruption-detected"),
+    configured("network/transport-dhcp", "network", &[], Fixture::Fresh),
     future("network/device-bind", "network", Fixture::Fresh),
     future("network/configuration", "network", Fixture::Fresh),
     future("network/icmp-echo", "network", Fixture::Fresh),
@@ -206,6 +207,7 @@ struct ImageProfile {
     terminal: PathBuf,
     sessions: PathBuf,
     storage: PathBuf,
+    network: PathBuf,
     block_probe: bool,
 }
 
@@ -519,6 +521,7 @@ impl Harness {
         fs::copy(&profile.terminal, payload_dir.join("TERMINAL.EFI")).map_err(io_error)?;
         fs::copy(&profile.sessions, payload_dir.join("SESSIONS.EFI")).map_err(io_error)?;
         fs::copy(&profile.storage, payload_dir.join("STORAGE.EFI")).map_err(io_error)?;
+        fs::copy(&profile.network, payload_dir.join("NETWORK.EFI")).map_err(io_error)?;
         let disk = fixture_dir.join("store.raw");
         if !disk.exists() {
             fs::File::create(&disk)
@@ -547,6 +550,10 @@ impl Harness {
                 &format!("format=raw,file=fat:rw:{}", fixture_dir.join("esp").display()),
                 "-device",
                 "virtio-balloon-pci,disable-modern=on,id=logos-virtio",
+                "-netdev",
+                "user,id=logos-net,net=10.0.2.0/24,dhcpstart=10.0.2.15",
+                "-device",
+                "virtio-net-pci,disable-modern=on,netdev=logos-net,id=logos-network,mac=52:54:00:12:34:56",
                 "-drive",
                 &format!(
                     "if=none,format=raw,cache=writeback,file={},id=logos-store",
@@ -639,6 +646,11 @@ impl Harness {
     }
 
     fn run_id(&mut self, id: &str) -> Result<(), String> {
+        if id == "network/transport-dhcp" {
+            self.wait_debug(
+                "LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2",
+            )?;
+        }
         self.send(&format!("LOGOS/1 RUN {id}\n"))?;
         self.wait(&format!("LOGOS/1 RESULT scenario={id} status=passed"))
     }
@@ -692,6 +704,20 @@ impl Harness {
             }
         }
         Ok(())
+    }
+
+    fn wait_debug(&mut self, expected: &str) -> Result<(), String> {
+        while Instant::now() < self.deadline {
+            if fs::read_to_string(&self.debug_log)
+                .map_err(io_error)?
+                .lines()
+                .any(|line| line.starts_with(expected))
+            {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err(format!("timeout waiting for {expected}"))
     }
 
     fn wait_boot_report(&mut self) -> Result<BootReport, String> {
@@ -1328,7 +1354,7 @@ fn build_profile(
     if !status.success() {
         return Err("kernel build failed".into());
     }
-    for package in ["logos-terminal-service", "logos-sessions-service"] {
+    for package in ["logos-terminal-service", "logos-sessions-service", "logos-network-service"] {
         let status = Command::new("cargo")
             .current_dir(root)
             .args(["build", "-p", package, "--target", "x86_64-unknown-uefi"])
@@ -1361,6 +1387,7 @@ fn build_profile(
         terminal: copy("logos-terminal-service.efi")?,
         sessions: copy("logos-sessions-service.efi")?,
         storage: copy("logos-storage-service.efi")?,
+        network: copy("logos-network-service.efi")?,
         block_probe,
     })
 }
@@ -1591,6 +1618,7 @@ mod tests {
                         | "persistence/write-interruption"
                         | "persistence/recovery"
                         | "persistence/corruption-detected"
+                        | "network/transport-dhcp"
                 )
         }));
     }

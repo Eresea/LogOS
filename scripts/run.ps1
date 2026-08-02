@@ -34,8 +34,8 @@ $qemuArgs = @(
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
     '-drive', "format=raw,file=fat:rw:$((Resolve-Path $esp).Path)",
     '-device', 'virtio-balloon-pci,disable-modern=on,id=logos-virtio',
-    '-netdev', 'user,id=logos-net',
-    '-device', 'virtio-net-pci,disable-modern=on,netdev=logos-net,id=logos-network',
+    '-netdev', 'user,id=logos-net,net=10.0.2.0/24,dhcpstart=10.0.2.15',
+    '-device', 'virtio-net-pci,disable-modern=on,netdev=logos-net,id=logos-network,mac=52:54:00:12:34:56',
     '-drive', "if=none,format=raw,cache=writeback,file=$disk,id=logos-store",
     '-device', 'virtio-blk-pci,disable-modern=on,drive=logos-store,id=logos-block',
     '-debugcon', 'stdio', '-global', 'isa-debugcon.iobase=0xe9'

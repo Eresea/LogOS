@@ -287,12 +287,13 @@ pub(crate) fn main(
     else {
         fail!(b"block bind");
     };
-    let mut network_device = network_driver::discover(&devices).and_then(|network_pci| {
+    let network_pci = network_driver::discover(&devices);
+    let mut network_device = network_pci.and_then(|network_pci| {
         let (bus, slot, _) = network_pci.location();
-        acpi.and_then(|tables| {
+        let gsi = acpi.and_then(|tables| {
             tables.pci_gsi(bus, slot, network_pci.interrupt_pin().checked_sub(1)?)
-        })
-        .and_then(|gsi| network_driver::Device::bind(network_pci, gsi, &mut memory))
+        });
+        gsi.and_then(|gsi| network_driver::Device::bind(network_pci, gsi, &mut memory))
     });
     check!(
         b"block device",
@@ -631,7 +632,7 @@ pub(crate) fn main(
                 let _ = shared_pages.release(owner, rx);
                 return None;
             };
-            Some((owner, rx, rx_virtual, tx, tx_virtual))
+            Some((owner, rx, rx_physical, rx_virtual, tx, tx_physical, tx_virtual))
         });
     if network_setup.is_none() {
         if let Some(task) = native_network.take() {
@@ -710,8 +711,11 @@ pub(crate) fn main(
             address: storage_block_virtual,
         }),
     );
+    let network_dma = network_setup.as_ref().map(|(_, _, rx_physical, _, _, tx_physical, _)| {
+        NetworkDmaPages { rx_address: *rx_physical, tx_address: *tx_physical }
+    });
     let network_pages_ready = native_network_endpoint.zip(network_setup).is_some_and(
-        |(endpoint, (_, rx, rx_address, tx, tx_address))| {
+        |(endpoint, (_, rx, _, rx_address, tx, _, tx_address))| {
             endpoint.configure(logos_core::native_service::NetworkPages {
                 rx_handle: rx,
                 rx_address,
@@ -771,16 +775,22 @@ pub(crate) fn main(
             storage_handle
         ),
     );
-    let mut network_handle = None;
-    if let Some(network_task) = native_network.as_mut()
+    let network_handle = if let Some(network_task) = native_network.as_mut()
         && let Some(handle) = native_scheduler.spawn(network_task)
     {
-        network_handle = Some(handle);
-        if !native_scheduler.run_next() {
+        if native_scheduler.run_next() && !native_scheduler.failed(handle) {
+            Some(handle)
+        } else {
             debug::write_line(b"LogOS: network service unavailable");
-            network_handle = None;
+            None
         }
-    }
+    } else {
+        None
+    };
+    let mut network_pending = None;
+    let mut network_probe = Some(0x8000_0001u32);
+    let mut network_probe_due = 0;
+    let mut network_reported = false;
     health.finish();
     let mut store_relay_state = StoreRelayState::new();
     if !native_input.deliver(logos_abi::InputEvent::STARTUP) {
@@ -834,6 +844,18 @@ pub(crate) fn main(
     }
     #[cfg(feature = "test-hooks")]
     let proof = Cell::new(false);
+    #[cfg(feature = "test-hooks")]
+    let network_device_ptr = &mut network_device as *mut Option<network_driver::Device>;
+    #[cfg(feature = "test-hooks")]
+    let native_scheduler_ptr = &mut native_scheduler as *mut _;
+    #[cfg(feature = "test-hooks")]
+    let network_pending_ptr = &mut network_pending as *mut Option<PendingNetworkDevice>;
+    #[cfg(feature = "test-hooks")]
+    let network_probe_ptr = &mut network_probe as *mut Option<u32>;
+    #[cfg(feature = "test-hooks")]
+    let network_probe_due_ptr = &mut network_probe_due as *mut u64;
+    #[cfg(feature = "test-hooks")]
+    let network_reported_ptr = &mut network_reported as *mut bool;
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(
         unsafe {
@@ -1605,9 +1627,25 @@ pub(crate) fn main(
             }
             passed
         },
+        || {
+            // SAFETY: the test hook is single-threaded and never outlives these locals.
+            let _ = poll_network(
+                unsafe { (*network_device_ptr).as_mut() },
+                native_network_endpoint,
+                network_handle,
+                network_dma,
+                unsafe { &mut *native_scheduler_ptr },
+                unsafe { &mut *network_pending_ptr },
+                unsafe { &mut *network_probe_ptr },
+                unsafe { &mut *network_probe_due_ptr },
+                unsafe { &mut *network_reported_ptr },
+                interrupts::ticks(),
+            );
+        },
         |id| {
             id == "core/boot-normal"
                 || (cfg!(feature = "block-probe") && id == "persistence/block-read-flush")
+                || (id == "network/transport-dhcp" && network_reported)
                 || proof.get()
         },
     );
@@ -1659,7 +1697,13 @@ pub(crate) fn main(
                 network_device.as_mut(),
                 native_network_endpoint,
                 network_handle,
+                network_dma,
                 &mut native_scheduler,
+                &mut network_pending,
+                &mut network_probe,
+                &mut network_probe_due,
+                &mut network_reported,
+                tick,
             ) {
                 debug::write_line(b"LogOS: network service unavailable");
             }
@@ -1863,7 +1907,13 @@ pub(crate) fn main(
                 network_device.as_mut(),
                 native_network_endpoint,
                 network_handle,
+                network_dma,
                 &mut native_scheduler,
+                &mut network_pending,
+                &mut network_probe,
+                &mut network_probe_due,
+                &mut network_reported,
+                tick,
             );
         })
     }
@@ -1885,38 +1935,262 @@ fn dispatch_store_block(
     context.endpoint.reply(reply) && scheduler.wake(handle) && scheduler.run(handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn poll_network(
     device: Option<&mut network_driver::Device>,
     endpoint: Option<native_task::NetworkEndpoint>,
     handle: Option<scheduler::TaskHandle>,
+    dma: Option<NetworkDmaPages>,
     scheduler: &mut scheduler::Scheduler<'_>,
+    pending: &mut Option<PendingNetworkDevice>,
+    probe: &mut Option<u32>,
+    probe_due: &mut u64,
+    reported: &mut bool,
+    tick: u64,
 ) -> bool {
     let (Some(device), Some(endpoint), Some(handle)) = (device, endpoint, handle) else {
         return true;
     };
+    if let Some(request) = pending.as_ref().copied() {
+        if tick >= request.request.deadline {
+            debug::write_line(b"LogOS: network TX timeout");
+            let reset = device.reset();
+            let info = device.info();
+            let reply = logos_abi::NetworkDeviceReply {
+                id: request.request.id,
+                status: if reset {
+                    logos_abi::NetworkStatus::TimedOut
+                } else {
+                    logos_abi::NetworkStatus::Reset
+                },
+                generation: info.generation,
+                info: network_info(info),
+            };
+            let delivered = if unsafe {
+                logos_core::native_service::Context::network_waiting_at(endpoint.context())
+            } {
+                endpoint.deliver_device_reply(reply)
+            } else {
+                endpoint.reply_device(reply)
+            };
+            *pending = None;
+            return delivered && scheduler.wake(handle) && scheduler.run(handle);
+        }
+        match device.complete_transmit() {
+            Ok(Some(())) => {
+                let info = device.info();
+                let reply = logos_abi::NetworkDeviceReply {
+                    id: request.request.id,
+                    status: logos_abi::NetworkStatus::Complete,
+                    generation: info.generation,
+                    info: network_info(info),
+                };
+                let delivered = if unsafe {
+                    logos_core::native_service::Context::network_waiting_at(endpoint.context())
+                } {
+                    endpoint.deliver_device_reply(reply)
+                } else {
+                    endpoint.reply_device(reply)
+                };
+                *pending = None;
+                return delivered && scheduler.wake(handle) && scheduler.run(handle);
+            }
+            Ok(None) => return true,
+            Err(_) => {
+                debug::write_line(b"LogOS: network TX completion invalid");
+                let _ = device.reset();
+                let info = device.info();
+                let reply = logos_abi::NetworkDeviceReply {
+                    id: request.request.id,
+                    status: logos_abi::NetworkStatus::Reset,
+                    generation: info.generation,
+                    info: network_info(info),
+                };
+                let delivered = if unsafe {
+                    logos_core::native_service::Context::network_waiting_at(endpoint.context())
+                } {
+                    endpoint.deliver_device_reply(reply)
+                } else {
+                    endpoint.reply_device(reply)
+                };
+                *pending = None;
+                return delivered && scheduler.wake(handle) && scheduler.run(handle);
+            }
+        }
+    }
+    if unsafe { logos_core::native_service::Context::network_device_pending_at(endpoint.context()) }
+        && endpoint.device_request().is_none()
+    {
+        debug::write_line(b"LogOS: invalid network device request");
+        return false;
+    }
+    if let Some(request) = endpoint.device_request() {
+        debug::write_line(b"LogOS: network device request");
+        let info = device.info();
+        let response = match request.operation {
+            logos_abi::NetworkDeviceOperation::Info => Some(logos_abi::NetworkDeviceReply {
+                id: request.id,
+                status: logos_abi::NetworkStatus::Complete,
+                generation: info.generation,
+                info: network_info(info),
+            }),
+            logos_abi::NetworkDeviceOperation::Reset => {
+                let status = if request.generation == info.generation && device.reset() {
+                    logos_abi::NetworkStatus::Complete
+                } else {
+                    logos_abi::NetworkStatus::Reset
+                };
+                let info = device.info();
+                Some(logos_abi::NetworkDeviceReply {
+                    id: request.id,
+                    status,
+                    generation: info.generation,
+                    info: network_info(info),
+                })
+            }
+            logos_abi::NetworkDeviceOperation::Transmit => {
+                if request.generation != info.generation {
+                    Some(logos_abi::NetworkDeviceReply {
+                        id: request.id,
+                        status: logos_abi::NetworkStatus::Reset,
+                        generation: info.generation,
+                        info: network_info(info),
+                    })
+                } else {
+                    let Some(dma) = dma else {
+                        return false;
+                    };
+                    let frame = unsafe {
+                        core::slice::from_raw_parts(
+                            dma.tx_address as *const u8,
+                            usize::from(request.length),
+                        )
+                    };
+                    match device.transmit(frame) {
+                        Ok(()) => {
+                            *pending = Some(PendingNetworkDevice { request });
+                            return scheduler.wake(handle) && scheduler.run(handle);
+                        }
+                        Err(error) => Some(logos_abi::NetworkDeviceReply {
+                            id: request.id,
+                            status: match error {
+                                network_driver::NetworkError::Busy => {
+                                    logos_abi::NetworkStatus::Busy
+                                }
+                                network_driver::NetworkError::Length => {
+                                    logos_abi::NetworkStatus::Invalid
+                                }
+                                network_driver::NetworkError::Device => {
+                                    logos_abi::NetworkStatus::Io
+                                }
+                            },
+                            generation: info.generation,
+                            info: network_info(info),
+                        }),
+                    }
+                }
+            }
+        };
+        if let Some(reply) = response {
+            return endpoint.reply_device(reply) && scheduler.wake(handle) && scheduler.run(handle);
+        }
+        return true;
+    }
+    if let Some(id) = *probe {
+        if let Some(reply) = endpoint.response(id) {
+            if reply.status == logos_abi::NetworkStatus::Complete
+                && reply.info.configuration == 1
+                && reply.info.ipv4 == u32::from_be_bytes([10, 0, 2, 15])
+                && reply.info.subnet_mask == u32::from_be_bytes([255, 255, 255, 0])
+                && reply.info.router == u32::from_be_bytes([10, 0, 2, 2])
+            {
+                debug::write_line(
+                    b"LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2",
+                );
+                *reported = true;
+                *probe = None;
+            } else {
+                *probe = Some(id.wrapping_add(1).max(1));
+                *probe_due = tick.saturating_add(64);
+            }
+            let ok = scheduler.wake(handle) && scheduler.run(handle);
+            return ok;
+        }
+    }
     if !unsafe { logos_core::native_service::Context::network_waiting_at(endpoint.context()) } {
         return true;
     }
-    let Some(pages) =
-        (unsafe { logos_core::native_service::Context::network_pages_at(endpoint.context()) })
-    else {
+    if !*reported {
+        if tick >= *probe_due {
+            if let Some(id) = *probe {
+                let request = logos_abi::NetworkRequest {
+                    id,
+                    operation: logos_abi::NetworkOperation::Status,
+                    endpoint: logos_abi::NetworkEndpoint(0),
+                    peer: logos_abi::NetworkScope(0),
+                    page: logos_abi::PageHandle(0),
+                    length: 0,
+                    generation: 0,
+                    deadline: u64::MAX / 2,
+                };
+                if endpoint.deliver(request) {
+                    return scheduler.wake(handle) && scheduler.run(handle);
+                }
+            }
+        }
+    }
+    if unsafe { logos_core::native_service::Context::network_deadline_at(endpoint.context()) }
+        .is_some_and(|deadline| tick >= deadline)
+    {
+        let event = logos_abi::NetworkEvent {
+            id: tick.try_into().unwrap_or(1).max(1),
+            kind: logos_abi::NetworkEventKind::Timer,
+            generation: device.info().generation,
+            length: 0,
+            now: tick.max(1),
+        };
+        return endpoint.deliver_event(event) && scheduler.wake(handle) && scheduler.run(handle);
+    }
+    let Some(dma) = dma else {
         return false;
     };
     let frame = unsafe {
-        core::slice::from_raw_parts_mut(pages.rx_address as *mut u8, logos_net::ETHERNET_MAX_FRAME)
+        core::slice::from_raw_parts_mut(dma.rx_address as *mut u8, logos_net::ETHERNET_MAX_FRAME)
     };
     match device.receive(frame) {
         Ok(Some(length)) => {
             let event = logos_abi::NetworkEvent {
-                id: interrupts::ticks().try_into().unwrap_or(1).max(1),
+                id: tick.try_into().unwrap_or(1).max(1),
                 kind: logos_abi::NetworkEventKind::Frame,
                 generation: device.info().generation,
                 length: length as u16,
+                now: tick.max(1),
             };
             endpoint.deliver_event(event) && scheduler.wake(handle) && scheduler.run(handle)
         }
         Ok(None) => true,
         Err(_) => device.reset(),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PendingNetworkDevice {
+    request: logos_abi::NetworkDeviceRequest,
+}
+
+#[derive(Clone, Copy)]
+struct NetworkDmaPages {
+    rx_address: u64,
+    tx_address: u64,
+}
+
+fn network_info(info: network_driver::Info) -> logos_abi::NetworkInfo {
+    logos_abi::NetworkInfo {
+        mac: info.mac,
+        mtu: info.mtu,
+        generation: info.generation,
+        link_up: 1,
+        ..logos_abi::NetworkInfo::default()
     }
 }
 

@@ -9,6 +9,10 @@ impl Page {
     pub const fn address(&self) -> u64 {
         self.0
     }
+
+    pub(crate) const fn from_address(address: u64) -> Self {
+        Self(address)
+    }
 }
 
 pub struct Contiguous {
@@ -23,6 +27,13 @@ impl Contiguous {
 
     pub const fn pages(&self) -> usize {
         self.pages
+    }
+
+    pub(crate) const fn page(&self, index: usize) -> Option<Page> {
+        if index >= self.pages {
+            return None;
+        }
+        Some(Page::from_address(self.start + index as u64 * PAGE_SIZE))
     }
 
     pub fn release(self, memory: &mut PhysicalMemory) -> bool {
