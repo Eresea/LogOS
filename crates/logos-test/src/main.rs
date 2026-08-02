@@ -1,8 +1,9 @@
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::{
     cell::Cell,
     env, fs,
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    io::{self, BufRead, BufReader, IsTerminal, Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -261,6 +262,79 @@ struct ResultRecord {
     seed: u64,
     failure: Option<String>,
     artifacts: PathBuf,
+}
+
+struct Progress {
+    total: usize,
+    interactive: bool,
+    state: Mutex<ProgressState>,
+}
+
+#[derive(Default)]
+struct ProgressState {
+    completed: usize,
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+    current: Option<String>,
+}
+
+impl Progress {
+    fn new(total: usize) -> Self {
+        let progress = Self {
+            total,
+            interactive: io::stdout().is_terminal(),
+            state: Mutex::new(ProgressState::default()),
+        };
+        progress.print();
+        progress
+    }
+
+    fn record(&self, result: &ResultRecord) {
+        let mut state = self.state.lock().expect("progress mutex poisoned");
+        state.completed += 1;
+        match result.status {
+            Status::Passed => state.passed += 1,
+            Status::Failed => state.failed += 1,
+            Status::Skipped => state.skipped += 1,
+        }
+        self.render(&state);
+    }
+
+    fn start(&self, id: &str) {
+        let mut state = self.state.lock().expect("progress mutex poisoned");
+        state.current = Some(id.into());
+        self.render(&state);
+    }
+
+    fn print(&self) {
+        let state = self.state.lock().expect("progress mutex poisoned");
+        self.render(&state);
+    }
+
+    fn finish(&self) {
+        if self.interactive {
+            println!();
+        }
+    }
+
+    fn render(&self, state: &ProgressState) {
+        let line = format!(
+            "[{}/{}] {} passed={} failed={}, skipped={}",
+            state.completed,
+            self.total,
+            state.current.as_deref().unwrap_or("-"),
+            state.passed,
+            state.failed,
+            state.skipped
+        );
+        if self.interactive {
+            print!("\r\x1b[2K{line}");
+            let _ = io::stdout().flush();
+        } else {
+            println!("{line}");
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -870,6 +944,7 @@ fn run_suite(name: &str) -> i32 {
         }
     };
     let seed = test_seed();
+    let progress = Progress::new(selected.len());
     let profiles = match build_profiles(
         &root,
         &run_dir,
@@ -882,7 +957,24 @@ fn run_suite(name: &str) -> i32 {
                 .filter(|item| item.implemented)
                 .map(|item| failed(item, seed, &run_dir, &error))
                 .collect::<Vec<_>>();
+            for result in &results {
+                progress.start(&result.id);
+                progress.record(result);
+            }
+            for item in selected.iter().filter(|item| !item.implemented) {
+                let result = ResultRecord {
+                    id: item.id.into(),
+                    status: Status::Skipped,
+                    duration_ms: 0,
+                    seed,
+                    failure: Some("semantic proof unavailable".into()),
+                    artifacts: run_dir.clone(),
+                };
+                progress.start(&result.id);
+                progress.record(&result);
+            }
             let _ = write_reports(&run_dir, &results);
+            progress.finish();
             for result in &results {
                 report(result);
             }
@@ -906,23 +998,28 @@ fn run_suite(name: &str) -> i32 {
                 &format!("{suite}-shared"),
                 &shared,
                 seed,
+                &progress,
             ));
         }
     }
-    results.extend(run_independent(&root, &run_dir, &profiles, &selected, seed));
+    results.extend(run_independent(&root, &run_dir, &profiles, &selected, seed, &progress));
     for item in selected.iter().filter(|item| !item.implemented) {
-        results.push(ResultRecord {
+        let result = ResultRecord {
             id: item.id.into(),
             status: Status::Skipped,
             duration_ms: 0,
             seed,
             failure: Some("semantic proof unavailable".into()),
             artifacts: run_dir.clone(),
-        });
+        };
+        progress.start(&result.id);
+        progress.record(&result);
+        results.push(result);
     }
     if let Err(error) = write_reports(&run_dir, &results) {
         eprintln!("FAILED report: {error}");
     }
+    progress.finish();
     let mut failed = false;
     for result in &results {
         failed |= report(result) != 0;
@@ -951,6 +1048,7 @@ fn run_one(id: &str) -> i32 {
         }
     };
     let seed = test_seed();
+    let progress = Progress::new(1);
     if !scenario.implemented {
         let result = ResultRecord {
             id: id.into(),
@@ -960,6 +1058,9 @@ fn run_one(id: &str) -> i32 {
             failure: Some("semantic proof unavailable".into()),
             artifacts: run_dir.clone(),
         };
+        progress.start(&result.id);
+        progress.record(&result);
+        progress.finish();
         let _ = write_reports(&run_dir, std::slice::from_ref(&result));
         report(&result);
         return 0;
@@ -968,6 +1069,7 @@ fn run_one(id: &str) -> i32 {
     let profiles = match build_profiles(&root, &run_dir, scenario.fixture == Fixture::Persistence) {
         Ok(profiles) => profiles,
         Err(error) => {
+            progress.finish();
             eprintln!("FAILED {id}: {error}");
             return 1;
         }
@@ -978,14 +1080,17 @@ fn run_one(id: &str) -> i32 {
         &profiles.standard
     };
     if scenario.id == "network/configuration" {
+        progress.start(scenario.id);
         let result = run_network_configuration(&run_dir, profile, scenario, seed);
+        progress.record(&result);
+        progress.finish();
         let _ = write_reports(&run_dir, std::slice::from_ref(&result));
         cleanup_bulk_artifacts(&run_dir);
         return report(&result);
     }
     let mut results = Vec::new();
     if scenario.fixture == Fixture::Persistence {
-        results.push(run_persistence_proof(&root, &run_dir, profile, scenario, seed));
+        results.push(run_persistence_proof(&root, &run_dir, profile, scenario, seed, &progress));
     } else {
         results.extend(run_fixture(
             &root,
@@ -994,8 +1099,10 @@ fn run_one(id: &str) -> i32 {
             id,
             std::slice::from_ref(&scenario),
             seed,
+            &progress,
         ));
     }
+    progress.finish();
     let _ = write_reports(&run_dir, &results);
     cleanup_bulk_artifacts(&run_dir);
     results.first().map_or(1, report)
@@ -1043,8 +1150,10 @@ fn run_persistence_proof(
     profile: &ImageProfile,
     scenario: Scenario,
     seed: u64,
+    progress: &Progress,
 ) -> ResultRecord {
     let started = Instant::now();
+    progress.start(scenario.id);
     let result = match scenario.id {
         "persistence/write-interruption" => run_write_interruption(run_dir, profile, scenario),
         "persistence/recovery" => run_recovery(run_dir, profile, scenario),
@@ -1063,14 +1172,16 @@ fn run_persistence_proof(
         &run_dir.join("fixtures").join(scenario.id.replace('/', "-")),
         failure.is_some(),
     );
-    ResultRecord {
+    let result = ResultRecord {
         id: scenario.id.into(),
         status: if failure.is_none() { Status::Passed } else { Status::Failed },
         duration_ms: started.elapsed().as_millis(),
         seed,
         failure,
         artifacts: run_dir.to_path_buf(),
-    }
+    };
+    progress.record(&result);
+    result
 }
 
 fn run_independent(
@@ -1079,6 +1190,7 @@ fn run_independent(
     profiles: &Profiles,
     selected: &[Scenario],
     seed: u64,
+    progress: &Progress,
 ) -> Vec<ResultRecord> {
     let tasks: Vec<_> = selected
         .iter()
@@ -1089,7 +1201,9 @@ fn run_independent(
     if tasks.len() < 2 {
         return tasks
             .into_iter()
-            .flat_map(|(_, item)| run_independent_one(root, run_dir, profiles, item, seed))
+            .flat_map(|(_, item)| {
+                run_independent_one(root, run_dir, profiles, item, seed, progress)
+            })
             .collect();
     }
 
@@ -1110,7 +1224,7 @@ fn run_independent(
                     {
                         output.push((
                             task.0,
-                            run_independent_one(root, run_dir, profiles, task.1, seed),
+                            run_independent_one(root, run_dir, profiles, task.1, seed, progress),
                         ));
                     }
                     output
@@ -1140,6 +1254,7 @@ fn run_independent_one(
     profiles: &Profiles,
     item: Scenario,
     seed: u64,
+    progress: &Progress,
 ) -> Vec<ResultRecord> {
     let profile = if item.fixture == Fixture::Persistence {
         &profiles.persistence
@@ -1147,9 +1262,9 @@ fn run_independent_one(
         &profiles.standard
     };
     if item.fixture == Fixture::Persistence {
-        vec![run_persistence_proof(root, run_dir, profile, item, seed)]
+        vec![run_persistence_proof(root, run_dir, profile, item, seed, progress)]
     } else {
-        run_fixture(root, run_dir, profile, item.id, std::slice::from_ref(&item), seed)
+        run_fixture(root, run_dir, profile, item.id, std::slice::from_ref(&item), seed, progress)
     }
 }
 
@@ -1432,6 +1547,7 @@ fn run_fixture(
     name: &str,
     scenarios: &[Scenario],
     seed: u64,
+    progress: &Progress,
 ) -> Vec<ResultRecord> {
     let mut results = Vec::new();
     let fixture = scenarios.first().map_or(Fixture::Fresh, |scenario| scenario.fixture);
@@ -1444,7 +1560,10 @@ fn run_fixture(
     let fixture_dir = run_dir.join("fixtures").join(name.replace('/', "-"));
     if let Err(error) = fs::create_dir_all(&fixture_dir) {
         for scenario in scenarios {
-            results.push(failed(scenario, seed, run_dir, &error.to_string()));
+            let result = failed(scenario, seed, run_dir, &error.to_string());
+            progress.start(&result.id);
+            progress.record(&result);
+            results.push(result);
         }
         return results;
     }
@@ -1453,7 +1572,10 @@ fn run_fixture(
         Some(path) => path,
         None => {
             for scenario in scenarios {
-                results.push(failed(scenario, seed, run_dir, "qemu-system-x86_64 not found"));
+                let result = failed(scenario, seed, run_dir, "qemu-system-x86_64 not found");
+                progress.start(&result.id);
+                progress.record(&result);
+                results.push(result);
             }
             return results;
         }
@@ -1462,7 +1584,10 @@ fn run_fixture(
         Some(path) => path,
         None => {
             for scenario in scenarios {
-                results.push(failed(scenario, seed, run_dir, "OVMF_CODE not found"));
+                let result = failed(scenario, seed, run_dir, "OVMF_CODE not found");
+                progress.start(&result.id);
+                progress.record(&result);
+                results.push(result);
             }
             return results;
         }
@@ -1478,7 +1603,10 @@ fn run_fixture(
             capture_failure(&fixture_dir, 0, &PathBuf::new());
             cleanup_fixture_artifacts(&fixture_dir, true);
             for scenario in scenarios {
-                results.push(failed(scenario, seed, run_dir, &error));
+                let result = failed(scenario, seed, run_dir, &error);
+                progress.start(&result.id);
+                progress.record(&result);
+                results.push(result);
             }
             return results;
         }
@@ -1490,6 +1618,7 @@ fn run_fixture(
                 results[index].status = Status::Failed;
                 results[index].failure =
                     Some(format!("reset failed before next scenario: {error}"));
+                progress.record(&results[index]);
                 capture_failure(&fixture_dir, harness.qmp_port, &harness.qmp_log);
                 let _ = harness.child.kill();
                 let _ = harness.child.wait();
@@ -1505,10 +1634,15 @@ fn run_fixture(
                 ) {
                     Ok(harness) => harness,
                     Err(error) => {
-                        results.push(failed(scenario, seed, run_dir, &error));
+                        let result = failed(scenario, seed, run_dir, &error);
+                        progress.start(&result.id);
+                        progress.record(&result);
+                        results.push(result);
                         continue;
                     }
                 };
+            } else {
+                progress.record(&results[index]);
             }
         } else if matches!(
             scenario.fixture,
@@ -1521,16 +1655,15 @@ fn run_fixture(
         ) {
             // The persistence fixture boots into the proof directly.
         } else if let Err(error) = harness.reset(scenario.id) {
-            results.push(failed(
-                scenario,
-                seed,
-                run_dir,
-                &format!("initial reset failed: {error}"),
-            ));
+            let result = failed(scenario, seed, run_dir, &format!("initial reset failed: {error}"));
+            progress.start(&result.id);
+            progress.record(&result);
+            results.push(result);
             capture_failure(&fixture_dir, harness.qmp_port, &harness.qmp_log);
             break;
         }
         let started = Instant::now();
+        progress.start(scenario.id);
         let outcome = harness.run(*scenario);
         let result = ResultRecord {
             id: scenario.id.into(),
@@ -1549,6 +1682,9 @@ fn run_fixture(
             results[index].failure = Some(error);
         }
         capture_failure(&fixture_dir, harness.qmp_port, &harness.qmp_log);
+    }
+    if let Some(index) = last_result {
+        progress.record(&results[index]);
     }
     let failed =
         results.iter().any(|result| result.status == Status::Failed && result.artifacts == run_dir);
