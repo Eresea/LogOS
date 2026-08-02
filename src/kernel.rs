@@ -880,6 +880,9 @@ pub(crate) fn main(
     #[cfg(feature = "test-hooks")]
     let network_reported_ptr = &mut network_reported as *mut bool;
     #[cfg(feature = "test-hooks")]
+    let network_client_pending_ptr =
+        &mut network_client_pending as *mut Option<PendingNetworkClient>;
+    #[cfg(feature = "test-hooks")]
     let shared_pages_ptr = &shared_pages as *const logos_core::shared_pages::SharedPages;
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(
@@ -1674,6 +1677,46 @@ pub(crate) fn main(
             );
         },
         |id| {
+            if id == "network/device-bind" {
+                let request = logos_abi::NetworkRequest {
+                    id: 0x9000_0001,
+                    operation: logos_abi::NetworkOperation::Bind,
+                    endpoint: logos_abi::NetworkEndpoint(0),
+                    peer: logos_abi::NetworkScope::new(logos_abi::NetworkProtocol::Udp, 0, 4000),
+                    page: logos_abi::PageHandle(0),
+                    length: 0,
+                    generation: 0,
+                    deadline: u64::MAX / 2,
+                };
+                if !network_reported || !native_terminal_network.deliver(request) {
+                    return false;
+                }
+                for step in 0..256 {
+                    let _ = poll_network(
+                        unsafe { (*network_device_ptr).as_mut() },
+                        native_network_endpoint,
+                        network_handle,
+                        network_dma,
+                        unsafe { &mut *native_scheduler_ptr },
+                        unsafe { &mut *network_pending_ptr },
+                        unsafe { &mut *network_probe_ptr },
+                        unsafe { &mut *network_probe_due_ptr },
+                        unsafe { &mut *network_reported_ptr },
+                        interrupts::ticks().saturating_add(step),
+                        native_terminal_network,
+                        unsafe { &mut *network_client_pending_ptr },
+                        &session,
+                        &capabilities,
+                        unsafe { &*shared_pages_ptr },
+                        terminal_owner,
+                    );
+                    if let Some(reply) = native_terminal_network.response(request.id) {
+                        return reply.status == logos_abi::NetworkStatus::Complete
+                            && reply.endpoint.valid();
+                    }
+                }
+                return false;
+            }
             id == "core/boot-normal"
                 || (cfg!(feature = "block-probe") && id == "persistence/block-read-flush")
                 || (id == "network/transport-dhcp" && network_reported)

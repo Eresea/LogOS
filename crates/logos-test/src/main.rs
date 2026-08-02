@@ -153,7 +153,7 @@ const SCENARIOS: &[Scenario] = &[
     persistence_scenario("persistence/recovery"),
     persistence_scenario("persistence/corruption-detected"),
     configured("network/transport-dhcp", "network", &[], Fixture::Fresh),
-    future("network/device-bind", "network", Fixture::Fresh),
+    configured("network/device-bind", "network", &[], Fixture::Fresh),
     future("network/configuration", "network", Fixture::Fresh),
     future("network/icmp-echo", "network", Fixture::Fresh),
     future("network/udp-round-trip", "network", Fixture::Fresh),
