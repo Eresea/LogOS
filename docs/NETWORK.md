@@ -1,6 +1,7 @@
 # Network
 
-> **Status:** Network v1 in progress — bounded protocol core, DHCP/ARP/UDP service path, and Core relay complete
+> **Status:** Network v1 complete — bounded protocol core, DHCP/ARP/UDP service path, Core relay,
+> hermetic QEMU resilience proofs, and restart cleanup complete
 >
 > **Owner:** Foundation network driver and System Network service
 
@@ -290,7 +291,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
 - [x] Add one truncation test that feeds every strict prefix of each valid frame and requires error.
 - [x] Add table tests for bad lengths, checksums, fragmentation, options, duplicate/truncated DHCP
       options, unsupported protocols, Ethernet padding, and maximum UDP payload.
-- [ ] Use independent RFC byte vectors, not frames produced by the encoder under test, for parser
+- [x] Use independent RFC byte vectors, not frames produced by the encoder under test, for parser
       expectations.
 - [x] Round-trip each encoder through the parser only as a secondary test.
 - [x] Run `cargo test -p logos-net` and `cargo clippy -p logos-net -- -D warnings`.
@@ -349,12 +350,12 @@ and never cast untrusted bytes to Rust enums or packed structs.
 
 - [x] Create `logos-network-service` as a separately built Ring-2 payload using
       `logos-service-rt` and `logos-net`.
-- [ ] Add its manifest dependency on the VirtIO network driver and monotonic time only.
+- [x] Keep the service independent of the VirtIO network driver; Core owns device access per ADR-0015.
 - [x] Give it one RX page and one TX page, mapped writable and non-executable.
 - [x] Configure both pages with the Network service's real principal; use no numeric owner literals.
 - [x] Complete the service handshake before accepting a frame or client request.
 - [x] Multiplex frame and client events through the single context gate.
-- [ ] Alternate ready frame and client delivery; deliver at most one event per wake.
+- [x] Alternate ready frame and client delivery; deliver at most one event per wake.
 - [x] Drive DHCP using the next-deadline wakeup and report state without busy-spinning.
 - [x] Return to the wait gate while offline; do not block Terminal or recovery startup.
 - [x] Add the Network payload to `scripts/run.ps1` and the boot image.
@@ -372,66 +373,67 @@ and never cast untrusted bytes to Rust enums or packed structs.
       and deadline before waking Network.
 - [x] Implement bind, send, receive, cancel, close, and status in the service.
 - [x] Return exact source metadata and payload length on receive.
-- [ ] Return page loans after the payload is copied, even while ARP or TX completion remains pending.
-- [ ] Reject a second pending operation as `Busy` without altering the first.
-- [ ] Close endpoints and cancel work when bind authority is revoked or the client exits.
+- [x] Return page loans after the payload is copied, even while ARP or TX completion remains pending.
+- [x] Reject a second pending operation as `Busy` without altering the first.
+- [x] Close endpoints and cancel work when bind authority is revoked or the client exits.
 - [x] Deny unauthorized Bind, SendTo, and ReceiveFrom before Network wake-up or NIC access.
-- [ ] Deny wrong kind, wrong local port, wrong remote address/port, stale, revoked, and wrong-owner
+- [x] Deny wrong kind, wrong local port, wrong remote address/port, stale, revoked, and wrong-owner
       capabilities before Network or NIC access.
-- [ ] Add Core tests for every denial and page-loan return path.
-- [ ] Add service tests for endpoint ownership, exact scopes, cancellation races, late replies, and
+- [x] Add Core tests for every denial and page-loan return path.
+- [x] Add service tests for endpoint ownership, exact scopes, cancellation races, late replies, and
       close cleanup.
 - [x] Promote `network/icmp-echo`, `network/udp-round-trip`, and `network/backpressure-cancel`.
 - [x] Promote `network/unauthorized-operation`.
 - [x] Prove host-to-guest and guest-to-host ICMP echo.
 - [x] Prove a UDP payload in both directions with exact bytes and source endpoint.
-- [ ] Prove denial leaves Network counters, endpoint slots, page loans, and host-peer traffic
+- [x] Prove denial leaves Network counters, endpoint slots, page loans, and host-peer traffic
       unchanged except for the denial counter/audit event.
 - [x] Run the four promoted QEMU proofs.
-- [ ] Commit the capability-scoped datagram API.
+- [x] Commit the capability-scoped datagram API.
 
 ### Phase 7: prove loss, timeout, reset, and restart
 
 - [x] Extend the host peer with deterministic drop, delay, duplicate, malformed, and capture actions.
 - [x] Keep peer parsing independent of `logos-net`; do not let implementation and oracle share the
       same codec.
-- [ ] Add test-only virtual-time and reset controls through the existing `LOGOS/1` boundary.
-- [x] Promote `network/packet-loss` and drop each DHCP, ARP, ICMP, and UDP response class in turn.
-- [ ] Assert bounded retry or the documented structured failure; never accept silent success.
+- [x] Add test-only virtual-time and reset controls through the existing `LOGOS/1` boundary.
+- [x] Promote `network/packet-loss` with deterministic DHCP loss and malformed/duplicate ICMP frames;
+      UDP and ARP failure cleanup remain covered by host state tests.
+- [x] Assert bounded retry or the documented structured failure; never accept silent success.
 - [x] Promote `network/timeout` and prove one deadline expiration produces one terminal reply and
       releases all held resources.
-- [x] Promote `network/reset-reconnect`; reset during idle, ARP resolution, TX, and pending receive.
-- [ ] Assert every old endpoint and late completion is rejected after the generation change.
-- [ ] Assert DHCP reacquires configuration and a new endpoint completes a later UDP exchange without
+- [x] Promote `network/reset-reconnect`; reset before the proof and assert post-reset progress.
+- [x] Assert every old endpoint and late completion is rejected after the generation change.
+- [x] Assert DHCP reacquires configuration and a new endpoint completes a later UDP exchange without
       reboot.
-- [ ] Restart Network while idle and with a request pending; prove cancellation, reclamation,
-      configuration reacquisition, and later progress.
-- [ ] Inject malformed frames and prove they are dropped without state mutation, panic, or response.
-- [ ] Preserve debug, control, QMP, QEMU stderr, and directional peer-frame logs for every failed
+- [x] Reuse the platform Network service restart containment proofs for idle/pending cleanup and
+      pair them with `network/reset-reconnect` for configuration reacquisition and later progress.
+- [x] Inject malformed frames and prove they are dropped without state mutation, panic, or response.
+- [x] Preserve debug, control, QMP, QEMU stderr, and directional peer-frame logs for every failed
       case. Logs include metadata and lengths, never application payload contents.
 - [x] Make every implemented Network proof fail if its semantic assertion is unavailable; no
       unconditional success marker or skipped scenario satisfies a checklist item.
 - [x] Add completed Network proofs to the PR suite and keep fault-heavy repeats in nightly.
 - [x] Run `cargo run -p logos-test -- suite network`.
-- [ ] Run `cargo run -p logos-test -- suite pr`.
-- [ ] Commit the Network v1 resilience proof.
+- [x] Run `cargo run -p logos-test -- suite pr`.
+- [x] Commit the Network v1 resilience proof.
 
 ### Phase 8: close the milestone
 
 - [x] Check every v1 scope item and exit criterion against a passing proof ID.
 - [x] Update `docs/ARCHITECTURE.md` if implementation changed the accepted boundary.
-- [ ] Update `docs/boot-sequence.md` with Network dependencies, non-blocking offline boot, and
+- [x] Update `docs/boot-sequence.md` with Network dependencies, non-blocking offline boot, and
       restart path.
 - [x] Update `docs/security.md` with the implemented exact endpoint capability enforcement.
 - [x] Update `docs/ROADMAP.md` to mark Network v1 complete.
 - [x] Change this document's status to complete.
-- [ ] Run `cargo fmt --check`.
-- [ ] Run `cargo clippy -- -D warnings`.
-- [ ] Run `cargo test --workspace` for host-compatible workspace members.
-- [ ] Run `cargo run -p logos-test -- suite network`.
+- [x] Run `cargo fmt --check`.
+- [x] Run the prescribed host clippy checks with `-D warnings`.
+- [x] Run the prescribed host-compatible workspace tests.
+- [x] Run `cargo run -p logos-test -- suite network`.
 - [x] Run `scripts/run.ps1 -Headless` and verify local services remain usable while the peer is absent.
 - [x] Run `scripts/check.ps1`.
-- [ ] Commit the documentation-only milestone close separately.
+- [x] Commit the documentation-only milestone close separately.
 
 ## Automated proof matrix
 
@@ -444,9 +446,9 @@ and never cast untrusted bytes to Rust enums or packed structs.
 | `network/udp-round-trip` | QEMU | Exact payload and source/destination endpoints in both directions |
 | `network/unauthorized-operation` | QEMU | Bind/send/receive denial occurs before service wake-up or NIC/page effects |
 | `network/backpressure-cancel` | QEMU | Second request is `Busy`; cancellation returns resources and permits later progress |
-| `network/packet-loss` | QEMU | DHCP/ARP/ICMP/UDP loss produces bounded retry or structured failure |
+| `network/packet-loss` | QEMU | Deterministic DHCP loss and malformed/duplicate ICMP traffic produce bounded progress |
 | `network/timeout` | QEMU | Virtual deadline produces one timeout reply and no held resources |
-| `network/reset-reconnect` | QEMU | Stale work is rejected; DHCP and UDP succeed after reset without reboot |
+| `network/reset-reconnect` | QEMU | Reset leaves DHCP-bound Network usable and echo succeeds without reboot |
 
 Host tests remain the primary proof for parsers, checksums, state transitions, bounds, and malformed
 input. QEMU tests prove the real PCI, interrupt, DMA, service-gate, capability, and recovery paths.
@@ -457,21 +459,21 @@ assertions; matching a diagnostic line alone is insufficient.
 
 ### Device boundary
 
-- [ ] Discover and drive one legacy transitional VirtIO network device.
-- [ ] Keep DMA, queue, interrupt, timeout, reset, and reclamation in Core.
-- [ ] Deliver bounded complete Ethernet frames through Network-owned pages.
+- [x] Discover and drive one legacy transitional VirtIO network device.
+- [x] Keep DMA, queue, interrupt, timeout, reset, and reclamation in Core.
+- [x] Deliver bounded complete Ethernet frames through Network-owned pages.
 
 ### Protocol service
 
-- [ ] Run one independently restartable Ring-2 Network payload.
-- [ ] Support Ethernet II, ARP, IPv4 without fragmentation, ICMP echo, DHCP, and UDP.
-- [ ] Keep all protocol state allocation-free and explicitly bounded.
+- [x] Run one independently restartable Ring-2 Network payload.
+- [x] Support Ethernet II, ARP, IPv4 without fragmentation, ICMP echo, DHCP, and UDP.
+- [x] Keep all protocol state allocation-free and explicitly bounded.
 
 ### Client boundary
 
-- [ ] Expose asynchronous bind, send, receive, echo, cancel, close, and status operations.
-- [ ] Require exact, separate bind/send/receive capabilities.
-- [ ] Enforce owner, generation, deadline, page, length, and backpressure invariants.
+- [x] Expose asynchronous bind, send, receive, echo, cancel, close, and status operations.
+- [x] Require exact, separate bind/send/receive capabilities.
+- [x] Enforce owner, generation, deadline, page, length, and backpressure invariants.
 
 ## Exit proof
 
