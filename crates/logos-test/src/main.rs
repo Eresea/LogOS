@@ -1619,6 +1619,7 @@ mod tests {
                         | "persistence/recovery"
                         | "persistence/corruption-detected"
                         | "network/transport-dhcp"
+                        | "network/device-bind"
                 )
         }));
     }
