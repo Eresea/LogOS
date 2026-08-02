@@ -8,6 +8,7 @@ use std::time::Duration;
 
 const GUEST: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
 const SERVER: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+const SERVER_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc];
 
 pub struct NetworkPeer {
     stop: Arc<AtomicBool>,
@@ -35,6 +36,7 @@ impl NetworkPeer {
         let worker = thread::spawn(move || {
             let mut input = [0; 2048];
             let mut drop_first_discover = true;
+            let mut drop_first_loss_echo = true;
             while !worker_stop.load(Ordering::Relaxed) {
                 let Ok((length, _)) = socket.recv_from(&mut input) else { continue };
                 if drop_first_discover && dhcp_message_type(&input[..length]) == Some(1) {
@@ -42,6 +44,18 @@ impl NetworkPeer {
                     continue;
                 }
                 if let Some(frame) = dhcp_reply(&input[..length]) {
+                    let _ = socket.send_to(&frame, qemu);
+                } else if let Some(frame) = arp_reply(&input[..length]) {
+                    let _ = socket.send_to(&frame, qemu);
+                } else if let Some(frame) = icmp_reply(&input[..length]) {
+                    if drop_first_loss_echo
+                        && icmp_identifier(&input[..length]).is_some_and(|id| id >= 2)
+                    {
+                        drop_first_loss_echo = false;
+                        let _ = socket.send_to(&[0; 60], qemu);
+                    }
+                    let _ = socket.send_to(&frame, qemu);
+                } else if let Some(frame) = udp_reply(&input[..length]) {
                     let _ = socket.send_to(&frame, qemu);
                 }
             }
@@ -74,6 +88,135 @@ fn dhcp_message_type(frame: &[u8]) -> Option<u8> {
         return None;
     }
     option(&udp[8..length], 53).and_then(|value| value.first().copied())
+}
+
+fn ipv4_payload(frame: &[u8], protocol: u8) -> Option<(&[u8], [u8; 6], [u8; 6])> {
+    if frame.len() < 14 + 20 || u16::from_be_bytes([frame[12], frame[13]]) != 0x0800 {
+        return None;
+    }
+    let ip = &frame[14..];
+    let ihl = usize::from(ip[0] & 0x0f) * 4;
+    if ip[0] >> 4 != 4 || ihl < 20 || ip.len() < ihl || ip[9] != protocol {
+        return None;
+    }
+    let total = usize::from(u16::from_be_bytes([ip[2], ip[3]]));
+    if total < ihl || total > ip.len() {
+        return None;
+    }
+    let mut destination = [0; 6];
+    destination.copy_from_slice(&frame[..6]);
+    let mut source = [0; 6];
+    source.copy_from_slice(&frame[6..12]);
+    Some((&ip[ihl..total], destination, source))
+}
+
+fn arp_reply(frame: &[u8]) -> Option<Vec<u8>> {
+    if frame.len() < 14 + 28 || u16::from_be_bytes([frame[12], frame[13]]) != 0x0806 {
+        return None;
+    }
+    let arp = &frame[14..42];
+    if u16::from_be_bytes([arp[0], arp[1]]) != 1
+        || u16::from_be_bytes([arp[2], arp[3]]) != 0x0800
+        || arp[4] != 6
+        || arp[5] != 4
+        || u16::from_be_bytes([arp[6], arp[7]]) != 1
+        || arp[24..28] != SERVER.octets()
+    {
+        return None;
+    }
+    let mut output = vec![0; 60];
+    output[..6].copy_from_slice(&frame[6..12]);
+    output[6..12].copy_from_slice(&SERVER_MAC);
+    output[12..14].copy_from_slice(&0x0806u16.to_be_bytes());
+    output[14..16].copy_from_slice(&1u16.to_be_bytes());
+    output[16..18].copy_from_slice(&0x0800u16.to_be_bytes());
+    output[18] = 6;
+    output[19] = 4;
+    output[20..22].copy_from_slice(&2u16.to_be_bytes());
+    output[22..28].copy_from_slice(&SERVER_MAC);
+    output[28..32].copy_from_slice(&SERVER.octets());
+    output[32..38].copy_from_slice(&arp[8..14]);
+    output[38..42].copy_from_slice(&arp[14..18]);
+    Some(output)
+}
+
+fn icmp_reply(frame: &[u8]) -> Option<Vec<u8>> {
+    let (payload, _destination, source) = ipv4_payload(frame, 1)?;
+    if payload.len() < 8 || payload[0] != 8 || checksum_bytes(payload) != 0 {
+        return None;
+    }
+    let mut ip = vec![0; 20 + payload.len()];
+    ip[0] = 0x45;
+    let ip_length = ip.len() as u16;
+    ip[2..4].copy_from_slice(&ip_length.to_be_bytes());
+    ip[8] = 64;
+    ip[9] = 1;
+    ip[12..16].copy_from_slice(&SERVER.octets());
+    ip[16..20].copy_from_slice(&GUEST.octets());
+    let mut icmp = payload.to_vec();
+    icmp[0] = 0;
+    icmp[2..4].fill(0);
+    let icmp_checksum = checksum_bytes(&icmp);
+    icmp[2..4].copy_from_slice(&icmp_checksum.to_be_bytes());
+    let ip_checksum = checksum_bytes(&ip[..20]);
+    ip[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+    ip[20..].copy_from_slice(&icmp);
+    ethernet_frame(source, SERVER_MAC, 0x0800, &ip)
+}
+
+fn icmp_identifier(frame: &[u8]) -> Option<u16> {
+    let (payload, _, _) = ipv4_payload(frame, 1)?;
+    (payload.len() >= 8 && payload[0] == 8).then(|| u16::from_be_bytes([payload[4], payload[5]]))
+}
+
+fn udp_reply(frame: &[u8]) -> Option<Vec<u8>> {
+    let (payload, _destination, source) = ipv4_payload(frame, 17)?;
+    if payload.len() < 8
+        || u16::from_be_bytes([payload[0], payload[1]]) == 0
+        || u16::from_be_bytes([payload[2], payload[3]]) != 4001
+    {
+        return None;
+    }
+    let length = usize::from(u16::from_be_bytes([payload[4], payload[5]]));
+    if length < 8 || length > payload.len() {
+        return None;
+    }
+    let body = &payload[8..length];
+    let mut udp = vec![0; 8 + body.len()];
+    udp[0..2].copy_from_slice(&4001u16.to_be_bytes());
+    udp[2..4].copy_from_slice(&4000u16.to_be_bytes());
+    let udp_length = udp.len() as u16;
+    udp[4..6].copy_from_slice(&udp_length.to_be_bytes());
+    udp[8..].copy_from_slice(body);
+    let udp_checksum = pseudo_checksum(SERVER, GUEST, &udp);
+    udp[6..8].copy_from_slice(&udp_checksum.to_be_bytes());
+    let mut ip = vec![0; 20 + udp.len()];
+    ip[0] = 0x45;
+    let ip_length = ip.len() as u16;
+    ip[2..4].copy_from_slice(&ip_length.to_be_bytes());
+    ip[8] = 64;
+    ip[9] = 17;
+    ip[12..16].copy_from_slice(&SERVER.octets());
+    ip[16..20].copy_from_slice(&GUEST.octets());
+    let ip_checksum = checksum_bytes(&ip[..20]);
+    ip[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+    ip[20..].copy_from_slice(&udp);
+    ethernet_frame(source, SERVER_MAC, 0x0800, &ip)
+}
+
+fn ethernet_frame(
+    destination: [u8; 6],
+    source: [u8; 6],
+    ether_type: u16,
+    payload: &[u8],
+) -> Option<Vec<u8>> {
+    let length = 14usize.checked_add(payload.len())?;
+    let mut output = vec![0; length.max(60)];
+    output[..6].copy_from_slice(&destination);
+    output[6..12].copy_from_slice(&source);
+    output[12..14].copy_from_slice(&ether_type.to_be_bytes());
+    output[14..length].copy_from_slice(payload);
+    Some(output)
 }
 
 fn dhcp_reply(frame: &[u8]) -> Option<Vec<u8>> {

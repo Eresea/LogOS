@@ -232,6 +232,24 @@ impl Context {
             && self.invoke(native_service::NETWORK_REPLY)
     }
 
+    pub fn network_reply_after_device(
+        &mut self,
+        request: logos_abi::NetworkRequest,
+        reply: logos_abi::NetworkReply,
+    ) -> bool {
+        (unsafe { RawContext::reply_network_after_device_at(self.raw_address(), request, reply) })
+            && self.invoke(native_service::NETWORK_REPLY)
+    }
+
+    pub fn network_reply_after_event(
+        &mut self,
+        request: logos_abi::NetworkRequest,
+        reply: logos_abi::NetworkReply,
+    ) -> bool {
+        (unsafe { RawContext::reply_network_after_event_at(self.raw_address(), request, reply) })
+            && self.invoke(native_service::NETWORK_REPLY)
+    }
+
     pub fn network_device_request(&mut self, request: logos_abi::NetworkDeviceRequest) -> bool {
         (unsafe { RawContext::request_network_device_at(self.raw_address(), request) })
             && self.invoke(native_service::NETWORK_DEVICE_REQUEST)

@@ -790,6 +790,42 @@ impl Context {
     }
 
     /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by the service.
+    pub unsafe fn reply_network_after_device_at(
+        address: u64,
+        request: logos_abi::NetworkRequest,
+        reply: logos_abi::NetworkReply,
+    ) -> bool {
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.operation != NETWORK_DEVICE_REPLY || !reply.valid_for(request) {
+            return false;
+        }
+        encode_network_reply(&mut context.text, reply);
+        context.text_length = NETWORK_REPLY_BYTES as u32;
+        context.operation = NETWORK_REPLY;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by the service.
+    pub unsafe fn reply_network_after_event_at(
+        address: u64,
+        request: logos_abi::NetworkRequest,
+        reply: logos_abi::NetworkReply,
+    ) -> bool {
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.operation != NETWORK_EVENT || !reply.valid_for(request) {
+            return false;
+        }
+        encode_network_reply(&mut context.text, reply);
+        context.text_length = NETWORK_REPLY_BYTES as u32;
+        context.operation = NETWORK_REPLY;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
     pub unsafe fn network_reply_at(
         address: u64,
@@ -1593,7 +1629,7 @@ mod tests {
             source_address: 0,
             source_port: 0,
             length: 0,
-            info: logos_abi::NetworkInfo::default(),
+            info: logos_abi::NetworkInfo { generation: 1, ..Default::default() },
             counters: logos_abi::NetworkCounters::default(),
         };
         assert!(unsafe { Context::reply_network_at(address, reply) });
@@ -1609,6 +1645,8 @@ mod tests {
         };
         assert!(unsafe { Context::deliver_network_event_at(address, event) });
         assert_eq!(unsafe { Context::network_event_at(address) }, Some(event));
+        assert!(unsafe { Context::reply_network_after_event_at(address, request, reply) });
+        assert_eq!(unsafe { Context::network_reply_at(address, request.id) }, Some(reply));
         assert!(unsafe { !Context::network_wait_at(address, 0) });
         assert!(unsafe { Context::network_reply_at(address, request.id + 1) }.is_none());
 

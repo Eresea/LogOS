@@ -217,13 +217,12 @@ const SCENARIOS: &[Scenario] = &[
     configured("network/device-bind", "network", &[], Fixture::Fresh),
     configured("network/configuration", "network", &[], Fixture::Fresh),
     configured("network/unauthorized-operation", "network", &[], Fixture::Fresh),
-    future("network/icmp-echo", "network", Fixture::Fresh),
-    future("network/udp-round-trip", "network", Fixture::Fresh),
-    future("network/backpressure-cancel", "network", Fixture::Fresh),
-    future("network/packet-loss", "network", Fixture::Fresh),
-    future("network/timeout", "network", Fixture::Fresh),
-    future("network/reset-reconnect", "network", Fixture::Fresh),
-    future("network/unauthorized-operation", "network", Fixture::Fresh),
+    configured("network/icmp-echo", "network", &[], Fixture::Fresh),
+    configured("network/udp-round-trip", "network", &[], Fixture::Fresh),
+    configured("network/backpressure-cancel", "network", &[], Fixture::Fresh),
+    configured("network/packet-loss", "network", &[], Fixture::Fresh),
+    configured("network/timeout", "network", &[], Fixture::Fresh),
+    configured("network/reset-reconnect", "network", &[], Fixture::Fresh),
 ];
 
 const fn scenario(id: &'static str, suite: &'static str, fixture: Fixture) -> Scenario {
@@ -780,7 +779,7 @@ impl Harness {
     }
 
     fn run_id(&mut self, id: &str) -> Result<(), String> {
-        if id == "network/transport-dhcp" {
+        if id.starts_with("network/") {
             self.wait_debug(
                 "LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2",
             )?;
@@ -1415,17 +1414,21 @@ fn run_fixture(
             return;
         }
     };
-    let mut harness =
-        match Harness::boot(&qemu, &ovmf, &profile, &fixture_dir, timeout, expected_storage) {
-            Ok(harness) => harness,
-            Err(error) => {
-                capture_failure(&fixture_dir, 0, &PathBuf::new());
-                for scenario in scenarios {
-                    results.push(failed(scenario, seed, run_dir, &error));
-                }
-                return;
+    let network_peer = scenarios.iter().all(|scenario| scenario.suite == "network");
+    let mut harness = match if network_peer {
+        Harness::boot_with_peer(&qemu, &ovmf, &profile, &fixture_dir, timeout, expected_storage)
+    } else {
+        Harness::boot(&qemu, &ovmf, &profile, &fixture_dir, timeout, expected_storage)
+    } {
+        Ok(harness) => harness,
+        Err(error) => {
+            capture_failure(&fixture_dir, 0, &PathBuf::new());
+            for scenario in scenarios {
+                results.push(failed(scenario, seed, run_dir, &error));
             }
-        };
+            return;
+        }
+    };
     let mut last_result: Option<usize> = None;
     for scenario in scenarios {
         if let Some(index) = last_result.take() {
@@ -1667,7 +1670,7 @@ fn artifact_dir(name: &str) -> Result<PathBuf, String> {
 fn suite_contains(requested: &str, actual: &str) -> bool {
     requested == actual
         || matches!(requested, "main" | "nightly" | "weekly")
-        || requested == "pr" && matches!(actual, "core" | "console" | "platform")
+        || requested == "pr" && matches!(actual, "core" | "console" | "platform" | "network")
 }
 
 fn repo_root() -> PathBuf {
@@ -1835,6 +1838,12 @@ mod tests {
                         | "network/device-bind"
                         | "network/configuration"
                         | "network/unauthorized-operation"
+                        | "network/icmp-echo"
+                        | "network/udp-round-trip"
+                        | "network/backpressure-cancel"
+                        | "network/packet-loss"
+                        | "network/timeout"
+                        | "network/reset-reconnect"
                         | "platform/missing-sessions"
                         | "platform/missing-terminal"
                         | "platform/incompatible-sessions"
@@ -1847,7 +1856,7 @@ mod tests {
     #[test]
     fn pr_suite_is_bounded_to_implemented_milestones() {
         assert!(suite_contains("pr", "core"));
-        assert!(!suite_contains("pr", "network"));
+        assert!(suite_contains("pr", "network"));
     }
 
     #[test]

@@ -559,6 +559,7 @@ impl NetworkRequest {
                     && self.peer.address() == 0
                     && self.page.0 == 0
                     && self.length == 0
+                    && self.generation == 0
             }
             NetworkOperation::SendTo => {
                 self.endpoint.valid()
@@ -566,7 +567,8 @@ impl NetworkRequest {
                     && self.peer.valid()
                     && self.peer.address() != 0
                     && self.page.0 != 0
-                    && (self.length as usize) <= MAX_NETWORK_PAYLOAD
+                    && (1..=MAX_NETWORK_PAYLOAD).contains(&(self.length as usize))
+                    && self.generation != 0
             }
             NetworkOperation::ReceiveFrom => {
                 self.endpoint.valid()
@@ -575,6 +577,7 @@ impl NetworkRequest {
                     && self.peer.address() == 0
                     && self.page.0 != 0
                     && self.length as usize == MAX_NETWORK_PAYLOAD
+                    && self.generation != 0
             }
             NetworkOperation::Echo => {
                 !self.endpoint.valid()
@@ -583,9 +586,14 @@ impl NetworkRequest {
                     && self.peer.address() != 0
                     && self.page.0 == 0
                     && self.length == 0
+                    && self.generation == 0
             }
             NetworkOperation::Cancel | NetworkOperation::Close => {
-                self.endpoint.valid() && self.peer.0 == 0 && self.page.0 == 0 && self.length == 0
+                self.endpoint.valid()
+                    && self.peer.0 == 0
+                    && self.page.0 == 0
+                    && self.length == 0
+                    && self.generation == 0
             }
         }
     }
@@ -607,11 +615,61 @@ pub struct NetworkReply {
 
 impl NetworkReply {
     pub fn valid_for(self, request: NetworkRequest) -> bool {
-        self.id == request.id
-            && self.length as usize <= MAX_NETWORK_PAYLOAD
-            && (self.status != NetworkStatus::Complete
-                || request.generation == 0
-                || self.generation == request.generation)
+        if self.id != request.id || self.length as usize > MAX_NETWORK_PAYLOAD {
+            return false;
+        }
+        if self.status != NetworkStatus::Complete {
+            return self.endpoint.0 == 0
+                && self.source_address == 0
+                && self.source_port == 0
+                && self.length == 0;
+        }
+        if self.generation == 0 {
+            return false;
+        }
+        match request.operation {
+            NetworkOperation::Status => {
+                self.endpoint.0 == 0
+                    && self.source_address == 0
+                    && self.source_port == 0
+                    && self.length == 0
+                    && self.generation != 0
+            }
+            NetworkOperation::Bind => {
+                self.endpoint.valid()
+                    && self.source_address == 0
+                    && self.source_port == 0
+                    && self.length == 0
+                    && self.generation != 0
+            }
+            NetworkOperation::SendTo => {
+                self.endpoint == request.endpoint
+                    && self.source_address == 0
+                    && self.source_port == 0
+                    && self.length == request.length
+                    && self.generation == request.generation
+            }
+            NetworkOperation::ReceiveFrom => {
+                self.endpoint == request.endpoint
+                    && self.source_address != 0
+                    && self.source_port != 0
+                    && self.generation == request.generation
+            }
+            NetworkOperation::Echo => {
+                self.endpoint.0 == 0
+                    && self.source_address == request.peer.address()
+                    && self.source_port == 0
+                    && self.length == 0
+                    && self.generation != 0
+            }
+            NetworkOperation::Cancel | NetworkOperation::Close => {
+                self.endpoint.0 == 0
+                    && self.source_address == 0
+                    && self.source_port == 0
+                    && self.length == 0
+                    && self.generation != 0
+            }
+        }
     }
 }
 
@@ -1243,5 +1301,25 @@ mod tests {
             deadline: 1,
         };
         assert!(echo.valid_shape());
+
+        let reply = NetworkReply {
+            id: send.id,
+            status: NetworkStatus::Complete,
+            endpoint: send.endpoint,
+            generation: send.generation,
+            source_address: 0,
+            source_port: 0,
+            length: send.length,
+            info: NetworkInfo { generation: send.generation, ..NetworkInfo::default() },
+            counters: NetworkCounters::default(),
+        };
+        assert!(reply.valid_for(send));
+        assert!(!NetworkReply { endpoint: NetworkEndpoint(0), ..reply }.valid_for(send));
+        assert!(!NetworkReply { generation: 2, ..reply }.valid_for(send));
+        assert!(!NetworkReply { length: send.length - 1, ..reply }.valid_for(send));
+        assert!(
+            !NetworkReply { status: NetworkStatus::TimedOut, endpoint: send.endpoint, ..reply }
+                .valid_for(send)
+        );
     }
 }

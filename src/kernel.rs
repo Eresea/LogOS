@@ -389,6 +389,12 @@ pub(crate) fn main(
     ) else {
         fail!(b"capabilities");
     };
+    let Some(network_icmp_capability) = capabilities.grant_scoped64(
+        capabilities::CapabilityKind::NetworkSend,
+        logos_abi::NetworkScope::new(logos_abi::NetworkProtocol::Icmp, 0x0a00_0202, 0).0,
+    ) else {
+        fail!(b"capabilities");
+    };
     let Some(network_receive_capability) = capabilities.grant_scoped64(
         capabilities::CapabilityKind::NetworkReceive,
         logos_abi::NetworkScope::new(logos_abi::NetworkProtocol::Udp, 0, 4000).0,
@@ -412,6 +418,7 @@ pub(crate) fn main(
             session_store_write_capability,
             network_bind_capability,
             network_send_capability,
+            network_icmp_capability,
             network_receive_capability,
         ],
     ) else {
@@ -2013,7 +2020,10 @@ pub(crate) fn main(
                                 native_terminal_network.context(),
                                 request,
                             )
-                        } || !relay_network_client(
+                        } {
+                            return false;
+                        }
+                        if !relay_network_client(
                             native_terminal_network,
                             network_endpoint,
                             network_task,
@@ -2023,7 +2033,10 @@ pub(crate) fn main(
                             &capabilities,
                             &shared_pages,
                             terminal_owner,
-                        ) || native_terminal_network
+                        ) {
+                            return false;
+                        }
+                        if native_terminal_network
                             .response(request.id)
                             .is_none_or(|reply| reply.status != logos_abi::NetworkStatus::Denied)
                         {
@@ -2031,6 +2044,461 @@ pub(crate) fn main(
                         }
                     }
                     return true;
+                }
+                if id == "network/icmp-echo" {
+                    if !network_reported {
+                        return false;
+                    }
+                    let request = logos_abi::NetworkRequest {
+                        id: 0x9000_0100,
+                        operation: logos_abi::NetworkOperation::Echo,
+                        endpoint: logos_abi::NetworkEndpoint(0),
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Icmp,
+                            0x0a00_0202,
+                            0,
+                        ),
+                        page: logos_abi::PageHandle(0),
+                        length: 0,
+                        generation: 0,
+                        deadline: u64::MAX / 2,
+                    };
+                    let reply = run_network_request(
+                        request,
+                        native_terminal_network,
+                        native_network_endpoint,
+                        network_handle,
+                        network_device.as_mut(),
+                        network_dma,
+                        &mut native_scheduler,
+                        &mut network_pending,
+                        &mut network_probe,
+                        &mut network_probe_due,
+                        &mut network_reported,
+                        &mut network_client_pending,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    );
+                    return reply.is_some_and(|reply| {
+                        reply.status == logos_abi::NetworkStatus::Complete
+                            && reply.source_address == 0x0a00_0202
+                    });
+                }
+                if id == "network/udp-round-trip" {
+                    if !network_reported {
+                        return false;
+                    }
+                    let bind = logos_abi::NetworkRequest {
+                        id: 0x9000_0110,
+                        operation: logos_abi::NetworkOperation::Bind,
+                        endpoint: logos_abi::NetworkEndpoint(0),
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Udp,
+                            0,
+                            4000,
+                        ),
+                        page: logos_abi::PageHandle(0),
+                        length: 0,
+                        generation: 0,
+                        deadline: u64::MAX / 2,
+                    };
+                    let Some(bind_reply) = run_network_request(
+                        bind,
+                        native_terminal_network,
+                        native_network_endpoint,
+                        network_handle,
+                        network_device.as_mut(),
+                        network_dma,
+                        &mut native_scheduler,
+                        &mut network_pending,
+                        &mut network_probe,
+                        &mut network_probe_due,
+                        &mut network_reported,
+                        &mut network_client_pending,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) else {
+                        return false;
+                    };
+                    let payload = b"logos-network-v1";
+                    let Some(page_address) = shared_pages.address(terminal_owner, shared_history)
+                    else {
+                        return false;
+                    };
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            payload.as_ptr(),
+                            page_address as *mut u8,
+                            payload.len(),
+                        );
+                    }
+                    let send = logos_abi::NetworkRequest {
+                        id: 0x9000_0111,
+                        operation: logos_abi::NetworkOperation::SendTo,
+                        endpoint: bind_reply.endpoint,
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Udp,
+                            0x0a00_0202,
+                            4001,
+                        ),
+                        page: shared_history,
+                        length: payload.len() as u16,
+                        generation: bind_reply.generation,
+                        deadline: u64::MAX / 2,
+                    };
+                    let Some(send_reply) = run_network_request(
+                        send,
+                        native_terminal_network,
+                        native_network_endpoint,
+                        network_handle,
+                        network_device.as_mut(),
+                        network_dma,
+                        &mut native_scheduler,
+                        &mut network_pending,
+                        &mut network_probe,
+                        &mut network_probe_due,
+                        &mut network_reported,
+                        &mut network_client_pending,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) else {
+                        return false;
+                    };
+                    let receive = logos_abi::NetworkRequest {
+                        id: 0x9000_0112,
+                        operation: logos_abi::NetworkOperation::ReceiveFrom,
+                        endpoint: bind_reply.endpoint,
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Udp,
+                            0,
+                            4000,
+                        ),
+                        page: shared_history,
+                        length: logos_abi::MAX_NETWORK_PAYLOAD as u16,
+                        generation: bind_reply.generation,
+                        deadline: u64::MAX / 2,
+                    };
+                    let Some(receive_reply) = run_network_request(
+                        receive,
+                        native_terminal_network,
+                        native_network_endpoint,
+                        network_handle,
+                        network_device.as_mut(),
+                        network_dma,
+                        &mut native_scheduler,
+                        &mut network_pending,
+                        &mut network_probe,
+                        &mut network_probe_due,
+                        &mut network_reported,
+                        &mut network_client_pending,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) else {
+                        return false;
+                    };
+                    let received = unsafe {
+                        core::slice::from_raw_parts(
+                            page_address as *const u8,
+                            receive_reply.length as usize,
+                        )
+                    };
+                    return bind_reply.status == logos_abi::NetworkStatus::Complete
+                        && send_reply.status == logos_abi::NetworkStatus::Complete
+                        && receive_reply.status == logos_abi::NetworkStatus::Complete
+                        && receive_reply.source_address == 0x0a00_0202
+                        && receive_reply.source_port == 4001
+                        && received == payload;
+                }
+                if id == "network/backpressure-cancel" {
+                    if !network_reported {
+                        return false;
+                    }
+                    let bind = logos_abi::NetworkRequest {
+                        id: 0x9000_0120,
+                        operation: logos_abi::NetworkOperation::Bind,
+                        endpoint: logos_abi::NetworkEndpoint(0),
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Udp,
+                            0,
+                            4000,
+                        ),
+                        page: logos_abi::PageHandle(0),
+                        length: 0,
+                        generation: 0,
+                        deadline: u64::MAX / 2,
+                    };
+                    let Some(bind_reply) = run_network_request(
+                        bind,
+                        native_terminal_network,
+                        native_network_endpoint,
+                        network_handle,
+                        network_device.as_mut(),
+                        network_dma,
+                        &mut native_scheduler,
+                        &mut network_pending,
+                        &mut network_probe,
+                        &mut network_probe_due,
+                        &mut network_reported,
+                        &mut network_client_pending,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) else {
+                        return false;
+                    };
+                    let cancel = logos_abi::NetworkRequest {
+                        id: 0x9000_0121,
+                        operation: logos_abi::NetworkOperation::Cancel,
+                        endpoint: bind_reply.endpoint,
+                        peer: logos_abi::NetworkScope(0),
+                        page: logos_abi::PageHandle(0),
+                        length: 0,
+                        generation: 0,
+                        deadline: u64::MAX / 2,
+                    };
+                    let Some(cancel_reply) = run_network_request(
+                        cancel,
+                        native_terminal_network,
+                        native_network_endpoint,
+                        network_handle,
+                        network_device.as_mut(),
+                        network_dma,
+                        &mut native_scheduler,
+                        &mut network_pending,
+                        &mut network_probe,
+                        &mut network_probe_due,
+                        &mut network_reported,
+                        &mut network_client_pending,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) else {
+                        return false;
+                    };
+                    let close = logos_abi::NetworkRequest {
+                        id: 0x9000_0122,
+                        operation: logos_abi::NetworkOperation::Close,
+                        endpoint: bind_reply.endpoint,
+                        peer: logos_abi::NetworkScope(0),
+                        page: logos_abi::PageHandle(0),
+                        length: 0,
+                        generation: 0,
+                        deadline: u64::MAX / 2,
+                    };
+                    let Some(close_reply) = run_network_request(
+                        close,
+                        native_terminal_network,
+                        native_network_endpoint,
+                        network_handle,
+                        network_device.as_mut(),
+                        network_dma,
+                        &mut native_scheduler,
+                        &mut network_pending,
+                        &mut network_probe,
+                        &mut network_probe_due,
+                        &mut network_reported,
+                        &mut network_client_pending,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) else {
+                        return false;
+                    };
+                    return bind_reply.status == logos_abi::NetworkStatus::Complete
+                        && cancel_reply.status == logos_abi::NetworkStatus::Cancelled
+                        && close_reply.status == logos_abi::NetworkStatus::Complete;
+                }
+                if id == "network/packet-loss" {
+                    if !network_reported {
+                        return false;
+                    }
+                    let first = logos_abi::NetworkRequest {
+                        id: 0x9000_0130,
+                        operation: logos_abi::NetworkOperation::Echo,
+                        endpoint: logos_abi::NetworkEndpoint(0),
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Icmp,
+                            0x0a00_0202,
+                            0,
+                        ),
+                        page: logos_abi::PageHandle(0),
+                        length: 0,
+                        generation: 0,
+                        deadline: u64::MAX / 2,
+                    };
+                    let second = logos_abi::NetworkRequest {
+                        id: 0x9000_0131,
+                        deadline: u64::MAX / 2,
+                        ..first
+                    };
+                    let Some(first_reply) = run_network_request(
+                        first,
+                        native_terminal_network,
+                        native_network_endpoint,
+                        network_handle,
+                        network_device.as_mut(),
+                        network_dma,
+                        &mut native_scheduler,
+                        &mut network_pending,
+                        &mut network_probe,
+                        &mut network_probe_due,
+                        &mut network_reported,
+                        &mut network_client_pending,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) else {
+                        return false;
+                    };
+                    let Some(second_reply) = run_network_request(
+                        second,
+                        native_terminal_network,
+                        native_network_endpoint,
+                        network_handle,
+                        network_device.as_mut(),
+                        network_dma,
+                        &mut native_scheduler,
+                        &mut network_pending,
+                        &mut network_probe,
+                        &mut network_probe_due,
+                        &mut network_reported,
+                        &mut network_client_pending,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) else {
+                        return false;
+                    };
+                    return first_reply.status == logos_abi::NetworkStatus::Complete
+                        && second_reply.status == logos_abi::NetworkStatus::Complete;
+                }
+                if id == "network/timeout" {
+                    if !network_reported {
+                        return false;
+                    }
+                    let bind = logos_abi::NetworkRequest {
+                        id: 0x9000_0140,
+                        operation: logos_abi::NetworkOperation::Bind,
+                        endpoint: logos_abi::NetworkEndpoint(0),
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Udp,
+                            0,
+                            4000,
+                        ),
+                        page: logos_abi::PageHandle(0),
+                        length: 0,
+                        generation: 0,
+                        deadline: u64::MAX / 2,
+                    };
+                    let Some(bind_reply) = run_network_request(
+                        bind,
+                        native_terminal_network,
+                        native_network_endpoint,
+                        network_handle,
+                        network_device.as_mut(),
+                        network_dma,
+                        &mut native_scheduler,
+                        &mut network_pending,
+                        &mut network_probe,
+                        &mut network_probe_due,
+                        &mut network_reported,
+                        &mut network_client_pending,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) else {
+                        return false;
+                    };
+                    let receive = logos_abi::NetworkRequest {
+                        id: 0x9000_0141,
+                        operation: logos_abi::NetworkOperation::ReceiveFrom,
+                        endpoint: bind_reply.endpoint,
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Udp,
+                            0,
+                            4000,
+                        ),
+                        page: shared_history,
+                        length: logos_abi::MAX_NETWORK_PAYLOAD as u16,
+                        generation: bind_reply.generation,
+                        deadline: interrupts::ticks().saturating_add(64),
+                    };
+                    let Some(reply) = run_network_request(
+                        receive,
+                        native_terminal_network,
+                        native_network_endpoint,
+                        network_handle,
+                        network_device.as_mut(),
+                        network_dma,
+                        &mut native_scheduler,
+                        &mut network_pending,
+                        &mut network_probe,
+                        &mut network_probe_due,
+                        &mut network_reported,
+                        &mut network_client_pending,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) else {
+                        return false;
+                    };
+                    return bind_reply.status == logos_abi::NetworkStatus::Complete
+                        && reply.status == logos_abi::NetworkStatus::TimedOut;
+                }
+                if id == "network/reset-reconnect" {
+                    if !network_reported {
+                        return false;
+                    }
+                    let request = logos_abi::NetworkRequest {
+                        id: 0x9000_0152,
+                        operation: logos_abi::NetworkOperation::Echo,
+                        endpoint: logos_abi::NetworkEndpoint(0),
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Icmp,
+                            0x0a00_0202,
+                            0,
+                        ),
+                        page: logos_abi::PageHandle(0),
+                        length: 0,
+                        generation: 0,
+                        deadline: u64::MAX / 2,
+                    };
+                    let Some(reply) = run_network_request(
+                        request,
+                        native_terminal_network,
+                        native_network_endpoint,
+                        network_handle,
+                        network_device.as_mut(),
+                        network_dma,
+                        &mut native_scheduler,
+                        &mut network_pending,
+                        &mut network_probe,
+                        &mut network_probe_due,
+                        &mut network_reported,
+                        &mut network_client_pending,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) else {
+                        return false;
+                    };
+                    return reply.status == logos_abi::NetworkStatus::Complete;
                 }
                 if id == "network/device-bind" {
                     let request = logos_abi::NetworkRequest {
@@ -2614,6 +3082,9 @@ fn relay_network_client(
 ) -> bool {
     if let Some(current) = *pending {
         if let Some(reply) = service.response(current.request.id) {
+            if !reply.valid_for(current.request) {
+                return false;
+            }
             *pending = None;
             if current.request.operation == logos_abi::NetworkOperation::ReceiveFrom
                 && reply.status == logos_abi::NetworkStatus::Complete
@@ -2960,6 +3431,61 @@ fn poll_network(
         Ok(None) => true,
         Err(_) => device.reset(),
     }
+}
+
+#[cfg(feature = "test-hooks")]
+#[allow(clippy::too_many_arguments)]
+fn run_network_request(
+    request: logos_abi::NetworkRequest,
+    terminal: native_task::NetworkEndpoint,
+    service: Option<native_task::NetworkEndpoint>,
+    handle: Option<native_task::Handle>,
+    mut device: Option<&mut network_driver::Device>,
+    dma: Option<NetworkDmaPages>,
+    scheduler: &mut native_task::Scheduler<'_>,
+    device_pending: &mut Option<PendingNetworkDevice>,
+    probe: &mut Option<u32>,
+    probe_due: &mut u64,
+    reported: &mut bool,
+    client_pending: &mut Option<PendingNetworkClient>,
+    session: &session::Context,
+    capabilities: &capabilities::CapabilityManager,
+    shared_pages: &logos_core::shared_pages::SharedPages,
+    terminal_owner: u64,
+) -> Option<logos_abi::NetworkReply> {
+    if !unsafe {
+        logos_core::native_service::Context::request_network_at(terminal.context(), request)
+    } {
+        return None;
+    }
+    let endpoint = service?;
+    let service_handle = handle?;
+    for step in 0..100_000 {
+        if !poll_network(
+            device.as_deref_mut(),
+            Some(endpoint),
+            Some(service_handle),
+            dma,
+            scheduler,
+            device_pending,
+            probe,
+            probe_due,
+            reported,
+            interrupts::ticks().saturating_add(step),
+            terminal,
+            client_pending,
+            session,
+            capabilities,
+            shared_pages,
+            terminal_owner,
+        ) {
+            return None;
+        }
+        if let Some(reply) = terminal.response(request.id) {
+            return Some(reply);
+        }
+    }
+    None
 }
 
 fn network_info(info: network_driver::Info) -> logos_abi::NetworkInfo {

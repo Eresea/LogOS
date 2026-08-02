@@ -664,6 +664,7 @@ pub enum DhcpAction {
     Rebind,
     Expired,
     ArpReply,
+    IcmpReply,
 }
 
 #[derive(Clone, Copy)]
@@ -971,11 +972,14 @@ impl NetworkState {
     }
 
     pub fn begin_echo(&mut self, echo: EchoMatch) -> Result<(), StateError> {
-        if self.echo.is_some() || echo.peer.0 == [0; 4] || echo.generation != self.generation {
-            return Err(StateError::Busy);
+        if echo.peer.0 == [0; 4] || echo.generation != self.generation {
+            return Err(StateError::Invalid);
         }
         if echo.identifier == 0 || echo.deadline == 0 {
             return Err(StateError::Invalid);
+        }
+        if self.echo.is_some() {
+            return Err(StateError::Busy);
         }
         self.echo = Some(echo);
         Ok(())
@@ -1029,7 +1033,13 @@ impl NetworkState {
             .iter()
             .position(|entry| entry.active && entry.ip == ip)
             .or_else(|| self.arp.iter().position(|entry| !entry.active || entry.expires <= now))
-            .unwrap_or(0);
+            .unwrap_or_else(|| {
+                self.arp
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, entry)| entry.expires)
+                    .map_or(0, |(index, _)| index)
+            });
         let entry = &mut self.arp[index];
         *entry = ArpEntry { ip, mac, expires: now.saturating_add(ttl), active: true };
         self.arp_target = None;
@@ -1048,6 +1058,18 @@ impl NetworkState {
             .iter()
             .find(|entry| entry.active && entry.ip == ip && entry.expires > now)
             .map(|entry| entry.mac)
+    }
+
+    pub fn endpoint_count(&self) -> usize {
+        self.endpoints.iter().filter(|endpoint| endpoint.active).count()
+    }
+
+    pub fn datagram_count(&self) -> usize {
+        self.datagrams.iter().filter(|datagram| datagram.active).count()
+    }
+
+    pub fn arp_count(&self, now: u64) -> usize {
+        self.arp.iter().filter(|entry| entry.active && entry.expires > now).count()
     }
 
     pub fn reset(&mut self) {
@@ -1322,6 +1344,35 @@ mod tests {
         state.reset();
         assert_eq!(state.resolve_arp(PEER_IP, 2), None);
         assert!(state.expect_arp(PEER_IP));
+    }
+
+    #[test]
+    fn bounded_slots_release_on_failure_and_expire_before_live_arp() {
+        let mut state = NetworkState::new();
+        let mut endpoints = [EndpointId(0); 8];
+        for (port, endpoint) in endpoints.iter_mut().enumerate() {
+            *endpoint = state.bind(7, 4000 + port as u16).unwrap();
+        }
+        assert_eq!(state.endpoint_count(), 8);
+        assert_eq!(state.bind(7, 5000), Err(StateError::Full));
+        assert_eq!(state.close(7, endpoints[0]), Ok(()));
+        assert_eq!(state.endpoint_count(), 7);
+        let endpoint = state.bind(7, 5000).unwrap();
+        assert_eq!(state.enqueue(endpoint, PEER_IP, 4001, &[1]), Ok(()));
+        assert_eq!(state.enqueue(endpoint, PEER_IP, 4001, &[2]), Ok(()));
+        assert_eq!(state.enqueue(endpoint, PEER_IP, 4001, &[3]), Ok(()));
+        assert_eq!(state.enqueue(endpoint, PEER_IP, 4001, &[4]), Ok(()));
+        assert_eq!(state.enqueue(endpoint, PEER_IP, 4001, &[5]), Err(StateError::QueueFull));
+        assert_eq!(state.datagram_count(), 4);
+        state.close(7, endpoint).unwrap();
+        assert_eq!(state.datagram_count(), 0);
+
+        for index in 0..8 {
+            state.learn_arp(Ipv4([192, 0, 2, index as u8 + 10]), Mac([index as u8 + 1; 6]), 0, 10);
+        }
+        state.learn_arp(PEER_IP, Mac([9; 6]), 20, 10);
+        assert_eq!(state.resolve_arp(PEER_IP, 21), Some(Mac([9; 6])));
+        assert_eq!(state.arp_count(21), 1);
     }
 
     #[test]
