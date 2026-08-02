@@ -890,13 +890,24 @@ fn run_suite(name: &str) -> i32 {
         }
     };
     let mut results: Vec<ResultRecord> = Vec::new();
-    let shared: Vec<_> = selected
-        .iter()
-        .filter(|item| item.implemented && item.fixture == Fixture::Shared)
-        .copied()
-        .collect();
-    if !shared.is_empty() {
-        results.extend(run_fixture(&root, &run_dir, &profiles.standard, "shared", &shared, seed));
+    for suite in ["core", "console", "platform", "persistence", "network"] {
+        let shared: Vec<_> = selected
+            .iter()
+            .filter(|item| {
+                item.implemented && item.fixture == Fixture::Shared && item.suite == suite
+            })
+            .copied()
+            .collect();
+        if !shared.is_empty() {
+            results.extend(run_fixture(
+                &root,
+                &run_dir,
+                &profiles.standard,
+                &format!("{suite}-shared"),
+                &shared,
+                seed,
+            ));
+        }
     }
     results.extend(run_independent(&root, &run_dir, &profiles, &selected, seed));
     for item in selected.iter().filter(|item| !item.implemented) {
