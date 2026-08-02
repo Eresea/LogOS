@@ -429,6 +429,15 @@ pub enum StateError {
 pub struct EndpointId(u32);
 
 impl EndpointId {
+    pub const fn from_wire(value: u32) -> Option<Self> {
+        let endpoint = Self(value);
+        if endpoint.generation() != 0 && endpoint.slot() < 8 { Some(endpoint) } else { None }
+    }
+
+    pub const fn wire(self) -> u32 {
+        self.0
+    }
+
     pub const fn slot(self) -> usize {
         (self.0 as u16).wrapping_sub(1) as usize
     }
