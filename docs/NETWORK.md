@@ -357,7 +357,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
 - [x] Add the Network payload to `scripts/run.ps1` and the boot image.
 - [x] Add the hermetic QEMU DHCP peer with wire parsing independent of `logos-net`.
 - [x] Promote `network/configuration` and prove DISCOVER/OFFER/REQUEST/ACK plus exact configuration.
-- [ ] Drop the first offer and prove the fake-clock retry sends a second discover at the specified
+- [x] Drop the first offer and prove the bounded retry sends a second discover at the specified
       boundary without sleeping in the guest.
 - [x] Run `cargo run -p logos-test -- run network/configuration`.
 - [x] Commit the online Network service.

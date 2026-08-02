@@ -34,8 +34,13 @@ impl NetworkPeer {
         let worker_stop = Arc::clone(&stop);
         let worker = thread::spawn(move || {
             let mut input = [0; 2048];
+            let mut drop_first_discover = true;
             while !worker_stop.load(Ordering::Relaxed) {
                 let Ok((length, _)) = socket.recv_from(&mut input) else { continue };
+                if drop_first_discover && dhcp_message_type(&input[..length]) == Some(1) {
+                    drop_first_discover = false;
+                    continue;
+                }
                 if let Some(frame) = dhcp_reply(&input[..length]) {
                     let _ = socket.send_to(&frame, qemu);
                 }
@@ -52,6 +57,23 @@ impl Drop for NetworkPeer {
             let _ = worker.join();
         }
     }
+}
+
+fn dhcp_message_type(frame: &[u8]) -> Option<u8> {
+    if frame.len() < 14 + 20 + 8 + 240 || u16::from_be_bytes([frame[12], frame[13]]) != 0x0800 {
+        return None;
+    }
+    let ip = &frame[14..];
+    let ihl = usize::from(ip[0] & 0x0f) * 4;
+    if ip[0] >> 4 != 4 || ihl < 20 || ip.len() < ihl + 8 || ip[9] != 17 {
+        return None;
+    }
+    let udp = &ip[ihl..];
+    let length = usize::from(u16::from_be_bytes([udp[4], udp[5]]));
+    if length < 8 || length > udp.len() || u16::from_be_bytes([udp[0], udp[1]]) != 68 {
+        return None;
+    }
+    option(&udp[8..length], 53).and_then(|value| value.first().copied())
 }
 
 fn dhcp_reply(frame: &[u8]) -> Option<Vec<u8>> {
