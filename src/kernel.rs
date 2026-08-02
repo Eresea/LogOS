@@ -2155,7 +2155,7 @@ fn poll_network(
         return false;
     };
     let frame = unsafe {
-        core::slice::from_raw_parts_mut(dma.rx_address as *mut u8, logos_net::ETHERNET_MAX_FRAME)
+        core::slice::from_raw_parts_mut(dma.rx_address as *mut u8, logos_abi::NETWORK_MAX_FRAME)
     };
     match device.receive(frame) {
         Ok(Some(length)) => {

@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ROLES = {
     "logos-abi": (0, "contracts"),
     "logos-core": (0, "core"),
+    "logos-net": (2, "network-protocol"),
+    "logos-network-service": (2, "network-service"),
     "logos-service-rt": (1, "service-rt"),
     "logos-store": (2, "store"),
     "logos-storage-service": (3, "storage"),
@@ -24,6 +26,8 @@ ROLES = {
 ALLOWED = {
     "logos-abi": set(),
     "logos-core": {"logos-abi"},
+    "logos-net": set(),
+    "logos-network-service": {"logos-abi", "logos-net", "logos-service-rt"},
     "logos-service-rt": {"logos-abi", "logos-core"},
     "logos-store": {"logos-abi"},
     "logos-storage-service": {"logos-abi", "logos-core", "logos-service-rt", "logos-store"},
@@ -65,7 +69,12 @@ def violations(data: dict) -> list[str]:
         unexpected = dependencies - ALLOWED.get(package, set())
         for dependency in sorted(unexpected):
             errors.append(f"{package} depends on unapproved internal package {dependency}")
-    for package in ("logos-terminal-service", "logos-sessions-service", "logos-storage-service"):
+    for package in (
+        "logos-network-service",
+        "logos-terminal-service",
+        "logos-sessions-service",
+        "logos-storage-service",
+    ):
         source = ROOT / "crates" / package / "src" / "main.rs"
         text = source.read_text(encoding="utf-8")
         if any(token in text for token in ("asm!", "core::arch", "int 0x80")):
