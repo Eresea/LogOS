@@ -423,7 +423,11 @@ pub(crate) fn main(
     else {
         fail!(b"storage capability");
     };
-    let network_service_capability = capabilities.grant(capabilities::CapabilityKind::Service);
+    let network_service_capability = supervisor.grant(
+        supervisor::NETWORK,
+        &mut capabilities,
+        capabilities::CapabilityKind::Service,
+    );
     check!(
         b"service capability",
         supervisor::grant_self_check()

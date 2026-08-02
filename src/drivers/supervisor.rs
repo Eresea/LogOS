@@ -1,12 +1,15 @@
 use crate::debug;
 use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
-const MAX_MANIFESTS: usize = 4;
+const MAX_MANIFESTS: usize = 7;
 
 pub const SUPERVISOR: &[u8] = b"supervisor";
 pub const VIRTIO_BALLOON: &[u8] = b"virtio-balloon";
 pub const VIRTIO_BLOCK: &[u8] = b"virtio-block";
 pub const STORAGE: &[u8] = b"storage";
+pub const TERMINAL: &[u8] = b"terminal";
+pub const SESSIONS: &[u8] = b"sessions";
+pub const NETWORK: &[u8] = b"network";
 
 #[derive(Clone, Copy)]
 pub enum Profile {
@@ -25,6 +28,7 @@ impl Profiles {
 
     pub const ALL: Self = Self(Self::NORMAL | Self::RECOVERY | Self::DIAGNOSTICS);
     pub const NORMAL_RECOVERY: Self = Self(Self::NORMAL | Self::RECOVERY);
+    pub const NORMAL_ONLY: Self = Self(Self::NORMAL);
 
     const fn includes(self, profile: Profile) -> bool {
         self.0
@@ -123,8 +127,44 @@ const STORAGE_MANIFEST: Manifest = Manifest {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     profiles: Profiles::NORMAL_RECOVERY,
 };
-const BOOT_MANIFESTS: &[Manifest] =
-    &[SUPERVISOR_MANIFEST, VIRTIO_MANIFEST, BLOCK_MANIFEST, STORAGE_MANIFEST];
+const TERMINAL_MANIFEST: Manifest = Manifest {
+    name: TERMINAL,
+    dependencies: &[SUPERVISOR],
+    capabilities: &[CapabilityKind::Service, CapabilityKind::Input, CapabilityKind::Display],
+    protocol: Protocol { abi: 1, version: 0 },
+    restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
+    profiles: Profiles::NORMAL_ONLY,
+};
+const SESSIONS_MANIFEST: Manifest = Manifest {
+    name: SESSIONS,
+    dependencies: &[SUPERVISOR],
+    capabilities: &[CapabilityKind::Service, CapabilityKind::Session],
+    protocol: Protocol { abi: 1, version: 0 },
+    restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
+    profiles: Profiles::NORMAL_ONLY,
+};
+const NETWORK_MANIFEST: Manifest = Manifest {
+    name: NETWORK,
+    dependencies: &[SUPERVISOR],
+    capabilities: &[
+        CapabilityKind::Service,
+        CapabilityKind::NetworkBind,
+        CapabilityKind::NetworkSend,
+        CapabilityKind::NetworkReceive,
+    ],
+    protocol: Protocol { abi: 1, version: 0 },
+    restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
+    profiles: Profiles::NORMAL_ONLY,
+};
+const BOOT_MANIFESTS: &[Manifest] = &[
+    SUPERVISOR_MANIFEST,
+    VIRTIO_MANIFEST,
+    BLOCK_MANIFEST,
+    STORAGE_MANIFEST,
+    TERMINAL_MANIFEST,
+    SESSIONS_MANIFEST,
+    NETWORK_MANIFEST,
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Error {
