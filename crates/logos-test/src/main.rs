@@ -14,6 +14,9 @@ use logos_abi::{NamespaceId, TERMINAL_NAMESPACE};
 use logos_store::{Error as StoreError, SECTOR_SIZE, SectorBackend, Store};
 use logos_terminal::terminal::{HISTORY_BYTES, Model, Submission};
 
+mod network_peer;
+use network_peer::NetworkPeer;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
     Passed,
@@ -154,7 +157,7 @@ const SCENARIOS: &[Scenario] = &[
     persistence_scenario("persistence/corruption-detected"),
     configured("network/transport-dhcp", "network", &[], Fixture::Fresh),
     configured("network/device-bind", "network", &[], Fixture::Fresh),
-    future("network/configuration", "network", Fixture::Fresh),
+    configured("network/configuration", "network", &[], Fixture::Fresh),
     future("network/icmp-echo", "network", Fixture::Fresh),
     future("network/udp-round-trip", "network", Fixture::Fresh),
     future("network/backpressure-cancel", "network", Fixture::Fresh),
@@ -502,6 +505,7 @@ struct Harness {
     report: BootReport,
     serial: String,
     deadline: Instant,
+    _network_peer: Option<NetworkPeer>,
 }
 
 impl Harness {
@@ -512,6 +516,37 @@ impl Harness {
         fixture_dir: &Path,
         timeout: u64,
         expected_storage: &str,
+    ) -> Result<Self, String> {
+        Self::boot_inner(qemu, ovmf, profile, fixture_dir, timeout, expected_storage, None)
+    }
+
+    fn boot_with_peer(
+        qemu: &str,
+        ovmf: &str,
+        profile: &ImageProfile,
+        fixture_dir: &Path,
+        timeout: u64,
+        expected_storage: &str,
+    ) -> Result<Self, String> {
+        Self::boot_inner(
+            qemu,
+            ovmf,
+            profile,
+            fixture_dir,
+            timeout,
+            expected_storage,
+            Some(NetworkPeer::start()?),
+        )
+    }
+
+    fn boot_inner(
+        qemu: &str,
+        ovmf: &str,
+        profile: &ImageProfile,
+        fixture_dir: &Path,
+        timeout: u64,
+        expected_storage: &str,
+        network_peer: Option<NetworkPeer>,
     ) -> Result<Self, String> {
         let esp = fixture_dir.join("esp/EFI/BOOT");
         fs::create_dir_all(&esp).map_err(io_error)?;
@@ -538,6 +573,15 @@ impl Harness {
         let qmp_log = fixture_dir.join(format!("qmp-{boot_id}.log"));
         let stderr_log = fixture_dir.join(format!("qemu-{boot_id}.stderr.log"));
         let stderr = fs::File::create(&stderr_log).map_err(io_error)?;
+        let netdev = network_peer.as_ref().map_or_else(
+            || "user,id=logos-net,net=10.0.2.0/24,dhcpstart=10.0.2.15".to_string(),
+            |peer| {
+                format!(
+                    "dgram,id=logos-net,local.type=inet,local.host=127.0.0.1,local.port={},remote.type=inet,remote.host=127.0.0.1,remote.port={}",
+                    peer.qemu_port, peer.peer_port
+                )
+            },
+        );
         let mut child = Command::new(qemu)
             .args([
                 "-machine",
@@ -551,7 +595,7 @@ impl Harness {
                 "-device",
                 "virtio-balloon-pci,disable-modern=on,id=logos-virtio",
                 "-netdev",
-                "user,id=logos-net,net=10.0.2.0/24,dhcpstart=10.0.2.15",
+                &netdev,
                 "-device",
                 "virtio-net-pci,disable-modern=on,netdev=logos-net,id=logos-network,mac=52:54:00:12:34:56",
                 "-drive",
@@ -613,6 +657,7 @@ impl Harness {
             report: BootReport { session: 0, storage: String::new() },
             serial: String::new(),
             deadline,
+            _network_peer: network_peer,
         };
         let report = harness.wait_boot_report()?;
         let expected_storage =
@@ -920,6 +965,12 @@ fn run_one(id: &str) -> i32 {
     } else {
         &profiles.standard
     };
+    if scenario.id == "network/configuration" {
+        let result = run_network_configuration(&run_dir, profile, scenario, seed);
+        let _ = write_reports(&run_dir, std::slice::from_ref(&result));
+        cleanup_bulk_artifacts(&run_dir);
+        return report(&result);
+    }
     let mut results = Vec::new();
     if scenario.fixture == Fixture::Persistence {
         results.push(run_persistence_proof(&root, &run_dir, profile, scenario, seed));
@@ -937,6 +988,41 @@ fn run_one(id: &str) -> i32 {
     let _ = write_reports(&run_dir, &results);
     cleanup_bulk_artifacts(&run_dir);
     results.first().map_or(1, report)
+}
+
+fn run_network_configuration(
+    run_dir: &Path,
+    profile: &ImageProfile,
+    scenario: Scenario,
+    seed: u64,
+) -> ResultRecord {
+    let started = Instant::now();
+    let fixture_dir = run_dir.join("fixtures").join("network-configuration");
+    let result = (|| -> Result<(), String> {
+        fs::create_dir_all(&fixture_dir).map_err(io_error)?;
+        let (qemu, ovmf) = qemu_paths()?;
+        let mut harness = Harness::boot_with_peer(
+            &qemu,
+            &ovmf,
+            profile,
+            &fixture_dir,
+            scenario.timeout,
+            "LogOS: storage formatted",
+        )?;
+        harness.wait_debug(
+            "LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2",
+        )?;
+        harness.run_id(scenario.id)?;
+        harness.shutdown()
+    })();
+    ResultRecord {
+        id: scenario.id.into(),
+        status: if result.is_ok() { Status::Passed } else { Status::Failed },
+        duration_ms: started.elapsed().as_millis(),
+        seed,
+        failure: result.err(),
+        artifacts: run_dir.to_path_buf(),
+    }
 }
 
 fn run_persistence_proof(
@@ -1620,6 +1706,7 @@ mod tests {
                         | "persistence/corruption-detected"
                         | "network/transport-dhcp"
                         | "network/device-bind"
+                        | "network/configuration"
                 )
         }));
     }

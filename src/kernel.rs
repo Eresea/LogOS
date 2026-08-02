@@ -1720,6 +1720,7 @@ pub(crate) fn main(
             id == "core/boot-normal"
                 || (cfg!(feature = "block-probe") && id == "persistence/block-read-flush")
                 || (id == "network/transport-dhcp" && network_reported)
+                || (id == "network/configuration" && network_reported)
                 || proof.get()
         },
     );
