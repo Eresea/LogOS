@@ -16,7 +16,7 @@ pub struct Shell<'a> {
     console: Console,
     command: [u8; 16],
     length: usize,
-    endpoint: Endpoint<'a>,
+    endpoint: Option<Endpoint<'a>>,
 }
 
 pub struct Startup {
@@ -94,7 +94,11 @@ struct Console {
 
 impl<'a> Shell<'a> {
     pub fn from_startup(startup: Startup, endpoint: Endpoint<'a>) -> Self {
-        Self { console: startup.console, command: [0; 16], length: 0, endpoint }
+        Self { console: startup.console, command: [0; 16], length: 0, endpoint: Some(endpoint) }
+    }
+
+    pub fn offline(startup: Startup) -> Self {
+        Self { console: startup.console, command: [0; 16], length: 0, endpoint: None }
     }
 
     pub fn start(&mut self) -> bool {
@@ -106,7 +110,7 @@ impl<'a> Shell<'a> {
     pub fn run(mut self, mut schedule: impl FnMut()) -> ! {
         loop {
             schedule();
-            match self.endpoint.reply() {
+            match self.endpoint.and_then(Endpoint::reply) {
                 Some(Message::Pong) => {
                     self.console.newline();
                     self.console.write(b"PONG RECEIVED\n");
@@ -181,9 +185,15 @@ impl<'a> Shell<'a> {
                     self.console.write(trace::message(*event));
                 }
             }
-            b"ping" if self.endpoint.ping() => self.console.write(b"PING SENT\n"),
-            b"inflate" if self.endpoint.inflate() => self.console.write(b"INFLATE SENT\n"),
-            b"recover" if self.endpoint.recover() => self.console.write(b"RECOVER SENT\n"),
+            b"ping" if self.endpoint.is_some_and(Endpoint::ping) => {
+                self.console.write(b"PING SENT\n")
+            }
+            b"inflate" if self.endpoint.is_some_and(Endpoint::inflate) => {
+                self.console.write(b"INFLATE SENT\n")
+            }
+            b"recover" if self.endpoint.is_some_and(Endpoint::recover) => {
+                self.console.write(b"RECOVER SENT\n")
+            }
             b"version" => self.console.write(b"LOGOS 0 1 0\n"),
             b"exit" => self.exit(),
             _ => self.console.write(b"UNKNOWN COMMAND\n"),

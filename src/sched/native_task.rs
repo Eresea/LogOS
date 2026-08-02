@@ -97,31 +97,54 @@ impl SyscallEndpoint {
 }
 
 impl StoreEndpoint {
+    pub const fn unavailable() -> Self {
+        Self { context_physical: 0 }
+    }
+
+    pub const fn available(self) -> bool {
+        self.context_physical != 0
+    }
+
     pub const fn context(self) -> u64 {
         self.context_physical
     }
 
     pub fn request(self) -> Option<logos_abi::StoreRequest> {
+        if !self.available() {
+            return None;
+        }
         unsafe { logos_core::native_service::Context::store_at(self.context_physical) }
     }
 
     pub fn deliver(self, request: logos_abi::StoreRequest) -> bool {
+        if !self.available() {
+            return false;
+        }
         unsafe {
             logos_core::native_service::Context::deliver_store_at(self.context_physical, request)
         }
     }
 
     pub fn response(self, expected_id: u32) -> Option<logos_abi::StoreReply> {
+        if !self.available() {
+            return None;
+        }
         unsafe {
             logos_core::native_service::Context::store_reply_at(self.context_physical, expected_id)
         }
     }
 
     pub fn reply(self, reply: logos_abi::StoreReply) -> bool {
+        if !self.available() {
+            return false;
+        }
         unsafe { logos_core::native_service::Context::reply_store_at(self.context_physical, reply) }
     }
 
     pub fn configure_shared_page(self, page: logos_abi::PageHandle) -> bool {
+        if !self.available() {
+            return false;
+        }
         unsafe {
             logos_core::native_service::Context::configure_shared_page_at(
                 self.context_physical,
@@ -132,11 +155,22 @@ impl StoreEndpoint {
 }
 
 impl BlockEndpoint {
+    pub const fn unavailable() -> Self {
+        Self { context_physical: 0 }
+    }
+
+    pub const fn available(self) -> bool {
+        self.context_physical != 0
+    }
+
     pub const fn context(self) -> u64 {
         self.context_physical
     }
 
     pub fn configure(self, page: logos_core::native_service::BlockPage) -> bool {
+        if !self.available() {
+            return false;
+        }
         unsafe {
             logos_core::native_service::Context::configure_block_page_at(
                 self.context_physical,
@@ -147,11 +181,17 @@ impl BlockEndpoint {
 
     #[allow(dead_code)]
     pub fn request(self) -> Option<logos_abi::BlockRequest> {
+        if !self.available() {
+            return None;
+        }
         unsafe { logos_core::native_service::Context::block_at(self.context_physical) }
     }
 
     #[allow(dead_code)]
     pub fn reply(self, reply: logos_abi::BlockReply) -> bool {
+        if !self.available() {
+            return false;
+        }
         unsafe { logos_core::native_service::Context::reply_block_at(self.context_physical, reply) }
     }
 }
@@ -415,6 +455,13 @@ impl Runnable for Task<'_> {
 pub struct Handle(u32);
 
 impl Handle {
+    pub const fn unavailable() -> Self {
+        Self(0)
+    }
+
+    pub const fn available(self) -> bool {
+        self.0 != 0
+    }
     pub const fn generation(self) -> u16 {
         (self.0 >> 16) as u16
     }
@@ -476,7 +523,6 @@ impl<'a> Scheduler<'a> {
         Some(self.entry(handle)?.task.store_endpoint())
     }
 
-    #[cfg(feature = "test-hooks")]
     pub fn block_endpoint(&self, handle: Handle) -> Option<BlockEndpoint> {
         Some(self.entry(handle)?.task.block_endpoint())
     }

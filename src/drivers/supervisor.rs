@@ -475,6 +475,16 @@ impl NativeController {
 
     pub fn failed(&mut self, service: NativeService, tick: u64) -> FailureAction {
         let slot = &mut self.slots[service.index()];
+        if slot.state == NativeState::Backoff {
+            return FailureAction::Retry;
+        }
+        if matches!(slot.state, NativeState::Missing | NativeState::Stopped) {
+            return if service == NativeService::Terminal {
+                FailureAction::Recover
+            } else {
+                FailureAction::Degrade
+            };
+        }
         if slot.lifecycle.failed(tick) {
             slot.state = NativeState::Backoff;
             FailureAction::Retry

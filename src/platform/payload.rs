@@ -26,9 +26,9 @@ pub struct Payload {
 
 #[derive(Clone, Copy)]
 pub struct Payloads {
-    pub terminal: Payload,
-    pub sessions: Payload,
-    pub storage: Payload,
+    pub terminal: Option<Payload>,
+    pub sessions: Option<Payload>,
+    pub storage: Option<Payload>,
     pub network: Option<Payload>,
 }
 
@@ -144,37 +144,42 @@ pub fn stage() -> Option<Payloads> {
     let Ok(mut root) = file_system.open_volume() else {
         return None;
     };
-    let mut terminal = root
-        .open(cstr16!(r"\EFI\LOGOS\TERMINAL.EFI"), FileMode::Read, FileAttribute::empty())
-        .ok()
-        .and_then(|file| file.into_regular_file())?;
-    let terminal_buffer = unsafe { &mut *TERMINAL_PAYLOAD.0.get() };
-    let terminal = load(&mut terminal, terminal_buffer, b"terminal", ProtocolVersion::V1)?;
-    let mut sessions = root
-        .open(cstr16!(r"\EFI\LOGOS\SESSIONS.EFI"), FileMode::Read, FileAttribute::empty())
-        .ok()
-        .and_then(|file| file.into_regular_file())?;
-    let sessions_buffer = unsafe { &mut *SESSIONS_PAYLOAD.0.get() };
-    let sessions = load(&mut sessions, sessions_buffer, b"sessions", ProtocolVersion::V1)?;
-    let mut storage = root
-        .open(cstr16!(r"\EFI\LOGOS\STORAGE.EFI"), FileMode::Read, FileAttribute::empty())
-        .ok()
-        .and_then(|file| file.into_regular_file())?;
-    let storage_buffer = unsafe { &mut *STORAGE_PAYLOAD.0.get() };
-    let storage = load(&mut storage, storage_buffer, b"storage", ProtocolVersion::V1)?;
-    let network = root
-        .open(cstr16!(r"\EFI\LOGOS\NETWORK.EFI"), FileMode::Read, FileAttribute::empty())
-        .ok()
-        .and_then(|file| file.into_regular_file())
-        .and_then(|mut file| {
-            load(
-                &mut file,
-                unsafe { &mut *NETWORK_PAYLOAD.0.get() },
-                b"network",
-                ProtocolVersion::V1,
-            )
-        });
+    let terminal = open_load(
+        &mut root,
+        cstr16!(r"\EFI\LOGOS\TERMINAL.EFI"),
+        unsafe { &mut *TERMINAL_PAYLOAD.0.get() },
+        b"terminal",
+    );
+    let sessions = open_load(
+        &mut root,
+        cstr16!(r"\EFI\LOGOS\SESSIONS.EFI"),
+        unsafe { &mut *SESSIONS_PAYLOAD.0.get() },
+        b"sessions",
+    );
+    let storage = open_load(
+        &mut root,
+        cstr16!(r"\EFI\LOGOS\STORAGE.EFI"),
+        unsafe { &mut *STORAGE_PAYLOAD.0.get() },
+        b"storage",
+    );
+    let network = open_load(
+        &mut root,
+        cstr16!(r"\EFI\LOGOS\NETWORK.EFI"),
+        unsafe { &mut *NETWORK_PAYLOAD.0.get() },
+        b"network",
+    );
     Some(Payloads { terminal, sessions, storage, network })
+}
+
+fn open_load(
+    root: &mut impl File,
+    path: &uefi::CStr16,
+    buffer: &mut [u8; MAX_PAYLOAD],
+    name: &[u8],
+) -> Option<Payload> {
+    let mut file =
+        root.open(path, FileMode::Read, FileAttribute::empty()).ok()?.into_regular_file()?;
+    load(&mut file, buffer, name, ProtocolVersion::V1)
 }
 
 fn load(

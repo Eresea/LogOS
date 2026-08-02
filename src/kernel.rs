@@ -143,7 +143,12 @@ pub(crate) fn main(
     let Some(payloads) = payload else {
         fail!(b"native image map");
     };
-    let payload = payloads.terminal;
+    let Some(payload) = payloads.terminal else {
+        debug::write_line(b"LogOS: terminal payload unavailable; entering recovery");
+        let mut shell = console::Shell::offline(startup);
+        let _ = shell.start();
+        shell.run(|| {});
+    };
     let Some(mut service_address_space) = address_space::AddressSpace::new(&mut memory) else {
         fail!(b"native image map");
     };
@@ -154,26 +159,34 @@ pub(crate) fn main(
             .is_some_and(|entry| entry != 0 && service_address_space.verifies_isolation())
             && service_address_space.release(&mut memory),
     );
-    let Some(mut sessions_address_space) = address_space::AddressSpace::new(&mut memory) else {
-        fail!(b"sessions image map");
-    };
-    check!(
-        b"sessions image map",
-        sessions_address_space
-            .map_image(&mut memory, payloads.sessions)
-            .is_some_and(|entry| entry != 0 && sessions_address_space.verifies_isolation())
-            && sessions_address_space.release(&mut memory),
-    );
-    let Some(mut storage_address_space) = address_space::AddressSpace::new(&mut memory) else {
-        fail!(b"storage image map");
-    };
-    check!(
-        b"storage image map",
-        storage_address_space
-            .map_image(&mut memory, payloads.storage)
-            .is_some_and(|entry| entry != 0 && storage_address_space.verifies_isolation())
-            && storage_address_space.release(&mut memory),
-    );
+    if let Some(sessions) = payloads.sessions {
+        let Some(mut space) = address_space::AddressSpace::new(&mut memory) else {
+            fail!(b"sessions image map");
+        };
+        check!(
+            b"sessions image map",
+            space
+                .map_image(&mut memory, sessions)
+                .is_some_and(|entry| entry != 0 && space.verifies_isolation())
+                && space.release(&mut memory),
+        );
+    } else {
+        debug::write_line(b"LogOS: Sessions payload unavailable");
+    }
+    if let Some(storage) = payloads.storage {
+        let Some(mut space) = address_space::AddressSpace::new(&mut memory) else {
+            fail!(b"storage image map");
+        };
+        check!(
+            b"storage image map",
+            space
+                .map_image(&mut memory, storage)
+                .is_some_and(|entry| entry != 0 && space.verifies_isolation())
+                && space.release(&mut memory),
+        );
+    } else {
+        debug::write_line(b"LogOS: Store payload unavailable");
+    }
     let keyboard_interrupts = interrupts::install(madt);
     interrupts::enable();
     interrupts::wait_for_tick();
@@ -306,6 +319,9 @@ pub(crate) fn main(
     check!(b"network driver", network_driver::self_check());
     let Some(supervisor) = supervisor::boot_plan(supervisor::Profile::Normal).ok() else {
         fail!(b"supervisor manifest");
+    };
+    let Some(mut native_services) = supervisor::NativeController::new(&supervisor) else {
+        fail!(b"native service controller");
     };
     check!(b"supervisor manifest", supervisor::self_check() && supervisor.starts(balloon::NAME),);
     check!(b"service profiles", supervisor::profiles_self_check());
@@ -608,51 +624,47 @@ pub(crate) fn main(
     else {
         fail!(b"native terminal task");
     };
-    let Some(native_sessions) = native_task::Task::load(&mut memory, payloads.sessions, &privilege)
-    else {
-        fail!(b"native sessions task");
-    };
-    let Some(mut native_storage) =
-        native_task::Task::load(&mut memory, payloads.storage, &privilege)
-    else {
-        fail!(b"native storage task");
-    };
+    let native_sessions = payloads
+        .sessions
+        .and_then(|payload| native_task::Task::load(&mut memory, payload, &privilege));
+    let mut native_storage = payloads
+        .storage
+        .and_then(|payload| native_task::Task::load(&mut memory, payload, &privilege));
     let mut native_network = payloads.network.and_then(|payload| {
         (network_device.is_some() && network_service_handle.is_some())
             .then(|| native_task::Task::load(&mut memory, payload, &privilege))
             .flatten()
     });
-    check!(b"storage heap", native_storage.map_heap(&mut memory).is_some());
+    if let Some(storage) = native_storage.as_mut() {
+        check!(b"storage heap", storage.map_heap(&mut memory).is_some());
+    }
     let mut shared_pages = logos_core::shared_pages::SharedPages::new();
     let terminal_owner = session.principal().page_owner();
     let storage_owner = storage_service_handle.principal().page_owner();
     let network_owner = network_service_handle.map(|handle| handle.principal().page_owner());
     let shared_history = native_terminal.map_shared_owned(&mut memory).and_then(|page| {
-        shared_pages
-            .register(terminal_owner, page, 1)
-            .filter(|_| native_storage.map_shared_borrowed(page))
+        shared_pages.register(terminal_owner, page, 1).filter(|_| {
+            native_storage.as_mut().is_none_or(|storage| storage.map_shared_borrowed(page))
+        })
     });
     let Some(mut shared_history) = shared_history else {
         fail!(b"terminal storage page");
     };
     #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
-    let Some((storage_block_physical, mut storage_block_virtual)) =
-        native_storage.map_block_owned(&mut memory)
-    else {
-        fail!(b"storage block page");
-    };
+    let storage_block =
+        native_storage.as_mut().and_then(|storage| storage.map_block_owned(&mut memory));
     #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
-    let Some(mut storage_block_page) =
-        shared_pages.register(storage_owner, storage_block_physical, 1)
-    else {
-        fail!(b"storage block page");
-    };
+    let mut storage_block_virtual = storage_block.map(|(_, address)| address).unwrap_or(0);
+    #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
+    let mut storage_block_page = storage_block
+        .and_then(|(physical, _)| shared_pages.register(storage_owner, physical, 1))
+        .unwrap_or(logos_abi::PageHandle(0));
     check!(
         b"terminal storage page",
         shared_pages.address(terminal_owner, shared_history).is_some()
     );
     check!(b"shared pages", logos_core::shared_pages::self_check());
-    let network_setup = native_network
+    let mut network_setup = native_network
         .as_mut()
         .and_then(|task| task.map_network_owned(&mut memory))
         .and_then(|((rx_physical, rx_virtual), (tx_physical, tx_virtual))| {
@@ -662,7 +674,15 @@ pub(crate) fn main(
                 let _ = shared_pages.release(owner, rx);
                 return None;
             };
-            Some((owner, rx, rx_physical, rx_virtual, tx, tx_physical, tx_virtual))
+            Some(NetworkResources {
+                owner,
+                rx,
+                rx_physical,
+                rx_virtual,
+                tx,
+                tx_physical,
+                tx_virtual,
+            })
         });
     if network_setup.is_none() {
         if let Some(task) = native_network.take() {
@@ -727,45 +747,55 @@ pub(crate) fn main(
     let mut native_input = native_terminal.input_endpoint();
     let mut native_command = native_terminal.syscall_endpoint();
     let mut native_display = native_terminal.display_endpoint();
-    let mut native_sessions_endpoint = native_sessions.session_endpoint();
+    let mut native_sessions_endpoint =
+        native_sessions.as_ref().map(native_task::Task::session_endpoint);
     #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
-    let mut native_storage_block = native_storage.block_endpoint();
+    let mut native_storage_block = native_storage
+        .as_ref()
+        .map(native_task::Task::block_endpoint)
+        .unwrap_or_else(native_task::BlockEndpoint::unavailable);
     let mut native_store = native_terminal.store_endpoint();
     #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
-    let mut native_storage_store = native_storage.store_endpoint();
+    let mut native_storage_store = native_storage
+        .as_ref()
+        .map(native_task::Task::store_endpoint)
+        .unwrap_or_else(native_task::StoreEndpoint::unavailable);
     let mut native_terminal_network = native_terminal.network_endpoint();
-    let native_network_endpoint = native_network.as_ref().map(native_task::Task::network_endpoint);
+    let mut native_network_endpoint =
+        native_network.as_ref().map(native_task::Task::network_endpoint);
     check!(
         b"storage shared page",
         native_store.configure_shared_page(shared_history)
-            && native_storage_store.configure_shared_page(shared_history),
+            && (!native_storage_store.available()
+                || native_storage_store.configure_shared_page(shared_history)),
     );
     check!(
         b"storage block page",
-        native_storage_block.configure(logos_core::native_service::BlockPage {
-            handle: storage_block_page,
-            address: storage_block_virtual,
-        }),
+        !native_storage_block.available()
+            || native_storage_block.configure(logos_core::native_service::BlockPage {
+                handle: storage_block_page,
+                address: storage_block_virtual,
+            }),
     );
-    let network_dma = network_setup.as_ref().map(|(_, _, rx_physical, _, _, tx_physical, _)| {
-        NetworkDmaPages { rx_address: *rx_physical, tx_address: *tx_physical }
+    let mut network_dma = network_setup.map(|resources| NetworkDmaPages {
+        rx_address: resources.rx_physical,
+        tx_address: resources.tx_physical,
     });
-    let network_pages_ready = native_network_endpoint.zip(network_setup).is_some_and(
-        |(endpoint, (_, rx, _, rx_address, tx, _, tx_address))| {
+    let network_pages_ready =
+        native_network_endpoint.zip(network_setup).is_some_and(|(endpoint, resources)| {
             endpoint.configure(logos_core::native_service::NetworkPages {
-                rx_handle: rx,
-                rx_address,
-                tx_handle: tx,
-                tx_address,
+                rx_handle: resources.rx,
+                rx_address: resources.rx_virtual,
+                tx_handle: resources.tx,
+                tx_address: resources.tx_virtual,
             })
-        },
-    );
+        });
     check!(
         b"network page configuration",
         network_device.is_none() || native_network_endpoint.is_none() || network_pages_ready
     );
     let mut block_dispatch = block::Dispatch::new();
-    let mut network_client_pending = None;
+    let mut network_client_pending: Option<PendingNetworkClient> = None;
     let mut native_scheduler = native_task::Scheduler::new();
     let Some(mut native_handle) = native_scheduler.spawn(native_terminal) else {
         fail!(b"native terminal task");
@@ -783,36 +813,47 @@ pub(crate) fn main(
     ) {
         fail!(b"native terminal display");
     }
-    let Some(mut sessions_handle) = native_scheduler.spawn(native_sessions) else {
-        fail!(b"native sessions task");
-    };
-    if !native_scheduler.run_next() {
-        fail!(b"native sessions ready");
+    let mut sessions_handle = native_sessions.and_then(|task| native_scheduler.spawn(task));
+    if sessions_handle
+        .is_some_and(|handle| !native_scheduler.run(handle) || native_scheduler.failed(handle))
+    {
+        debug::write_line(b"LogOS: Sessions service unavailable");
+        sessions_handle = None;
+        native_sessions_endpoint = None;
+    }
+    if sessions_handle.is_some() {
+        native_services.ready(supervisor::NativeService::Sessions);
+    } else {
+        let _ = native_services.missing(supervisor::NativeService::Sessions);
     }
     #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
-    let Some(mut storage_handle) = native_scheduler.spawn(native_storage) else {
-        fail!(b"native storage task");
-    };
-    if !native_scheduler.run_next() {
-        fail!(b"native storage ready");
+    let mut storage_handle = native_storage
+        .and_then(|task| native_scheduler.spawn(task))
+        .unwrap_or_else(native_task::Handle::unavailable);
+    if storage_handle.available() {
+        check!(b"native storage ready", native_scheduler.run(storage_handle));
+        check!(
+            b"storage startup",
+            run_storage_startup(
+                &mut block_dispatch,
+                &mut block::DispatchContext {
+                    endpoint: native_storage_block,
+                    pages: &mut shared_pages,
+                    store_owner: storage_owner,
+                    store_page: storage_block_page,
+                    device: &mut block_device,
+                    memory: &mut memory,
+                },
+                &mut native_scheduler,
+                storage_handle,
+            ),
+        );
+        native_services.ready(supervisor::NativeService::Store);
+    } else {
+        debug::write_line(b"LogOS: Store service unavailable");
+        let _ = native_services.missing(supervisor::NativeService::Store);
     }
-    check!(
-        b"storage startup",
-        run_storage_startup(
-            &mut block_dispatch,
-            &mut block::DispatchContext {
-                endpoint: native_storage_block,
-                pages: &mut shared_pages,
-                store_owner: storage_owner,
-                store_page: storage_block_page,
-                device: &mut block_device,
-                memory: &mut memory,
-            },
-            &mut native_scheduler,
-            storage_handle
-        ),
-    );
-    let network_handle = if let Some(network_task) = native_network.take()
+    let mut network_handle = if let Some(network_task) = native_network.take()
         && let Some(handle) = native_scheduler.spawn(network_task)
     {
         if native_scheduler.run_next() && !native_scheduler.failed(handle) {
@@ -824,6 +865,11 @@ pub(crate) fn main(
     } else {
         None
     };
+    if network_handle.is_some() {
+        native_services.ready(supervisor::NativeService::Network);
+    } else {
+        let _ = native_services.missing(supervisor::NativeService::Network);
+    }
     let mut network_pending = None;
     let mut network_probe = Some(0x8000_0001u32);
     let mut network_probe_due = 0;
@@ -879,14 +925,21 @@ pub(crate) fn main(
     {
         fail!(b"terminal history startup");
     }
+    native_services.ready(supervisor::NativeService::Terminal);
     #[cfg(feature = "test-hooks")]
     let proof = Cell::new(false);
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(
-        unsafe {
-            logos_core::native_service::Context::storage_status_at(native_storage_store.context())
-        }
-        .unwrap_or(logos_core::native_service::STORAGE_IO_FAILED),
+        if native_storage_store.available() {
+            unsafe {
+                logos_core::native_service::Context::storage_status_at(
+                    native_storage_store.context(),
+                )
+            }
+            .unwrap_or(logos_core::native_service::STORAGE_IO_FAILED)
+        } else {
+            logos_core::native_service::STORAGE_IO_FAILED
+        },
         |action| match action {
             test_hooks::Action::Input(value) => {
                 let tick = interrupts::ticks();
@@ -943,27 +996,29 @@ pub(crate) fn main(
                         return false;
                     }
 
-                    let previous_sessions = sessions_handle;
-                    if !native_scheduler.fail(previous_sessions) || !startup.start() {
-                        return false;
-                    }
-                    let Some(restarted_sessions) = restart_native_service(
-                        &mut native_scheduler,
-                        previous_sessions,
-                        &mut memory,
-                    ) else {
-                        return false;
-                    };
-                    sessions_handle = restarted_sessions;
-                    let Some(endpoint) = native_scheduler.session_endpoint(sessions_handle) else {
-                        return false;
-                    };
-                    native_sessions_endpoint = endpoint;
-                    debug::write_line(b"LogOS: reset sessions ready");
-                    if !native_scheduler.run(sessions_handle)
-                        || native_scheduler.wake(previous_sessions)
-                    {
-                        return false;
+                    if let Some(previous_sessions) = sessions_handle {
+                        if !native_scheduler.fail(previous_sessions) || !startup.start() {
+                            return false;
+                        }
+                        let Some(restarted_sessions) = restart_native_service(
+                            &mut native_scheduler,
+                            previous_sessions,
+                            &mut memory,
+                        ) else {
+                            return false;
+                        };
+                        sessions_handle = Some(restarted_sessions);
+                        let Some(endpoint) = native_scheduler.session_endpoint(restarted_sessions)
+                        else {
+                            return false;
+                        };
+                        native_sessions_endpoint = Some(endpoint);
+                        debug::write_line(b"LogOS: reset sessions ready");
+                        if !native_scheduler.run(restarted_sessions)
+                            || native_scheduler.wake(previous_sessions)
+                        {
+                            return false;
+                        }
                     }
 
                     let previous_storage = storage_handle;
@@ -1365,8 +1420,12 @@ pub(crate) fn main(
                     }
                 }
                 if sessions_restart {
-                    let previous = sessions_handle;
-                    let previous_context = native_sessions_endpoint.context();
+                    let (Some(previous), Some(previous_endpoint)) =
+                        (sessions_handle, native_sessions_endpoint)
+                    else {
+                        return false;
+                    };
+                    let previous_context = previous_endpoint.context();
                     if !native_scheduler.fail(previous) || !startup.start() {
                         return false;
                     }
@@ -1375,14 +1434,14 @@ pub(crate) fn main(
                     else {
                         return false;
                     };
-                    sessions_handle = restarted;
-                    let Some(endpoint) = native_scheduler.session_endpoint(sessions_handle) else {
+                    sessions_handle = Some(restarted);
+                    let Some(endpoint) = native_scheduler.session_endpoint(restarted) else {
                         return false;
                     };
-                    native_sessions_endpoint = endpoint;
+                    native_sessions_endpoint = Some(endpoint);
                     if restarted.generation() == previous.generation()
-                        || native_sessions_endpoint.context() == previous_context
-                        || !native_scheduler.run(sessions_handle)
+                        || endpoint.context() == previous_context
+                        || !native_scheduler.run(restarted)
                         || native_scheduler.wake(previous)
                     {
                         return false;
@@ -1552,20 +1611,24 @@ pub(crate) fn main(
                     return passed;
                 }
                 if value == "assert-sessions" {
-                    let passed = native_sessions_endpoint.deliver(logos_abi::SessionRequest::new(
+                    let (Some(endpoint), Some(handle)) =
+                        (native_sessions_endpoint, sessions_handle)
+                    else {
+                        return false;
+                    };
+                    let passed = endpoint.deliver(logos_abi::SessionRequest::new(
                         logos_abi::Syscall::Tasks,
                         [0; logos_abi::MAX_SESSION_TEXT],
                         0,
-                    )) && native_scheduler.wake(sessions_handle)
-                        && native_scheduler.run(sessions_handle)
-                        && native_sessions_endpoint.effect().is_some_and(|effect| {
+                    )) && native_scheduler.wake(handle)
+                        && native_scheduler.run(handle)
+                        && endpoint.effect().is_some_and(|effect| {
                             effect.effect == logos_abi::Effect::ReadTasks
-                                && native_sessions_endpoint
-                                    .reply_effect(logos_abi::EffectResult::TasksActive)
+                                && endpoint.reply_effect(logos_abi::EffectResult::TasksActive)
                         })
-                        && native_scheduler.wake(sessions_handle)
-                        && native_scheduler.run(sessions_handle)
-                        && native_sessions_endpoint.reply().is_some_and(|reply| {
+                        && native_scheduler.wake(handle)
+                        && native_scheduler.run(handle)
+                        && endpoint.reply().is_some_and(|reply| {
                             reply.length == b"scheduler active".len()
                                 && reply.text[..reply.length] == *b"scheduler active"
                         });
@@ -1880,9 +1943,6 @@ pub(crate) fn main(
             }
         },
     );
-    // ponytail: one bootstrap retry; use supervisor policy when native services join System lifecycle.
-    let mut terminal_restart_available = true;
-    let mut sessions_restart_available = true;
     if console_mode == mode::ConsoleMode::Normal {
         while keyboard::poll_scancode().is_some() {}
         input = input::Service::new();
@@ -1907,6 +1967,109 @@ pub(crate) fn main(
             if !service_health.healthy(balloon::NAME, tick) {
                 debug::write_line(b"LogOS: service heartbeat overdue");
                 let _ = service_lifecycle.failed(tick);
+            }
+            if native_services.due(supervisor::NativeService::Sessions, tick)
+                && let Some(failed_sessions) = sessions_handle
+                && let Some(restarted) =
+                    restart_native_service(&mut native_scheduler, failed_sessions, &mut memory)
+                && native_scheduler.run(restarted)
+                && let Some(endpoint) = native_scheduler.session_endpoint(restarted)
+            {
+                sessions_handle = Some(restarted);
+                native_sessions_endpoint = Some(endpoint);
+                native_services.ready(supervisor::NativeService::Sessions);
+                debug::write_line(b"LogOS: native Sessions restarted");
+            }
+            if storage_handle.available() && native_scheduler.failed(storage_handle) {
+                let _ = native_services.failed(supervisor::NativeService::Store, tick);
+            }
+            if native_services.due(supervisor::NativeService::Store, tick)
+                && storage_handle.available()
+            {
+                block_dispatch.cancel_on_exit(&mut block::DispatchContext {
+                    endpoint: native_storage_block,
+                    pages: &mut shared_pages,
+                    store_owner: storage_owner,
+                    store_page: storage_block_page,
+                    device: &mut block_device,
+                    memory: &mut memory,
+                });
+                if let Some(history_address) = shared_pages.address(terminal_owner, shared_history)
+                    && let Some((restarted, store, block, block_page, block_virtual)) =
+                        replace_storage(
+                            &mut native_scheduler,
+                            storage_handle,
+                            &mut memory,
+                            &mut shared_pages,
+                            storage_owner,
+                            storage_block_page,
+                            history_address,
+                            shared_history,
+                        )
+                    && native_scheduler.run(restarted)
+                {
+                    storage_handle = restarted;
+                    native_storage_store = store;
+                    native_storage_block = block;
+                    storage_block_page = block_page;
+                    let _ = block_virtual;
+                    if run_storage_startup(
+                        &mut block_dispatch,
+                        &mut block::DispatchContext {
+                            endpoint: native_storage_block,
+                            pages: &mut shared_pages,
+                            store_owner: storage_owner,
+                            store_page: storage_block_page,
+                            device: &mut block_device,
+                            memory: &mut memory,
+                        },
+                        &mut native_scheduler,
+                        storage_handle,
+                    ) {
+                        store_relay_state.clear();
+                        native_services.ready(supervisor::NativeService::Store);
+                        debug::write_line(b"LogOS: Store service restarted");
+                    }
+                }
+            }
+            if native_services.due(supervisor::NativeService::Network, tick)
+                && let (Some(failed_network), Some(resources)) = (network_handle, network_setup)
+            {
+                if let Some(pending) = network_client_pending.take() {
+                    let _ = native_terminal_network.reply(logos_abi::NetworkReply {
+                        id: pending.request.id,
+                        status: logos_abi::NetworkStatus::Reset,
+                        endpoint: logos_abi::NetworkEndpoint(0),
+                        generation: pending.request.generation,
+                        source_address: 0,
+                        source_port: 0,
+                        length: 0,
+                        info: logos_abi::NetworkInfo::default(),
+                        counters: logos_abi::NetworkCounters::default(),
+                    });
+                }
+                network_pending = None;
+                if let Some((restarted, endpoint, resources, dma)) = replace_network(
+                    &mut native_scheduler,
+                    failed_network,
+                    &mut memory,
+                    &mut shared_pages,
+                    resources,
+                ) && native_scheduler.run(restarted)
+                {
+                    network_handle = Some(restarted);
+                    native_network_endpoint = Some(endpoint);
+                    network_setup = Some(resources);
+                    network_dma = Some(dma);
+                    network_probe = Some(0x8000_0001);
+                    network_probe_due = tick;
+                    network_reported = false;
+                    if let Some(device) = network_device.as_mut() {
+                        let _ = device.reset();
+                    }
+                    native_services.ready(supervisor::NativeService::Network);
+                    debug::write_line(b"LogOS: Network service restarted");
+                }
             }
             if !dispatch_store_block(
                 &mut block_dispatch,
@@ -1943,6 +2106,9 @@ pub(crate) fn main(
                 terminal_owner,
             ) {
                 debug::write_line(b"LogOS: network service unavailable");
+                if network_handle.is_some() {
+                    let _ = native_services.failed(supervisor::NativeService::Network, tick);
+                }
             }
             if let Some(event) = input.next(tick, keyboard::poll_scancode) {
                 if let Some(native_event) = native_input_event(event) {
@@ -1958,8 +2124,10 @@ pub(crate) fn main(
                             native_handle,
                         )
                     {
-                        if terminal_restart_available {
-                            terminal_restart_available = false;
+                        if native_services.failed(supervisor::NativeService::Terminal, tick)
+                            == supervisor::FailureAction::Retry
+                            && native_services.due(supervisor::NativeService::Terminal, tick)
+                        {
                             if !cancel_store_transaction(
                                 native_storage_store,
                                 &mut native_scheduler,
@@ -1988,8 +2156,7 @@ pub(crate) fn main(
                                 ) = endpoints;
                                 shared_history = history;
                                 store_relay_state.clear();
-                                if native_scheduler.wake(native_handle)
-                                    && native_scheduler.run(native_handle)
+                                if native_scheduler.run(native_handle)
                                     && resume_display(
                                         native_display,
                                         &session,
@@ -1999,6 +2166,7 @@ pub(crate) fn main(
                                         native_handle,
                                     )
                                 {
+                                    native_services.ready(supervisor::NativeService::Terminal);
                                     debug::write_line(b"LogOS: native terminal restarted");
                                     continue;
                                 }
@@ -2070,28 +2238,14 @@ pub(crate) fn main(
                             },
                         );
 
-                        if matches!(relay, SessionRelay::Handled(false))
-                            && sessions_restart_available
-                        {
-                            sessions_restart_available = false;
-                            if let Some(restarted) = restart_native_service(
-                                &mut native_scheduler,
-                                sessions_handle,
-                                &mut memory,
-                            ) {
-                                sessions_handle = restarted;
-                                let Some(endpoint) =
-                                    native_scheduler.session_endpoint(sessions_handle)
-                                else {
-                                    relay = SessionRelay::Handled(false);
-                                    continue;
-                                };
-                                native_sessions_endpoint = endpoint;
-                                debug::write_line(b"LogOS: native Sessions restarted");
-                                relay = SessionRelay::Handled(
-                                    native_command.reply(b"session restarted; retry command"),
-                                );
+                        if matches!(relay, SessionRelay::Handled(false)) {
+                            if sessions_handle.is_some() {
+                                let _ = native_services
+                                    .failed(supervisor::NativeService::Sessions, tick);
                             }
+                            relay = SessionRelay::Handled(
+                                native_command.reply(b"session unavailable; retry command"),
+                            );
                         }
                         match relay {
                             SessionRelay::Recovery => {
@@ -2101,8 +2255,6 @@ pub(crate) fn main(
                             }
                             SessionRelay::Handled(false) => {
                                 debug::write_line(b"LogOS: Sessions relay failed");
-                                console_mode = mode::ConsoleMode::Recovery;
-                                break;
                             }
                             SessionRelay::Handled(true) => {
                                 if !native_scheduler.wake(native_handle)
@@ -2196,6 +2348,9 @@ fn dispatch_store_block(
     handle: native_task::Handle,
     tick: u64,
 ) -> bool {
+    if !context.endpoint.available() || !handle.available() {
+        return true;
+    }
     let Some(reply) = dispatch.poll(context, tick) else {
         return true;
     };
@@ -2582,6 +2737,17 @@ struct NetworkDmaPages {
     tx_address: u64,
 }
 
+#[derive(Clone, Copy)]
+struct NetworkResources {
+    owner: u64,
+    rx: logos_abi::PageHandle,
+    rx_physical: u64,
+    rx_virtual: u64,
+    tx: logos_abi::PageHandle,
+    tx_physical: u64,
+    tx_virtual: u64,
+}
+
 fn network_info(info: network_driver::Info) -> logos_abi::NetworkInfo {
     logos_abi::NetworkInfo {
         mac: info.mac,
@@ -2825,6 +2991,14 @@ fn relay_store_request(
     let Some(request) = terminal.request() else {
         return SessionRelay::Handled(true);
     };
+    if !storage.available() || !storage_handle.available() {
+        return SessionRelay::Handled(terminal.reply(logos_abi::StoreReply {
+            id: request.id,
+            status: logos_abi::PersistenceStatus::Unavailable,
+            version: 0,
+            length: 0,
+        }));
+    }
     let Some(namespace) = store_namespace(request, state) else {
         let _ = terminal.reply(logos_abi::StoreReply {
             id: request.id,
@@ -2966,7 +3140,7 @@ fn relay_terminal_store_requests(
             let Some(request) = terminal.request() else { return false };
             if !terminal.reply(logos_abi::StoreReply {
                 id: request.id,
-                status: logos_abi::PersistenceStatus::Io,
+                status: logos_abi::PersistenceStatus::Unavailable,
                 version: 0,
                 length: 0,
             }) {
@@ -2985,6 +3159,9 @@ fn cancel_store_transaction(
     scheduler: &mut native_task::Scheduler<'_>,
     storage_handle: native_task::Handle,
 ) -> bool {
+    if !storage.available() || !storage_handle.available() {
+        return true;
+    }
     let request = logos_abi::StoreRequest {
         id: u32::MAX,
         operation: logos_abi::StoreOperation::Cancel,
@@ -3067,21 +3244,24 @@ fn replace_terminal(
     let address = replacement_page?;
     pages.release(terminal_owner, history)?;
     let new_history = pages.register(terminal_owner, address, 1)?;
-    if !scheduler.task_mut(storage_handle)?.remap_shared_borrowed(address) {
+    let endpoints = terminal_endpoints(scheduler, replacement)?;
+    if !endpoints.3.configure_shared_page(new_history) {
         return None;
     }
-    let endpoints = terminal_endpoints(scheduler, replacement)?;
-    let storage = scheduler.store_endpoint(storage_handle)?;
-    if !endpoints.3.configure_shared_page(new_history)
-        || !storage.configure_shared_page(new_history)
-        || pages.address(storage_owner, new_history).is_some()
-    {
-        return None;
+    if storage_handle.available() {
+        if !scheduler.task_mut(storage_handle)?.remap_shared_borrowed(address) {
+            return None;
+        }
+        let storage = scheduler.store_endpoint(storage_handle)?;
+        if !storage.configure_shared_page(new_history)
+            || pages.address(storage_owner, new_history).is_some()
+        {
+            return None;
+        }
     }
     Some((replacement, endpoints, new_history))
 }
 
-#[cfg(feature = "test-hooks")]
 type StorageReplacement = (
     native_task::Handle,
     native_task::StoreEndpoint,
@@ -3090,7 +3270,6 @@ type StorageReplacement = (
     u64,
 );
 
-#[cfg(feature = "test-hooks")]
 #[allow(clippy::too_many_arguments)]
 fn replace_storage(
     scheduler: &mut native_task::Scheduler<'_>,
@@ -3127,6 +3306,53 @@ fn replace_storage(
     Some((replacement, store, block, block_page, block_virtual))
 }
 
+fn replace_network(
+    scheduler: &mut native_task::Scheduler<'_>,
+    handle: native_task::Handle,
+    memory: &mut memory::PhysicalMemory,
+    pages: &mut logos_core::shared_pages::SharedPages,
+    previous: NetworkResources,
+) -> Option<(native_task::Handle, native_task::NetworkEndpoint, NetworkResources, NetworkDmaPages)>
+{
+    if !scheduler.failed(handle) && !scheduler.fail(handle) {
+        return None;
+    }
+    let mut mapped = None;
+    let replacement = scheduler.replace(handle, memory, |task, memory| {
+        mapped = task.map_network_owned(memory);
+        mapped.is_some()
+    })?;
+    let ((rx_physical, rx_virtual), (tx_physical, tx_virtual)) = mapped?;
+    pages.release(previous.owner, previous.rx)?;
+    pages.release(previous.owner, previous.tx)?;
+    let rx = pages.register(previous.owner, rx_physical, 2)?;
+    let tx = pages.register(previous.owner, tx_physical, 2)?;
+    let resources = NetworkResources {
+        owner: previous.owner,
+        rx,
+        rx_physical,
+        rx_virtual,
+        tx,
+        tx_physical,
+        tx_virtual,
+    };
+    let endpoint = scheduler.network_endpoint(replacement)?;
+    if !endpoint.configure(logos_abi::service::NetworkPages {
+        rx_handle: rx,
+        rx_address: rx_virtual,
+        tx_handle: tx,
+        tx_address: tx_virtual,
+    }) {
+        return None;
+    }
+    Some((
+        replacement,
+        endpoint,
+        resources,
+        NetworkDmaPages { rx_address: rx_physical, tx_address: tx_physical },
+    ))
+}
+
 fn restart_native_service(
     scheduler: &mut native_task::Scheduler<'_>,
     handle: native_task::Handle,
@@ -3140,9 +3366,9 @@ fn restart_native_service(
 
 fn relay_session_request(
     terminal: native_task::SyscallEndpoint,
-    sessions: native_task::SessionEndpoint,
+    sessions: Option<native_task::SessionEndpoint>,
     scheduler: &mut native_task::Scheduler<'_>,
-    sessions_handle: native_task::Handle,
+    sessions_handle: Option<native_task::Handle>,
     context: effects::Context<'_, '_>,
 ) -> SessionRelay {
     let Some(request) = terminal.request() else {
@@ -3151,6 +3377,9 @@ fn relay_session_request(
     if !context.session.allows(context.capabilities, capabilities::CapabilityKind::Session) {
         return SessionRelay::Handled(terminal.reply(b"permission denied"));
     }
+    let (Some(sessions), Some(sessions_handle)) = (sessions, sessions_handle) else {
+        return SessionRelay::Handled(terminal.reply(b"session unavailable"));
+    };
     if !sessions.deliver(request)
         || !scheduler.wake(sessions_handle)
         || !scheduler.run(sessions_handle)
