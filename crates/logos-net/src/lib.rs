@@ -317,6 +317,365 @@ pub fn encode_tcp(
     Ok(length)
 }
 
+pub const TCP_FLAG_FIN: u8 = 0x01;
+pub const TCP_FLAG_SYN: u8 = 0x02;
+pub const TCP_FLAG_RST: u8 = 0x04;
+pub const TCP_FLAG_ACK: u8 = 0x10;
+pub const MAX_TCP_STREAM: usize = 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TcpStateError {
+    Full,
+    AddressInUse,
+    Invalid,
+    Busy,
+    NotFound,
+    NoData,
+    MessageTooLarge,
+    Owner,
+    Reset,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TcpPhase {
+    SynReceived,
+    Established,
+    CloseWait,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TcpTx {
+    pub source: Ipv4,
+    pub destination: Ipv4,
+    pub header: TcpHeader,
+    pub length: u16,
+    pub payload: [u8; MAX_TCP_STREAM],
+}
+
+#[derive(Clone, Copy)]
+struct TcpConnection {
+    owner: u64,
+    endpoint: EndpointId,
+    local_port: u16,
+    peer: Ipv4,
+    peer_port: u16,
+    phase: TcpPhase,
+    local_seq: u32,
+    remote_seq: u32,
+    accepted: bool,
+    read_length: u16,
+    read_buffer: [u8; MAX_TCP_STREAM],
+    write_pending: bool,
+    write_sequence: u32,
+    write_length: u16,
+    write_buffer: [u8; MAX_TCP_STREAM],
+}
+
+pub struct TcpState {
+    generation: u16,
+    owner: u64,
+    port: u16,
+    listener: Option<EndpointId>,
+    connection: Option<TcpConnection>,
+    outgoing: Option<TcpTx>,
+    last: Option<TcpTx>,
+    deadline: u64,
+    retries: u8,
+}
+
+impl Default for TcpState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TcpState {
+    pub const fn new() -> Self {
+        Self {
+            generation: 1,
+            owner: 0,
+            port: 0,
+            listener: None,
+            connection: None,
+            outgoing: None,
+            last: None,
+            deadline: 0,
+            retries: 0,
+        }
+    }
+
+    pub const fn generation(&self) -> u16 {
+        self.generation
+    }
+
+    pub fn listen(
+        &mut self,
+        owner: u64,
+        port: u16,
+        sequence: u32,
+    ) -> Result<EndpointId, TcpStateError> {
+        if port == 0 {
+            return Err(TcpStateError::Invalid);
+        }
+        if self.listener.is_some() {
+            return Err(TcpStateError::AddressInUse);
+        }
+        let endpoint = EndpointId((u32::from(self.generation) << 16) | 1);
+        self.owner = owner;
+        self.port = port;
+        self.listener = Some(endpoint);
+        self.connection = None;
+        self.outgoing = None;
+        self.last = None;
+        self.deadline = sequence as u64;
+        Ok(endpoint)
+    }
+
+    pub fn accept(
+        &mut self,
+        owner: u64,
+        listener: EndpointId,
+    ) -> Result<EndpointId, TcpStateError> {
+        if self.owner != owner || self.listener != Some(listener) {
+            return Err(TcpStateError::Owner);
+        }
+        let connection = self.connection.as_mut().ok_or(TcpStateError::NoData)?;
+        if connection.phase != TcpPhase::Established {
+            return Err(TcpStateError::Busy);
+        }
+        if connection.accepted {
+            return Err(TcpStateError::Busy);
+        }
+        connection.accepted = true;
+        Ok(connection.endpoint)
+    }
+
+    pub fn ingest(&mut self, source: Ipv4, packet: Tcp<'_>) -> Result<(), TcpStateError> {
+        if let Some(connection) = self.connection {
+            if source != connection.peer
+                || packet.source_port != connection.peer_port
+                || packet.destination_port != connection.local_port
+            {
+                return Ok(());
+            }
+            if packet.flags & TCP_FLAG_RST != 0 {
+                self.connection = None;
+                self.outgoing = None;
+                self.last = None;
+                return Err(TcpStateError::Reset);
+            }
+            if connection.phase == TcpPhase::SynReceived {
+                if packet.flags & TCP_FLAG_ACK != 0
+                    && packet.acknowledgement == connection.local_seq + 1
+                {
+                    let mut established = connection;
+                    established.phase = TcpPhase::Established;
+                    established.local_seq = established.local_seq.wrapping_add(1);
+                    self.connection = Some(established);
+                    self.arm_ack(
+                        source,
+                        packet.source_port,
+                        established.remote_seq,
+                        established.local_seq,
+                    );
+                    return Ok(());
+                }
+                return Ok(());
+            }
+            let mut connection = connection;
+            if connection.write_pending
+                && packet.flags & TCP_FLAG_ACK != 0
+                && packet.acknowledgement.wrapping_sub(connection.write_sequence)
+                    >= u32::from(connection.write_length)
+            {
+                connection.write_pending = false;
+                self.last = None;
+            }
+            if packet.sequence == connection.remote_seq {
+                if packet.payload.len() > MAX_TCP_STREAM - usize::from(connection.read_length) {
+                    self.arm_ack(
+                        source,
+                        packet.source_port,
+                        connection.remote_seq,
+                        connection.local_seq,
+                    );
+                    return Err(TcpStateError::MessageTooLarge);
+                }
+                let start = usize::from(connection.read_length);
+                connection.read_buffer[start..start + packet.payload.len()]
+                    .copy_from_slice(packet.payload);
+                connection.read_length = (start + packet.payload.len()) as u16;
+                connection.remote_seq =
+                    connection.remote_seq.wrapping_add(packet.payload.len() as u32);
+            }
+            if packet.flags & TCP_FLAG_FIN != 0 && packet.sequence == connection.remote_seq {
+                connection.remote_seq = connection.remote_seq.wrapping_add(1);
+                connection.phase = TcpPhase::CloseWait;
+            }
+            self.connection = Some(connection);
+            self.arm_ack(source, packet.source_port, connection.remote_seq, connection.local_seq);
+            return Ok(());
+        }
+        if self.listener.is_some()
+            && packet.destination_port == self.port
+            && packet.flags & TCP_FLAG_SYN != 0
+        {
+            let endpoint = EndpointId((u32::from(self.generation) << 16) | 2);
+            let connection = TcpConnection {
+                owner: self.owner,
+                endpoint,
+                local_port: packet.destination_port,
+                peer: source,
+                peer_port: packet.source_port,
+                phase: TcpPhase::SynReceived,
+                local_seq: self.deadline as u32,
+                remote_seq: packet.sequence.wrapping_add(1),
+                accepted: false,
+                read_length: 0,
+                read_buffer: [0; MAX_TCP_STREAM],
+                write_pending: false,
+                write_sequence: 0,
+                write_length: 0,
+                write_buffer: [0; MAX_TCP_STREAM],
+            };
+            self.connection = Some(connection);
+            self.arm_tx(TcpTx {
+                source: Ipv4([0; 4]),
+                destination: source,
+                header: TcpHeader {
+                    source_port: packet.destination_port,
+                    destination_port: packet.source_port,
+                    sequence: connection.local_seq,
+                    acknowledgement: connection.remote_seq,
+                    flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
+                    window: MAX_TCP_STREAM as u16,
+                },
+                length: 0,
+                payload: [0; MAX_TCP_STREAM],
+            });
+        }
+        Ok(())
+    }
+
+    fn arm_ack(
+        &mut self,
+        destination: Ipv4,
+        destination_port: u16,
+        sequence: u32,
+        acknowledgement: u32,
+    ) {
+        let source = Ipv4([0; 4]);
+        self.arm_tx(TcpTx {
+            source,
+            destination,
+            header: TcpHeader {
+                source_port: self.port,
+                destination_port,
+                sequence,
+                acknowledgement,
+                flags: TCP_FLAG_ACK,
+                window: (MAX_TCP_STREAM as u16)
+                    .saturating_sub(self.connection.map_or(0, |c| c.read_length)),
+            },
+            length: 0,
+            payload: [0; MAX_TCP_STREAM],
+        });
+    }
+
+    fn arm_tx(&mut self, tx: TcpTx) {
+        self.outgoing = Some(tx);
+        self.last = Some(tx);
+        self.retries = 0;
+        self.deadline = self.deadline.saturating_add(1).max(1);
+    }
+
+    pub fn take_tx(&mut self) -> Option<TcpTx> {
+        self.outgoing.take()
+    }
+
+    pub fn read(
+        &mut self,
+        owner: u64,
+        endpoint: EndpointId,
+        output: &mut [u8],
+    ) -> Result<usize, TcpStateError> {
+        let connection = self.connection.as_mut().ok_or(TcpStateError::NotFound)?;
+        if connection.owner != owner || connection.endpoint != endpoint {
+            return Err(TcpStateError::Owner);
+        }
+        if connection.read_length == 0 {
+            return Err(TcpStateError::NoData);
+        }
+        let length = usize::from(connection.read_length).min(output.len());
+        output[..length].copy_from_slice(&connection.read_buffer[..length]);
+        connection.read_buffer.copy_within(length..usize::from(connection.read_length), 0);
+        connection.read_length -= length as u16;
+        Ok(length)
+    }
+
+    pub fn write(
+        &mut self,
+        owner: u64,
+        endpoint: EndpointId,
+        payload: &[u8],
+    ) -> Result<(), TcpStateError> {
+        if payload.is_empty() || payload.len() > MAX_TCP_STREAM {
+            return Err(TcpStateError::MessageTooLarge);
+        }
+        let tx = {
+            let connection = self.connection.as_mut().ok_or(TcpStateError::NotFound)?;
+            if connection.owner != owner || connection.endpoint != endpoint {
+                return Err(TcpStateError::Owner);
+            }
+            if connection.phase != TcpPhase::Established || connection.write_pending {
+                return Err(TcpStateError::Busy);
+            }
+            connection.write_pending = true;
+            connection.write_sequence = connection.local_seq;
+            connection.write_length = payload.len() as u16;
+            connection.write_buffer[..payload.len()].copy_from_slice(payload);
+            connection.local_seq = connection.local_seq.wrapping_add(payload.len() as u32);
+            let mut bytes = [0; MAX_TCP_STREAM];
+            bytes[..payload.len()].copy_from_slice(payload);
+            TcpTx {
+                source: Ipv4([0; 4]),
+                destination: connection.peer,
+                header: TcpHeader {
+                    source_port: connection.local_port,
+                    destination_port: connection.peer_port,
+                    sequence: connection.write_sequence,
+                    acknowledgement: connection.remote_seq,
+                    flags: TCP_FLAG_ACK,
+                    window: MAX_TCP_STREAM as u16,
+                },
+                length: payload.len() as u16,
+                payload: bytes,
+            }
+        };
+        self.arm_tx(tx);
+        Ok(())
+    }
+
+    pub fn close(&mut self, owner: u64, endpoint: EndpointId) -> Result<(), TcpStateError> {
+        let connection = self.connection.ok_or(TcpStateError::NotFound)?;
+        if connection.owner != owner || connection.endpoint != endpoint {
+            return Err(TcpStateError::Owner);
+        }
+        self.connection = None;
+        self.outgoing = None;
+        self.last = None;
+        Ok(())
+    }
+
+    pub fn reset(&mut self) {
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.listener = None;
+        self.connection = None;
+        self.outgoing = None;
+        self.last = None;
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IcmpEcho<'a> {
     pub reply: bool,
@@ -898,6 +1257,7 @@ pub struct NetworkState {
     echo: Option<EchoMatch>,
     arp_target: Option<Ipv4>,
     dhcp: DhcpMachine,
+    tcp: TcpState,
 }
 
 impl NetworkState {
@@ -914,11 +1274,20 @@ impl NetworkState {
             echo: None,
             arp_target: None,
             dhcp: DhcpMachine::new(),
+            tcp: TcpState::new(),
         }
     }
 
     pub const fn generation(&self) -> u16 {
         self.generation
+    }
+
+    pub const fn tcp(&self) -> &TcpState {
+        &self.tcp
+    }
+
+    pub fn tcp_mut(&mut self) -> &mut TcpState {
+        &mut self.tcp
     }
 
     pub const fn pending(&self) -> Option<Pending> {
@@ -1156,6 +1525,7 @@ impl NetworkState {
         self.echo = None;
         self.arp_target = None;
         self.dhcp = DhcpMachine::new();
+        self.tcp.reset();
     }
 
     pub fn dhcp_start(&mut self, now: u64, xid: u32) {
@@ -1344,6 +1714,66 @@ mod tests {
         }
         bytes[19] ^= 1;
         assert_eq!(parse_tcp(&bytes[..length], LOCAL_IP, PEER_IP), Err(Error::Checksum));
+    }
+
+    #[test]
+    fn tcp_stream_handshake_owner_and_bounded_io() {
+        let mut state = TcpState::new();
+        let listener = state.listen(7, 7443, 100).unwrap();
+        state
+            .ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 50000,
+                    destination_port: 7443,
+                    sequence: 200,
+                    acknowledgement: 0,
+                    flags: TCP_FLAG_SYN,
+                    window: 1024,
+                    payload: &[],
+                },
+            )
+            .unwrap();
+        let syn_ack = state.take_tx().unwrap();
+        assert_eq!(syn_ack.header.flags, TCP_FLAG_SYN | TCP_FLAG_ACK);
+        state
+            .ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 50000,
+                    destination_port: 7443,
+                    sequence: 201,
+                    acknowledgement: 101,
+                    flags: TCP_FLAG_ACK,
+                    window: 1024,
+                    payload: &[],
+                },
+            )
+            .unwrap();
+        let stream = state.accept(7, listener).unwrap();
+        assert_eq!(state.accept(8, listener), Err(TcpStateError::Owner));
+        state
+            .ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 50000,
+                    destination_port: 7443,
+                    sequence: 201,
+                    acknowledgement: 101,
+                    flags: TCP_FLAG_ACK,
+                    window: 1024,
+                    payload: b"hello",
+                },
+            )
+            .unwrap();
+        let mut output = [0; 5];
+        assert_eq!(state.read(7, stream, &mut output), Ok(5));
+        assert_eq!(&output, b"hello");
+        assert_eq!(state.write(7, stream, b"pong"), Ok(()));
+        assert_eq!(state.write(7, stream, b"again"), Err(TcpStateError::Busy));
+        state.reset();
+        assert_ne!(state.generation(), 1);
+        assert_eq!(state.read(7, stream, &mut output), Err(TcpStateError::NotFound));
     }
 
     #[test]
