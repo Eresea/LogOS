@@ -21,12 +21,19 @@ pub const SESSION_BLOB_BYTES: usize =
     PROTECTED_NONCE_BYTES + SESSION_RECORD_BYTES + PROTECTED_TAG_BYTES;
 pub const ENROLLMENT_AD: &[u8] = b"LogOS/trust/enrollment/v1";
 pub const SESSION_AD: &[u8] = b"LogOS/trust/remote-session/v1";
+pub const REMOTE_CONTROL_AD: &[u8] = b"LogOS/trust/remote-control/v2";
 pub const MAX_COMMAND: usize = 256;
 pub const REMOTE_REQUEST_BYTES: usize = 2 + 8 + SESSION_ID_LEN + 8 + 2 + MAX_COMMAND;
 pub const REMOTE_REPLY_BYTES: usize = 2 + 8 + 8 + 1 + 2 + MAX_COMMAND;
 pub const REMOTE_PROTOCOL_V2: u16 = 2;
 pub const REMOTE_MESSAGE_HEADER: usize = 30;
 pub const REMOTE_MESSAGE_PAYLOAD: usize = MAX_FRAME - REMOTE_MESSAGE_HEADER;
+pub const REMOTE_AUDIT_EVENTS: usize = 16;
+pub const REMOTE_AUDIT_EVENT_BYTES: usize = 88;
+pub const REMOTE_CONTROL_RECORD_BYTES: usize =
+    16 + SESSION_RECORD_BYTES + REMOTE_AUDIT_EVENTS * REMOTE_AUDIT_EVENT_BYTES;
+pub const REMOTE_CONTROL_BLOB_BYTES: usize =
+    PROTECTED_NONCE_BYTES + REMOTE_CONTROL_RECORD_BYTES + PROTECTED_TAG_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -221,6 +228,200 @@ pub struct SessionRecord {
     pub digest: [u8; REQUEST_DIGEST_LEN],
     pub reply: [u8; REMOTE_REPLY_BYTES],
     pub reply_length: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RemoteAuditPhase {
+    Started = 1,
+    Completed,
+    Denied,
+    Indeterminate,
+}
+
+impl RemoteAuditPhase {
+    fn from_wire(value: u8) -> Result<Self, Error> {
+        match value {
+            1 => Ok(Self::Started),
+            2 => Ok(Self::Completed),
+            3 => Ok(Self::Denied),
+            4 => Ok(Self::Indeterminate),
+            _ => Err(Error::Frame),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteAuditEvent {
+    pub sequence: u64,
+    pub enrollment_generation: u64,
+    pub session: [u8; SESSION_ID_LEN],
+    pub request_sequence: u64,
+    pub command: u8,
+    pub phase: RemoteAuditPhase,
+    pub outcome: u8,
+    pub tick: u64,
+    pub digest: [u8; REQUEST_DIGEST_LEN],
+}
+
+impl RemoteAuditEvent {
+    fn encode(self, output: &mut [u8; REMOTE_AUDIT_EVENT_BYTES]) {
+        *output = [0; REMOTE_AUDIT_EVENT_BYTES];
+        output[0..8].copy_from_slice(&self.sequence.to_be_bytes());
+        output[8..16].copy_from_slice(&self.enrollment_generation.to_be_bytes());
+        output[16..32].copy_from_slice(&self.session);
+        output[32..40].copy_from_slice(&self.request_sequence.to_be_bytes());
+        output[40] = self.command;
+        output[41] = self.phase as u8;
+        output[42] = self.outcome;
+        output[48..56].copy_from_slice(&self.tick.to_be_bytes());
+        output[56..88].copy_from_slice(&self.digest);
+    }
+
+    fn decode(input: &[u8]) -> Result<Self, Error> {
+        if input.len() != REMOTE_AUDIT_EVENT_BYTES {
+            return Err(Error::Frame);
+        }
+        let mut session = [0; SESSION_ID_LEN];
+        session.copy_from_slice(&input[16..32]);
+        let mut digest = [0; REQUEST_DIGEST_LEN];
+        digest.copy_from_slice(&input[56..88]);
+        Ok(Self {
+            sequence: u64::from_be_bytes(input[0..8].try_into().map_err(|_| Error::Frame)?),
+            enrollment_generation: u64::from_be_bytes(
+                input[8..16].try_into().map_err(|_| Error::Frame)?,
+            ),
+            session,
+            request_sequence: u64::from_be_bytes(
+                input[32..40].try_into().map_err(|_| Error::Frame)?,
+            ),
+            command: input[40],
+            phase: RemoteAuditPhase::from_wire(input[41])?,
+            outcome: input[42],
+            tick: u64::from_be_bytes(input[48..56].try_into().map_err(|_| Error::Frame)?),
+            digest,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteControlRecord {
+    pub session: SessionRecord,
+    pub audit_length: u8,
+    pub audit_next: u64,
+    pub audit: [RemoteAuditEvent; REMOTE_AUDIT_EVENTS],
+}
+
+impl RemoteControlRecord {
+    pub const fn empty() -> Self {
+        Self {
+            session: SessionRecord {
+                enrollment_generation: 0,
+                session: [0; SESSION_ID_LEN],
+                sequence: 0,
+                pending: false,
+                digest: [0; REQUEST_DIGEST_LEN],
+                reply: [0; REMOTE_REPLY_BYTES],
+                reply_length: 0,
+            },
+            audit_length: 0,
+            audit_next: 1,
+            audit: [RemoteAuditEvent {
+                sequence: 0,
+                enrollment_generation: 0,
+                session: [0; SESSION_ID_LEN],
+                request_sequence: 0,
+                command: 0,
+                phase: RemoteAuditPhase::Started,
+                outcome: 0,
+                tick: 0,
+                digest: [0; REQUEST_DIGEST_LEN],
+            }; REMOTE_AUDIT_EVENTS],
+        }
+    }
+
+    pub fn append(&mut self, mut event: RemoteAuditEvent) -> u64 {
+        let index = (self.audit_next as usize - 1) % REMOTE_AUDIT_EVENTS;
+        event.sequence = self.audit_next;
+        self.audit[index] = event;
+        self.audit_next = self.audit_next.wrapping_add(1).max(1);
+        self.audit_length = self.audit_length.saturating_add(1).min(REMOTE_AUDIT_EVENTS as u8);
+        event.sequence
+    }
+
+    pub fn encode(self, output: &mut [u8; REMOTE_CONTROL_RECORD_BYTES]) -> Result<(), Error> {
+        if usize::from(self.audit_length) > REMOTE_AUDIT_EVENTS {
+            return Err(Error::Frame);
+        }
+        *output = [0; REMOTE_CONTROL_RECORD_BYTES];
+        output[0] = 1;
+        output[1] = self.audit_length;
+        output[8..16].copy_from_slice(&self.audit_next.to_be_bytes());
+        let mut session = [0; SESSION_RECORD_BYTES];
+        self.session.encode(&mut session)?;
+        output[16..16 + SESSION_RECORD_BYTES].copy_from_slice(&session);
+        for (index, event) in self.audit.iter().copied().enumerate() {
+            let mut bytes = [0; REMOTE_AUDIT_EVENT_BYTES];
+            event.encode(&mut bytes);
+            let start = 16 + SESSION_RECORD_BYTES + index * REMOTE_AUDIT_EVENT_BYTES;
+            output[start..start + REMOTE_AUDIT_EVENT_BYTES].copy_from_slice(&bytes);
+        }
+        Ok(())
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, Error> {
+        if input.len() != REMOTE_CONTROL_RECORD_BYTES
+            || input[0] != 1
+            || usize::from(input[1]) > REMOTE_AUDIT_EVENTS
+        {
+            return Err(Error::Frame);
+        }
+        let mut session_bytes = [0; SESSION_RECORD_BYTES];
+        session_bytes.copy_from_slice(&input[16..16 + SESSION_RECORD_BYTES]);
+        let mut audit = [RemoteControlRecord::empty().audit[0]; REMOTE_AUDIT_EVENTS];
+        for (index, event) in audit.iter_mut().enumerate() {
+            let start = 16 + SESSION_RECORD_BYTES + index * REMOTE_AUDIT_EVENT_BYTES;
+            *event = RemoteAuditEvent::decode(&input[start..start + REMOTE_AUDIT_EVENT_BYTES])?;
+        }
+        Ok(Self {
+            session: SessionRecord::decode(&session_bytes)?,
+            audit_length: input[1],
+            audit_next: u64::from_be_bytes(input[8..16].try_into().map_err(|_| Error::Frame)?),
+            audit,
+        })
+    }
+
+    pub fn seal_blob(
+        self,
+        storage_key: &[u8; 32],
+        nonce: &[u8; PROTECTED_NONCE_BYTES],
+        output: &mut [u8; REMOTE_CONTROL_BLOB_BYTES],
+    ) -> Result<(), Error> {
+        output[..PROTECTED_NONCE_BYTES].copy_from_slice(nonce);
+        let ciphertext = &mut output[PROTECTED_NONCE_BYTES..];
+        let mut record = [0; REMOTE_CONTROL_RECORD_BYTES];
+        self.encode(&mut record)?;
+        ciphertext[..REMOTE_CONTROL_RECORD_BYTES].copy_from_slice(&record);
+        seal(storage_key, nonce, REMOTE_CONTROL_AD, ciphertext, REMOTE_CONTROL_RECORD_BYTES)?;
+        Ok(())
+    }
+
+    pub fn open_blob(
+        storage_key: &[u8; 32],
+        input: &mut [u8; REMOTE_CONTROL_BLOB_BYTES],
+    ) -> Result<Self, Error> {
+        let mut nonce = [0; PROTECTED_NONCE_BYTES];
+        nonce.copy_from_slice(&input[..PROTECTED_NONCE_BYTES]);
+        let ciphertext = &mut input[PROTECTED_NONCE_BYTES..];
+        let length = open(
+            storage_key,
+            &nonce,
+            REMOTE_CONTROL_AD,
+            ciphertext,
+            REMOTE_CONTROL_RECORD_BYTES + PROTECTED_TAG_BYTES,
+        )?;
+        Self::decode(&ciphertext[..length])
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1048,6 +1249,49 @@ mod tests {
         assert_eq!(RemoteMessage::decode(&encoded[..length]), Err(Error::Frame));
         assert_eq!(RemoteCommand::from_name(b"poweroff"), Some(RemoteCommand::PowerOff));
         assert!(!RemoteCommand::PowerOff.takes_argument());
+    }
+
+    #[test]
+    fn control_record_atomically_carries_replay_and_audit() {
+        let mut record = RemoteControlRecord::empty();
+        record.session = SessionRecord {
+            enrollment_generation: 2,
+            session: [1; SESSION_ID_LEN],
+            sequence: 3,
+            pending: true,
+            digest: [4; REQUEST_DIGEST_LEN],
+            reply: [5; REMOTE_REPLY_BYTES],
+            reply_length: 6,
+        };
+        let sequence = record.append(RemoteAuditEvent {
+            sequence: 0,
+            enrollment_generation: 2,
+            session: [1; SESSION_ID_LEN],
+            request_sequence: 3,
+            command: RemoteCommand::Ping as u8,
+            phase: RemoteAuditPhase::Started,
+            outcome: 0,
+            tick: 9,
+            digest: [4; REQUEST_DIGEST_LEN],
+        });
+        assert_eq!(sequence, 1);
+        let mut bytes = [0; REMOTE_CONTROL_RECORD_BYTES];
+        record.encode(&mut bytes).unwrap();
+        assert_eq!(RemoteControlRecord::decode(&bytes), Ok(record));
+        for _ in 0..REMOTE_AUDIT_EVENTS + 2 {
+            record.append(RemoteAuditEvent {
+                sequence: 0,
+                enrollment_generation: 2,
+                session: [1; SESSION_ID_LEN],
+                request_sequence: 3,
+                command: RemoteCommand::Ping as u8,
+                phase: RemoteAuditPhase::Completed,
+                outcome: 1,
+                tick: 10,
+                digest: [4; REQUEST_DIGEST_LEN],
+            });
+        }
+        assert_eq!(record.audit_length as usize, REMOTE_AUDIT_EVENTS);
     }
 
     #[test]
