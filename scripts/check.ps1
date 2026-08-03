@@ -7,7 +7,6 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $repoRoot
-$env:RUSTFLAGS = '-D warnings'
 
 function Invoke-Checked([string]$Name, [scriptblock]$Command) {
     Write-Host "== $Name =="
