@@ -237,6 +237,7 @@ impl RemoteRequest {
             || self.command_length as usize > MAX_COMMAND
             || self.session.iter().all(|byte| *byte == 0)
             || self.sequence == 0
+            || self.command[self.command_length as usize..].iter().any(|byte| *byte != 0)
         {
             return Err(Error::Frame);
         }
@@ -302,6 +303,7 @@ impl RemoteReply {
         if self.version != PROTOCOL_VERSION
             || self.sequence == 0
             || self.payload_length as usize > MAX_COMMAND
+            || self.payload[self.payload_length as usize..].iter().any(|byte| *byte != 0)
         {
             return Err(Error::Frame);
         }
