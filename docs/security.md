@@ -35,6 +35,17 @@ generation, interface generation, lengths, and source metadata match the outstan
 bounce buffers prevent the Network service from programming DMA, but IOMMU protection from a malicious
 physical device remains deferred.
 
+## Remote Foundation
+
+Remote Foundation accepts one client static X25519 key only after a local enrollment effect. The
+Gateway uses Noise IK with the machine static key held by the System trust owner; it receives no
+long-term key material and receives only a `Service` capability for `ping`. TCP authority is scoped
+to local port 7443, while accepted stream handles are owner- and generation-bound. Enrollment and
+remote-session records are separately derived-key, authenticated-encrypted Store objects. A failed
+authentication, malformed Noise message, stale sequence, or protected-record failure denies remote
+work before Session dispatch; corruption disables remote access rather than falling back. A pending
+durable command is never replayed after reset.
+
 ## Native-service fault containment
 
 Ring-3 CPU faults and typed service panics return to Core with a normalized failure record. Core

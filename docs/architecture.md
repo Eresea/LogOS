@@ -510,6 +510,16 @@ remote client
     <-> shell / command registry
 ```
 
+### Remote Foundation v1
+
+The Gateway is an optional Ring-3 payload. It owns one bounded TCP attachment and relays only
+authenticated typed requests to Sessions. System trust policy derives the machine static key and
+protected-store key from the UEFI root, completes Noise IK, and never maps long-term key material
+into Gateway. Sessions owns the durable sequence journal: it writes `Pending` before a remote
+effect and `Complete` before the reply, replaying only the exact completed request after reconnect.
+Network owns TCP state; Core continues to own NIC DMA and validates every Gateway page, capability,
+generation, deadline, and relay transition. See ADR-0018.
+
 ## Component responsibilities
 
 | Component | Responsibility |
@@ -640,6 +650,11 @@ flush, commit sector, and final flush complete. Recovery ignores incomplete or c
 Compaction copies live current/previous versions to the inactive arena before switching the
 superblock generation. See [ADR-0013](adr/0013-persistence-v1-boundary.md).
 
+Remote Foundation adds a protected namespace over the same Store contract. The trust owner seals
+the enrollment and remote-session objects before Store replacement and opens them only after
+authenticated readback. Authentication failure is degraded remote state, never permission to use a
+previous version.
+
 A file view may provide:
 
 - paths;
@@ -678,6 +693,11 @@ Policy is separated from mechanism:
 - firewall: allow/deny policy;
 - identity/trust: peer authentication;
 - session gateway: remote LogOS protocol.
+
+Remote Foundation adds only passive, bounded TCP to the Network service: one listener, one accepted
+stream, fixed buffers, finite retransmission, and no DNS or outbound connect. Gateway receives
+capabilities scoped to its exact local TCP port; the authenticated stream handle remains owner- and
+generation-bound.
 
 ## 12.1 Inference model
 

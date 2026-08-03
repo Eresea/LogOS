@@ -92,7 +92,7 @@ A name becomes **Reserved** when:
 | `session.commands`      | **Commands**         |    3 | Working   | Command descriptors, discovery, schemas, invocation, and typed results        |
 | `session.shell`         | **Shell**            |    3 | Working   | Syntax, variables, pipelines, jobs, cancellation, and automation              |
 | `session.terminal`      | **Slate**            |    3 | Working   | Terminal model, cursor, editing, scrollback, selection, and rendering         |
-| `session.remote`        | **Gateway**          |    3 | Candidate | Authenticated remote transport, multiplexing, resume, and client bridging     |
+| `session.remote`        | **Gateway**          |    3 | Working   | Authenticated remote transport, multiplexing, resume, and client bridging     |
 | `runtime.wasm`          | **WASM Runtime**     |    4 | Working   | WASM validation, instantiation, host interfaces, quotas, and lifecycle        |
 | `runtime.package`       | **Packages**         |    4 | Working   | Signed application bundles, manifests, dependencies, and versions             |
 | `runtime.app`           | **Application**      |    4 | Working   | Sandboxed executable identity and owned resources                             |
@@ -214,7 +214,7 @@ Current preference: **Slate** as the short name; canonical namespace remains `se
 - `Portal`
 - `Remote`
 
-Current preference: **Gateway**, pending protocol design.
+Current preference: **Gateway**. The bounded Remote Foundation v1 contract is accepted in ADR-0018.
 
 ## 6. Reserved vocabulary
 

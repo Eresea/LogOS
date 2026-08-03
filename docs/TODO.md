@@ -10,9 +10,10 @@
 - [x] Platform bootstrap code provides static manifests, lifecycle policy, capability grants, identities, time, entropy, secrets, audit, and driver binding.
 - [x] The kernel-owned recovery console remains a direct, independent fallback.
 
-## 2. Current milestone: Network v1
+## 2. Current milestone: Remote Foundation v1
 
-Persistence v1 is complete. The next execution boundary is Network v1; persistence proofs and scope live in [PERSISTENCE.md](PERSISTENCE.md):
+Network v1 is complete. Remote Foundation v1 is tracked in [REMOTE.md](REMOTE.md) and composes the
+smallest Network v2, Platform v2, Persistence v2, and Sessions v2 slices.
 
 1. [x] Define the minimal versioned Input, Display, and Session capability contracts required by `logos-terminal`.
 2. [x] Replace the bounded Core context gate with those contracts without granting raw framebuffer or PS/2 access.

@@ -1,10 +1,37 @@
 # Remote
 
-> **Status:** Remote v1 planned
+> **Status:** Remote Foundation v1 in progress
 
 ## Goal
 
 Make remote operation the first complete LogOS user experience. SSH may be supported, but the native architecture uses the structured session and command contracts.
+
+## Foundation v1
+
+This is the capability-6 slice, not Remote v1 administration. It proves one locally enrolled
+client can reconnect and invoke the existing typed `ping` command.
+
+### Fixed decisions
+
+- Use `Noise_IK_25519_ChaChaPoly_SHA256`, one X25519 client key, guest TCP port 7443, one
+  connection, one request, and 1024-byte framed transport messages.
+- `remote-key`, `enroll <64-hex-key>`, and `unenroll` are local-only commands. Enrollment and
+  replay state are encrypted in the protected Store namespace.
+- A completed request is replayed after reconnect or reset. A journalled-but-incomplete request is
+  `Indeterminate` and is not executed again.
+- Only `ping` receives remote authority. Missing entropy, root key, Store, Network, Sessions, or
+  Gateway leaves local operation available and remote unavailable.
+
+### Exit proofs
+
+- `network/tcp-stream`
+- `remote/enrollment-persistence`
+- `remote/auth-denied`
+- `remote/typed-invoke`
+- `remote/reconnect-replay`
+- `remote/pending-after-reset`
+- `remote/gateway-restart`
+- `remote/protected-state-corrupt`
 
 ## V1 scope
 

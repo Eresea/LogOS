@@ -57,3 +57,12 @@ failure is reported as a degraded Store status and never silently reformatted. T
 console remains available for those statuses, and an incomplete committed tail is recovered using
 the last valid superblock. Store restart cancels in-flight Block work, reclaims its pages, and
 repeats this startup handshake before service traffic resumes.
+
+## Remote Foundation ordering and recovery
+
+After Store recovery, the trust owner opens the protected enrollment and session records. It starts
+the optional Gateway only after Sessions and Network are available; Gateway waits for DHCP and does
+not delay local boot. Missing entropy, root key, enrollment, Store, Sessions, Network, or Gateway
+leaves remote explicitly unavailable while Terminal and recovery remain usable. Gateway, Network,
+or link restart requires a fresh authenticated attachment; Sessions replays only a completed
+sequence record and reports an incomplete journal entry as `Indeterminate`.
