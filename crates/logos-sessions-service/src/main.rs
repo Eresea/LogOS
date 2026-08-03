@@ -68,6 +68,7 @@ fn dispatch(syscall: Syscall) -> Effect {
         Syscall::RemoteKey => Effect::RemoteKey,
         Syscall::Enroll => Effect::Enroll,
         Syscall::Unenroll => Effect::Unenroll,
+        Syscall::Health => Effect::ReadHealth,
     }
 }
 
@@ -85,6 +86,7 @@ fn format(request: &SessionRequest, result: EffectResult) -> &[u8] {
             Syscall::Ping => b"ping unavailable",
             Syscall::Restart | Syscall::Cancel => b"unknown or unavailable service",
             Syscall::RemoteKey | Syscall::Enroll | Syscall::Unenroll => b"remote trust unavailable",
+            Syscall::Health => b"health unavailable",
             _ => b"unavailable",
         },
         EffectResult::Pong => b"pong",

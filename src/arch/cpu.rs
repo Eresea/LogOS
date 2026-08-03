@@ -311,6 +311,12 @@ extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
     {
         return 2;
     }
+    if context != 0
+        && unsafe { logos_core::native_service::Context::remote_gate_at(context) }.is_some()
+        && save_user_frame(frame, true, false)
+    {
+        return 2;
+    }
     0
 }
 

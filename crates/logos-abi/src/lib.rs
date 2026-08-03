@@ -820,6 +820,7 @@ pub enum Syscall {
     RemoteKey,
     Enroll,
     Unenroll,
+    Health,
 }
 
 impl Syscall {
@@ -839,6 +840,7 @@ impl Syscall {
             b"remote-key" => Some(Self::RemoteKey),
             b"enroll" => Some(Self::Enroll),
             b"unenroll" => Some(Self::Unenroll),
+            b"health" => Some(Self::Health),
             _ => None,
         }
     }
@@ -860,6 +862,7 @@ impl Syscall {
             13 => Some(Self::RemoteKey),
             14 => Some(Self::Enroll),
             15 => Some(Self::Unenroll),
+            16 => Some(Self::Health),
             _ => None,
         }
     }
@@ -891,6 +894,7 @@ pub enum Effect {
     RemoteKey,
     Enroll,
     Unenroll,
+    ReadHealth,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -933,6 +937,7 @@ impl Effect {
             13 => Some(Self::RemoteKey),
             14 => Some(Self::Enroll),
             15 => Some(Self::Unenroll),
+            16 => Some(Self::ReadHealth),
             _ => None,
         }
     }

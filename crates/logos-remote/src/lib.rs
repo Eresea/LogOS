@@ -12,7 +12,7 @@ pub const SESSION_ID_LEN: usize = 16;
 pub const REQUEST_DIGEST_LEN: usize = 32;
 pub const MAX_FRAME_BUFFER: usize = MAX_FRAME + 2;
 pub const ENROLLMENT_BYTES: usize = 42;
-pub const SESSION_RECORD_BYTES: usize = 68 + REMOTE_REPLY_BYTES;
+pub const SESSION_RECORD_BYTES: usize = 68 + MAX_FRAME;
 pub const PROTECTED_NONCE_BYTES: usize = 24;
 pub const PROTECTED_TAG_BYTES: usize = 16;
 pub const ENROLLMENT_BLOB_BYTES: usize =
@@ -29,6 +29,9 @@ pub const REMOTE_REPLY_BYTES: usize = 2 + 8 + 8 + 1 + 2 + MAX_COMMAND;
 pub const REMOTE_PROTOCOL_V2: u16 = 2;
 pub const REMOTE_MESSAGE_HEADER: usize = 30;
 pub const REMOTE_MESSAGE_PAYLOAD: usize = MAX_FRAME - REMOTE_MESSAGE_HEADER;
+pub const REMOTE_EVENT_CREDIT: u64 = 8;
+pub const REMOTE_SUBSCRIBE_TRACE: &[u8] = b"trace";
+pub const REMOTE_SUBSCRIBE_LOG: &[u8] = b"log";
 pub const REMOTE_INVOCATION_HEADER: usize = 3;
 pub const REMOTE_INVOCATION_ARGUMENT: usize = REMOTE_MESSAGE_PAYLOAD - REMOTE_INVOCATION_HEADER;
 pub const REMOTE_AUDIT_EVENTS: usize = 16;
@@ -230,7 +233,7 @@ pub struct SessionRecord {
     pub sequence: u64,
     pub pending: bool,
     pub digest: [u8; REQUEST_DIGEST_LEN],
-    pub reply: [u8; REMOTE_REPLY_BYTES],
+    pub reply: [u8; MAX_FRAME],
     pub reply_length: u16,
 }
 
@@ -325,7 +328,7 @@ impl RemoteControlRecord {
                 sequence: 0,
                 pending: false,
                 digest: [0; REQUEST_DIGEST_LEN],
-                reply: [0; REMOTE_REPLY_BYTES],
+                reply: [0; MAX_FRAME],
                 reply_length: 0,
             },
             audit_length: 0,
@@ -358,7 +361,7 @@ impl RemoteControlRecord {
             return Err(Error::Frame);
         }
         *output = [0; REMOTE_CONTROL_RECORD_BYTES];
-        output[0] = 1;
+        output[0] = 2;
         output[1] = self.audit_length;
         output[8..16].copy_from_slice(&self.audit_next.to_be_bytes());
         let mut session = [0; SESSION_RECORD_BYTES];
@@ -375,7 +378,7 @@ impl RemoteControlRecord {
 
     pub fn decode(input: &[u8]) -> Result<Self, Error> {
         if input.len() != REMOTE_CONTROL_RECORD_BYTES
-            || input[0] != 1
+            || input[0] != 2
             || usize::from(input[1]) > REMOTE_AUDIT_EVENTS
         {
             return Err(Error::Frame);
@@ -584,9 +587,39 @@ pub struct RemoteMessage {
 }
 
 impl RemoteMessage {
+    pub fn valid(self) -> bool {
+        let length = usize::from(self.payload_length);
+        if self.id == 0 || length > self.payload.len() {
+            return false;
+        }
+        let payload = &self.payload[..length];
+        match self.kind {
+            RemoteMessageKind::Invoke => {
+                self.sequence != 0 && self.cursor == 0 && RemoteInvocation::decode(payload).is_ok()
+            }
+            RemoteMessageKind::Subscribe => {
+                self.sequence == 0
+                    && matches!(payload, REMOTE_SUBSCRIBE_TRACE | REMOTE_SUBSCRIBE_LOG)
+            }
+            RemoteMessageKind::Credit => {
+                self.sequence == 0
+                    && payload.is_empty()
+                    && (1..=REMOTE_EVENT_CREDIT).contains(&self.cursor)
+            }
+            RemoteMessageKind::Cancel => {
+                self.sequence == 0 && self.cursor == 0 && payload.is_empty()
+            }
+            RemoteMessageKind::Reply => self.sequence != 0 && self.cursor == 0,
+            RemoteMessageKind::Event => {
+                self.sequence == 0 && self.cursor != 0 && !payload.is_empty()
+            }
+            RemoteMessageKind::Error => self.cursor == 0 && !payload.is_empty(),
+        }
+    }
+
     pub fn encode(self, output: &mut [u8; MAX_FRAME]) -> Result<usize, Error> {
         let length = usize::from(self.payload_length);
-        if length > REMOTE_MESSAGE_PAYLOAD {
+        if length > REMOTE_MESSAGE_PAYLOAD || !self.valid() {
             return Err(Error::Frame);
         }
         let body = REMOTE_MESSAGE_HEADER.checked_add(length).ok_or(Error::Frame)?;
@@ -623,14 +656,15 @@ impl RemoteMessage {
         }
         let mut payload = [0; REMOTE_MESSAGE_PAYLOAD];
         payload[..payload_length].copy_from_slice(&input[REMOTE_MESSAGE_HEADER..]);
-        Ok(Self {
+        let message = Self {
             kind: RemoteMessageKind::from_wire(input[2])?,
             id: u64::from_be_bytes(input[4..12].try_into().map_err(|_| Error::Frame)?),
             sequence: u64::from_be_bytes(input[12..20].try_into().map_err(|_| Error::Frame)?),
             cursor: u64::from_be_bytes(input[20..28].try_into().map_err(|_| Error::Frame)?),
             payload,
             payload_length: payload_length as u16,
-        })
+        };
+        message.valid().then_some(message).ok_or(Error::Frame)
     }
 
     pub fn digest(self) -> Result<[u8; REQUEST_DIGEST_LEN], Error> {
@@ -800,7 +834,7 @@ impl SessionRecord {
             return Err(Error::Frame);
         }
         *output = [0; SESSION_RECORD_BYTES];
-        output[0] = 1;
+        output[0] = 2;
         output[1..9].copy_from_slice(&self.enrollment_generation.to_be_bytes());
         output[9..25].copy_from_slice(&self.session);
         output[25..33].copy_from_slice(&self.sequence.to_be_bytes());
@@ -812,16 +846,16 @@ impl SessionRecord {
     }
 
     pub fn decode(input: &[u8]) -> Result<Self, Error> {
-        if input.len() != SESSION_RECORD_BYTES || input[0] != 1 || input[33] > 1 {
+        if input.len() != SESSION_RECORD_BYTES || input[0] != 2 || input[33] > 1 {
             return Err(Error::Frame);
         }
         let reply_length = u16::from_be_bytes(input[66..68].try_into().map_err(|_| Error::Frame)?);
-        if reply_length as usize > REMOTE_REPLY_BYTES {
+        if reply_length as usize > MAX_FRAME {
             return Err(Error::Frame);
         }
         let mut session = [0; SESSION_ID_LEN];
         let mut digest = [0; REQUEST_DIGEST_LEN];
-        let mut reply = [0; REMOTE_REPLY_BYTES];
+        let mut reply = [0; MAX_FRAME];
         session.copy_from_slice(&input[9..25]);
         digest.copy_from_slice(&input[34..66]);
         reply.copy_from_slice(&input[68..]);
@@ -1396,14 +1430,15 @@ mod tests {
     #[test]
     fn protocol_v2_messages_are_bounded_and_canonical() {
         let mut payload = [0; REMOTE_MESSAGE_PAYLOAD];
-        payload[..6].copy_from_slice(b"trace\0");
+        let invocation = RemoteInvocation::new(RemoteCommand::Inspect, b"tasks").unwrap();
+        let invocation_length = invocation.encode(&mut payload).unwrap();
         let message = RemoteMessage {
             kind: RemoteMessageKind::Invoke,
             id: 7,
             sequence: 3,
-            cursor: 11,
+            cursor: 0,
             payload,
-            payload_length: 6,
+            payload_length: invocation_length as u16,
         };
         let mut encoded = [0; MAX_FRAME];
         let length = message.encode(&mut encoded).unwrap();
@@ -1412,7 +1447,6 @@ mod tests {
         assert_eq!(RemoteMessage::decode(&encoded[..length]), Err(Error::Frame));
         assert_eq!(RemoteCommand::from_name(b"poweroff"), Some(RemoteCommand::PowerOff));
         assert!(!RemoteCommand::PowerOff.takes_argument());
-        let invocation = RemoteInvocation::new(RemoteCommand::Inspect, b"tasks").unwrap();
         let mut invocation_payload = [0; REMOTE_MESSAGE_PAYLOAD];
         let invocation_length = invocation.encode(&mut invocation_payload).unwrap();
         assert_eq!(
@@ -1425,6 +1459,19 @@ mod tests {
         digest_message.payload = invocation_payload;
         digest_message.payload_length = invocation_length as u16;
         assert_ne!(digest_message.digest().unwrap(), [0; REQUEST_DIGEST_LEN]);
+        let mut subscription = RemoteMessage {
+            kind: RemoteMessageKind::Subscribe,
+            id: 7,
+            sequence: 0,
+            cursor: 11,
+            payload: [0; REMOTE_MESSAGE_PAYLOAD],
+            payload_length: REMOTE_SUBSCRIBE_TRACE.len() as u16,
+        };
+        subscription.payload[..REMOTE_SUBSCRIBE_TRACE.len()]
+            .copy_from_slice(REMOTE_SUBSCRIBE_TRACE);
+        assert!(subscription.encode(&mut encoded).is_ok());
+        subscription.sequence = 1;
+        assert_eq!(subscription.encode(&mut encoded), Err(Error::Frame));
     }
 
     #[test]
@@ -1436,7 +1483,7 @@ mod tests {
             sequence: 3,
             pending: true,
             digest: [4; REQUEST_DIGEST_LEN],
-            reply: [5; REMOTE_REPLY_BYTES],
+            reply: [5; MAX_FRAME],
             reply_length: 6,
         };
         let sequence = record.append(RemoteAuditEvent {
@@ -1516,7 +1563,7 @@ mod tests {
             sequence: 1,
             pending: false,
             digest: [2; REQUEST_DIGEST_LEN],
-            reply: [3; REMOTE_REPLY_BYTES],
+            reply: [3; MAX_FRAME],
             reply_length: 2,
         };
         let mut blob = [0; SESSION_BLOB_BYTES];
@@ -1552,7 +1599,7 @@ mod tests {
             sequence: 7,
             pending: true,
             digest: [6; REQUEST_DIGEST_LEN],
-            reply: [8; REMOTE_REPLY_BYTES],
+            reply: [8; MAX_FRAME],
             reply_length: 4,
         };
         let mut record_bytes = [0; SESSION_RECORD_BYTES];

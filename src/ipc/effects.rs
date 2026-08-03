@@ -57,6 +57,13 @@ pub fn execute(request: EffectRequest, context: Context<'_, '_>) -> EffectResult
                 EffectResult::ServiceOverdue
             }
         }
+        Effect::ReadHealth => {
+            if context.service_healthy {
+                EffectResult::ServiceRunning
+            } else {
+                EffectResult::ServiceOverdue
+            }
+        }
         Effect::ReadDrivers => EffectResult::DriverBound,
         Effect::ReadTrace => trace_result(trace::latest()),
         Effect::InspectResource => EffectResult::Inspected,
