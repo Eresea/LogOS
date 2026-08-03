@@ -281,6 +281,24 @@ impl Context {
         unsafe { RawContext::network_event_at(self.raw_address()) }
     }
 
+    pub fn remote_gate_request(&self) -> Option<native_service::RemoteGateRequest> {
+        unsafe { RawContext::remote_gate_at(self.raw_address()) }
+    }
+
+    pub fn remote_gate_reply(&self, expected_id: u32) -> Option<native_service::RemoteGateReply> {
+        unsafe { RawContext::remote_gate_reply_at(self.raw_address(), expected_id) }
+    }
+
+    pub fn request_remote_gate(&mut self, request: native_service::RemoteGateRequest) -> bool {
+        (unsafe { RawContext::request_remote_gate_at(self.raw_address(), request) })
+            && self.invoke(native_service::REMOTE_GATE)
+    }
+
+    pub fn reply_remote_gate(&mut self, reply: native_service::RemoteGateReply) -> bool {
+        (unsafe { RawContext::reply_remote_gate_at(self.raw_address(), reply) })
+            && self.invoke(native_service::REMOTE_GATE)
+    }
+
     pub fn storage_status(&self) -> Option<u32> {
         unsafe { RawContext::storage_status_at(self.raw_address()) }
     }

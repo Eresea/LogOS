@@ -64,6 +64,22 @@ pub enum RemoteGateOperation {
     Reset,
 }
 
+impl RemoteGateOperation {
+    fn from_wire(value: u32) -> Option<Self> {
+        Some(match value {
+            1 => Self::Handshake,
+            2 => Self::Open,
+            3 => Self::Invoke,
+            4 => Self::Seal,
+            5 => Self::Subscribe,
+            6 => Self::Credit,
+            7 => Self::Acknowledge,
+            8 => Self::Reset,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum RemoteGateStatus {
@@ -73,6 +89,20 @@ pub enum RemoteGateStatus {
     Invalid,
     Unavailable,
     Indeterminate,
+}
+
+impl RemoteGateStatus {
+    fn from_wire(value: u32) -> Option<Self> {
+        Some(match value {
+            1 => Self::Complete,
+            2 => Self::Busy,
+            3 => Self::Denied,
+            4 => Self::Invalid,
+            5 => Self::Unavailable,
+            6 => Self::Indeterminate,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,6 +156,8 @@ const NETWORK_REPLY_BYTES: usize = 148;
 const NETWORK_DEVICE_REQUEST_BYTES: usize = 18;
 const NETWORK_DEVICE_REPLY_BYTES: usize = 34;
 const NETWORK_EVENT_BYTES: usize = 18;
+const REMOTE_GATE_REQUEST_BYTES: usize = 24;
+const REMOTE_GATE_REPLY_BYTES: usize = 20;
 
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?))
@@ -147,6 +179,44 @@ fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
 
 fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
     Some(u16::from_le_bytes(bytes.get(offset..offset + 2)?.try_into().ok()?))
+}
+
+fn decode_remote_gate_request(bytes: &[u8]) -> Option<RemoteGateRequest> {
+    (bytes.len() >= REMOTE_GATE_REQUEST_BYTES && bytes[14..16] == [0; 2]).then_some(())?;
+    Some(RemoteGateRequest {
+        id: read_u32(bytes, 0)?,
+        operation: RemoteGateOperation::from_wire(read_u32(bytes, 4)?)?,
+        page: logos_abi::PageHandle(read_u32(bytes, 8)?),
+        length: read_u16(bytes, 12)?,
+        deadline: read_u64(bytes, 16)?,
+    })
+}
+
+fn encode_remote_gate_request(bytes: &mut [u8; MAX_TEXT], request: RemoteGateRequest) {
+    *bytes = [0; MAX_TEXT];
+    write_u32(bytes, 0, request.id);
+    write_u32(bytes, 4, request.operation as u32);
+    write_u32(bytes, 8, request.page.0);
+    write_u16(bytes, 12, request.length);
+    write_u64(bytes, 16, request.deadline);
+}
+
+fn decode_remote_gate_reply(bytes: &[u8]) -> Option<RemoteGateReply> {
+    (bytes.len() >= REMOTE_GATE_REPLY_BYTES && bytes[10..12] == [0; 2]).then_some(())?;
+    Some(RemoteGateReply {
+        id: read_u32(bytes, 0)?,
+        status: RemoteGateStatus::from_wire(read_u32(bytes, 4)?)?,
+        length: read_u16(bytes, 8)?,
+        cursor: read_u64(bytes, 12)?,
+    })
+}
+
+fn encode_remote_gate_reply(bytes: &mut [u8; MAX_TEXT], reply: RemoteGateReply) {
+    *bytes = [0; MAX_TEXT];
+    write_u32(bytes, 0, reply.id);
+    write_u32(bytes, 4, reply.status as u32);
+    write_u16(bytes, 8, reply.length);
+    write_u64(bytes, 12, reply.cursor);
 }
 
 fn decode_block_request(bytes: &[u8]) -> Option<logos_abi::BlockRequest> {
@@ -515,6 +585,84 @@ impl Context {
             && context.reserved == 0
             && context.operation == READ_INPUT
             && context.status == ACKNOWLEDGED
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by Core.
+    pub unsafe fn request_remote_gate_at(address: u64, request: RemoteGateRequest) -> bool {
+        if request.length as usize > MAX_TEXT {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.status != ACKNOWLEDGED
+            || !matches!(context.operation, READY | READ_INPUT | REMOTE_GATE)
+        {
+            return false;
+        }
+        encode_remote_gate_request(&mut context.text, request);
+        context.text_length = REMOTE_GATE_REQUEST_BYTES as u32;
+        context.operation = REMOTE_GATE;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping owned by Core.
+    pub unsafe fn deliver_remote_gate_at(address: u64, request: RemoteGateRequest) -> bool {
+        if !unsafe { Self::request_remote_gate_at(address, request) } {
+            return false;
+        }
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn remote_gate_at(address: u64) -> Option<RemoteGateRequest> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != REMOTE_GATE
+            || context.status != ACKNOWLEDGED
+            || context.text_length != REMOTE_GATE_REQUEST_BYTES as u32
+        {
+            return None;
+        }
+        let request = decode_remote_gate_request(&context.text)?;
+        (request.length as usize <= MAX_TEXT).then_some(request)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned Context mapping owned by the service.
+    pub unsafe fn reply_remote_gate_at(address: u64, reply: RemoteGateReply) -> bool {
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        let valid = unsafe { Self::remote_gate_at(address) }
+            .is_some_and(|request| request.id == reply.id && reply.length as usize <= MAX_TEXT);
+        if !valid {
+            return false;
+        }
+        encode_remote_gate_reply(&mut context.text, reply);
+        context.text_length = REMOTE_GATE_REPLY_BYTES as u32;
+        context.operation = REMOTE_GATE;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn remote_gate_reply_at(address: u64, expected_id: u32) -> Option<RemoteGateReply> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != REMOTE_GATE
+            || context.status != ACKNOWLEDGED
+            || context.text_length != REMOTE_GATE_REPLY_BYTES as u32
+        {
+            return None;
+        }
+        let reply = decode_remote_gate_reply(&context.text)?;
+        (reply.id == expected_id).then_some(reply)
     }
 
     /// # Safety
@@ -1655,6 +1803,32 @@ mod tests {
         assert!(unsafe { Context::reply_block_at(address, block_reply) });
         assert!(unsafe { Context::block_reply_at(address, 10) }.is_none());
         assert_eq!(unsafe { Context::block_reply_at(address, 9) }, Some(block_reply));
+    }
+
+    #[test]
+    fn remote_gate_request_and_reply_round_trip() {
+        let mut context = Context::new();
+        context.operation = READ_INPUT;
+        context.status = ACKNOWLEDGED;
+        let address = (&mut context as *mut Context) as u64;
+        let request = RemoteGateRequest {
+            id: 3,
+            operation: RemoteGateOperation::Invoke,
+            page: logos_abi::PageHandle(8),
+            length: 42,
+            deadline: 99,
+        };
+        assert!(unsafe { Context::request_remote_gate_at(address, request) });
+        assert_eq!(unsafe { Context::remote_gate_at(address) }, Some(request));
+        let reply = RemoteGateReply {
+            id: request.id,
+            status: RemoteGateStatus::Complete,
+            length: 7,
+            cursor: 11,
+        };
+        assert!(unsafe { Context::reply_remote_gate_at(address, reply) });
+        assert_eq!(unsafe { Context::remote_gate_reply_at(address, request.id) }, Some(reply));
+        assert!(unsafe { Context::remote_gate_reply_at(address, request.id + 1) }.is_none());
     }
 
     #[test]
