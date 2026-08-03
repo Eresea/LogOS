@@ -659,9 +659,9 @@ pub(crate) fn main(
             .then(|| native_task::Task::load(&mut memory, payload, &privilege))
             .flatten()
     });
-    // Gateway staging is part of the payload contract; its task wiring follows the
-    // typed remote gate integration.
+    // Gateway remains optional until its Core gate relay is wired.
     let _gateway_payload = payloads.gateway;
+    let _ = native_services.missing(supervisor::NativeService::Gateway);
     if let Some(storage) = native_storage.as_mut() {
         check!(b"storage heap", storage.map_heap(&mut memory).is_some());
     }

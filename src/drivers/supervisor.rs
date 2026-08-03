@@ -1,7 +1,7 @@
 use crate::debug;
 use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
-const MAX_MANIFESTS: usize = 7;
+const MAX_MANIFESTS: usize = 8;
 
 pub const SUPERVISOR: &[u8] = b"supervisor";
 pub const VIRTIO_BALLOON: &[u8] = b"virtio-balloon";
@@ -10,6 +10,7 @@ pub const STORAGE: &[u8] = b"storage";
 pub const TERMINAL: &[u8] = b"terminal";
 pub const SESSIONS: &[u8] = b"sessions";
 pub const NETWORK: &[u8] = b"network";
+pub const GATEWAY: &[u8] = b"gateway";
 
 #[derive(Clone, Copy)]
 pub enum Profile {
@@ -171,6 +172,20 @@ const NETWORK_MANIFEST: Manifest = Manifest {
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
 };
+const GATEWAY_MANIFEST: Manifest = Manifest {
+    name: GATEWAY,
+    dependencies: &[STORAGE, SESSIONS, NETWORK],
+    capabilities: &[
+        CapabilityKind::Service,
+        CapabilityKind::NetworkBind,
+        CapabilityKind::NetworkSend,
+        CapabilityKind::NetworkReceive,
+    ],
+    protocol: Protocol { abi: 1, version: 0 },
+    restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
+    recovery: RecoveryClass::Restartable,
+    profiles: Profiles::NORMAL_ONLY,
+};
 const BOOT_MANIFESTS: &[Manifest] = &[
     SUPERVISOR_MANIFEST,
     VIRTIO_MANIFEST,
@@ -179,6 +194,7 @@ const BOOT_MANIFESTS: &[Manifest] = &[
     TERMINAL_MANIFEST,
     SESSIONS_MANIFEST,
     NETWORK_MANIFEST,
+    GATEWAY_MANIFEST,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -409,6 +425,7 @@ pub enum NativeService {
     Sessions,
     Store,
     Network,
+    Gateway,
 }
 
 impl NativeService {
@@ -440,7 +457,7 @@ struct NativeSlot {
 }
 
 pub struct NativeController {
-    slots: [NativeSlot; 4],
+    slots: [NativeSlot; 5],
 }
 
 impl NativeController {
@@ -453,7 +470,9 @@ impl NativeController {
             NativeSlot { lifecycle: Lifecycle::new(plan, STORAGE)?, state: NativeState::Starting };
         let network =
             NativeSlot { lifecycle: Lifecycle::new(plan, NETWORK)?, state: NativeState::Starting };
-        Some(Self { slots: [terminal, sessions, store, network] })
+        let gateway =
+            NativeSlot { lifecycle: Lifecycle::new(plan, GATEWAY)?, state: NativeState::Starting };
+        Some(Self { slots: [terminal, sessions, store, network, gateway] })
     }
 
     pub fn missing(&mut self, service: NativeService) -> FailureAction {
