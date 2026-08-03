@@ -23,6 +23,7 @@ pub const NETWORK_WAIT: u32 = 16;
 pub const NETWORK_EVENT: u32 = 17;
 pub const NETWORK_DEVICE_REQUEST: u32 = 18;
 pub const NETWORK_DEVICE_REPLY: u32 = 19;
+pub const REMOTE_GATE: u32 = 20;
 pub const PANIC: u32 = 20;
 pub const ACKNOWLEDGED: u32 = 1;
 pub const STORAGE_FORMATTED: u32 = 1;
@@ -48,6 +49,49 @@ pub struct Context {
     pub shared_page: u32,
     pub network_rx_page: u32,
     pub network_tx_page: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RemoteGateOperation {
+    Handshake = 1,
+    Open,
+    Invoke,
+    Seal,
+    Subscribe,
+    Credit,
+    Acknowledge,
+    Reset,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RemoteGateStatus {
+    Complete = 1,
+    Busy,
+    Denied,
+    Invalid,
+    Unavailable,
+    Indeterminate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct RemoteGateRequest {
+    pub id: u32,
+    pub operation: RemoteGateOperation,
+    pub page: logos_abi::PageHandle,
+    pub length: u16,
+    pub deadline: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct RemoteGateReply {
+    pub id: u32,
+    pub status: RemoteGateStatus,
+    pub length: u16,
+    pub cursor: u64,
 }
 
 #[derive(Clone, Copy)]

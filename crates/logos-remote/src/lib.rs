@@ -24,6 +24,9 @@ pub const SESSION_AD: &[u8] = b"LogOS/trust/remote-session/v1";
 pub const MAX_COMMAND: usize = 256;
 pub const REMOTE_REQUEST_BYTES: usize = 2 + 8 + SESSION_ID_LEN + 8 + 2 + MAX_COMMAND;
 pub const REMOTE_REPLY_BYTES: usize = 2 + 8 + 8 + 1 + 2 + MAX_COMMAND;
+pub const REMOTE_PROTOCOL_V2: u16 = 2;
+pub const REMOTE_MESSAGE_HEADER: usize = 30;
+pub const REMOTE_MESSAGE_PAYLOAD: usize = MAX_FRAME - REMOTE_MESSAGE_HEADER;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -227,6 +230,133 @@ pub enum RemoteStatus {
     Denied,
     Indeterminate,
     Invalid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RemoteMessageKind {
+    Invoke = 1,
+    Subscribe,
+    Credit,
+    Cancel,
+    Reply,
+    Event,
+    Error,
+}
+
+impl RemoteMessageKind {
+    pub fn from_wire(value: u8) -> Result<Self, Error> {
+        match value {
+            1 => Ok(Self::Invoke),
+            2 => Ok(Self::Subscribe),
+            3 => Ok(Self::Credit),
+            4 => Ok(Self::Cancel),
+            5 => Ok(Self::Reply),
+            6 => Ok(Self::Event),
+            7 => Ok(Self::Error),
+            _ => Err(Error::Frame),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RemoteCommand {
+    Health = 1,
+    Ping,
+    Tasks,
+    Services,
+    Drivers,
+    Trace,
+    Inspect,
+    Restart,
+    Cancel,
+    Reboot,
+    PowerOff,
+}
+
+impl RemoteCommand {
+    pub fn from_name(name: &[u8]) -> Option<Self> {
+        match name {
+            b"health" => Some(Self::Health),
+            b"ping" => Some(Self::Ping),
+            b"tasks" => Some(Self::Tasks),
+            b"services" => Some(Self::Services),
+            b"drivers" => Some(Self::Drivers),
+            b"trace" => Some(Self::Trace),
+            b"inspect" => Some(Self::Inspect),
+            b"restart" => Some(Self::Restart),
+            b"cancel" => Some(Self::Cancel),
+            b"reboot" => Some(Self::Reboot),
+            b"poweroff" => Some(Self::PowerOff),
+            _ => None,
+        }
+    }
+
+    pub const fn takes_argument(self) -> bool {
+        matches!(self, Self::Inspect | Self::Restart | Self::Cancel)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteMessage {
+    pub kind: RemoteMessageKind,
+    pub id: u64,
+    pub sequence: u64,
+    pub cursor: u64,
+    pub payload: [u8; REMOTE_MESSAGE_PAYLOAD],
+    pub payload_length: u16,
+}
+
+impl RemoteMessage {
+    pub fn encode(self, output: &mut [u8; MAX_FRAME]) -> Result<usize, Error> {
+        let length = usize::from(self.payload_length);
+        if length > REMOTE_MESSAGE_PAYLOAD {
+            return Err(Error::Frame);
+        }
+        let body = REMOTE_MESSAGE_HEADER.checked_add(length).ok_or(Error::Frame)?;
+        if body == 0 || body > MAX_FRAME {
+            return Err(Error::Frame);
+        }
+        *output = [0; MAX_FRAME];
+        output[0..2].copy_from_slice(&REMOTE_PROTOCOL_V2.to_be_bytes());
+        output[2] = self.kind as u8;
+        output[3] = 0;
+        output[4..12].copy_from_slice(&self.id.to_be_bytes());
+        output[12..20].copy_from_slice(&self.sequence.to_be_bytes());
+        output[20..28].copy_from_slice(&self.cursor.to_be_bytes());
+        output[28..30].copy_from_slice(&self.payload_length.to_be_bytes());
+        output[30..body].copy_from_slice(&self.payload[..length]);
+        Ok(body)
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, Error> {
+        if input.len() < REMOTE_MESSAGE_HEADER
+            || input.len() > MAX_FRAME
+            || u16::from_be_bytes(input[0..2].try_into().map_err(|_| Error::Frame)?)
+                != REMOTE_PROTOCOL_V2
+            || input[3] != 0
+        {
+            return Err(Error::Frame);
+        }
+        let payload_length =
+            usize::from(u16::from_be_bytes(input[28..30].try_into().map_err(|_| Error::Frame)?));
+        if payload_length != input.len() - REMOTE_MESSAGE_HEADER
+            || payload_length > REMOTE_MESSAGE_PAYLOAD
+        {
+            return Err(Error::Frame);
+        }
+        let mut payload = [0; REMOTE_MESSAGE_PAYLOAD];
+        payload[..payload_length].copy_from_slice(&input[REMOTE_MESSAGE_HEADER..]);
+        Ok(Self {
+            kind: RemoteMessageKind::from_wire(input[2])?,
+            id: u64::from_be_bytes(input[4..12].try_into().map_err(|_| Error::Frame)?),
+            sequence: u64::from_be_bytes(input[12..20].try_into().map_err(|_| Error::Frame)?),
+            cursor: u64::from_be_bytes(input[20..28].try_into().map_err(|_| Error::Frame)?),
+            payload,
+            payload_length: payload_length as u16,
+        })
+    }
 }
 
 impl RemoteStatus {
