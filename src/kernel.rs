@@ -26,12 +26,14 @@ use logos_terminal::{command, display, input, terminal, text};
 use uefi::mem::memory_map::MemoryMap;
 
 #[cfg_attr(feature = "test-hooks", allow(unreachable_code, unused_mut, unused_variables))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn main(
     boot_info: boot::Info,
     memory_map: impl MemoryMap,
     acpi: Option<acpi::Tables>,
     machine: identity::Machine,
     mut secret_root: Option<root_key::RootKey>,
+    remote_machine_public: [u8; 32],
     wall_clock: time::WallClock,
     payload: Option<payload::Payloads>,
 ) -> ! {
@@ -2892,7 +2894,34 @@ pub(crate) fn main(
                             console_mode = mode::ConsoleMode::Recovery;
                             break;
                         }
-                        if native_command.request().is_some() {
+                        if native_command
+                            .request()
+                            .is_some_and(|request| request.syscall == logos_abi::Syscall::RemoteKey)
+                        {
+                            let mut key_text = [0; 64];
+                            let reply = if remote_machine_public == [0; 32] {
+                                b"remote unavailable" as &[u8]
+                            } else {
+                                hex_key(&remote_machine_public, &mut key_text);
+                                &key_text
+                            };
+                            if !native_command.reply(reply)
+                                || !native_scheduler.wake(native_handle)
+                                || !native_scheduler.run(native_handle)
+                                || !resume_display(
+                                    native_display,
+                                    &session,
+                                    &capabilities,
+                                    session_display_capability,
+                                    &mut native_scheduler,
+                                    native_handle,
+                                )
+                            {
+                                debug::write_line(b"LogOS: remote key reply failed");
+                                console_mode = mode::ConsoleMode::Recovery;
+                                break;
+                            }
+                        } else if native_command.request().is_some() {
                             let mut relay = session::relay_native(
                                 native_command,
                                 native_sessions_endpoint,
@@ -4130,6 +4159,14 @@ fn restart_native_service(
         return None;
     }
     scheduler.replace(handle, memory, |_, _| true)
+}
+
+fn hex_key(key: &[u8; 32], output: &mut [u8; 64]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (index, byte) in key.iter().copied().enumerate() {
+        output[index * 2] = HEX[(byte >> 4) as usize];
+        output[index * 2 + 1] = HEX[(byte & 0x0f) as usize];
+    }
 }
 
 fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {

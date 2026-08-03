@@ -13,6 +13,8 @@ fn main() -> Status {
     entropy::announce(entropy);
     let machine = identity::load(entropy.as_ref());
     let secret_root = root_key::load(entropy::load().as_ref());
+    let remote_machine_public =
+        secret_root.as_ref().map_or([0; 32], |key| logos_remote::machine_public(key.bytes()));
     root_key::announce(secret_root.as_ref());
     identity::announce(&machine);
     let wall_clock = time::wall_clock();
@@ -29,7 +31,16 @@ fn main() -> Status {
 
     let payload = payload::stage();
     let memory_map = unsafe { boot::exit_boot_services(None) };
-    kernel::main(boot_info, memory_map, acpi, machine, secret_root, wall_clock, payload)
+    kernel::main(
+        boot_info,
+        memory_map,
+        acpi,
+        machine,
+        secret_root,
+        remote_machine_public,
+        wall_clock,
+        payload,
+    )
 }
 
 pub(crate) struct Info {

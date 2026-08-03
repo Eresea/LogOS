@@ -391,6 +391,10 @@ pub fn derive_keys(root: &[u8; 32]) -> Result<([u8; 32], [u8; 32]), Error> {
     Ok((device, storage))
 }
 
+pub fn machine_public(secret: &[u8; 32]) -> [u8; 32] {
+    X25519::pubkey(secret)
+}
+
 pub fn seal(
     key: &[u8; 32],
     nonce: &[u8; 24],

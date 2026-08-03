@@ -52,10 +52,10 @@ pub const COMMAND_LIST: [&[u8]; 8] = [
     b"ping poweroff",
     b"tasks services",
     b"drivers trace",
-    b"inspect restart cancel",
+    b"inspect restart cancel remote-key enroll unenroll",
 ];
 
-const DESCRIPTORS: [Descriptor; 17] = [
+const DESCRIPTORS: [Descriptor; 20] = [
     Descriptor {
         name: b"health",
         summary: b"show machine health",
@@ -141,6 +141,24 @@ const DESCRIPTORS: [Descriptor; 17] = [
         name: b"cancel",
         summary: b"cancel a service request",
         takes_argument: true,
+        remote: true,
+    },
+    Descriptor {
+        name: b"remote-key",
+        summary: b"show the machine public key",
+        takes_argument: false,
+        remote: true,
+    },
+    Descriptor {
+        name: b"enroll",
+        summary: b"enroll one X25519 client key",
+        takes_argument: true,
+        remote: true,
+    },
+    Descriptor {
+        name: b"unenroll",
+        summary: b"revoke the enrolled client",
+        takes_argument: false,
         remote: true,
     },
 ];
@@ -284,6 +302,6 @@ pub fn self_check() -> bool {
         && health_is_local
         && clear_is_local
         && layout_is_local
-        && descriptors().len() == 17
+        && descriptors().len() == 20
         && COMMAND_LIST.len() == 8
 }

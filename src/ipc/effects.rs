@@ -91,6 +91,7 @@ pub fn execute(request: EffectRequest, context: Context<'_, '_>) -> EffectResult
                 _ => EffectResult::Unknown,
             }
         }
+        Effect::RemoteKey | Effect::Enroll | Effect::Unenroll => EffectResult::Unavailable,
     }
 }
 

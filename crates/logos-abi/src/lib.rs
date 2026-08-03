@@ -815,6 +815,9 @@ pub enum Syscall {
     Restart,
     Cancel,
     SetInputLayout,
+    RemoteKey,
+    Enroll,
+    Unenroll,
 }
 
 impl Syscall {
@@ -831,6 +834,9 @@ impl Syscall {
             b"inspect" => Some(Self::Inspect),
             b"restart" => Some(Self::Restart),
             b"cancel" => Some(Self::Cancel),
+            b"remote-key" => Some(Self::RemoteKey),
+            b"enroll" => Some(Self::Enroll),
+            b"unenroll" => Some(Self::Unenroll),
             _ => None,
         }
     }
@@ -849,12 +855,18 @@ impl Syscall {
             10 => Some(Self::Restart),
             11 => Some(Self::Cancel),
             12 => Some(Self::SetInputLayout),
+            13 => Some(Self::RemoteKey),
+            14 => Some(Self::Enroll),
+            15 => Some(Self::Unenroll),
             _ => None,
         }
     }
 
     pub const fn takes_argument(self) -> bool {
-        matches!(self, Self::Inspect | Self::Restart | Self::Cancel | Self::SetInputLayout)
+        matches!(
+            self,
+            Self::Inspect | Self::Restart | Self::Cancel | Self::SetInputLayout | Self::Enroll
+        )
     }
 }
 
@@ -874,6 +886,9 @@ pub enum Effect {
     RestartService,
     CancelService,
     SetInputLayout,
+    RemoteKey,
+    Enroll,
+    Unenroll,
 }
 
 impl Effect {
@@ -891,6 +906,9 @@ impl Effect {
             10 => Some(Self::RestartService),
             11 => Some(Self::CancelService),
             12 => Some(Self::SetInputLayout),
+            13 => Some(Self::RemoteKey),
+            14 => Some(Self::Enroll),
+            15 => Some(Self::Unenroll),
             _ => None,
         }
     }
@@ -902,6 +920,7 @@ impl Effect {
                 | Self::RestartService
                 | Self::CancelService
                 | Self::SetInputLayout
+                | Self::Enroll
         )
     }
 }

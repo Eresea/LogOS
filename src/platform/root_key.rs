@@ -8,6 +8,10 @@ const NAME: &uefi::CStr16 = cstr16!("LogOSSecretRoot");
 pub struct RootKey([u8; 32]);
 
 impl RootKey {
+    pub const fn bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
     pub fn wipe(&mut self) {
         self.0.fill(0);
     }

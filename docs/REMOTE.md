@@ -41,6 +41,8 @@ client can reconnect and invoke the existing typed `ping` command.
 - [ ] Passive TCP owner multiplexing for Terminal and Gateway clients.
 - [ ] Protected Store enrollment, local trust commands, Gateway attachment, and `logosctl`.
 - [x] Host `logosctl keygen` and pinned Noise IK typed `invoke` client with bounded reconnects.
+- [x] Local command ABI recognizes `remote-key`, `enroll <64-hex-key>`, and `unenroll`; the
+  machine key is available when the firmware root is present.
 - [ ] QEMU restart, corruption, and typed-invocation proofs.
 
 ## V1 scope
