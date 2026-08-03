@@ -1622,6 +1622,7 @@ fn run_fixture(
                 capture_failure(&fixture_dir, harness.qmp_port, &harness.qmp_log);
                 let _ = harness.child.kill();
                 let _ = harness.child.wait();
+                let _ = fs::remove_dir_all(&fixture_dir);
                 let _ = fs::create_dir_all(&fixture_dir);
                 harness = match Harness::boot(
                     &qemu,

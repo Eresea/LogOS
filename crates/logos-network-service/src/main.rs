@@ -14,14 +14,6 @@ use logos_net::{
 };
 use logos_service_rt::{Context, Header, ProtocolVersion};
 
-#[cfg(feature = "test-hooks")]
-fn trace(message: &[u8]) {
-    logos_service_rt::debug(message);
-}
-
-#[cfg(not(feature = "test-hooks"))]
-fn trace(_: &[u8]) {}
-
 const DHCP_CLIENT: u16 = 68;
 const DHCP_SERVER: u16 = 67;
 const DEVICE_DEADLINE: u64 = u64::MAX / 2;
@@ -465,7 +457,6 @@ fn run(context: &mut Context) -> ! {
                 continue;
             }
             if let Some(request) = waiting_receive {
-                trace(b"LogOS: network receive poll\r\n");
                 let received = context.network_pages().and_then(|pages| {
                     let output = unsafe {
                         core::slice::from_raw_parts_mut(
@@ -480,7 +471,6 @@ fn run(context: &mut Context) -> ! {
                         .map(|receive| (receive.source, receive.source_port, receive.payload.len()))
                 });
                 if let Some(receive) = received {
-                    trace(b"LogOS: network receive complete\r\n");
                     let _ = state.finish_pending(request.id);
                     waiting_receive = None;
                     if !context.network_reply_after_event(
@@ -1070,12 +1060,8 @@ fn accept_dhcp(
         return DhcpAction::None;
     }
     let udp = match parse_udp(ip.payload, ip.source, ip.destination) {
-        Ok(udp) => {
-            trace(b"LogOS: network udp parsed\r\n");
-            udp
-        }
+        Ok(udp) => udp,
         Err(_) => {
-            trace(b"LogOS: network udp rejected\r\n");
             counters.malformed = counters.malformed.saturating_add(1);
             return DhcpAction::None;
         }
@@ -1085,17 +1071,14 @@ fn accept_dhcp(
             counters.udp_no_endpoint = counters.udp_no_endpoint.saturating_add(1);
         } else if let Some(endpoint) = state.endpoint_for_port(udp.destination_port) {
             match state.enqueue(endpoint, ip.source, udp.source_port, udp.payload) {
-                Ok(()) => trace(b"LogOS: network udp queued\r\n"),
+                Ok(()) => {}
                 Err(StateError::QueueFull) => {
-                    trace(b"LogOS: network udp queue-full\r\n");
                     counters.udp_queue_dropped = counters.udp_queue_dropped.saturating_add(1);
                 }
                 Err(StateError::MessageTooLarge) => {
-                    trace(b"LogOS: network udp too-large\r\n");
                     counters.malformed = counters.malformed.saturating_add(1);
                 }
                 Err(_) => {
-                    trace(b"LogOS: network udp queue-error\r\n");
                     counters.malformed = counters.malformed.saturating_add(1);
                 }
             }

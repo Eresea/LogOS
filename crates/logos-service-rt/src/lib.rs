@@ -32,16 +32,6 @@ pub const STORAGE_CORRUPT: u32 = native_service::STORAGE_CORRUPT;
 pub const STORAGE_IO_FAILED: u32 = native_service::STORAGE_IO_FAILED;
 pub const STORAGE_UNAVAILABLE: u32 = native_service::STORAGE_UNAVAILABLE;
 
-#[cfg(target_arch = "x86_64")]
-pub fn debug(message: &[u8]) {
-    for &byte in message {
-        unsafe { core::arch::asm!("out dx, al", in("dx") 0xe9u16, in("al") byte) };
-    }
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-pub fn debug(_: &[u8]) {}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockError {
     Invalid,
