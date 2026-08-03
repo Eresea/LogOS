@@ -1,6 +1,6 @@
 # Remote
 
-> **Status:** Remote Foundation v1 in progress
+> **Status:** Remote Foundation v1 integration in progress
 
 ## Goal
 
@@ -32,6 +32,14 @@ client can reconnect and invoke the existing typed `ping` command.
 - `remote/pending-after-reset`
 - `remote/gateway-restart`
 - `remote/protected-state-corrupt`
+
+### Implementation checkpoints
+
+- [x] Bounded Noise IK, HKDF key separation, XChaCha protected-record primitive, replay model,
+  enrollment/session record codecs, and partial-frame transport buffering.
+- [ ] Passive TCP service integration and owner-bound accepted handles.
+- [ ] Protected Store enrollment, local trust commands, Gateway attachment, and `logosctl`.
+- [ ] QEMU restart, corruption, and typed-invocation proofs.
 
 ## V1 scope
 

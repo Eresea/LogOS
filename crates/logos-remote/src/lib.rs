@@ -10,6 +10,9 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_FRAME: usize = 1024;
 pub const SESSION_ID_LEN: usize = 16;
 pub const REQUEST_DIGEST_LEN: usize = 32;
+pub const MAX_FRAME_BUFFER: usize = MAX_FRAME + 2;
+pub const ENROLLMENT_BYTES: usize = 42;
+pub const SESSION_RECORD_BYTES: usize = 324;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -18,6 +21,92 @@ pub enum Error {
     Mismatch,
     Busy,
     Crypto,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Enrollment {
+    pub generation: u64,
+    pub active: bool,
+    pub client_key: [u8; 32],
+}
+
+impl Enrollment {
+    pub fn encode(self, output: &mut [u8; ENROLLMENT_BYTES]) {
+        *output = [0; ENROLLMENT_BYTES];
+        output[0] = 1;
+        output[1] = u8::from(self.active);
+        output[2..10].copy_from_slice(&self.generation.to_be_bytes());
+        output[10..].copy_from_slice(&self.client_key);
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, Error> {
+        if input.len() != ENROLLMENT_BYTES || input[0] != 1 || input[1] > 1 {
+            return Err(Error::Frame);
+        }
+        let mut client_key = [0; 32];
+        client_key.copy_from_slice(&input[10..]);
+        Ok(Self {
+            generation: u64::from_be_bytes(input[2..10].try_into().map_err(|_| Error::Frame)?),
+            active: input[1] == 1,
+            client_key,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionRecord {
+    pub enrollment_generation: u64,
+    pub session: [u8; SESSION_ID_LEN],
+    pub sequence: u64,
+    pub pending: bool,
+    pub digest: [u8; REQUEST_DIGEST_LEN],
+    pub reply: [u8; 256],
+    pub reply_length: u16,
+}
+
+impl SessionRecord {
+    pub fn encode(self, output: &mut [u8; SESSION_RECORD_BYTES]) -> Result<(), Error> {
+        if self.reply_length as usize > self.reply.len() {
+            return Err(Error::Frame);
+        }
+        *output = [0; SESSION_RECORD_BYTES];
+        output[0] = 1;
+        output[1..9].copy_from_slice(&self.enrollment_generation.to_be_bytes());
+        output[9..25].copy_from_slice(&self.session);
+        output[25..33].copy_from_slice(&self.sequence.to_be_bytes());
+        output[33] = u8::from(self.pending);
+        output[34..66].copy_from_slice(&self.digest);
+        output[66..68].copy_from_slice(&self.reply_length.to_be_bytes());
+        output[68..].copy_from_slice(&self.reply);
+        Ok(())
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, Error> {
+        if input.len() != SESSION_RECORD_BYTES || input[0] != 1 || input[33] > 1 {
+            return Err(Error::Frame);
+        }
+        let reply_length = u16::from_be_bytes(input[66..68].try_into().map_err(|_| Error::Frame)?);
+        if reply_length as usize > 256 {
+            return Err(Error::Frame);
+        }
+        let mut session = [0; SESSION_ID_LEN];
+        let mut digest = [0; REQUEST_DIGEST_LEN];
+        let mut reply = [0; 256];
+        session.copy_from_slice(&input[9..25]);
+        digest.copy_from_slice(&input[34..66]);
+        reply.copy_from_slice(&input[68..]);
+        Ok(Self {
+            enrollment_generation: u64::from_be_bytes(
+                input[1..9].try_into().map_err(|_| Error::Frame)?,
+            ),
+            session,
+            sequence: u64::from_be_bytes(input[25..33].try_into().map_err(|_| Error::Frame)?),
+            pending: input[33] == 1,
+            digest,
+            reply,
+            reply_length,
+        })
+    }
 }
 
 pub fn derive_keys(root: &[u8; 32]) -> Result<([u8; 32], [u8; 32]), Error> {
@@ -77,7 +166,7 @@ impl DH for X25519 {
     }
 
     fn genkey() -> Self::Key {
-        [0; 32]
+        panic!("Noise ephemeral keys must be supplied from firmware entropy")
     }
 
     fn pubkey(key: &Self::Key) -> Self::Pubkey {
@@ -209,6 +298,61 @@ pub fn frame_decode(frame: &[u8]) -> Result<&[u8], Error> {
         return Err(Error::Frame);
     }
     Ok(&frame[2..])
+}
+
+pub struct FrameDecoder {
+    bytes: [u8; MAX_FRAME_BUFFER],
+    length: usize,
+}
+
+impl FrameDecoder {
+    pub const fn new() -> Self {
+        Self { bytes: [0; MAX_FRAME_BUFFER], length: 0 }
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) -> Result<(), Error> {
+        let end = self.length.checked_add(chunk.len()).ok_or(Error::Frame)?;
+        if end > self.bytes.len() {
+            return Err(Error::Frame);
+        }
+        self.bytes[self.length..end].copy_from_slice(chunk);
+        self.length = end;
+        if self.length >= 2 {
+            let declared = usize::from(u16::from_be_bytes([self.bytes[0], self.bytes[1]]));
+            if declared == 0 || declared > MAX_FRAME || declared + 2 > self.bytes.len() {
+                return Err(Error::Frame);
+            }
+            if self.length > declared + 2 {
+                return Err(Error::Frame);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn ready(&self) -> Result<Option<&[u8]>, Error> {
+        if self.length < 2 {
+            return Ok(None);
+        }
+        let declared = usize::from(u16::from_be_bytes([self.bytes[0], self.bytes[1]]));
+        if self.length < declared + 2 {
+            return Ok(None);
+        }
+        Ok(Some(&self.bytes[2..declared + 2]))
+    }
+
+    pub fn consume(&mut self) -> Result<(), Error> {
+        let Some(frame) = self.ready()? else { return Err(Error::Frame) };
+        let consumed = frame.len() + 2;
+        self.bytes.copy_within(consumed..self.length, 0);
+        self.length -= consumed;
+        Ok(())
+    }
+}
+
+impl Default for FrameDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -345,6 +489,35 @@ mod tests {
             open(&storage, &[9; 24], b"enrollment", &mut record, length),
             Err(Error::Crypto)
         );
+    }
+
+    #[test]
+    fn records_and_partial_frames_are_exact() {
+        let enrollment = Enrollment { generation: 3, active: true, client_key: [4; 32] };
+        let mut enrollment_bytes = [0; ENROLLMENT_BYTES];
+        enrollment.encode(&mut enrollment_bytes);
+        assert_eq!(Enrollment::decode(&enrollment_bytes), Ok(enrollment));
+        let record = SessionRecord {
+            enrollment_generation: 3,
+            session: [5; SESSION_ID_LEN],
+            sequence: 7,
+            pending: true,
+            digest: [6; REQUEST_DIGEST_LEN],
+            reply: [8; 256],
+            reply_length: 4,
+        };
+        let mut record_bytes = [0; SESSION_RECORD_BYTES];
+        record.encode(&mut record_bytes).unwrap();
+        assert_eq!(SessionRecord::decode(&record_bytes), Ok(record));
+        let mut encoded = [0; MAX_FRAME_BUFFER];
+        let length = frame_encode(&mut encoded, b"hello").unwrap();
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&encoded[..2]).unwrap();
+        assert_eq!(decoder.ready(), Ok(None));
+        decoder.push(&encoded[2..length]).unwrap();
+        assert_eq!(decoder.ready(), Ok(Some(&b"hello"[..])));
+        decoder.consume().unwrap();
+        assert_eq!(decoder.ready(), Ok(None));
     }
 
     #[test]

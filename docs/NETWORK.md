@@ -525,6 +525,8 @@ See [Architecture](architecture.md#12-networking-model),
 
 ### V2 — Stream connectivity
 
+- Remote Foundation has completed the portable TCP ABI and checksum-validated TCP codec. The
+  remaining V2 slice is passive listen/accept/read/write integration for one stream on port 7443.
 - Capability-scoped TCP connect, listen, accept, close, and bounded stream I/O.
 - Concurrent operations, ephemeral ports, connected endpoint state, and DNS resolution.
 - Authenticated-transport integration; identity, trust policy, and key ownership stay in their System services.
