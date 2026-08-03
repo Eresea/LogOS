@@ -773,6 +773,31 @@ impl Context {
     }
 
     /// # Safety
+    /// `address` must point to a live Network service context owned by Core.
+    pub unsafe fn deliver_network_for_owner_at(
+        address: u64,
+        request: logos_abi::NetworkRequest,
+        owner: u64,
+    ) -> bool {
+        if !unsafe { Self::deliver_network_at(address, request) } {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        context.x = owner as u32;
+        context.y = (owner >> 32) as u32;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live Network service context.
+    pub unsafe fn network_owner_at(address: u64) -> Option<u64> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.operation == NETWORK_REQUEST)
+            .then_some(u64::from(context.x) | (u64::from(context.y) << 32))
+    }
+
+    /// # Safety
     /// `address` must point to a live, aligned `Context` mapping owned by Core.
     pub unsafe fn reply_network_at(address: u64, reply: logos_abi::NetworkReply) -> bool {
         let mut context = unsafe { (address as *mut Self).read_volatile() };

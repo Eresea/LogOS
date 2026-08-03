@@ -65,7 +65,7 @@ fn run(context: &mut Context) -> ! {
     let mut next_id = 2u32;
     let mut now = 1u64;
     let mut xid = 0x4c4f_474fu32;
-    let mut waiting_receive: Option<NetworkRequest> = None;
+    let mut waiting_receive: Option<(NetworkRequest, u64)> = None;
     let mut waiting_send: Option<NetworkRequest> = None;
     let mut waiting_send_arp = false;
     let mut waiting_echo: Option<NetworkRequest> = None;
@@ -226,20 +226,22 @@ fn run(context: &mut Context) -> ! {
         }
 
         if let Some(request) = context.network_request() {
+            let owner = context.network_owner().unwrap_or(0);
             #[cfg(feature = "test-hooks")]
             inject_failure(request.id);
             if matches!(request.operation, NetworkOperation::Cancel | NetworkOperation::Close) {
                 counters.cancellations = counters.cancellations.saturating_add(1);
                 let endpoint = logos_net::EndpointId::from_wire(request.endpoint.0);
-                let cancels_receive = waiting_receive.is_some_and(|pending| {
-                    endpoint == logos_net::EndpointId::from_wire(pending.endpoint.0)
+                let cancels_receive = waiting_receive.is_some_and(|(pending, pending_owner)| {
+                    owner == pending_owner
+                        && endpoint == logos_net::EndpointId::from_wire(pending.endpoint.0)
                 });
                 let cancels_send = waiting_send.is_some_and(|pending| {
                     endpoint == logos_net::EndpointId::from_wire(pending.endpoint.0)
                 });
                 let cancels_echo = waiting_echo.is_some();
                 if cancels_receive || cancels_send || cancels_echo {
-                    if let Some(pending) = waiting_receive.take() {
+                    if let Some((pending, _)) = waiting_receive.take() {
                         let _ = state.cancel_pending(pending.id);
                     }
                     if let Some(pending) = waiting_send.take() {
@@ -254,7 +256,7 @@ fn run(context: &mut Context) -> ! {
                 }
                 let status = if request.operation == NetworkOperation::Close {
                     endpoint.map_or(NetworkStatus::Invalid, |endpoint| {
-                        if state.tcp_mut().close(0, endpoint).is_ok()
+                        if state.tcp_mut().close(owner, endpoint).is_ok()
                             || state.close(0, endpoint).is_ok()
                         {
                             NetworkStatus::Complete
@@ -345,7 +347,7 @@ fn run(context: &mut Context) -> ! {
             if request.operation == NetworkOperation::Listen {
                 let config = state.dhcp_config();
                 let result = match config {
-                    Some(_) => state.tcp_mut().listen(0, request.peer.port(), request.id).ok(),
+                    Some(_) => state.tcp_mut().listen(owner, request.peer.port(), request.id).ok(),
                     None => None,
                 }
                 .map(|endpoint| NetworkReply {
@@ -379,11 +381,11 @@ fn run(context: &mut Context) -> ! {
             if request.operation == NetworkOperation::Accept {
                 let result = logos_net::EndpointId::from_wire(request.endpoint.0)
                     .ok_or(logos_net::TcpStateError::Invalid)
-                    .and_then(|endpoint| state.tcp_mut().accept(0, endpoint));
+                    .and_then(|endpoint| state.tcp_mut().accept(owner, endpoint));
                 let reply = match result {
                     Ok(endpoint) => {
                         let (source, source_port) =
-                            state.tcp().peer(0, endpoint).unwrap_or((Ipv4([0; 4]), 0));
+                            state.tcp().peer(owner, endpoint).unwrap_or((Ipv4([0; 4]), 0));
                         NetworkReply {
                             id: request.id,
                             status: NetworkStatus::Complete,
@@ -412,10 +414,10 @@ fn run(context: &mut Context) -> ! {
                         )
                     };
                     let endpoint = logos_net::EndpointId::from_wire(request.endpoint.0)?;
-                    state.tcp_mut().read(0, endpoint, output).ok()
+                    state.tcp_mut().read(owner, endpoint, output).ok()
                 });
                 if received.is_none() {
-                    waiting_receive = Some(request);
+                    waiting_receive = Some((request, owner));
                     if !context.network_wait(request.deadline) {
                         spin();
                     }
@@ -457,7 +459,7 @@ fn run(context: &mut Context) -> ! {
                 };
                 let status =
                     if let Some(endpoint) = logos_net::EndpointId::from_wire(request.endpoint.0) {
-                        if state.tcp_mut().write(0, endpoint, payload).is_ok() {
+                        if state.tcp_mut().write(owner, endpoint, payload).is_ok() {
                             tcp_reply = state.tcp_mut().take_tx();
                             if tcp_reply.is_some()
                                 && submit_action(
@@ -566,7 +568,7 @@ fn run(context: &mut Context) -> ! {
                         kind: logos_net::PendingKind::Receive,
                         deadline: request.deadline,
                     });
-                    waiting_receive = Some(request);
+                    waiting_receive = Some((request, owner));
                     if !context.network_wait(request.deadline) {
                         spin();
                     }
@@ -641,7 +643,7 @@ fn run(context: &mut Context) -> ! {
                 }
                 continue;
             }
-            if let Some(request) = waiting_receive {
+            if let Some((request, owner)) = waiting_receive {
                 if request.operation == NetworkOperation::Read {
                     let length = context.network_pages().and_then(|pages| {
                         let output = unsafe {
@@ -651,7 +653,7 @@ fn run(context: &mut Context) -> ! {
                             )
                         };
                         let endpoint = logos_net::EndpointId::from_wire(request.endpoint.0)?;
-                        state.tcp_mut().read(0, endpoint, output).ok()
+                        state.tcp_mut().read(owner, endpoint, output).ok()
                     });
                     if let Some(length) = length {
                         waiting_receive = None;

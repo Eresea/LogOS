@@ -3356,7 +3356,7 @@ fn relay_network_client(
             }
         }
     }
-    if !service.deliver(request) {
+    if !service.deliver_for_owner(request, terminal_owner) {
         return true;
     }
     *pending = Some(PendingNetworkClient { request });

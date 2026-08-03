@@ -232,6 +232,10 @@ impl Context {
         unsafe { RawContext::network_at(self.raw_address()) }
     }
 
+    pub fn network_owner(&self) -> Option<u64> {
+        unsafe { RawContext::network_owner_at(self.raw_address()) }
+    }
+
     pub fn request_network(&mut self, request: logos_abi::NetworkRequest) -> bool {
         (unsafe { RawContext::request_network_at(self.raw_address(), request) })
             && self.invoke(native_service::NETWORK_REQUEST)

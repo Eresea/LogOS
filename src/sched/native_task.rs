@@ -233,6 +233,16 @@ impl NetworkEndpoint {
         }
     }
 
+    pub fn deliver_for_owner(self, request: logos_abi::NetworkRequest, owner: u64) -> bool {
+        unsafe {
+            logos_abi::service::Context::deliver_network_for_owner_at(
+                self.context_physical,
+                request,
+                owner,
+            )
+        }
+    }
+
     pub fn reply(self, reply: logos_abi::NetworkReply) -> bool {
         unsafe {
             logos_core::native_service::Context::reply_network_at(self.context_physical, reply)
