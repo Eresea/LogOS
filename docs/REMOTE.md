@@ -40,6 +40,7 @@ client can reconnect and invoke the existing typed `ping` command.
   partial/coalesced frame buffering.
 - [ ] Passive TCP owner multiplexing for Terminal and Gateway clients.
 - [ ] Protected Store enrollment, local trust commands, Gateway attachment, and `logosctl`.
+- [x] Host `logosctl keygen` and pinned Noise IK typed `invoke` client with bounded reconnects.
 - [ ] QEMU restart, corruption, and typed-invocation proofs.
 
 ## V1 scope
