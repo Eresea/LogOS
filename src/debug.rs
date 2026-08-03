@@ -1,4 +1,31 @@
-use core::arch::asm;
+use core::{
+    arch::asm,
+    cell::UnsafeCell,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+const LOG_EVENTS: usize = 32;
+const LOG_BYTES: usize = 160;
+
+struct LogRing(UnsafeCell<[[u8; LOG_BYTES]; LOG_EVENTS]>);
+unsafe impl Sync for LogRing {}
+
+static LOG_RING: LogRing = LogRing(UnsafeCell::new([[0; LOG_BYTES]; LOG_EVENTS]));
+static LOG_LENGTHS: LogLengths = LogLengths(UnsafeCell::new([0; LOG_EVENTS]));
+static LOG_HEAD: AtomicUsize = AtomicUsize::new(0);
+
+struct LogLengths(UnsafeCell<[u16; LOG_EVENTS]>);
+unsafe impl Sync for LogLengths {}
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub struct Snapshot {
+    pub lines: [[u8; LOG_BYTES]; LOG_EVENTS],
+    pub lengths: [u16; LOG_EVENTS],
+    pub len: usize,
+    pub first_cursor: u64,
+    pub next_cursor: u64,
+}
 
 pub fn write(message: &[u8]) {
     for &byte in message {
@@ -9,4 +36,48 @@ pub fn write(message: &[u8]) {
 pub fn write_line(message: &[u8]) {
     write(message);
     write(b"\r\n");
+    let head = LOG_HEAD.fetch_add(1, Ordering::AcqRel);
+    let index = head % LOG_EVENTS;
+    let length = message.len().min(LOG_BYTES);
+    let flags: u64;
+    unsafe {
+        asm!("pushfq", "pop {}", out(reg) flags);
+        asm!("cli");
+        (*LOG_RING.0.get())[index].fill(0);
+        (&mut (*LOG_RING.0.get())[index])[..length].copy_from_slice(&message[..length]);
+        (*LOG_LENGTHS.0.get())[index] = length as u16;
+        if flags & (1 << 9) != 0 {
+            asm!("sti");
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn snapshot() -> Snapshot {
+    let flags: u64;
+    unsafe {
+        asm!("pushfq", "pop {}", out(reg) flags);
+        asm!("cli");
+        let head = LOG_HEAD.load(Ordering::Acquire);
+        let len = head.min(LOG_EVENTS);
+        let mut lines = [[0; LOG_BYTES]; LOG_EVENTS];
+        let mut lengths = [0; LOG_EVENTS];
+        for (index, (line, length)) in
+            lines[..len].iter_mut().zip(lengths[..len].iter_mut()).enumerate()
+        {
+            let source = (head - len + index) % LOG_EVENTS;
+            *line = (*LOG_RING.0.get())[source];
+            *length = (*LOG_LENGTHS.0.get())[source];
+        }
+        if flags & (1 << 9) != 0 {
+            asm!("sti");
+        }
+        Snapshot {
+            lines,
+            lengths,
+            len,
+            first_cursor: (head - len) as u64,
+            next_cursor: head as u64,
+        }
+    }
 }
