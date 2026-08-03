@@ -12,9 +12,12 @@ fn main() -> Status {
     let entropy = entropy::load();
     entropy::announce(entropy);
     let machine = identity::load(entropy.as_ref());
-    let secret_root = root_key::load(entropy::load().as_ref());
-    let remote_machine_public =
-        secret_root.as_ref().map_or([0; 32], |key| logos_remote::machine_public(key.bytes()));
+    let secret_root = root_key::load(entropy.as_ref());
+    let remote_bootstrap = secret_root.as_ref().and_then(|key| {
+        entropy
+            .as_ref()
+            .and_then(|seed| logos_remote::Bootstrap::from_root(key.bytes(), seed.bytes()).ok())
+    });
     root_key::announce(secret_root.as_ref());
     identity::announce(&machine);
     let wall_clock = time::wall_clock();
@@ -37,7 +40,7 @@ fn main() -> Status {
         acpi,
         machine,
         secret_root,
-        remote_machine_public,
+        remote_bootstrap,
         wall_clock,
         payload,
     )

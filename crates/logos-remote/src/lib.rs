@@ -13,6 +13,14 @@ pub const REQUEST_DIGEST_LEN: usize = 32;
 pub const MAX_FRAME_BUFFER: usize = MAX_FRAME + 2;
 pub const ENROLLMENT_BYTES: usize = 42;
 pub const SESSION_RECORD_BYTES: usize = 324;
+pub const PROTECTED_NONCE_BYTES: usize = 24;
+pub const PROTECTED_TAG_BYTES: usize = 16;
+pub const ENROLLMENT_BLOB_BYTES: usize =
+    PROTECTED_NONCE_BYTES + ENROLLMENT_BYTES + PROTECTED_TAG_BYTES;
+pub const SESSION_BLOB_BYTES: usize =
+    PROTECTED_NONCE_BYTES + SESSION_RECORD_BYTES + PROTECTED_TAG_BYTES;
+pub const ENROLLMENT_AD: &[u8] = b"LogOS/trust/enrollment/v1";
+pub const SESSION_AD: &[u8] = b"LogOS/trust/remote-session/v1";
 pub const MAX_COMMAND: usize = 256;
 pub const REMOTE_REQUEST_BYTES: usize = 2 + 8 + SESSION_ID_LEN + 8 + 2 + MAX_COMMAND;
 pub const REMOTE_REPLY_BYTES: usize = 2 + 8 + 8 + 1 + 2 + MAX_COMMAND;
@@ -139,8 +147,22 @@ impl TrustState {
     ) -> Result<(), Error> {
         self.enrollment
             .encode((&mut output[..ENROLLMENT_BYTES]).try_into().map_err(|_| Error::Frame)?);
-        seal(storage_key, nonce, b"enrollment", output, ENROLLMENT_BYTES)?;
+        seal(storage_key, nonce, ENROLLMENT_AD, output, ENROLLMENT_BYTES)?;
         Ok(())
+    }
+
+    pub fn seal_enrollment_blob(
+        &self,
+        storage_key: &[u8; 32],
+        nonce: &[u8; 24],
+        output: &mut [u8; ENROLLMENT_BLOB_BYTES],
+    ) -> Result<(), Error> {
+        output[..PROTECTED_NONCE_BYTES].copy_from_slice(nonce);
+        self.seal_enrollment(
+            storage_key,
+            nonce,
+            (&mut output[PROTECTED_NONCE_BYTES..]).try_into().map_err(|_| Error::Frame)?,
+        )
     }
 
     pub fn open_enrollment(
@@ -153,7 +175,7 @@ impl TrustState {
             return Self::unavailable(machine_secret);
         };
         let input_length = input.len();
-        let Ok(length) = open(storage_key, nonce, b"enrollment", input, input_length) else {
+        let Ok(length) = open(storage_key, nonce, ENROLLMENT_AD, input, input_length) else {
             return Self::unavailable(machine_secret);
         };
         let Ok(enrollment) = Enrollment::decode(&input[..length]) else {
@@ -164,6 +186,18 @@ impl TrustState {
         }
         state.enrollment = enrollment;
         state
+    }
+
+    pub fn open_enrollment_blob(
+        machine_secret: [u8; 32],
+        storage_key: &[u8; 32],
+        input: &mut [u8; ENROLLMENT_BLOB_BYTES],
+    ) -> Self {
+        let mut nonce = [0; PROTECTED_NONCE_BYTES];
+        nonce.copy_from_slice(&input[..PROTECTED_NONCE_BYTES]);
+        let mut ciphertext = [0; ENROLLMENT_BYTES + PROTECTED_TAG_BYTES];
+        ciphertext.copy_from_slice(&input[PROTECTED_NONCE_BYTES..]);
+        Self::open_enrollment(machine_secret, storage_key, &nonce, &mut ciphertext)
     }
 
     pub fn machine_secret(&self) -> [u8; 32] {
@@ -382,6 +416,39 @@ impl SessionRecord {
             reply_length,
         })
     }
+
+    pub fn seal_blob(
+        self,
+        storage_key: &[u8; 32],
+        nonce: &[u8; 24],
+        output: &mut [u8; SESSION_BLOB_BYTES],
+    ) -> Result<(), Error> {
+        output[..PROTECTED_NONCE_BYTES].copy_from_slice(nonce);
+        let ciphertext = &mut output[PROTECTED_NONCE_BYTES
+            ..PROTECTED_NONCE_BYTES + SESSION_RECORD_BYTES + PROTECTED_TAG_BYTES];
+        let mut record = [0; SESSION_RECORD_BYTES];
+        self.encode(&mut record)?;
+        ciphertext[..SESSION_RECORD_BYTES].copy_from_slice(&record);
+        seal(storage_key, nonce, SESSION_AD, ciphertext, SESSION_RECORD_BYTES)?;
+        Ok(())
+    }
+
+    pub fn open_blob(
+        storage_key: &[u8; 32],
+        input: &mut [u8; SESSION_BLOB_BYTES],
+    ) -> Result<Self, Error> {
+        let mut nonce = [0; PROTECTED_NONCE_BYTES];
+        nonce.copy_from_slice(&input[..PROTECTED_NONCE_BYTES]);
+        let ciphertext = &mut input[PROTECTED_NONCE_BYTES..];
+        let length = open(
+            storage_key,
+            &nonce,
+            SESSION_AD,
+            ciphertext,
+            SESSION_RECORD_BYTES + PROTECTED_TAG_BYTES,
+        )?;
+        Self::decode(&ciphertext[..length])
+    }
 }
 
 pub fn derive_keys(root: &[u8; 32]) -> Result<([u8; 32], [u8; 32]), Error> {
@@ -393,8 +460,64 @@ pub fn derive_keys(root: &[u8; 32]) -> Result<([u8; 32], [u8; 32]), Error> {
     Ok((device, storage))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Bootstrap {
+    pub device_key: [u8; 32],
+    pub storage_key: [u8; 32],
+    pub rng_seed: [u8; 32],
+}
+
+pub struct Csprng {
+    key: [u8; 32],
+    counter: u64,
+}
+
+impl Csprng {
+    pub fn from_seed(seed: [u8; 32]) -> Self {
+        Self { key: seed, counter: 0 }
+    }
+
+    pub fn fill(&mut self, output: &mut [u8]) {
+        let mut nonce = [0; 24];
+        nonce[16..].copy_from_slice(&self.counter.to_le_bytes());
+        let mut block = [0; 32];
+        let tag = XChaCha20Poly1305::new((&self.key).into())
+            .encrypt_in_place_detached((&nonce).into(), b"LogOS/csprng/v1", &mut block)
+            .expect("fixed CSPRNG buffer");
+        block[16..].copy_from_slice(tag.as_slice());
+        output.copy_from_slice(&block[..output.len()]);
+        self.counter = self.counter.wrapping_add(1);
+    }
+
+    pub fn wipe(&mut self) {
+        self.key.fill(0);
+        self.counter = 0;
+    }
+}
+
+impl Bootstrap {
+    pub fn from_root(root: &[u8; 32], entropy: &[u8; 32]) -> Result<Self, Error> {
+        let (device_key, storage_key) = derive_keys(root)?;
+        let hkdf = Hkdf::<sha2::Sha256>::new(Some(b"LogOS remote entropy v1"), entropy);
+        let mut rng_seed = [0; 32];
+        hkdf.expand(root, &mut rng_seed).map_err(|_| Error::Crypto)?;
+        Ok(Self { device_key, storage_key, rng_seed })
+    }
+
+    pub fn machine_public(&self) -> [u8; 32] {
+        machine_public(&self.device_key)
+    }
+}
+
 pub fn machine_public(secret: &[u8; 32]) -> [u8; 32] {
     X25519::pubkey(secret)
+}
+
+pub fn protected_nonce(key: &[u8; 32], generation: u64) -> [u8; PROTECTED_NONCE_BYTES] {
+    let hkdf = Hkdf::<sha2::Sha256>::new(Some(b"LogOS protected nonce v1"), key);
+    let mut nonce = [0; PROTECTED_NONCE_BYTES];
+    let _ = hkdf.expand(&generation.to_be_bytes(), &mut nonce);
+    nonce
 }
 
 pub fn seal(
@@ -774,13 +897,68 @@ mod tests {
         assert_ne!(device, storage);
         let mut record = [0; 32];
         record[..4].copy_from_slice(b"ping");
-        let length = seal(&storage, &[9; 24], b"enrollment", &mut record, 4).unwrap();
-        assert_eq!(open(&storage, &[9; 24], b"enrollment", &mut record, length).unwrap(), 4);
+        let length = seal(&storage, &[9; 24], ENROLLMENT_AD, &mut record, 4).unwrap();
+        assert_eq!(open(&storage, &[9; 24], ENROLLMENT_AD, &mut record, length).unwrap(), 4);
         record[0] ^= 1;
         assert_eq!(
-            open(&storage, &[9; 24], b"enrollment", &mut record, length),
+            open(&storage, &[9; 24], ENROLLMENT_AD, &mut record, length),
             Err(Error::Crypto)
         );
+    }
+
+    #[test]
+    fn protected_blobs_carry_nonce_and_reject_tampering() {
+        let bootstrap = Bootstrap::from_root(&[7; 32], &[9; 32]).unwrap();
+        assert_ne!(bootstrap.device_key, bootstrap.storage_key);
+        assert_ne!(bootstrap.rng_seed, [0; 32]);
+        let mut trust = TrustState::new(bootstrap.device_key).unwrap();
+        let client = [8; 32];
+        let generation = trust.enroll(client).unwrap();
+        let mut enrollment = [0; ENROLLMENT_BLOB_BYTES];
+        trust.seal_enrollment_blob(&bootstrap.storage_key, &[3; 24], &mut enrollment).unwrap();
+        let loaded = TrustState::open_enrollment_blob(
+            bootstrap.device_key,
+            &bootstrap.storage_key,
+            &mut enrollment,
+        );
+        assert!(loaded.available() && loaded.authorizes(&client, generation));
+        enrollment[PROTECTED_NONCE_BYTES] ^= 1;
+        assert!(
+            !TrustState::open_enrollment_blob(
+                bootstrap.device_key,
+                &bootstrap.storage_key,
+                &mut enrollment,
+            )
+            .available()
+        );
+        let record = SessionRecord {
+            enrollment_generation: generation,
+            session: [1; SESSION_ID_LEN],
+            sequence: 1,
+            pending: false,
+            digest: [2; REQUEST_DIGEST_LEN],
+            reply: [3; 256],
+            reply_length: 2,
+        };
+        let mut blob = [0; SESSION_BLOB_BYTES];
+        record.seal_blob(&bootstrap.storage_key, &[4; 24], &mut blob).unwrap();
+        assert_eq!(SessionRecord::open_blob(&bootstrap.storage_key, &mut blob), Ok(record));
+    }
+
+    #[test]
+    fn csprng_is_seeded_and_bounded() {
+        let mut first = Csprng::from_seed([1; 32]);
+        let mut second = Csprng::from_seed([1; 32]);
+        let mut a = [0; 24];
+        let mut b = [0; 24];
+        first.fill(&mut a);
+        second.fill(&mut b);
+        assert_eq!(a, b);
+        assert_ne!(a, [0; 24]);
+        first.wipe();
+        let mut c = [0; 24];
+        first.fill(&mut c);
+        assert_ne!(a, c);
     }
 
     #[test]

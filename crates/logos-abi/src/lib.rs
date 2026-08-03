@@ -25,6 +25,8 @@ pub struct NamespaceId(pub u32);
 
 pub const TERMINAL_NAMESPACE: NamespaceId = NamespaceId(1);
 pub const TRUST_NAMESPACE: NamespaceId = NamespaceId(5);
+pub const TRUST_ENROLLMENT_NAME: &[u8] = b"enrollment";
+pub const TRUST_SESSION_NAME: &[u8] = b"remote-session";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
@@ -891,6 +893,28 @@ pub enum Effect {
     Unenroll,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct EffectReply {
+    pub result: EffectResult,
+    pub text: [u8; MAX_SESSION_TEXT],
+    pub length: u16,
+}
+
+impl EffectReply {
+    pub fn new(result: EffectResult, text: &[u8]) -> Self {
+        let length = text.len().min(MAX_SESSION_TEXT);
+        let mut output = Self { result, text: [0; MAX_SESSION_TEXT], length: length as u16 };
+        output.text[..length].copy_from_slice(&text[..length]);
+        output
+    }
+
+    pub fn valid(self) -> bool {
+        self.length as usize <= self.text.len()
+            && self.text[self.length as usize..].iter().all(|byte| *byte == 0)
+    }
+}
+
 impl Effect {
     pub const fn from_wire(value: u32) -> Option<Self> {
         match value {
@@ -991,7 +1015,7 @@ impl SessionReply {
 
 /// Typed result of one capability-gated Core effect. Sessions owns rendering
 /// this value into a terminal reply.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum EffectResult {
     Completed = 1,

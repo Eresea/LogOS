@@ -33,7 +33,7 @@ pub(crate) fn main(
     acpi: Option<acpi::Tables>,
     machine: identity::Machine,
     mut secret_root: Option<root_key::RootKey>,
-    remote_machine_public: [u8; 32],
+    remote_bootstrap: Option<logos_remote::Bootstrap>,
     wall_clock: time::WallClock,
     payload: Option<payload::Payloads>,
 ) -> ! {
@@ -77,6 +77,7 @@ pub(crate) fn main(
         key.wipe();
         check!(b"secret root wiped", key.is_wiped());
     }
+    let mut remote_state = remote_bootstrap.and_then(secrets::RemoteState::new);
     check!(b"audit", audit::self_check());
     check!(b"approvals", approvals::self_check());
     check!(b"inference", inference::self_check());
@@ -875,6 +876,38 @@ pub(crate) fn main(
     } else {
         debug::write_line(b"LogOS: Store service unavailable");
         let _ = native_services.missing(supervisor::NativeService::Store);
+    }
+    if let (Some(bootstrap), Some(page_address)) =
+        (remote_bootstrap, shared_pages.address(terminal_owner, shared_history))
+    {
+        let mut blob = [0; logos_remote::ENROLLMENT_BLOB_BYTES];
+        let status = protected_store_read(
+            native_storage_store,
+            &mut block_dispatch,
+            &mut block::DispatchContext {
+                endpoint: native_storage_block,
+                pages: &mut shared_pages,
+                store_owner: storage_owner,
+                store_page: storage_block_page,
+                device: &mut block_device,
+                memory: &mut memory,
+            },
+            &mut native_scheduler,
+            storage_handle,
+            shared_history,
+            page_address,
+            logos_abi::TRUST_NAMESPACE,
+            logos_abi::TRUST_ENROLLMENT_NAME,
+            &mut blob,
+            interrupts::ticks(),
+        );
+        if status == logos_abi::PersistenceStatus::Complete {
+            remote_state = Some(secrets::RemoteState::load_enrollment(bootstrap, &mut blob));
+        } else if status != logos_abi::PersistenceStatus::NotFound {
+            remote_state = Some(secrets::RemoteState::unavailable(bootstrap));
+        }
+    } else if let Some(bootstrap) = remote_bootstrap {
+        remote_state = Some(secrets::RemoteState::unavailable(bootstrap));
     }
     let mut network_handle = if let Some(network_task) = native_network.take()
         && let Some(handle) = native_scheduler.spawn(network_task)
@@ -2894,16 +2927,87 @@ pub(crate) fn main(
                             console_mode = mode::ConsoleMode::Recovery;
                             break;
                         }
-                        if native_command
-                            .request()
-                            .is_some_and(|request| request.syscall == logos_abi::Syscall::RemoteKey)
-                        {
+                        if native_command.request().is_some_and(|request| {
+                            matches!(
+                                request.syscall,
+                                logos_abi::Syscall::RemoteKey
+                                    | logos_abi::Syscall::Enroll
+                                    | logos_abi::Syscall::Unenroll
+                            )
+                        }) {
+                            let request = native_command.request().unwrap();
                             let mut key_text = [0; 64];
-                            let reply = if remote_machine_public == [0; 32] {
-                                b"remote unavailable" as &[u8]
-                            } else {
-                                hex_key(&remote_machine_public, &mut key_text);
-                                &key_text
+                            let mut reply = b"remote unavailable" as &[u8];
+                            if let Some(state) = remote_state.as_mut() {
+                                match request.syscall {
+                                    logos_abi::Syscall::RemoteKey => {
+                                        if state.available() {
+                                            hex_key(&state.machine_public(), &mut key_text);
+                                            reply = &key_text;
+                                        }
+                                    }
+                                    logos_abi::Syscall::Enroll => {
+                                        let mut client_key = [0; 32];
+                                        if request.length == 64
+                                            && hex_decode_key(
+                                                &request.argument[..request.length],
+                                                &mut client_key,
+                                            )
+                                            && state.enroll(client_key).is_some_and(|_| {
+                                                persist_remote_enrollment(
+                                                    state,
+                                                    remote_bootstrap,
+                                                    native_storage_store,
+                                                    &mut block_dispatch,
+                                                    &mut block::DispatchContext {
+                                                        endpoint: native_storage_block,
+                                                        pages: &mut shared_pages,
+                                                        store_owner: storage_owner,
+                                                        store_page: storage_block_page,
+                                                        device: &mut block_device,
+                                                        memory: &mut memory,
+                                                    },
+                                                    &mut native_scheduler,
+                                                    storage_handle,
+                                                    shared_history,
+                                                    terminal_owner,
+                                                    tick,
+                                                )
+                                            })
+                                        {
+                                            hex_key(&state.machine_public(), &mut key_text);
+                                            reply = &key_text;
+                                        } else {
+                                            reply = b"invalid enrollment key";
+                                        }
+                                    }
+                                    logos_abi::Syscall::Unenroll => {
+                                        if state.unenroll().is_some_and(|_| {
+                                            persist_remote_enrollment(
+                                                state,
+                                                remote_bootstrap,
+                                                native_storage_store,
+                                                &mut block_dispatch,
+                                                &mut block::DispatchContext {
+                                                    endpoint: native_storage_block,
+                                                    pages: &mut shared_pages,
+                                                    store_owner: storage_owner,
+                                                    store_page: storage_block_page,
+                                                    device: &mut block_device,
+                                                    memory: &mut memory,
+                                                },
+                                                &mut native_scheduler,
+                                                storage_handle,
+                                                shared_history,
+                                                terminal_owner,
+                                                tick,
+                                            )
+                                        }) {
+                                            reply = b"remote unenrolled";
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             };
                             if !native_command.reply(reply)
                                 || !native_scheduler.wake(native_handle)
@@ -3892,6 +3996,278 @@ fn relay_store_request(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn protected_store_request(
+    storage: native_task::StoreEndpoint,
+    dispatch: &mut block::Dispatch,
+    block_context: &mut block::DispatchContext<'_>,
+    scheduler: &mut native_task::Scheduler<'_>,
+    storage_handle: native_task::Handle,
+    request: logos_abi::StoreRequest,
+    tick: u64,
+) -> Option<logos_abi::StoreReply> {
+    if !storage.available() || !storage.deliver(request) || !scheduler.wake(storage_handle) {
+        return None;
+    }
+    let mut current_tick = tick.max(1);
+    if !scheduler.run(storage_handle) {
+        return None;
+    }
+    loop {
+        if let Some(reply) = storage.response(request.id) {
+            return Some(reply);
+        }
+        if scheduler.run_next() {
+            continue;
+        }
+        if scheduler.failed(storage_handle) {
+            return None;
+        }
+        if let Some(reply) = dispatch.poll(block_context, current_tick) {
+            if !block_context.endpoint.reply(reply)
+                || !scheduler.wake(storage_handle)
+                || !scheduler.run(storage_handle)
+            {
+                return None;
+            }
+        } else if dispatch.accepts_new_request() {
+            interrupts::wait_for_tick();
+        } else {
+            interrupts::wait_for_virtio();
+        }
+        current_tick = interrupts::ticks();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn protected_store_replace(
+    storage: native_task::StoreEndpoint,
+    dispatch: &mut block::Dispatch,
+    block_context: &mut block::DispatchContext<'_>,
+    scheduler: &mut native_task::Scheduler<'_>,
+    storage_handle: native_task::Handle,
+    page: logos_abi::PageHandle,
+    page_address: u64,
+    namespace: logos_abi::NamespaceId,
+    name: &[u8],
+    bytes: &[u8],
+    tick: u64,
+) -> logos_abi::PersistenceStatus {
+    if name.is_empty()
+        || name.len() > logos_abi::MAX_OBJECT_NAME
+        || bytes.is_empty()
+        || bytes.len() > logos_abi::PAGE_SIZE
+        || core::str::from_utf8(name).is_err()
+    {
+        return logos_abi::PersistenceStatus::Invalid;
+    }
+    let mut identity = [0; logos_abi::MAX_OBJECT_NAME];
+    identity[..name.len()].copy_from_slice(name);
+    let begin = logos_abi::StoreRequest {
+        id: u32::MAX - 3,
+        operation: logos_abi::StoreOperation::BeginReplace,
+        namespace,
+        name: identity,
+        name_length: name.len() as u8,
+        version: logos_abi::VersionSelector::None,
+        offset: 0,
+        length: bytes.len() as u32,
+        page: logos_abi::PageHandle(0),
+        deadline: tick.max(1).saturating_add(100),
+    };
+    if protected_store_request(
+        storage,
+        dispatch,
+        block_context,
+        scheduler,
+        storage_handle,
+        begin,
+        tick,
+    )
+    .is_none_or(|reply| reply.status != logos_abi::PersistenceStatus::Complete)
+    {
+        return logos_abi::PersistenceStatus::Unavailable;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), page_address as *mut u8, bytes.len());
+    }
+    let write = logos_abi::StoreRequest {
+        id: u32::MAX - 2,
+        operation: logos_abi::StoreOperation::WriteChunk,
+        namespace: logos_abi::NamespaceId(0),
+        name: [0; logos_abi::MAX_OBJECT_NAME],
+        name_length: 0,
+        version: logos_abi::VersionSelector::None,
+        offset: 0,
+        length: bytes.len() as u32,
+        page,
+        deadline: tick.max(1).saturating_add(100),
+    };
+    if protected_store_request(
+        storage,
+        dispatch,
+        block_context,
+        scheduler,
+        storage_handle,
+        write,
+        tick,
+    )
+    .is_none_or(|reply| reply.status != logos_abi::PersistenceStatus::Complete)
+    {
+        let _ = cancel_store_transaction(storage, scheduler, storage_handle);
+        return logos_abi::PersistenceStatus::Unavailable;
+    }
+    let commit = logos_abi::StoreRequest {
+        id: u32::MAX - 1,
+        operation: logos_abi::StoreOperation::Commit,
+        namespace: logos_abi::NamespaceId(0),
+        name: [0; logos_abi::MAX_OBJECT_NAME],
+        name_length: 0,
+        version: logos_abi::VersionSelector::None,
+        offset: 0,
+        length: 0,
+        page: logos_abi::PageHandle(0),
+        deadline: tick.max(1).saturating_add(100),
+    };
+    protected_store_request(
+        storage,
+        dispatch,
+        block_context,
+        scheduler,
+        storage_handle,
+        commit,
+        tick,
+    )
+    .map_or(logos_abi::PersistenceStatus::Unavailable, |reply| reply.status)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn protected_store_read(
+    storage: native_task::StoreEndpoint,
+    dispatch: &mut block::Dispatch,
+    block_context: &mut block::DispatchContext<'_>,
+    scheduler: &mut native_task::Scheduler<'_>,
+    storage_handle: native_task::Handle,
+    page: logos_abi::PageHandle,
+    page_address: u64,
+    namespace: logos_abi::NamespaceId,
+    name: &[u8],
+    output: &mut [u8],
+    tick: u64,
+) -> logos_abi::PersistenceStatus {
+    if name.is_empty()
+        || name.len() > logos_abi::MAX_OBJECT_NAME
+        || output.is_empty()
+        || output.len() > logos_abi::PAGE_SIZE
+        || core::str::from_utf8(name).is_err()
+    {
+        return logos_abi::PersistenceStatus::Invalid;
+    }
+    let mut identity = [0; logos_abi::MAX_OBJECT_NAME];
+    identity[..name.len()].copy_from_slice(name);
+    let open = logos_abi::StoreRequest {
+        id: u32::MAX - 6,
+        operation: logos_abi::StoreOperation::OpenRead,
+        namespace,
+        name: identity,
+        name_length: name.len() as u8,
+        version: logos_abi::VersionSelector::Current,
+        offset: 0,
+        length: 0,
+        page: logos_abi::PageHandle(0),
+        deadline: tick.max(1).saturating_add(100),
+    };
+    let Some(reply) = protected_store_request(
+        storage,
+        dispatch,
+        block_context,
+        scheduler,
+        storage_handle,
+        open,
+        tick,
+    ) else {
+        return logos_abi::PersistenceStatus::Unavailable;
+    };
+    if reply.status != logos_abi::PersistenceStatus::Complete {
+        return reply.status;
+    }
+    let length = reply.length as usize;
+    if length == 0 || length > output.len() {
+        return logos_abi::PersistenceStatus::Invalid;
+    }
+    let read = logos_abi::StoreRequest {
+        id: u32::MAX - 5,
+        operation: logos_abi::StoreOperation::ReadChunk,
+        namespace: logos_abi::NamespaceId(0),
+        name: [0; logos_abi::MAX_OBJECT_NAME],
+        name_length: 0,
+        version: logos_abi::VersionSelector::None,
+        offset: 0,
+        length: length as u32,
+        page,
+        deadline: tick.max(1).saturating_add(100),
+    };
+    let Some(reply) = protected_store_request(
+        storage,
+        dispatch,
+        block_context,
+        scheduler,
+        storage_handle,
+        read,
+        tick,
+    ) else {
+        return logos_abi::PersistenceStatus::Unavailable;
+    };
+    if reply.status == logos_abi::PersistenceStatus::Complete {
+        unsafe {
+            core::ptr::copy_nonoverlapping(page_address as *const u8, output.as_mut_ptr(), length);
+        }
+    }
+    reply.status
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_remote_enrollment(
+    state: &mut secrets::RemoteState,
+    bootstrap: Option<logos_remote::Bootstrap>,
+    storage: native_task::StoreEndpoint,
+    dispatch: &mut block::Dispatch,
+    block_context: &mut block::DispatchContext<'_>,
+    scheduler: &mut native_task::Scheduler<'_>,
+    storage_handle: native_task::Handle,
+    page: logos_abi::PageHandle,
+    terminal_owner: u64,
+    tick: u64,
+) -> bool {
+    let Some(bootstrap) = bootstrap else { return false };
+    let Some(page_address) = block_context.pages.address(terminal_owner, page) else {
+        return false;
+    };
+    let mut blob = [0; logos_remote::ENROLLMENT_BLOB_BYTES];
+    if !state.seal_enrollment_random(&mut blob) {
+        return false;
+    }
+    let status = protected_store_replace(
+        storage,
+        dispatch,
+        block_context,
+        scheduler,
+        storage_handle,
+        page,
+        page_address,
+        logos_abi::TRUST_NAMESPACE,
+        logos_abi::TRUST_ENROLLMENT_NAME,
+        &blob,
+        tick,
+    );
+    if status == logos_abi::PersistenceStatus::Complete {
+        true
+    } else {
+        *state = secrets::RemoteState::unavailable(bootstrap);
+        false
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn relay_terminal_store_requests(
     terminal: native_task::StoreEndpoint,
     storage: native_task::StoreEndpoint,
@@ -4166,6 +4542,27 @@ fn hex_key(key: &[u8; 32], output: &mut [u8; 64]) {
     for (index, byte) in key.iter().copied().enumerate() {
         output[index * 2] = HEX[(byte >> 4) as usize];
         output[index * 2 + 1] = HEX[(byte & 0x0f) as usize];
+    }
+}
+
+fn hex_decode_key(input: &[u8], output: &mut [u8; 32]) -> bool {
+    if input.len() != 64 {
+        return false;
+    }
+    for (index, chunk) in input.chunks_exact(2).enumerate() {
+        let Some(high) = hex_value(chunk[0]) else { return false };
+        let Some(low) = hex_value(chunk[1]) else { return false };
+        output[index] = (high << 4) | low;
+    }
+    !output.iter().all(|byte| *byte == 0)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 

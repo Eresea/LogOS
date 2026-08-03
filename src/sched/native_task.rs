@@ -309,6 +309,16 @@ impl SessionEndpoint {
             logos_core::native_service::Context::reply_effect_at(self.context_physical, reply)
         }
     }
+
+    #[allow(dead_code)]
+    pub fn reply_effect_with_text(self, reply: logos_abi::EffectReply) -> bool {
+        unsafe {
+            logos_core::native_service::Context::reply_effect_with_text_at(
+                self.context_physical,
+                reply,
+            )
+        }
+    }
 }
 
 impl<'a> Task<'a> {

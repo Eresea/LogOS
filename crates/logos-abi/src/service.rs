@@ -1278,13 +1278,23 @@ impl Context {
     /// # Safety
     /// `address` must point to a live, aligned `Context` mapping.
     pub unsafe fn reply_effect_at(address: u64, reply: logos_abi::EffectResult) -> bool {
+        unsafe { Self::reply_effect_with_text_at(address, logos_abi::EffectReply::new(reply, &[])) }
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `Context` mapping.
+    pub unsafe fn reply_effect_with_text_at(address: u64, reply: logos_abi::EffectReply) -> bool {
+        if !reply.valid() {
+            return false;
+        }
         if unsafe { Self::session_effect_at(address) }.is_none() {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
-        context.x = reply as u32;
+        context.x = reply.result as u32;
         context.text = [0; MAX_TEXT];
-        context.text_length = 0;
+        context.text[..reply.length as usize].copy_from_slice(&reply.text[..reply.length as usize]);
+        context.text_length = u32::from(reply.length);
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -1432,6 +1442,15 @@ pub fn self_check() -> bool {
             logos_abi::EffectResult::TasksActive,
         )
     } && syscall.x == logos_abi::EffectResult::TasksActive as u32;
+    syscall.operation = SESSION_EFFECT;
+    let effect_text = unsafe {
+        Context::reply_effect_with_text_at(
+            (&mut syscall as *mut Context) as u64,
+            logos_abi::EffectReply::new(logos_abi::EffectResult::Completed, b"ok"),
+        )
+    } && syscall.x == logos_abi::EffectResult::Completed as u32
+        && syscall.text_length == 2
+        && syscall.text[..2] == *b"ok";
     syscall.operation = SESSION_REPLY;
     syscall.text[..2].copy_from_slice(b"ok");
     syscall.text_length = 2;
@@ -1449,6 +1468,7 @@ pub fn self_check() -> bool {
         && malformed
         && delivered
         && effect
+        && effect_text
         && reply
         && reset
 }
