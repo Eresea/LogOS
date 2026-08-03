@@ -12,6 +12,7 @@ ROLES = {
     "logos-abi": (0, "contracts"),
     "logos-core": (0, "core"),
     "logos-net": (2, "network-protocol"),
+    "logos-remote": (1, "remote-contracts"),
     "logos-network-service": (2, "network-service"),
     "logos-service-rt": (1, "service-rt"),
     "logos-store": (2, "store"),
@@ -21,12 +22,14 @@ ROLES = {
     "logos-sessions-service": (3, "sessions-service"),
     "logos-uefi": (0, "uefi-boot"),
     "logos-test": (99, "test"),
+    "logosctl": (99, "host-client"),
 }
 
 ALLOWED = {
     "logos-abi": set(),
     "logos-core": {"logos-abi"},
     "logos-net": set(),
+    "logos-remote": {"logos-abi"},
     "logos-network-service": {"logos-abi", "logos-net", "logos-service-rt"},
     "logos-service-rt": {"logos-abi"},
     "logos-store": {"logos-abi"},
@@ -36,8 +39,9 @@ ALLOWED = {
     "logos-sessions-service": {"logos-abi", "logos-service-rt"},
     # The boot adapter is the documented temporary exception while terminal
     # bootstrap remains statically linked.
-    "logos-uefi": {"logos-abi", "logos-core", "logos-terminal"},
+    "logos-uefi": {"logos-abi", "logos-core", "logos-terminal", "logos-remote"},
     "logos-test": {"logos-abi", "logos-store", "logos-terminal"},
+    "logosctl": {"logos-remote"},
 }
 
 

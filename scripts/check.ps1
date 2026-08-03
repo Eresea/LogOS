@@ -18,12 +18,14 @@ function Invoke-Checked([string]$Name, [scriptblock]$Command) {
 if ($Stage -in @('all', 'host')) {
     Invoke-Checked 'format' { cargo fmt --check --all }
     Invoke-Checked 'host clippy' {
-        cargo clippy -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-storage-service -p logos-terminal --lib --all-features -- -D warnings
+        cargo clippy -p logos-abi -p logos-core -p logos-remote -p logos-service-rt -p logos-store -p logos-storage-service -p logos-terminal --lib --all-features -- -D warnings
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        cargo clippy -p logosctl --bin logosctl --all-features -- -D warnings
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         cargo clippy -p logos-test --bin logos-test --all-features -- -D warnings
     }
     Invoke-Checked 'host tests' {
-        cargo test -p logos-abi -p logos-core -p logos-service-rt -p logos-store -p logos-storage-service -p logos-terminal --lib --all-features
+        cargo test -p logos-abi -p logos-core -p logos-remote -p logos-service-rt -p logos-store -p logos-storage-service -p logos-terminal -p logosctl --all-features
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         cargo test -p logos-test --bin logos-test
     }
