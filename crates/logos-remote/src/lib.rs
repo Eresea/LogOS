@@ -1030,6 +1030,27 @@ mod tests {
     }
 
     #[test]
+    fn protocol_v2_messages_are_bounded_and_canonical() {
+        let mut payload = [0; REMOTE_MESSAGE_PAYLOAD];
+        payload[..6].copy_from_slice(b"trace\0");
+        let message = RemoteMessage {
+            kind: RemoteMessageKind::Invoke,
+            id: 7,
+            sequence: 3,
+            cursor: 11,
+            payload,
+            payload_length: 6,
+        };
+        let mut encoded = [0; MAX_FRAME];
+        let length = message.encode(&mut encoded).unwrap();
+        assert_eq!(RemoteMessage::decode(&encoded[..length]), Ok(message));
+        encoded[3] = 1;
+        assert_eq!(RemoteMessage::decode(&encoded[..length]), Err(Error::Frame));
+        assert_eq!(RemoteCommand::from_name(b"poweroff"), Some(RemoteCommand::PowerOff));
+        assert!(!RemoteCommand::PowerOff.takes_argument());
+    }
+
+    #[test]
     fn protected_records_reject_tampering() {
         let (device, storage) = derive_keys(&[7; 32]).unwrap();
         assert_ne!(device, storage);
