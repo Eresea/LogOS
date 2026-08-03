@@ -51,6 +51,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos-remote"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
 name = "logos-service-rt"
 version = "0.1.0"
 dependencies = [
