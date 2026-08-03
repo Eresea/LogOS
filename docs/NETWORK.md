@@ -531,6 +531,7 @@ See [Architecture](architecture.md#12-networking-model),
   Network-service frame parsing/transmit and Core payload copying now consume TCP operations;
   owner multiplexing and Gateway remain.
 - Capability-scoped TCP connect, listen, accept, close, and bounded stream I/O.
+- Remote Foundation constrains TCP capability scopes to the exact local port `7443`.
 - Concurrent operations, ephemeral ports, connected endpoint state, and DNS resolution.
 - Authenticated-transport integration; identity, trust policy, and key ownership stay in their System services.
 - Public-network and longer-duration recovery proofs.

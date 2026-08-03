@@ -13,6 +13,7 @@ pub const NETWORK_MAX_ARP_ENTRIES: usize = 8;
 pub const NETWORK_MAX_DATAGRAMS: usize = 4;
 pub const NETWORK_MIN_FRAME: usize = 60;
 pub const NETWORK_MAX_FRAME: usize = 1514;
+pub const REMOTE_TCP_PORT: u16 = 7443;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
@@ -330,7 +331,7 @@ impl NetworkScope {
         match self.protocol() {
             Some(NetworkProtocol::Udp) => self.port() != 0,
             Some(NetworkProtocol::Icmp) => self.address() != 0 && self.port() == 0,
-            Some(NetworkProtocol::Tcp) => self.port() != 0,
+            Some(NetworkProtocol::Tcp) => self.port() == REMOTE_TCP_PORT,
             None => false,
         }
     }
@@ -1390,6 +1391,7 @@ mod tests {
             deadline: 1,
         };
         assert!(listen.valid_shape());
+        assert!(!NetworkScope::new(NetworkProtocol::Tcp, 0, REMOTE_TCP_PORT + 1).valid());
         let write = NetworkRequest {
             id: 6,
             operation: NetworkOperation::Write,
