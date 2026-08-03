@@ -352,6 +352,7 @@ struct ImageProfile {
     sessions: Option<PathBuf>,
     storage: Option<PathBuf>,
     network: Option<PathBuf>,
+    gateway: Option<PathBuf>,
     incompatible_sessions: bool,
     block_probe: bool,
 }
@@ -655,6 +656,7 @@ impl Harness {
             (&profile.sessions, "SESSIONS.EFI"),
             (&profile.storage, "STORAGE.EFI"),
             (&profile.network, "NETWORK.EFI"),
+            (&profile.gateway, "GATEWAY.EFI"),
         ] {
             if let Some(source) = source {
                 fs::copy(source, payload_dir.join(name)).map_err(io_error)?;
@@ -1742,7 +1744,12 @@ fn build_profile(
     if !status.success() {
         return Err("kernel build failed".into());
     }
-    for package in ["logos-terminal-service", "logos-sessions-service", "logos-network-service"] {
+    for package in [
+        "logos-terminal-service",
+        "logos-sessions-service",
+        "logos-network-service",
+        "logos-gateway-service",
+    ] {
         let status = Command::new("cargo")
             .current_dir(root)
             .args([
@@ -1786,6 +1793,7 @@ fn build_profile(
         sessions: Some(copy("logos-sessions-service.efi")?),
         storage: Some(copy("logos-storage-service.efi")?),
         network: Some(copy("logos-network-service.efi")?),
+        gateway: Some(copy("logos-gateway-service.efi")?),
         incompatible_sessions: false,
         block_probe,
     })

@@ -16,6 +16,7 @@ cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-t
 cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-sessions-service --target x86_64-unknown-uefi $(if ($Release) { "--release" })
 cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-storage-service --target x86_64-unknown-uefi $(if ($Release) { "--release" })
 cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-network-service --target x86_64-unknown-uefi $(if ($Release) { "--release" })
+cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --package logos-gateway-service --target x86_64-unknown-uefi $(if ($Release) { "--release" })
 New-Item -ItemType Directory -Force "$esp\EFI\BOOT" | Out-Null
 New-Item -ItemType Directory -Force "$esp\EFI\LOGOS" | Out-Null
 Copy-Item $efi "$esp\EFI\BOOT\BOOTX64.EFI" -Force
@@ -23,6 +24,7 @@ Copy-Item (Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-termin
 Copy-Item (Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-sessions-service.efi") "$esp\EFI\LOGOS\SESSIONS.EFI" -Force
 Copy-Item (Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-storage-service.efi") "$esp\EFI\LOGOS\STORAGE.EFI" -Force
 Copy-Item (Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-network-service.efi") "$esp\EFI\LOGOS\NETWORK.EFI" -Force
+Copy-Item (Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-gateway-service.efi") "$esp\EFI\LOGOS\GATEWAY.EFI" -Force
 $disk = Join-Path $repoRoot "target\logos-store.raw"
 if (-not (Test-Path $disk)) {
     $stream = [System.IO.File]::Create($disk)

@@ -20,6 +20,7 @@ ROLES = {
     "logos-terminal": (3, "terminal"),
     "logos-terminal-service": (3, "terminal-service"),
     "logos-sessions-service": (3, "sessions-service"),
+    "logos-gateway-service": (3, "gateway-service"),
     "logos-uefi": (0, "uefi-boot"),
     "logos-test": (99, "test"),
     "logosctl": (99, "host-client"),
@@ -37,6 +38,7 @@ ALLOWED = {
     "logos-terminal": set(),
     "logos-terminal-service": {"logos-abi", "logos-service-rt", "logos-terminal"},
     "logos-sessions-service": {"logos-abi", "logos-service-rt"},
+    "logos-gateway-service": {"logos-abi", "logos-remote", "logos-service-rt"},
     # The boot adapter is the documented temporary exception while terminal
     # bootstrap remains statically linked.
     "logos-uefi": {"logos-abi", "logos-core", "logos-terminal", "logos-remote"},
@@ -78,6 +80,7 @@ def violations(data: dict) -> list[str]:
         "logos-terminal-service",
         "logos-sessions-service",
         "logos-storage-service",
+        "logos-gateway-service",
     ):
         source = ROOT / "crates" / package / "src" / "main.rs"
         text = source.read_text(encoding="utf-8")

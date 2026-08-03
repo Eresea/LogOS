@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/logos-abi", "crates/logos-core", "crates/logos-net", "crates/logos-network-service", "crates/logos-remote", "crates/logos-service-rt", "crates/logos-store", "crates/logos-storage-service", "crates/logos-terminal", "crates/logos-terminal-service", "crates/logos-sessions-service", "crates/logos-test", "crates/logosctl"]
+members = ["crates/logos-abi", "crates/logos-core", "crates/logos-net", "crates/logos-network-service", "crates/logos-remote", "crates/logos-service-rt", "crates/logos-store", "crates/logos-storage-service", "crates/logos-terminal", "crates/logos-terminal-service", "crates/logos-sessions-service", "crates/logos-gateway-service", "crates/logos-test", "crates/logosctl"]
 default-members = ["crates/logos-abi", "crates/logos-core", "crates/logos-service-rt", "crates/logos-store", "crates/logos-terminal", "crates/logos-test"]
 resolver = "3"
 

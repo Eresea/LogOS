@@ -232,6 +232,10 @@ impl Context {
         unsafe { RawContext::network_at(self.raw_address()) }
     }
 
+    pub fn network_response(&self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
+        unsafe { RawContext::network_reply_at(self.raw_address(), expected_id) }
+    }
+
     pub fn network_owner(&self) -> Option<u64> {
         unsafe { RawContext::network_owner_at(self.raw_address()) }
     }

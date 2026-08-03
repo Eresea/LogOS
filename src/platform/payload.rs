@@ -16,6 +16,7 @@ static TERMINAL_PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
 static SESSIONS_PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
 static STORAGE_PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
 static NETWORK_PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
+static GATEWAY_PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));
 
 #[derive(Clone, Copy)]
 pub struct Payload {
@@ -30,6 +31,7 @@ pub struct Payloads {
     pub sessions: Option<Payload>,
     pub storage: Option<Payload>,
     pub network: Option<Payload>,
+    pub gateway: Option<Payload>,
 }
 
 impl Payload {
@@ -168,7 +170,13 @@ pub fn stage() -> Option<Payloads> {
         unsafe { &mut *NETWORK_PAYLOAD.0.get() },
         b"network",
     );
-    Some(Payloads { terminal, sessions, storage, network })
+    let gateway = open_load(
+        &mut root,
+        cstr16!(r"\EFI\LOGOS\GATEWAY.EFI"),
+        unsafe { &mut *GATEWAY_PAYLOAD.0.get() },
+        b"gateway",
+    );
+    Some(Payloads { terminal, sessions, storage, network, gateway })
 }
 
 fn open_load(

@@ -24,4 +24,5 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0016](0016-capability-slices.md) | Accepted | Compose system capabilities from independently versioned module contracts. |
 | [0017](0017-native-service-fault-restart.md) | Accepted | Reload native services after contained Ring-3 faults. |
 | [0018](0018-remote-foundation-boundary.md) | Accepted | Keep Remote Foundation behind bounded TCP, trust, and session gates. |
+| [0019](0019-remote-v1-administration-attachment.md) | Accepted | Extend Remote Foundation into a persistent, credit-bounded administration attachment. |
 

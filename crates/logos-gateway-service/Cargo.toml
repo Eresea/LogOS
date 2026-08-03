@@ -1,0 +1,19 @@
+[package]
+name = "logos-gateway-service"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+logos-abi = { path = "../logos-abi" }
+logos-remote = { path = "../logos-remote" }
+logos-service-rt = { path = "../logos-service-rt" }
+
+[features]
+test-hooks = []
+
+[[bin]]
+name = "logos-gateway-service"
+path = "src/main.rs"
