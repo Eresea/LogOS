@@ -678,6 +678,9 @@ VirtIO negotiation, DMA queues and bounce buffers, interrupts, timeout, reset, a
 copies complete Ethernet frames through two fixed Network-owned pages and multiplexes frame events,
 client requests, and finite timer wakeups through the service's existing context gate. Core and the
 service validate request IDs, endpoint/interface generations, operation shape, page bounds, and deadlines.
+For passive TCP, Core stamps the calling native-service owner into the trusted delivery context;
+the public `NetworkRequest` never carries an owner. The Network service applies that owner to
+listener, accepted-stream, read, write, and close operations.
 The Ring-2 Network service owns Ethernet, ARP, IPv4, ICMP echo, DHCP, UDP, and generation-tagged datagram
 endpoints. Clients receive no raw-frame access. The hermetic QEMU peer supplies independent DHCP, ARP,
 ICMP, UDP, malformed-frame, cancellation, timeout, and reconnect proofs.
