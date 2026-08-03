@@ -25,6 +25,8 @@ pub enum Event {
 pub struct Snapshot {
     events: [Event; EVENTS],
     len: usize,
+    first_cursor: u64,
+    next_cursor: u64,
 }
 
 struct Ring(UnsafeCell<[Event; EVENTS]>);
@@ -67,7 +69,8 @@ pub fn snapshot() -> Snapshot {
         if flags & (1 << 9) != 0 {
             core::arch::asm!("sti");
         }
-        Snapshot { events, len }
+        let next_cursor = head as u64;
+        Snapshot { events, len, first_cursor: next_cursor.saturating_sub(len as u64), next_cursor }
     }
 }
 
@@ -75,11 +78,31 @@ impl Snapshot {
     pub fn events(&self) -> &[Event] {
         &self.events[..self.len]
     }
+
+    pub const fn cursor_range(&self) -> (u64, u64) {
+        (self.first_cursor, self.next_cursor)
+    }
+
+    pub fn since(&self, cursor: u64, output: &mut [Event; EVENTS]) -> (u64, usize, bool) {
+        let gap = cursor < self.first_cursor;
+        let start = cursor.max(self.first_cursor).min(self.next_cursor);
+        let count = (self.next_cursor - start).min(EVENTS as u64) as usize;
+        output[..count]
+            .copy_from_slice(&self.events[(start - self.first_cursor) as usize..][..count]);
+        (self.next_cursor, count, gap)
+    }
 }
 
 pub fn self_check() -> bool {
     record(Event::SelfCheck);
-    latest() == Event::SelfCheck && snapshot().events().last() == Some(&Event::SelfCheck)
+    let snapshot = snapshot();
+    let mut output = [Event::Empty; EVENTS];
+    let (next, count, gap) = snapshot.since(snapshot.cursor_range().0, &mut output);
+    latest() == Event::SelfCheck
+        && snapshot.events().last() == Some(&Event::SelfCheck)
+        && next == snapshot.cursor_range().1
+        && count != 0
+        && !gap
 }
 
 pub fn message(event: Event) -> &'static [u8] {
