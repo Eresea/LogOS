@@ -29,6 +29,8 @@ pub const REMOTE_REPLY_BYTES: usize = 2 + 8 + 8 + 1 + 2 + MAX_COMMAND;
 pub const REMOTE_PROTOCOL_V2: u16 = 2;
 pub const REMOTE_MESSAGE_HEADER: usize = 30;
 pub const REMOTE_MESSAGE_PAYLOAD: usize = MAX_FRAME - REMOTE_MESSAGE_HEADER;
+pub const REMOTE_INVOCATION_HEADER: usize = 3;
+pub const REMOTE_INVOCATION_ARGUMENT: usize = REMOTE_MESSAGE_PAYLOAD - REMOTE_INVOCATION_HEADER;
 pub const REMOTE_AUDIT_EVENTS: usize = 16;
 pub const REMOTE_AUDIT_EVENT_BYTES: usize = 88;
 pub const REMOTE_CONTROL_RECORD_BYTES: usize =
@@ -479,6 +481,23 @@ pub enum RemoteCommand {
 }
 
 impl RemoteCommand {
+    pub fn from_wire(value: u8) -> Result<Self, Error> {
+        match value {
+            1 => Ok(Self::Health),
+            2 => Ok(Self::Ping),
+            3 => Ok(Self::Tasks),
+            4 => Ok(Self::Services),
+            5 => Ok(Self::Drivers),
+            6 => Ok(Self::Trace),
+            7 => Ok(Self::Inspect),
+            8 => Ok(Self::Restart),
+            9 => Ok(Self::Cancel),
+            10 => Ok(Self::Reboot),
+            11 => Ok(Self::PowerOff),
+            _ => Err(Error::Frame),
+        }
+    }
+
     pub fn from_name(name: &[u8]) -> Option<Self> {
         match name {
             b"health" => Some(Self::Health),
@@ -498,6 +517,59 @@ impl RemoteCommand {
 
     pub const fn takes_argument(self) -> bool {
         matches!(self, Self::Inspect | Self::Restart | Self::Cancel)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteInvocation {
+    pub command: RemoteCommand,
+    pub argument: [u8; REMOTE_INVOCATION_ARGUMENT],
+    pub argument_length: u16,
+}
+
+impl RemoteInvocation {
+    pub fn new(command: RemoteCommand, argument: &[u8]) -> Result<Self, Error> {
+        if argument.len() > REMOTE_INVOCATION_ARGUMENT
+            || command.takes_argument() == argument.is_empty()
+        {
+            return Err(Error::Frame);
+        }
+        let mut encoded = [0; REMOTE_INVOCATION_ARGUMENT];
+        encoded[..argument.len()].copy_from_slice(argument);
+        Ok(Self { command, argument: encoded, argument_length: argument.len() as u16 })
+    }
+
+    pub fn encode(self, output: &mut [u8; REMOTE_MESSAGE_PAYLOAD]) -> Result<usize, Error> {
+        let length = usize::from(self.argument_length);
+        if length > REMOTE_INVOCATION_ARGUMENT
+            || self.argument[length..].iter().any(|byte| *byte != 0)
+            || self.command.takes_argument() != (length != 0)
+        {
+            return Err(Error::Frame);
+        }
+        *output = [0; REMOTE_MESSAGE_PAYLOAD];
+        output[0] = self.command as u8;
+        output[1..3].copy_from_slice(&self.argument_length.to_be_bytes());
+        output[3..3 + length].copy_from_slice(&self.argument[..length]);
+        Ok(REMOTE_INVOCATION_HEADER + length)
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, Error> {
+        if input.len() < REMOTE_INVOCATION_HEADER || input.len() > REMOTE_MESSAGE_PAYLOAD {
+            return Err(Error::Frame);
+        }
+        let argument_length =
+            usize::from(u16::from_be_bytes(input[1..3].try_into().map_err(|_| Error::Frame)?));
+        if argument_length != input.len() - REMOTE_INVOCATION_HEADER
+            || argument_length > REMOTE_INVOCATION_ARGUMENT
+        {
+            return Err(Error::Frame);
+        }
+        let command = RemoteCommand::from_wire(input[0])?;
+        let invocation = Self::new(command, &input[3..])?;
+        (invocation.argument_length as usize == argument_length)
+            .then_some(invocation)
+            .ok_or(Error::Frame)
     }
 }
 
@@ -559,6 +631,14 @@ impl RemoteMessage {
             payload,
             payload_length: payload_length as u16,
         })
+    }
+
+    pub fn digest(self) -> Result<[u8; REQUEST_DIGEST_LEN], Error> {
+        let mut encoded = [0; MAX_FRAME];
+        let length = self.encode(&mut encoded)?;
+        let mut digest = sha2::Sha256::new();
+        digest.update(&encoded[..length]);
+        Ok(digest.finalize().into())
     }
 }
 
@@ -1332,6 +1412,19 @@ mod tests {
         assert_eq!(RemoteMessage::decode(&encoded[..length]), Err(Error::Frame));
         assert_eq!(RemoteCommand::from_name(b"poweroff"), Some(RemoteCommand::PowerOff));
         assert!(!RemoteCommand::PowerOff.takes_argument());
+        let invocation = RemoteInvocation::new(RemoteCommand::Inspect, b"tasks").unwrap();
+        let mut invocation_payload = [0; REMOTE_MESSAGE_PAYLOAD];
+        let invocation_length = invocation.encode(&mut invocation_payload).unwrap();
+        assert_eq!(
+            RemoteInvocation::decode(&invocation_payload[..invocation_length]),
+            Ok(invocation)
+        );
+        assert!(RemoteInvocation::new(RemoteCommand::Ping, b"unexpected").is_err());
+        assert!(RemoteInvocation::new(RemoteCommand::Inspect, b"").is_err());
+        let mut digest_message = message;
+        digest_message.payload = invocation_payload;
+        digest_message.payload_length = invocation_length as u16;
+        assert_ne!(digest_message.digest().unwrap(), [0; REQUEST_DIGEST_LEN]);
     }
 
     #[test]
