@@ -22,6 +22,7 @@ pub const SESSION_BLOB_BYTES: usize =
 pub const ENROLLMENT_AD: &[u8] = b"LogOS/trust/enrollment/v1";
 pub const SESSION_AD: &[u8] = b"LogOS/trust/remote-session/v1";
 pub const REMOTE_CONTROL_AD: &[u8] = b"LogOS/trust/remote-control/v2";
+pub const REMOTE_PROLOGUE: &[u8] = b"LogOS/remote/2";
 pub const MAX_COMMAND: usize = 256;
 pub const REMOTE_REQUEST_BYTES: usize = 2 + 8 + SESSION_ID_LEN + 8 + 2 + MAX_COMMAND;
 pub const REMOTE_REPLY_BYTES: usize = 2 + 8 + 8 + 1 + 2 + MAX_COMMAND;
@@ -43,6 +44,7 @@ pub enum Error {
     Busy,
     Crypto,
     Invalid,
+    Denied,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -921,6 +923,87 @@ impl DH for X25519 {
     }
 }
 
+pub struct RemoteResponder {
+    handshake: Option<noise_protocol::HandshakeState<X25519, NoiseChaCha, NoiseSha256>>,
+    send: Option<noise_protocol::CipherState<NoiseChaCha>>,
+    receive: Option<noise_protocol::CipherState<NoiseChaCha>>,
+    authorized: bool,
+}
+
+impl RemoteResponder {
+    pub fn new(machine_secret: [u8; 32], ephemeral: [u8; 32]) -> Self {
+        use noise_protocol::{HandshakeStateBuilder, patterns::noise_ik};
+        let mut builder = HandshakeStateBuilder::<X25519>::new();
+        builder
+            .set_pattern(noise_ik())
+            .set_is_initiator(false)
+            .set_prologue(REMOTE_PROLOGUE)
+            .set_s(machine_secret)
+            .set_e(ephemeral);
+        Self {
+            handshake: Some(builder.build_handshake_state::<NoiseChaCha, NoiseSha256>()),
+            send: None,
+            receive: None,
+            authorized: false,
+        }
+    }
+
+    pub fn accept_handshake(
+        &mut self,
+        first: &[u8],
+        enrolled_client: &[u8; 32],
+        output: &mut [u8; MAX_FRAME],
+    ) -> Result<usize, Error> {
+        let handshake = self.handshake.as_mut().ok_or(Error::Busy)?;
+        handshake.read_message(first, &mut []).map_err(|_| Error::Crypto)?;
+        if handshake.get_rs().as_ref() != Some(enrolled_client) {
+            self.reset();
+            return Err(Error::Invalid);
+        }
+        let length = handshake.get_next_message_overhead();
+        handshake.write_message(&[], &mut output[..length]).map_err(|_| Error::Crypto)?;
+        if !handshake.completed() {
+            return Err(Error::Crypto);
+        }
+        let (receive, send) = handshake.get_ciphers();
+        self.receive = Some(receive);
+        self.send = Some(send);
+        self.authorized = true;
+        self.handshake = None;
+        Ok(length)
+    }
+
+    pub fn open(&mut self, ciphertext: &[u8], plaintext: &mut [u8]) -> Result<(), Error> {
+        if !self.authorized {
+            return Err(Error::Denied);
+        }
+        self.receive
+            .as_mut()
+            .ok_or(Error::Busy)?
+            .decrypt(ciphertext, plaintext)
+            .map_err(|_| Error::Crypto)
+    }
+
+    pub fn seal(&mut self, plaintext: &[u8], ciphertext: &mut [u8]) -> Result<(), Error> {
+        if !self.authorized || ciphertext.len() != plaintext.len() + 16 {
+            return Err(Error::Denied);
+        }
+        self.send.as_mut().ok_or(Error::Busy)?.encrypt(plaintext, ciphertext);
+        Ok(())
+    }
+
+    pub const fn authorized(&self) -> bool {
+        self.authorized
+    }
+
+    pub fn reset(&mut self) {
+        self.handshake = None;
+        self.send = None;
+        self.receive = None;
+        self.authorized = false;
+    }
+}
+
 pub enum NoiseChaCha {}
 
 impl Cipher for NoiseChaCha {
@@ -1460,5 +1543,42 @@ mod tests {
         responder.write_message(&[], &mut second).unwrap();
         initiator.read_message(&second, &mut []).unwrap();
         assert!(initiator.completed() && responder.completed());
+    }
+
+    #[test]
+    fn responder_rejects_unknown_client_and_encrypts_authorized_messages() {
+        let machine = [3; 32];
+        let client = [1; 32];
+        let mut initiator = HandshakeStateBuilder::<X25519>::new();
+        initiator
+            .set_pattern(noise_ik())
+            .set_is_initiator(true)
+            .set_prologue(REMOTE_PROLOGUE)
+            .set_s(client)
+            .set_e([2; 32])
+            .set_rs(X25519::pubkey(&machine));
+        let mut initiator = initiator.build_handshake_state::<NoiseChaCha, NoiseSha256>();
+        let mut first = [0; 96];
+        let first_length = initiator.get_next_message_overhead();
+        initiator.write_message(&[], &mut first[..first_length]).unwrap();
+        let mut responder = RemoteResponder::new(machine, [4; 32]);
+        let mut second = [0; MAX_FRAME];
+        assert_eq!(
+            responder.accept_handshake(&first[..first_length], &[9; 32], &mut second),
+            Err(Error::Invalid)
+        );
+
+        let mut responder = RemoteResponder::new(machine, [4; 32]);
+        let second_length = responder
+            .accept_handshake(&first[..first_length], &X25519::pubkey(&client), &mut second)
+            .unwrap();
+        initiator.read_message(&second[..second_length], &mut []).unwrap();
+        assert!(responder.authorized());
+        let mut ciphertext = [0; 21];
+        responder.seal(b"hello", &mut ciphertext).unwrap();
+        let (_, mut receive) = initiator.get_ciphers();
+        let mut plaintext = [0; 5];
+        receive.decrypt(&ciphertext, &mut plaintext).unwrap();
+        assert_eq!(&plaintext, b"hello");
     }
 }
