@@ -3117,8 +3117,10 @@ fn relay_network_client(
                 return false;
             }
             *pending = None;
-            if current.request.operation == logos_abi::NetworkOperation::ReceiveFrom
-                && reply.status == logos_abi::NetworkStatus::Complete
+            if matches!(
+                current.request.operation,
+                logos_abi::NetworkOperation::ReceiveFrom | logos_abi::NetworkOperation::Read
+            ) && reply.status == logos_abi::NetworkStatus::Complete
                 && let (Some(source), Some(network_pages)) =
                     (shared_pages.address(terminal_owner, current.request.page), unsafe {
                         logos_core::native_service::Context::network_pages_at(service.context())
@@ -3174,7 +3176,10 @@ fn relay_network_client(
     }
     if matches!(
         request.operation,
-        logos_abi::NetworkOperation::SendTo | logos_abi::NetworkOperation::ReceiveFrom
+        logos_abi::NetworkOperation::SendTo
+            | logos_abi::NetworkOperation::Write
+            | logos_abi::NetworkOperation::ReceiveFrom
+            | logos_abi::NetworkOperation::Read
     ) {
         let Some(client) = shared_pages.address(terminal_owner, request.page) else {
             return terminal.reply(logos_abi::NetworkReply {
@@ -3190,7 +3195,10 @@ fn relay_network_client(
             }) && scheduler.wake(handle)
                 && scheduler.run(handle);
         };
-        if request.operation == logos_abi::NetworkOperation::SendTo {
+        if matches!(
+            request.operation,
+            logos_abi::NetworkOperation::SendTo | logos_abi::NetworkOperation::Write
+        ) {
             let Some(network_pages) = (unsafe {
                 logos_core::native_service::Context::network_pages_at(service.context())
             }) else {

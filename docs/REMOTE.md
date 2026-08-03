@@ -37,7 +37,7 @@ client can reconnect and invoke the existing typed `ping` command.
 
 - [x] Bounded Noise IK, HKDF key separation, XChaCha protected-record primitive, replay model,
   enrollment/session record codecs, and partial-frame transport buffering.
-- [ ] Passive TCP service integration and owner-bound accepted handles.
+- [ ] Passive TCP owner multiplexing for Terminal and Gateway clients.
 - [ ] Protected Store enrollment, local trust commands, Gateway attachment, and `logosctl`.
 - [ ] QEMU restart, corruption, and typed-invocation proofs.
 

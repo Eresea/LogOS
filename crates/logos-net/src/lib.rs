@@ -450,6 +450,14 @@ impl TcpState {
         Ok(connection.endpoint)
     }
 
+    pub fn peer(&self, owner: u64, endpoint: EndpointId) -> Result<(Ipv4, u16), TcpStateError> {
+        let connection = self.connection.ok_or(TcpStateError::NotFound)?;
+        if connection.owner != owner || connection.endpoint != endpoint {
+            return Err(TcpStateError::Owner);
+        }
+        Ok((connection.peer, connection.peer_port))
+    }
+
     pub fn ingest(&mut self, source: Ipv4, packet: Tcp<'_>) -> Result<(), TcpStateError> {
         if let Some(connection) = self.connection {
             if source != connection.peer
@@ -472,6 +480,7 @@ impl TcpState {
                     established.phase = TcpPhase::Established;
                     established.local_seq = established.local_seq.wrapping_add(1);
                     self.connection = Some(established);
+                    self.last = None;
                     self.arm_ack(
                         source,
                         packet.source_port,
@@ -565,7 +574,7 @@ impl TcpState {
         acknowledgement: u32,
     ) {
         let source = Ipv4([0; 4]);
-        self.arm_tx(TcpTx {
+        self.outgoing = Some(TcpTx {
             source,
             destination,
             header: TcpHeader {
@@ -591,6 +600,22 @@ impl TcpState {
 
     pub fn take_tx(&mut self) -> Option<TcpTx> {
         self.outgoing.take()
+    }
+
+    /// Retransmit reliable control/data frames a bounded number of times.
+    pub fn tick(&mut self, now: u64) -> bool {
+        if self.outgoing.is_some() || self.last.is_none() || now < self.deadline {
+            return false;
+        }
+        if self.retries >= 3 {
+            self.connection = None;
+            self.last = None;
+            return false;
+        }
+        self.retries += 1;
+        self.deadline = now.saturating_add(1u64 << self.retries);
+        self.outgoing = self.last;
+        true
     }
 
     pub fn read(
@@ -657,6 +682,11 @@ impl TcpState {
     }
 
     pub fn close(&mut self, owner: u64, endpoint: EndpointId) -> Result<(), TcpStateError> {
+        if self.owner == owner && self.listener == Some(endpoint) && self.connection.is_none() {
+            self.listener = None;
+            self.port = 0;
+            return Ok(());
+        }
         let connection = self.connection.ok_or(TcpStateError::NotFound)?;
         if connection.owner != owner || connection.endpoint != endpoint {
             return Err(TcpStateError::Owner);
@@ -1093,6 +1123,7 @@ pub enum DhcpAction {
     Expired,
     ArpReply,
     IcmpReply,
+    TcpReply,
 }
 
 #[derive(Clone, Copy)]

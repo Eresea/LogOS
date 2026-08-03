@@ -8,9 +8,10 @@ use logos_abi::{
 use logos_net::{
     Arp, DHCP_ACK, DHCP_NAK, DHCP_OFFER, DHCP_OPTION_LEASE_TIME, DHCP_OPTION_MESSAGE_TYPE,
     DHCP_OPTION_ROUTER, DHCP_OPTION_SERVER_ID, DHCP_OPTION_SUBNET_MASK, DHCP_OPTION_T1,
-    DHCP_OPTION_T2, DhcpAction, Ipv4, Mac, NetworkConfig, NetworkState, StateError, encode_arp,
-    encode_dhcp_discover, encode_dhcp_request, encode_ethernet, encode_ipv4, encode_udp, parse_arp,
-    parse_dhcp, parse_ethernet, parse_icmp_echo, parse_ipv4, parse_udp,
+    DHCP_OPTION_T2, DhcpAction, Ipv4, Mac, NetworkConfig, NetworkState, StateError, TcpTx,
+    encode_arp, encode_dhcp_discover, encode_dhcp_request, encode_ethernet, encode_ipv4,
+    encode_tcp, encode_udp, parse_arp, parse_dhcp, parse_ethernet, parse_icmp_echo, parse_ipv4,
+    parse_tcp, parse_udp,
 };
 use logos_service_rt::{Context, Header, ProtocolVersion};
 
@@ -71,6 +72,7 @@ fn run(context: &mut Context) -> ! {
     let mut waiting_echo_arp = false;
     let mut next_echo = 1u16;
     let mut icmp_reply: Option<IcmpReply> = None;
+    let mut tcp_reply: Option<TcpTx> = None;
     let mut counters = logos_abi::NetworkCounters::default();
 
     if !issue_info(context, pending) {
@@ -99,6 +101,7 @@ fn run(context: &mut Context) -> ! {
                         server,
                         arp_reply,
                         icmp_reply,
+                        tcp_reply,
                         next_id,
                     ) {
                         spin();
@@ -250,9 +253,15 @@ fn run(context: &mut Context) -> ! {
                     waiting_send_arp = false;
                 }
                 let status = if request.operation == NetworkOperation::Close {
-                    endpoint
-                        .and_then(|endpoint| state.close(0, endpoint).ok())
-                        .map_or(NetworkStatus::Invalid, |_| NetworkStatus::Complete)
+                    endpoint.map_or(NetworkStatus::Invalid, |endpoint| {
+                        if state.tcp_mut().close(0, endpoint).is_ok()
+                            || state.close(0, endpoint).is_ok()
+                        {
+                            NetworkStatus::Complete
+                        } else {
+                            NetworkStatus::Invalid
+                        }
+                    })
                 } else {
                     NetworkStatus::Cancelled
                 };
@@ -332,6 +341,166 @@ fn run(context: &mut Context) -> ! {
                         continue;
                     }
                 }
+            }
+            if request.operation == NetworkOperation::Listen {
+                let config = state.dhcp_config();
+                let result = match config {
+                    Some(_) => state.tcp_mut().listen(0, request.peer.port(), request.id).ok(),
+                    None => None,
+                }
+                .map(|endpoint| NetworkReply {
+                    id: request.id,
+                    status: NetworkStatus::Complete,
+                    endpoint: NetworkEndpoint(endpoint.wire()),
+                    generation: info.generation,
+                    source_address: 0,
+                    source_port: 0,
+                    length: 0,
+                    info,
+                    counters,
+                })
+                .unwrap_or_else(|| {
+                    error_reply(
+                        request,
+                        if config.is_some() {
+                            NetworkStatus::AddressInUse
+                        } else {
+                            NetworkStatus::Offline
+                        },
+                        info,
+                        counters,
+                    )
+                });
+                if !context.network_reply(result) {
+                    spin();
+                }
+                continue;
+            }
+            if request.operation == NetworkOperation::Accept {
+                let result = logos_net::EndpointId::from_wire(request.endpoint.0)
+                    .ok_or(logos_net::TcpStateError::Invalid)
+                    .and_then(|endpoint| state.tcp_mut().accept(0, endpoint));
+                let reply = match result {
+                    Ok(endpoint) => {
+                        let (source, source_port) =
+                            state.tcp().peer(0, endpoint).unwrap_or((Ipv4([0; 4]), 0));
+                        NetworkReply {
+                            id: request.id,
+                            status: NetworkStatus::Complete,
+                            endpoint: NetworkEndpoint(endpoint.wire()),
+                            generation: info.generation,
+                            source_address: u32::from_be_bytes(source.0),
+                            source_port,
+                            length: 0,
+                            info,
+                            counters,
+                        }
+                    }
+                    Err(_) => error_reply(request, NetworkStatus::Busy, info, counters),
+                };
+                if !context.network_reply(reply) {
+                    spin();
+                }
+                continue;
+            }
+            if request.operation == NetworkOperation::Read {
+                let received = context.network_pages().and_then(|pages| {
+                    let output = unsafe {
+                        core::slice::from_raw_parts_mut(
+                            (pages.tx_address + CLIENT_PAYLOAD_OFFSET as u64) as *mut u8,
+                            logos_abi::MAX_TCP_PAYLOAD,
+                        )
+                    };
+                    let endpoint = logos_net::EndpointId::from_wire(request.endpoint.0)?;
+                    state.tcp_mut().read(0, endpoint, output).ok()
+                });
+                if received.is_none() {
+                    waiting_receive = Some(request);
+                    if !context.network_wait(request.deadline) {
+                        spin();
+                    }
+                    continue;
+                }
+                let reply = NetworkReply {
+                    id: request.id,
+                    status: NetworkStatus::Complete,
+                    endpoint: request.endpoint,
+                    generation: info.generation,
+                    source_address: 0,
+                    source_port: 0,
+                    length: received.unwrap_or(0) as u16,
+                    info,
+                    counters,
+                };
+                if !context.network_reply(reply) {
+                    spin();
+                }
+                continue;
+            }
+            if request.operation == NetworkOperation::Write {
+                let Some(pages) = context.network_pages() else {
+                    if !context.network_reply(error_reply(
+                        request,
+                        NetworkStatus::Offline,
+                        info,
+                        counters,
+                    )) {
+                        spin();
+                    }
+                    continue;
+                };
+                let payload = unsafe {
+                    core::slice::from_raw_parts(
+                        (pages.tx_address + CLIENT_PAYLOAD_OFFSET as u64) as *const u8,
+                        usize::from(request.length),
+                    )
+                };
+                let status =
+                    if let Some(endpoint) = logos_net::EndpointId::from_wire(request.endpoint.0) {
+                        if state.tcp_mut().write(0, endpoint, payload).is_ok() {
+                            tcp_reply = state.tcp_mut().take_tx();
+                            if tcp_reply.is_some()
+                                && submit_action(
+                                    context,
+                                    &state,
+                                    &info,
+                                    DhcpAction::TcpReply,
+                                    offer,
+                                    server,
+                                    arp_reply,
+                                    icmp_reply,
+                                    tcp_reply,
+                                    next_id,
+                                )
+                            {
+                                NetworkStatus::Complete
+                            } else {
+                                NetworkStatus::Io
+                            }
+                        } else {
+                            NetworkStatus::Busy
+                        }
+                    } else {
+                        NetworkStatus::Invalid
+                    };
+                if !context.network_reply(NetworkReply {
+                    id: request.id,
+                    status,
+                    endpoint: if status == NetworkStatus::Complete {
+                        request.endpoint
+                    } else {
+                        NetworkEndpoint(0)
+                    },
+                    generation: info.generation,
+                    source_address: 0,
+                    source_port: 0,
+                    length: if status == NetworkStatus::Complete { request.length } else { 0 },
+                    info,
+                    counters,
+                }) {
+                    spin();
+                }
+                continue;
             }
             if request.operation == NetworkOperation::Echo {
                 #[cfg(feature = "test-hooks")]
@@ -429,10 +598,18 @@ fn run(context: &mut Context) -> ! {
                         &mut server,
                         &mut arp_reply,
                         &mut icmp_reply,
+                        &mut tcp_reply,
                         &mut counters,
                     )
                 }
-                logos_abi::NetworkEventKind::Timer => state.dhcp_tick(now),
+                logos_abi::NetworkEventKind::Timer => {
+                    if state.tcp_mut().tick(now) {
+                        tcp_reply = state.tcp_mut().take_tx();
+                        DhcpAction::TcpReply
+                    } else {
+                        state.dhcp_tick(now)
+                    }
+                }
                 logos_abi::NetworkEventKind::Reset => {
                     counters.resets = counters.resets.saturating_add(1);
                     state.reset();
@@ -465,6 +642,49 @@ fn run(context: &mut Context) -> ! {
                 continue;
             }
             if let Some(request) = waiting_receive {
+                if request.operation == NetworkOperation::Read {
+                    let length = context.network_pages().and_then(|pages| {
+                        let output = unsafe {
+                            core::slice::from_raw_parts_mut(
+                                (pages.tx_address + CLIENT_PAYLOAD_OFFSET as u64) as *mut u8,
+                                logos_abi::MAX_TCP_PAYLOAD,
+                            )
+                        };
+                        let endpoint = logos_net::EndpointId::from_wire(request.endpoint.0)?;
+                        state.tcp_mut().read(0, endpoint, output).ok()
+                    });
+                    if let Some(length) = length {
+                        waiting_receive = None;
+                        if !context.network_reply_after_event(
+                            request,
+                            NetworkReply {
+                                id: request.id,
+                                status: NetworkStatus::Complete,
+                                endpoint: request.endpoint,
+                                generation: info.generation,
+                                source_address: 0,
+                                source_port: 0,
+                                length: length as u16,
+                                info,
+                                counters,
+                            },
+                        ) {
+                            spin();
+                        }
+                        continue;
+                    }
+                    if now >= request.deadline {
+                        waiting_receive = None;
+                        if !context.network_reply_after_event(
+                            request,
+                            error_reply(request, NetworkStatus::TimedOut, info, counters),
+                        ) {
+                            spin();
+                        }
+                        continue;
+                    }
+                    continue;
+                }
                 let received = context.network_pages().and_then(|pages| {
                     let output = unsafe {
                         core::slice::from_raw_parts_mut(
@@ -588,7 +808,8 @@ fn run(context: &mut Context) -> ! {
             }
             if action != DhcpAction::None && action != DhcpAction::Expired {
                 if !submit_action(
-                    context, &state, &info, action, offer, server, arp_reply, icmp_reply, next_id,
+                    context, &state, &info, action, offer, server, arp_reply, icmp_reply,
+                    tcp_reply, next_id,
                 ) {
                     spin();
                 }
@@ -837,6 +1058,7 @@ fn submit_action(
     server: Ipv4,
     arp_reply: Option<Arp>,
     icmp_reply: Option<IcmpReply>,
+    tcp_reply: Option<TcpTx>,
     id: u32,
 ) -> bool {
     let Some(pages) = context.network_pages() else {
@@ -906,13 +1128,56 @@ fn submit_action(
             deadline: DEVICE_DEADLINE,
         });
     }
+    if action == DhcpAction::TcpReply {
+        let Some(reply) = tcp_reply else { return false };
+        let Some(config) = state.dhcp_config() else { return false };
+        let Some(remote) = state.resolve_arp(reply.destination, 0) else { return false };
+        let mut tcp = [0; logos_net::TCP_HEADER + logos_net::MAX_TCP_STREAM];
+        let Ok(tcp_length) = encode_tcp(
+            &mut tcp,
+            config.address,
+            reply.destination,
+            reply.header,
+            &reply.payload[..usize::from(reply.length)],
+        ) else {
+            return false;
+        };
+        let mut ipv4 =
+            [0; logos_net::IPV4_HEADER + logos_net::TCP_HEADER + logos_net::MAX_TCP_STREAM];
+        let Ok(ipv4_length) = encode_ipv4(
+            &mut ipv4,
+            config.address,
+            reply.destination,
+            id as u16,
+            6,
+            &tcp[..tcp_length],
+        ) else {
+            return false;
+        };
+        let tx = unsafe { core::slice::from_raw_parts_mut(pages.tx_address as *mut u8, 4096) };
+        let Ok(frame_length) = encode_ethernet(tx, remote, mac, 0x0800, &ipv4[..ipv4_length])
+        else {
+            return false;
+        };
+        return context.network_device_request(NetworkDeviceRequest {
+            id,
+            operation: NetworkDeviceOperation::Transmit,
+            length: frame_length as u16,
+            generation: info.generation,
+            deadline: DEVICE_DEADLINE,
+        });
+    }
     let mut dhcp = [0; 300];
     let dhcp_length = match action {
         DhcpAction::Discover => encode_dhcp_discover(&mut dhcp, state.dhcp_xid(), mac),
         DhcpAction::Request | DhcpAction::Renew | DhcpAction::Rebind => {
             encode_dhcp_request(&mut dhcp, state.dhcp_xid(), mac, offer, server)
         }
-        DhcpAction::None | DhcpAction::Expired | DhcpAction::ArpReply | DhcpAction::IcmpReply => {
+        DhcpAction::None
+        | DhcpAction::Expired
+        | DhcpAction::ArpReply
+        | DhcpAction::IcmpReply
+        | DhcpAction::TcpReply => {
             return false;
         }
     }
@@ -965,6 +1230,7 @@ fn accept_dhcp(
     server: &mut Ipv4,
     arp_reply: &mut Option<Arp>,
     icmp_reply: &mut Option<IcmpReply>,
+    tcp_reply: &mut Option<TcpTx>,
     counters: &mut logos_abi::NetworkCounters,
 ) -> DhcpAction {
     let Some(pages) = context.network_pages() else {
@@ -1001,6 +1267,9 @@ fn accept_dhcp(
         };
         let local =
             state.dhcp_config().map_or(Ipv4(info.ipv4.to_be_bytes()), |config| config.address);
+        if arp.sender_ip.0 != [0; 4] {
+            state.learn_arp(arp.sender_ip, arp.sender_mac, now, 60);
+        }
         if !arp.reply && arp.target_ip == local {
             *arp_reply = Some(Arp {
                 reply: true,
@@ -1063,6 +1332,18 @@ fn accept_dhcp(
             payload,
         });
         return DhcpAction::IcmpReply;
+    }
+    if ip.protocol == 6 {
+        let tcp = match parse_tcp(ip.payload, ip.source, ip.destination) {
+            Ok(tcp) => tcp,
+            Err(_) => {
+                counters.malformed = counters.malformed.saturating_add(1);
+                return DhcpAction::None;
+            }
+        };
+        let _ = state.tcp_mut().ingest(ip.source, tcp);
+        *tcp_reply = state.tcp_mut().take_tx();
+        return tcp_reply.as_ref().map_or(DhcpAction::None, |_| DhcpAction::TcpReply);
     }
     if ip.protocol != 17 {
         counters.unsupported = counters.unsupported.saturating_add(1);
