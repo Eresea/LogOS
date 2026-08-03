@@ -39,6 +39,11 @@ client can reconnect and invoke the existing typed `ping` command.
 - [x] Bounded Noise IK, HKDF key separation, XChaCha protected-record primitive, fail-closed trust
   state, replay model, typed attach/invoke/reply codecs, enrollment/session record codecs, and
   partial/coalesced frame buffering.
+- [x] Protocol-v2 message and canonical typed-invocation codecs, bounded request digests, and
+  Core-owned remote-gate ABI operations (handshake, open, invoke, seal, subscription, credit,
+  acknowledgement, and reset).
+- [x] Native Gateway payload is present in the supervised manifest and remains independently
+  optional while its Core relay is being completed.
 - [x] Core carries each Network client owner out-of-band to the Network service; TCP listener,
   accepted stream, read, write, and close ownership is enforced there.
 - [x] Protected Store enrollment, local trust commands, root-derived device/storage keys, and
