@@ -1,6 +1,7 @@
 #![no_std]
 
-use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
+use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, XChaCha20Poly1305};
+use hkdf::Hkdf;
 use noise_protocol::{Cipher, DH, Hash};
 use sha2::Digest;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -17,6 +18,51 @@ pub enum Error {
     Mismatch,
     Busy,
     Crypto,
+}
+
+pub fn derive_keys(root: &[u8; 32]) -> Result<([u8; 32], [u8; 32]), Error> {
+    let hkdf = Hkdf::<sha2::Sha256>::new(None, root);
+    let mut device = [0; 32];
+    let mut storage = [0; 32];
+    hkdf.expand(b"LogOS remote device v1", &mut device).map_err(|_| Error::Crypto)?;
+    hkdf.expand(b"LogOS remote storage v1", &mut storage).map_err(|_| Error::Crypto)?;
+    Ok((device, storage))
+}
+
+pub fn seal(
+    key: &[u8; 32],
+    nonce: &[u8; 24],
+    associated_data: &[u8],
+    buffer: &mut [u8],
+    plaintext_len: usize,
+) -> Result<usize, Error> {
+    let ciphertext_len = plaintext_len.checked_add(16).ok_or(Error::Crypto)?;
+    if ciphertext_len > buffer.len() {
+        return Err(Error::Crypto);
+    }
+    let (plaintext, tag) = buffer[..ciphertext_len].split_at_mut(plaintext_len);
+    let tag_value = XChaCha20Poly1305::new(key.into())
+        .encrypt_in_place_detached(nonce.into(), associated_data, plaintext)
+        .map_err(|_| Error::Crypto)?;
+    tag.copy_from_slice(tag_value.as_slice());
+    Ok(ciphertext_len)
+}
+
+pub fn open(
+    key: &[u8; 32],
+    nonce: &[u8; 24],
+    associated_data: &[u8],
+    buffer: &mut [u8],
+    ciphertext_len: usize,
+) -> Result<usize, Error> {
+    if ciphertext_len < 16 || ciphertext_len > buffer.len() {
+        return Err(Error::Crypto);
+    }
+    let (ciphertext, tag) = buffer[..ciphertext_len].split_at_mut(ciphertext_len - 16);
+    XChaCha20Poly1305::new(key.into())
+        .decrypt_in_place_detached(nonce.into(), associated_data, ciphertext, tag.as_ref().into())
+        .map_err(|_| Error::Crypto)?;
+    Ok(ciphertext.len())
 }
 
 pub enum X25519 {}
@@ -284,6 +330,21 @@ mod tests {
         assert_eq!(frame_decode(&output[..length]), Ok(&b"ping"[..]));
         assert_eq!(frame_decode(&output[..length - 1]), Err(Error::Frame));
         assert_eq!(frame_encode(&mut output, &[]), Err(Error::Frame));
+    }
+
+    #[test]
+    fn protected_records_reject_tampering() {
+        let (device, storage) = derive_keys(&[7; 32]).unwrap();
+        assert_ne!(device, storage);
+        let mut record = [0; 32];
+        record[..4].copy_from_slice(b"ping");
+        let length = seal(&storage, &[9; 24], b"enrollment", &mut record, 4).unwrap();
+        assert_eq!(open(&storage, &[9; 24], b"enrollment", &mut record, length).unwrap(), 4);
+        record[0] ^= 1;
+        assert_eq!(
+            open(&storage, &[9; 24], b"enrollment", &mut record, length),
+            Err(Error::Crypto)
+        );
     }
 
     #[test]
