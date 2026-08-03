@@ -15,7 +15,8 @@ client can reconnect and invoke the existing typed `ping` command.
 
 - Use `Noise_IK_25519_ChaChaPoly_SHA256`, one X25519 client key, guest TCP port 7443, one
   connection, one request, and 1024-byte framed transport messages.
-- `remote-key`, `enroll <64-hex-key>`, and `unenroll` are local-only commands. Enrollment and
+- `remote-key`, `enroll <64-hex-key>`, and `unenroll` are local-only commands. Successful
+  enrollment returns `<machine-key-hex>:<generation>` for `logosctl invoke`; enrollment and
   replay state are encrypted in the protected Store namespace.
 - A completed request is replayed after reconnect or reset. A journalled-but-incomplete request is
   `Indeterminate` and is not executed again.
@@ -38,19 +39,20 @@ client can reconnect and invoke the existing typed `ping` command.
 - [x] Bounded Noise IK, HKDF key separation, XChaCha protected-record primitive, fail-closed trust
   state, replay model, typed attach/invoke/reply codecs, enrollment/session record codecs, and
   partial/coalesced frame buffering.
-- [ ] Passive TCP owner multiplexing for Terminal and Gateway clients.
+- [x] Core carries each Network client owner out-of-band to the Network service; TCP listener,
+  accepted stream, read, write, and close ownership is enforced there.
 - [x] Protected Store enrollment, local trust commands, root-derived device/storage keys, and
   fail-closed corruption recovery.
 - [ ] Gateway attachment and `logosctl` end-to-end invocation.
-- [x] Host `logosctl keygen` and pinned Noise IK typed `invoke` client with bounded reconnects.
+- [x] Host `logosctl keygen` and pinned Noise IK typed `invoke` client with bounded reconnects;
+  `invoke` consumes the enrollment descriptor rather than a hard-coded generation.
 - [x] Local command ABI recognizes `remote-key`, `enroll <64-hex-key>`, and `unenroll`; the
   machine key is available when the firmware root is present.
 - [ ] QEMU restart, corruption, and typed-invocation proofs.
 
-The remote proof IDs are registered in `logos-test`; enrollment, denial, and protected-state
-corruption proofs are now the next QEMU gate. Gateway and replay proofs remain skipped. On this
-Windows toolchain, a full UEFI link of the crypto dependencies can still hit an LLVM code-generation
-failure; target `cargo check` and host tests remain green until that linker gate is resolved.
+The remote proof IDs are registered in `logos-test`; Gateway and replay proofs remain skipped.
+UEFI builds use target-scoped Fiat Curve25519 and software ChaCha20/Poly1305 backends so the full
+payload set builds consistently on the supported host toolchains.
 
 ## V1 scope
 

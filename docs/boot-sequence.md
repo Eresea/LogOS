@@ -62,9 +62,8 @@ repeats this startup handshake before service traffic resumes.
 
 Before leaving the bootstrap path, the trust owner derives separate device and storage keys from
 the UEFI root, seeds bounded ephemeral-key generation from firmware entropy, and wipes the root.
-After Store recovery, it opens the protected enrollment and session records. It starts
-the optional Gateway only after Sessions and Network are available; Gateway waits for DHCP and does
-not delay local boot. Missing entropy, root key, enrollment, Store, Sessions, Network, or Gateway
-leaves remote explicitly unavailable while Terminal and recovery remain usable. Gateway, Network,
-or link restart requires a fresh authenticated attachment; Sessions replays only a completed
-sequence record and reports an incomplete journal entry as `Indeterminate`.
+After Store recovery, the trust owner opens the protected enrollment record. Session-record loading,
+the optional Gateway, and durable remote replay are the remaining attachment work; they must not
+delay local boot. Missing entropy, root key, enrollment, Store, Sessions, Network, or Gateway
+leaves remote explicitly unavailable while Terminal and recovery remain usable. The completed
+Network transport slice preserves trusted caller ownership across the Network-service boundary.
