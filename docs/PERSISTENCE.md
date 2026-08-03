@@ -358,6 +358,12 @@ dependency boundary requires it.
 
 Remote Foundation may consume protected trust and configuration records before V2 is complete. Update v1 requires the artifact and journal slices.
 
+The protected remote slice uses `TRUST_NAMESPACE` objects encrypted with a storage key derived
+separately from the firmware root. Core serializes bounded reads and replacements through the
+existing Store page; no delete or previous-version fallback is used. A missing current enrollment
+object means unenrolled. Any malformed, unauthenticated, or corrupt current object disables remote
+access while local operation continues.
+
 ### V3 — Objects and workspaces
 
 - Stable object identities independent of paths, typed metadata, relationships, aliases, and views.

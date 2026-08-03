@@ -38,13 +38,16 @@ physical device remains deferred.
 ## Remote Foundation
 
 Remote Foundation accepts one client static X25519 key only after a local enrollment effect. The
+The trust owner derives separate device and storage keys from the UEFI root, seeds ephemeral
+generation from firmware entropy, and wipes the root before normal service startup. The
 Gateway uses Noise IK with the machine static key held by the System trust owner; it receives no
 long-term key material and receives only a `Service` capability for `ping`. TCP authority is scoped
 to local port 7443, while accepted stream handles are owner- and generation-bound. Enrollment and
 remote-session records are separately derived-key, authenticated-encrypted Store objects. A failed
 authentication, malformed Noise message, stale sequence, or protected-record failure denies remote
-work before Session dispatch; corruption disables remote access rather than falling back. A pending
-durable command is never replayed after reset.
+work before Session dispatch; corruption disables remote access rather than falling back. Revocation
+advances the enrollment generation and invalidates the in-memory session record. A pending durable
+command is never replayed after reset.
 
 ## Native-service fault containment
 

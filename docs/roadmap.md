@@ -26,7 +26,7 @@ See [Architecture](architecture.md), [security constraints](security.md), and [b
 | 3 | Replaceable services | [Platform v1](PLATFORM.md) | Complete: services negotiate, fail, and restart independently |
 | 4 | Durable bounded state | [Persistence v1](PERSISTENCE.md) | Complete: scoped state survives interrupted writes and resets |
 | 5 | Bounded packet connectivity | [Network v1](NETWORK.md) | Complete: bounded DHCP, ICMP, UDP, denial, cancellation, loss, timeout, and reconnect proofs |
-| 6 | Remote foundation | [Remote Foundation v1](REMOTE.md#foundation-v1): Network v2 transport slice, [Platform v2](PLATFORM.md) trust slice, [Persistence v2](PERSISTENCE.md) protected-state slice, [Sessions v2](SESSIONS.md) attachment slice | In progress: bounded TCP/Noise contracts, fail-closed trust model, typed host client, and `remote-key`; Store/Gateway attachment remains |
+| 6 | Remote foundation | [Remote Foundation v1](REMOTE.md#foundation-v1): Network v2 transport slice, [Platform v2](PLATFORM.md) trust slice, [Persistence v2](PERSISTENCE.md) protected-state slice, [Sessions v2](SESSIONS.md) attachment slice | In progress: bounded TCP/Noise contracts, root-derived protected enrollment, local trust commands, and fail-closed recovery; Gateway/Sessions attachment remains |
 | 7 | Remote administration | [Remote v1](REMOTE.md) | Headless authenticated administration works through existing contracts |
 | 8 | Safe system artifacts | Complete Persistence v2 | Large signed artifacts and durable configuration are safe to stage |
 | 9 | Atomic system evolution | [Update v1](UPDATE.md) | A signed system bundle activates or rolls back atomically |

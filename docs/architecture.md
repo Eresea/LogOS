@@ -650,10 +650,11 @@ flush, commit sector, and final flush complete. Recovery ignores incomplete or c
 Compaction copies live current/previous versions to the inactive arena before switching the
 superblock generation. See [ADR-0013](adr/0013-persistence-v1-boundary.md).
 
-Remote Foundation adds a protected namespace over the same Store contract. The trust owner seals
-the enrollment and remote-session objects before Store replacement and opens them only after
-authenticated readback. Authentication failure is degraded remote state, never permission to use a
-previous version.
+Remote Foundation adds a protected namespace over the same Store contract. The trust owner derives
+separate device and storage keys from the UEFI root, seeds bounded ephemeral-key generation from
+firmware entropy, and wipes the bootstrap root. It seals the enrollment and remote-session objects
+before Store replacement and opens them only after authenticated readback. Authentication failure
+is degraded remote state, never permission to use a previous version.
 
 A file view may provide:
 

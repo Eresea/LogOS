@@ -39,16 +39,18 @@ client can reconnect and invoke the existing typed `ping` command.
   state, replay model, typed attach/invoke/reply codecs, enrollment/session record codecs, and
   partial/coalesced frame buffering.
 - [ ] Passive TCP owner multiplexing for Terminal and Gateway clients.
-- [ ] Protected Store enrollment, local trust commands, Gateway attachment, and `logosctl`.
+- [x] Protected Store enrollment, local trust commands, root-derived device/storage keys, and
+  fail-closed corruption recovery.
+- [ ] Gateway attachment and `logosctl` end-to-end invocation.
 - [x] Host `logosctl keygen` and pinned Noise IK typed `invoke` client with bounded reconnects.
 - [x] Local command ABI recognizes `remote-key`, `enroll <64-hex-key>`, and `unenroll`; the
   machine key is available when the firmware root is present.
 - [ ] QEMU restart, corruption, and typed-invocation proofs.
 
-The remote proof IDs are registered in `logos-test`; they remain skipped until Gateway and
-protected Store integration land. On this Windows toolchain, a full UEFI link of the new crypto
-dependencies also currently hits an LLVM code-generation failure; `cargo check` and host tests
-remain green.
+The remote proof IDs are registered in `logos-test`; enrollment, denial, and protected-state
+corruption proofs are now the next QEMU gate. Gateway and replay proofs remain skipped. On this
+Windows toolchain, a full UEFI link of the crypto dependencies can still hit an LLVM code-generation
+failure; target `cargo check` and host tests remain green until that linker gate is resolved.
 
 ## V1 scope
 

@@ -50,8 +50,10 @@ capabilities, health, versioned contracts, isolated address spaces, Core-owned s
 
 ## V2 — Trust and control plane
 
-- Durable machine and device identity, enrollment, and trust policy.
-- Secret broker operations instead of direct secret access.
+- Durable machine and device identity, enrollment, and trust policy (Remote Foundation now
+  derives device/storage keys and persists the single enrollment record).
+- Secret broker operations instead of direct secret access (the current bootstrap keeps keys in
+  the Core-owned Secrets module until the replaceable broker payload lands).
 - Durable structured audit records.
 - Host-testable authorization and lifecycle policy.
 - A platform controller that owns service lifecycle wiring.
