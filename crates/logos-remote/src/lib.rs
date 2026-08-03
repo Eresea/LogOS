@@ -12,7 +12,7 @@ pub const SESSION_ID_LEN: usize = 16;
 pub const REQUEST_DIGEST_LEN: usize = 32;
 pub const MAX_FRAME_BUFFER: usize = MAX_FRAME + 2;
 pub const ENROLLMENT_BYTES: usize = 42;
-pub const SESSION_RECORD_BYTES: usize = 324;
+pub const SESSION_RECORD_BYTES: usize = 68 + REMOTE_REPLY_BYTES;
 pub const PROTECTED_NONCE_BYTES: usize = 24;
 pub const PROTECTED_TAG_BYTES: usize = 16;
 pub const ENROLLMENT_BLOB_BYTES: usize =
@@ -216,7 +216,7 @@ pub struct SessionRecord {
     pub sequence: u64,
     pub pending: bool,
     pub digest: [u8; REQUEST_DIGEST_LEN],
-    pub reply: [u8; 256],
+    pub reply: [u8; REMOTE_REPLY_BYTES],
     pub reply_length: u16,
 }
 
@@ -307,6 +307,14 @@ impl RemoteRequest {
         request.encode(&mut encoded)?;
         (encoded == input).then_some(request).ok_or(Error::Frame)
     }
+
+    pub fn digest(self) -> Result<[u8; REQUEST_DIGEST_LEN], Error> {
+        let mut encoded = [0; REMOTE_REQUEST_BYTES];
+        self.encode(&mut encoded)?;
+        let mut digest = sha2::Sha256::new();
+        digest.update(encoded);
+        Ok(digest.finalize().into())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -395,12 +403,12 @@ impl SessionRecord {
             return Err(Error::Frame);
         }
         let reply_length = u16::from_be_bytes(input[66..68].try_into().map_err(|_| Error::Frame)?);
-        if reply_length as usize > 256 {
+        if reply_length as usize > REMOTE_REPLY_BYTES {
             return Err(Error::Frame);
         }
         let mut session = [0; SESSION_ID_LEN];
         let mut digest = [0; REQUEST_DIGEST_LEN];
-        let mut reply = [0; 256];
+        let mut reply = [0; REMOTE_REPLY_BYTES];
         session.copy_from_slice(&input[9..25]);
         digest.copy_from_slice(&input[34..66]);
         reply.copy_from_slice(&input[68..]);
@@ -937,7 +945,7 @@ mod tests {
             sequence: 1,
             pending: false,
             digest: [2; REQUEST_DIGEST_LEN],
-            reply: [3; 256],
+            reply: [3; REMOTE_REPLY_BYTES],
             reply_length: 2,
         };
         let mut blob = [0; SESSION_BLOB_BYTES];
@@ -973,7 +981,7 @@ mod tests {
             sequence: 7,
             pending: true,
             digest: [6; REQUEST_DIGEST_LEN],
-            reply: [8; 256],
+            reply: [8; REMOTE_REPLY_BYTES],
             reply_length: 4,
         };
         let mut record_bytes = [0; SESSION_RECORD_BYTES];

@@ -22,11 +22,11 @@ fn main() {
         Some("invoke") => {
             let address = args.next().unwrap_or_else(|| "127.0.0.1:7443".into());
             let key = args.next().unwrap_or_else(|| "logosctl.key".into());
-            let machine = args.next().unwrap_or_default();
-            invoke(&address, Path::new(&key), &machine);
+            let enrollment = args.next().unwrap_or_default();
+            invoke(&address, Path::new(&key), &enrollment);
         }
         _ => eprintln!(
-            "usage: logosctl keygen [file] | invoke [address] [key-file] [machine-key-hex]"
+            "usage: logosctl keygen [file] | invoke [address] [key-file] [machine-key-hex:generation]"
         ),
     }
 }
@@ -42,12 +42,16 @@ fn keygen(path: Option<String>) {
     }
 }
 
-fn invoke(address: &str, key_path: &Path, machine_hex: &str) {
+fn invoke(address: &str, key_path: &Path, enrollment: &str) {
     let secret = parse_hex::<32>(&fs::read_to_string(key_path).expect("read key"));
+    let (machine_hex, generation) =
+        enrollment.split_once(':').expect("expected machine-key:generation");
     let machine = parse_hex::<32>(machine_hex);
+    let generation = generation.parse::<u64>().expect("invalid enrollment generation");
+    assert!(generation != 0, "invalid enrollment generation");
     let session = [1; SESSION_ID_LEN];
     for attempt in 0..3 {
-        match connect_once(address, secret, machine, session, 1) {
+        match connect_once(address, secret, machine, session, generation) {
             Ok(reply) => {
                 println!(
                     "{}",

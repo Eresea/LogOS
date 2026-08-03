@@ -2936,14 +2936,16 @@ pub(crate) fn main(
                             )
                         }) {
                             let request = native_command.request().unwrap();
-                            let mut key_text = [0; 64];
+                            let mut key_text = [0; 96];
                             let mut reply = b"remote unavailable" as &[u8];
                             if let Some(state) = remote_state.as_mut() {
                                 match request.syscall {
                                     logos_abi::Syscall::RemoteKey => {
                                         if state.available() {
-                                            hex_key(&state.machine_public(), &mut key_text);
-                                            reply = &key_text;
+                                            let mut machine_key = [0; 64];
+                                            hex_key(&state.machine_public(), &mut machine_key);
+                                            key_text[..64].copy_from_slice(&machine_key);
+                                            reply = &key_text[..64];
                                         }
                                     }
                                     logos_abi::Syscall::Enroll => {
@@ -2975,8 +2977,16 @@ pub(crate) fn main(
                                                 )
                                             })
                                         {
-                                            hex_key(&state.machine_public(), &mut key_text);
-                                            reply = &key_text;
+                                            let mut machine_key = [0; 64];
+                                            hex_key(&state.machine_public(), &mut machine_key);
+                                            key_text[..64].copy_from_slice(&machine_key);
+                                            key_text[64] = b':';
+                                            let generation = state.enrollment().generation;
+                                            let mut digits = [0; 20];
+                                            let length = decimal_u64(generation, &mut digits);
+                                            key_text[65..65 + length]
+                                                .copy_from_slice(&digits[..length]);
+                                            reply = &key_text[..65 + length];
                                         } else {
                                             reply = b"invalid enrollment key";
                                         }
@@ -4555,6 +4565,21 @@ fn hex_decode_key(input: &[u8], output: &mut [u8; 32]) -> bool {
         output[index] = (high << 4) | low;
     }
     !output.iter().all(|byte| *byte == 0)
+}
+
+fn decimal_u64(mut value: u64, output: &mut [u8; 20]) -> usize {
+    let mut position = output.len();
+    loop {
+        position -= 1;
+        output[position] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    let length = output.len() - position;
+    output.copy_within(position.., 0);
+    length
 }
 
 fn hex_value(byte: u8) -> Option<u8> {
