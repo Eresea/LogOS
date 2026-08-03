@@ -225,6 +225,14 @@ const SCENARIOS: &[Scenario] = &[
     configured("network/packet-loss", "network", &[], Fixture::Fresh),
     configured("network/timeout", "network", &[], Fixture::Fresh),
     configured("network/reset-reconnect", "network", &[], Fixture::Fresh),
+    scenario("network/tcp-stream", "remote", Fixture::Fresh),
+    scenario("remote/enrollment-persistence", "remote", Fixture::Persistence),
+    scenario("remote/auth-denied", "remote", Fixture::Fresh),
+    scenario("remote/typed-invoke", "remote", Fixture::Fresh),
+    scenario("remote/reconnect-replay", "remote", Fixture::Persistence),
+    scenario("remote/pending-after-reset", "remote", Fixture::Persistence),
+    scenario("remote/gateway-restart", "remote", Fixture::Fresh),
+    scenario("remote/protected-state-corrupt", "remote", Fixture::Persistence),
 ];
 
 const fn scenario(id: &'static str, suite: &'static str, fixture: Fixture) -> Scenario {
@@ -929,6 +937,7 @@ fn run_suite(name: &str) -> i32 {
             | "platform"
             | "persistence"
             | "network"
+            | "remote"
     ) {
         eprintln!("unknown suite: {name}");
         return 2;
@@ -982,7 +991,7 @@ fn run_suite(name: &str) -> i32 {
         }
     };
     let mut results: Vec<ResultRecord> = Vec::new();
-    for suite in ["core", "console", "platform", "persistence", "network"] {
+    for suite in ["core", "console", "platform", "persistence", "network", "remote"] {
         let shared: Vec<_> = selected
             .iter()
             .filter(|item| {

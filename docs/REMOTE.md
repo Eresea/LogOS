@@ -45,6 +45,11 @@ client can reconnect and invoke the existing typed `ping` command.
   machine key is available when the firmware root is present.
 - [ ] QEMU restart, corruption, and typed-invocation proofs.
 
+The remote proof IDs are registered in `logos-test`; they remain skipped until Gateway and
+protected Store integration land. On this Windows toolchain, a full UEFI link of the new crypto
+dependencies also currently hits an LLVM code-generation failure; `cargo check` and host tests
+remain green.
+
 ## V1 scope
 
 - [ ] Authenticated machine enrollment and public/device-key authentication.
