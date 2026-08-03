@@ -1299,9 +1299,12 @@ fn handle_request(
             }
         }
         NetworkOperation::ReceiveFrom => (NetworkStatus::Offline, NetworkEndpoint(0)),
-        NetworkOperation::SendTo | NetworkOperation::Echo => {
-            (NetworkStatus::Offline, NetworkEndpoint(0))
-        }
+        NetworkOperation::SendTo
+        | NetworkOperation::Echo
+        | NetworkOperation::Listen
+        | NetworkOperation::Accept
+        | NetworkOperation::Read
+        | NetworkOperation::Write => (NetworkStatus::Offline, NetworkEndpoint(0)),
     };
     NetworkReply {
         id: request.id,

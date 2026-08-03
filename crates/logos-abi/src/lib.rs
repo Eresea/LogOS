@@ -7,6 +7,7 @@ pub const PAGE_SIZE: usize = 4096;
 pub const MAX_OBJECT_NAME: usize = 64;
 pub const MAX_PERSISTENCE_OPERATIONS: usize = 8;
 pub const MAX_NETWORK_PAYLOAD: usize = 1472;
+pub const MAX_TCP_PAYLOAD: usize = 1024;
 pub const NETWORK_MAX_ENDPOINTS: usize = 8;
 pub const NETWORK_MAX_ARP_ENTRIES: usize = 8;
 pub const NETWORK_MAX_DATAGRAMS: usize = 4;
@@ -22,6 +23,7 @@ pub struct PageHandle(pub u32);
 pub struct NamespaceId(pub u32);
 
 pub const TERMINAL_NAMESPACE: NamespaceId = NamespaceId(1);
+pub const TRUST_NAMESPACE: NamespaceId = NamespaceId(5);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
@@ -289,6 +291,7 @@ pub struct StoreReply {
 pub enum NetworkProtocol {
     Udp = 1,
     Icmp = 2,
+    Tcp = 3,
 }
 
 impl NetworkProtocol {
@@ -296,6 +299,7 @@ impl NetworkProtocol {
         match value {
             1 => Some(Self::Udp),
             2 => Some(Self::Icmp),
+            3 => Some(Self::Tcp),
             _ => None,
         }
     }
@@ -326,6 +330,7 @@ impl NetworkScope {
         match self.protocol() {
             Some(NetworkProtocol::Udp) => self.port() != 0,
             Some(NetworkProtocol::Icmp) => self.address() != 0 && self.port() == 0,
+            Some(NetworkProtocol::Tcp) => self.port() != 0,
             None => false,
         }
     }
@@ -367,6 +372,10 @@ pub enum NetworkOperation {
     Echo,
     Cancel,
     Close,
+    Listen,
+    Accept,
+    Read,
+    Write,
 }
 
 impl NetworkOperation {
@@ -379,6 +388,10 @@ impl NetworkOperation {
             5 => Some(Self::Echo),
             6 => Some(Self::Cancel),
             7 => Some(Self::Close),
+            8 => Some(Self::Listen),
+            9 => Some(Self::Accept),
+            10 => Some(Self::Read),
+            11 => Some(Self::Write),
             _ => None,
         }
     }
@@ -588,6 +601,42 @@ impl NetworkRequest {
                     && self.length == 0
                     && self.generation == 0
             }
+            NetworkOperation::Listen => {
+                !self.endpoint.valid()
+                    && self.peer.protocol() == Some(NetworkProtocol::Tcp)
+                    && self.peer.valid()
+                    && self.peer.address() == 0
+                    && self.page.0 == 0
+                    && self.length == 0
+                    && self.generation == 0
+            }
+            NetworkOperation::Accept => {
+                self.endpoint.valid()
+                    && self.peer.protocol() == Some(NetworkProtocol::Tcp)
+                    && self.peer.valid()
+                    && self.peer.address() == 0
+                    && self.page.0 == 0
+                    && self.length == 0
+                    && self.generation == 0
+            }
+            NetworkOperation::Read => {
+                self.endpoint.valid()
+                    && self.peer.protocol() == Some(NetworkProtocol::Tcp)
+                    && self.peer.valid()
+                    && self.peer.address() == 0
+                    && self.page.0 != 0
+                    && self.length as usize == MAX_TCP_PAYLOAD
+                    && self.generation != 0
+            }
+            NetworkOperation::Write => {
+                self.endpoint.valid()
+                    && self.peer.protocol() == Some(NetworkProtocol::Tcp)
+                    && self.peer.valid()
+                    && self.peer.address() == 0
+                    && self.page.0 != 0
+                    && (1..=MAX_TCP_PAYLOAD).contains(&(self.length as usize))
+                    && self.generation != 0
+            }
             NetworkOperation::Cancel | NetworkOperation::Close => {
                 self.endpoint.valid()
                     && self.peer.0 == 0
@@ -661,6 +710,34 @@ impl NetworkReply {
                     && self.source_port == 0
                     && self.length == 0
                     && self.generation != 0
+            }
+            NetworkOperation::Listen => {
+                self.endpoint.valid()
+                    && self.source_address == 0
+                    && self.source_port == 0
+                    && self.length == 0
+                    && self.generation != 0
+            }
+            NetworkOperation::Accept => {
+                self.endpoint.valid()
+                    && self.source_address != 0
+                    && self.source_port != 0
+                    && self.length == 0
+                    && self.generation != 0
+            }
+            NetworkOperation::Read => {
+                self.endpoint == request.endpoint
+                    && self.source_address == 0
+                    && self.source_port == 0
+                    && self.length as usize <= MAX_TCP_PAYLOAD
+                    && self.generation == request.generation
+            }
+            NetworkOperation::Write => {
+                self.endpoint == request.endpoint
+                    && self.source_address == 0
+                    && self.source_port == 0
+                    && self.length == request.length
+                    && self.generation == request.generation
             }
             NetworkOperation::Cancel | NetworkOperation::Close => {
                 self.endpoint.0 == 0
@@ -1302,6 +1379,30 @@ mod tests {
         };
         assert!(echo.valid_shape());
 
+        let listen = NetworkRequest {
+            id: 5,
+            operation: NetworkOperation::Listen,
+            endpoint: NetworkEndpoint(0),
+            peer: NetworkScope::new(NetworkProtocol::Tcp, 0, 7443),
+            page: PageHandle(0),
+            length: 0,
+            generation: 0,
+            deadline: 1,
+        };
+        assert!(listen.valid_shape());
+        let write = NetworkRequest {
+            id: 6,
+            operation: NetworkOperation::Write,
+            endpoint: NetworkEndpoint::new(1, 1).unwrap(),
+            peer: NetworkScope::new(NetworkProtocol::Tcp, 0, 7443),
+            page: PageHandle(1),
+            length: MAX_TCP_PAYLOAD as u16,
+            generation: 1,
+            deadline: 1,
+        };
+        assert!(write.valid_shape());
+        assert!(!NetworkRequest { length: MAX_TCP_PAYLOAD as u16 + 1, ..write }.valid_shape());
+
         let reply = NetworkReply {
             id: send.id,
             status: NetworkStatus::Complete,
@@ -1316,6 +1417,18 @@ mod tests {
         assert!(reply.valid_for(send));
         assert!(!NetworkReply { endpoint: NetworkEndpoint(0), ..reply }.valid_for(send));
         assert!(!NetworkReply { generation: 2, ..reply }.valid_for(send));
+        let tcp_reply = NetworkReply {
+            id: write.id,
+            status: NetworkStatus::Complete,
+            endpoint: write.endpoint,
+            generation: write.generation,
+            source_address: 0,
+            source_port: 0,
+            length: write.length,
+            info: NetworkInfo { generation: write.generation, ..NetworkInfo::default() },
+            counters: NetworkCounters::default(),
+        };
+        assert!(tcp_reply.valid_for(write));
         assert!(!NetworkReply { length: send.length - 1, ..reply }.valid_for(send));
         assert!(
             !NetworkReply { status: NetworkStatus::TimedOut, endpoint: send.endpoint, ..reply }

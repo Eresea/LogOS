@@ -5,6 +5,7 @@ pub const ETHERNET_HEADER: usize = 14;
 pub const ETHERNET_MAX_FRAME: usize = 1514;
 pub const IPV4_HEADER: usize = 20;
 pub const UDP_HEADER: usize = 8;
+pub const TCP_HEADER: usize = 20;
 pub const MAX_UDP_PAYLOAD: usize = 1472;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -245,6 +246,74 @@ pub fn encode_udp(
     output[UDP_HEADER..length].copy_from_slice(payload);
     let value = pseudo_checksum(source, destination, 17, &output[..length]);
     output[6..8].copy_from_slice(&(if value == 0 { 0xffff } else { value }).to_be_bytes());
+    Ok(length)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Tcp<'a> {
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub sequence: u32,
+    pub acknowledgement: u32,
+    pub flags: u8,
+    pub window: u16,
+    pub payload: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TcpHeader {
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub sequence: u32,
+    pub acknowledgement: u32,
+    pub flags: u8,
+    pub window: u16,
+}
+
+pub fn parse_tcp<'a>(bytes: &'a [u8], source: Ipv4, destination: Ipv4) -> Result<Tcp<'a>, Error> {
+    if bytes.len() < TCP_HEADER {
+        return Err(Error::Short);
+    }
+    let header = usize::from(bytes[12] >> 4) * 4;
+    if header < TCP_HEADER || header > bytes.len() {
+        return Err(Error::Length);
+    }
+    if pseudo_checksum(source, destination, 6, bytes) != 0 {
+        return Err(Error::Checksum);
+    }
+    Ok(Tcp {
+        source_port: u16::from_be_bytes([bytes[0], bytes[1]]),
+        destination_port: u16::from_be_bytes([bytes[2], bytes[3]]),
+        sequence: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        acknowledgement: u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+        flags: bytes[13],
+        window: u16::from_be_bytes([bytes[14], bytes[15]]),
+        payload: &bytes[header..],
+    })
+}
+
+pub fn encode_tcp(
+    output: &mut [u8],
+    source: Ipv4,
+    destination: Ipv4,
+    header: TcpHeader,
+    payload: &[u8],
+) -> Result<usize, Error> {
+    let length = TCP_HEADER.checked_add(payload.len()).ok_or(Error::TooLarge)?;
+    if length > usize::from(u16::MAX) || output.len() < length {
+        return Err(Error::TooLarge);
+    }
+    output[..length].fill(0);
+    output[0..2].copy_from_slice(&header.source_port.to_be_bytes());
+    output[2..4].copy_from_slice(&header.destination_port.to_be_bytes());
+    output[4..8].copy_from_slice(&header.sequence.to_be_bytes());
+    output[8..12].copy_from_slice(&header.acknowledgement.to_be_bytes());
+    output[12] = 5 << 4;
+    output[13] = header.flags;
+    output[14..16].copy_from_slice(&header.window.to_be_bytes());
+    output[TCP_HEADER..length].copy_from_slice(payload);
+    let checksum = pseudo_checksum(source, destination, 6, &output[..length]).to_be_bytes();
+    output[16..18].copy_from_slice(&checksum);
     Ok(length)
 }
 
@@ -1247,6 +1316,34 @@ mod tests {
         let icmp_length = encode_icmp_echo(&mut icmp, false, 3, 4, b"ping").unwrap();
         assert_eq!(parse_icmp_echo(&icmp[..icmp_length]).unwrap().sequence, 4);
         assert_eq!(parse_icmp_echo(&icmp[..icmp_length]).unwrap().payload, b"ping");
+    }
+
+    #[test]
+    fn tcp_round_trip_rejects_truncation_and_tampering() {
+        let mut bytes = [0; TCP_HEADER + 5];
+        let length = encode_tcp(
+            &mut bytes,
+            LOCAL_IP,
+            PEER_IP,
+            TcpHeader {
+                source_port: 7443,
+                destination_port: 50000,
+                sequence: 7,
+                acknowledgement: 3,
+                flags: 0x18,
+                window: 1024,
+            },
+            b"hello",
+        )
+        .unwrap();
+        let tcp = parse_tcp(&bytes[..length], LOCAL_IP, PEER_IP).unwrap();
+        assert_eq!(tcp.payload, b"hello");
+        assert_eq!(tcp.flags, 0x18);
+        for prefix in 0..length {
+            assert!(parse_tcp(&bytes[..prefix], LOCAL_IP, PEER_IP).is_err());
+        }
+        bytes[19] ^= 1;
+        assert_eq!(parse_tcp(&bytes[..length], LOCAL_IP, PEER_IP), Err(Error::Checksum));
     }
 
     #[test]

@@ -32,11 +32,15 @@ pub struct Resources {
 
 pub fn capability(request: NetworkRequest) -> Option<(CapabilityKind, u64)> {
     match request.operation {
-        NetworkOperation::Bind => Some((CapabilityKind::NetworkBind, request.peer.0)),
-        NetworkOperation::SendTo | NetworkOperation::Echo => {
+        NetworkOperation::Bind | NetworkOperation::Listen => {
+            Some((CapabilityKind::NetworkBind, request.peer.0))
+        }
+        NetworkOperation::SendTo | NetworkOperation::Echo | NetworkOperation::Write => {
             Some((CapabilityKind::NetworkSend, request.peer.0))
         }
-        NetworkOperation::ReceiveFrom => Some((CapabilityKind::NetworkReceive, request.peer.0)),
+        NetworkOperation::ReceiveFrom | NetworkOperation::Accept | NetworkOperation::Read => {
+            Some((CapabilityKind::NetworkReceive, request.peer.0))
+        }
         NetworkOperation::Status | NetworkOperation::Cancel | NetworkOperation::Close => None,
     }
 }
