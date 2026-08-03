@@ -331,6 +331,18 @@ impl Plan {
             .and_then(|_| manager.grant(kind))
     }
 
+    pub fn grant_scoped64(
+        &self,
+        name: &[u8],
+        manager: &mut CapabilityManager,
+        kind: CapabilityKind,
+        resource: u64,
+    ) -> Option<Capability> {
+        self.manifest(name)
+            .filter(|manifest| manifest.capabilities.contains(&kind))
+            .and_then(|_| manager.grant_scoped64(kind, resource))
+    }
+
     pub fn negotiate(&self, name: &[u8], offered: Protocol) -> Option<Protocol> {
         let required = self.manifest(name)?.protocol;
         (required.abi == offered.abi).then_some(Protocol {

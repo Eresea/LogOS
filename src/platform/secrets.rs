@@ -1,6 +1,9 @@
 use crate::platform::session::Principal;
 use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
-use logos_remote::{Bootstrap, Csprng, ENROLLMENT_BLOB_BYTES, Enrollment, TrustState};
+use logos_remote::{
+    Bootstrap, Csprng, ENROLLMENT_BLOB_BYTES, Enrollment, MAX_FRAME, REMOTE_CONTROL_BLOB_BYTES,
+    RemoteControlRecord, RemoteResponder, TrustState,
+};
 
 const SECRETS: usize = 4;
 const BYTES: usize = 64;
@@ -19,6 +22,8 @@ pub struct RemoteState {
     trust: TrustState,
     storage_key: [u8; 32],
     rng: Csprng,
+    responder: Option<RemoteResponder>,
+    control: RemoteControlRecord,
 }
 
 impl RemoteState {
@@ -27,6 +32,8 @@ impl RemoteState {
             trust: TrustState::new(bootstrap.device_key).ok()?,
             storage_key: bootstrap.storage_key,
             rng: Csprng::from_seed(bootstrap.rng_seed),
+            responder: None,
+            control: RemoteControlRecord::empty(),
         })
     }
 
@@ -35,6 +42,8 @@ impl RemoteState {
             trust: TrustState::unavailable(bootstrap.device_key),
             storage_key: bootstrap.storage_key,
             rng: Csprng::from_seed(bootstrap.rng_seed),
+            responder: None,
+            control: RemoteControlRecord::empty(),
         }
     }
 
@@ -76,6 +85,8 @@ impl RemoteState {
             ),
             storage_key: bootstrap.storage_key,
             rng: Csprng::from_seed(bootstrap.rng_seed),
+            responder: None,
+            control: RemoteControlRecord::empty(),
         }
     }
 
@@ -88,6 +99,59 @@ impl RemoteState {
         let mut nonce = [0; 24];
         self.rng.fill(&mut nonce);
         self.seal_enrollment(&nonce, output)
+    }
+
+    pub fn handshake(&mut self, input: &[u8], output: &mut [u8; MAX_FRAME]) -> Option<usize> {
+        let enrollment = self.trust.enrollment();
+        if !self.available() || !enrollment.active {
+            return None;
+        }
+        let mut ephemeral = [0; 32];
+        self.rng.fill(&mut ephemeral);
+        let mut responder = RemoteResponder::new(self.trust.machine_secret(), ephemeral);
+        let length = responder.accept_handshake(input, &enrollment.client_key, output).ok()?;
+        self.responder = Some(responder);
+        Some(length)
+    }
+
+    pub fn open(&mut self, input: &[u8], output: &mut [u8]) -> bool {
+        self.responder.as_mut().is_some_and(|state| state.open(input, output).is_ok())
+    }
+
+    pub fn seal(&mut self, input: &[u8], output: &mut [u8]) -> bool {
+        self.responder.as_mut().is_some_and(|state| state.seal(input, output).is_ok())
+    }
+
+    pub fn reset_transport(&mut self) {
+        self.responder = None;
+    }
+
+    pub const fn control(&self) -> RemoteControlRecord {
+        self.control
+    }
+
+    pub fn replace_control(&mut self, control: RemoteControlRecord) {
+        self.control = control;
+    }
+
+    pub fn load_control(&mut self, input: &mut [u8; REMOTE_CONTROL_BLOB_BYTES]) -> bool {
+        let Ok(control) = RemoteControlRecord::open_blob(&self.storage_key, input) else {
+            self.disable();
+            return false;
+        };
+        self.control = control;
+        true
+    }
+
+    pub fn seal_control_random(&mut self, output: &mut [u8; REMOTE_CONTROL_BLOB_BYTES]) -> bool {
+        let mut nonce = [0; 24];
+        self.rng.fill(&mut nonce);
+        self.control.seal_blob(&self.storage_key, &nonce, output).is_ok()
+    }
+
+    pub fn disable(&mut self) {
+        self.responder = None;
+        self.trust = TrustState::unavailable(self.trust.machine_secret());
     }
 }
 

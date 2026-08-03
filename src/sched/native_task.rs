@@ -5,7 +5,7 @@ use crate::{
     sched::scheduler::{Event, Runnable, TaskState},
 };
 
-const TASKS: usize = 4;
+const TASKS: usize = 5;
 
 pub struct Task<'a> {
     privilege: &'a Privilege,
@@ -62,6 +62,23 @@ pub struct BlockEndpoint {
 #[allow(dead_code)]
 pub struct NetworkEndpoint {
     context_physical: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct RemoteEndpoint {
+    context_physical: u64,
+}
+
+impl RemoteEndpoint {
+    pub fn request(self) -> Option<logos_core::native_service::RemoteGateRequest> {
+        unsafe { logos_core::native_service::Context::remote_gate_at(self.context_physical) }
+    }
+
+    pub fn reply(self, reply: logos_core::native_service::RemoteGateReply) -> bool {
+        unsafe {
+            logos_core::native_service::Context::reply_remote_gate_at(self.context_physical, reply)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -396,6 +413,10 @@ impl<'a> Task<'a> {
     #[allow(dead_code)]
     pub const fn network_endpoint(&self) -> NetworkEndpoint {
         NetworkEndpoint { context_physical: self.context_physical }
+    }
+
+    pub const fn remote_endpoint(&self) -> RemoteEndpoint {
+        RemoteEndpoint { context_physical: self.context_physical }
     }
 
     pub fn map_shared_owned(&mut self, memory: &mut PhysicalMemory) -> Option<u64> {

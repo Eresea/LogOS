@@ -9,13 +9,16 @@ pub enum Service {
     VirtioBlock,
     Storage,
     Network,
+    Gateway,
 }
 
 impl Service {
     pub const fn protocol(self) -> Protocol {
         match self {
             Self::VirtioBalloon => Protocol { abi: 1, version: 0 },
-            Self::VirtioBlock | Self::Storage | Self::Network => Protocol { abi: 1, version: 0 },
+            Self::VirtioBlock | Self::Storage | Self::Network | Self::Gateway => {
+                Protocol { abi: 1, version: 0 }
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-const CAPABILITIES: usize = 16;
+const CAPABILITIES: usize = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CapabilityKind {

@@ -224,3 +224,27 @@ pub fn relay_native(
     }
     if result == logos_abi::EffectResult::Recovery { Relay::Recovery } else { Relay::Handled(true) }
 }
+
+pub fn invoke_native(
+    request: logos_abi::SessionRequest,
+    sessions: Option<crate::sched::native_task::SessionEndpoint>,
+    scheduler: &mut crate::sched::native_task::Scheduler<'_>,
+    sessions_handle: Option<crate::sched::native_task::Handle>,
+    context: crate::ipc::effects::Context<'_, '_>,
+) -> Option<logos_abi::SessionReply> {
+    if !context.session.allows(context.capabilities, CapabilityKind::Session) {
+        return logos_abi::SessionReply::from_bytes(b"permission denied");
+    }
+    let (Some(sessions), Some(handle)) = (sessions, sessions_handle) else {
+        return logos_abi::SessionReply::from_bytes(b"session unavailable");
+    };
+    if !sessions.deliver(request) || !scheduler.wake(handle) || !scheduler.run(handle) {
+        return None;
+    }
+    let result = crate::ipc::effects::execute(sessions.effect()?, context);
+    if !sessions.reply_effect(result) || !scheduler.wake(handle) || !scheduler.run(handle) {
+        return None;
+    }
+    let reply = sessions.reply()?;
+    (scheduler.wake(handle) && scheduler.run(handle)).then_some(reply)
+}

@@ -468,6 +468,35 @@ pub(crate) fn main(
         &mut capabilities,
         capabilities::CapabilityKind::Service,
     );
+    let gateway_service_capability = supervisor.grant(
+        supervisor::GATEWAY,
+        &mut capabilities,
+        capabilities::CapabilityKind::Service,
+    );
+    let tcp_scope = logos_abi::NetworkScope::new(
+        logos_abi::NetworkProtocol::Tcp,
+        0,
+        logos_abi::REMOTE_TCP_PORT,
+    )
+    .0;
+    let gateway_bind_capability = supervisor.grant_scoped64(
+        supervisor::GATEWAY,
+        &mut capabilities,
+        capabilities::CapabilityKind::NetworkBind,
+        tcp_scope,
+    );
+    let gateway_send_capability = supervisor.grant_scoped64(
+        supervisor::GATEWAY,
+        &mut capabilities,
+        capabilities::CapabilityKind::NetworkSend,
+        tcp_scope,
+    );
+    let gateway_receive_capability = supervisor.grant_scoped64(
+        supervisor::GATEWAY,
+        &mut capabilities,
+        capabilities::CapabilityKind::NetworkReceive,
+        tcp_scope,
+    );
     check!(
         b"service capability",
         supervisor::grant_self_check()
@@ -506,6 +535,21 @@ pub(crate) fn main(
     };
     let network_service_handle = network_service_capability
         .and_then(|capability| services.register(&capabilities, capability, network::SERVICE));
+    let gateway_service_handle = gateway_service_capability.and_then(|capability| {
+        services.register(&capabilities, capability, services::Service::Gateway)
+    });
+    let gateway_network_session = gateway_service_handle.and_then(|handle| {
+        session::Context::new(
+            session::Id(2),
+            handle.principal(),
+            &[gateway_bind_capability?, gateway_send_capability?, gateway_receive_capability?],
+        )
+    });
+    let remote_session = session::Context::new(
+        session::Id(3),
+        session::Principal::process(1),
+        &[session_capability, session_service_capability, recovery_capability],
+    );
     check!(
         b"services",
         services.resolve(balloon::SERVICE) == Some(virtio_handle)
@@ -659,9 +703,11 @@ pub(crate) fn main(
             .then(|| native_task::Task::load(&mut memory, payload, &privilege))
             .flatten()
     });
-    // Gateway remains optional until its Core gate relay is wired.
-    let _gateway_payload = payloads.gateway;
-    let _ = native_services.missing(supervisor::NativeService::Gateway);
+    let mut native_gateway = payloads.gateway.and_then(|payload| {
+        (gateway_service_handle.is_some() && gateway_network_session.is_some())
+            .then(|| native_task::Task::load(&mut memory, payload, &privilege))
+            .flatten()
+    });
     if let Some(storage) = native_storage.as_mut() {
         check!(b"storage heap", storage.map_heap(&mut memory).is_some());
     }
@@ -669,6 +715,7 @@ pub(crate) fn main(
     let terminal_owner = session.principal().page_owner();
     let storage_owner = storage_service_handle.principal().page_owner();
     let network_owner = network_service_handle.map(|handle| handle.principal().page_owner());
+    let gateway_owner = gateway_service_handle.map(|handle| handle.principal().page_owner());
     let shared_history = native_terminal.map_shared_owned(&mut memory).and_then(|page| {
         shared_pages.register(terminal_owner, page, 1).filter(|_| {
             native_storage.as_mut().is_none_or(|storage| storage.map_shared_borrowed(page))
@@ -677,6 +724,15 @@ pub(crate) fn main(
     let Some(mut shared_history) = shared_history else {
         fail!(b"terminal storage page");
     };
+    let gateway_page = native_gateway
+        .as_mut()
+        .and_then(|gateway| gateway.map_shared_owned(&mut memory))
+        .and_then(|page| shared_pages.register(gateway_owner?, page, 1));
+    if native_gateway.is_some() && gateway_page.is_none() {
+        if let Some(task) = native_gateway.take() {
+            let _ = task.release(&mut memory);
+        }
+    }
     #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
     let storage_block =
         native_storage.as_mut().and_then(|storage| storage.map_block_owned(&mut memory));
@@ -788,6 +844,9 @@ pub(crate) fn main(
         .map(native_task::Task::store_endpoint)
         .unwrap_or_else(native_task::StoreEndpoint::unavailable);
     let mut native_terminal_network = native_terminal.network_endpoint();
+    let native_gateway_network = native_gateway.as_ref().map(native_task::Task::network_endpoint);
+    let native_gateway_remote = native_gateway.as_ref().map(native_task::Task::remote_endpoint);
+    let native_gateway_store = native_gateway.as_ref().map(native_task::Task::store_endpoint);
     let mut native_network_endpoint =
         native_network.as_ref().map(native_task::Task::network_endpoint);
     check!(
@@ -795,6 +854,12 @@ pub(crate) fn main(
         native_store.configure_shared_page(shared_history)
             && (!native_storage_store.available()
                 || native_storage_store.configure_shared_page(shared_history)),
+    );
+    check!(
+        b"gateway shared page",
+        native_gateway_store
+            .zip(gateway_page)
+            .is_none_or(|(endpoint, page)| endpoint.configure_shared_page(page)),
     );
     check!(
         b"storage block page",
@@ -912,6 +977,37 @@ pub(crate) fn main(
     } else if let Some(bootstrap) = remote_bootstrap {
         remote_state = Some(secrets::RemoteState::unavailable(bootstrap));
     }
+    if let (Some(state), Some(page_address)) = (
+        remote_state.as_mut().filter(|state| state.available()),
+        shared_pages.address(terminal_owner, shared_history),
+    ) {
+        let mut blob = [0; logos_remote::REMOTE_CONTROL_BLOB_BYTES];
+        let status = protected_store_read(
+            native_storage_store,
+            &mut block_dispatch,
+            &mut block::DispatchContext {
+                endpoint: native_storage_block,
+                pages: &mut shared_pages,
+                store_owner: storage_owner,
+                store_page: storage_block_page,
+                device: &mut block_device,
+                memory: &mut memory,
+            },
+            &mut native_scheduler,
+            storage_handle,
+            shared_history,
+            page_address,
+            logos_abi::TRUST_NAMESPACE,
+            logos_abi::TRUST_SESSION_NAME,
+            &mut blob,
+            interrupts::ticks(),
+        );
+        if status == logos_abi::PersistenceStatus::Complete {
+            let _ = state.load_control(&mut blob);
+        } else if status != logos_abi::PersistenceStatus::NotFound {
+            state.disable();
+        }
+    }
     let mut network_handle = if let Some(network_task) = native_network.take()
         && let Some(handle) = native_scheduler.spawn(network_task)
     {
@@ -929,6 +1025,70 @@ pub(crate) fn main(
     } else {
         let _ = native_services.missing(supervisor::NativeService::Network);
     }
+    let mut gateway_handle = if network_handle.is_some()
+        && sessions_handle.is_some()
+        && storage_handle.available()
+        && remote_state.as_ref().is_some_and(secrets::RemoteState::available)
+    {
+        native_gateway.take().and_then(|task| native_scheduler.spawn(task))
+    } else {
+        None
+    };
+    if gateway_handle
+        .is_some_and(|handle| !native_scheduler.run(handle) || native_scheduler.failed(handle))
+    {
+        gateway_handle = None;
+    }
+    if gateway_handle.is_some() {
+        native_services.ready(supervisor::NativeService::Gateway);
+    } else {
+        let _ = native_services.missing(supervisor::NativeService::Gateway);
+    }
+    let mut gateway_network_pending: Option<PendingNetworkClient> = None;
+    macro_rules! poll_gateway {
+        () => {
+            poll_gateway(
+                native_gateway_network,
+                native_gateway_remote,
+                gateway_handle,
+                &mut gateway_network_pending,
+                gateway_network_session.as_ref(),
+                gateway_owner,
+                native_network_endpoint,
+                network_handle,
+                &mut native_scheduler,
+                &capabilities,
+                gateway_page,
+                shared_history,
+                terminal_owner,
+                &mut remote_state,
+                native_sessions_endpoint,
+                sessions_handle,
+                remote_session.as_ref(),
+                native_storage_store,
+                &mut block_dispatch,
+                &mut block::DispatchContext {
+                    endpoint: native_storage_block,
+                    pages: &mut shared_pages,
+                    store_owner: storage_owner,
+                    store_page: storage_block_page,
+                    device: &mut block_device,
+                    memory: &mut memory,
+                },
+                storage_handle,
+                interrupts::ticks(),
+                &mut input,
+                &mut service_lifecycle,
+                service_health.healthy(balloon::NAME, interrupts::ticks()),
+                &channel,
+                &responses,
+                &mut service_scheduler,
+                service_capability,
+                virtio_handle,
+            )
+        };
+    }
+    let _ = poll_gateway!();
     let mut network_pending = None;
     let mut network_probe = Some(0x8000_0001u32);
     let mut network_probe_due = 0;
@@ -1998,7 +2158,7 @@ pub(crate) fn main(
                     &shared_pages,
                     terminal_owner,
                 );
-                true
+                poll_gateway!()
             }
             test_hooks::Action::Advance(ticks) => {
                 for step in 0..ticks.min(4096) {
@@ -2020,6 +2180,9 @@ pub(crate) fn main(
                         &shared_pages,
                         terminal_owner,
                     ) {
+                        return false;
+                    }
+                    if !poll_gateway!() {
                         return false;
                     }
                 }
@@ -2822,6 +2985,12 @@ pub(crate) fn main(
                         let _ = native_services.failed(supervisor::NativeService::Network, tick);
                     }
                 }
+                if !poll_gateway!() {
+                    debug::write_line(b"LogOS: Gateway service unavailable");
+                    if gateway_handle.is_some() {
+                        let _ = native_services.failed(supervisor::NativeService::Gateway, tick);
+                    }
+                }
                 if let Some(event) = input.next(tick, keyboard::poll_scancode) {
                     if let Some(native_event) = native_input_event(event) {
                         if !native_input.deliver(native_event)
@@ -3215,6 +3384,7 @@ pub(crate) fn main(
                     &shared_pages,
                     terminal_owner,
                 );
+                let _ = poll_gateway!();
                 false
             });
             console_mode = mode::ConsoleMode::Normal;
@@ -3683,6 +3853,419 @@ fn network_info(info: network_driver::Info) -> logos_abi::NetworkInfo {
         generation: info.generation,
         link_up: 1,
         ..logos_abi::NetworkInfo::default()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn poll_gateway(
+    client: Option<native_task::NetworkEndpoint>,
+    remote: Option<native_task::RemoteEndpoint>,
+    gateway_handle: Option<native_task::Handle>,
+    gateway_pending: &mut Option<PendingNetworkClient>,
+    gateway_session: Option<&session::Context>,
+    gateway_owner: Option<u64>,
+    network_service: Option<native_task::NetworkEndpoint>,
+    network_handle: Option<native_task::Handle>,
+    scheduler: &mut native_task::Scheduler<'_>,
+    capabilities: &capabilities::CapabilityManager,
+    gateway_page: Option<logos_abi::PageHandle>,
+    persistence_page: logos_abi::PageHandle,
+    persistence_owner: u64,
+    remote_state: &mut Option<secrets::RemoteState>,
+    sessions: Option<native_task::SessionEndpoint>,
+    sessions_handle: Option<native_task::Handle>,
+    remote_session: Option<&session::Context>,
+    storage: native_task::StoreEndpoint,
+    block_dispatch: &mut block::Dispatch,
+    block_context: &mut block::DispatchContext<'_>,
+    storage_handle: native_task::Handle,
+    tick: u64,
+    input: &mut input::Service,
+    lifecycle: &mut supervisor::Lifecycle,
+    service_healthy: bool,
+    channel: &ipc::Channel,
+    responses: &ipc::Channel,
+    service_scheduler: &mut scheduler::Scheduler<'_>,
+    service_capability: capabilities::Capability,
+    service: services::ServiceHandle,
+) -> bool {
+    let (
+        Some(client),
+        Some(handle),
+        Some(network_service),
+        Some(network_handle),
+        Some(gateway_session),
+        Some(owner),
+    ) = (client, gateway_handle, network_service, network_handle, gateway_session, gateway_owner)
+    else {
+        return true;
+    };
+    if !relay_network_client(
+        client,
+        network_service,
+        network_handle,
+        scheduler,
+        gateway_pending,
+        gateway_session,
+        capabilities,
+        block_context.pages,
+        owner,
+    ) {
+        return false;
+    }
+    let (Some(remote), Some(page), Some(remote_state), Some(remote_session)) =
+        (remote, gateway_page, remote_state.as_mut(), remote_session)
+    else {
+        return true;
+    };
+    let Some(request) = remote.request() else { return true };
+    let Some(address) = block_context.pages.address(owner, page).filter(|_| request.page == page)
+    else {
+        return remote.reply(logos_abi::service::RemoteGateReply {
+            id: request.id,
+            status: logos_abi::service::RemoteGateStatus::Denied,
+            length: 0,
+            cursor: 0,
+        }) && scheduler.wake(handle)
+            && scheduler.run(handle);
+    };
+    let length = usize::from(request.length);
+    let bytes = unsafe { core::slice::from_raw_parts(address as *const u8, length) };
+    let mut source = [0; logos_remote::MAX_FRAME];
+    if length > source.len() {
+        return false;
+    }
+    source[..length].copy_from_slice(bytes);
+    let outcome = match request.operation {
+        logos_abi::service::RemoteGateOperation::Handshake => {
+            let mut output = [0; logos_remote::MAX_FRAME];
+            remote_state.handshake(&source[..length], &mut output).map(|length| {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(output.as_ptr(), address as *mut u8, length)
+                };
+                (logos_abi::service::RemoteGateStatus::Complete, length, 0)
+            })
+        }
+        logos_abi::service::RemoteGateOperation::Open => {
+            let plaintext_length = length.checked_sub(16);
+            plaintext_length
+                .filter(|length| {
+                    remote_state
+                        .open(&source[..request.length as usize], output_page(address, *length))
+                })
+                .map(|length| (logos_abi::service::RemoteGateStatus::Complete, length, 0))
+        }
+        logos_abi::service::RemoteGateOperation::Seal => {
+            let mut output = [0; logos_remote::MAX_FRAME];
+            let sealed = length.checked_add(16).filter(|sealed| *sealed <= output.len());
+            sealed
+                .filter(|sealed| remote_state.seal(&source[..length], &mut output[..*sealed]))
+                .map(|sealed| {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(output.as_ptr(), address as *mut u8, sealed)
+                    };
+                    (logos_abi::service::RemoteGateStatus::Complete, sealed, 0)
+                })
+        }
+        logos_abi::service::RemoteGateOperation::Invoke => remote_invoke(
+            remote_state,
+            &source[..length],
+            address,
+            storage,
+            block_dispatch,
+            block_context,
+            scheduler,
+            storage_handle,
+            persistence_page,
+            persistence_owner,
+            tick,
+            sessions,
+            sessions_handle,
+            remote_session,
+            capabilities,
+            input,
+            lifecycle,
+            service_healthy,
+            channel,
+            responses,
+            service_scheduler,
+            service_capability,
+            service,
+        ),
+        logos_abi::service::RemoteGateOperation::Subscribe
+        | logos_abi::service::RemoteGateOperation::Credit
+        | logos_abi::service::RemoteGateOperation::Acknowledge => {
+            remote_simple_reply(&source[..length], address, b"subscribed")
+        }
+        logos_abi::service::RemoteGateOperation::Reset => {
+            remote_state.reset_transport();
+            Some((logos_abi::service::RemoteGateStatus::Complete, 0, 0))
+        }
+    };
+    let (status, length, cursor) =
+        outcome.unwrap_or((logos_abi::service::RemoteGateStatus::Denied, 0, 0));
+    remote.reply(logos_abi::service::RemoteGateReply {
+        id: request.id,
+        status,
+        length: length as u16,
+        cursor,
+    }) && scheduler.wake(handle)
+        && scheduler.run(handle)
+}
+
+fn output_page(address: u64, length: usize) -> &'static mut [u8] {
+    unsafe { core::slice::from_raw_parts_mut(address as *mut u8, length) }
+}
+
+fn remote_simple_reply(
+    input: &[u8],
+    address: u64,
+    payload: &[u8],
+) -> Option<(logos_abi::service::RemoteGateStatus, usize, u64)> {
+    let request = logos_remote::RemoteMessage::decode(input).ok()?;
+    let mut body = [0; logos_remote::REMOTE_MESSAGE_PAYLOAD];
+    body[..payload.len()].copy_from_slice(payload);
+    let reply = logos_remote::RemoteMessage {
+        kind: logos_remote::RemoteMessageKind::Reply,
+        id: request.id,
+        sequence: request.sequence.max(1),
+        cursor: 0,
+        payload: body,
+        payload_length: payload.len() as u16,
+    };
+    let mut encoded = [0; logos_remote::MAX_FRAME];
+    let length = reply.encode(&mut encoded).ok()?;
+    unsafe { core::ptr::copy_nonoverlapping(encoded.as_ptr(), address as *mut u8, length) };
+    Some((logos_abi::service::RemoteGateStatus::Complete, length, 0))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remote_invoke(
+    state: &mut secrets::RemoteState,
+    bytes: &[u8],
+    address: u64,
+    storage: native_task::StoreEndpoint,
+    dispatch: &mut block::Dispatch,
+    block_context: &mut block::DispatchContext<'_>,
+    scheduler: &mut native_task::Scheduler<'_>,
+    storage_handle: native_task::Handle,
+    page: logos_abi::PageHandle,
+    owner: u64,
+    tick: u64,
+    sessions: Option<native_task::SessionEndpoint>,
+    sessions_handle: Option<native_task::Handle>,
+    remote_session: &session::Context,
+    capabilities: &capabilities::CapabilityManager,
+    input: &mut input::Service,
+    lifecycle: &mut supervisor::Lifecycle,
+    service_healthy: bool,
+    channel: &ipc::Channel,
+    responses: &ipc::Channel,
+    service_scheduler: &mut scheduler::Scheduler<'_>,
+    service_capability: capabilities::Capability,
+    service: services::ServiceHandle,
+) -> Option<(logos_abi::service::RemoteGateStatus, usize, u64)> {
+    let message = logos_remote::RemoteMessage::decode(bytes).ok()?;
+    if message.kind != logos_remote::RemoteMessageKind::Invoke {
+        return None;
+    }
+    let invocation = logos_remote::RemoteInvocation::decode(
+        &message.payload[..usize::from(message.payload_length)],
+    )
+    .ok()?;
+    let digest = message.digest().ok()?;
+    let enrollment = state.enrollment();
+    let mut session_id = [0; logos_remote::SESSION_ID_LEN];
+    session_id[..8].copy_from_slice(&enrollment.generation.to_be_bytes());
+    session_id[8..].copy_from_slice(&message.id.to_be_bytes());
+    let current = state.control().session;
+    if current.session == session_id && current.sequence == message.sequence {
+        if current.digest != digest {
+            return remote_error(message, address, b"mismatch");
+        }
+        if current.pending {
+            return remote_error(message, address, b"indeterminate");
+        }
+        let length = usize::from(current.reply_length);
+        unsafe {
+            core::ptr::copy_nonoverlapping(current.reply.as_ptr(), address as *mut u8, length)
+        };
+        return Some((logos_abi::service::RemoteGateStatus::Complete, length, 0));
+    }
+    if current.session == session_id && message.sequence <= current.sequence {
+        return remote_error(message, address, b"stale");
+    }
+    let mut control = state.control();
+    control.session = logos_remote::SessionRecord {
+        enrollment_generation: enrollment.generation,
+        session: session_id,
+        sequence: message.sequence,
+        pending: true,
+        digest,
+        reply: [0; logos_remote::MAX_FRAME],
+        reply_length: 0,
+    };
+    control.append(logos_remote::RemoteAuditEvent {
+        sequence: 0,
+        enrollment_generation: enrollment.generation,
+        session: session_id,
+        request_sequence: message.sequence,
+        command: invocation.command as u8,
+        phase: logos_remote::RemoteAuditPhase::Started,
+        outcome: 0,
+        tick,
+        digest,
+    });
+    state.replace_control(control);
+    if !persist_remote_control(
+        state,
+        storage,
+        dispatch,
+        block_context,
+        scheduler,
+        storage_handle,
+        page,
+        owner,
+        tick,
+    ) {
+        return None;
+    }
+    let syscall = match invocation.command {
+        logos_remote::RemoteCommand::Health => logos_abi::Syscall::Health,
+        logos_remote::RemoteCommand::Ping => logos_abi::Syscall::Ping,
+        logos_remote::RemoteCommand::Tasks => logos_abi::Syscall::Tasks,
+        logos_remote::RemoteCommand::Services => logos_abi::Syscall::Services,
+        logos_remote::RemoteCommand::Drivers => logos_abi::Syscall::Drivers,
+        logos_remote::RemoteCommand::Trace => logos_abi::Syscall::Trace,
+        logos_remote::RemoteCommand::Inspect => logos_abi::Syscall::Inspect,
+        logos_remote::RemoteCommand::Restart => logos_abi::Syscall::Restart,
+        logos_remote::RemoteCommand::Cancel => logos_abi::Syscall::Cancel,
+        logos_remote::RemoteCommand::Reboot => logos_abi::Syscall::Reboot,
+        logos_remote::RemoteCommand::PowerOff => logos_abi::Syscall::PowerOff,
+    };
+    let mut argument = [0; logos_abi::MAX_SESSION_TEXT];
+    let argument_length = usize::from(invocation.argument_length);
+    argument[..argument_length].copy_from_slice(&invocation.argument[..argument_length]);
+    let reply = session::invoke_native(
+        logos_abi::SessionRequest::new(syscall, argument, argument_length),
+        sessions,
+        scheduler,
+        sessions_handle,
+        effects::Context {
+            session: remote_session,
+            capabilities,
+            tick,
+            input,
+            lifecycle,
+            service_healthy,
+            channel,
+            responses,
+            service_scheduler,
+            service_capability,
+            service,
+        },
+    )?;
+    let mut payload = [0; logos_remote::REMOTE_MESSAGE_PAYLOAD];
+    payload[..reply.length].copy_from_slice(&reply.text[..reply.length]);
+    let response = logos_remote::RemoteMessage {
+        kind: logos_remote::RemoteMessageKind::Reply,
+        id: message.id,
+        sequence: message.sequence,
+        cursor: 0,
+        payload,
+        payload_length: reply.length as u16,
+    };
+    let mut encoded = [0; logos_remote::MAX_FRAME];
+    let length = response.encode(&mut encoded).ok()?;
+    let mut control = state.control();
+    control.session.pending = false;
+    control.session.reply[..length].copy_from_slice(&encoded[..length]);
+    control.session.reply_length = length as u16;
+    control.append(logos_remote::RemoteAuditEvent {
+        sequence: 0,
+        enrollment_generation: enrollment.generation,
+        session: session_id,
+        request_sequence: message.sequence,
+        command: invocation.command as u8,
+        phase: logos_remote::RemoteAuditPhase::Completed,
+        outcome: 1,
+        tick,
+        digest,
+    });
+    state.replace_control(control);
+    if !persist_remote_control(
+        state,
+        storage,
+        dispatch,
+        block_context,
+        scheduler,
+        storage_handle,
+        page,
+        owner,
+        tick,
+    ) {
+        return None;
+    }
+    unsafe { core::ptr::copy_nonoverlapping(encoded.as_ptr(), address as *mut u8, length) };
+    Some((logos_abi::service::RemoteGateStatus::Complete, length, 0))
+}
+
+fn remote_error(
+    request: logos_remote::RemoteMessage,
+    address: u64,
+    payload: &[u8],
+) -> Option<(logos_abi::service::RemoteGateStatus, usize, u64)> {
+    let mut bytes = [0; logos_remote::REMOTE_MESSAGE_PAYLOAD];
+    bytes[..payload.len()].copy_from_slice(payload);
+    let reply = logos_remote::RemoteMessage {
+        kind: logos_remote::RemoteMessageKind::Error,
+        id: request.id,
+        sequence: request.sequence,
+        cursor: 0,
+        payload: bytes,
+        payload_length: payload.len() as u16,
+    };
+    let mut encoded = [0; logos_remote::MAX_FRAME];
+    let length = reply.encode(&mut encoded).ok()?;
+    unsafe { core::ptr::copy_nonoverlapping(encoded.as_ptr(), address as *mut u8, length) };
+    Some((logos_abi::service::RemoteGateStatus::Complete, length, 0))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_remote_control(
+    state: &mut secrets::RemoteState,
+    storage: native_task::StoreEndpoint,
+    dispatch: &mut block::Dispatch,
+    context: &mut block::DispatchContext<'_>,
+    scheduler: &mut native_task::Scheduler<'_>,
+    storage_handle: native_task::Handle,
+    page: logos_abi::PageHandle,
+    owner: u64,
+    tick: u64,
+) -> bool {
+    let Some(address) = context.pages.address(owner, page) else { return false };
+    let mut blob = [0; logos_remote::REMOTE_CONTROL_BLOB_BYTES];
+    if !state.seal_control_random(&mut blob) {
+        return false;
+    }
+    let status = protected_store_replace(
+        storage,
+        dispatch,
+        context,
+        scheduler,
+        storage_handle,
+        page,
+        address,
+        logos_abi::TRUST_NAMESPACE,
+        logos_abi::TRUST_SESSION_NAME,
+        &blob,
+        tick,
+    );
+    if status == logos_abi::PersistenceStatus::Complete {
+        true
+    } else {
+        state.disable();
+        false
     }
 }
 
