@@ -36,7 +36,8 @@ client can reconnect and invoke the existing typed `ping` command.
 ### Implementation checkpoints
 
 - [x] Bounded Noise IK, HKDF key separation, XChaCha protected-record primitive, fail-closed trust
-  state, replay model, enrollment/session record codecs, and partial/coalesced frame buffering.
+  state, replay model, typed attach/invoke/reply codecs, enrollment/session record codecs, and
+  partial/coalesced frame buffering.
 - [ ] Passive TCP owner multiplexing for Terminal and Gateway clients.
 - [ ] Protected Store enrollment, local trust commands, Gateway attachment, and `logosctl`.
 - [ ] QEMU restart, corruption, and typed-invocation proofs.

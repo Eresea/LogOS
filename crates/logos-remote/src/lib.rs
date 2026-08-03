@@ -13,6 +13,9 @@ pub const REQUEST_DIGEST_LEN: usize = 32;
 pub const MAX_FRAME_BUFFER: usize = MAX_FRAME + 2;
 pub const ENROLLMENT_BYTES: usize = 42;
 pub const SESSION_RECORD_BYTES: usize = 324;
+pub const MAX_COMMAND: usize = 256;
+pub const REMOTE_REQUEST_BYTES: usize = 2 + 8 + SESSION_ID_LEN + 8 + 2 + MAX_COMMAND;
+pub const REMOTE_REPLY_BYTES: usize = 2 + 8 + 8 + 1 + 2 + MAX_COMMAND;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -181,6 +184,157 @@ pub struct SessionRecord {
     pub digest: [u8; REQUEST_DIGEST_LEN],
     pub reply: [u8; 256],
     pub reply_length: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RemoteStatus {
+    Ok = 1,
+    Denied,
+    Indeterminate,
+    Invalid,
+}
+
+impl RemoteStatus {
+    pub fn from_wire(value: u8) -> Result<Self, Error> {
+        match value {
+            1 => Ok(Self::Ok),
+            2 => Ok(Self::Denied),
+            3 => Ok(Self::Indeterminate),
+            4 => Ok(Self::Invalid),
+            _ => Err(Error::Frame),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteRequest {
+    pub version: u16,
+    pub enrollment_generation: u64,
+    pub session: [u8; SESSION_ID_LEN],
+    pub sequence: u64,
+    pub command: [u8; MAX_COMMAND],
+    pub command_length: u16,
+}
+
+impl RemoteRequest {
+    pub fn ping(enrollment_generation: u64, session: [u8; SESSION_ID_LEN], sequence: u64) -> Self {
+        let mut command = [0; MAX_COMMAND];
+        command[..4].copy_from_slice(b"ping");
+        Self {
+            version: PROTOCOL_VERSION,
+            enrollment_generation,
+            session,
+            sequence,
+            command,
+            command_length: 4,
+        }
+    }
+
+    pub fn encode(self, output: &mut [u8; REMOTE_REQUEST_BYTES]) -> Result<(), Error> {
+        if self.version != PROTOCOL_VERSION
+            || self.command_length == 0
+            || self.command_length as usize > MAX_COMMAND
+            || self.session.iter().all(|byte| *byte == 0)
+            || self.sequence == 0
+        {
+            return Err(Error::Frame);
+        }
+        *output = [0; REMOTE_REQUEST_BYTES];
+        output[0..2].copy_from_slice(&self.version.to_be_bytes());
+        output[2..10].copy_from_slice(&self.enrollment_generation.to_be_bytes());
+        output[10..26].copy_from_slice(&self.session);
+        output[26..34].copy_from_slice(&self.sequence.to_be_bytes());
+        output[34..36].copy_from_slice(&self.command_length.to_be_bytes());
+        output[36..].copy_from_slice(&self.command);
+        Ok(())
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, Error> {
+        if input.len() != REMOTE_REQUEST_BYTES {
+            return Err(Error::Frame);
+        }
+        let mut session = [0; SESSION_ID_LEN];
+        let mut command = [0; MAX_COMMAND];
+        session.copy_from_slice(&input[10..26]);
+        command.copy_from_slice(&input[36..]);
+        let request = Self {
+            version: u16::from_be_bytes(input[0..2].try_into().map_err(|_| Error::Frame)?),
+            enrollment_generation: u64::from_be_bytes(
+                input[2..10].try_into().map_err(|_| Error::Frame)?,
+            ),
+            session,
+            sequence: u64::from_be_bytes(input[26..34].try_into().map_err(|_| Error::Frame)?),
+            command,
+            command_length: u16::from_be_bytes(input[34..36].try_into().map_err(|_| Error::Frame)?),
+        };
+        let mut encoded = [0; REMOTE_REQUEST_BYTES];
+        request.encode(&mut encoded)?;
+        (encoded == input).then_some(request).ok_or(Error::Frame)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteReply {
+    pub version: u16,
+    pub enrollment_generation: u64,
+    pub sequence: u64,
+    pub status: RemoteStatus,
+    pub payload: [u8; MAX_COMMAND],
+    pub payload_length: u16,
+}
+
+impl RemoteReply {
+    pub fn pong(enrollment_generation: u64, sequence: u64) -> Self {
+        let mut payload = [0; MAX_COMMAND];
+        payload[..4].copy_from_slice(b"pong");
+        Self {
+            version: PROTOCOL_VERSION,
+            enrollment_generation,
+            sequence,
+            status: RemoteStatus::Ok,
+            payload,
+            payload_length: 4,
+        }
+    }
+
+    pub fn encode(self, output: &mut [u8; REMOTE_REPLY_BYTES]) -> Result<(), Error> {
+        if self.version != PROTOCOL_VERSION
+            || self.sequence == 0
+            || self.payload_length as usize > MAX_COMMAND
+        {
+            return Err(Error::Frame);
+        }
+        *output = [0; REMOTE_REPLY_BYTES];
+        output[0..2].copy_from_slice(&self.version.to_be_bytes());
+        output[2..10].copy_from_slice(&self.enrollment_generation.to_be_bytes());
+        output[10..18].copy_from_slice(&self.sequence.to_be_bytes());
+        output[18] = self.status as u8;
+        output[19..21].copy_from_slice(&self.payload_length.to_be_bytes());
+        output[21..].copy_from_slice(&self.payload);
+        Ok(())
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, Error> {
+        if input.len() != REMOTE_REPLY_BYTES {
+            return Err(Error::Frame);
+        }
+        let mut payload = [0; MAX_COMMAND];
+        payload.copy_from_slice(&input[21..]);
+        let reply = Self {
+            version: u16::from_be_bytes(input[0..2].try_into().map_err(|_| Error::Frame)?),
+            enrollment_generation: u64::from_be_bytes(
+                input[2..10].try_into().map_err(|_| Error::Frame)?,
+            ),
+            sequence: u64::from_be_bytes(input[10..18].try_into().map_err(|_| Error::Frame)?),
+            status: RemoteStatus::from_wire(input[18])?,
+            payload,
+            payload_length: u16::from_be_bytes(input[19..21].try_into().map_err(|_| Error::Frame)?),
+        };
+        let mut encoded = [0; REMOTE_REPLY_BYTES];
+        reply.encode(&mut encoded)?;
+        (encoded == input).then_some(reply).ok_or(Error::Frame)
+    }
 }
 
 impl SessionRecord {
@@ -590,6 +744,22 @@ mod tests {
         assert_eq!(frame_decode(&output[..length]), Ok(&b"ping"[..]));
         assert_eq!(frame_decode(&output[..length - 1]), Err(Error::Frame));
         assert_eq!(frame_encode(&mut output, &[]), Err(Error::Frame));
+    }
+
+    #[test]
+    fn typed_remote_contracts_are_exact_and_versioned() {
+        let request = RemoteRequest::ping(4, [1; SESSION_ID_LEN], 9);
+        let mut request_bytes = [0; REMOTE_REQUEST_BYTES];
+        request.encode(&mut request_bytes).unwrap();
+        assert_eq!(RemoteRequest::decode(&request_bytes), Ok(request));
+        request_bytes[1] = 0;
+        assert_eq!(RemoteRequest::decode(&request_bytes), Err(Error::Frame));
+        let reply = RemoteReply::pong(4, 9);
+        let mut reply_bytes = [0; REMOTE_REPLY_BYTES];
+        reply.encode(&mut reply_bytes).unwrap();
+        assert_eq!(RemoteReply::decode(&reply_bytes), Ok(reply));
+        reply_bytes[18] = 0;
+        assert_eq!(RemoteReply::decode(&reply_bytes), Err(Error::Frame));
     }
 
     #[test]
