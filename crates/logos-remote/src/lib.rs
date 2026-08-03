@@ -21,6 +21,7 @@ pub enum Error {
     Mismatch,
     Busy,
     Crypto,
+    Invalid,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,6 +52,124 @@ impl Enrollment {
             client_key,
         })
     }
+}
+
+/// Bounded machine trust state. A failed protected-record load is represented
+/// by `available = false`; callers must not fall back to an older record.
+pub struct TrustState {
+    machine_secret: [u8; 32],
+    machine_public: [u8; 32],
+    enrollment: Enrollment,
+    available: bool,
+}
+
+impl TrustState {
+    pub fn new(machine_secret: [u8; 32]) -> Result<Self, Error> {
+        if machine_secret.iter().all(|byte| *byte == 0) {
+            return Err(Error::Invalid);
+        }
+        let machine_public = X25519::pubkey(&machine_secret);
+        if machine_public.iter().all(|byte| *byte == 0) {
+            return Err(Error::Invalid);
+        }
+        Ok(Self {
+            machine_secret,
+            machine_public,
+            enrollment: Enrollment { generation: 1, active: false, client_key: [0; 32] },
+            available: true,
+        })
+    }
+
+    pub fn unavailable(machine_secret: [u8; 32]) -> Self {
+        Self {
+            machine_public: X25519::pubkey(&machine_secret),
+            machine_secret,
+            enrollment: Enrollment { generation: 0, active: false, client_key: [0; 32] },
+            available: false,
+        }
+    }
+
+    pub fn machine_public(&self) -> [u8; 32] {
+        self.machine_public
+    }
+
+    pub fn enrollment(&self) -> Enrollment {
+        self.enrollment
+    }
+
+    pub const fn available(&self) -> bool {
+        self.available
+    }
+
+    pub fn enroll(&mut self, client_key: [u8; 32]) -> Result<u64, Error> {
+        if !self.available || !valid_public_key(&client_key) {
+            return Err(Error::Invalid);
+        }
+        self.enrollment.generation = self.enrollment.generation.saturating_add(1).max(1);
+        self.enrollment.client_key = client_key;
+        self.enrollment.active = true;
+        Ok(self.enrollment.generation)
+    }
+
+    pub fn unenroll(&mut self) -> Result<u64, Error> {
+        if !self.available {
+            return Err(Error::Invalid);
+        }
+        self.enrollment.generation = self.enrollment.generation.saturating_add(1).max(1);
+        self.enrollment.client_key = [0; 32];
+        self.enrollment.active = false;
+        Ok(self.enrollment.generation)
+    }
+
+    pub fn authorizes(&self, client_key: &[u8; 32], generation: u64) -> bool {
+        self.available
+            && self.enrollment.active
+            && self.enrollment.generation == generation
+            && &self.enrollment.client_key == client_key
+    }
+
+    pub fn seal_enrollment(
+        &self,
+        storage_key: &[u8; 32],
+        nonce: &[u8; 24],
+        output: &mut [u8; ENROLLMENT_BYTES + 16],
+    ) -> Result<(), Error> {
+        self.enrollment
+            .encode((&mut output[..ENROLLMENT_BYTES]).try_into().map_err(|_| Error::Frame)?);
+        seal(storage_key, nonce, b"enrollment", output, ENROLLMENT_BYTES)?;
+        Ok(())
+    }
+
+    pub fn open_enrollment(
+        machine_secret: [u8; 32],
+        storage_key: &[u8; 32],
+        nonce: &[u8; 24],
+        input: &mut [u8; ENROLLMENT_BYTES + 16],
+    ) -> Self {
+        let Ok(mut state) = Self::new(machine_secret) else {
+            return Self::unavailable(machine_secret);
+        };
+        let input_length = input.len();
+        let Ok(length) = open(storage_key, nonce, b"enrollment", input, input_length) else {
+            return Self::unavailable(machine_secret);
+        };
+        let Ok(enrollment) = Enrollment::decode(&input[..length]) else {
+            return Self::unavailable(machine_secret);
+        };
+        if enrollment.active && !valid_public_key(&enrollment.client_key) {
+            return Self::unavailable(machine_secret);
+        }
+        state.enrollment = enrollment;
+        state
+    }
+
+    pub fn machine_secret(&self) -> [u8; 32] {
+        self.machine_secret
+    }
+}
+
+fn valid_public_key(key: &[u8; 32]) -> bool {
+    !key.iter().all(|byte| *byte == 0) && X25519::dh(&[1; 32], key).is_ok()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -322,9 +441,6 @@ impl FrameDecoder {
             if declared == 0 || declared > MAX_FRAME || declared + 2 > self.bytes.len() {
                 return Err(Error::Frame);
             }
-            if self.length > declared + 2 {
-                return Err(Error::Frame);
-            }
         }
         Ok(())
     }
@@ -518,6 +634,33 @@ mod tests {
         assert_eq!(decoder.ready(), Ok(Some(&b"hello"[..])));
         decoder.consume().unwrap();
         assert_eq!(decoder.ready(), Ok(None));
+        let mut joined = [0; MAX_FRAME_BUFFER];
+        let first = frame_encode(&mut joined, b"a").unwrap();
+        let mut second = [0; MAX_FRAME_BUFFER];
+        let second_len = frame_encode(&mut second, b"b").unwrap();
+        joined[first..first + second_len].copy_from_slice(&second[..second_len]);
+        let mut joined_decoder = FrameDecoder::new();
+        joined_decoder.push(&joined[..first + second_len]).unwrap();
+        assert_eq!(joined_decoder.ready(), Ok(Some(&b"a"[..])));
+        joined_decoder.consume().unwrap();
+        assert_eq!(joined_decoder.ready(), Ok(Some(&b"b"[..])));
+    }
+
+    #[test]
+    fn trust_generation_and_corruption_are_fail_closed() {
+        let mut state = TrustState::new([7; 32]).unwrap();
+        assert!(!state.authorizes(&[8; 32], 1));
+        let generation = state.enroll([8; 32]).unwrap();
+        assert!(state.authorizes(&[8; 32], generation));
+        assert!(!state.authorizes(&[8; 32], generation - 1));
+        let storage = derive_keys(&[9; 32]).unwrap().1;
+        let mut sealed = [0; ENROLLMENT_BYTES + 16];
+        state.seal_enrollment(&storage, &[3; 24], &mut sealed).unwrap();
+        let loaded = TrustState::open_enrollment([7; 32], &storage, &[3; 24], &mut sealed);
+        assert!(loaded.available() && loaded.authorizes(&[8; 32], generation));
+        sealed[0] ^= 1;
+        assert!(!TrustState::open_enrollment([7; 32], &storage, &[3; 24], &mut sealed).available());
+        assert!(matches!(TrustState::new([0; 32]), Err(Error::Invalid)));
     }
 
     #[test]
