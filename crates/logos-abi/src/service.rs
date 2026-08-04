@@ -223,9 +223,11 @@ impl InputPage {
         if address == 0 {
             return false;
         }
-        let page = unsafe { (address as *const Self).read_volatile() };
-        page.generation == generation
-            && EndpointState::from_wire(page.state) == Some(EndpointState::Waiting)
+        let page = address as *const Self;
+        let page_generation = unsafe { core::ptr::addr_of!((*page).generation).read_volatile() };
+        let state = unsafe { core::ptr::addr_of!((*page).state).read_volatile() };
+        page_generation == generation
+            && EndpointState::from_wire(state) == Some(EndpointState::Waiting)
     }
 
     /// # Safety
@@ -363,9 +365,11 @@ impl DisplayPage {
         if address == 0 {
             return false;
         }
-        let page = unsafe { (address as *const Self).read_volatile() };
-        page.generation == generation
-            && EndpointState::from_wire(page.state) == Some(EndpointState::Request)
+        let page = address as *const Self;
+        let page_generation = unsafe { core::ptr::addr_of!((*page).generation).read_volatile() };
+        let state = unsafe { core::ptr::addr_of!((*page).state).read_volatile() };
+        page_generation == generation
+            && EndpointState::from_wire(state) == Some(EndpointState::Request)
     }
 
     /// # Safety
@@ -983,9 +987,7 @@ impl ControlPage {
         context.lifecycle = LIFECYCLE_STARTING;
         context.operation = 0;
         context.status = 0;
-        context.slot0 = 0;
-        context.slot1 = 0;
-        context.slot2 = 0;
+        // slot0..2 may hold a configured block page; keep endpoint configuration across reset.
         context.payload_length = 0;
         context.payload = [0; MAX_TEXT];
         unsafe { (address as *mut Self).write_volatile(context) };
@@ -2280,9 +2282,12 @@ mod tests {
         let page = BlockPage { handle: logos_abi::PageHandle(7), address: 0x2000 };
         assert!(unsafe { ControlPage::configure_block_page_at(address, page) });
         assert_eq!(unsafe { ControlPage::block_page_at(address) }, Some(page));
-        context.operation = READY;
-        context.status = ACKNOWLEDGED;
-        unsafe { (address as *mut ControlPage).write_volatile(context) };
+        assert!(unsafe { ControlPage::set_generation_at(address, 2) });
+        assert_eq!(unsafe { ControlPage::block_page_at(address) }, Some(page));
+        let mut ready = unsafe { (address as *const ControlPage).read_volatile() };
+        ready.operation = READY;
+        ready.status = ACKNOWLEDGED;
+        unsafe { (address as *mut ControlPage).write_volatile(ready) };
         let request = logos_abi::BlockRequest {
             id: 3,
             operation: logos_abi::BlockOperation::Info,

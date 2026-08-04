@@ -37,7 +37,6 @@ pub struct Task<'a> {
 
 #[derive(Clone, Copy)]
 pub struct InputEndpoint {
-    context_physical: u64,
     page_physical: Option<u64>,
     generation: u32,
 }
@@ -119,6 +118,7 @@ impl DisplayEndpoint {
         })
     }
 
+    #[allow(dead_code)]
     pub const fn context(self) -> u64 {
         self.context_physical
     }
@@ -442,7 +442,6 @@ impl<'a> Task<'a> {
 
     pub fn input_endpoint(&self) -> Option<InputEndpoint> {
         self.input_page_physical.map(|page_physical| InputEndpoint {
-            context_physical: self.context_physical,
             page_physical: Some(page_physical),
             generation: self.generation,
         })
