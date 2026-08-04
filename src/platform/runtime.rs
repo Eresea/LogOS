@@ -707,7 +707,12 @@ pub(crate) fn run(
         fail!(b"native terminal task");
     };
     let native_sessions = payloads.sessions.and_then(|payload| {
-        native_task::Task::load(&mut memory, payload, &privilege, native_task::EndpointPages::NONE)
+        native_task::Task::load(
+            &mut memory,
+            payload,
+            &privilege,
+            native_task::EndpointPages::SESSIONS,
+        )
     });
     let mut native_storage = payloads.storage.and_then(|payload| {
         native_task::Task::load(&mut memory, payload, &privilege, native_task::EndpointPages::NONE)

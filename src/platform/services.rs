@@ -67,16 +67,20 @@ pub struct EndpointSet(u16);
 impl EndpointSet {
     const INPUT_BIT: u16 = 1 << 0;
     const DISPLAY_BIT: u16 = 1 << 1;
-    const SESSION_BIT: u16 = 1 << 2;
-    const STORE_BIT: u16 = 1 << 3;
-    const BLOCK_BIT: u16 = 1 << 4;
-    const NETWORK_BIT: u16 = 1 << 5;
-    const REMOTE_BIT: u16 = 1 << 6;
+    const SESSION_CLIENT_BIT: u16 = 1 << 2;
+    const SESSION_SERVER_BIT: u16 = 1 << 3;
+    const EFFECT_BIT: u16 = 1 << 4;
+    const STORE_BIT: u16 = 1 << 5;
+    const BLOCK_BIT: u16 = 1 << 6;
+    const NETWORK_BIT: u16 = 1 << 7;
+    const REMOTE_BIT: u16 = 1 << 8;
 
     pub const NONE: Self = Self(0);
     pub const INPUT: Self = Self(Self::INPUT_BIT);
     pub const DISPLAY: Self = Self(Self::DISPLAY_BIT);
-    pub const SESSION: Self = Self(Self::SESSION_BIT);
+    pub const SESSION_CLIENT: Self = Self(Self::SESSION_CLIENT_BIT);
+    pub const SESSION_SERVER: Self = Self(Self::SESSION_SERVER_BIT);
+    pub const EFFECT: Self = Self(Self::EFFECT_BIT);
     pub const STORE: Self = Self(Self::STORE_BIT);
     pub const BLOCK: Self = Self(Self::BLOCK_BIT);
     pub const NETWORK: Self = Self(Self::NETWORK_BIT);
@@ -176,6 +180,7 @@ const TERMINAL_SPEC: ServiceSpec = ServiceSpec {
     profiles: Profiles::NORMAL_ONLY,
     endpoints: EndpointSet::INPUT
         .union(EndpointSet::DISPLAY)
+        .union(EndpointSet::SESSION_CLIENT)
         .union(EndpointSet::STORE)
         .union(EndpointSet::NETWORK),
 };
@@ -188,7 +193,7 @@ const SESSIONS_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
-    endpoints: EndpointSet::SESSION,
+    endpoints: EndpointSet::SESSION_SERVER.union(EndpointSet::EFFECT),
 };
 const NETWORK_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Network,
@@ -260,6 +265,9 @@ pub fn self_check() -> bool {
         && SERVICE_SPECS.len() == SERVICES
         && Service::Terminal.spec().protocol == Protocol { abi: 1, version: 0 }
         && Service::Storage.spec().endpoints.contains(EndpointSet::STORE)
+        && Service::Terminal.spec().endpoints.contains(EndpointSet::SESSION_CLIENT)
+        && Service::Sessions.spec().endpoints.contains(EndpointSet::SESSION_SERVER)
+        && Service::Sessions.spec().endpoints.contains(EndpointSet::EFFECT)
         && Service::VirtioBlock.spec().endpoints.contains(EndpointSet::BLOCK)
         && Service::Gateway.spec().endpoints.contains(EndpointSet::REMOTE)
 }

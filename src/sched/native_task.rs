@@ -11,11 +11,22 @@ const TASKS: usize = 5;
 pub struct EndpointPages {
     pub input: bool,
     pub display: bool,
+    pub session_client: bool,
+    pub session_server: bool,
+    pub effect: bool,
 }
 
 impl EndpointPages {
-    pub const NONE: Self = Self { input: false, display: false };
-    pub const TERMINAL: Self = Self { input: true, display: true };
+    pub const NONE: Self = Self {
+        input: false,
+        display: false,
+        session_client: false,
+        session_server: false,
+        effect: false,
+    };
+    pub const TERMINAL: Self =
+        Self { input: true, display: true, session_client: true, ..Self::NONE };
+    pub const SESSIONS: Self = Self { session_server: true, effect: true, ..Self::NONE };
 }
 
 pub struct Task<'a> {
@@ -27,6 +38,9 @@ pub struct Task<'a> {
     context: u64,
     input_page_physical: Option<u64>,
     display_page_physical: Option<u64>,
+    session_client_page_physical: Option<u64>,
+    session_server_page_physical: Option<u64>,
+    effect_page_physical: Option<u64>,
     endpoint_pages: EndpointPages,
     generation: u32,
     started: bool,
@@ -53,6 +67,140 @@ impl InputEndpoint {
         self.page_physical.is_some_and(|page| unsafe {
             logos_abi::service::InputPage::deliver_at(page, self.generation, input)
         })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct SessionClientEndpoint {
+    page_physical: u64,
+    service_generation: u32,
+    endpoint_generation: u32,
+}
+
+impl SessionClientEndpoint {
+    pub fn request(self) -> Option<logos_abi::service::SessionClientRequest> {
+        unsafe {
+            logos_abi::service::SessionClientPage::take_request_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
+        }
+    }
+
+    pub fn reply(
+        self,
+        id: u32,
+        status: logos_abi::service::SessionStatus,
+        reply: logos_abi::SessionReply,
+    ) -> bool {
+        unsafe {
+            logos_abi::service::SessionClientPage::reply_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                id,
+                status,
+                reply,
+            )
+        }
+    }
+
+    pub fn cancel(self, id: u32) -> bool {
+        unsafe {
+            logos_abi::service::SessionClientPage::cancel_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                id,
+            )
+        }
+    }
+
+    pub const fn generation(self) -> u32 {
+        self.service_generation
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct SessionServerEndpoint {
+    page_physical: u64,
+    service_generation: u32,
+    endpoint_generation: u32,
+}
+
+impl SessionServerEndpoint {
+    pub fn waiting(self) -> bool {
+        unsafe {
+            logos_abi::service::SessionServerPage::waiting_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
+        }
+    }
+
+    pub fn deliver(self, id: u32, caller: u64, request: logos_abi::SessionRequest) -> bool {
+        unsafe {
+            logos_abi::service::SessionServerPage::deliver_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                id,
+                caller,
+                request,
+            )
+        }
+    }
+
+    pub fn reply(self, id: u32) -> Option<logos_abi::service::SessionServerReply> {
+        unsafe {
+            logos_abi::service::SessionServerPage::take_reply_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                id,
+            )
+        }
+    }
+
+    pub const fn generation(self) -> u32 {
+        self.service_generation
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct EffectEndpoint {
+    page_physical: u64,
+    service_generation: u32,
+    endpoint_generation: u32,
+}
+
+impl EffectEndpoint {
+    pub fn request(self) -> Option<logos_abi::service::EffectMessage> {
+        unsafe {
+            logos_abi::service::EffectPage::take_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
+        }
+    }
+
+    pub fn reply(self, id: u32, reply: logos_abi::EffectReply) -> bool {
+        unsafe {
+            logos_abi::service::EffectPage::reply_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                id,
+                reply,
+            )
+        }
+    }
+
+    pub const fn generation(self) -> u32 {
+        self.service_generation
     }
 }
 
@@ -409,8 +557,14 @@ impl<'a> Task<'a> {
             let _ = space.release(memory);
             return None;
         };
-        let Some(mapping) = space.map_context(memory, endpoint_pages.input, endpoint_pages.display)
-        else {
+        let Some(mapping) = space.map_context(
+            memory,
+            endpoint_pages.input,
+            endpoint_pages.display,
+            endpoint_pages.session_client,
+            endpoint_pages.session_server,
+            endpoint_pages.effect,
+        ) else {
             let _ = space.release(memory);
             return None;
         };
@@ -424,6 +578,9 @@ impl<'a> Task<'a> {
             context,
             input_page_physical: mapping.input.map(|(physical, _)| physical),
             display_page_physical: mapping.display.map(|(physical, _)| physical),
+            session_client_page_physical: mapping.session_client.map(|(physical, _)| physical),
+            session_server_page_physical: mapping.session_server.map(|(physical, _)| physical),
+            effect_page_physical: mapping.effect.map(|(physical, _)| physical),
             endpoint_pages,
             generation: 1,
             started: false,
@@ -459,6 +616,30 @@ impl<'a> Task<'a> {
         })
     }
 
+    pub fn session_client_endpoint(&self) -> Option<SessionClientEndpoint> {
+        self.session_client_page_physical.map(|page_physical| SessionClientEndpoint {
+            page_physical,
+            service_generation: self.generation,
+            endpoint_generation: self.generation,
+        })
+    }
+
+    pub fn session_server_endpoint(&self) -> Option<SessionServerEndpoint> {
+        self.session_server_page_physical.map(|page_physical| SessionServerEndpoint {
+            page_physical,
+            service_generation: self.generation,
+            endpoint_generation: self.generation,
+        })
+    }
+
+    pub fn effect_endpoint(&self) -> Option<EffectEndpoint> {
+        self.effect_page_physical.map(|page_physical| EffectEndpoint {
+            page_physical,
+            service_generation: self.generation,
+            endpoint_generation: self.generation,
+        })
+    }
+
     pub fn set_generation(&mut self, generation: u16) -> bool {
         let generation = u32::from(generation.max(1));
         if !unsafe {
@@ -476,6 +657,31 @@ impl<'a> Task<'a> {
         }
         if let Some(page) = self.display_page_physical {
             if !unsafe { logos_core::native_service::DisplayPage::reset_at(page, generation) } {
+                return false;
+            }
+        }
+        if let Some(page) = self.session_client_page_physical {
+            if !unsafe {
+                logos_core::native_service::SessionClientPage::reset_at(
+                    page, generation, generation,
+                )
+            } {
+                return false;
+            }
+        }
+        if let Some(page) = self.session_server_page_physical {
+            if !unsafe {
+                logos_core::native_service::SessionServerPage::reset_at(
+                    page, generation, generation,
+                )
+            } {
+                return false;
+            }
+        }
+        if let Some(page) = self.effect_page_physical {
+            if !unsafe {
+                logos_core::native_service::EffectPage::reset_at(page, generation, generation)
+            } {
                 return false;
             }
         }
@@ -656,6 +862,18 @@ impl<'a> Scheduler<'a> {
 
     pub fn display_endpoint(&self, handle: Handle) -> Option<DisplayEndpoint> {
         self.entry(handle)?.task.display_endpoint()
+    }
+
+    pub fn session_client_endpoint(&self, handle: Handle) -> Option<SessionClientEndpoint> {
+        self.entry(handle)?.task.session_client_endpoint()
+    }
+
+    pub fn session_server_endpoint(&self, handle: Handle) -> Option<SessionServerEndpoint> {
+        self.entry(handle)?.task.session_server_endpoint()
+    }
+
+    pub fn effect_endpoint(&self, handle: Handle) -> Option<EffectEndpoint> {
+        self.entry(handle)?.task.effect_endpoint()
     }
 
     pub fn session_endpoint(&self, handle: Handle) -> Option<SessionEndpoint> {

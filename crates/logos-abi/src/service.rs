@@ -52,6 +52,9 @@ pub struct ControlPage {
     pub lifecycle: u32,
     pub input_page: u64,
     pub display_page: u64,
+    pub session_client_page: u64,
+    pub session_server_page: u64,
+    pub effect_page: u64,
     pub slot0: u32,
     pub slot1: u32,
     pub slot2: u32,
@@ -1634,6 +1637,9 @@ impl ControlPage {
             lifecycle: LIFECYCLE_STARTING,
             input_page: 0,
             display_page: 0,
+            session_client_page: 0,
+            session_server_page: 0,
+            effect_page: 0,
             slot0: 0,
             slot1: 0,
             slot2: 0,
@@ -1666,6 +1672,9 @@ impl ControlPage {
         let mut reset = unsafe { (address as *mut Self).read_volatile() };
         reset.input_page = current.input_page;
         reset.display_page = current.display_page;
+        reset.session_client_page = current.session_client_page;
+        reset.session_server_page = current.session_server_page;
+        reset.effect_page = current.effect_page;
         reset.shared_page = current.shared_page;
         reset.network_rx_page = current.network_rx_page;
         reset.network_tx_page = current.network_tx_page;
@@ -1680,6 +1689,9 @@ impl ControlPage {
         generation: u32,
         input_page: Option<u64>,
         display_page: Option<u64>,
+        session_client_page: Option<u64>,
+        session_server_page: Option<u64>,
+        effect_page: Option<u64>,
     ) -> bool {
         if generation == 0 {
             return false;
@@ -1692,6 +1704,9 @@ impl ControlPage {
         context.lifecycle = LIFECYCLE_STARTING;
         context.input_page = input_page.unwrap_or(0);
         context.display_page = display_page.unwrap_or(0);
+        context.session_client_page = session_client_page.unwrap_or(0);
+        context.session_server_page = session_server_page.unwrap_or(0);
+        context.effect_page = effect_page.unwrap_or(0);
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -1739,6 +1754,30 @@ impl ControlPage {
         let context = unsafe { (address as *const Self).read_volatile() };
         (context.abi == ABI && context.reserved == 0 && context.display_page != 0)
             .then_some(context.display_page)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `ControlPage` mapping.
+    pub unsafe fn session_client_page_at(address: u64) -> Option<u64> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.session_client_page != 0)
+            .then_some(context.session_client_page)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `ControlPage` mapping.
+    pub unsafe fn session_server_page_at(address: u64) -> Option<u64> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.session_server_page != 0)
+            .then_some(context.session_server_page)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `ControlPage` mapping.
+    pub unsafe fn effect_page_at(address: u64) -> Option<u64> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.effect_page != 0)
+            .then_some(context.effect_page)
     }
 
     /// # Safety
