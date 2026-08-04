@@ -2398,4 +2398,39 @@ mod tests {
         );
         assert!(unsafe { ControlPage::network_device_reply_at(address, request.id + 1) }.is_none());
     }
+
+    #[test]
+    fn input_page_transitions_and_rejects_stale_generation() {
+        let mut page = InputPage::new(7);
+        let address = (&mut page as *mut InputPage) as u64;
+        assert!(unsafe { InputPage::wait_at(address, 7) });
+        assert!(unsafe { InputPage::waiting_at(address, 7) });
+        assert!(!unsafe { InputPage::deliver_at(address, 8, b'x') });
+        assert!(unsafe { InputPage::deliver_at(address, 7, b'x') });
+        assert_eq!(unsafe { InputPage::take_at(address, 7) }, Some(b'x'));
+        assert!(!unsafe { InputPage::take_at(address, 7) }.is_some());
+        assert!(!unsafe { InputPage::deliver_at(address, 7, b'y') });
+        assert!(unsafe { InputPage::reset_at(address, 8) });
+        assert!(!unsafe { InputPage::wait_at(address, 7) });
+        assert!(unsafe { InputPage::wait_at(address, 8) });
+    }
+
+    #[test]
+    fn display_page_completes_and_rejects_stale_generation() {
+        let mut page = DisplayPage::new(3);
+        let address = (&mut page as *mut DisplayPage) as u64;
+        assert!(unsafe {
+            DisplayPage::request_text_at(address, 3, 8, 16, logos_abi::DisplayColor::GREEN, b"ok")
+        });
+        let request = unsafe { DisplayPage::request_at(address, 3) }.unwrap();
+        assert_eq!(request.operation, PRESENT_TEXT);
+        assert_eq!(request.length, 2);
+        assert!(!unsafe { DisplayPage::complete_at(address, 4) });
+        assert!(unsafe { DisplayPage::complete_at(address, 3) });
+        assert!(unsafe { DisplayPage::finish_at(address, 3) });
+        assert!(!unsafe { DisplayPage::finish_at(address, 3) });
+        assert!(unsafe { DisplayPage::request_clear_at(address, 3) });
+        assert!(unsafe { DisplayPage::reset_at(address, 4) });
+        assert!(!unsafe { DisplayPage::pending_at(address, 3) });
+    }
 }

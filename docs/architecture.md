@@ -15,13 +15,21 @@ explicitly deprecated. See [ADR-0002](adr/0002-test-control-boundary.md).
 
 ## ABI v4 and native-service ownership
 
-Native service transport uses a dedicated mapped `logos_abi::service::ControlPage` header (ABI v4). Typed
+Native service transport uses a dedicated mapped `logos_abi::service::ControlPage` header (ABI v4). The
+Terminal's typed endpoint pages (`InputPage`, `DisplayPage`) are the active keyboard/display transport;
+the header carries lifecycle, generation, and notification state only for those protocols. Typed
 endpoint pages (`InputPage`, `DisplayPage`, `SessionPage`, `StoreEndpointPage`,
 `BlockEndpointPage`, `NetworkPage`, and `RemotePage`) carry explicit scalar state, generation, and
 bounded payload fields. Core owns endpoint mappings, capability checks, and reclamation; a service
 receives only the endpoint set declared by its canonical `platform::services::ServiceSpec`.
 The control page is implicit; `ServiceSpec::endpoints` is the single map for additional Input,
 Display, Session, Store, Block, Network, and Remote pages.
+
+Input transitions `Ready -> Waiting -> Reply -> Ready`; Display transitions `Ready -> Request ->
+Complete -> Ready`. Core and services validate scalar state and generation on every transition. Native
+task replacement advances the generation before releasing the old address space, so stale handles and
+physically reused pages cannot affect the replacement. The concrete mapping/reclamation pattern is
+recorded in [ADR-0021](adr/0021-typed-input-display-pages.md).
 
 The canonical specification is consumed by supervisor planning, service lookup, and payload header
 validation. `src/kernel.rs` is the privileged boot-facing entry boundary, with bootstrap composition,

@@ -26,4 +26,5 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0018](0018-remote-foundation-boundary.md) | Accepted | Keep Remote Foundation behind bounded TCP, trust, and session gates. |
 | [0019](0019-remote-v1-administration-attachment.md) | Accepted | Extend Remote Foundation into a persistent, credit-bounded administration attachment. |
 | [0020](0020-typed-native-endpoint-pages.md) | Accepted | Use typed ABI-v4 endpoint pages and one canonical native-service specification. |
+| [0021](0021-typed-input-display-pages.md) | Accepted | Make Input and Display typed pages the active Terminal transport with generation-safe replacement. |
 

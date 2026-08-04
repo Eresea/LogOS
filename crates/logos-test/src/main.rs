@@ -67,8 +67,18 @@ const SCENARIOS: &[Scenario] = &[
     scenario("core/driver-reset-recovery", "core", Fixture::Fresh),
     scenario("core/resource-reclamation", "core", Fixture::Fresh),
     scenario("core/panic-diagnostics", "core", Fixture::Fresh),
-    scenario("console/input-qwerty", "console", Fixture::Shared),
-    scenario("console/input-azerty", "console", Fixture::Shared),
+    configured(
+        "console/input-qwerty",
+        "console",
+        &["layout qwerty", "assert-input"],
+        Fixture::Shared,
+    ),
+    configured(
+        "console/input-azerty",
+        "console",
+        &["layout azerty", "assert-input"],
+        Fixture::Shared,
+    ),
     scenario("console/editing-utf8", "console", Fixture::Shared),
     scenario("console/history", "console", Fixture::Shared),
     configured(
@@ -82,7 +92,12 @@ const SCENARIOS: &[Scenario] = &[
     configured("console/display-capability-denied", "console", &["deny-display"], Fixture::Shared),
     configured("console/session-capability-denied", "console", &["deny-session"], Fixture::Shared),
     configured("console/cancellation", "console", &["assert-cancel"], Fixture::Shared),
-    scenario("console/display-restart", "console", Fixture::Shared),
+    configured(
+        "console/display-restart",
+        "console",
+        &["assert-display", "assert-terminal-service-restart"],
+        Fixture::Shared,
+    ),
     configured("console/input-service-restart", "console", &["assert-restart"], Fixture::Shared),
     configured(
         "console/terminal-service-restart",
