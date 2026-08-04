@@ -1,69 +1,21 @@
 # Test Status
 
-Last run: `cargo run -p logos-test -- suite main`
-Seed: `424242`
-Result: **21 passed, 36 skipped**
+Last verification: `cargo run -p logos-test -- suite main` (2026-08-04).
 
-Persistence suite: `cargo run -p logos-test -- suite persistence` passed, seed `424242`.
+- Catalog: 83 proofs; 52 ready; 31 intentionally skipped. The pre-refactor and current
+  `cargo run -p logos-test -- list` outputs have the same IDs and readiness states.
+- Main: 33 passed, 19 failed, 31 skipped. All startup and boot-health checks passed. The failures
+  are the registered network/remote semantic paths that currently time out or report unavailable,
+  plus `persistence/terminal-history` (`read terminal history: NotFound`) and
+  `persistence/block-timeout-reset` (timeout waiting for `RESULT input=accepted`).
+- Persistence: 6 passed, 2 failed (the two failures above).
+- Network: 3 passed, 7 failed; DHCP, configuration, and unauthorized-operation passed. Device-bind
+  and packet/transport proofs timed out waiting for QEMU exit.
+- Remote: 0 passed, 8 failed; all registered remote proofs timed out waiting for QEMU/peer completion.
+- Boot script: `scripts/run.ps1 -Headless` reached kernel entry, all startup self-checks, storage
+  recovery, and DHCP; the intentionally bounded 90-second command timed out while QEMU remained in
+  its interactive run loop.
+- Post-refactor smoke proofs: `core/boot-normal` and `network/configuration` passed.
 
-| Test | Status | Detail |
-| --- | --- | --- |
-| console/structured-command | passed | |
-| console/capability-denied | passed | |
-| console/input-capability-denied | passed | |
-| console/display-capability-denied | passed | |
-| console/session-capability-denied | passed | |
-| console/cancellation | passed | |
-| console/input-service-restart | passed | |
-| console/terminal-service-restart | passed | |
-| console/sessions-service-restart | passed | |
-| core/boot-normal | passed | |
-| persistence/block-read-flush | passed | |
-| persistence/terminal-history | passed | |
-| persistence/block-timeout-reset | passed | timeout reset followed by a real read without reboot |
-| persistence/capability-denied | passed | |
-| core/boot-recovery | skipped | semantic proof unavailable |
-| core/ipc-request-reply | skipped | semantic proof unavailable |
-| core/ipc-cancellation | skipped | semantic proof unavailable |
-| core/task-block-wake | skipped | semantic proof unavailable |
-| core/capability-denied | skipped | semantic proof unavailable |
-| core/capability-revoked | skipped | semantic proof unavailable |
-| core/driver-reset-recovery | skipped | semantic proof unavailable |
-| core/resource-reclamation | skipped | semantic proof unavailable |
-| core/panic-diagnostics | skipped | semantic proof unavailable |
-| console/input-qwerty | skipped | semantic proof unavailable |
-| console/input-azerty | skipped | semantic proof unavailable |
-| console/editing-utf8 | skipped | semantic proof unavailable |
-| console/history | skipped | semantic proof unavailable |
-| console/display-restart | skipped | semantic proof unavailable |
-| console/recovery-handoff | skipped | semantic proof unavailable |
-| platform/manifest-valid | skipped | semantic proof unavailable |
-| platform/manifest-invalid | skipped | semantic proof unavailable |
-| platform/dependency-order | skipped | semantic proof unavailable |
-| platform/dependency-cycle-rejected | skipped | semantic proof unavailable |
-| platform/startup-failure | skipped | semantic proof unavailable |
-| platform/dependency-loss | skipped | semantic proof unavailable |
-| platform/resource-reclamation | skipped | semantic proof unavailable |
-| platform/protocol-compatible | skipped | semantic proof unavailable |
-| platform/protocol-incompatible | skipped | semantic proof unavailable |
-| platform/unauthorized-capability | skipped | semantic proof unavailable |
-| platform/diagnostics | skipped | semantic proof unavailable |
-| platform/native-payload-staged | skipped | semantic proof unavailable |
-| platform/service-address-space | skipped | semantic proof unavailable |
-| platform/native-image-mapped | skipped | semantic proof unavailable |
-| platform/service-privilege-setup | skipped | semantic proof unavailable |
-| platform/service-ring3-transition | skipped | semantic proof unavailable |
-| platform/runtime-crash-restart | passed | |
-| platform/restart-backoff | passed | |
-| platform/native-service-ready | passed | |
-| persistence/write-interruption | passed | replacement and compaction interruption matrix |
-| persistence/recovery | passed | |
-| persistence/capability-denied | passed | |
-| persistence/corruption-detected | passed | corruption reported without reformat |
-| persistence/storage-service-restart | passed | |
-| network/packet-loss | skipped | semantic proof unavailable |
-| network/timeout | skipped | semantic proof unavailable |
-| network/reset-reconnect | skipped | semantic proof unavailable |
-| network/unauthorized-operation | skipped | semantic proof unavailable |
-
-Artifacts: `target/logos-test/main-424242.run2` (same-seed reruns are isolated with suffixed directories).
+Portable tests and target checks are recorded in the change report. The skipped proofs remain
+permanent IDs and are not removed by this refactor.

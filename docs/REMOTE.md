@@ -1,6 +1,6 @@
 # Remote
 
-> **Status:** Remote Foundation v1 integration in progress
+> **Status:** Remote Foundation v1 implementation complete; QEMU verification is the remaining gate
 
 ## Goal
 
@@ -48,14 +48,17 @@ client can reconnect and invoke the existing typed `ping` command.
   accepted stream, read, write, and close ownership is enforced there.
 - [x] Protected Store enrollment, local trust commands, root-derived device/storage keys, and
   fail-closed corruption recovery.
-- [ ] Gateway attachment and `logosctl` end-to-end invocation.
+- [x] Gateway attachment and `logosctl` end-to-end invocation are wired through the typed Core
+  remote gate; proof execution remains an environment-dependent verification step.
 - [x] Host `logosctl keygen` and pinned Noise IK typed `invoke` client with bounded reconnects;
   `invoke` consumes the enrollment descriptor rather than a hard-coded generation.
 - [x] Local command ABI recognizes `remote-key`, `enroll <64-hex-key>`, and `unenroll`; the
   machine key is available when the firmware root is present.
-- [ ] QEMU restart, corruption, and typed-invocation proofs.
+- [ ] QEMU restart, corruption, and typed-invocation proofs (run the registered `remote/*` IDs when
+  QEMU and OVMF are available).
 
-The remote proof IDs are registered in `logos-test`; Gateway and replay proofs remain skipped.
+The remote proof IDs are registered in `logos-test`; the current host run reaches the registered
+proofs but reports QEMU/peer availability timeouts, so they remain an explicit verification gate.
 UEFI builds use target-scoped Fiat Curve25519 and software ChaCha20/Poly1305 backends so the full
 payload set builds consistently on the supported host toolchains.
 

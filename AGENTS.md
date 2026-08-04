@@ -2,7 +2,9 @@
 
 ## Scope
 
-LogOS is an experimental Rust UEFI kernel. The current milestone is Persistence v1.
+LogOS is an experimental Rust UEFI kernel. Persistence v1 and Network v1 are complete; the
+current milestone is Remote Foundation v1 and the ABI-v4 maintainability migration recorded in
+ADR-0020.
 
 ## Rules
 
