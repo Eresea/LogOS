@@ -70,6 +70,17 @@ pub struct ControlPage {
 /// | Display | `Ready -> Request -> Ready` (`request_*`, `finish_at`) | `Request -> Complete` (`complete_at`) | reset to `Ready`; generation mismatch rejects |
 ///
 /// Unknown scalar states and malformed payloads are rejected without a write.
+/// Session endpoint transitions are role-specific:
+///
+/// | role | service transitions | Core transitions |
+/// | --- | --- | --- |
+/// | client | `Ready -> Request`, terminal result -> `Ready` | `Request -> Waiting -> Reply/Denied/Failed/Cancelled` |
+/// | server | `Ready -> Waiting`, `Request -> Processing -> Reply/Failed/Cancelled` | `Waiting -> Request`, terminal result -> `Ready` |
+/// | effect | `Ready -> Request`, terminal result -> `Ready` | `Request -> Waiting -> Reply/Denied/Failed/Cancelled` |
+///
+/// Every transition requires both generations and the active request ID. Unknown
+/// states and malformed bounded values are rejected without a write. Reset and
+/// replacement install `Ready` with new generations, invalidating pending work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum EndpointState {
@@ -126,16 +137,124 @@ pub struct DisplayPage {
     pub reserved: [u8; logos_abi::PAGE_SIZE - 284],
 }
 
-/// Fixed-size Sessions endpoint page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SessionPageState {
+    Ready = 1,
+    Waiting = 2,
+    Request = 3,
+    Processing = 4,
+    Reply = 5,
+    Failed = 6,
+    Cancelled = 7,
+    Denied = 8,
+}
+
+impl SessionPageState {
+    pub const fn wire(self) -> u32 {
+        self as u32
+    }
+
+    pub const fn from_wire(value: u32) -> Option<Self> {
+        Some(match value {
+            1 => Self::Ready,
+            2 => Self::Waiting,
+            3 => Self::Request,
+            4 => Self::Processing,
+            5 => Self::Reply,
+            6 => Self::Failed,
+            7 => Self::Cancelled,
+            8 => Self::Denied,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SessionStatus {
+    Complete = 1,
+    Denied = 2,
+    Failed = 3,
+    Cancelled = 4,
+}
+
+impl SessionStatus {
+    pub const fn wire(self) -> u32 {
+        self as u32
+    }
+
+    pub const fn from_wire(value: u32) -> Option<Self> {
+        Some(match value {
+            1 => Self::Complete,
+            2 => Self::Denied,
+            3 => Self::Failed,
+            4 => Self::Cancelled,
+            _ => return None,
+        })
+    }
+
+    const fn state(self) -> SessionPageState {
+        match self {
+            Self::Complete => SessionPageState::Reply,
+            Self::Denied => SessionPageState::Denied,
+            Self::Failed => SessionPageState::Failed,
+            Self::Cancelled => SessionPageState::Cancelled,
+        }
+    }
+}
+
+/// Terminal-owned Session request/reply endpoint. Core mediates this page.
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct SessionPage {
-    pub generation: u32,
-    pub state: EndpointState,
-    pub syscall: u32,
-    pub text_length: u32,
-    pub text: [u8; MAX_TEXT],
-    pub reserved: [u8; logos_abi::PAGE_SIZE - 272],
+pub struct SessionClientPage {
+    pub service_generation: u32,
+    pub endpoint_generation: u32,
+    pub state: u32,
+    pub request_id: u32,
+    pub operation: u32,
+    pub request_length: u32,
+    pub reply_status: u32,
+    pub reply_length: u32,
+    pub request: [u8; MAX_TEXT],
+    pub reply: [u8; MAX_TEXT],
+    pub reserved: [u8; logos_abi::PAGE_SIZE - 544],
+}
+
+/// Sessions-owned server endpoint. It is never mapped into a client service.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct SessionServerPage {
+    pub service_generation: u32,
+    pub endpoint_generation: u32,
+    pub state: u32,
+    pub request_id: u32,
+    pub caller_low: u32,
+    pub caller_high: u32,
+    pub operation: u32,
+    pub request_length: u32,
+    pub reply_status: u32,
+    pub reply_length: u32,
+    pub request: [u8; MAX_TEXT],
+    pub reply: [u8; MAX_TEXT],
+    pub reserved: [u8; logos_abi::PAGE_SIZE - 552],
+}
+
+/// Sessions-owned privileged-effect endpoint. Core alone executes requests.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct EffectPage {
+    pub service_generation: u32,
+    pub endpoint_generation: u32,
+    pub state: u32,
+    pub request_id: u32,
+    pub effect: u32,
+    pub request_length: u32,
+    pub result: u32,
+    pub reply_length: u32,
+    pub request: [u8; MAX_TEXT],
+    pub reply: [u8; MAX_TEXT],
+    pub reserved: [u8; logos_abi::PAGE_SIZE - 544],
 }
 
 /// Fixed-size Store endpoint page.
@@ -433,10 +552,614 @@ pub struct DisplayRequest {
     pub length: usize,
 }
 
+#[derive(Clone, Copy)]
+pub struct SessionClientRequest {
+    pub id: u32,
+    pub request: logos_abi::SessionRequest,
+}
+
+#[derive(Clone, Copy)]
+pub struct SessionClientReply {
+    pub id: u32,
+    pub status: SessionStatus,
+    pub reply: logos_abi::SessionReply,
+}
+
+#[derive(Clone, Copy)]
+pub struct SessionServerRequest {
+    pub id: u32,
+    pub caller: u64,
+    pub request: logos_abi::SessionRequest,
+}
+
+#[derive(Clone, Copy)]
+pub struct SessionServerReply {
+    pub id: u32,
+    pub status: SessionStatus,
+    pub reply: logos_abi::SessionReply,
+}
+
+#[derive(Clone, Copy)]
+pub struct EffectMessage {
+    pub id: u32,
+    pub request: logos_abi::EffectRequest,
+}
+
+#[derive(Clone, Copy)]
+pub struct EffectResponse {
+    pub id: u32,
+    pub reply: logos_abi::EffectReply,
+}
+
+impl SessionClientPage {
+    pub const fn new(service_generation: u32, endpoint_generation: u32) -> Self {
+        Self {
+            service_generation,
+            endpoint_generation,
+            state: SessionPageState::Ready.wire(),
+            request_id: 0,
+            operation: 0,
+            request_length: 0,
+            reply_status: 0,
+            reply_length: 0,
+            request: [0; MAX_TEXT],
+            reply: [0; MAX_TEXT],
+            reserved: [0; logos_abi::PAGE_SIZE - 544],
+        }
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned client page mapping.
+    pub unsafe fn reset_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        if !valid_page_identity::<Self>(address, service_generation, endpoint_generation) {
+            return false;
+        }
+        unsafe {
+            (address as *mut Self)
+                .write_volatile(Self::new(service_generation, endpoint_generation))
+        };
+        true
+    }
+
+    /// # Safety
+    /// The mapped client service owns the page while creating the request.
+    pub unsafe fn request_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        id: u32,
+        request: logos_abi::SessionRequest,
+    ) -> bool {
+        if id == 0 || !request.valid() {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || SessionPageState::from_wire(page.state) != Some(SessionPageState::Ready)
+        {
+            return false;
+        }
+        page.request_id = id;
+        page.operation = request.syscall as u32;
+        page.request_length = request.length as u32;
+        page.request = [0; MAX_TEXT];
+        page.request[..request.length].copy_from_slice(&request.argument[..request.length]);
+        page.reply_status = 0;
+        page.reply_length = 0;
+        page.reply = [0; MAX_TEXT];
+        page.state = SessionPageState::Request.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// Core owns the transition from request to waiting.
+    pub unsafe fn take_request_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<SessionClientRequest> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || SessionPageState::from_wire(page.state) != Some(SessionPageState::Request)
+        {
+            return None;
+        }
+        let request = decode_session_request(page.operation, page.request_length, page.request)?;
+        if page.request_id == 0 {
+            return None;
+        }
+        page.state = SessionPageState::Waiting.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(SessionClientRequest { id: page.request_id, request })
+    }
+
+    /// # Safety
+    /// Core owns client completion.
+    pub unsafe fn reply_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        id: u32,
+        status: SessionStatus,
+        reply: logos_abi::SessionReply,
+    ) -> bool {
+        if !reply.valid() || reply.length > MAX_TEXT {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || page.request_id != id
+            || SessionPageState::from_wire(page.state) != Some(SessionPageState::Waiting)
+        {
+            return false;
+        }
+        page.reply_status = status.wire();
+        page.reply_length = reply.length as u32;
+        page.reply = [0; MAX_TEXT];
+        page.reply[..reply.length].copy_from_slice(&reply.text[..reply.length]);
+        page.state = status.state().wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// The mapped client service owns reply consumption.
+    pub unsafe fn finish_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        id: u32,
+    ) -> Option<SessionClientReply> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        let state = SessionPageState::from_wire(page.state)?;
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || page.request_id != id
+            || !matches!(
+                state,
+                SessionPageState::Reply
+                    | SessionPageState::Denied
+                    | SessionPageState::Failed
+                    | SessionPageState::Cancelled
+            )
+        {
+            return None;
+        }
+        let status = SessionStatus::from_wire(page.reply_status)?;
+        let reply = decode_session_reply(page.reply_length, page.reply)?;
+        page = Self::new(service_generation, endpoint_generation);
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(SessionClientReply { id, status, reply })
+    }
+
+    /// # Safety
+    /// Core may cancel only the current request.
+    pub unsafe fn cancel_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        id: u32,
+    ) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || page.request_id != id
+            || !matches!(
+                SessionPageState::from_wire(page.state),
+                Some(SessionPageState::Request | SessionPageState::Waiting)
+            )
+        {
+            return false;
+        }
+        page.reply_status = SessionStatus::Cancelled.wire();
+        page.reply_length = 0;
+        page.reply = [0; MAX_TEXT];
+        page.state = SessionPageState::Cancelled.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+}
+
+impl SessionServerPage {
+    pub const fn new(service_generation: u32, endpoint_generation: u32) -> Self {
+        Self {
+            service_generation,
+            endpoint_generation,
+            state: SessionPageState::Ready.wire(),
+            request_id: 0,
+            caller_low: 0,
+            caller_high: 0,
+            operation: 0,
+            request_length: 0,
+            reply_status: 0,
+            reply_length: 0,
+            request: [0; MAX_TEXT],
+            reply: [0; MAX_TEXT],
+            reserved: [0; logos_abi::PAGE_SIZE - 552],
+        }
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned server page mapping.
+    pub unsafe fn reset_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        if !valid_page_identity::<Self>(address, service_generation, endpoint_generation) {
+            return false;
+        }
+        unsafe {
+            (address as *mut Self)
+                .write_volatile(Self::new(service_generation, endpoint_generation))
+        };
+        true
+    }
+
+    /// # Safety
+    /// The Sessions service owns the ready-to-waiting transition.
+    pub unsafe fn wait_at(address: u64, service_generation: u32, endpoint_generation: u32) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || SessionPageState::from_wire(page.state) != Some(SessionPageState::Ready)
+        {
+            return false;
+        }
+        page.state = SessionPageState::Waiting.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// Core reads only scalar state and generation fields.
+    pub unsafe fn waiting_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        server_identity(&page, service_generation, endpoint_generation)
+            && SessionPageState::from_wire(page.state) == Some(SessionPageState::Waiting)
+    }
+
+    /// # Safety
+    /// Core owns delivery into a waiting server page.
+    pub unsafe fn deliver_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        id: u32,
+        caller: u64,
+        request: logos_abi::SessionRequest,
+    ) -> bool {
+        if id == 0 || !request.valid() {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || SessionPageState::from_wire(page.state) != Some(SessionPageState::Waiting)
+        {
+            return false;
+        }
+        page.request_id = id;
+        page.caller_low = caller as u32;
+        page.caller_high = (caller >> 32) as u32;
+        page.operation = request.syscall as u32;
+        page.request_length = request.length as u32;
+        page.request = [0; MAX_TEXT];
+        page.request[..request.length].copy_from_slice(&request.argument[..request.length]);
+        page.state = SessionPageState::Request.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// The Sessions service owns request consumption.
+    pub unsafe fn take_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<SessionServerRequest> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || SessionPageState::from_wire(page.state) != Some(SessionPageState::Request)
+            || page.request_id == 0
+        {
+            return None;
+        }
+        let request = decode_session_request(page.operation, page.request_length, page.request)?;
+        page.state = SessionPageState::Processing.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(SessionServerRequest {
+            id: page.request_id,
+            caller: u64::from(page.caller_low) | (u64::from(page.caller_high) << 32),
+            request,
+        })
+    }
+
+    /// # Safety
+    /// The Sessions service replies only to its current processing request.
+    pub unsafe fn reply_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        id: u32,
+        status: SessionStatus,
+        reply: logos_abi::SessionReply,
+    ) -> bool {
+        if !reply.valid() || reply.length > MAX_TEXT {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || page.request_id != id
+            || SessionPageState::from_wire(page.state) != Some(SessionPageState::Processing)
+        {
+            return false;
+        }
+        page.reply_status = status.wire();
+        page.reply_length = reply.length as u32;
+        page.reply = [0; MAX_TEXT];
+        page.reply[..reply.length].copy_from_slice(&reply.text[..reply.length]);
+        page.state = status.state().wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// Core owns reply consumption and deterministic reset.
+    pub unsafe fn take_reply_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        id: u32,
+    ) -> Option<SessionServerReply> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        let state = SessionPageState::from_wire(page.state)?;
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || page.request_id != id
+            || !matches!(
+                state,
+                SessionPageState::Reply
+                    | SessionPageState::Denied
+                    | SessionPageState::Failed
+                    | SessionPageState::Cancelled
+            )
+        {
+            return None;
+        }
+        let status = SessionStatus::from_wire(page.reply_status)?;
+        let reply = decode_session_reply(page.reply_length, page.reply)?;
+        page = Self::new(service_generation, endpoint_generation);
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(SessionServerReply { id, status, reply })
+    }
+}
+
+impl EffectPage {
+    pub const fn new(service_generation: u32, endpoint_generation: u32) -> Self {
+        Self {
+            service_generation,
+            endpoint_generation,
+            state: SessionPageState::Ready.wire(),
+            request_id: 0,
+            effect: 0,
+            request_length: 0,
+            result: 0,
+            reply_length: 0,
+            request: [0; MAX_TEXT],
+            reply: [0; MAX_TEXT],
+            reserved: [0; logos_abi::PAGE_SIZE - 544],
+        }
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned effect page mapping.
+    pub unsafe fn reset_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        if !valid_page_identity::<Self>(address, service_generation, endpoint_generation) {
+            return false;
+        }
+        unsafe {
+            (address as *mut Self)
+                .write_volatile(Self::new(service_generation, endpoint_generation))
+        };
+        true
+    }
+
+    /// # Safety
+    /// The Sessions service owns effect request creation.
+    pub unsafe fn request_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        id: u32,
+        request: logos_abi::EffectRequest,
+    ) -> bool {
+        if id == 0 || !request.valid() {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !effect_identity(&page, service_generation, endpoint_generation)
+            || SessionPageState::from_wire(page.state) != Some(SessionPageState::Ready)
+        {
+            return false;
+        }
+        page.request_id = id;
+        page.effect = request.effect as u32;
+        page.request_length = request.length as u32;
+        page.request = [0; MAX_TEXT];
+        page.request[..request.length].copy_from_slice(&request.argument[..request.length]);
+        page.result = 0;
+        page.reply_length = 0;
+        page.reply = [0; MAX_TEXT];
+        page.state = SessionPageState::Request.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// Core owns effect request consumption.
+    pub unsafe fn take_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<EffectMessage> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !effect_identity(&page, service_generation, endpoint_generation)
+            || SessionPageState::from_wire(page.state) != Some(SessionPageState::Request)
+            || page.request_id == 0
+        {
+            return None;
+        }
+        let request = decode_effect_request(page.effect, page.request_length, page.request)?;
+        page.state = SessionPageState::Waiting.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(EffectMessage { id: page.request_id, request })
+    }
+
+    /// # Safety
+    /// Core owns effect completion after authorization and execution.
+    pub unsafe fn reply_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        id: u32,
+        reply: logos_abi::EffectReply,
+    ) -> bool {
+        if !reply.valid() || reply.length as usize > MAX_TEXT {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !effect_identity(&page, service_generation, endpoint_generation)
+            || page.request_id != id
+            || SessionPageState::from_wire(page.state) != Some(SessionPageState::Waiting)
+        {
+            return false;
+        }
+        page.result = reply.result as u32;
+        page.reply_length = u32::from(reply.length);
+        page.reply = [0; MAX_TEXT];
+        page.reply[..usize::from(reply.length)]
+            .copy_from_slice(&reply.text[..usize::from(reply.length)]);
+        page.state = if reply.result == logos_abi::EffectResult::Denied {
+            SessionPageState::Denied.wire()
+        } else {
+            SessionPageState::Reply.wire()
+        };
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// The Sessions service owns result consumption.
+    pub unsafe fn finish_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        id: u32,
+    ) -> Option<EffectResponse> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        let state = SessionPageState::from_wire(page.state)?;
+        if !effect_identity(&page, service_generation, endpoint_generation)
+            || page.request_id != id
+            || !matches!(
+                state,
+                SessionPageState::Reply
+                    | SessionPageState::Denied
+                    | SessionPageState::Failed
+                    | SessionPageState::Cancelled
+            )
+        {
+            return None;
+        }
+        let result = logos_abi::EffectResult::from_wire(page.result)?;
+        let length = usize::try_from(page.reply_length).ok()?;
+        if length > MAX_TEXT || page.reply[length..].iter().any(|byte| *byte != 0) {
+            return None;
+        }
+        let reply = logos_abi::EffectReply::new(result, &page.reply[..length]);
+        page = Self::new(service_generation, endpoint_generation);
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(EffectResponse { id, reply })
+    }
+}
+
+fn valid_page_identity<T>(address: u64, service_generation: u32, endpoint_generation: u32) -> bool {
+    address != 0
+        && service_generation != 0
+        && endpoint_generation != 0
+        && address.is_multiple_of(align_of::<T>() as u64)
+}
+
+fn client_identity(
+    page: &SessionClientPage,
+    service_generation: u32,
+    endpoint_generation: u32,
+) -> bool {
+    page.service_generation == service_generation && page.endpoint_generation == endpoint_generation
+}
+
+fn server_identity(
+    page: &SessionServerPage,
+    service_generation: u32,
+    endpoint_generation: u32,
+) -> bool {
+    page.service_generation == service_generation && page.endpoint_generation == endpoint_generation
+}
+
+fn effect_identity(page: &EffectPage, service_generation: u32, endpoint_generation: u32) -> bool {
+    page.service_generation == service_generation && page.endpoint_generation == endpoint_generation
+}
+
+fn decode_session_request(
+    operation: u32,
+    length: u32,
+    argument: [u8; MAX_TEXT],
+) -> Option<logos_abi::SessionRequest> {
+    let length = usize::try_from(length).ok()?;
+    if length > MAX_TEXT || argument[length..].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    let request =
+        logos_abi::SessionRequest::new(logos_abi::Syscall::from_wire(operation)?, argument, length);
+    request.valid().then_some(request)
+}
+
+fn decode_session_reply(length: u32, text: [u8; MAX_TEXT]) -> Option<logos_abi::SessionReply> {
+    let length = usize::try_from(length).ok()?;
+    if length > MAX_TEXT || text[length..].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    Some(logos_abi::SessionReply { text, length })
+}
+
+fn decode_effect_request(
+    effect: u32,
+    length: u32,
+    argument: [u8; MAX_TEXT],
+) -> Option<logos_abi::EffectRequest> {
+    let length = usize::try_from(length).ok()?;
+    if length > MAX_TEXT || argument[length..].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    let request =
+        logos_abi::EffectRequest::new(logos_abi::Effect::from_wire(effect)?, argument, length);
+    request.valid().then_some(request)
+}
+
 const _: () = assert!(size_of::<ControlPage>() <= logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<InputPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<DisplayPage>() == logos_abi::PAGE_SIZE);
-const _: () = assert!(size_of::<SessionPage>() == logos_abi::PAGE_SIZE);
+const _: () = assert!(size_of::<SessionClientPage>() == logos_abi::PAGE_SIZE);
+const _: () = assert!(size_of::<SessionServerPage>() == logos_abi::PAGE_SIZE);
+const _: () = assert!(size_of::<EffectPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<StoreEndpointPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<BlockEndpointPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<NetworkPage>() == logos_abi::PAGE_SIZE);
@@ -2442,5 +3165,89 @@ mod tests {
         assert!(unsafe { DisplayPage::request_clear_at(address, 3) });
         assert!(unsafe { DisplayPage::reset_at(address, 4) });
         assert!(!unsafe { DisplayPage::pending_at(address, 3) });
+    }
+
+    #[test]
+    fn session_client_page_matches_ids_and_rejects_stale_generations() {
+        let mut page = SessionClientPage::new(2, 5);
+        let address = (&mut page as *mut SessionClientPage) as u64;
+        let request = logos_abi::SessionRequest::new(logos_abi::Syscall::Tasks, [0; MAX_TEXT], 0);
+        assert!(unsafe { SessionClientPage::request_at(address, 2, 5, 11, request) });
+        assert!(unsafe { SessionClientPage::take_request_at(address, 1, 5) }.is_none());
+        assert_eq!(
+            unsafe { SessionClientPage::take_request_at(address, 2, 5) }.map(|message| message.id),
+            Some(11)
+        );
+        let reply = logos_abi::SessionReply::from_bytes(b"ok").unwrap();
+        assert!(!unsafe {
+            SessionClientPage::reply_at(address, 2, 5, 12, SessionStatus::Complete, reply)
+        });
+        assert!(unsafe {
+            SessionClientPage::reply_at(address, 2, 5, 11, SessionStatus::Complete, reply)
+        });
+        assert!(unsafe { SessionClientPage::finish_at(address, 2, 4, 11) }.is_none());
+        let completed = unsafe { SessionClientPage::finish_at(address, 2, 5, 11) }.unwrap();
+        assert_eq!(completed.status, SessionStatus::Complete);
+        assert_eq!(&completed.reply.text[..completed.reply.length], b"ok");
+        assert!(unsafe { SessionClientPage::reset_at(address, 3, 6) });
+        assert!(!unsafe { SessionClientPage::request_at(address, 2, 5, 12, request) });
+    }
+
+    #[test]
+    fn session_server_page_preserves_caller_and_rejects_malformed_state() {
+        let mut page = SessionServerPage::new(4, 9);
+        let address = (&mut page as *mut SessionServerPage) as u64;
+        let request = logos_abi::SessionRequest::new(
+            logos_abi::Syscall::Inspect,
+            {
+                let mut bytes = [0; MAX_TEXT];
+                bytes[..4].copy_from_slice(b"name");
+                bytes
+            },
+            4,
+        );
+        assert!(unsafe { SessionServerPage::wait_at(address, 4, 9) });
+        assert!(unsafe { SessionServerPage::waiting_at(address, 4, 9) });
+        assert!(unsafe {
+            SessionServerPage::deliver_at(address, 4, 9, 17, 0x2000_0000_0000_0007, request)
+        });
+        let delivered = unsafe { SessionServerPage::take_at(address, 4, 9) }.unwrap();
+        assert_eq!(delivered.id, 17);
+        assert_eq!(delivered.caller, 0x2000_0000_0000_0007);
+        let reply = logos_abi::SessionReply::from_bytes(b"name").unwrap();
+        assert!(unsafe {
+            SessionServerPage::reply_at(address, 4, 9, 17, SessionStatus::Complete, reply)
+        });
+        assert!(unsafe { SessionServerPage::take_reply_at(address, 4, 8, 17) }.is_none());
+        assert_eq!(
+            unsafe { SessionServerPage::take_reply_at(address, 4, 9, 17) }.map(|reply| reply.id),
+            Some(17)
+        );
+        page.state = u32::MAX;
+        unsafe { (address as *mut SessionServerPage).write_volatile(page) };
+        assert!(unsafe { SessionServerPage::take_at(address, 4, 9) }.is_none());
+    }
+
+    #[test]
+    fn effect_page_round_trip_denies_and_rejects_stale_results() {
+        let mut page = EffectPage::new(6, 3);
+        let address = (&mut page as *mut EffectPage) as u64;
+        let request = logos_abi::EffectRequest::new(logos_abi::Effect::ReadTasks, [0; MAX_TEXT], 0);
+        assert!(unsafe { EffectPage::request_at(address, 6, 3, 21, request) });
+        assert_eq!(
+            unsafe { EffectPage::take_at(address, 6, 3) }.map(|message| message.id),
+            Some(21)
+        );
+        let denied = logos_abi::EffectReply::new(logos_abi::EffectResult::Denied, &[]);
+        assert!(!unsafe { EffectPage::reply_at(address, 6, 3, 20, denied) });
+        assert!(unsafe { EffectPage::reply_at(address, 6, 3, 21, denied) });
+        assert!(unsafe { EffectPage::finish_at(address, 7, 3, 21) }.is_none());
+        assert_eq!(
+            unsafe { EffectPage::finish_at(address, 6, 3, 21) }
+                .map(|response| response.reply.result),
+            Some(logos_abi::EffectResult::Denied)
+        );
+        assert!(unsafe { EffectPage::reset_at(address, 7, 4) });
+        assert!(!unsafe { EffectPage::request_at(address, 6, 3, 22, request) });
     }
 }
