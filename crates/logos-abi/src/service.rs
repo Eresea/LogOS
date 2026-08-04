@@ -26,6 +26,8 @@ pub const NETWORK_DEVICE_REPLY: u32 = 19;
 pub const REMOTE_GATE: u32 = 20;
 pub const PANIC: u32 = 21;
 pub const ACKNOWLEDGED: u32 = 1;
+pub const LIFECYCLE_STARTING: u32 = 0;
+pub const LIFECYCLE_READY: u32 = 1;
 pub const STORAGE_FORMATTED: u32 = 1;
 pub const STORAGE_RECOVERED: u32 = 2;
 pub const STORAGE_RECOVERED_INCOMPLETE: u32 = 3;
@@ -46,18 +48,28 @@ pub struct ControlPage {
     pub reserved: u16,
     pub operation: u32,
     pub status: u32,
-    pub input: u32,
-    pub x: u32,
-    pub y: u32,
-    pub color: u32,
-    pub text_length: u32,
-    pub text: [u8; MAX_TEXT],
+    pub generation: u32,
+    pub lifecycle: u32,
+    pub input_page: u64,
+    pub display_page: u64,
+    pub slot0: u32,
+    pub slot1: u32,
+    pub slot2: u32,
+    pub payload_length: u32,
+    pub payload: [u8; MAX_TEXT],
     pub shared_page: u32,
     pub network_rx_page: u32,
     pub network_tx_page: u32,
 }
 
 /// Explicit state values shared by typed endpoint pages.
+///
+/// | page | service transition | Core transition | reset/replacement |
+/// | --- | --- | --- | --- |
+/// | Input | `Ready -> Waiting -> Ready` (`wait_at`, `take_at`) | `Waiting -> Reply` (`deliver_at`) | reset to `Ready`; generation mismatch rejects |
+/// | Display | `Ready -> Request -> Ready` (`request_*`, `finish_at`) | `Request -> Complete` (`complete_at`) | reset to `Ready`; generation mismatch rejects |
+///
+/// Unknown scalar states and malformed payloads are rejected without a write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum EndpointState {
@@ -70,12 +82,31 @@ pub enum EndpointState {
     Failed = 6,
 }
 
+impl EndpointState {
+    pub const fn wire(self) -> u32 {
+        self as u32
+    }
+
+    pub const fn from_wire(value: u32) -> Option<Self> {
+        Some(match value {
+            0 => Self::Empty,
+            1 => Self::Ready,
+            2 => Self::Request,
+            3 => Self::Reply,
+            4 => Self::Waiting,
+            5 => Self::Complete,
+            6 => Self::Failed,
+            _ => return None,
+        })
+    }
+}
+
 /// Fixed-size Input endpoint page.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct InputPage {
     pub generation: u32,
-    pub state: EndpointState,
+    pub state: u32,
     pub event: u32,
     pub reserved: [u8; logos_abi::PAGE_SIZE - 12],
 }
@@ -85,7 +116,7 @@ pub struct InputPage {
 #[repr(C)]
 pub struct DisplayPage {
     pub generation: u32,
-    pub state: EndpointState,
+    pub state: u32,
     pub operation: u32,
     pub x: u32,
     pub y: u32,
@@ -150,6 +181,252 @@ pub struct RemotePage {
     pub request: [u8; REMOTE_GATE_REQUEST_BYTES],
     pub reply: [u8; REMOTE_GATE_REPLY_BYTES],
     pub reserved: [u8; logos_abi::PAGE_SIZE - 52],
+}
+
+impl InputPage {
+    pub const fn new(generation: u32) -> Self {
+        Self {
+            generation,
+            state: EndpointState::Ready.wire(),
+            event: 0,
+            reserved: [0; logos_abi::PAGE_SIZE - 12],
+        }
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned InputPage mapping.
+    pub unsafe fn reset_at(address: u64, generation: u32) -> bool {
+        if address == 0 || generation == 0 || !address.is_multiple_of(align_of::<Self>() as u64) {
+            return false;
+        }
+        unsafe { (address as *mut Self).write_volatile(Self::new(generation)) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned InputPage mapping.
+    pub unsafe fn wait_at(address: u64, generation: u32) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if page.generation != generation
+            || EndpointState::from_wire(page.state) != Some(EndpointState::Ready)
+        {
+            return false;
+        }
+        page.state = EndpointState::Waiting.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned InputPage mapping.
+    pub unsafe fn waiting_at(address: u64, generation: u32) -> bool {
+        if address == 0 {
+            return false;
+        }
+        let page = unsafe { (address as *const Self).read_volatile() };
+        page.generation == generation
+            && EndpointState::from_wire(page.state) == Some(EndpointState::Waiting)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned InputPage mapping owned by Core.
+    pub unsafe fn deliver_at(address: u64, generation: u32, event: u8) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if page.generation != generation
+            || EndpointState::from_wire(page.state) != Some(EndpointState::Waiting)
+        {
+            return false;
+        }
+        page.event = u32::from(event);
+        page.state = EndpointState::Reply.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned InputPage mapping owned by the service.
+    pub unsafe fn take_at(address: u64, generation: u32) -> Option<u8> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if page.generation != generation
+            || EndpointState::from_wire(page.state) != Some(EndpointState::Reply)
+        {
+            return None;
+        }
+        let event = u8::try_from(page.event).ok()?;
+        page.event = 0;
+        page.state = EndpointState::Ready.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(event)
+    }
+}
+
+impl DisplayPage {
+    pub const fn new(generation: u32) -> Self {
+        Self {
+            generation,
+            state: EndpointState::Ready.wire(),
+            operation: 0,
+            x: 0,
+            y: 0,
+            color: 0,
+            text_length: 0,
+            text: [0; MAX_TEXT],
+            reserved: [0; logos_abi::PAGE_SIZE - 284],
+        }
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned DisplayPage mapping.
+    pub unsafe fn reset_at(address: u64, generation: u32) -> bool {
+        if address == 0 || generation == 0 || !address.is_multiple_of(align_of::<Self>() as u64) {
+            return false;
+        }
+        unsafe { (address as *mut Self).write_volatile(Self::new(generation)) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned DisplayPage mapping owned by the service.
+    pub unsafe fn request_pixel_at(
+        address: u64,
+        generation: u32,
+        x: u32,
+        y: u32,
+        color: logos_abi::DisplayColor,
+    ) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if page.generation != generation
+            || EndpointState::from_wire(page.state) != Some(EndpointState::Ready)
+        {
+            return false;
+        }
+        page.operation = PRESENT_PIXEL;
+        page.x = x;
+        page.y = y;
+        page.color = color.wire();
+        page.text_length = 0;
+        page.state = EndpointState::Request.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned DisplayPage mapping owned by the service.
+    pub unsafe fn request_text_at(
+        address: u64,
+        generation: u32,
+        x: u32,
+        y: u32,
+        color: logos_abi::DisplayColor,
+        text: &[u8],
+    ) -> bool {
+        if text.len() > MAX_TEXT {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if page.generation != generation
+            || EndpointState::from_wire(page.state) != Some(EndpointState::Ready)
+        {
+            return false;
+        }
+        page.operation = PRESENT_TEXT;
+        page.x = x;
+        page.y = y;
+        page.color = color.wire();
+        page.text = [0; MAX_TEXT];
+        page.text[..text.len()].copy_from_slice(text);
+        page.text_length = text.len() as u32;
+        page.state = EndpointState::Request.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned DisplayPage mapping owned by the service.
+    pub unsafe fn request_clear_at(address: u64, generation: u32) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if page.generation != generation
+            || EndpointState::from_wire(page.state) != Some(EndpointState::Ready)
+        {
+            return false;
+        }
+        page.operation = CLEAR_DISPLAY;
+        page.text_length = 0;
+        page.state = EndpointState::Request.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned DisplayPage mapping.
+    pub unsafe fn pending_at(address: u64, generation: u32) -> bool {
+        if address == 0 {
+            return false;
+        }
+        let page = unsafe { (address as *const Self).read_volatile() };
+        page.generation == generation
+            && EndpointState::from_wire(page.state) == Some(EndpointState::Request)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned DisplayPage mapping owned by Core.
+    pub unsafe fn request_at(address: u64, generation: u32) -> Option<DisplayRequest> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        if page.generation != generation
+            || EndpointState::from_wire(page.state) != Some(EndpointState::Request)
+            || !matches!(page.operation, PRESENT_PIXEL | PRESENT_TEXT | CLEAR_DISPLAY)
+        {
+            return None;
+        }
+        let color = logos_abi::DisplayColor::from_wire(page.color)?;
+        let length = usize::try_from(page.text_length).ok()?;
+        (length <= MAX_TEXT).then_some(DisplayRequest {
+            operation: page.operation,
+            x: page.x,
+            y: page.y,
+            color,
+            text: page.text,
+            length,
+        })
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned DisplayPage mapping owned by Core.
+    pub unsafe fn complete_at(address: u64, generation: u32) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if page.generation != generation
+            || EndpointState::from_wire(page.state) != Some(EndpointState::Request)
+        {
+            return false;
+        }
+        page.state = EndpointState::Complete.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned DisplayPage mapping owned by the service.
+    pub unsafe fn finish_at(address: u64, generation: u32) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if page.generation != generation
+            || EndpointState::from_wire(page.state) != Some(EndpointState::Complete)
+        {
+            return false;
+        }
+        page.state = EndpointState::Ready.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct DisplayRequest {
+    pub operation: u32,
+    pub x: u32,
+    pub y: u32,
+    pub color: logos_abi::DisplayColor,
+    pub text: [u8; MAX_TEXT],
+    pub length: usize,
 }
 
 const _: () = assert!(size_of::<ControlPage>() <= logos_abi::PAGE_SIZE);
@@ -617,17 +894,24 @@ fn encode_network_event(bytes: &mut [u8; MAX_TEXT], event: logos_abi::NetworkEve
 
 impl ControlPage {
     pub const fn new() -> Self {
+        Self::with_generation(1)
+    }
+
+    pub const fn with_generation(generation: u32) -> Self {
         Self {
             abi: ABI,
             reserved: 0,
             operation: 0,
             status: 0,
-            input: 0,
-            x: 0,
-            y: 0,
-            color: 0,
-            text_length: 0,
-            text: [0; MAX_TEXT],
+            generation,
+            lifecycle: LIFECYCLE_STARTING,
+            input_page: 0,
+            display_page: 0,
+            slot0: 0,
+            slot1: 0,
+            slot2: 0,
+            payload_length: 0,
+            payload: [0; MAX_TEXT],
             shared_page: 0,
             network_rx_page: 0,
             network_tx_page: 0,
@@ -647,8 +931,89 @@ impl ControlPage {
         if address == 0 || !address.is_multiple_of(align_of::<Self>() as u64) {
             return false;
         }
-        unsafe { (address as *mut Self).write_volatile(Self::new()) };
+        let current = unsafe { (address as *const Self).read_volatile() };
+        if current.abi != ABI || current.reserved != 0 || current.generation == 0 {
+            return false;
+        }
+        unsafe { (address as *mut Self).write_volatile(Self::with_generation(current.generation)) };
+        let mut reset = unsafe { (address as *mut Self).read_volatile() };
+        reset.input_page = current.input_page;
+        reset.display_page = current.display_page;
+        reset.shared_page = current.shared_page;
+        reset.network_rx_page = current.network_rx_page;
+        reset.network_tx_page = current.network_tx_page;
+        unsafe { (address as *mut Self).write_volatile(reset) };
         true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
+    pub unsafe fn configure_endpoint_pages_at(
+        address: u64,
+        generation: u32,
+        input_page: Option<u64>,
+        display_page: Option<u64>,
+    ) -> bool {
+        if generation == 0 {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI || context.reserved != 0 || context.operation != 0 {
+            return false;
+        }
+        context.generation = generation;
+        context.lifecycle = LIFECYCLE_STARTING;
+        context.input_page = input_page.unwrap_or(0);
+        context.display_page = display_page.unwrap_or(0);
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
+    pub unsafe fn set_generation_at(address: u64, generation: u32) -> bool {
+        if generation == 0 {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI || context.reserved != 0 {
+            return false;
+        }
+        context.generation = generation;
+        context.lifecycle = LIFECYCLE_STARTING;
+        context.operation = 0;
+        context.status = 0;
+        context.slot0 = 0;
+        context.slot1 = 0;
+        context.slot2 = 0;
+        context.payload_length = 0;
+        context.payload = [0; MAX_TEXT];
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `ControlPage` mapping.
+    pub unsafe fn generation_at(address: u64) -> Option<u32> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.generation != 0)
+            .then_some(context.generation)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `ControlPage` mapping.
+    pub unsafe fn input_page_at(address: u64) -> Option<u64> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.input_page != 0)
+            .then_some(context.input_page)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `ControlPage` mapping.
+    pub unsafe fn display_page_at(address: u64) -> Option<u64> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.display_page != 0)
+            .then_some(context.display_page)
     }
 
     /// # Safety
@@ -671,7 +1036,10 @@ impl ControlPage {
         {
             return false;
         }
-        unsafe { (address as *mut Self).cast::<u32>().add(2).write_volatile(ACKNOWLEDGED) };
+        let mut acknowledged = context;
+        acknowledged.status = ACKNOWLEDGED;
+        acknowledged.lifecycle = LIFECYCLE_READY;
+        unsafe { (address as *mut Self).write_volatile(acknowledged) };
         true
     }
 
@@ -691,10 +1059,15 @@ impl ControlPage {
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn input_waiting_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
-        context.abi == ABI
-            && context.reserved == 0
-            && context.operation == READ_INPUT
-            && context.status == ACKNOWLEDGED
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != READ_INPUT
+            || context.status != ACKNOWLEDGED
+        {
+            return false;
+        }
+        context.input_page == 0
+            || unsafe { InputPage::waiting_at(context.input_page, context.generation) }
     }
 
     /// # Safety
@@ -711,8 +1084,8 @@ impl ControlPage {
         {
             return false;
         }
-        encode_remote_gate_request(&mut context.text, request);
-        context.text_length = REMOTE_GATE_REQUEST_BYTES as u32;
+        encode_remote_gate_request(&mut context.payload, request);
+        context.payload_length = REMOTE_GATE_REQUEST_BYTES as u32;
         context.operation = REMOTE_GATE;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -735,11 +1108,11 @@ impl ControlPage {
             || context.reserved != 0
             || context.operation != REMOTE_GATE
             || context.status != ACKNOWLEDGED
-            || context.text_length != REMOTE_GATE_REQUEST_BYTES as u32
+            || context.payload_length != REMOTE_GATE_REQUEST_BYTES as u32
         {
             return None;
         }
-        let request = decode_remote_gate_request(&context.text)?;
+        let request = decode_remote_gate_request(&context.payload)?;
         (request.length as usize <= MAX_TEXT).then_some(request)
     }
 
@@ -752,8 +1125,8 @@ impl ControlPage {
         if !valid {
             return false;
         }
-        encode_remote_gate_reply(&mut context.text, reply);
-        context.text_length = REMOTE_GATE_REPLY_BYTES as u32;
+        encode_remote_gate_reply(&mut context.payload, reply);
+        context.payload_length = REMOTE_GATE_REPLY_BYTES as u32;
         context.operation = REMOTE_GATE;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -767,11 +1140,11 @@ impl ControlPage {
             || context.reserved != 0
             || context.operation != REMOTE_GATE
             || context.status != ACKNOWLEDGED
-            || context.text_length != REMOTE_GATE_REPLY_BYTES as u32
+            || context.payload_length != REMOTE_GATE_REPLY_BYTES as u32
         {
             return None;
         }
-        let reply = decode_remote_gate_reply(&context.text)?;
+        let reply = decode_remote_gate_reply(&context.payload)?;
         (reply.id == expected_id).then_some(reply)
     }
 
@@ -781,25 +1154,8 @@ impl ControlPage {
         let context = unsafe { (address as *const Self).read_volatile() };
         (context.abi == ABI
             && context.reserved == 0
-            && (STORAGE_FORMATTED..=STORAGE_IO_FAILED).contains(&context.x))
-        .then_some(context.x)
-    }
-
-    /// # Safety
-    ///
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn deliver_input_at(address: u64, input: u8) -> bool {
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != READ_INPUT
-            || context.status != ACKNOWLEDGED
-        {
-            return false;
-        }
-        context.input = u32::from(input);
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
+            && (STORAGE_FORMATTED..=STORAGE_IO_FAILED).contains(&context.slot0))
+        .then_some(context.slot0)
     }
 
     /// # Safety
@@ -816,10 +1172,10 @@ impl ControlPage {
         {
             return false;
         }
-        context.input = 1;
-        context.x = request.syscall as u32;
-        context.text = request.argument;
-        context.text_length = request.length as u32;
+        context.slot0 = 1;
+        context.slot1 = request.syscall as u32;
+        context.payload = request.argument;
+        context.payload_length = request.length as u32;
         context.operation = SYSCALL;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -829,9 +1185,9 @@ impl ControlPage {
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn syscall_at(address: u64) -> Option<logos_abi::SessionRequest> {
         let context = unsafe { (address as *const Self).read_volatile() };
-        let length = usize::try_from(context.text_length).ok()?;
-        let syscall = logos_abi::Syscall::from_wire(context.x)?;
-        let request = logos_abi::SessionRequest::new(syscall, context.text, length);
+        let length = usize::try_from(context.payload_length).ok()?;
+        let syscall = logos_abi::Syscall::from_wire(context.slot1)?;
+        let request = logos_abi::SessionRequest::new(syscall, context.payload, length);
         (context.abi == ABI
             && context.reserved == 0
             && context.operation == SYSCALL
@@ -847,9 +1203,9 @@ impl ControlPage {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
-        context.text = [0; MAX_TEXT];
-        context.text[..reply.len()].copy_from_slice(reply);
-        context.text_length = reply.len() as u32;
+        context.payload = [0; MAX_TEXT];
+        context.payload[..reply.len()].copy_from_slice(reply);
+        context.payload_length = reply.len() as u32;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -858,17 +1214,17 @@ impl ControlPage {
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn response_at(address: u64) -> Option<TextRequest> {
         let context = unsafe { (address as *const Self).read_volatile() };
-        let length = usize::try_from(context.text_length).ok()?;
+        let length = usize::try_from(context.payload_length).ok()?;
         (context.abi == ABI
             && context.reserved == 0
             && context.operation == SYSCALL
             && context.status == ACKNOWLEDGED
-            && length <= context.text.len())
+            && length <= context.payload.len())
         .then_some(TextRequest {
             x: 0,
             y: 0,
             color: logos_abi::DisplayColor::BLACK,
-            text: context.text,
+            text: context.payload,
             length,
         })
     }
@@ -877,22 +1233,22 @@ impl ControlPage {
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn session_reply_at(address: u64) -> Option<logos_abi::SessionReply> {
         let context = unsafe { (address as *const Self).read_volatile() };
-        let length = usize::try_from(context.text_length).ok()?;
+        let length = usize::try_from(context.payload_length).ok()?;
         (context.abi == ABI
             && context.reserved == 0
             && context.operation == SESSION_REPLY
             && context.status == ACKNOWLEDGED
-            && length <= context.text.len())
-        .then_some(logos_abi::SessionReply { text: context.text, length })
+            && length <= context.payload.len())
+        .then_some(logos_abi::SessionReply { text: context.payload, length })
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn session_effect_at(address: u64) -> Option<logos_abi::EffectRequest> {
         let context = unsafe { (address as *const Self).read_volatile() };
-        let length = usize::try_from(context.text_length).ok()?;
-        let effect = logos_abi::Effect::from_wire(context.x)?;
-        let request = logos_abi::EffectRequest::new(effect, context.text, length);
+        let length = usize::try_from(context.payload_length).ok()?;
+        let effect = logos_abi::Effect::from_wire(context.slot1)?;
+        let request = logos_abi::EffectRequest::new(effect, context.payload, length);
         (context.abi == ABI
             && context.reserved == 0
             && context.operation == SESSION_EFFECT
@@ -909,11 +1265,11 @@ impl ControlPage {
             || context.reserved != 0
             || context.operation != STORE_REQUEST
             || context.status != ACKNOWLEDGED
-            || context.text_length != STORE_REQUEST_BYTES as u32
+            || context.payload_length != STORE_REQUEST_BYTES as u32
         {
             return None;
         }
-        let request = decode_store_request(&context.text)?;
+        let request = decode_store_request(&context.payload)?;
         request.valid().then_some(request)
     }
 
@@ -931,8 +1287,8 @@ impl ControlPage {
         {
             return false;
         }
-        encode_store_request(&mut context.text, request);
-        context.text_length = STORE_REQUEST_BYTES as u32;
+        encode_store_request(&mut context.payload, request);
+        context.payload_length = STORE_REQUEST_BYTES as u32;
         context.operation = STORE_REQUEST;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -952,9 +1308,9 @@ impl ControlPage {
         {
             return false;
         }
-        context.text = [0; MAX_TEXT];
-        encode_store_request(&mut context.text, request);
-        context.text_length = STORE_REQUEST_BYTES as u32;
+        context.payload = [0; MAX_TEXT];
+        encode_store_request(&mut context.payload, request);
+        context.payload_length = STORE_REQUEST_BYTES as u32;
         context.operation = STORE_REQUEST;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -965,11 +1321,10 @@ impl ControlPage {
     pub unsafe fn reply_store_at(address: u64, reply: logos_abi::StoreReply) -> bool {
         let mut context = unsafe { (address as *mut Self).read_volatile() };
         let valid = match context.operation {
-            STORE_REQUEST => {
-                decode_store_request(&context.text).is_some_and(|request| reply.valid_for(request))
-            }
+            STORE_REQUEST => decode_store_request(&context.payload)
+                .is_some_and(|request| reply.valid_for(request)),
             BLOCK_REPLY => {
-                reply.length as usize <= logos_abi::PAGE_SIZE && context.color == reply.id
+                reply.length as usize <= logos_abi::PAGE_SIZE && context.slot2 == reply.id
             }
             _ => false,
         };
@@ -977,9 +1332,9 @@ impl ControlPage {
             return false;
         }
         context.operation = STORE_REPLY;
-        context.color = 0;
-        encode_store_reply(&mut context.text, reply);
-        context.text_length = STORE_REPLY_BYTES as u32;
+        context.slot2 = 0;
+        encode_store_reply(&mut context.payload, reply);
+        context.payload_length = STORE_REPLY_BYTES as u32;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -999,11 +1354,11 @@ impl ControlPage {
             || context.reserved != 0
             || context.operation != STORE_REPLY
             || context.status != ACKNOWLEDGED
-            || context.text_length != STORE_REPLY_BYTES as u32
+            || context.payload_length != STORE_REPLY_BYTES as u32
         {
             return None;
         }
-        decode_store_reply(&context.text)
+        decode_store_reply(&context.payload)
             .filter(|reply| reply.length as usize <= logos_abi::PAGE_SIZE)
     }
 
@@ -1015,11 +1370,11 @@ impl ControlPage {
             || context.reserved != 0
             || context.operation != NETWORK_REQUEST
             || context.status != ACKNOWLEDGED
-            || context.text_length != NETWORK_REQUEST_BYTES as u32
+            || context.payload_length != NETWORK_REQUEST_BYTES as u32
         {
             return None;
         }
-        let request = decode_network_request(&context.text)?;
+        let request = decode_network_request(&context.payload)?;
         request.valid_shape().then_some(request)
     }
 
@@ -1046,8 +1401,8 @@ impl ControlPage {
         {
             return false;
         }
-        encode_network_request(&mut context.text, request);
-        context.text_length = NETWORK_REQUEST_BYTES as u32;
+        encode_network_request(&mut context.payload, request);
+        context.payload_length = NETWORK_REQUEST_BYTES as u32;
         context.operation = NETWORK_REQUEST;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -1067,8 +1422,8 @@ impl ControlPage {
         {
             return false;
         }
-        encode_network_request(&mut context.text, request);
-        context.text_length = NETWORK_REQUEST_BYTES as u32;
+        encode_network_request(&mut context.payload, request);
+        context.payload_length = NETWORK_REQUEST_BYTES as u32;
         context.operation = NETWORK_REQUEST;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -1085,8 +1440,8 @@ impl ControlPage {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
-        context.x = owner as u32;
-        context.y = (owner >> 32) as u32;
+        context.slot0 = owner as u32;
+        context.slot1 = (owner >> 32) as u32;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -1096,7 +1451,7 @@ impl ControlPage {
     pub unsafe fn network_owner_at(address: u64) -> Option<u64> {
         let context = unsafe { (address as *const Self).read_volatile() };
         (context.abi == ABI && context.reserved == 0 && context.operation == NETWORK_REQUEST)
-            .then_some(u64::from(context.x) | (u64::from(context.y) << 32))
+            .then_some(u64::from(context.slot0) | (u64::from(context.slot1) << 32))
     }
 
     /// # Safety
@@ -1104,13 +1459,13 @@ impl ControlPage {
     pub unsafe fn reply_network_at(address: u64, reply: logos_abi::NetworkReply) -> bool {
         let mut context = unsafe { (address as *mut Self).read_volatile() };
         let valid = context.operation == NETWORK_REQUEST
-            && decode_network_request(&context.text)
+            && decode_network_request(&context.payload)
                 .is_some_and(|request| reply.valid_for(request));
         if !valid {
             return false;
         }
-        encode_network_reply(&mut context.text, reply);
-        context.text_length = NETWORK_REPLY_BYTES as u32;
+        encode_network_reply(&mut context.payload, reply);
+        context.payload_length = NETWORK_REPLY_BYTES as u32;
         context.operation = NETWORK_REPLY;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -1127,8 +1482,8 @@ impl ControlPage {
         if context.operation != NETWORK_DEVICE_REPLY || !reply.valid_for(request) {
             return false;
         }
-        encode_network_reply(&mut context.text, reply);
-        context.text_length = NETWORK_REPLY_BYTES as u32;
+        encode_network_reply(&mut context.payload, reply);
+        context.payload_length = NETWORK_REPLY_BYTES as u32;
         context.operation = NETWORK_REPLY;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -1145,8 +1500,8 @@ impl ControlPage {
         if context.operation != NETWORK_EVENT || !reply.valid_for(request) {
             return false;
         }
-        encode_network_reply(&mut context.text, reply);
-        context.text_length = NETWORK_REPLY_BYTES as u32;
+        encode_network_reply(&mut context.payload, reply);
+        context.payload_length = NETWORK_REPLY_BYTES as u32;
         context.operation = NETWORK_REPLY;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -1163,11 +1518,11 @@ impl ControlPage {
             || context.reserved != 0
             || context.operation != NETWORK_REPLY
             || context.status != ACKNOWLEDGED
-            || context.text_length != NETWORK_REPLY_BYTES as u32
+            || context.payload_length != NETWORK_REPLY_BYTES as u32
         {
             return None;
         }
-        decode_network_reply(&context.text).filter(|reply| reply.id == expected_id)
+        decode_network_reply(&context.payload).filter(|reply| reply.id == expected_id)
     }
 
     /// # Safety
@@ -1178,7 +1533,7 @@ impl ControlPage {
             && context.reserved == 0
             && context.operation == NETWORK_REPLY
             && context.status == ACKNOWLEDGED
-            && context.text_length == NETWORK_REPLY_BYTES as u32
+            && context.payload_length == NETWORK_REPLY_BYTES as u32
     }
 
     /// # Safety
@@ -1189,11 +1544,11 @@ impl ControlPage {
             || context.reserved != 0
             || context.operation != NETWORK_DEVICE_REQUEST
             || context.status != ACKNOWLEDGED
-            || context.text_length != NETWORK_DEVICE_REQUEST_BYTES as u32
+            || context.payload_length != NETWORK_DEVICE_REQUEST_BYTES as u32
         {
             return None;
         }
-        let request = decode_network_device_request(&context.text)?;
+        let request = decode_network_device_request(&context.payload)?;
         request.valid_shape().then_some(request)
     }
 
@@ -1205,7 +1560,7 @@ impl ControlPage {
             && context.reserved == 0
             && context.operation == NETWORK_DEVICE_REQUEST
             && context.status == ACKNOWLEDGED
-            && context.text_length == NETWORK_DEVICE_REQUEST_BYTES as u32
+            && context.payload_length == NETWORK_DEVICE_REQUEST_BYTES as u32
     }
 
     /// # Safety
@@ -1233,8 +1588,8 @@ impl ControlPage {
         {
             return false;
         }
-        encode_network_device_request(&mut context.text, request);
-        context.text_length = NETWORK_DEVICE_REQUEST_BYTES as u32;
+        encode_network_device_request(&mut context.payload, request);
+        context.payload_length = NETWORK_DEVICE_REQUEST_BYTES as u32;
         context.operation = NETWORK_DEVICE_REQUEST;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -1248,13 +1603,13 @@ impl ControlPage {
     ) -> bool {
         let mut context = unsafe { (address as *mut Self).read_volatile() };
         let valid = context.operation == NETWORK_DEVICE_REQUEST
-            && decode_network_device_request(&context.text)
+            && decode_network_device_request(&context.payload)
                 .is_some_and(|request| reply.valid_for(request));
         if !valid {
             return false;
         }
-        encode_network_device_reply(&mut context.text, reply);
-        context.text_length = NETWORK_DEVICE_REPLY_BYTES as u32;
+        encode_network_device_reply(&mut context.payload, reply);
+        context.payload_length = NETWORK_DEVICE_REPLY_BYTES as u32;
         context.operation = NETWORK_DEVICE_REPLY;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -1271,11 +1626,11 @@ impl ControlPage {
             || context.reserved != 0
             || context.operation != NETWORK_DEVICE_REPLY
             || context.status != ACKNOWLEDGED
-            || context.text_length != NETWORK_DEVICE_REPLY_BYTES as u32
+            || context.payload_length != NETWORK_DEVICE_REPLY_BYTES as u32
         {
             return None;
         }
-        decode_network_device_reply(&context.text).filter(|reply| reply.id == expected_id)
+        decode_network_device_reply(&context.payload).filter(|reply| reply.id == expected_id)
     }
 
     /// # Safety
@@ -1292,8 +1647,8 @@ impl ControlPage {
         {
             return false;
         }
-        encode_network_device_reply(&mut context.text, reply);
-        context.text_length = NETWORK_DEVICE_REPLY_BYTES as u32;
+        encode_network_device_reply(&mut context.payload, reply);
+        context.payload_length = NETWORK_DEVICE_REPLY_BYTES as u32;
         context.operation = NETWORK_DEVICE_REPLY;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -1322,10 +1677,10 @@ impl ControlPage {
         {
             return false;
         }
-        context.x = deadline as u32;
-        context.y = (deadline >> 32) as u32;
-        context.text = [0; MAX_TEXT];
-        context.text_length = 0;
+        context.slot0 = deadline as u32;
+        context.slot1 = (deadline >> 32) as u32;
+        context.payload = [0; MAX_TEXT];
+        context.payload_length = 0;
         context.operation = NETWORK_WAIT;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -1339,7 +1694,7 @@ impl ControlPage {
             && context.reserved == 0
             && context.operation == NETWORK_WAIT
             && context.status == ACKNOWLEDGED
-            && (u64::from(context.x) | (u64::from(context.y) << 32)) != 0
+            && (u64::from(context.slot0) | (u64::from(context.slot1) << 32)) != 0
     }
 
     /// # Safety
@@ -1350,7 +1705,7 @@ impl ControlPage {
             && context.reserved == 0
             && context.operation == NETWORK_WAIT
             && context.status == ACKNOWLEDGED)
-            .then_some(u64::from(context.x) | (u64::from(context.y) << 32))
+            .then_some(u64::from(context.slot0) | (u64::from(context.slot1) << 32))
             .filter(|deadline| *deadline != 0)
     }
 
@@ -1368,8 +1723,8 @@ impl ControlPage {
         {
             return false;
         }
-        encode_network_event(&mut context.text, event);
-        context.text_length = NETWORK_EVENT_BYTES as u32;
+        encode_network_event(&mut context.payload, event);
+        context.payload_length = NETWORK_EVENT_BYTES as u32;
         context.operation = NETWORK_EVENT;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -1383,11 +1738,11 @@ impl ControlPage {
             || context.reserved != 0
             || context.operation != NETWORK_EVENT
             || context.status != ACKNOWLEDGED
-            || context.text_length != NETWORK_EVENT_BYTES as u32
+            || context.payload_length != NETWORK_EVENT_BYTES as u32
         {
             return None;
         }
-        let event = decode_network_event(&context.text)?;
+        let event = decode_network_event(&context.payload)?;
         event.valid().then_some(event)
     }
 
@@ -1399,11 +1754,11 @@ impl ControlPage {
             || context.reserved != 0
             || context.operation != BLOCK_REQUEST
             || context.status != ACKNOWLEDGED
-            || context.text_length != BLOCK_REQUEST_BYTES as u32
+            || context.payload_length != BLOCK_REQUEST_BYTES as u32
         {
             return None;
         }
-        let request = decode_block_request(&context.text)?;
+        let request = decode_block_request(&context.payload)?;
         request.valid_shape().then_some(request)
     }
 
@@ -1424,9 +1779,9 @@ impl ControlPage {
         {
             return false;
         }
-        context.input = page.handle.0;
-        context.x = page.address as u32;
-        context.y = (page.address >> 32) as u32;
+        context.slot0 = page.handle.0;
+        context.slot1 = page.address as u32;
+        context.slot2 = (page.address >> 32) as u32;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -1522,8 +1877,8 @@ impl ControlPage {
     pub unsafe fn block_page_at(address: u64) -> Option<BlockPage> {
         let context = unsafe { (address as *const Self).read_volatile() };
         let page = BlockPage {
-            handle: logos_abi::PageHandle(context.input),
-            address: u64::from(context.x) | (u64::from(context.y) << 32),
+            handle: logos_abi::PageHandle(context.slot0),
+            address: u64::from(context.slot1) | (u64::from(context.slot2) << 32),
         };
         (context.abi == ABI
             && context.reserved == 0
@@ -1548,7 +1903,7 @@ impl ControlPage {
             return false;
         }
         let parent_store_id = if context.operation == STORE_REQUEST {
-            let Some(parent) = decode_store_request(&context.text) else {
+            let Some(parent) = decode_store_request(&context.payload) else {
                 return false;
             };
             Some(parent.id)
@@ -1558,12 +1913,12 @@ impl ControlPage {
         if let Some(id) = parent_store_id {
             // `color` is free while a Block request is active and preserves the
             // Store request ID across the nested Block round trip.
-            context.color = id;
+            context.slot2 = id;
         } else if context.operation != BLOCK_REPLY {
-            context.color = 0;
+            context.slot2 = 0;
         }
-        encode_block_request(&mut context.text, request);
-        context.text_length = BLOCK_REQUEST_BYTES as u32;
+        encode_block_request(&mut context.payload, request);
+        context.payload_length = BLOCK_REQUEST_BYTES as u32;
         context.operation = BLOCK_REQUEST;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
@@ -1580,8 +1935,8 @@ impl ControlPage {
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
         context.operation = BLOCK_REPLY;
-        encode_block_reply(&mut context.text, reply);
-        context.text_length = BLOCK_REPLY_BYTES as u32;
+        encode_block_reply(&mut context.payload, reply);
+        context.payload_length = BLOCK_REPLY_BYTES as u32;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -1594,11 +1949,11 @@ impl ControlPage {
             || context.reserved != 0
             || context.operation != BLOCK_REPLY
             || context.status != ACKNOWLEDGED
-            || context.text_length != BLOCK_REPLY_BYTES as u32
+            || context.payload_length != BLOCK_REPLY_BYTES as u32
         {
             return None;
         }
-        let reply = decode_block_reply(&context.text)?;
+        let reply = decode_block_reply(&context.payload)?;
         (reply.id == expected_id).then_some(reply)
     }
 
@@ -1618,10 +1973,11 @@ impl ControlPage {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
-        context.x = reply.result as u32;
-        context.text = [0; MAX_TEXT];
-        context.text[..reply.length as usize].copy_from_slice(&reply.text[..reply.length as usize]);
-        context.text_length = u32::from(reply.length);
+        context.slot0 = reply.result as u32;
+        context.payload = [0; MAX_TEXT];
+        context.payload[..reply.length as usize]
+            .copy_from_slice(&reply.text[..reply.length as usize]);
+        context.payload_length = u32::from(reply.length);
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -1629,48 +1985,16 @@ impl ControlPage {
     /// # Safety
     ///
     /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn pixel_at(address: u64) -> Option<(u32, u32, logos_abi::DisplayColor)> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        let color = logos_abi::DisplayColor::from_wire(context.color)?;
-        (context.abi == ABI
-            && context.reserved == 0
-            && context.operation == PRESENT_PIXEL
-            && context.status == ACKNOWLEDGED)
-            .then_some((context.x, context.y, color))
-    }
-
-    /// # Safety
-    ///
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn text_at(address: u64) -> Option<TextRequest> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        let length = usize::try_from(context.text_length).ok()?;
-        let color = logos_abi::DisplayColor::from_wire(context.color)?;
-        (context.abi == ABI
-            && context.reserved == 0
-            && context.operation == PRESENT_TEXT
-            && context.status == ACKNOWLEDGED
-            && length <= context.text.len())
-        .then_some(TextRequest { x: context.x, y: context.y, color, text: context.text, length })
-    }
-
-    /// # Safety
-    ///
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn clear_at(address: u64) -> bool {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        context.abi == ABI
-            && context.reserved == 0
-            && context.operation == CLEAR_DISPLAY
-            && context.status == ACKNOWLEDGED
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn display_waiting_at(address: u64) -> bool {
-        unsafe { Self::pixel_at(address) }.is_some()
-            || unsafe { Self::text_at(address) }.is_some()
-            || unsafe { Self::clear_at(address) }
+        let context = unsafe { (address as *const Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.status != ACKNOWLEDGED
+            || context.display_page == 0
+        {
+            return false;
+        }
+        unsafe { DisplayPage::pending_at(context.display_page, context.generation) }
     }
 }
 
@@ -1746,17 +2070,17 @@ pub fn self_check() -> bool {
     let mut syscall = ControlPage::new();
     syscall.operation = SYSCALL;
     syscall.status = ACKNOWLEDGED;
-    syscall.x = logos_abi::Syscall::Inspect as u32;
-    syscall.text[..4].copy_from_slice(b"name");
-    syscall.text_length = 4;
+    syscall.slot1 = logos_abi::Syscall::Inspect as u32;
+    syscall.payload[..4].copy_from_slice(b"name");
+    syscall.payload_length = 4;
     let valid = unsafe { ControlPage::syscall_at((&syscall as *const ControlPage) as u64) }
         .is_some_and(|request| {
             request.syscall == logos_abi::Syscall::Inspect && request.length == 4
         });
-    syscall.x = 0;
+    syscall.slot1 = 0;
     let unknown =
         unsafe { ControlPage::syscall_at((&syscall as *const ControlPage) as u64) }.is_none();
-    syscall.x = logos_abi::Syscall::Reboot as u32;
+    syscall.slot1 = logos_abi::Syscall::Reboot as u32;
     let malformed =
         unsafe { ControlPage::syscall_at((&syscall as *const ControlPage) as u64) }.is_none();
     let request = logos_abi::SessionRequest::new(logos_abi::Syscall::Tasks, [0; MAX_TEXT], 0);
@@ -1765,25 +2089,25 @@ pub fn self_check() -> bool {
         ControlPage::deliver_session_at((&mut syscall as *mut ControlPage) as u64, request)
     } && syscall.operation == SYSCALL;
     syscall.operation = SESSION_EFFECT;
-    syscall.x = logos_abi::Effect::ReadTasks as u32;
+    syscall.slot1 = logos_abi::Effect::ReadTasks as u32;
     let effect = unsafe {
         ControlPage::reply_effect_at(
             (&mut syscall as *mut ControlPage) as u64,
             logos_abi::EffectResult::TasksActive,
         )
-    } && syscall.x == logos_abi::EffectResult::TasksActive as u32;
+    } && syscall.slot1 == logos_abi::EffectResult::TasksActive as u32;
     syscall.operation = SESSION_EFFECT;
     let effect_text = unsafe {
         ControlPage::reply_effect_with_text_at(
             (&mut syscall as *mut ControlPage) as u64,
             logos_abi::EffectReply::new(logos_abi::EffectResult::Completed, b"ok"),
         )
-    } && syscall.x == logos_abi::EffectResult::Completed as u32
-        && syscall.text_length == 2
-        && syscall.text[..2] == *b"ok";
+    } && syscall.slot1 == logos_abi::EffectResult::Completed as u32
+        && syscall.payload_length == 2
+        && syscall.payload[..2] == *b"ok";
     syscall.operation = SESSION_REPLY;
-    syscall.text[..2].copy_from_slice(b"ok");
-    syscall.text_length = 2;
+    syscall.payload[..2].copy_from_slice(b"ok");
+    syscall.payload_length = 2;
     let reply = unsafe { ControlPage::session_reply_at((&syscall as *const ControlPage) as u64) }
         .is_some_and(|reply| reply.length == 2 && reply.text[..2] == *b"ok");
     let reset = unsafe { ControlPage::reset_at((&mut syscall as *mut ControlPage) as u64) }

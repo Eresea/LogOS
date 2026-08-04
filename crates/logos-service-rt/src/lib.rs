@@ -12,7 +12,7 @@ use core::panic::PanicInfo;
 
 use logos_abi::service as native_service;
 pub use logos_abi::service::{
-    BlockPage, ControlPage, Header, MAX_TEXT, NetworkPages, ProtocolVersion,
+    BlockPage, ControlPage, DisplayPage, Header, InputPage, MAX_TEXT, NetworkPages, ProtocolVersion,
 };
 
 pub type EntryControlPage = *mut ControlPage;
@@ -79,6 +79,18 @@ impl ServiceContext {
         self.raw.as_ptr() as u64
     }
 
+    fn endpoint_page(&self, operation: u32) -> Option<(u64, u32)> {
+        let raw = self.raw();
+        let page = match operation {
+            native_service::READ_INPUT => raw.input_page,
+            native_service::PRESENT_PIXEL
+            | native_service::PRESENT_TEXT
+            | native_service::CLEAR_DISPLAY => raw.display_page,
+            _ => 0,
+        };
+        (page != 0 && raw.generation != 0).then_some((page, raw.generation))
+    }
+
     fn raw(&self) -> &ControlPage {
         // SAFETY: `entry` validates the pointer and the kernel owns the mapping for the task.
         unsafe { self.raw.as_ref() }
@@ -107,7 +119,11 @@ impl ServiceContext {
     }
 
     pub fn wait_for_input(&mut self) -> bool {
-        self.invoke(native_service::READ_INPUT)
+        let waiting = match self.endpoint_page(native_service::READ_INPUT) {
+            Some((page, generation)) => unsafe { InputPage::wait_at(page, generation) },
+            None => true,
+        };
+        waiting && self.invoke(native_service::READ_INPUT)
     }
 
     pub fn complete(&mut self) -> bool {
@@ -119,15 +135,24 @@ impl ServiceContext {
     }
 
     pub fn input(&self) -> u32 {
-        self.raw().input
+        self.raw().slot0
     }
 
     pub fn input_byte(&self) -> Option<u8> {
-        u8::try_from(self.input()).ok()
+        if let Some((page, generation)) = self.endpoint_page(native_service::READ_INPUT) {
+            unsafe { InputPage::take_at(page, generation) }
+        } else {
+            u8::try_from(self.input()).ok()
+        }
     }
 
     pub fn clear_display(&mut self) -> bool {
-        self.invoke(native_service::CLEAR_DISPLAY)
+        let Some((page, generation)) = self.endpoint_page(native_service::CLEAR_DISPLAY) else {
+            return self.invoke(native_service::CLEAR_DISPLAY);
+        };
+        (unsafe { DisplayPage::request_clear_at(page, generation) })
+            && self.invoke(native_service::CLEAR_DISPLAY)
+            && unsafe { DisplayPage::finish_at(page, generation) }
     }
 
     pub fn present_text(
@@ -140,14 +165,13 @@ impl ServiceContext {
         if text.len() > MAX_TEXT {
             return false;
         }
-        let raw = self.raw_mut();
-        raw.text = [0; MAX_TEXT];
-        raw.text[..text.len()].copy_from_slice(text);
-        raw.x = x;
-        raw.y = y;
-        raw.color = color.wire();
-        raw.text_length = text.len() as u32;
-        self.invoke(native_service::PRESENT_TEXT)
+        if let Some((page, generation)) = self.endpoint_page(native_service::PRESENT_TEXT) {
+            (unsafe { DisplayPage::request_text_at(page, generation, x, y, color, text) })
+                && self.invoke(native_service::PRESENT_TEXT)
+                && unsafe { DisplayPage::finish_at(page, generation) }
+        } else {
+            false
+        }
     }
 
     pub fn syscall(&mut self, syscall: logos_abi::Syscall, argument: &[u8]) -> Option<TextReply> {
@@ -155,10 +179,10 @@ impl ServiceContext {
             return None;
         }
         let raw = self.raw_mut();
-        raw.x = syscall as u32;
-        raw.text = [0; MAX_TEXT];
-        raw.text[..argument.len()].copy_from_slice(argument);
-        raw.text_length = argument.len() as u32;
+        raw.slot1 = syscall as u32;
+        raw.payload = [0; MAX_TEXT];
+        raw.payload[..argument.len()].copy_from_slice(argument);
+        raw.payload_length = argument.len() as u32;
         if !self.invoke(native_service::SYSCALL) {
             return None;
         }
@@ -171,11 +195,11 @@ impl ServiceContext {
     }
 
     pub fn session_effect(&mut self, effect: logos_abi::Effect) -> Option<logos_abi::EffectResult> {
-        self.raw_mut().x = effect as u32;
+        self.raw_mut().slot1 = effect as u32;
         if !self.invoke(native_service::SESSION_EFFECT) {
             return None;
         }
-        logos_abi::EffectResult::from_wire(self.raw().x)
+        logos_abi::EffectResult::from_wire(self.raw().slot1)
     }
 
     pub fn session_reply(&mut self, reply: &[u8]) -> bool {
@@ -183,9 +207,9 @@ impl ServiceContext {
             return false;
         }
         let raw = self.raw_mut();
-        raw.text = [0; MAX_TEXT];
-        raw.text[..reply.len()].copy_from_slice(reply);
-        raw.text_length = reply.len() as u32;
+        raw.payload = [0; MAX_TEXT];
+        raw.payload[..reply.len()].copy_from_slice(reply);
+        raw.payload_length = reply.len() as u32;
         self.invoke(native_service::SESSION_REPLY)
     }
 
@@ -304,7 +328,7 @@ impl ServiceContext {
     }
 
     pub fn set_storage_status(&mut self, status: u32) {
-        self.raw_mut().x = status;
+        self.raw_mut().slot0 = status;
     }
 
     pub fn heap_slot<T>(&self) -> Option<&'static mut MaybeUninit<T>> {
