@@ -847,7 +847,7 @@ pub(crate) fn main(
     let mut native_gateway_network =
         native_gateway.as_ref().map(native_task::Task::network_endpoint);
     let mut native_gateway_remote = native_gateway.as_ref().map(native_task::Task::remote_endpoint);
-    let mut native_gateway_store = native_gateway.as_ref().map(native_task::Task::store_endpoint);
+    let native_gateway_store = native_gateway.as_ref().map(native_task::Task::store_endpoint);
     let mut native_network_endpoint =
         native_network.as_ref().map(native_task::Task::network_endpoint);
     check!(
@@ -3022,7 +3022,6 @@ pub(crate) fn main(
                     gateway_page = Some(page);
                     native_gateway_network = native_scheduler.network_endpoint(restarted);
                     native_gateway_remote = native_scheduler.remote_endpoint(restarted);
-                    native_gateway_store = native_scheduler.store_endpoint(restarted);
                     gateway_started = false;
                     gateway_network_pending = None;
                     if let Some(state) = remote_state.as_mut() {
