@@ -181,6 +181,103 @@ impl Relay {
     }
 }
 
+pub struct SessionsRuntime {
+    terminal: crate::sched::native_task::SyscallEndpoint,
+    sessions: Option<crate::sched::native_task::SessionEndpoint>,
+    handle: Option<crate::sched::native_task::Handle>,
+    pending: Option<u32>,
+    failed: u32,
+}
+
+impl SessionsRuntime {
+    pub const fn new(terminal: crate::sched::native_task::SyscallEndpoint) -> Self {
+        Self { terminal, sessions: None, handle: None, pending: None, failed: 0 }
+    }
+
+    pub fn bind_terminal(&mut self, terminal: crate::sched::native_task::SyscallEndpoint) {
+        self.terminal = terminal;
+        self.pending = None;
+    }
+
+    pub fn bind_sessions(
+        &mut self,
+        sessions: Option<crate::sched::native_task::SessionEndpoint>,
+        handle: Option<crate::sched::native_task::Handle>,
+    ) {
+        self.sessions = sessions;
+        self.handle = handle;
+        self.pending = None;
+    }
+
+    #[allow(dead_code)]
+    pub const fn available(&self) -> bool {
+        self.sessions.is_some() && self.handle.is_some()
+    }
+
+    #[allow(dead_code)]
+    pub const fn failures(&self) -> u32 {
+        self.failed
+    }
+
+    pub fn relay(
+        &mut self,
+        scheduler: &mut crate::sched::native_task::Scheduler<'_>,
+        context: crate::ipc::effects::Context<'_, '_>,
+    ) -> Relay {
+        let Some(message) = self.terminal.message() else { return Relay::Handled(true) };
+        if !context.session.allows(context.capabilities, CapabilityKind::Session) {
+            return Relay::Handled(self.terminal.reply_id(
+                message.id,
+                logos_abi::service::SessionStatus::Denied,
+                b"permission denied",
+            ));
+        }
+        let (Some(sessions), Some(handle)) = (self.sessions, self.handle) else {
+            return Relay::Handled(self.terminal.reply_id(
+                message.id,
+                logos_abi::service::SessionStatus::Failed,
+                b"session unavailable",
+            ));
+        };
+        self.pending = Some(message.id);
+        let ok = sessions.deliver_id(
+            message.id,
+            context.session.principal().page_owner(),
+            message.request,
+        ) && scheduler.wake(handle)
+            && scheduler.run(handle);
+        let Some(effect) = ok.then(|| sessions.effect_id(message.id)).flatten() else {
+            self.failed = self.failed.saturating_add(1);
+            return Relay::Handled(false);
+        };
+        let result = crate::ipc::effects::execute(effect, context);
+        if !sessions.reply_effect(result) || !scheduler.wake(handle) || !scheduler.run(handle) {
+            self.failed = self.failed.saturating_add(1);
+            return Relay::Handled(false);
+        }
+        let Some(reply) = sessions.reply_id(message.id) else {
+            self.failed = self.failed.saturating_add(1);
+            return Relay::Handled(false);
+        };
+        let ok = self.terminal.reply_id(
+            message.id,
+            reply.status,
+            &reply.reply.text[..reply.reply.length],
+        ) && scheduler.wake(handle)
+            && scheduler.run(handle);
+        self.pending = None;
+        if !ok {
+            self.failed = self.failed.saturating_add(1);
+        }
+        if result == logos_abi::EffectResult::Recovery {
+            Relay::Recovery
+        } else {
+            Relay::Handled(ok)
+        }
+    }
+}
+
+#[allow(dead_code)]
 pub fn relay_native(
     terminal: crate::sched::native_task::SyscallEndpoint,
     sessions: Option<crate::sched::native_task::SessionEndpoint>,

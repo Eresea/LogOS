@@ -974,6 +974,8 @@ pub(crate) fn run(
     } else {
         let _ = native_services.missing(supervisor::NativeService::Sessions);
     }
+    let mut sessions_runtime = session::SessionsRuntime::new(native_command);
+    sessions_runtime.bind_sessions(native_sessions_endpoint, sessions_handle);
     #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
     let mut storage_handle = native_storage
         .and_then(|task| native_scheduler.spawn(task))
@@ -1267,6 +1269,7 @@ pub(crate) fn run(
                         native_store,
                         native_terminal_network,
                     ) = endpoints;
+                    sessions_runtime.bind_terminal(native_command);
                     shared_history = history;
                     store_relay_state.clear();
                     debug::write_line(b"LogOS: reset terminal ready");
@@ -1302,6 +1305,7 @@ pub(crate) fn run(
                             return false;
                         };
                         native_sessions_endpoint = Some(endpoint);
+                        sessions_runtime.bind_sessions(native_sessions_endpoint, sessions_handle);
                         debug::write_line(b"LogOS: reset sessions ready");
                         if !native_scheduler.run(restarted_sessions)
                             || native_scheduler.wake(previous_sessions)
@@ -1683,6 +1687,7 @@ pub(crate) fn run(
                         native_store,
                         native_terminal_network,
                     ) = endpoints;
+                    sessions_runtime.bind_terminal(native_command);
                     shared_history = history;
                     store_relay_state.clear();
                     if restarted.generation() == previous.generation()
@@ -1777,6 +1782,7 @@ pub(crate) fn run(
                         return false;
                     };
                     native_sessions_endpoint = Some(endpoint);
+                    sessions_runtime.bind_sessions(native_sessions_endpoint, sessions_handle);
                     if restarted.generation() == previous.generation()
                         || endpoint.context() == previous_context
                         || !native_scheduler.run(restarted)
@@ -2165,11 +2171,8 @@ pub(crate) fn run(
                         )
                         && (native_command.request().is_none()
                             || ({
-                                let reply = session::relay_native(
-                                    native_command,
-                                    native_sessions_endpoint,
+                                let reply = sessions_runtime.relay(
                                     &mut native_scheduler,
-                                    sessions_handle,
                                     effects::Context {
                                         session: request_session,
 
@@ -2904,6 +2907,7 @@ pub(crate) fn run(
                     {
                         sessions_handle = Some(restarted);
                         native_sessions_endpoint = native_scheduler.session_endpoint(restarted);
+                        sessions_runtime.bind_sessions(native_sessions_endpoint, sessions_handle);
                         if native_scheduler.run(restarted) && native_sessions_endpoint.is_some() {
                             native_services.ready(supervisor::NativeService::Sessions);
                             debug::write_line(b"LogOS: native Sessions restarted");
@@ -3133,6 +3137,7 @@ pub(crate) fn run(
                                         native_store,
                                         native_terminal_network,
                                     ) = endpoints;
+                                    sessions_runtime.bind_terminal(native_command);
                                     shared_history = history;
                                     store_relay_state.clear();
                                     if native_scheduler.run(native_handle)
@@ -3319,11 +3324,8 @@ pub(crate) fn run(
                                 break;
                             }
                         } else if native_command.request().is_some() {
-                            let mut relay = session::relay_native(
-                                native_command,
-                                native_sessions_endpoint,
+                            let mut relay = sessions_runtime.relay(
                                 &mut native_scheduler,
-                                sessions_handle,
                                 effects::Context {
                                     session: &session,
                                     capabilities: &capabilities,
@@ -3405,6 +3407,7 @@ pub(crate) fn run(
                     {
                         sessions_handle = Some(restarted);
                         native_sessions_endpoint = native_scheduler.session_endpoint(restarted);
+                        sessions_runtime.bind_sessions(native_sessions_endpoint, sessions_handle);
                         if native_scheduler.run(restarted) && native_sessions_endpoint.is_some() {
                             native_services.ready(supervisor::NativeService::Sessions);
                             debug::write_line(b"LogOS: Sessions manually restarted");
@@ -3438,6 +3441,7 @@ pub(crate) fn run(
                             native_store,
                             native_terminal_network,
                         ) = endpoints;
+                        sessions_runtime.bind_terminal(native_command);
                         shared_history = history;
                         store_relay_state.clear();
                         if native_scheduler.run(native_handle)

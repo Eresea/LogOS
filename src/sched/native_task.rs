@@ -294,7 +294,7 @@ impl DisplayEndpoint {
 }
 
 impl SyscallEndpoint {
-    pub fn request(self) -> Option<logos_abi::SessionRequest> {
+    pub fn message(self) -> Option<logos_abi::service::SessionClientRequest> {
         unsafe {
             logos_abi::service::SessionClientPage::current_request_at(
                 self.client.page_physical,
@@ -302,22 +302,27 @@ impl SyscallEndpoint {
                 self.client.endpoint_generation,
             )
         }
-        .map(|message| message.request)
+    }
+
+    pub fn request(self) -> Option<logos_abi::SessionRequest> {
+        self.message().map(|message| message.request)
     }
 
     pub fn reply(self, bytes: &[u8]) -> bool {
-        let Some(message) = (unsafe {
-            logos_abi::service::SessionClientPage::current_request_at(
-                self.client.page_physical,
-                self.client.service_generation,
-                self.client.endpoint_generation,
-            )
-        }) else {
+        let Some(message) = self.message() else {
             return false;
         };
-        logos_abi::SessionReply::from_bytes(bytes).is_some_and(|reply| {
-            self.client.reply(message.id, logos_abi::service::SessionStatus::Complete, reply)
-        })
+        self.reply_id(message.id, logos_abi::service::SessionStatus::Complete, bytes)
+    }
+
+    pub fn reply_id(
+        self,
+        id: u32,
+        status: logos_abi::service::SessionStatus,
+        bytes: &[u8],
+    ) -> bool {
+        logos_abi::SessionReply::from_bytes(bytes)
+            .is_some_and(|reply| self.client.reply(id, status, reply))
     }
 
     #[cfg(feature = "test-hooks")]
@@ -552,12 +557,24 @@ impl SessionEndpoint {
         self.server.deliver(1, 0, request)
     }
 
+    pub fn deliver_id(self, id: u32, caller: u64, request: logos_abi::SessionRequest) -> bool {
+        self.server.deliver(id, caller, request)
+    }
+
     pub fn reply(self) -> Option<logos_abi::SessionReply> {
         self.server.reply(1).map(|response| response.reply)
     }
 
+    pub fn reply_id(self, id: u32) -> Option<logos_abi::service::SessionServerReply> {
+        self.server.reply(id)
+    }
+
     pub fn effect(self) -> Option<logos_abi::EffectRequest> {
         self.effect.request().map(|message| message.request)
+    }
+
+    pub fn effect_id(self, id: u32) -> Option<logos_abi::EffectRequest> {
+        self.effect.request().filter(|message| message.id == id).map(|message| message.request)
     }
 
     pub fn reply_effect(self, reply: logos_abi::EffectResult) -> bool {
