@@ -323,7 +323,7 @@ fn run(context: &mut ServiceContext) -> ! {
     };
     let Some(state) = state else { spin() };
     while context.acknowledged() {
-        if !context.wait_for_input() {
+        if !context.wait_for_request() {
             spin();
         }
         if let Some(request) = context.store_request() {

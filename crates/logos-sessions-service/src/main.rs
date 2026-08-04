@@ -19,13 +19,13 @@ fn run(context: &mut ServiceContext) -> ! {
         spin();
     }
     while context.acknowledged() {
-        if !context.wait_for_input() {
+        if !context.wait_for_request() {
             spin();
         }
         let Some(request) = context.session_request() else { continue };
         #[cfg(feature = "test-hooks")]
         inject_failure(&request);
-        if context.input() != 1 || !request.valid() {
+        if !request.valid() {
             continue;
         }
         let Some(result) = context.session_effect(dispatch(request.syscall)) else {

@@ -119,11 +119,14 @@ impl ServiceContext {
     }
 
     pub fn wait_for_input(&mut self) -> bool {
-        let waiting = match self.endpoint_page(native_service::READ_INPUT) {
-            Some((page, generation)) => unsafe { InputPage::wait_at(page, generation) },
-            None => true,
+        let Some((page, generation)) = self.endpoint_page(native_service::READ_INPUT) else {
+            return false;
         };
-        waiting && self.invoke(native_service::READ_INPUT)
+        (unsafe { InputPage::wait_at(page, generation) }) && self.invoke(native_service::READ_INPUT)
+    }
+
+    pub fn wait_for_request(&mut self) -> bool {
+        self.invoke(native_service::READ_INPUT)
     }
 
     pub fn complete(&mut self) -> bool {
@@ -134,21 +137,14 @@ impl ServiceContext {
         self.raw().status == ACKNOWLEDGED
     }
 
-    pub fn input(&self) -> u32 {
-        self.raw().slot0
-    }
-
     pub fn input_byte(&self) -> Option<u8> {
-        if let Some((page, generation)) = self.endpoint_page(native_service::READ_INPUT) {
-            unsafe { InputPage::take_at(page, generation) }
-        } else {
-            u8::try_from(self.input()).ok()
-        }
+        let (page, generation) = self.endpoint_page(native_service::READ_INPUT)?;
+        unsafe { InputPage::take_at(page, generation) }
     }
 
     pub fn clear_display(&mut self) -> bool {
         let Some((page, generation)) = self.endpoint_page(native_service::CLEAR_DISPLAY) else {
-            return self.invoke(native_service::CLEAR_DISPLAY);
+            return false;
         };
         (unsafe { DisplayPage::request_clear_at(page, generation) })
             && self.invoke(native_service::CLEAR_DISPLAY)
