@@ -16,9 +16,9 @@ explicitly deprecated. See [ADR-0002](adr/0002-test-control-boundary.md).
 ## ABI v4 and native-service ownership
 
 Native service transport uses a dedicated mapped `logos_abi::service::ControlPage` header (ABI v4). The
-Terminal's typed endpoint pages (`InputPage`, `DisplayPage`) are the active keyboard/display transport;
+Terminal's typed endpoint pages (`InputPage`, `DisplayPage`, `SessionClientPage`) are the active keyboard/display/session transport;
 the header carries lifecycle, generation, and notification state only for those protocols. Typed
-endpoint pages (`InputPage`, `DisplayPage`, `SessionPage`, `StoreEndpointPage`,
+endpoint pages (`InputPage`, `DisplayPage`, `SessionClientPage`, `SessionServerPage`, `EffectPage`, `StoreEndpointPage`,
 `BlockEndpointPage`, `NetworkPage`, and `RemotePage`) carry explicit scalar state, generation, and
 bounded payload fields. Core owns endpoint mappings, capability checks, and reclamation; a service
 receives only the endpoint set declared by its canonical `platform::services::ServiceSpec`.
@@ -496,7 +496,7 @@ capability. A denial or malformed presentation stops the normal terminal and ent
 ### Platform v1 Session contract
 
 `foundation.session` v1 gates every typed terminal syscall with an explicit Session capability.
-Core brokers each request to the separately loaded Sessions service. Sessions requests an
+Core brokers each request through independent Terminal client and Sessions server pages. Sessions requests an
 individually capability-gated privileged effect, receives a typed `EffectResult`, formats the
 bounded reply, and returns it to the terminal. A missing Session capability is rejected before
 dispatch. Versioned requests and effect results live in `logos-abi`; Core retains no normal-command
