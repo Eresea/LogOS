@@ -81,3 +81,16 @@ pub fn snapshot() -> Snapshot {
         }
     }
 }
+
+pub fn since(cursor: u64, output: &mut [u8; LOG_BYTES]) -> (u64, usize, bool) {
+    let snapshot = snapshot();
+    let gap = cursor < snapshot.first_cursor;
+    let start = cursor.max(snapshot.first_cursor).min(snapshot.next_cursor);
+    let index = (start - snapshot.first_cursor) as usize;
+    if index >= snapshot.len {
+        return (snapshot.next_cursor, 0, gap);
+    }
+    let length = usize::from(snapshot.lengths[index]).min(output.len());
+    output[..length].copy_from_slice(&snapshot.lines[index][..length]);
+    (start.saturating_add(1), length, gap)
+}

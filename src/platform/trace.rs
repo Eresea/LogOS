@@ -121,3 +121,17 @@ pub fn message(event: Event) -> &'static [u8] {
         Event::Empty => b"TRACE NONE\n",
     }
 }
+
+pub fn next(cursor: u64, output: &mut [u8; 160]) -> (u64, usize, bool) {
+    let snapshot = snapshot();
+    let (next, count, gap) = snapshot.since(cursor, &mut [Event::Empty; EVENTS]);
+    if gap || count == 0 {
+        return (next, 0, gap);
+    }
+    let start = cursor.max(snapshot.cursor_range().0);
+    let index = (start - snapshot.cursor_range().0) as usize;
+    let bytes = message(snapshot.events()[index]);
+    let length = bytes.len().min(output.len());
+    output[..length].copy_from_slice(&bytes[..length]);
+    (start.saturating_add(1), length, false)
+}

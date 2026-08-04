@@ -24,6 +24,22 @@ pub struct RemoteState {
     rng: Csprng,
     responder: Option<RemoteResponder>,
     control: RemoteControlRecord,
+    subscription: RemoteSubscription,
+}
+
+#[derive(Clone, Copy)]
+pub struct RemoteSubscription {
+    pub attachment: u64,
+    pub source: u8,
+    pub cursor: u64,
+    pub credits: u8,
+    pub in_flight: u64,
+}
+
+impl RemoteSubscription {
+    pub const fn empty() -> Self {
+        Self { attachment: 0, source: 0, cursor: 0, credits: 0, in_flight: 0 }
+    }
 }
 
 impl RemoteState {
@@ -34,6 +50,7 @@ impl RemoteState {
             rng: Csprng::from_seed(bootstrap.rng_seed),
             responder: None,
             control: RemoteControlRecord::empty(),
+            subscription: RemoteSubscription::empty(),
         })
     }
 
@@ -44,6 +61,7 @@ impl RemoteState {
             rng: Csprng::from_seed(bootstrap.rng_seed),
             responder: None,
             control: RemoteControlRecord::empty(),
+            subscription: RemoteSubscription::empty(),
         }
     }
 
@@ -87,6 +105,7 @@ impl RemoteState {
             rng: Csprng::from_seed(bootstrap.rng_seed),
             responder: None,
             control: RemoteControlRecord::empty(),
+            subscription: RemoteSubscription::empty(),
         }
     }
 
@@ -124,6 +143,7 @@ impl RemoteState {
 
     pub fn reset_transport(&mut self) {
         self.responder = None;
+        self.subscription = RemoteSubscription::empty();
     }
 
     pub const fn control(&self) -> RemoteControlRecord {
@@ -151,7 +171,16 @@ impl RemoteState {
 
     pub fn disable(&mut self) {
         self.responder = None;
+        self.subscription = RemoteSubscription::empty();
         self.trust = TrustState::unavailable(self.trust.machine_secret());
+    }
+
+    pub const fn subscription(&self) -> RemoteSubscription {
+        self.subscription
+    }
+
+    pub fn replace_subscription(&mut self, subscription: RemoteSubscription) {
+        self.subscription = subscription;
     }
 }
 

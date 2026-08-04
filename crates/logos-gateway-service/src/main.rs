@@ -102,6 +102,7 @@ fn serve(
             else {
                 break 'connection;
             };
+            let mut stream_events = false;
             let response_length = if authenticated {
                 let plaintext =
                     unsafe { core::slice::from_raw_parts(address as *const u8, opened) };
@@ -115,6 +116,10 @@ fn serve(
                     RemoteMessageKind::Cancel => RemoteGateOperation::Acknowledge,
                     _ => break 'connection,
                 };
+                stream_events = matches!(
+                    message.kind,
+                    RemoteMessageKind::Subscribe | RemoteMessageKind::Credit
+                );
                 let Some(length) = gate(context, id, page, address, operation, plaintext) else {
                     break 'connection;
                 };
@@ -147,6 +152,42 @@ fn serve(
             }
             if decoder.consume().is_err() {
                 break 'connection;
+            }
+            if authenticated && stream_events {
+                loop {
+                    let Some(length) =
+                        gate(context, id, page, address, RemoteGateOperation::Acknowledge, &[])
+                    else {
+                        break 'connection;
+                    };
+                    if length == 0 {
+                        break;
+                    }
+                    let plaintext =
+                        unsafe { core::slice::from_raw_parts(address as *const u8, length) };
+                    let mut plain = [0; MAX_FRAME];
+                    plain[..length].copy_from_slice(plaintext);
+                    let Some(sealed) = gate(
+                        context,
+                        id,
+                        page,
+                        address,
+                        RemoteGateOperation::Seal,
+                        &plain[..length],
+                    ) else {
+                        break 'connection;
+                    };
+                    let response =
+                        unsafe { core::slice::from_raw_parts(address as *const u8, sealed) };
+                    let mut event_frame = [0; MAX_FRAME_BUFFER];
+                    let Ok(event_length) = frame_encode(&mut event_frame, response) else {
+                        break 'connection;
+                    };
+                    if !write_all(context, id, page, address, stream, &event_frame[..event_length])
+                    {
+                        break 'connection;
+                    }
+                }
             }
         }
     }

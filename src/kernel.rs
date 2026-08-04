@@ -724,7 +724,7 @@ pub(crate) fn main(
     let Some(mut shared_history) = shared_history else {
         fail!(b"terminal storage page");
     };
-    let gateway_page = native_gateway
+    let mut gateway_page = native_gateway
         .as_mut()
         .and_then(|gateway| gateway.map_shared_owned(&mut memory))
         .and_then(|page| shared_pages.register(gateway_owner?, page, 1));
@@ -844,9 +844,10 @@ pub(crate) fn main(
         .map(native_task::Task::store_endpoint)
         .unwrap_or_else(native_task::StoreEndpoint::unavailable);
     let mut native_terminal_network = native_terminal.network_endpoint();
-    let native_gateway_network = native_gateway.as_ref().map(native_task::Task::network_endpoint);
-    let native_gateway_remote = native_gateway.as_ref().map(native_task::Task::remote_endpoint);
-    let native_gateway_store = native_gateway.as_ref().map(native_task::Task::store_endpoint);
+    let mut native_gateway_network =
+        native_gateway.as_ref().map(native_task::Task::network_endpoint);
+    let mut native_gateway_remote = native_gateway.as_ref().map(native_task::Task::remote_endpoint);
+    let mut native_gateway_store = native_gateway.as_ref().map(native_task::Task::store_endpoint);
     let mut native_network_endpoint =
         native_network.as_ref().map(native_task::Task::network_endpoint);
     check!(
@@ -1034,65 +1035,70 @@ pub(crate) fn main(
     } else {
         None
     };
-    if gateway_handle
-        .is_some_and(|handle| !native_scheduler.run(handle) || native_scheduler.failed(handle))
-    {
-        gateway_handle = None;
-    }
-    if gateway_handle.is_some() {
-        native_services.ready(supervisor::NativeService::Gateway);
-    } else {
+    let mut gateway_started = false;
+    if gateway_handle.is_none() {
         let _ = native_services.missing(supervisor::NativeService::Gateway);
     }
-    let mut gateway_network_pending: Option<PendingNetworkClient> = None;
-    macro_rules! poll_gateway {
-        () => {
-            poll_gateway(
-                native_gateway_network,
-                native_gateway_remote,
-                gateway_handle,
-                &mut gateway_network_pending,
-                gateway_network_session.as_ref(),
-                gateway_owner,
-                native_network_endpoint,
-                network_handle,
-                &mut native_scheduler,
-                &capabilities,
-                gateway_page,
-                shared_history,
-                terminal_owner,
-                &mut remote_state,
-                native_sessions_endpoint,
-                sessions_handle,
-                remote_session.as_ref(),
-                native_storage_store,
-                &mut block_dispatch,
-                &mut block::DispatchContext {
-                    endpoint: native_storage_block,
-                    pages: &mut shared_pages,
-                    store_owner: storage_owner,
-                    store_page: storage_block_page,
-                    device: &mut block_device,
-                    memory: &mut memory,
-                },
-                storage_handle,
-                interrupts::ticks(),
-                &mut input,
-                &mut service_lifecycle,
-                service_health.healthy(balloon::NAME, interrupts::ticks()),
-                &channel,
-                &responses,
-                &mut service_scheduler,
-                service_capability,
-                virtio_handle,
-            )
-        };
-    }
-    let _ = poll_gateway!();
     let mut network_pending = None;
     let mut network_probe = Some(0x8000_0001u32);
     let mut network_probe_due = 0;
     let mut network_reported = false;
+    let mut gateway_network_pending: Option<PendingNetworkClient> = None;
+    macro_rules! poll_gateway {
+        () => {{
+            if !gateway_started && network_reported {
+                gateway_started = gateway_handle.is_some_and(|handle| {
+                    native_scheduler.run(handle) && !native_scheduler.failed(handle)
+                });
+                if gateway_started {
+                    native_services.ready(supervisor::NativeService::Gateway);
+                }
+            }
+            if !gateway_started {
+                true
+            } else {
+                poll_gateway(
+                    native_gateway_network,
+                    native_gateway_remote,
+                    gateway_handle,
+                    &mut gateway_network_pending,
+                    gateway_network_session.as_ref(),
+                    gateway_owner,
+                    native_network_endpoint,
+                    network_handle,
+                    &mut native_scheduler,
+                    &capabilities,
+                    gateway_page,
+                    shared_history,
+                    terminal_owner,
+                    &mut remote_state,
+                    native_sessions_endpoint,
+                    sessions_handle,
+                    remote_session.as_ref(),
+                    native_storage_store,
+                    &mut block_dispatch,
+                    &mut block::DispatchContext {
+                        endpoint: native_storage_block,
+                        pages: &mut shared_pages,
+                        store_owner: storage_owner,
+                        store_page: storage_block_page,
+                        device: &mut block_device,
+                        memory: &mut memory,
+                    },
+                    storage_handle,
+                    interrupts::ticks(),
+                    &mut input,
+                    &mut service_lifecycle,
+                    service_health.healthy(balloon::NAME, interrupts::ticks()),
+                    &channel,
+                    &responses,
+                    &mut service_scheduler,
+                    service_capability,
+                    virtio_handle,
+                )
+            }
+        }};
+    }
     health.finish();
     let mut store_relay_state = storage::RelayState::new();
     if !native_input.deliver(logos_abi::InputEvent::STARTUP) {
@@ -2794,6 +2800,8 @@ pub(crate) fn main(
                     || (cfg!(feature = "block-probe") && id == "persistence/block-read-flush")
                     || (id == "network/transport-dhcp" && network_reported)
                     || (id == "network/configuration" && network_reported)
+                    || (id == "network/tcp-stream" && gateway_handle.is_some())
+                    || (id.starts_with("remote/") && gateway_handle.is_some())
                     || proof.get()
             }
         },
@@ -2988,6 +2996,33 @@ pub(crate) fn main(
                 if !poll_gateway!() {
                     debug::write_line(b"LogOS: Gateway service unavailable");
                     if gateway_handle.is_some() {
+                        let _ = native_services.failed(supervisor::NativeService::Gateway, tick);
+                    }
+                }
+                if native_services.due(supervisor::NativeService::Gateway, tick)
+                    && let Some(failed) = gateway_handle
+                    && let Some((restarted, page)) = replace_gateway(
+                        &mut native_scheduler,
+                        failed,
+                        &mut memory,
+                        &mut shared_pages,
+                        gateway_owner,
+                        gateway_page,
+                    )
+                {
+                    gateway_handle = Some(restarted);
+                    gateway_page = Some(page);
+                    native_gateway_network = native_scheduler.network_endpoint(restarted);
+                    native_gateway_remote = native_scheduler.remote_endpoint(restarted);
+                    native_gateway_store = native_scheduler.store_endpoint(restarted);
+                    gateway_started = false;
+                    gateway_network_pending = None;
+                    if let Some(state) = remote_state.as_mut() {
+                        state.reset_transport();
+                    }
+                    if native_scheduler.run(restarted) {
+                        debug::write_line(b"LogOS: Gateway restarted");
+                    } else {
                         let _ = native_services.failed(supervisor::NativeService::Gateway, tick);
                     }
                 }
@@ -3995,7 +4030,7 @@ fn poll_gateway(
         logos_abi::service::RemoteGateOperation::Subscribe
         | logos_abi::service::RemoteGateOperation::Credit
         | logos_abi::service::RemoteGateOperation::Acknowledge => {
-            remote_simple_reply(&source[..length], address, b"subscribed")
+            remote_subscription(remote_state, &source[..length], address, request.operation)
         }
         logos_abi::service::RemoteGateOperation::Reset => {
             remote_state.reset_transport();
@@ -4011,6 +4046,116 @@ fn poll_gateway(
         cursor,
     }) && scheduler.wake(handle)
         && scheduler.run(handle)
+}
+
+fn remote_subscription(
+    state: &mut secrets::RemoteState,
+    input: &[u8],
+    address: u64,
+    operation: logos_abi::service::RemoteGateOperation,
+) -> Option<(logos_abi::service::RemoteGateStatus, usize, u64)> {
+    let message = if input.is_empty() {
+        None
+    } else {
+        Some(logos_remote::RemoteMessage::decode(input).ok()?)
+    };
+    let mut subscription = state.subscription();
+    if operation == logos_abi::service::RemoteGateOperation::Subscribe {
+        let message = message?;
+        if message.kind != logos_remote::RemoteMessageKind::Subscribe {
+            return None;
+        }
+        let source = if message.payload[..usize::from(message.payload_length)]
+            == *logos_remote::REMOTE_SUBSCRIBE_TRACE
+        {
+            1
+        } else if message.payload[..usize::from(message.payload_length)]
+            == *logos_remote::REMOTE_SUBSCRIBE_LOG
+        {
+            2
+        } else {
+            return None;
+        };
+        subscription = secrets::RemoteSubscription {
+            attachment: message.id,
+            source,
+            cursor: message.cursor,
+            credits: 0,
+            in_flight: 0,
+        };
+        state.replace_subscription(subscription);
+        return remote_simple_reply(input, address, b"subscribed");
+    }
+    if let Some(message) = message {
+        if message.kind == logos_remote::RemoteMessageKind::Cancel {
+            state.replace_subscription(secrets::RemoteSubscription::empty());
+            return remote_simple_reply(input, address, b"unfollowed");
+        }
+        if message.kind != logos_remote::RemoteMessageKind::Credit
+            || operation != logos_abi::service::RemoteGateOperation::Credit
+        {
+            return None;
+        }
+        let credit = message.cursor;
+        if credit == 0
+            || credit > logos_remote::REMOTE_EVENT_CREDIT
+            || u16::from(subscription.credits) + credit as u16
+                > logos_remote::REMOTE_EVENT_CREDIT as u16
+        {
+            return None;
+        }
+        subscription.credits = subscription.credits.saturating_add(credit as u8);
+    } else if operation != logos_abi::service::RemoteGateOperation::Acknowledge {
+        return None;
+    } else if subscription.in_flight != 0 {
+        subscription.cursor = subscription.in_flight;
+        subscription.in_flight = 0;
+        subscription.credits = subscription.credits.saturating_sub(1);
+    }
+    state.replace_subscription(subscription);
+    let mut payload = [0; logos_remote::REMOTE_MESSAGE_PAYLOAD];
+    let (cursor, length, gap) = if subscription.source == 1 {
+        let mut output = [0; 160];
+        let (cursor, length, gap) = crate::platform::trace::next(subscription.cursor, &mut output);
+        if gap {
+            payload[..9].copy_from_slice(b"gap trace");
+            (cursor, 9, true)
+        } else {
+            payload[..length].copy_from_slice(&output[..length]);
+            (cursor, length, false)
+        }
+    } else if subscription.source == 2 {
+        let mut output = [0; 160];
+        let (cursor, length, gap) = crate::debug::since(subscription.cursor, &mut output);
+        if gap {
+            payload[..7].copy_from_slice(b"gap log");
+            (cursor, 7, true)
+        } else {
+            payload[..length].copy_from_slice(&output[..length]);
+            (cursor, length, false)
+        }
+    } else {
+        return None;
+    };
+    let mut subscription = state.subscription();
+    if subscription.credits == 0 || subscription.in_flight != 0 || length == 0 {
+        return Some((logos_abi::service::RemoteGateStatus::Complete, 0, 0));
+    }
+    subscription.in_flight = cursor;
+    state.replace_subscription(subscription);
+    let reply = logos_remote::RemoteMessage {
+        kind: logos_remote::RemoteMessageKind::Event,
+        id: subscription.attachment,
+        sequence: 0,
+        cursor,
+        payload,
+        payload_length: length as u16,
+    };
+    let mut encoded = [0; logos_remote::MAX_FRAME];
+    let encoded_length = reply.encode(&mut encoded).ok()?;
+    unsafe { core::ptr::copy_nonoverlapping(encoded.as_ptr(), address as *mut u8, encoded_length) };
+    let _ = gap;
+    Some((logos_abi::service::RemoteGateStatus::Complete, encoded_length, cursor))
 }
 
 fn output_page(address: u64, length: usize) -> &'static mut [u8] {
@@ -5120,6 +5265,29 @@ fn replace_network(
         resources,
         NetworkDmaPages { rx_address: rx_physical, tx_address: tx_physical },
     ))
+}
+
+fn replace_gateway(
+    scheduler: &mut native_task::Scheduler<'_>,
+    handle: native_task::Handle,
+    memory: &mut memory::PhysicalMemory,
+    pages: &mut logos_core::shared_pages::SharedPages,
+    owner: Option<u64>,
+    previous: Option<logos_abi::PageHandle>,
+) -> Option<(native_task::Handle, logos_abi::PageHandle)> {
+    let owner = owner?;
+    let previous = previous?;
+    if !scheduler.failed(handle) && !scheduler.fail(handle) {
+        return None;
+    }
+    let mut address = None;
+    let replacement = scheduler.replace(handle, memory, |task, memory| {
+        address = task.map_shared_owned(memory);
+        address.is_some()
+    })?;
+    pages.release(owner, previous)?;
+    let page = pages.register(owner, address?, 1)?;
+    Some((replacement, page))
 }
 
 fn restart_native_service(

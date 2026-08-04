@@ -3,6 +3,7 @@ use std::{
     io::{self, BufRead, Read, Write},
     net::{TcpStream, ToSocketAddrs},
     path::Path,
+    sync::mpsc,
     time::Duration,
 };
 
@@ -51,46 +52,142 @@ fn session(address: &str, key_path: &Path, enrollment: &str) {
     let attachment = OsRng.next_u64().max(1);
     let mut sequence = 1u64;
     let mut cursor = 0u64;
-    let stdin = io::stdin();
+    let (commands, input) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in io::stdin().lock().lines() {
+            if commands.send(line).is_err() {
+                break;
+            }
+        }
+    });
     let mut transport: Option<Transport> = None;
-    for line in stdin.lock().lines() {
-        let line = line.expect("read command");
-        let line = line.trim();
-        if line.is_empty() {
+    let mut pending: Option<Pending> = None;
+    let mut following = false;
+    let mut input_closed = false;
+    loop {
+        if pending.is_none() && !input_closed {
+            match input.recv_timeout(Duration::from_millis(20)) {
+                Ok(Ok(line)) => {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if line == "quit" {
+                        return;
+                    }
+                    let message = if let Some(source) = line.strip_prefix("follow ") {
+                        let source = match source {
+                            "trace" => REMOTE_SUBSCRIBE_TRACE,
+                            "log" => REMOTE_SUBSCRIBE_LOG,
+                            _ => panic!("expected follow trace|log"),
+                        };
+                        following = true;
+                        wire_message(RemoteMessageKind::Subscribe, attachment, 0, cursor, source)
+                    } else if line == "unfollow" {
+                        following = false;
+                        wire_message(RemoteMessageKind::Cancel, attachment, 0, 0, &[])
+                    } else {
+                        invocation(attachment, sequence, line)
+                    };
+                    pending = Some(Pending::new(message));
+                }
+                Ok(Err(error)) => panic!("read command: {error}"),
+                Err(mpsc::RecvTimeoutError::Disconnected) => input_closed = true,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+        let Some(current) = pending.as_mut() else {
+            if input_closed {
+                return;
+            }
             continue;
-        }
-        if line == "quit" {
-            return;
-        }
-        let message = if let Some(source) = line.strip_prefix("follow ") {
-            let source = match source {
-                "trace" => REMOTE_SUBSCRIBE_TRACE,
-                "log" => REMOTE_SUBSCRIBE_LOG,
-                _ => panic!("expected follow trace|log"),
-            };
-            wire_message(RemoteMessageKind::Subscribe, attachment, 0, cursor, source)
-        } else if line == "unfollow" {
-            wire_message(RemoteMessageKind::Cancel, attachment, 0, 0, &[])
-        } else {
-            invocation(attachment, sequence, line)
         };
-        let mut plaintext = [0; MAX_FRAME];
-        let length = message.encode(&mut plaintext).expect("encode message");
-        let reply = exchange(&mut transport, address, secret, machine, &plaintext[..length])
-            .unwrap_or_else(|error| panic!("session failed: {error}"));
-        let payload = &reply.payload[..usize::from(reply.payload_length)];
-        println!("{}", String::from_utf8_lossy(payload));
-        cursor = reply.cursor.max(cursor);
-        if message.kind == RemoteMessageKind::Invoke {
-            sequence = sequence.wrapping_add(1).max(1);
+        if transport.is_none() {
+            match Transport::connect(address, secret, machine) {
+                Ok(value) => transport = Some(value),
+                Err(error) => {
+                    current.attempts = current.attempts.saturating_add(1);
+                    if current.attempts >= 3 {
+                        panic!("session reconnect failed: {error}");
+                    }
+                    continue;
+                }
+            }
+            current.sent = false;
         }
-        if message.kind == RemoteMessageKind::Subscribe {
-            let credit =
-                wire_message(RemoteMessageKind::Credit, attachment, 0, REMOTE_EVENT_CREDIT, &[]);
-            let mut bytes = [0; MAX_FRAME];
-            let length = credit.encode(&mut bytes).expect("encode credit");
-            let _ = exchange(&mut transport, address, secret, machine, &bytes[..length]);
+        if !current.sent {
+            if let Err(error) =
+                transport.as_mut().expect("transport").send(&current.bytes[..current.length])
+            {
+                transport = None;
+                current.attempts = current.attempts.saturating_add(1);
+                if current.attempts >= 3 {
+                    panic!("session send failed: {error}");
+                }
+                continue;
+            }
+            current.sent = true;
         }
+        match transport.as_mut().expect("transport").try_read() {
+            Ok(Some(reply)) => {
+                let kind = current.message.kind;
+                if reply.kind == RemoteMessageKind::Error {
+                    println!(
+                        "error: {}",
+                        String::from_utf8_lossy(
+                            &reply.payload[..usize::from(reply.payload_length)]
+                        )
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        String::from_utf8_lossy(
+                            &reply.payload[..usize::from(reply.payload_length)]
+                        )
+                    );
+                }
+                cursor = reply.cursor.max(cursor);
+                if kind == RemoteMessageKind::Invoke {
+                    sequence = sequence.wrapping_add(1).max(1);
+                }
+                pending = if kind == RemoteMessageKind::Subscribe && following {
+                    Some(Pending::new(wire_message(
+                        RemoteMessageKind::Credit,
+                        attachment,
+                        0,
+                        REMOTE_EVENT_CREDIT,
+                        &[],
+                    )))
+                } else {
+                    None
+                };
+            }
+            Ok(None) => {}
+            Err(error) => {
+                transport = None;
+                current.sent = false;
+                current.attempts = current.attempts.saturating_add(1);
+                if current.attempts >= 3 {
+                    panic!("session read failed: {error}");
+                }
+            }
+        }
+    }
+}
+
+struct Pending {
+    message: RemoteMessage,
+    bytes: [u8; MAX_FRAME],
+    length: usize,
+    sent: bool,
+    attempts: u8,
+}
+
+impl Pending {
+    fn new(message: RemoteMessage) -> Self {
+        let mut bytes = [0; MAX_FRAME];
+        let length = message.encode(&mut bytes).expect("encode message");
+        Self { message, bytes, length, sent: false, attempts: 0 }
     }
 }
 
@@ -122,33 +219,11 @@ fn wire_message(
     RemoteMessage { kind, id, sequence, cursor, payload, payload_length: bytes.len() as u16 }
 }
 
-fn exchange(
-    transport: &mut Option<Transport>,
-    address: &str,
-    secret: [u8; 32],
-    machine: [u8; 32],
-    plaintext: &[u8],
-) -> io::Result<RemoteMessage> {
-    let mut last = io::Error::other("not connected");
-    for _ in 0..3 {
-        if transport.is_none() {
-            *transport = Some(Transport::connect(address, secret, machine)?);
-        }
-        match transport.as_mut().expect("transport").exchange(plaintext) {
-            Ok(reply) => return Ok(reply),
-            Err(error) => {
-                last = error;
-                *transport = None;
-            }
-        }
-    }
-    Err(last)
-}
-
 struct Transport {
     stream: TcpStream,
     send: CipherState<logos_remote::NoiseChaCha>,
     receive: CipherState<logos_remote::NoiseChaCha>,
+    input: Vec<u8>,
 }
 
 impl Transport {
@@ -178,22 +253,49 @@ impl Transport {
             return Err(io::Error::other("noise incomplete"));
         }
         let (send, receive) = handshake.get_ciphers();
-        Ok(Self { stream, send, receive })
+        stream.set_read_timeout(Some(Duration::from_millis(50)))?;
+        Ok(Self { stream, send, receive, input: Vec::new() })
     }
 
-    fn exchange(&mut self, plaintext: &[u8]) -> io::Result<RemoteMessage> {
+    fn send(&mut self, plaintext: &[u8]) -> io::Result<()> {
         let mut ciphertext = vec![0; plaintext.len() + 16];
         self.send.encrypt(plaintext, &mut ciphertext);
-        write_frame(&mut self.stream, &ciphertext)?;
-        let ciphertext = read_frame(&mut self.stream)?;
-        if ciphertext.len() < 16 {
+        write_frame(&mut self.stream, &ciphertext)
+    }
+
+    fn try_read(&mut self) -> io::Result<Option<RemoteMessage>> {
+        let mut bytes = [0; 1024];
+        match self.stream.read(&mut bytes) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "closed")),
+            Ok(length) => self.input.extend_from_slice(&bytes[..length]),
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.kind() == io::ErrorKind::TimedOut =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+        if self.input.len() < 2 {
+            return Ok(None);
+        }
+        let length = usize::from(u16::from_be_bytes([self.input[0], self.input[1]]));
+        if length == 0 || length > MAX_FRAME {
+            return Err(io::Error::other("frame bound"));
+        }
+        if self.input.len() < length + 2 {
+            return Ok(None);
+        }
+        let frame = frame_decode(&self.input[..length + 2])
+            .map_err(|_| io::Error::other("frame"))?
+            .to_vec();
+        self.input.drain(..length + 2);
+        if frame.len() < 16 {
             return Err(io::Error::other("short reply"));
         }
-        let mut plaintext = vec![0; ciphertext.len() - 16];
-        self.receive
-            .decrypt(&ciphertext, &mut plaintext)
-            .map_err(|_| io::Error::other("reply auth"))?;
-        RemoteMessage::decode(&plaintext).map_err(|_| io::Error::other("reply"))
+        let mut plaintext = vec![0; frame.len() - 16];
+        self.receive.decrypt(&frame, &mut plaintext).map_err(|_| io::Error::other("reply auth"))?;
+        RemoteMessage::decode(&plaintext).map(Some).map_err(|_| io::Error::other("reply"))
     }
 }
 

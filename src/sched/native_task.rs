@@ -576,6 +576,10 @@ impl<'a> Scheduler<'a> {
         Some(self.entry(handle)?.task.store_endpoint())
     }
 
+    pub fn remote_endpoint(&self, handle: Handle) -> Option<RemoteEndpoint> {
+        Some(self.entry(handle)?.task.remote_endpoint())
+    }
+
     pub fn block_endpoint(&self, handle: Handle) -> Option<BlockEndpoint> {
         Some(self.entry(handle)?.task.block_endpoint())
     }
