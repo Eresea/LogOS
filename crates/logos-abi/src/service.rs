@@ -1973,7 +1973,7 @@ impl ControlPage {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
-        context.slot0 = reply.result as u32;
+        context.slot1 = reply.result as u32;
         context.payload = [0; MAX_TEXT];
         context.payload[..reply.length as usize]
             .copy_from_slice(&reply.text[..reply.length as usize]);
@@ -2136,6 +2136,11 @@ extern "C" fn self_check_entry(_: *mut ControlPage) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abi_self_check_covers_header_and_session_payload() {
+        assert!(self_check());
+    }
 
     #[test]
     fn persistence_replies_round_trip_and_match_ids() {
