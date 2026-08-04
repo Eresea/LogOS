@@ -32,12 +32,16 @@ pub fn install(
     true
 }
 
-pub fn present(context: u64) -> bool {
-    let Some((x, y, color)) =
-        (unsafe { logos_core::native_service::ControlPage::pixel_at(context) })
+pub fn present(page: u64, generation: u32) -> bool {
+    let Some(request) =
+        (unsafe { logos_core::native_service::DisplayPage::request_at(page, generation) })
     else {
         return false;
     };
+    if request.operation != logos_abi::service::PRESENT_PIXEL {
+        return false;
+    }
+    let (x, y, color) = (request.x, request.y, request.color);
     let (x, y) = (x as usize, y as usize);
     let Some(offset) = y
         .checked_mul(STRIDE.load(Ordering::Acquire))
@@ -64,15 +68,19 @@ pub fn present(context: u64) -> bool {
         pixel.add(2).write_volatile(color[2]);
         pixel.add(3).write_volatile(0);
     }
-    true
+    unsafe { logos_core::native_service::DisplayPage::complete_at(page, generation) }
 }
 
-pub fn present_text(context: u64) -> bool {
-    let Some(request) = (unsafe { logos_core::native_service::ControlPage::text_at(context) })
+pub fn present_text(page: u64, generation: u32) -> bool {
+    let Some(request) =
+        (unsafe { logos_core::native_service::DisplayPage::request_at(page, generation) })
     else {
         return false;
     };
-    request.text[..request.length].iter().enumerate().all(|(index, &byte)| {
+    if request.operation != logos_abi::service::PRESENT_TEXT {
+        return false;
+    }
+    let rendered = request.text[..request.length].iter().enumerate().all(|(index, &byte)| {
         let Some(x) = usize::try_from(request.x).ok().and_then(|x| x.checked_add(index * 8)) else {
             return false;
         };
@@ -85,11 +93,17 @@ pub fn present_text(context: u64) -> bool {
                     || write_pixel(x + column, y + row, request.color.rgb())
             })
         })
-    })
+    });
+    rendered && unsafe { logos_core::native_service::DisplayPage::complete_at(page, generation) }
 }
 
-pub fn clear(context: u64) -> bool {
-    if !unsafe { logos_core::native_service::ControlPage::clear_at(context) } {
+pub fn clear(page: u64, generation: u32) -> bool {
+    let Some(request) =
+        (unsafe { logos_core::native_service::DisplayPage::request_at(page, generation) })
+    else {
+        return false;
+    };
+    if request.operation != logos_abi::service::CLEAR_DISPLAY {
         return false;
     }
     let framebuffer = FRAMEBUFFER.load(Ordering::Acquire) as *mut u8;
@@ -97,11 +111,22 @@ pub fn clear(context: u64) -> bool {
         return false;
     }
     unsafe { core::ptr::write_bytes(framebuffer, 0, FRAMEBUFFER_SIZE.load(Ordering::Acquire)) };
-    true
+    unsafe { logos_core::native_service::DisplayPage::complete_at(page, generation) }
 }
 
-pub fn handle(context: u64) -> bool {
-    present(context) || present_text(context) || clear(context)
+pub fn handle(page: u64, generation: u32) -> bool {
+    let Some(operation) =
+        (unsafe { logos_core::native_service::DisplayPage::request_at(page, generation) })
+            .map(|request| request.operation)
+    else {
+        return false;
+    };
+    match operation {
+        logos_abi::service::PRESENT_PIXEL => present(page, generation),
+        logos_abi::service::PRESENT_TEXT => present_text(page, generation),
+        logos_abi::service::CLEAR_DISPLAY => clear(page, generation),
+        _ => false,
+    }
 }
 
 pub fn matches(x: usize, y: usize, color: [u8; 3]) -> bool {

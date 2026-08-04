@@ -4600,7 +4600,9 @@ fn resume_display(
     while endpoint.pending() {
         if !session.allows(capabilities, capabilities::CapabilityKind::Display)
             || !capabilities.allows(capability, capabilities::CapabilityKind::Display)
-            || !native_display::handle(endpoint.context())
+            || !endpoint
+                .page()
+                .is_some_and(|page| native_display::handle(page, endpoint.generation()))
             || !scheduler.wake(handle)
             || !scheduler.run(handle)
         {
@@ -4616,7 +4618,7 @@ fn resume_probe_display(
     handle: scheduler::TaskHandle,
 ) -> bool {
     while endpoint.pending() {
-        if !native_display::handle(endpoint.context())
+        if !endpoint.page().is_some_and(|page| native_display::handle(page, endpoint.generation()))
             || !scheduler.wake(handle)
             || !scheduler.run(handle)
         {

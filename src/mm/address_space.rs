@@ -259,6 +259,9 @@ impl AddressSpace {
             }
             if let Err(page) = self.insert_mapping(index, page) {
                 let _ = physical.release_page(page);
+                self.unmap_index(CONTEXT_PAGE, physical);
+                self.unmap_index(INPUT_PAGE, physical);
+                self.unmap_index(DISPLAY_PAGE, physical);
                 return None;
             }
         }
@@ -271,6 +274,9 @@ impl AddressSpace {
                 display_virtual,
             )
         } {
+            self.unmap_index(CONTEXT_PAGE, physical);
+            self.unmap_index(INPUT_PAGE, physical);
+            self.unmap_index(DISPLAY_PAGE, physical);
             return None;
         }
         Some(ContextMapping {
