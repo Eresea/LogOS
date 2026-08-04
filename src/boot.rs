@@ -9,7 +9,10 @@ use crate::{
 #[entry]
 fn main() -> Status {
     debug::write_line(b"LogOS: kernel entered");
+    #[cfg(not(feature = "test-hooks"))]
     let entropy = entropy::load();
+    #[cfg(feature = "test-hooks")]
+    let entropy = Some(entropy::Seed::from_bytes([9; 32]));
     entropy::announce(entropy);
     let machine = identity::load(entropy.as_ref());
     let secret_root = root_key::load(entropy.as_ref());

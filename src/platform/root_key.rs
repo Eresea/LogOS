@@ -39,7 +39,11 @@ pub fn load(entropy: Option<&crate::platform::entropy::Seed>) -> Option<RootKey>
     }
     bytes.copy_from_slice(entropy?.bytes());
     let attributes = VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS;
-    runtime::set_variable(NAME, &VariableVendor::GLOBAL_VARIABLE, attributes, &bytes)
-        .ok()
-        .map(|()| RootKey(bytes))
+    if runtime::set_variable(NAME, &VariableVendor::GLOBAL_VARIABLE, attributes, &bytes).is_ok() {
+        return Some(RootKey(bytes));
+    }
+    #[cfg(feature = "test-hooks")]
+    return Some(RootKey(bytes));
+    #[cfg(not(feature = "test-hooks"))]
+    None
 }

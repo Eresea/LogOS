@@ -150,7 +150,9 @@ fn session(address: &str, key_path: &Path, enrollment: &str) {
                 if kind == RemoteMessageKind::Invoke {
                     sequence = sequence.wrapping_add(1).max(1);
                 }
-                pending = if kind == RemoteMessageKind::Subscribe && following {
+                pending = if following
+                    && matches!(reply.kind, RemoteMessageKind::Subscribe | RemoteMessageKind::Event)
+                {
                     Some(Pending::new(wire_message(
                         RemoteMessageKind::Credit,
                         attachment,
@@ -230,9 +232,9 @@ impl Transport {
     fn connect(address: &str, secret: [u8; 32], machine: [u8; 32]) -> io::Result<Self> {
         let address =
             address.to_socket_addrs()?.next().ok_or_else(|| io::Error::other("address"))?;
-        let mut stream = TcpStream::connect(address)?;
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
         stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_read_timeout(Some(Duration::from_millis(500)))?;
         let mut ephemeral = [0; 32];
         OsRng.fill_bytes(&mut ephemeral);
         let mut builder = HandshakeStateBuilder::<X25519>::new();

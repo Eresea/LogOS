@@ -13,6 +13,7 @@ logos-service-rt = { path = "../logos-service-rt" }
 
 [features]
 test-hooks = []
+test-usernet = ["test-hooks"]
 
 [[bin]]
 name = "logos-network-service"

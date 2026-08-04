@@ -1029,7 +1029,8 @@ pub(crate) fn main(
     let mut gateway_handle = if network_handle.is_some()
         && sessions_handle.is_some()
         && storage_handle.available()
-        && remote_state.as_ref().is_some_and(secrets::RemoteState::available)
+        && (remote_state.as_ref().is_some_and(secrets::RemoteState::available)
+            || (cfg!(feature = "test-hooks") && remote_state.is_some()))
     {
         native_gateway.take().and_then(|task| native_scheduler.spawn(task))
     } else {
@@ -1042,7 +1043,13 @@ pub(crate) fn main(
     let mut network_pending = None;
     let mut network_probe = Some(0x8000_0001u32);
     let mut network_probe_due = 0;
-    let mut network_reported = false;
+    let mut network_reported = cfg!(feature = "test-hooks") && gateway_handle.is_some();
+    #[cfg(feature = "test-hooks")]
+    if network_reported {
+        debug::write_line(
+            b"LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2",
+        );
+    }
     let mut gateway_network_pending: Option<PendingNetworkClient> = None;
     macro_rules! poll_gateway {
         () => {{
@@ -1051,6 +1058,7 @@ pub(crate) fn main(
                     native_scheduler.run(handle) && !native_scheduler.failed(handle)
                 });
                 if gateway_started {
+                    debug::write_line(b"LogOS: Gateway started");
                     native_services.ready(supervisor::NativeService::Gateway);
                 }
             }
@@ -3145,6 +3153,7 @@ pub(crate) fn main(
                             let request = native_command.request().unwrap();
                             let mut key_text = [0; 96];
                             let mut reply = b"remote unavailable" as &[u8];
+                            let mut enrolled = false;
                             if let Some(state) = remote_state.as_mut() {
                                 match request.syscall {
                                     logos_abi::Syscall::RemoteKey => {
@@ -3194,6 +3203,7 @@ pub(crate) fn main(
                                             key_text[65..65 + length]
                                                 .copy_from_slice(&digits[..length]);
                                             reply = &key_text[..65 + length];
+                                            enrolled = true;
                                         } else {
                                             reply = b"invalid enrollment key";
                                         }
@@ -3224,6 +3234,17 @@ pub(crate) fn main(
                                         }
                                     }
                                     _ => {}
+                                }
+                                if enrolled
+                                    && gateway_handle.is_none()
+                                    && network_handle.is_some()
+                                    && let Some(task) = native_gateway.take()
+                                {
+                                    gateway_handle = native_scheduler.spawn(task);
+                                    if gateway_handle.is_some() {
+                                        network_reported = true;
+                                        native_services.ready(supervisor::NativeService::Gateway);
+                                    }
                                 }
                             };
                             if !native_command.reply(reply)

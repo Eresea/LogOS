@@ -13,6 +13,7 @@ impl Seed {
     }
 }
 
+#[cfg_attr(feature = "test-hooks", allow(dead_code))]
 pub fn load() -> Option<Seed> {
     let handle = boot::get_handle_for_protocol::<Rng>().ok()?;
     let mut rng = boot::open_protocol_exclusive::<Rng>(handle).ok()?;

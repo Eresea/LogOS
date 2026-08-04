@@ -296,8 +296,10 @@ name = "logos-test"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
+ "logos-remote",
  "logos-store",
  "logos-terminal",
+ "x25519-dalek",
 ]
 
 [[package]]

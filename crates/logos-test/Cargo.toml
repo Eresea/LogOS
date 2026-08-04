@@ -10,3 +10,5 @@ workspace = true
 logos-abi = { path = "../logos-abi" }
 logos-store = { path = "../logos-store" }
 logos-terminal = { path = "../logos-terminal" }
+logos-remote = { path = "../logos-remote" }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }

@@ -417,8 +417,10 @@ impl TcpState {
         if port == 0 {
             return Err(TcpStateError::Invalid);
         }
-        if self.listener.is_some() {
-            return Err(TcpStateError::AddressInUse);
+        if let Some(endpoint) = self.listener {
+            return (self.owner == owner && self.port == port)
+                .then_some(endpoint)
+                .ok_or(TcpStateError::AddressInUse);
         }
         let endpoint = EndpointId((u32::from(self.generation) << 16) | 1);
         self.owner = owner;

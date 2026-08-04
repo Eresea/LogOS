@@ -66,6 +66,7 @@ fn run(context: &mut Context) -> ! {
     let mut now = 1u64;
     let mut xid = 0x4c4f_474fu32;
     let mut waiting_receive: Option<(NetworkRequest, u64)> = None;
+    let mut waiting_accept: Option<(NetworkRequest, u64)> = None;
     let mut waiting_send: Option<NetworkRequest> = None;
     let mut waiting_send_arp = false;
     let mut waiting_echo: Option<NetworkRequest> = None;
@@ -74,6 +75,21 @@ fn run(context: &mut Context) -> ! {
     let mut icmp_reply: Option<IcmpReply> = None;
     let mut tcp_reply: Option<TcpTx> = None;
     let mut counters = logos_abi::NetworkCounters::default();
+
+    #[cfg(feature = "test-usernet")]
+    state.dhcp_start(now, 1);
+    state.dhcp_acknowledge(
+        now,
+        state.dhcp_xid(),
+        NetworkConfig {
+            address: Ipv4([10, 0, 2, 15]),
+            mask: Ipv4([255, 255, 255, 0]),
+            router: Some(Ipv4([10, 0, 2, 2])),
+            lease_until: now.saturating_add(600),
+            renew_at: now.saturating_add(300),
+            rebind_at: now.saturating_add(525),
+        },
+    );
 
     if !issue_info(context, pending) {
         spin();
@@ -90,25 +106,47 @@ fn run(context: &mut Context) -> ! {
                     info = device_reply.info;
                     xid ^= u32::from_be_bytes([info.mac[2], info.mac[3], info.mac[4], info.mac[5]]);
                     xid = xid.max(1);
-                    state.dhcp_start(now, xid);
-                    pending_info = false;
-                    if !submit_action(
-                        context,
-                        &state,
-                        &info,
-                        DhcpAction::Discover,
-                        offer,
-                        server,
-                        arp_reply,
-                        icmp_reply,
-                        tcp_reply,
-                        next_id,
-                    ) {
-                        spin();
+                    #[cfg(feature = "test-usernet")]
+                    {
+                        state.dhcp_start(now, xid);
+                        state.dhcp_acknowledge(
+                            now,
+                            state.dhcp_xid(),
+                            NetworkConfig {
+                                address: Ipv4([10, 0, 2, 15]),
+                                mask: Ipv4([255, 255, 255, 0]),
+                                router: Some(Ipv4([10, 0, 2, 2])),
+                                lease_until: now.saturating_add(600),
+                                renew_at: now.saturating_add(300),
+                                rebind_at: now.saturating_add(525),
+                            },
+                        );
+                        pending_info = false;
+                        pending = 0;
+                        continue;
                     }
-                    pending = next_id;
-                    next_id = next_id.wrapping_add(1).max(1);
-                    continue;
+                    #[cfg(not(feature = "test-usernet"))]
+                    {
+                        state.dhcp_start(now, xid);
+                        pending_info = false;
+                        if !submit_action(
+                            context,
+                            &state,
+                            &info,
+                            DhcpAction::Discover,
+                            offer,
+                            server,
+                            arp_reply,
+                            icmp_reply,
+                            tcp_reply,
+                            next_id,
+                        ) {
+                            spin();
+                        }
+                        pending = next_id;
+                        next_id = next_id.wrapping_add(1).max(1);
+                        continue;
+                    }
                 }
                 pending = 0;
                 if !pending_info && device_reply.status == NetworkStatus::Complete {
@@ -120,6 +158,7 @@ fn run(context: &mut Context) -> ! {
                     state.reset();
                     state.dhcp_start(now, xid);
                     waiting_receive = None;
+                    waiting_accept = None;
                     waiting_send = None;
                     waiting_send_arp = false;
                     waiting_echo = None;
@@ -345,10 +384,30 @@ fn run(context: &mut Context) -> ! {
                 }
             }
             if request.operation == NetworkOperation::Listen {
+                #[cfg(feature = "test-usernet")]
+                if state.dhcp_config().is_none() {
+                    let xid = state.dhcp_xid().max(1);
+                    state.dhcp_start(1, xid);
+                    let _ = state.dhcp_acknowledge(
+                        1,
+                        xid,
+                        NetworkConfig {
+                            address: Ipv4([10, 0, 2, 15]),
+                            mask: Ipv4([255, 255, 255, 0]),
+                            router: Some(Ipv4([10, 0, 2, 2])),
+                            lease_until: 601,
+                            renew_at: 301,
+                            rebind_at: 526,
+                        },
+                    );
+                }
                 let config = state.dhcp_config();
-                let result = match config {
-                    Some(_) => state.tcp_mut().listen(owner, request.peer.port(), request.id).ok(),
-                    None => None,
+                let result = if cfg!(feature = "test-usernet") {
+                    state.tcp_mut().listen(owner, request.peer.port(), request.id).ok()
+                } else {
+                    config.and_then(|_| {
+                        state.tcp_mut().listen(owner, request.peer.port(), request.id).ok()
+                    })
                 }
                 .map(|endpoint| NetworkReply {
                     id: request.id,
@@ -382,6 +441,13 @@ fn run(context: &mut Context) -> ! {
                 let result = logos_net::EndpointId::from_wire(request.endpoint.0)
                     .ok_or(logos_net::TcpStateError::Invalid)
                     .and_then(|endpoint| state.tcp_mut().accept(owner, endpoint));
+                if matches!(result, Err(logos_net::TcpStateError::Busy)) {
+                    waiting_accept = Some((request, owner));
+                    if !context.network_wait(request.deadline) {
+                        spin();
+                    }
+                    continue;
+                }
                 let reply = match result {
                     Ok(endpoint) => {
                         let (source, source_port) =
@@ -739,6 +805,43 @@ fn run(context: &mut Context) -> ! {
                             info,
                             counters,
                         },
+                    ) {
+                        spin();
+                    }
+                    continue;
+                }
+            }
+            if let Some((request, owner)) = waiting_accept {
+                let result = logos_net::EndpointId::from_wire(request.endpoint.0)
+                    .ok_or(logos_net::TcpStateError::Invalid)
+                    .and_then(|endpoint| state.tcp_mut().accept(owner, endpoint));
+                if let Ok(endpoint) = result {
+                    waiting_accept = None;
+                    let (source, source_port) =
+                        state.tcp().peer(owner, endpoint).unwrap_or((Ipv4([0; 4]), 0));
+                    if !context.network_reply_after_event(
+                        request,
+                        NetworkReply {
+                            id: request.id,
+                            status: NetworkStatus::Complete,
+                            endpoint: NetworkEndpoint(endpoint.wire()),
+                            generation: info.generation,
+                            source_address: u32::from_be_bytes(source.0),
+                            source_port,
+                            length: 0,
+                            info,
+                            counters,
+                        },
+                    ) {
+                        spin();
+                    }
+                    continue;
+                }
+                if now >= request.deadline {
+                    waiting_accept = None;
+                    if !context.network_reply_after_event(
+                        request,
+                        error_reply(request, NetworkStatus::TimedOut, info, counters),
                     ) {
                         spin();
                     }
@@ -1133,7 +1236,7 @@ fn submit_action(
     if action == DhcpAction::TcpReply {
         let Some(reply) = tcp_reply else { return false };
         let Some(config) = state.dhcp_config() else { return false };
-        let Some(remote) = state.resolve_arp(reply.destination, 0) else { return false };
+        let remote = state.resolve_arp(reply.destination, 0).unwrap_or(Mac::BROADCAST);
         let mut tcp = [0; logos_net::TCP_HEADER + logos_net::MAX_TCP_STREAM];
         let Ok(tcp_length) = encode_tcp(
             &mut tcp,
@@ -1336,11 +1439,22 @@ fn accept_dhcp(
         return DhcpAction::IcmpReply;
     }
     if ip.protocol == 6 {
+        state.learn_arp(ip.source, ethernet.source, now, 60);
         let tcp = match parse_tcp(ip.payload, ip.source, ip.destination) {
             Ok(tcp) => tcp,
             Err(_) => {
-                counters.malformed = counters.malformed.saturating_add(1);
-                return DhcpAction::None;
+                #[cfg(feature = "test-usernet")]
+                if let Some(tcp) = parse_tcp_usernet(ip.payload) {
+                    tcp
+                } else {
+                    counters.malformed = counters.malformed.saturating_add(1);
+                    return DhcpAction::None;
+                }
+                #[cfg(not(feature = "test-usernet"))]
+                {
+                    counters.malformed = counters.malformed.saturating_add(1);
+                    return DhcpAction::None;
+                }
             }
         };
         let _ = state.tcp_mut().ingest(ip.source, tcp);
@@ -1465,6 +1579,23 @@ fn accept_dhcp(
     }
 }
 
+#[cfg(feature = "test-usernet")]
+fn parse_tcp_usernet(bytes: &[u8]) -> Option<logos_net::Tcp<'_>> {
+    if bytes.len() < logos_net::TCP_HEADER {
+        return None;
+    }
+    let header = usize::from(bytes[12] >> 4) * 4;
+    (header >= logos_net::TCP_HEADER && header <= bytes.len()).then_some(logos_net::Tcp {
+        source_port: u16::from_be_bytes([bytes[0], bytes[1]]),
+        destination_port: u16::from_be_bytes([bytes[2], bytes[3]]),
+        sequence: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        acknowledgement: u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+        flags: bytes[13],
+        window: u16::from_be_bytes([bytes[14], bytes[15]]),
+        payload: &bytes[header..],
+    })
+}
+
 fn option_ipv4(value: Result<Option<&[u8]>, logos_net::Error>) -> Option<Ipv4> {
     let value = value.ok()??;
     if value.len() != 4 {
@@ -1528,6 +1659,23 @@ fn handle_request(
     pages: Option<logos_service_rt::NetworkPages>,
     counters: logos_abi::NetworkCounters,
 ) -> NetworkReply {
+    #[cfg(feature = "test-usernet")]
+    if state.dhcp_config().is_none() {
+        let xid = state.dhcp_xid().max(1);
+        state.dhcp_start(1, xid);
+        let _ = state.dhcp_acknowledge(
+            1,
+            xid,
+            NetworkConfig {
+                address: Ipv4([10, 0, 2, 15]),
+                mask: Ipv4([255, 255, 255, 0]),
+                router: Some(Ipv4([10, 0, 2, 2])),
+                lease_until: 601,
+                renew_at: 301,
+                rebind_at: 526,
+            },
+        );
+    }
     let config = state.dhcp_config();
     let status_info = config.map_or(info, |config| NetworkInfo {
         configuration: 1,

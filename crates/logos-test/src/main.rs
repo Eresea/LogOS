@@ -225,14 +225,14 @@ const SCENARIOS: &[Scenario] = &[
     configured("network/packet-loss", "network", &[], Fixture::Fresh),
     configured("network/timeout", "network", &[], Fixture::Fresh),
     configured("network/reset-reconnect", "network", &[], Fixture::Fresh),
-    scenario("network/tcp-stream", "remote", Fixture::Fresh),
-    scenario("remote/enrollment-persistence", "remote", Fixture::Persistence),
-    scenario("remote/auth-denied", "remote", Fixture::Fresh),
-    scenario("remote/typed-invoke", "remote", Fixture::Fresh),
-    scenario("remote/reconnect-replay", "remote", Fixture::Persistence),
-    scenario("remote/pending-after-reset", "remote", Fixture::Persistence),
-    scenario("remote/gateway-restart", "remote", Fixture::Fresh),
-    scenario("remote/protected-state-corrupt", "remote", Fixture::Persistence),
+    configured("network/tcp-stream", "remote", &[], Fixture::Fresh),
+    configured("remote/enrollment-persistence", "remote", &[], Fixture::Persistence),
+    configured("remote/auth-denied", "remote", &[], Fixture::Fresh),
+    configured("remote/typed-invoke", "remote", &[], Fixture::Fresh),
+    configured("remote/reconnect-replay", "remote", &[], Fixture::Persistence),
+    configured("remote/pending-after-reset", "remote", &[], Fixture::Persistence),
+    configured("remote/gateway-restart", "remote", &[], Fixture::Fresh),
+    configured("remote/protected-state-corrupt", "remote", &[], Fixture::Persistence),
 ];
 
 const fn scenario(id: &'static str, suite: &'static str, fixture: Fixture) -> Scenario {
@@ -355,6 +355,7 @@ struct ImageProfile {
     gateway: Option<PathBuf>,
     incompatible_sessions: bool,
     block_probe: bool,
+    logosctl: PathBuf,
 }
 
 impl ImageProfile {
@@ -604,6 +605,8 @@ struct Harness {
     serial: String,
     deadline: Instant,
     network_peer: Option<NetworkPeer>,
+    remote_port: u16,
+    logosctl: PathBuf,
 }
 
 impl Harness {
@@ -676,6 +679,7 @@ impl Harness {
         listener.set_nonblocking(true).map_err(io_error)?;
         let port = listener.local_addr().map_err(io_error)?.port();
         let qmp_port = free_port()?;
+        let remote_port = free_port()?;
         let boot_id = BOOT_ID.fetch_add(1, Ordering::Relaxed);
         let debug_log = fixture_dir.join(format!("debug-{boot_id}.log"));
         let qmp_log = fixture_dir.join(format!("qmp-{boot_id}.log"));
@@ -683,7 +687,7 @@ impl Harness {
         fs::File::create(&qmp_log).map_err(io_error)?;
         let stderr = fs::File::create(&stderr_log).map_err(io_error)?;
         let netdev = network_peer.as_ref().map_or_else(
-            || "user,id=logos-net,net=10.0.2.0/24,dhcpstart=10.0.2.15".to_string(),
+            || format!("user,id=logos-net,net=10.0.2.0/24,dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:{remote_port}-:7443"),
             |peer| {
                 format!(
                     "dgram,id=logos-net,local.type=inet,local.host=127.0.0.1,local.port={},remote.type=inet,remote.host=127.0.0.1,remote.port={}",
@@ -757,6 +761,8 @@ impl Harness {
             serial: String::new(),
             deadline,
             network_peer,
+            remote_port,
+            logosctl: profile.logosctl.clone(),
         };
         let report = harness.wait_boot_report()?;
         let expected_storage =
@@ -789,14 +795,80 @@ impl Harness {
             self.send(&format!("LOGOS/1 INPUT {command}\n"))?;
             self.wait("LOGOS/1 RESULT input=accepted")?;
         }
+        if scenario.suite == "remote" {
+            self.run_remote(scenario.id)?;
+        }
         self.run_id(scenario.id)
+    }
+
+    fn run_remote(&mut self, id: &str) -> Result<(), String> {
+        let client_secret = if id == "remote/auth-denied" { [7; 32] } else { [8; 32] };
+        let enrolled_secret = [8; 32];
+        let client_public =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(enrolled_secret));
+        self.send(&format!("LOGOS/1 INPUT enroll {}\n", hex_bytes(client_public.as_bytes())))?;
+        self.wait("LOGOS/1 RESULT input=accepted")?;
+        self.wait_network_bound()?;
+        self.wait("LogOS: Gateway started")?;
+        let bootstrap = logos_remote::Bootstrap::from_root(&[9; 32], &[9; 32])
+            .map_err(|error| format!("bootstrap: {error:?}"))?;
+        let machine =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(bootstrap.device_key));
+        let fixture = self.disk.parent().ok_or("fixture path")?;
+        let key = fixture.join("logosctl.key");
+        fs::write(&key, hex_bytes(&client_secret)).map_err(io_error)?;
+        let descriptor = format!("{}:2", hex_bytes(machine.as_bytes()));
+        let input = if id == "remote/typed-invoke" {
+            "ping\ntasks\nservices\nquit\n"
+        } else {
+            "ping\nquit\n"
+        };
+        let mut child = Command::new(&self.logosctl)
+            .args([
+                "session",
+                &format!("127.0.0.1:{}", self.remote_port),
+                key.to_str().ok_or("key path")?,
+                &descriptor,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(io_error)?;
+        child
+            .stdin
+            .as_mut()
+            .ok_or("logosctl stdin")?
+            .write_all(input.as_bytes())
+            .map_err(io_error)?;
+        while child.try_wait().map_err(io_error)?.is_none() {
+            if Instant::now() >= self.deadline {
+                let _ = child.kill();
+                break;
+            }
+            self.send("LOGOS/1 ADVANCE 64\n")?;
+            let _ = self.wait("LOGOS/1 RESULT advance=accepted");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().map_err(io_error)?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let passed = if id == "remote/auth-denied" {
+            !output.status.success()
+        } else {
+            output.status.success() && stdout.contains("pong")
+        };
+        passed.then_some(()).ok_or_else(|| {
+            format!(
+                "logosctl failed: stdout={} stderr={}",
+                stdout,
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
     }
 
     fn run_id(&mut self, id: &str) -> Result<(), String> {
         if id.starts_with("network/") {
-            self.wait_debug(
-                "LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2",
-            )?;
+            self.wait_network_bound()?;
         }
         self.send(&format!("LOGOS/1 RUN {id}\n"))?;
         self.wait(&format!("LOGOS/1 RESULT scenario={id} status=passed"))
@@ -850,7 +922,8 @@ impl Harness {
         Ok(())
     }
 
-    fn wait_debug(&mut self, expected: &str) -> Result<(), String> {
+    fn wait_network_bound(&mut self) -> Result<(), String> {
+        let expected = "LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2";
         while Instant::now() < self.deadline {
             if fs::read_to_string(&self.debug_log)
                 .map_err(io_error)?
@@ -859,7 +932,8 @@ impl Harness {
             {
                 return Ok(());
             }
-            std::thread::sleep(Duration::from_millis(20));
+            self.send("LOGOS/1 ADVANCE 64\n")?;
+            let _ = self.wait("LOGOS/1 RESULT advance=accepted");
         }
         Err(format!("timeout waiting for {expected}"))
     }
@@ -1085,7 +1159,13 @@ fn run_one(id: &str) -> i32 {
             return 1;
         }
     };
-    let profile = if scenario.fixture == Fixture::Persistence {
+    let profile = if scenario.suite == "remote" {
+        if scenario.fixture == Fixture::Persistence {
+            &profiles.remote_persistence
+        } else {
+            &profiles.remote
+        }
+    } else if scenario.fixture == Fixture::Persistence {
         &profiles.persistence
     } else {
         &profiles.standard
@@ -1138,9 +1218,7 @@ fn run_network_configuration(
             scenario.timeout,
             "LogOS: storage formatted",
         )?;
-        harness.wait_debug(
-            "LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2",
-        )?;
+        harness.wait_network_bound()?;
         harness.run_id(scenario.id)?;
         harness.shutdown()
     })();
@@ -1267,7 +1345,13 @@ fn run_independent_one(
     seed: u64,
     progress: &Progress,
 ) -> Vec<ResultRecord> {
-    let profile = if item.fixture == Fixture::Persistence {
+    let profile = if item.suite == "remote" {
+        if item.fixture == Fixture::Persistence {
+            &profiles.remote_persistence
+        } else {
+            &profiles.remote
+        }
+    } else if item.fixture == Fixture::Persistence {
         &profiles.persistence
     } else {
         &profiles.standard
@@ -1707,26 +1791,44 @@ fn run_fixture(
 struct Profiles {
     standard: ImageProfile,
     persistence: ImageProfile,
+    remote: ImageProfile,
+    remote_persistence: ImageProfile,
 }
 
 fn build_profiles(root: &Path, run_dir: &Path, persistence: bool) -> Result<Profiles, String> {
     let profiles_dir = run_dir.join("profiles");
     fs::create_dir_all(&profiles_dir).map_err(io_error)?;
-    let standard = build_profile(root, &profiles_dir.join("standard"), false)?;
+    let standard = build_profile(root, &profiles_dir.join("standard"), false, false)?;
     let persistence_profile = if persistence {
-        build_profile(root, &profiles_dir.join("persistence"), true)?
+        build_profile(root, &profiles_dir.join("persistence"), true, false)?
     } else {
         standard.clone()
     };
-    Ok(Profiles { standard, persistence: persistence_profile })
+    let remote = build_profile(root, &profiles_dir.join("remote"), false, true)?;
+    let remote_persistence = if persistence {
+        build_profile(root, &profiles_dir.join("remote-persistence"), true, true)?
+    } else {
+        remote.clone()
+    };
+    Ok(Profiles { standard, persistence: persistence_profile, remote, remote_persistence })
 }
 
 fn build_profile(
     root: &Path,
     destination: &Path,
     block_probe: bool,
+    usernet: bool,
 ) -> Result<ImageProfile, String> {
     fs::create_dir_all(destination).map_err(io_error)?;
+    if !Command::new("cargo")
+        .current_dir(root)
+        .args(["build", "-p", "logosctl"])
+        .status()
+        .map_err(io_error)?
+        .success()
+    {
+        return Err("logosctl build failed".into());
+    }
     let features = if block_probe { "test-hooks,block-probe" } else { "test-hooks" };
     let status = Command::new("cargo")
         .current_dir(root)
@@ -1750,19 +1852,22 @@ fn build_profile(
         "logos-network-service",
         "logos-gateway-service",
     ] {
-        let status = Command::new("cargo")
-            .current_dir(root)
-            .args([
-                "build",
-                "-p",
-                package,
-                "--target",
-                "x86_64-unknown-uefi",
-                "--features",
-                "test-hooks",
-            ])
-            .status()
-            .map_err(io_error)?;
+        let mut command = Command::new("cargo");
+        let package_features = if package == "logos-network-service" && usernet {
+            "test-hooks,test-usernet"
+        } else {
+            "test-hooks"
+        };
+        command.current_dir(root).args([
+            "build",
+            "-p",
+            package,
+            "--target",
+            "x86_64-unknown-uefi",
+            "--features",
+            package_features,
+        ]);
+        let status = command.status().map_err(io_error)?;
         if !status.success() {
             return Err(format!("{package} build failed"));
         }
@@ -1796,7 +1901,18 @@ fn build_profile(
         gateway: Some(copy("logos-gateway-service.efi")?),
         incompatible_sessions: false,
         block_probe,
+        logosctl: root.join("target/debug").join(format!("logosctl{}", env::consts::EXE_SUFFIX)),
     })
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(TABLE[(byte >> 4) as usize] as char);
+        output.push(TABLE[(byte & 0xf) as usize] as char);
+    }
+    output
 }
 
 fn write_reports(run_dir: &Path, results: &[ResultRecord]) -> Result<(), String> {
