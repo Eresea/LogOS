@@ -17,7 +17,9 @@ use logos_store::{Error as StoreError, SECTOR_SIZE, SectorBackend, Store};
 use logos_terminal::terminal::{HISTORY_BYTES, Model, Submission};
 
 mod network_peer;
+mod suites;
 use network_peer::NetworkPeer;
+use suites::Runner;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
@@ -46,6 +48,7 @@ struct Scenario {
     implemented: bool,
     setup: &'static [&'static str],
     fixture: Fixture,
+    runner: Runner,
 }
 
 const SCENARIOS: &[Scenario] = &[
@@ -147,19 +150,33 @@ const SCENARIOS: &[Scenario] = &[
         &["assert-network-service-fault"],
         Fixture::Fresh,
     ),
-    configured("persistence/block-read-flush", "persistence", &[], Fixture::Persistence),
-    configured(
+    configured_with_runner(
+        "persistence/block-read-flush",
+        "persistence",
+        &[],
+        Fixture::Persistence,
+        Runner::PersistenceFixture,
+    ),
+    configured_with_runner(
         "persistence/terminal-history",
         "persistence",
         &["layout azerty", "layout qwerty", "persistence/terminal-history"],
         Fixture::Persistence,
+        Runner::PersistenceTerminalHistory,
     ),
-    configured("persistence/block-timeout-reset", "persistence", &[], Fixture::Persistence),
-    configured(
+    configured_with_runner(
+        "persistence/block-timeout-reset",
+        "persistence",
+        &[],
+        Fixture::Persistence,
+        Runner::PersistenceTimeoutReset,
+    ),
+    configured_with_runner(
         "persistence/capability-denied",
         "persistence",
         &["persistence/capability-denied"],
         Fixture::Persistence,
+        Runner::PersistenceCapabilityDenied,
     ),
     scenario("console/recovery-handoff", "console", Fixture::Fresh),
     scenario("platform/manifest-valid", "platform", Fixture::Fresh),
@@ -212,12 +229,18 @@ const SCENARIOS: &[Scenario] = &[
         ],
         Fixture::Shared,
     ),
-    persistence_scenario("persistence/write-interruption"),
-    persistence_scenario("persistence/recovery"),
-    persistence_scenario("persistence/corruption-detected"),
+    persistence_scenario("persistence/write-interruption", Runner::PersistenceWriteInterruption),
+    persistence_scenario("persistence/recovery", Runner::PersistenceRecovery),
+    persistence_scenario("persistence/corruption-detected", Runner::PersistenceCorruption),
     configured("network/transport-dhcp", "network", &[], Fixture::Fresh),
     configured("network/device-bind", "network", &[], Fixture::Fresh),
-    configured("network/configuration", "network", &[], Fixture::Fresh),
+    configured_with_runner(
+        "network/configuration",
+        "network",
+        &[],
+        Fixture::Fresh,
+        Runner::NetworkConfiguration,
+    ),
     configured("network/unauthorized-operation", "network", &[], Fixture::Fresh),
     configured("network/icmp-echo", "network", &[], Fixture::Fresh),
     configured("network/udp-round-trip", "network", &[], Fixture::Fresh),
@@ -227,8 +250,20 @@ const SCENARIOS: &[Scenario] = &[
     configured("network/reset-reconnect", "network", &[], Fixture::Fresh),
     configured("network/tcp-stream", "remote", &[], Fixture::Fresh),
     configured("remote/enrollment-persistence", "remote", &[], Fixture::Persistence),
-    configured("remote/auth-denied", "remote", &[], Fixture::Fresh),
-    configured("remote/typed-invoke", "remote", &[], Fixture::Fresh),
+    configured_with_runner(
+        "remote/auth-denied",
+        "remote",
+        &[],
+        Fixture::Fresh,
+        Runner::RemoteAuthDenied,
+    ),
+    configured_with_runner(
+        "remote/typed-invoke",
+        "remote",
+        &[],
+        Fixture::Fresh,
+        Runner::RemoteTypedInvoke,
+    ),
     configured("remote/reconnect-replay", "remote", &[], Fixture::Persistence),
     configured("remote/pending-after-reset", "remote", &[], Fixture::Persistence),
     configured("remote/gateway-restart", "remote", &[], Fixture::Fresh),
@@ -245,14 +280,32 @@ const fn configured(
     setup: &'static [&'static str],
     fixture: Fixture,
 ) -> Scenario {
-    Scenario { id, suite, timeout: 20, implemented: true, setup, fixture }
+    configured_with_runner(id, suite, setup, fixture, Runner::Default)
+}
+
+const fn configured_with_runner(
+    id: &'static str,
+    suite: &'static str,
+    setup: &'static [&'static str],
+    fixture: Fixture,
+    runner: Runner,
+) -> Scenario {
+    Scenario { id, suite, timeout: 20, implemented: true, setup, fixture, runner }
 }
 
 const fn future(id: &'static str, suite: &'static str, fixture: Fixture) -> Scenario {
-    Scenario { id, suite, timeout: 20, implemented: false, setup: &[], fixture }
+    Scenario {
+        id,
+        suite,
+        timeout: 20,
+        implemented: false,
+        setup: &[],
+        fixture,
+        runner: Runner::Default,
+    }
 }
 
-const fn persistence_scenario(id: &'static str) -> Scenario {
+const fn persistence_scenario(id: &'static str, runner: Runner) -> Scenario {
     Scenario {
         id,
         suite: "persistence",
@@ -260,6 +313,7 @@ const fn persistence_scenario(id: &'static str) -> Scenario {
         implemented: true,
         setup: &[],
         fixture: Fixture::Persistence,
+        runner,
     }
 }
 
@@ -796,13 +850,14 @@ impl Harness {
             self.wait("LOGOS/1 RESULT input=accepted")?;
         }
         if scenario.suite == "remote" {
-            self.run_remote(scenario.id)?;
+            self.run_remote(scenario)?;
         }
         self.run_id(scenario.id)
     }
 
-    fn run_remote(&mut self, id: &str) -> Result<(), String> {
-        let client_secret = if id == "remote/auth-denied" { [7; 32] } else { [8; 32] };
+    fn run_remote(&mut self, scenario: Scenario) -> Result<(), String> {
+        let client_secret =
+            if matches!(scenario.runner, Runner::RemoteAuthDenied) { [7; 32] } else { [8; 32] };
         let enrolled_secret = [8; 32];
         let client_public =
             x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(enrolled_secret));
@@ -818,7 +873,7 @@ impl Harness {
         let key = fixture.join("logosctl.key");
         fs::write(&key, hex_bytes(&client_secret)).map_err(io_error)?;
         let descriptor = format!("{}:2", hex_bytes(machine.as_bytes()));
-        let input = if id == "remote/typed-invoke" {
+        let input = if matches!(scenario.runner, Runner::RemoteTypedInvoke) {
             "ping\ntasks\nservices\nquit\n"
         } else {
             "ping\nquit\n"
@@ -852,7 +907,7 @@ impl Harness {
         }
         let output = child.wait_with_output().map_err(io_error)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let passed = if id == "remote/auth-denied" {
+        let passed = if matches!(scenario.runner, Runner::RemoteAuthDenied) {
             !output.status.success()
         } else {
             output.status.success() && stdout.contains("pong")
@@ -1170,7 +1225,7 @@ fn run_one(id: &str) -> i32 {
     } else {
         &profiles.standard
     };
-    if scenario.id == "network/configuration" {
+    if matches!(scenario.runner, Runner::NetworkConfiguration) {
         progress.start(scenario.id);
         let result = run_network_configuration(&run_dir, profile, scenario, seed);
         progress.record(&result);
@@ -1180,7 +1235,16 @@ fn run_one(id: &str) -> i32 {
         return report(&result);
     }
     let mut results = Vec::new();
-    if scenario.fixture == Fixture::Persistence {
+    if matches!(
+        scenario.runner,
+        Runner::PersistenceWriteInterruption
+            | Runner::PersistenceRecovery
+            | Runner::PersistenceCorruption
+            | Runner::PersistenceFixture
+            | Runner::PersistenceTimeoutReset
+            | Runner::PersistenceTerminalHistory
+            | Runner::PersistenceCapabilityDenied
+    ) {
         results.push(run_persistence_proof(&root, &run_dir, profile, scenario, seed, &progress));
     } else {
         results.extend(run_fixture(
@@ -1243,10 +1307,10 @@ fn run_persistence_proof(
 ) -> ResultRecord {
     let started = Instant::now();
     progress.start(scenario.id);
-    let result = match scenario.id {
-        "persistence/write-interruption" => run_write_interruption(run_dir, profile, scenario),
-        "persistence/recovery" => run_recovery(run_dir, profile, scenario),
-        "persistence/corruption-detected" => run_corruption(run_dir, profile, scenario),
+    let result = match scenario.runner {
+        Runner::PersistenceWriteInterruption => run_write_interruption(run_dir, profile, scenario),
+        Runner::PersistenceRecovery => run_recovery(run_dir, profile, scenario),
+        Runner::PersistenceCorruption => run_corruption(run_dir, profile, scenario),
         _ => {
             let mut results = Vec::new();
             run_persistence_fixture(root, run_dir, profile, scenario, 0, &mut results);
@@ -1577,12 +1641,12 @@ fn run_persistence_fixture(
             scenario.timeout,
             "LogOS: storage formatted",
         )?;
-        let first_outcome = if scenario.id == "persistence/block-timeout-reset" {
+        let first_outcome = if matches!(scenario.runner, Runner::PersistenceTimeoutReset) {
             first.run_input(scenario.id)
         } else {
             first.run(scenario)
         };
-        if scenario.id == "persistence/terminal-history" {
+        if matches!(scenario.runner, Runner::PersistenceTerminalHistory) {
             first.shutdown()?;
             validate_terminal_history(&fixture_dir.join("store.raw"))?;
             let host = host_recovery(&fixture_dir.join("store.raw"))?;
@@ -1602,8 +1666,8 @@ fn run_persistence_fixture(
             });
         }
         if matches!(
-            scenario.id,
-            "persistence/block-timeout-reset" | "persistence/capability-denied"
+            scenario.runner,
+            Runner::PersistenceTimeoutReset | Runner::PersistenceCapabilityDenied
         ) {
             let shutdown = first.shutdown();
             let failure = first_outcome.err().or_else(|| shutdown.err());
