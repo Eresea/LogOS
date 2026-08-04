@@ -7,6 +7,17 @@ use crate::{
 
 const TASKS: usize = 5;
 
+#[derive(Clone, Copy, Default)]
+pub struct EndpointPages {
+    pub input: bool,
+    pub display: bool,
+}
+
+impl EndpointPages {
+    pub const NONE: Self = Self { input: false, display: false };
+    pub const TERMINAL: Self = Self { input: true, display: true };
+}
+
 pub struct Task<'a> {
     privilege: &'a Privilege,
     payload: Payload,
@@ -14,6 +25,10 @@ pub struct Task<'a> {
     entry: u64,
     context_physical: u64,
     context: u64,
+    input_page_physical: Option<u64>,
+    display_page_physical: Option<u64>,
+    endpoint_pages: EndpointPages,
+    generation: u32,
     started: bool,
     event: Event,
     complete: bool,
@@ -23,21 +38,22 @@ pub struct Task<'a> {
 #[derive(Clone, Copy)]
 pub struct InputEndpoint {
     context_physical: u64,
+    page_physical: Option<u64>,
+    generation: u32,
 }
 
 impl InputEndpoint {
     pub fn deliver(self, input: logos_abi::InputEvent) -> bool {
-        unsafe {
-            logos_core::native_service::ControlPage::deliver_input_at(
-                self.context_physical,
-                input.byte(),
-            )
-        }
+        self.page_physical.is_some_and(|page| unsafe {
+            logos_core::native_service::InputPage::deliver_at(page, self.generation, input.byte())
+        })
     }
 
     #[cfg(feature = "test-hooks")]
     pub fn deliver_raw(self, input: u8) -> bool {
-        unsafe { logos_abi::service::ControlPage::deliver_input_at(self.context_physical, input) }
+        self.page_physical.is_some_and(|page| unsafe {
+            logos_abi::service::InputPage::deliver_at(page, self.generation, input)
+        })
     }
 }
 
@@ -92,17 +108,27 @@ pub struct SessionEndpoint {
 #[derive(Clone, Copy)]
 pub struct DisplayEndpoint {
     context_physical: u64,
+    page_physical: Option<u64>,
+    generation: u32,
 }
 
 impl DisplayEndpoint {
     pub fn pending(self) -> bool {
-        unsafe {
-            logos_core::native_service::ControlPage::display_waiting_at(self.context_physical)
-        }
+        self.page_physical.is_some_and(|page| unsafe {
+            logos_core::native_service::DisplayPage::pending_at(page, self.generation)
+        })
     }
 
     pub const fn context(self) -> u64 {
         self.context_physical
+    }
+
+    pub const fn page(self) -> Option<u64> {
+        self.page_physical
+    }
+
+    pub const fn generation(self) -> u32 {
+        self.generation
     }
 }
 
@@ -376,16 +402,19 @@ impl<'a> Task<'a> {
         memory: &mut PhysicalMemory,
         payload: Payload,
         privilege: &'a Privilege,
+        endpoint_pages: EndpointPages,
     ) -> Option<Self> {
         let mut space = AddressSpace::new(memory)?;
         let Some(entry) = space.map_image(memory, payload) else {
             let _ = space.release(memory);
             return None;
         };
-        let Some((context_physical, context)) = space.map_context(memory) else {
+        let Some(mapping) = space.map_context(memory, endpoint_pages.input, endpoint_pages.display)
+        else {
             let _ = space.release(memory);
             return None;
         };
+        let (context_physical, context) = mapping.context;
         Some(Self {
             privilege,
             payload,
@@ -393,6 +422,10 @@ impl<'a> Task<'a> {
             entry,
             context_physical,
             context,
+            input_page_physical: mapping.input.map(|(physical, _)| physical),
+            display_page_physical: mapping.display.map(|(physical, _)| physical),
+            endpoint_pages,
+            generation: 1,
             started: false,
             event: Event::INPUT,
             complete: false,
@@ -407,16 +440,48 @@ impl<'a> Task<'a> {
         self.advance(state)
     }
 
-    pub const fn input_endpoint(&self) -> InputEndpoint {
-        InputEndpoint { context_physical: self.context_physical }
+    pub fn input_endpoint(&self) -> Option<InputEndpoint> {
+        self.input_page_physical.map(|page_physical| InputEndpoint {
+            context_physical: self.context_physical,
+            page_physical: Some(page_physical),
+            generation: self.generation,
+        })
     }
 
     pub const fn syscall_endpoint(&self) -> SyscallEndpoint {
         SyscallEndpoint { context_physical: self.context_physical }
     }
 
-    pub const fn display_endpoint(&self) -> DisplayEndpoint {
-        DisplayEndpoint { context_physical: self.context_physical }
+    pub fn display_endpoint(&self) -> Option<DisplayEndpoint> {
+        self.display_page_physical.map(|page_physical| DisplayEndpoint {
+            context_physical: self.context_physical,
+            page_physical: Some(page_physical),
+            generation: self.generation,
+        })
+    }
+
+    pub fn set_generation(&mut self, generation: u16) -> bool {
+        let generation = u32::from(generation.max(1));
+        if !unsafe {
+            logos_core::native_service::ControlPage::set_generation_at(
+                self.context_physical,
+                generation,
+            )
+        } {
+            return false;
+        }
+        if let Some(page) = self.input_page_physical {
+            if !unsafe { logos_core::native_service::InputPage::reset_at(page, generation) } {
+                return false;
+            }
+        }
+        if let Some(page) = self.display_page_physical {
+            if !unsafe { logos_core::native_service::DisplayPage::reset_at(page, generation) } {
+                return false;
+            }
+        }
+        self.generation = generation;
+        true
     }
 
     pub const fn session_endpoint(&self) -> SessionEndpoint {
@@ -568,10 +633,13 @@ impl<'a> Scheduler<'a> {
         Self { tasks: [const { None }; TASKS], generations: [1; TASKS], next: 0 }
     }
 
-    pub fn spawn(&mut self, task: Task<'a>) -> Option<Handle> {
+    pub fn spawn(&mut self, mut task: Task<'a>) -> Option<Handle> {
         for (index, slot) in self.tasks.iter_mut().enumerate() {
             if slot.is_none() {
                 let generation = self.generations[index];
+                if !task.set_generation(generation) {
+                    return None;
+                }
                 *slot = Some(Entry { task, waiting: None, generation });
                 return Some(Handle::new(index, generation));
             }
@@ -580,7 +648,7 @@ impl<'a> Scheduler<'a> {
     }
 
     pub fn input_endpoint(&self, handle: Handle) -> Option<InputEndpoint> {
-        Some(self.entry(handle)?.task.input_endpoint())
+        self.entry(handle)?.task.input_endpoint()
     }
 
     pub fn syscall_endpoint(&self, handle: Handle) -> Option<SyscallEndpoint> {
@@ -588,7 +656,7 @@ impl<'a> Scheduler<'a> {
     }
 
     pub fn display_endpoint(&self, handle: Handle) -> Option<DisplayEndpoint> {
-        Some(self.entry(handle)?.task.display_endpoint())
+        self.entry(handle)?.task.display_endpoint()
     }
 
     pub fn session_endpoint(&self, handle: Handle) -> Option<SessionEndpoint> {
@@ -665,19 +733,28 @@ impl<'a> Scheduler<'a> {
         if entry.waiting != Some(Event::FAILURE) {
             return None;
         }
-        let mut replacement = Task::load(memory, entry.task.payload, entry.task.privilege)?;
+        let index = handle.index();
+        let generation = self.generations[index].wrapping_add(1).max(1);
+        let mut replacement = Task::load(
+            memory,
+            entry.task.payload,
+            entry.task.privilege,
+            entry.task.endpoint_pages,
+        )?;
+        if !replacement.set_generation(generation) {
+            let _ = replacement.release(memory);
+            return None;
+        }
         if !configure(&mut replacement, memory) {
             let _ = replacement.release(memory);
             return None;
         }
-        let index = handle.index();
         let old = self.tasks[index].take()?;
+        self.generations[index] = generation;
         if !old.task.release(memory) {
             let _ = replacement.release(memory);
             return None;
         }
-        let generation = self.generations[index].wrapping_add(1).max(1);
-        self.generations[index] = generation;
         self.tasks[index] = Some(Entry { task: replacement, waiting: None, generation });
         Some(Handle::new(index, generation))
     }

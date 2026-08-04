@@ -17,6 +17,8 @@ const SHARED_PAGE: usize = ENTRIES - 5;
 const BLOCK_PAGE: usize = ENTRIES - 10;
 const NETWORK_RX_PAGE: usize = ENTRIES - 23;
 const NETWORK_TX_PAGE: usize = ENTRIES - 24;
+const DISPLAY_PAGE: usize = ENTRIES - 26;
+const INPUT_PAGE: usize = ENTRIES - 27;
 const STACK_TOP: usize = BLOCK_PAGE;
 const STACK_PAGES: usize = 12;
 const STACK_BASE: usize = STACK_TOP - STACK_PAGES;
@@ -39,6 +41,12 @@ pub struct AddressSpace {
 struct Mapping {
     index: usize,
     page: Page,
+}
+
+pub struct ContextMapping {
+    pub context: (u64, u64),
+    pub input: Option<(u64, u64)>,
+    pub display: Option<(u64, u64)>,
 }
 
 impl AddressSpace {
@@ -168,25 +176,108 @@ impl AddressSpace {
         Some(self.base)
     }
 
-    pub fn map_context(&mut self, physical: &mut PhysicalMemory) -> Option<(u64, u64)> {
-        if self.mapping(CONTEXT_PAGE).is_some() {
+    pub fn map_context(
+        &mut self,
+        physical: &mut PhysicalMemory,
+        input: bool,
+        display: bool,
+    ) -> Option<ContextMapping> {
+        if self.mapping(CONTEXT_PAGE).is_some()
+            || input && self.mapping(INPUT_PAGE).is_some()
+            || display && self.mapping(DISPLAY_PAGE).is_some()
+        {
             return None;
         }
-        let page = physical.allocate_owned()?;
+        let context = physical.allocate_owned()?;
+        let input_page = if input {
+            match physical.allocate_owned() {
+                Some(page) => Some(page),
+                None => {
+                    let _ = physical.release_page(context);
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+        let display_page = if display {
+            match physical.allocate_owned() {
+                Some(page) => Some(page),
+                None => {
+                    if let Some(page) = input_page {
+                        let _ = physical.release_page(page);
+                    }
+                    let _ = physical.release_page(context);
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+        let context_address = context.address();
+        let input_address = input_page.as_ref().map(Page::address);
+        let display_address = display_page.as_ref().map(Page::address);
+        let input_virtual = input_page.as_ref().map(|_| self.base + PAGE_SIZE * INPUT_PAGE as u64);
+        let display_virtual =
+            display_page.as_ref().map(|_| self.base + PAGE_SIZE * DISPLAY_PAGE as u64);
         unsafe {
-            ptr::write_bytes(page.address() as *mut u8, 0, PAGE_SIZE as usize);
-            (page.address() as *mut logos_core::native_service::ControlPage)
+            ptr::write_bytes(context_address as *mut u8, 0, PAGE_SIZE as usize);
+            (context_address as *mut logos_core::native_service::ControlPage)
                 .write_volatile(logos_core::native_service::ControlPage::new());
             (self.pt.address() as *mut u64)
                 .add(CONTEXT_PAGE)
-                .write_volatile(page.address() | PRESENT | WRITABLE | USER | NO_EXECUTE);
+                .write_volatile(context_address | PRESENT | WRITABLE | USER | NO_EXECUTE);
         }
-        let address = page.address();
-        if let Err(page) = self.insert_mapping(CONTEXT_PAGE, page) {
+        if let Err(page) = self.insert_mapping(CONTEXT_PAGE, context) {
             let _ = physical.release_page(page);
+            if let Some(page) = input_page {
+                let _ = physical.release_page(page);
+            }
+            if let Some(page) = display_page {
+                let _ = physical.release_page(page);
+            }
             return None;
         }
-        Some((address, self.base + PAGE_SIZE * CONTEXT_PAGE as u64))
+        for (index, page) in [
+            (input.then_some(INPUT_PAGE), input_page),
+            (display.then_some(DISPLAY_PAGE), display_page),
+        ] {
+            let (Some(index), Some(page)) = (index, page) else { continue };
+            let address = page.address();
+            unsafe {
+                ptr::write_bytes(address as *mut u8, 0, PAGE_SIZE as usize);
+                if index == INPUT_PAGE {
+                    (address as *mut logos_core::native_service::InputPage)
+                        .write_volatile(logos_core::native_service::InputPage::new(1));
+                } else {
+                    (address as *mut logos_core::native_service::DisplayPage)
+                        .write_volatile(logos_core::native_service::DisplayPage::new(1));
+                }
+                (self.pt.address() as *mut u64)
+                    .add(index)
+                    .write_volatile(address | PRESENT | WRITABLE | USER | NO_EXECUTE);
+            }
+            if let Err(page) = self.insert_mapping(index, page) {
+                let _ = physical.release_page(page);
+                return None;
+            }
+        }
+        let context_virtual = self.base + PAGE_SIZE * CONTEXT_PAGE as u64;
+        if !unsafe {
+            logos_core::native_service::ControlPage::configure_endpoint_pages_at(
+                context_address,
+                1,
+                input_virtual,
+                display_virtual,
+            )
+        } {
+            return None;
+        }
+        Some(ContextMapping {
+            context: (context_address, context_virtual),
+            input: input_address.zip(input_virtual),
+            display: display_address.zip(display_virtual),
+        })
     }
 
     pub fn map_shared_owned(&mut self, physical: &mut PhysicalMemory) -> Option<u64> {

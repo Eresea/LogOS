@@ -232,11 +232,20 @@ pub(crate) fn run(
             && shared_borrower.release(&mut memory)
             && shared_owner.release(&mut memory),
     );
-    let Some(mut terminal_task) = native_task::Task::load(&mut memory, payload, &privilege) else {
+    let Some(mut terminal_task) = native_task::Task::load(
+        &mut memory,
+        payload,
+        &privilege,
+        native_task::EndpointPages::TERMINAL,
+    ) else {
         fail!(b"native service entry");
     };
-    let terminal_input = terminal_task.input_endpoint();
-    let terminal_display = terminal_task.display_endpoint();
+    let Some(terminal_input) = terminal_task.input_endpoint() else {
+        fail!(b"native input endpoint");
+    };
+    let Some(terminal_display) = terminal_task.display_endpoint() else {
+        fail!(b"native display endpoint");
+    };
     let terminal_result = {
         let mut terminal_scheduler = scheduler::Scheduler::new();
         let terminal_handle = terminal_scheduler.spawn(&mut terminal_task);
@@ -689,24 +698,42 @@ pub(crate) fn run(
     let Some(mut virtio_service) = replacement else {
         fail!(b"service replacement");
     };
-    let Some(mut native_terminal) = native_task::Task::load(&mut memory, payload, &privilege)
-    else {
+    let Some(mut native_terminal) = native_task::Task::load(
+        &mut memory,
+        payload,
+        &privilege,
+        native_task::EndpointPages::TERMINAL,
+    ) else {
         fail!(b"native terminal task");
     };
-    let native_sessions = payloads
-        .sessions
-        .and_then(|payload| native_task::Task::load(&mut memory, payload, &privilege));
-    let mut native_storage = payloads
-        .storage
-        .and_then(|payload| native_task::Task::load(&mut memory, payload, &privilege));
+    let native_sessions = payloads.sessions.and_then(|payload| {
+        native_task::Task::load(&mut memory, payload, &privilege, native_task::EndpointPages::NONE)
+    });
+    let mut native_storage = payloads.storage.and_then(|payload| {
+        native_task::Task::load(&mut memory, payload, &privilege, native_task::EndpointPages::NONE)
+    });
     let mut native_network = payloads.network.and_then(|payload| {
         (network_device.is_some() && network_service_handle.is_some())
-            .then(|| native_task::Task::load(&mut memory, payload, &privilege))
+            .then(|| {
+                native_task::Task::load(
+                    &mut memory,
+                    payload,
+                    &privilege,
+                    native_task::EndpointPages::NONE,
+                )
+            })
             .flatten()
     });
     let mut native_gateway = payloads.gateway.and_then(|payload| {
         (gateway_service_handle.is_some() && gateway_network_session.is_some())
-            .then(|| native_task::Task::load(&mut memory, payload, &privilege))
+            .then(|| {
+                native_task::Task::load(
+                    &mut memory,
+                    payload,
+                    &privilege,
+                    native_task::EndpointPages::NONE,
+                )
+            })
             .flatten()
     });
     let terminal_spec = services::Service::Terminal.spec();
@@ -846,9 +873,13 @@ pub(crate) fn run(
     console_mode.announce();
     check!(b"trace", trace::self_check());
     check!(b"remote gate", remote::self_check());
-    let mut native_input = native_terminal.input_endpoint();
+    let Some(mut native_input) = native_terminal.input_endpoint() else {
+        fail!(b"native input endpoint");
+    };
     let mut native_command = native_terminal.syscall_endpoint();
-    let mut native_display = native_terminal.display_endpoint();
+    let Some(mut native_display) = native_terminal.display_endpoint() else {
+        fail!(b"native display endpoint");
+    };
     let mut native_sessions_endpoint =
         native_sessions.as_ref().map(native_task::Task::session_endpoint);
     #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
