@@ -42,7 +42,7 @@ ALLOWED = {
     # The boot adapter is the documented temporary exception while terminal
     # bootstrap remains statically linked.
     "logos-uefi": {"logos-abi", "logos-core", "logos-terminal", "logos-remote"},
-    "logos-test": {"logos-abi", "logos-store", "logos-terminal"},
+    "logos-test": {"logos-abi", "logos-store", "logos-terminal", "logos-remote"},
     "logosctl": {"logos-remote"},
 }
 
