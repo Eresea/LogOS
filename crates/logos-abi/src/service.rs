@@ -221,7 +221,6 @@ pub struct SessionClientPage {
     pub reply_length: u32,
     pub request: [u8; MAX_TEXT],
     pub reply: [u8; MAX_TEXT],
-    pub reserved: [u8; logos_abi::PAGE_SIZE - 544],
 }
 
 /// Sessions-owned server endpoint. It is never mapped into a client service.
@@ -240,7 +239,6 @@ pub struct SessionServerPage {
     pub reply_length: u32,
     pub request: [u8; MAX_TEXT],
     pub reply: [u8; MAX_TEXT],
-    pub reserved: [u8; logos_abi::PAGE_SIZE - 552],
 }
 
 /// Sessions-owned privileged-effect endpoint. Core alone executes requests.
@@ -257,7 +255,6 @@ pub struct EffectPage {
     pub reply_length: u32,
     pub request: [u8; MAX_TEXT],
     pub reply: [u8; MAX_TEXT],
-    pub reserved: [u8; logos_abi::PAGE_SIZE - 544],
 }
 
 /// Fixed-size Store endpoint page.
@@ -607,7 +604,6 @@ impl SessionClientPage {
             reply_length: 0,
             request: [0; MAX_TEXT],
             reply: [0; MAX_TEXT],
-            reserved: [0; logos_abi::PAGE_SIZE - 544],
         }
     }
 
@@ -682,6 +678,41 @@ impl SessionClientPage {
     }
 
     /// # Safety
+    /// Core may inspect the current request while coordinating a synchronous relay.
+    pub unsafe fn current_request_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<SessionClientRequest> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        let state = SessionPageState::from_wire(page.state)?;
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || page.request_id == 0
+            || !matches!(state, SessionPageState::Request | SessionPageState::Waiting)
+        {
+            return None;
+        }
+        let request = decode_session_request(page.operation, page.request_length, page.request)?;
+        if state == SessionPageState::Request {
+            page.state = SessionPageState::Waiting.wire();
+            unsafe { (address as *mut Self).write_volatile(page) };
+        }
+        Some(SessionClientRequest { id: page.request_id, request })
+    }
+
+    /// # Safety
+    /// Core reads only scalar state and generation fields.
+    pub unsafe fn pending_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        client_identity(&page, service_generation, endpoint_generation)
+            && SessionPageState::from_wire(page.state) == Some(SessionPageState::Request)
+    }
+
+    /// # Safety
     /// Core owns client completion.
     pub unsafe fn reply_at(
         address: u64,
@@ -740,6 +771,34 @@ impl SessionClientPage {
     }
 
     /// # Safety
+    /// Core may inspect a completed reply before waking the client service.
+    pub unsafe fn reply_at_current(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<SessionClientReply> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        let state = SessionPageState::from_wire(page.state)?;
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || page.request_id == 0
+            || !matches!(
+                state,
+                SessionPageState::Reply
+                    | SessionPageState::Denied
+                    | SessionPageState::Failed
+                    | SessionPageState::Cancelled
+            )
+        {
+            return None;
+        }
+        Some(SessionClientReply {
+            id: page.request_id,
+            status: SessionStatus::from_wire(page.reply_status)?,
+            reply: decode_session_reply(page.reply_length, page.reply)?,
+        })
+    }
+
+    /// # Safety
     /// Core may cancel only the current request.
     pub unsafe fn cancel_at(
         address: u64,
@@ -781,7 +840,6 @@ impl SessionServerPage {
             reply_length: 0,
             request: [0; MAX_TEXT],
             reply: [0; MAX_TEXT],
-            reserved: [0; logos_abi::PAGE_SIZE - 552],
         }
     }
 
@@ -940,6 +998,26 @@ impl SessionServerPage {
         unsafe { (address as *mut Self).write_volatile(page) };
         Some(SessionServerReply { id, status, reply })
     }
+
+    /// # Safety
+    /// Core reads only scalar state and generation fields.
+    pub unsafe fn reply_pending_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        server_identity(&page, service_generation, endpoint_generation)
+            && matches!(
+                SessionPageState::from_wire(page.state),
+                Some(
+                    SessionPageState::Reply
+                        | SessionPageState::Denied
+                        | SessionPageState::Failed
+                        | SessionPageState::Cancelled
+                )
+            )
+    }
 }
 
 impl EffectPage {
@@ -955,7 +1033,6 @@ impl EffectPage {
             reply_length: 0,
             request: [0; MAX_TEXT],
             reply: [0; MAX_TEXT],
-            reserved: [0; logos_abi::PAGE_SIZE - 544],
         }
     }
 
@@ -1028,6 +1105,18 @@ impl EffectPage {
     }
 
     /// # Safety
+    /// Core reads only scalar state and generation fields.
+    pub unsafe fn pending_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        effect_identity(&page, service_generation, endpoint_generation)
+            && SessionPageState::from_wire(page.state) == Some(SessionPageState::Request)
+    }
+
+    /// # Safety
     /// Core owns effect completion after authorization and execution.
     pub unsafe fn reply_at(
         address: u64,
@@ -1091,6 +1180,20 @@ impl EffectPage {
         page = Self::new(service_generation, endpoint_generation);
         unsafe { (address as *mut Self).write_volatile(page) };
         Some(EffectResponse { id, reply })
+    }
+
+    /// # Safety
+    /// Core may recover the current ID only while an effect waits for completion.
+    pub unsafe fn waiting_id_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<u32> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        (effect_identity(&page, service_generation, endpoint_generation)
+            && page.request_id != 0
+            && SessionPageState::from_wire(page.state) == Some(SessionPageState::Waiting))
+        .then_some(page.request_id)
     }
 }
 
@@ -1160,9 +1263,9 @@ fn decode_effect_request(
 const _: () = assert!(size_of::<ControlPage>() <= logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<InputPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<DisplayPage>() == logos_abi::PAGE_SIZE);
-const _: () = assert!(size_of::<SessionClientPage>() == logos_abi::PAGE_SIZE);
-const _: () = assert!(size_of::<SessionServerPage>() == logos_abi::PAGE_SIZE);
-const _: () = assert!(size_of::<EffectPage>() == logos_abi::PAGE_SIZE);
+const _: () = assert!(size_of::<SessionClientPage>() <= logos_abi::PAGE_SIZE);
+const _: () = assert!(size_of::<SessionServerPage>() <= logos_abi::PAGE_SIZE);
+const _: () = assert!(size_of::<EffectPage>() <= logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<StoreEndpointPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<BlockEndpointPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<NetworkPage>() == logos_abi::PAGE_SIZE);
@@ -1239,15 +1342,6 @@ pub struct RemoteGateReply {
     pub status: RemoteGateStatus,
     pub length: u16,
     pub cursor: u64,
-}
-
-#[derive(Clone, Copy)]
-pub struct TextRequest {
-    pub x: u32,
-    pub y: u32,
-    pub color: logos_abi::DisplayColor,
-    pub text: [u8; MAX_TEXT],
-    pub length: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1924,101 +2018,70 @@ impl ControlPage {
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn deliver_session_at(address: u64, request: logos_abi::SessionRequest) -> bool {
-        if !request.valid() {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != READ_INPUT
-            || context.status != ACKNOWLEDGED
-        {
-            return false;
-        }
-        context.slot0 = 1;
-        context.slot1 = request.syscall as u32;
-        context.payload = request.argument;
-        context.payload_length = request.length as u32;
-        context.operation = SYSCALL;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn syscall_at(address: u64) -> Option<logos_abi::SessionRequest> {
+    pub unsafe fn session_client_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
-        let length = usize::try_from(context.payload_length).ok()?;
-        let syscall = logos_abi::Syscall::from_wire(context.slot1)?;
-        let request = logos_abi::SessionRequest::new(syscall, context.payload, length);
-        (context.abi == ABI
+        context.abi == ABI
             && context.reserved == 0
             && context.operation == SYSCALL
             && context.status == ACKNOWLEDGED
-            && request.valid())
-        .then_some(request)
+            && context.session_client_page != 0
+            && unsafe {
+                SessionClientPage::pending_at(
+                    context.session_client_page,
+                    context.generation,
+                    context.generation,
+                )
+            }
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn reply_at(address: u64, reply: &[u8]) -> bool {
-        if reply.len() > MAX_TEXT || unsafe { Self::syscall_at(address) }.is_none() {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        context.payload = [0; MAX_TEXT];
-        context.payload[..reply.len()].copy_from_slice(reply);
-        context.payload_length = reply.len() as u32;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn response_at(address: u64) -> Option<TextRequest> {
+    pub unsafe fn session_server_waiting_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
-        let length = usize::try_from(context.payload_length).ok()?;
-        (context.abi == ABI
+        context.abi == ABI
             && context.reserved == 0
-            && context.operation == SYSCALL
+            && context.operation == READ_INPUT
             && context.status == ACKNOWLEDGED
-            && length <= context.payload.len())
-        .then_some(TextRequest {
-            x: 0,
-            y: 0,
-            color: logos_abi::DisplayColor::BLACK,
-            text: context.payload,
-            length,
-        })
+            && context.session_server_page != 0
+            && unsafe {
+                SessionServerPage::waiting_at(
+                    context.session_server_page,
+                    context.generation,
+                    context.generation,
+                )
+            }
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn session_reply_at(address: u64) -> Option<logos_abi::SessionReply> {
+    pub unsafe fn session_server_reply_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
-        let length = usize::try_from(context.payload_length).ok()?;
-        (context.abi == ABI
+        context.abi == ABI
             && context.reserved == 0
             && context.operation == SESSION_REPLY
             && context.status == ACKNOWLEDGED
-            && length <= context.payload.len())
-        .then_some(logos_abi::SessionReply { text: context.payload, length })
+            && context.session_server_page != 0
+            && unsafe {
+                SessionServerPage::reply_pending_at(
+                    context.session_server_page,
+                    context.generation,
+                    context.generation,
+                )
+            }
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn session_effect_at(address: u64) -> Option<logos_abi::EffectRequest> {
+    pub unsafe fn effect_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
-        let length = usize::try_from(context.payload_length).ok()?;
-        let effect = logos_abi::Effect::from_wire(context.slot1)?;
-        let request = logos_abi::EffectRequest::new(effect, context.payload, length);
-        (context.abi == ABI
+        context.abi == ABI
             && context.reserved == 0
             && context.operation == SESSION_EFFECT
             && context.status == ACKNOWLEDGED
-            && request.valid())
-        .then_some(request)
+            && context.effect_page != 0
+            && unsafe {
+                EffectPage::pending_at(context.effect_page, context.generation, context.generation)
+            }
     }
 
     /// # Safety
@@ -2722,31 +2785,6 @@ impl ControlPage {
     }
 
     /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn reply_effect_at(address: u64, reply: logos_abi::EffectResult) -> bool {
-        unsafe { Self::reply_effect_with_text_at(address, logos_abi::EffectReply::new(reply, &[])) }
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn reply_effect_with_text_at(address: u64, reply: logos_abi::EffectReply) -> bool {
-        if !reply.valid() {
-            return false;
-        }
-        if unsafe { Self::session_effect_at(address) }.is_none() {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        context.slot1 = reply.result as u32;
-        context.payload = [0; MAX_TEXT];
-        context.payload[..reply.length as usize]
-            .copy_from_slice(&reply.text[..reply.length as usize]);
-        context.payload_length = u32::from(reply.length);
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
     ///
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn display_waiting_at(address: u64) -> bool {
@@ -2831,63 +2869,15 @@ impl Header {
 }
 
 pub fn self_check() -> bool {
-    let mut syscall = ControlPage::new();
-    syscall.operation = SYSCALL;
-    syscall.status = ACKNOWLEDGED;
-    syscall.slot1 = logos_abi::Syscall::Inspect as u32;
-    syscall.payload[..4].copy_from_slice(b"name");
-    syscall.payload_length = 4;
-    let valid = unsafe { ControlPage::syscall_at((&syscall as *const ControlPage) as u64) }
-        .is_some_and(|request| {
-            request.syscall == logos_abi::Syscall::Inspect && request.length == 4
-        });
-    syscall.slot1 = 0;
-    let unknown =
-        unsafe { ControlPage::syscall_at((&syscall as *const ControlPage) as u64) }.is_none();
-    syscall.slot1 = logos_abi::Syscall::Reboot as u32;
-    let malformed =
-        unsafe { ControlPage::syscall_at((&syscall as *const ControlPage) as u64) }.is_none();
-    let request = logos_abi::SessionRequest::new(logos_abi::Syscall::Tasks, [0; MAX_TEXT], 0);
-    syscall.operation = READ_INPUT;
-    let delivered = unsafe {
-        ControlPage::deliver_session_at((&mut syscall as *mut ControlPage) as u64, request)
-    } && syscall.operation == SYSCALL;
-    syscall.operation = SESSION_EFFECT;
-    syscall.slot1 = logos_abi::Effect::ReadTasks as u32;
-    let effect = unsafe {
-        ControlPage::reply_effect_at(
-            (&mut syscall as *mut ControlPage) as u64,
-            logos_abi::EffectResult::TasksActive,
-        )
-    } && syscall.slot1 == logos_abi::EffectResult::TasksActive as u32;
-    syscall.operation = SESSION_EFFECT;
-    let effect_text = unsafe {
-        ControlPage::reply_effect_with_text_at(
-            (&mut syscall as *mut ControlPage) as u64,
-            logos_abi::EffectReply::new(logos_abi::EffectResult::Completed, b"ok"),
-        )
-    } && syscall.slot1 == logos_abi::EffectResult::Completed as u32
-        && syscall.payload_length == 2
-        && syscall.payload[..2] == *b"ok";
-    syscall.operation = SESSION_REPLY;
-    syscall.payload[..2].copy_from_slice(b"ok");
-    syscall.payload_length = 2;
-    let reply = unsafe { ControlPage::session_reply_at((&syscall as *const ControlPage) as u64) }
-        .is_some_and(|reply| reply.length == 2 && reply.text[..2] == *b"ok");
-    let reset = unsafe { ControlPage::reset_at((&mut syscall as *mut ControlPage) as u64) }
-        && syscall.abi == ABI
-        && syscall.operation == 0;
+    let mut control = ControlPage::new();
+    control.operation = READY;
+    let reset = unsafe { ControlPage::reset_at((&mut control as *mut ControlPage) as u64) }
+        && control.abi == ABI
+        && control.operation == 0;
     Header::new(*b"terminal\0\0\0\0\0\0\0\0", ProtocolVersion::V1, self_check_entry)
         .valid_for(b"terminal", ProtocolVersion::V1)
         && !Header::new(*b"terminal\0\0\0\0\0\0\0\0", ProtocolVersion::V1, self_check_entry)
             .valid_for(b"other", ProtocolVersion::V1)
-        && valid
-        && unknown
-        && malformed
-        && delivered
-        && effect
-        && effect_text
-        && reply
         && reset
 }
 
@@ -2902,7 +2892,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn abi_self_check_covers_header_and_session_payload() {
+    fn abi_self_check_covers_header_and_control_reset() {
         assert!(self_check());
     }
 

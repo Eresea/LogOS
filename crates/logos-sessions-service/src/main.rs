@@ -19,20 +19,25 @@ fn run(context: &mut ServiceContext) -> ! {
         spin();
     }
     while context.acknowledged() {
-        if !context.wait_for_request() {
+        if !context.wait_for_session() {
             spin();
         }
-        let Some(request) = context.session_request() else { continue };
+        let Some(message) = context.session_request() else { continue };
+        let request = message.request;
         #[cfg(feature = "test-hooks")]
         inject_failure(&request);
         if !request.valid() {
             continue;
         }
-        let Some(result) = context.session_effect(dispatch(request.syscall)) else {
+        let Some(result) = context.session_effect(
+            message.id,
+            dispatch(request.syscall),
+            &request.argument[..request.length],
+        ) else {
             spin();
         };
         let reply = format(&request, result);
-        if !context.session_reply(reply) {
+        if !context.session_reply(message.id, logos_service_rt::SessionStatus::Complete, reply) {
             spin();
         }
     }

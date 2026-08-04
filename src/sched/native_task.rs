@@ -199,6 +199,16 @@ impl EffectEndpoint {
         }
     }
 
+    pub fn waiting_id(self) -> Option<u32> {
+        unsafe {
+            logos_abi::service::EffectPage::waiting_id_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
+        }
+    }
+
     pub const fn generation(self) -> u32 {
         self.service_generation
     }
@@ -207,6 +217,7 @@ impl EffectEndpoint {
 #[derive(Clone, Copy)]
 pub struct SyscallEndpoint {
     context_physical: u64,
+    client: SessionClientEndpoint,
 }
 
 #[derive(Clone, Copy)]
@@ -250,6 +261,8 @@ impl RemoteEndpoint {
 #[derive(Clone, Copy)]
 pub struct SessionEndpoint {
     context_physical: u64,
+    server: SessionServerEndpoint,
+    effect: EffectEndpoint,
 }
 
 #[derive(Clone, Copy)]
@@ -282,17 +295,41 @@ impl DisplayEndpoint {
 
 impl SyscallEndpoint {
     pub fn request(self) -> Option<logos_abi::SessionRequest> {
-        unsafe { logos_core::native_service::ControlPage::syscall_at(self.context_physical) }
+        unsafe {
+            logos_abi::service::SessionClientPage::current_request_at(
+                self.client.page_physical,
+                self.client.service_generation,
+                self.client.endpoint_generation,
+            )
+        }
+        .map(|message| message.request)
     }
 
     pub fn reply(self, bytes: &[u8]) -> bool {
-        unsafe { logos_core::native_service::ControlPage::reply_at(self.context_physical, bytes) }
+        let Some(message) = (unsafe {
+            logos_abi::service::SessionClientPage::current_request_at(
+                self.client.page_physical,
+                self.client.service_generation,
+                self.client.endpoint_generation,
+            )
+        }) else {
+            return false;
+        };
+        logos_abi::SessionReply::from_bytes(bytes).is_some_and(|reply| {
+            self.client.reply(message.id, logos_abi::service::SessionStatus::Complete, reply)
+        })
     }
 
     #[cfg(feature = "test-hooks")]
     pub fn reply_matches(self, expected: &[u8]) -> bool {
-        unsafe { logos_core::native_service::ControlPage::response_at(self.context_physical) }
-            .is_some_and(|response| response.text[..response.length] == *expected)
+        unsafe {
+            logos_abi::service::SessionClientPage::reply_at_current(
+                self.client.page_physical,
+                self.client.service_generation,
+                self.client.endpoint_generation,
+            )
+        }
+        .is_some_and(|response| response.reply.text[..response.reply.length] == *expected)
     }
 }
 
@@ -512,36 +549,24 @@ impl SessionEndpoint {
     }
 
     pub fn deliver(self, request: logos_abi::SessionRequest) -> bool {
-        unsafe {
-            logos_core::native_service::ControlPage::deliver_session_at(
-                self.context_physical,
-                request,
-            )
-        }
+        self.server.deliver(1, 0, request)
     }
 
     pub fn reply(self) -> Option<logos_abi::SessionReply> {
-        unsafe { logos_core::native_service::ControlPage::session_reply_at(self.context_physical) }
+        self.server.reply(1).map(|response| response.reply)
     }
 
     pub fn effect(self) -> Option<logos_abi::EffectRequest> {
-        unsafe { logos_core::native_service::ControlPage::session_effect_at(self.context_physical) }
+        self.effect.request().map(|message| message.request)
     }
 
     pub fn reply_effect(self, reply: logos_abi::EffectResult) -> bool {
-        unsafe {
-            logos_core::native_service::ControlPage::reply_effect_at(self.context_physical, reply)
-        }
+        self.reply_effect_with_text(logos_abi::EffectReply::new(reply, &[]))
     }
 
     #[allow(dead_code)]
     pub fn reply_effect_with_text(self, reply: logos_abi::EffectReply) -> bool {
-        unsafe {
-            logos_core::native_service::ControlPage::reply_effect_with_text_at(
-                self.context_physical,
-                reply,
-            )
-        }
+        self.effect.waiting_id().is_some_and(|id| self.effect.reply(id, reply))
     }
 }
 
@@ -604,8 +629,11 @@ impl<'a> Task<'a> {
         })
     }
 
-    pub const fn syscall_endpoint(&self) -> SyscallEndpoint {
-        SyscallEndpoint { context_physical: self.context_physical }
+    pub fn syscall_endpoint(&self) -> SyscallEndpoint {
+        SyscallEndpoint {
+            context_physical: self.context_physical,
+            client: self.session_client_endpoint().unwrap(),
+        }
     }
 
     pub fn display_endpoint(&self) -> Option<DisplayEndpoint> {
@@ -689,8 +717,12 @@ impl<'a> Task<'a> {
         true
     }
 
-    pub const fn session_endpoint(&self) -> SessionEndpoint {
-        SessionEndpoint { context_physical: self.context_physical }
+    pub fn session_endpoint(&self) -> SessionEndpoint {
+        SessionEndpoint {
+            context_physical: self.context_physical,
+            server: self.session_server_endpoint().unwrap(),
+            effect: self.effect_endpoint().unwrap(),
+        }
     }
 
     #[allow(dead_code)]

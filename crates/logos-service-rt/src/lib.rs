@@ -12,7 +12,8 @@ use core::panic::PanicInfo;
 
 use logos_abi::service as native_service;
 pub use logos_abi::service::{
-    BlockPage, ControlPage, DisplayPage, Header, InputPage, MAX_TEXT, NetworkPages, ProtocolVersion,
+    BlockPage, ControlPage, DisplayPage, EffectPage, Header, InputPage, MAX_TEXT, NetworkPages,
+    ProtocolVersion, SessionClientPage, SessionServerPage, SessionStatus,
 };
 
 pub type EntryControlPage = *mut ControlPage;
@@ -60,6 +61,7 @@ pub struct TextReply {
 
 pub struct ServiceContext {
     raw: NonNull<ControlPage>,
+    next_session_id: u32,
 }
 
 /// # Safety
@@ -70,7 +72,7 @@ pub fn entry(context: EntryControlPage, service: fn(&mut ServiceContext) -> !) -
         spin();
     }
     ACTIVE_CONTEXT.store(raw.as_ptr() as usize, Ordering::Release);
-    let mut context = ServiceContext { raw };
+    let mut context = ServiceContext { raw, next_session_id: 1 };
     service(&mut context)
 }
 
@@ -89,6 +91,23 @@ impl ServiceContext {
             _ => 0,
         };
         (page != 0 && raw.generation != 0).then_some((page, raw.generation))
+    }
+
+    fn session_client_page(&self) -> Option<(u64, u32)> {
+        let raw = self.raw();
+        (raw.session_client_page != 0 && raw.generation != 0)
+            .then_some((raw.session_client_page, raw.generation))
+    }
+
+    fn session_server_page(&self) -> Option<(u64, u32)> {
+        let raw = self.raw();
+        (raw.session_server_page != 0 && raw.generation != 0)
+            .then_some((raw.session_server_page, raw.generation))
+    }
+
+    fn effect_page(&self) -> Option<(u64, u32)> {
+        let raw = self.raw();
+        (raw.effect_page != 0 && raw.generation != 0).then_some((raw.effect_page, raw.generation))
     }
 
     fn raw(&self) -> &ControlPage {
@@ -174,39 +193,62 @@ impl ServiceContext {
         if argument.len() > MAX_TEXT {
             return None;
         }
-        let raw = self.raw_mut();
-        raw.slot1 = syscall as u32;
-        raw.payload = [0; MAX_TEXT];
-        raw.payload[..argument.len()].copy_from_slice(argument);
-        raw.payload_length = argument.len() as u32;
-        if !self.invoke(native_service::SYSCALL) {
+        let (page, generation) = self.session_client_page()?;
+        let id = self.next_session_id;
+        self.next_session_id = id.checked_add(1)?;
+        let mut bytes = [0; MAX_TEXT];
+        bytes[..argument.len()].copy_from_slice(argument);
+        let request = logos_abi::SessionRequest::new(syscall, bytes, argument.len());
+        if !(unsafe { SessionClientPage::request_at(page, generation, generation, id, request) })
+            || !self.invoke(native_service::SYSCALL)
+        {
             return None;
         }
-        let response = unsafe { ControlPage::response_at(self.raw_address()) }?;
-        Some(TextReply { text: response.text, length: response.length })
+        let response = unsafe { SessionClientPage::finish_at(page, generation, generation, id) }?;
+        Some(TextReply { text: response.reply.text, length: response.reply.length })
     }
 
-    pub fn session_request(&self) -> Option<logos_abi::SessionRequest> {
-        unsafe { ControlPage::syscall_at(self.raw_address()) }
+    pub fn wait_for_session(&mut self) -> bool {
+        let Some((page, generation)) = self.session_server_page() else { return false };
+        (unsafe { SessionServerPage::wait_at(page, generation, generation) })
+            && self.invoke(native_service::READ_INPUT)
     }
 
-    pub fn session_effect(&mut self, effect: logos_abi::Effect) -> Option<logos_abi::EffectResult> {
-        self.raw_mut().slot1 = effect as u32;
-        if !self.invoke(native_service::SESSION_EFFECT) {
+    pub fn session_request(&self) -> Option<native_service::SessionServerRequest> {
+        let (page, generation) = self.session_server_page()?;
+        unsafe { SessionServerPage::take_at(page, generation, generation) }
+    }
+
+    pub fn session_effect(
+        &mut self,
+        id: u32,
+        effect: logos_abi::Effect,
+        argument: &[u8],
+    ) -> Option<logos_abi::EffectResult> {
+        if argument.len() > MAX_TEXT {
             return None;
         }
-        logos_abi::EffectResult::from_wire(self.raw().slot1)
+        let (page, generation) = self.effect_page()?;
+        let mut bytes = [0; MAX_TEXT];
+        bytes[..argument.len()].copy_from_slice(argument);
+        let request = logos_abi::EffectRequest::new(effect, bytes, argument.len());
+        if !(unsafe { EffectPage::request_at(page, generation, generation, id, request) })
+            || !self.invoke(native_service::SESSION_EFFECT)
+        {
+            return None;
+        }
+        unsafe { EffectPage::finish_at(page, generation, generation, id) }
+            .map(|response| response.reply.result)
     }
 
-    pub fn session_reply(&mut self, reply: &[u8]) -> bool {
+    pub fn session_reply(&mut self, id: u32, status: SessionStatus, reply: &[u8]) -> bool {
         if reply.len() > MAX_TEXT {
             return false;
         }
-        let raw = self.raw_mut();
-        raw.payload = [0; MAX_TEXT];
-        raw.payload[..reply.len()].copy_from_slice(reply);
-        raw.payload_length = reply.len() as u32;
-        self.invoke(native_service::SESSION_REPLY)
+        let Some((page, generation)) = self.session_server_page() else { return false };
+        let Some(reply) = logos_abi::SessionReply::from_bytes(reply) else { return false };
+        (unsafe { SessionServerPage::reply_at(page, generation, generation, id, status, reply) })
+            && self.invoke(native_service::SESSION_REPLY)
     }
 
     pub fn store(&mut self, request: logos_abi::StoreRequest) -> Option<logos_abi::StoreReply> {
