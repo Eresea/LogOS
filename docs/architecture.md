@@ -1,7 +1,7 @@
 # LogOS Architecture Annex
 
 > **Status:** Living architecture reference  
-> **Updated:** 2026-07-30
+> **Updated:** 2026-08-04
 
 ## Testing boundary
 
@@ -13,13 +13,31 @@ the host; QEMU proves target boot, interrupts, memory, devices, isolation, and r
 milestone proof IDs remain regression contracts until the corresponding public contract is
 explicitly deprecated. See [ADR-0002](adr/0002-test-control-boundary.md).
 
+## ABI v4 and native-service ownership
+
+Native service transport uses a dedicated mapped `logos_abi::service::ControlPage` header (ABI v4). Typed
+endpoint pages (`InputPage`, `DisplayPage`, `SessionPage`, `StoreEndpointPage`,
+`BlockEndpointPage`, `NetworkPage`, and `RemotePage`) carry explicit scalar state, generation, and
+bounded payload fields. Core owns endpoint mappings, capability checks, and reclamation; a service
+receives only the endpoint set declared by its canonical `platform::services::ServiceSpec`.
+The control page is implicit; `ServiceSpec::endpoints` is the single map for additional Input,
+Display, Session, Store, Block, Network, and Remote pages.
+
+The canonical specification is consumed by supervisor planning, service lookup, and payload header
+validation. `src/kernel.rs` is the privileged boot-facing entry boundary, with bootstrap composition,
+health gating, privileged setup, and the run loop implemented in `platform::runtime`; subsystem
+coordination remains below `src/platform`, while hardware, memory, scheduling, IPC, and capability
+enforcement remain Core responsibilities. The migration is atomic: ABI-v3 payloads are
+rejected and no compatibility adapter or dynamic endpoint registry exists. See [ADR-0020](adr/0020-typed-native-endpoint-pages.md).
+
 ## 1. Purpose
 
 This document defines where responsibilities belong, how components depend on one another, and how LogOS preserves a small kernel while still becoming a complete operating system.
 
 Kernel source follows the same ownership boundaries: `arch`, `mm`, `sched`, `ipc`, `drivers`,
-`console`, and `platform`. `boot.rs` owns the UEFI handoff, `kernel.rs` owns bootstrap sequencing
-and the run loop, and `main.rs` declares modules and temporary flat compatibility exports only.
+`console`, and `platform`. `boot.rs` owns the UEFI handoff; `kernel.rs` owns the privileged
+bootstrap boundary and `platform::runtime` contains its composition, health gating, and top-level
+coordination loop; `main.rs` declares modules only.
 
 Assembly-visible GDT, TSS, IDT, and user-transition storage uses a layout-transparent writable
 cell. Access is restricted to raw pointers under the bootstrap single-CPU invariant; scalar state
