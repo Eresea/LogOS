@@ -188,21 +188,24 @@ fn run(context: &mut ServiceContext) -> ! {
         if !context.wait_for_input() {
             spin();
         }
+        let Some(byte) = context.input_byte() else {
+            continue;
+        };
         #[cfg(feature = "test-hooks")]
-        inject_failure(context.input());
-        if context.input() == 0x1b {
+        inject_failure(u32::from(byte));
+        if byte == 0x1b {
             let _ = context.complete();
             spin();
         }
         if !history_started {
             history_started = true;
-            if context.input_byte() == Some(logos_abi::InputEvent::STARTUP.byte()) {
+            if byte == logos_abi::InputEvent::STARTUP.byte() {
                 load_history(&mut terminal, context, &mut next_store_id);
                 continue;
             }
             load_history(&mut terminal, context, &mut next_store_id);
         }
-        let Some(input) = context.input_byte().and_then(logos_abi::InputEvent::from_byte) else {
+        let Some(input) = logos_abi::InputEvent::from_byte(byte) else {
             continue;
         };
         match input.byte() {
