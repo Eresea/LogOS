@@ -1,46 +1,22 @@
 use crate::debug;
+use crate::platform::services;
 use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
 const MAX_MANIFESTS: usize = 8;
 
-pub const SUPERVISOR: &[u8] = b"supervisor";
-pub const VIRTIO_BALLOON: &[u8] = b"virtio-balloon";
-pub const VIRTIO_BLOCK: &[u8] = b"virtio-block";
-pub const STORAGE: &[u8] = b"storage";
-pub const TERMINAL: &[u8] = b"terminal";
-pub const SESSIONS: &[u8] = b"sessions";
-pub const NETWORK: &[u8] = b"network";
-pub const GATEWAY: &[u8] = b"gateway";
+pub use services::{
+    EndpointSet, Profile, Profiles, Protocol, RecoveryClass, RestartPolicy, ServiceSpec,
+};
+pub type Manifest = ServiceSpec;
 
-#[derive(Clone, Copy)]
-pub enum Profile {
-    Normal,
-    Recovery,
-    Diagnostics,
-}
-
-#[derive(Clone, Copy)]
-pub struct Profiles(u8);
-
-impl Profiles {
-    const NORMAL: u8 = 1;
-    const RECOVERY: u8 = 2;
-    const DIAGNOSTICS: u8 = 4;
-
-    pub const ALL: Self = Self(Self::NORMAL | Self::RECOVERY | Self::DIAGNOSTICS);
-    pub const NORMAL_RECOVERY: Self = Self(Self::NORMAL | Self::RECOVERY);
-    pub const NORMAL_ONLY: Self = Self(Self::NORMAL);
-
-    const fn includes(self, profile: Profile) -> bool {
-        self.0
-            & match profile {
-                Profile::Normal => Self::NORMAL,
-                Profile::Recovery => Self::RECOVERY,
-                Profile::Diagnostics => Self::DIAGNOSTICS,
-            }
-            != 0
-    }
-}
+pub const SUPERVISOR: &[u8] = services::SUPERVISOR;
+pub const VIRTIO_BALLOON: &[u8] = services::VIRTIO_BALLOON;
+pub const VIRTIO_BLOCK: &[u8] = services::VIRTIO_BLOCK;
+pub const STORAGE: &[u8] = services::STORAGE;
+pub const TERMINAL: &[u8] = services::TERMINAL;
+pub const SESSIONS: &[u8] = services::SESSIONS;
+pub const NETWORK: &[u8] = services::NETWORK;
+pub const GATEWAY: &[u8] = services::GATEWAY;
 
 #[derive(Clone, Copy)]
 pub enum StartStage {
@@ -70,132 +46,7 @@ pub fn report_start_failure(name: &[u8], stage: StartStage) {
     debug::write_line(stage.message());
 }
 
-pub struct Manifest {
-    pub name: &'static [u8],
-    pub dependencies: &'static [&'static [u8]],
-    pub capabilities: &'static [CapabilityKind],
-    pub protocol: Protocol,
-    pub restart: RestartPolicy,
-    pub recovery: RecoveryClass,
-    pub profiles: Profiles,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum RecoveryClass {
-    Restartable,
-    Resettable,
-    Fatal,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Protocol {
-    pub abi: u16,
-    pub version: u16,
-}
-
-#[derive(Clone, Copy)]
-pub struct RestartPolicy {
-    retries: u8,
-    backoff_ticks: u64,
-}
-
-const SUPERVISOR_MANIFEST: Manifest = Manifest {
-    name: SUPERVISOR,
-    dependencies: &[],
-    capabilities: &[],
-    protocol: Protocol { abi: 1, version: 0 },
-    restart: RestartPolicy { retries: 0, backoff_ticks: 0 },
-    recovery: RecoveryClass::Fatal,
-    profiles: Profiles::ALL,
-};
-const VIRTIO_MANIFEST: Manifest = Manifest {
-    name: VIRTIO_BALLOON,
-    dependencies: &[SUPERVISOR],
-    capabilities: &[CapabilityKind::Service],
-    protocol: Protocol { abi: 1, version: 0 },
-    restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
-    recovery: RecoveryClass::Resettable,
-    profiles: Profiles::NORMAL_RECOVERY,
-};
-const BLOCK_MANIFEST: Manifest = Manifest {
-    name: VIRTIO_BLOCK,
-    dependencies: &[SUPERVISOR],
-    capabilities: &[CapabilityKind::Service, CapabilityKind::Block, CapabilityKind::Memory],
-    protocol: Protocol { abi: 1, version: 0 },
-    restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
-    recovery: RecoveryClass::Resettable,
-    profiles: Profiles::NORMAL_RECOVERY,
-};
-const STORAGE_MANIFEST: Manifest = Manifest {
-    name: STORAGE,
-    dependencies: &[VIRTIO_BLOCK],
-    capabilities: &[
-        CapabilityKind::Service,
-        CapabilityKind::Memory,
-        CapabilityKind::StoreRead,
-        CapabilityKind::StoreWrite,
-    ],
-    protocol: Protocol { abi: 1, version: 0 },
-    restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
-    recovery: RecoveryClass::Restartable,
-    profiles: Profiles::NORMAL_RECOVERY,
-};
-const TERMINAL_MANIFEST: Manifest = Manifest {
-    name: TERMINAL,
-    dependencies: &[SUPERVISOR],
-    capabilities: &[CapabilityKind::Service, CapabilityKind::Input, CapabilityKind::Display],
-    protocol: Protocol { abi: 1, version: 0 },
-    restart: RestartPolicy { retries: 1, backoff_ticks: 0 },
-    recovery: RecoveryClass::Restartable,
-    profiles: Profiles::NORMAL_ONLY,
-};
-const SESSIONS_MANIFEST: Manifest = Manifest {
-    name: SESSIONS,
-    dependencies: &[SUPERVISOR],
-    capabilities: &[CapabilityKind::Service, CapabilityKind::Session],
-    protocol: Protocol { abi: 1, version: 0 },
-    restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
-    recovery: RecoveryClass::Restartable,
-    profiles: Profiles::NORMAL_ONLY,
-};
-const NETWORK_MANIFEST: Manifest = Manifest {
-    name: NETWORK,
-    dependencies: &[SUPERVISOR],
-    capabilities: &[
-        CapabilityKind::Service,
-        CapabilityKind::NetworkBind,
-        CapabilityKind::NetworkSend,
-        CapabilityKind::NetworkReceive,
-    ],
-    protocol: Protocol { abi: 1, version: 0 },
-    restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
-    recovery: RecoveryClass::Restartable,
-    profiles: Profiles::NORMAL_ONLY,
-};
-const GATEWAY_MANIFEST: Manifest = Manifest {
-    name: GATEWAY,
-    dependencies: &[STORAGE, SESSIONS, NETWORK],
-    capabilities: &[
-        CapabilityKind::Service,
-        CapabilityKind::NetworkBind,
-        CapabilityKind::NetworkSend,
-        CapabilityKind::NetworkReceive,
-    ],
-    protocol: Protocol { abi: 1, version: 0 },
-    restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
-    recovery: RecoveryClass::Restartable,
-    profiles: Profiles::NORMAL_ONLY,
-};
-const BOOT_MANIFESTS: &[Manifest] = &[
-    SUPERVISOR_MANIFEST,
-    VIRTIO_MANIFEST,
-    BLOCK_MANIFEST,
-    STORAGE_MANIFEST,
-    TERMINAL_MANIFEST,
-    SESSIONS_MANIFEST,
-    NETWORK_MANIFEST,
-    GATEWAY_MANIFEST,
-];
+const BOOT_MANIFESTS: &[Manifest] = services::SERVICE_SPECS;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -558,6 +409,7 @@ pub fn self_check() -> bool {
     const B: &[u8] = b"b";
     const OK: &[Manifest] = &[
         Manifest {
+            service: services::Service::Supervisor,
             name: B,
             dependencies: &[A],
             capabilities: &[],
@@ -565,8 +417,10 @@ pub fn self_check() -> bool {
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
             recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
+            endpoints: EndpointSet::NONE,
         },
         Manifest {
+            service: services::Service::Supervisor,
             name: A,
             dependencies: &[],
             capabilities: &[],
@@ -574,9 +428,11 @@ pub fn self_check() -> bool {
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
             recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
+            endpoints: EndpointSet::NONE,
         },
     ];
     const MISSING: &[Manifest] = &[Manifest {
+        service: services::Service::Supervisor,
         name: A,
         dependencies: &[B],
         capabilities: &[],
@@ -584,9 +440,11 @@ pub fn self_check() -> bool {
         restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         recovery: RecoveryClass::Restartable,
         profiles: Profiles::ALL,
+        endpoints: EndpointSet::NONE,
     }];
     const CYCLE: &[Manifest] = &[
         Manifest {
+            service: services::Service::Supervisor,
             name: A,
             dependencies: &[B],
             capabilities: &[],
@@ -594,8 +452,10 @@ pub fn self_check() -> bool {
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
             recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
+            endpoints: EndpointSet::NONE,
         },
         Manifest {
+            service: services::Service::Supervisor,
             name: B,
             dependencies: &[A],
             capabilities: &[],
@@ -603,6 +463,7 @@ pub fn self_check() -> bool {
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
             recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
+            endpoints: EndpointSet::NONE,
         },
     ];
     Plan::build(OK, Profile::Normal).is_ok_and(|plan| plan.starts(A) && plan.starts(B))
@@ -624,6 +485,7 @@ pub fn protocol_self_check() -> bool {
 
 pub fn dependency_loss_self_check() -> bool {
     const MISSING: &[Manifest] = &[Manifest {
+        service: services::Service::Supervisor,
         name: b"a",
         dependencies: &[b"missing"],
         capabilities: &[],
@@ -631,6 +493,7 @@ pub fn dependency_loss_self_check() -> bool {
         restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         recovery: RecoveryClass::Restartable,
         profiles: Profiles::ALL,
+        endpoints: EndpointSet::NONE,
     }];
     matches!(Plan::build(MISSING, Profile::Normal), Err(Error::MissingDependency))
 }

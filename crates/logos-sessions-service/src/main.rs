@@ -2,7 +2,7 @@
 #![no_std]
 
 use logos_abi::{Effect, EffectResult, SessionRequest, Syscall};
-use logos_service_rt::{Context, Header, ProtocolVersion};
+use logos_service_rt::{Header, ProtocolVersion, ServiceContext};
 
 #[used]
 #[unsafe(link_section = ".logos")]
@@ -10,11 +10,11 @@ static HEADER: Header =
     Header::new(*b"sessions\0\0\0\0\0\0\0\0", ProtocolVersion::V1, logos_service_entry);
 
 #[unsafe(no_mangle)]
-extern "C" fn logos_service_entry(context: logos_service_rt::EntryContext) -> ! {
+extern "C" fn logos_service_entry(context: logos_service_rt::EntryControlPage) -> ! {
     logos_service_rt::entry(context, run)
 }
 
-fn run(context: &mut Context) -> ! {
+fn run(context: &mut ServiceContext) -> ! {
     if !context.ready() {
         spin();
     }

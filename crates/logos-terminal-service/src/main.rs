@@ -2,7 +2,7 @@
 #![cfg_attr(not(test), no_std)]
 
 use logos_abi::{NamespaceId, PageHandle, StoreOperation, StoreRequest, Syscall, VersionSelector};
-use logos_service_rt::{Context, Header, MAX_TEXT, ProtocolVersion, SharedPage};
+use logos_service_rt::{Header, MAX_TEXT, ProtocolVersion, ServiceContext, SharedPage};
 use logos_terminal::{
     command::{self, Local, Resolution},
     input::{self, LogicalKey},
@@ -98,7 +98,7 @@ fn load_history_with(
     }
 }
 
-fn load_history(terminal: &mut Model, context: &mut Context, next: &mut u32) {
+fn load_history(terminal: &mut Model, context: &mut ServiceContext, next: &mut u32) {
     let Some(page) = context.shared_page() else {
         let _ = terminal.write_output(b"history persistence failed");
         return;
@@ -160,7 +160,7 @@ fn save_history_with(
     true
 }
 
-fn save_history(terminal: &Model, context: &mut Context, next: &mut u32) -> bool {
+fn save_history(terminal: &Model, context: &mut ServiceContext, next: &mut u32) -> bool {
     let Some(page) = context.shared_page() else { return false };
     save_history_with(terminal, page, next, |request| context.store(request))
 }
@@ -171,11 +171,11 @@ static HEADER: Header =
     Header::new(*b"terminal\0\0\0\0\0\0\0\0", ProtocolVersion::V1, logos_service_entry);
 
 #[unsafe(no_mangle)]
-extern "C" fn logos_service_entry(context: logos_service_rt::EntryContext) -> ! {
+extern "C" fn logos_service_entry(context: logos_service_rt::EntryControlPage) -> ! {
     logos_service_rt::entry(context, run)
 }
 
-fn run(context: &mut Context) -> ! {
+fn run(context: &mut ServiceContext) -> ! {
     if !context.ready() {
         spin();
     }
@@ -246,7 +246,7 @@ fn inject_failure(control: u32) {
     }
 }
 
-fn submit_line(terminal: &mut Model, context: &mut Context, next: &mut u32) {
+fn submit_line(terminal: &mut Model, context: &mut ServiceContext, next: &mut u32) {
     let submission = terminal.submit();
     let _ = terminal.write_output(submission.as_bytes());
     if !submission.as_bytes().is_empty() && !save_history(terminal, context, next) {
@@ -289,7 +289,12 @@ fn submit_line(terminal: &mut Model, context: &mut Context, next: &mut u32) {
     }
 }
 
-fn submit_call(terminal: &mut Model, context: &mut Context, syscall: Syscall, argument: &[u8]) {
+fn submit_call(
+    terminal: &mut Model,
+    context: &mut ServiceContext,
+    syscall: Syscall,
+    argument: &[u8],
+) {
     let Some(reply) = context.syscall(syscall, argument) else {
         let _ = terminal.write_output(b"syscall failed");
         return;
@@ -301,7 +306,7 @@ fn submit_call(terminal: &mut Model, context: &mut Context, syscall: Syscall, ar
     }
 }
 
-fn render(terminal: &mut Model, context: &mut Context) {
+fn render(terminal: &mut Model, context: &mut ServiceContext) {
     let _ = context.clear_display();
     let mut row = 0u32;
     while let Some(line) = terminal.output_line(row as usize) {
@@ -315,7 +320,7 @@ fn render(terminal: &mut Model, context: &mut Context) {
     present(context, 40, 32 + row * 20, terminal.input_line());
 }
 
-fn present(context: &mut Context, x: u32, y: u32, bytes: &[u8]) {
+fn present(context: &mut ServiceContext, x: u32, y: u32, bytes: &[u8]) {
     for (chunk, bytes) in bytes.chunks(MAX_TEXT).enumerate() {
         let offset = u32::try_from(chunk * MAX_TEXT * 8).unwrap_or(u32::MAX);
         let _ = context.present_text(

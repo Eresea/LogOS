@@ -1,3 +1,4 @@
+use crate::platform::services::{Service, ServiceSpec};
 use core::{cell::UnsafeCell, mem::size_of, slice};
 use logos_abi::service::{Header, ProtocolVersion};
 use uefi::{
@@ -150,31 +151,31 @@ pub fn stage() -> Option<Payloads> {
         &mut root,
         cstr16!(r"\EFI\LOGOS\TERMINAL.EFI"),
         unsafe { &mut *TERMINAL_PAYLOAD.0.get() },
-        b"terminal",
+        Service::Terminal.spec(),
     );
     let sessions = open_load(
         &mut root,
         cstr16!(r"\EFI\LOGOS\SESSIONS.EFI"),
         unsafe { &mut *SESSIONS_PAYLOAD.0.get() },
-        b"sessions",
+        Service::Sessions.spec(),
     );
     let storage = open_load(
         &mut root,
         cstr16!(r"\EFI\LOGOS\STORAGE.EFI"),
         unsafe { &mut *STORAGE_PAYLOAD.0.get() },
-        b"storage",
+        Service::Storage.spec(),
     );
     let network = open_load(
         &mut root,
         cstr16!(r"\EFI\LOGOS\NETWORK.EFI"),
         unsafe { &mut *NETWORK_PAYLOAD.0.get() },
-        b"network",
+        Service::Network.spec(),
     );
     let gateway = open_load(
         &mut root,
         cstr16!(r"\EFI\LOGOS\GATEWAY.EFI"),
         unsafe { &mut *GATEWAY_PAYLOAD.0.get() },
-        b"gateway",
+        Service::Gateway.spec(),
     );
     Some(Payloads { terminal, sessions, storage, network, gateway })
 }
@@ -183,18 +184,17 @@ fn open_load(
     root: &mut impl File,
     path: &uefi::CStr16,
     buffer: &mut [u8; MAX_PAYLOAD],
-    name: &[u8],
+    spec: &'static ServiceSpec,
 ) -> Option<Payload> {
     let mut file =
         root.open(path, FileMode::Read, FileAttribute::empty()).ok()?.into_regular_file()?;
-    load(&mut file, buffer, name, ProtocolVersion::V1)
+    load(&mut file, buffer, spec)
 }
 
 fn load(
     file: &mut RegularFile,
     buffer: &mut [u8; MAX_PAYLOAD],
-    name: &[u8],
-    protocol: ProtocolVersion,
+    spec: &'static ServiceSpec,
 ) -> Option<Payload> {
     let Ok(length) = file.read(buffer) else {
         return None;
@@ -225,7 +225,12 @@ fn load(
     };
     let header = image.windows(core::mem::size_of::<Header>()).find_map(|bytes| {
         let header = unsafe { (bytes.as_ptr().cast::<Header>()).read_unaligned() };
-        header.valid_for(name, protocol).then_some(header)
+        header
+            .valid_for(
+                spec.name,
+                ProtocolVersion { major: spec.protocol.abi, minor: spec.protocol.version },
+            )
+            .then_some(header)
     })?;
     let entry = header.entry_address();
     let base_address = base as usize;

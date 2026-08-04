@@ -28,7 +28,7 @@ pub struct InputEndpoint {
 impl InputEndpoint {
     pub fn deliver(self, input: logos_abi::InputEvent) -> bool {
         unsafe {
-            logos_core::native_service::Context::deliver_input_at(
+            logos_core::native_service::ControlPage::deliver_input_at(
                 self.context_physical,
                 input.byte(),
             )
@@ -37,7 +37,7 @@ impl InputEndpoint {
 
     #[cfg(feature = "test-hooks")]
     pub fn deliver_raw(self, input: u8) -> bool {
-        unsafe { logos_abi::service::Context::deliver_input_at(self.context_physical, input) }
+        unsafe { logos_abi::service::ControlPage::deliver_input_at(self.context_physical, input) }
     }
 }
 
@@ -71,12 +71,15 @@ pub struct RemoteEndpoint {
 
 impl RemoteEndpoint {
     pub fn request(self) -> Option<logos_core::native_service::RemoteGateRequest> {
-        unsafe { logos_core::native_service::Context::remote_gate_at(self.context_physical) }
+        unsafe { logos_core::native_service::ControlPage::remote_gate_at(self.context_physical) }
     }
 
     pub fn reply(self, reply: logos_core::native_service::RemoteGateReply) -> bool {
         unsafe {
-            logos_core::native_service::Context::reply_remote_gate_at(self.context_physical, reply)
+            logos_core::native_service::ControlPage::reply_remote_gate_at(
+                self.context_physical,
+                reply,
+            )
         }
     }
 }
@@ -93,7 +96,9 @@ pub struct DisplayEndpoint {
 
 impl DisplayEndpoint {
     pub fn pending(self) -> bool {
-        unsafe { logos_core::native_service::Context::display_waiting_at(self.context_physical) }
+        unsafe {
+            logos_core::native_service::ControlPage::display_waiting_at(self.context_physical)
+        }
     }
 
     pub const fn context(self) -> u64 {
@@ -103,16 +108,16 @@ impl DisplayEndpoint {
 
 impl SyscallEndpoint {
     pub fn request(self) -> Option<logos_abi::SessionRequest> {
-        unsafe { logos_core::native_service::Context::syscall_at(self.context_physical) }
+        unsafe { logos_core::native_service::ControlPage::syscall_at(self.context_physical) }
     }
 
     pub fn reply(self, bytes: &[u8]) -> bool {
-        unsafe { logos_core::native_service::Context::reply_at(self.context_physical, bytes) }
+        unsafe { logos_core::native_service::ControlPage::reply_at(self.context_physical, bytes) }
     }
 
     #[cfg(feature = "test-hooks")]
     pub fn reply_matches(self, expected: &[u8]) -> bool {
-        unsafe { logos_core::native_service::Context::response_at(self.context_physical) }
+        unsafe { logos_core::native_service::ControlPage::response_at(self.context_physical) }
             .is_some_and(|response| response.text[..response.length] == *expected)
     }
 }
@@ -134,7 +139,7 @@ impl StoreEndpoint {
         if !self.available() {
             return None;
         }
-        unsafe { logos_core::native_service::Context::store_at(self.context_physical) }
+        unsafe { logos_core::native_service::ControlPage::store_at(self.context_physical) }
     }
 
     pub fn deliver(self, request: logos_abi::StoreRequest) -> bool {
@@ -142,7 +147,10 @@ impl StoreEndpoint {
             return false;
         }
         unsafe {
-            logos_core::native_service::Context::deliver_store_at(self.context_physical, request)
+            logos_core::native_service::ControlPage::deliver_store_at(
+                self.context_physical,
+                request,
+            )
         }
     }
 
@@ -151,7 +159,10 @@ impl StoreEndpoint {
             return None;
         }
         unsafe {
-            logos_core::native_service::Context::store_reply_at(self.context_physical, expected_id)
+            logos_core::native_service::ControlPage::store_reply_at(
+                self.context_physical,
+                expected_id,
+            )
         }
     }
 
@@ -159,7 +170,9 @@ impl StoreEndpoint {
         if !self.available() {
             return false;
         }
-        unsafe { logos_core::native_service::Context::reply_store_at(self.context_physical, reply) }
+        unsafe {
+            logos_core::native_service::ControlPage::reply_store_at(self.context_physical, reply)
+        }
     }
 
     pub fn configure_shared_page(self, page: logos_abi::PageHandle) -> bool {
@@ -167,7 +180,7 @@ impl StoreEndpoint {
             return false;
         }
         unsafe {
-            logos_core::native_service::Context::configure_shared_page_at(
+            logos_core::native_service::ControlPage::configure_shared_page_at(
                 self.context_physical,
                 page,
             )
@@ -178,7 +191,9 @@ impl StoreEndpoint {
         if !self.available() {
             return false;
         }
-        unsafe { logos_abi::service::Context::remap_shared_page_at(self.context_physical, page) }
+        unsafe {
+            logos_abi::service::ControlPage::remap_shared_page_at(self.context_physical, page)
+        }
     }
 }
 
@@ -200,7 +215,7 @@ impl BlockEndpoint {
             return false;
         }
         unsafe {
-            logos_core::native_service::Context::configure_block_page_at(
+            logos_core::native_service::ControlPage::configure_block_page_at(
                 self.context_physical,
                 page,
             )
@@ -212,7 +227,7 @@ impl BlockEndpoint {
         if !self.available() {
             return None;
         }
-        unsafe { logos_core::native_service::Context::block_at(self.context_physical) }
+        unsafe { logos_core::native_service::ControlPage::block_at(self.context_physical) }
     }
 
     #[allow(dead_code)]
@@ -220,7 +235,9 @@ impl BlockEndpoint {
         if !self.available() {
             return false;
         }
-        unsafe { logos_core::native_service::Context::reply_block_at(self.context_physical, reply) }
+        unsafe {
+            logos_core::native_service::ControlPage::reply_block_at(self.context_physical, reply)
+        }
     }
 }
 
@@ -232,7 +249,7 @@ impl NetworkEndpoint {
 
     pub fn configure(self, pages: logos_core::native_service::NetworkPages) -> bool {
         unsafe {
-            logos_core::native_service::Context::configure_network_pages_at(
+            logos_core::native_service::ControlPage::configure_network_pages_at(
                 self.context_physical,
                 pages.rx_handle,
                 pages.tx_handle,
@@ -241,18 +258,21 @@ impl NetworkEndpoint {
     }
 
     pub fn request(self) -> Option<logos_abi::NetworkRequest> {
-        unsafe { logos_core::native_service::Context::network_at(self.context_physical) }
+        unsafe { logos_core::native_service::ControlPage::network_at(self.context_physical) }
     }
 
     pub fn deliver(self, request: logos_abi::NetworkRequest) -> bool {
         unsafe {
-            logos_core::native_service::Context::deliver_network_at(self.context_physical, request)
+            logos_core::native_service::ControlPage::deliver_network_at(
+                self.context_physical,
+                request,
+            )
         }
     }
 
     pub fn deliver_for_owner(self, request: logos_abi::NetworkRequest, owner: u64) -> bool {
         unsafe {
-            logos_abi::service::Context::deliver_network_for_owner_at(
+            logos_abi::service::ControlPage::deliver_network_for_owner_at(
                 self.context_physical,
                 request,
                 owner,
@@ -262,13 +282,13 @@ impl NetworkEndpoint {
 
     pub fn reply(self, reply: logos_abi::NetworkReply) -> bool {
         unsafe {
-            logos_core::native_service::Context::reply_network_at(self.context_physical, reply)
+            logos_core::native_service::ControlPage::reply_network_at(self.context_physical, reply)
         }
     }
 
     pub fn response(self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
         unsafe {
-            logos_core::native_service::Context::network_reply_at(
+            logos_core::native_service::ControlPage::network_reply_at(
                 self.context_physical,
                 expected_id,
             )
@@ -277,7 +297,7 @@ impl NetworkEndpoint {
 
     pub fn deliver_event(self, event: logos_abi::NetworkEvent) -> bool {
         unsafe {
-            logos_core::native_service::Context::deliver_network_event_at(
+            logos_core::native_service::ControlPage::deliver_network_event_at(
                 self.context_physical,
                 event,
             )
@@ -285,16 +305,16 @@ impl NetworkEndpoint {
     }
 
     pub fn event(self) -> Option<logos_abi::NetworkEvent> {
-        unsafe { logos_core::native_service::Context::network_event_at(self.context_physical) }
+        unsafe { logos_core::native_service::ControlPage::network_event_at(self.context_physical) }
     }
 
     pub fn device_request(self) -> Option<logos_abi::NetworkDeviceRequest> {
-        unsafe { logos_core::native_service::Context::network_device_at(self.context_physical) }
+        unsafe { logos_core::native_service::ControlPage::network_device_at(self.context_physical) }
     }
 
     pub fn reply_device(self, reply: logos_abi::NetworkDeviceReply) -> bool {
         unsafe {
-            logos_core::native_service::Context::reply_network_device_at(
+            logos_core::native_service::ControlPage::reply_network_device_at(
                 self.context_physical,
                 reply,
             )
@@ -303,7 +323,7 @@ impl NetworkEndpoint {
 
     pub fn deliver_device_reply(self, reply: logos_abi::NetworkDeviceReply) -> bool {
         unsafe {
-            logos_core::native_service::Context::deliver_network_device_reply_at(
+            logos_core::native_service::ControlPage::deliver_network_device_reply_at(
                 self.context_physical,
                 reply,
             )
@@ -319,28 +339,31 @@ impl SessionEndpoint {
 
     pub fn deliver(self, request: logos_abi::SessionRequest) -> bool {
         unsafe {
-            logos_core::native_service::Context::deliver_session_at(self.context_physical, request)
+            logos_core::native_service::ControlPage::deliver_session_at(
+                self.context_physical,
+                request,
+            )
         }
     }
 
     pub fn reply(self) -> Option<logos_abi::SessionReply> {
-        unsafe { logos_core::native_service::Context::session_reply_at(self.context_physical) }
+        unsafe { logos_core::native_service::ControlPage::session_reply_at(self.context_physical) }
     }
 
     pub fn effect(self) -> Option<logos_abi::EffectRequest> {
-        unsafe { logos_core::native_service::Context::session_effect_at(self.context_physical) }
+        unsafe { logos_core::native_service::ControlPage::session_effect_at(self.context_physical) }
     }
 
     pub fn reply_effect(self, reply: logos_abi::EffectResult) -> bool {
         unsafe {
-            logos_core::native_service::Context::reply_effect_at(self.context_physical, reply)
+            logos_core::native_service::ControlPage::reply_effect_at(self.context_physical, reply)
         }
     }
 
     #[allow(dead_code)]
     pub fn reply_effect_with_text(self, reply: logos_abi::EffectReply) -> bool {
         unsafe {
-            logos_core::native_service::Context::reply_effect_with_text_at(
+            logos_core::native_service::ControlPage::reply_effect_with_text_at(
                 self.context_physical,
                 reply,
             )
@@ -487,7 +510,7 @@ impl<'a> Task<'a> {
             }
             Some(EntryState::Returned) => {
                 self.complete = unsafe {
-                    logos_core::native_service::Context::complete_at(self.context_physical)
+                    logos_core::native_service::ControlPage::complete_at(self.context_physical)
                 };
                 self.complete
             }

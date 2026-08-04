@@ -246,73 +246,79 @@ extern "C" fn user_gate_returned() {
 #[unsafe(no_mangle)]
 extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
     let context = USER_CONTEXT.load(Ordering::Acquire);
-    if context != 0 && unsafe { logos_abi::service::Context::panicked_at(context) } {
+    if context != 0 && unsafe { logos_abi::service::ControlPage::panicked_at(context) } {
         USER_PANICKED.store(true, Ordering::Release);
         return 0;
     }
-    if context != 0 && unsafe { logos_core::native_service::Context::acknowledge_at(context) } {
+    if context != 0 && unsafe { logos_core::native_service::ControlPage::acknowledge_at(context) } {
         return 1;
     }
     if context != 0
-        && unsafe { logos_core::native_service::Context::display_waiting_at(context) }
+        && unsafe { logos_core::native_service::ControlPage::display_waiting_at(context) }
         && save_user_frame(frame, false, true)
     {
         return 2;
     }
     if context != 0
-        && unsafe { logos_core::native_service::Context::input_waiting_at(context) }
+        && unsafe { logos_core::native_service::ControlPage::input_waiting_at(context) }
         && save_user_frame(frame, false, false)
     {
         return 2;
     }
     if context != 0
-        && unsafe { logos_core::native_service::Context::syscall_at(context) }.is_some()
+        && unsafe { logos_core::native_service::ControlPage::syscall_at(context) }.is_some()
         && save_user_frame(frame, true, false)
     {
         return 2;
     }
     if context != 0
-        && unsafe { logos_core::native_service::Context::store_at(context) }.is_some()
+        && unsafe { logos_core::native_service::ControlPage::store_at(context) }.is_some()
         && save_user_frame(frame, true, false)
     {
         return 2;
     }
     if context != 0
-        && unsafe { logos_core::native_service::Context::store_reply_pending_at(context) }.is_some()
+        && unsafe { logos_core::native_service::ControlPage::store_reply_pending_at(context) }
+            .is_some()
         && save_user_frame(frame, true, false)
     {
         return 2;
     }
     if context != 0
-        && unsafe { logos_core::native_service::Context::block_at(context) }.is_some()
+        && unsafe { logos_core::native_service::ControlPage::block_at(context) }.is_some()
         && save_user_frame(frame, true, false)
     {
         return 2;
     }
     if context != 0
-        && unsafe { logos_core::native_service::Context::session_reply_at(context) }.is_some()
+        && unsafe { logos_core::native_service::ControlPage::session_reply_at(context) }.is_some()
         && save_user_frame(frame, true, false)
     {
         return 2;
     }
     if context != 0
-        && unsafe { logos_core::native_service::Context::session_effect_at(context) }.is_some()
+        && unsafe { logos_core::native_service::ControlPage::session_effect_at(context) }.is_some()
         && save_user_frame(frame, true, false)
     {
         return 2;
     }
     if context != 0
-        && (unsafe { logos_core::native_service::Context::network_at(context) }.is_some()
-            || unsafe { logos_core::native_service::Context::network_reply_pending_at(context) }
-            || unsafe { logos_core::native_service::Context::network_device_pending_at(context) }
-            || unsafe { logos_core::native_service::Context::network_waiting_at(context) }
-            || unsafe { logos_core::native_service::Context::network_event_at(context) }.is_some())
+        && (unsafe { logos_core::native_service::ControlPage::network_at(context) }.is_some()
+            || unsafe {
+                logos_core::native_service::ControlPage::network_reply_pending_at(context)
+            }
+            || unsafe {
+                logos_core::native_service::ControlPage::network_device_pending_at(context)
+            }
+            || unsafe { logos_core::native_service::ControlPage::network_waiting_at(context) }
+            || unsafe { logos_core::native_service::ControlPage::network_event_at(context) }
+                .is_some())
         && save_user_frame(frame, true, false)
     {
         return 2;
     }
     if context != 0
-        && unsafe { logos_core::native_service::Context::remote_gate_at(context) }.is_some()
+        && unsafe { logos_core::native_service::ControlPage::remote_gate_at(context) }.is_some()
         && save_user_frame(frame, true, false)
     {
         return 2;

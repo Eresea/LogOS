@@ -33,7 +33,8 @@ pub fn install(
 }
 
 pub fn present(context: u64) -> bool {
-    let Some((x, y, color)) = (unsafe { logos_core::native_service::Context::pixel_at(context) })
+    let Some((x, y, color)) =
+        (unsafe { logos_core::native_service::ControlPage::pixel_at(context) })
     else {
         return false;
     };
@@ -67,7 +68,8 @@ pub fn present(context: u64) -> bool {
 }
 
 pub fn present_text(context: u64) -> bool {
-    let Some(request) = (unsafe { logos_core::native_service::Context::text_at(context) }) else {
+    let Some(request) = (unsafe { logos_core::native_service::ControlPage::text_at(context) })
+    else {
         return false;
     };
     request.text[..request.length].iter().enumerate().all(|(index, &byte)| {
@@ -87,7 +89,7 @@ pub fn present_text(context: u64) -> bool {
 }
 
 pub fn clear(context: u64) -> bool {
-    if !unsafe { logos_core::native_service::Context::clear_at(context) } {
+    if !unsafe { logos_core::native_service::ControlPage::clear_at(context) } {
         return false;
     }
     let framebuffer = FRAMEBUFFER.load(Ordering::Acquire) as *mut u8;

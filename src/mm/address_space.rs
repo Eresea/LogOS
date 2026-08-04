@@ -175,8 +175,8 @@ impl AddressSpace {
         let page = physical.allocate_owned()?;
         unsafe {
             ptr::write_bytes(page.address() as *mut u8, 0, PAGE_SIZE as usize);
-            (page.address() as *mut logos_core::native_service::Context)
-                .write_volatile(logos_core::native_service::Context::new());
+            (page.address() as *mut logos_core::native_service::ControlPage)
+                .write_volatile(logos_core::native_service::ControlPage::new());
             (self.pt.address() as *mut u64)
                 .add(CONTEXT_PAGE)
                 .write_volatile(page.address() | PRESENT | WRITABLE | USER | NO_EXECUTE);

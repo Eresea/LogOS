@@ -12,10 +12,10 @@ use core::panic::PanicInfo;
 
 use logos_abi::service as native_service;
 pub use logos_abi::service::{
-    BlockPage, Context as RawContext, Header, MAX_TEXT, NetworkPages, ProtocolVersion,
+    BlockPage, ControlPage, Header, MAX_TEXT, NetworkPages, ProtocolVersion,
 };
 
-pub type EntryContext = *mut RawContext;
+pub type EntryControlPage = *mut ControlPage;
 static ACTIVE_CONTEXT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,33 +58,33 @@ pub struct TextReply {
     pub length: usize,
 }
 
-pub struct Context {
-    raw: NonNull<RawContext>,
+pub struct ServiceContext {
+    raw: NonNull<ControlPage>,
 }
 
 /// # Safety
 /// The pointer must be the aligned, live context supplied by the kernel entry ABI.
-pub fn entry(context: EntryContext, service: fn(&mut Context) -> !) -> ! {
+pub fn entry(context: EntryControlPage, service: fn(&mut ServiceContext) -> !) -> ! {
     let Some(raw) = NonNull::new(context) else { spin() };
     if !raw.as_ptr().is_aligned() {
         spin();
     }
     ACTIVE_CONTEXT.store(raw.as_ptr() as usize, Ordering::Release);
-    let mut context = Context { raw };
+    let mut context = ServiceContext { raw };
     service(&mut context)
 }
 
-impl Context {
+impl ServiceContext {
     fn raw_address(&self) -> u64 {
         self.raw.as_ptr() as u64
     }
 
-    fn raw(&self) -> &RawContext {
+    fn raw(&self) -> &ControlPage {
         // SAFETY: `entry` validates the pointer and the kernel owns the mapping for the task.
         unsafe { self.raw.as_ref() }
     }
 
-    fn raw_mut(&mut self) -> &mut RawContext {
+    fn raw_mut(&mut self) -> &mut ControlPage {
         // SAFETY: `entry` validates the pointer and this service is single-threaded.
         unsafe { self.raw.as_mut() }
     }
@@ -162,12 +162,12 @@ impl Context {
         if !self.invoke(native_service::SYSCALL) {
             return None;
         }
-        let response = unsafe { RawContext::response_at(self.raw_address()) }?;
+        let response = unsafe { ControlPage::response_at(self.raw_address()) }?;
         Some(TextReply { text: response.text, length: response.length })
     }
 
     pub fn session_request(&self) -> Option<logos_abi::SessionRequest> {
-        unsafe { RawContext::syscall_at(self.raw_address()) }
+        unsafe { ControlPage::syscall_at(self.raw_address()) }
     }
 
     pub fn session_effect(&mut self, effect: logos_abi::Effect) -> Option<logos_abi::EffectResult> {
@@ -191,62 +191,62 @@ impl Context {
 
     pub fn store(&mut self, request: logos_abi::StoreRequest) -> Option<logos_abi::StoreReply> {
         if !request.valid()
-            || unsafe { !RawContext::request_store_at(self.raw_address(), request) }
+            || unsafe { !ControlPage::request_store_at(self.raw_address(), request) }
             || !self.invoke(native_service::STORE_REQUEST)
         {
             return None;
         }
-        unsafe { RawContext::store_reply_at(self.raw_address(), request.id) }
+        unsafe { ControlPage::store_reply_at(self.raw_address(), request.id) }
     }
 
     pub fn store_request(&self) -> Option<logos_abi::StoreRequest> {
-        unsafe { RawContext::store_at(self.raw_address()) }
+        unsafe { ControlPage::store_at(self.raw_address()) }
     }
 
     pub fn store_reply(&mut self, reply: logos_abi::StoreReply) -> bool {
-        let valid = unsafe { RawContext::reply_store_at(self.raw_address(), reply) };
+        let valid = unsafe { ControlPage::reply_store_at(self.raw_address(), reply) };
         valid && self.invoke(native_service::STORE_REPLY)
     }
 
     pub fn shared_page(&self) -> Option<SharedPage> {
-        let handle = unsafe { RawContext::shared_page_at(self.raw_address()) }?;
+        let handle = unsafe { ControlPage::shared_page_at(self.raw_address()) }?;
         let address = self.raw_address().checked_sub(logos_abi::PAGE_SIZE as u64)?;
         Some(SharedPage { handle, address })
     }
 
     pub fn block_client(&self) -> Option<BlockClient> {
-        let page = unsafe { RawContext::block_page_at(self.raw_address()) }?;
+        let page = unsafe { ControlPage::block_page_at(self.raw_address()) }?;
         Some(BlockClient { context: self.raw_address(), page, next_id: 1 })
     }
 
     pub fn network_wait(&mut self, deadline: u64) -> bool {
-        (unsafe { RawContext::network_wait_at(self.raw_address(), deadline) })
+        (unsafe { ControlPage::network_wait_at(self.raw_address(), deadline) })
             && self.invoke(native_service::NETWORK_WAIT)
     }
 
     pub fn network_pages(&self) -> Option<NetworkPages> {
-        unsafe { RawContext::network_pages_at(self.raw_address()) }
+        unsafe { ControlPage::network_pages_at(self.raw_address()) }
     }
 
     pub fn network_request(&self) -> Option<logos_abi::NetworkRequest> {
-        unsafe { RawContext::network_at(self.raw_address()) }
+        unsafe { ControlPage::network_at(self.raw_address()) }
     }
 
     pub fn network_response(&self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
-        unsafe { RawContext::network_reply_at(self.raw_address(), expected_id) }
+        unsafe { ControlPage::network_reply_at(self.raw_address(), expected_id) }
     }
 
     pub fn network_owner(&self) -> Option<u64> {
-        unsafe { RawContext::network_owner_at(self.raw_address()) }
+        unsafe { ControlPage::network_owner_at(self.raw_address()) }
     }
 
     pub fn request_network(&mut self, request: logos_abi::NetworkRequest) -> bool {
-        (unsafe { RawContext::request_network_at(self.raw_address(), request) })
+        (unsafe { ControlPage::request_network_at(self.raw_address(), request) })
             && self.invoke(native_service::NETWORK_REQUEST)
     }
 
     pub fn network_reply(&mut self, reply: logos_abi::NetworkReply) -> bool {
-        (unsafe { RawContext::reply_network_at(self.raw_address(), reply) })
+        (unsafe { ControlPage::reply_network_at(self.raw_address(), reply) })
             && self.invoke(native_service::NETWORK_REPLY)
     }
 
@@ -255,7 +255,7 @@ impl Context {
         request: logos_abi::NetworkRequest,
         reply: logos_abi::NetworkReply,
     ) -> bool {
-        (unsafe { RawContext::reply_network_after_device_at(self.raw_address(), request, reply) })
+        (unsafe { ControlPage::reply_network_after_device_at(self.raw_address(), request, reply) })
             && self.invoke(native_service::NETWORK_REPLY)
     }
 
@@ -264,43 +264,43 @@ impl Context {
         request: logos_abi::NetworkRequest,
         reply: logos_abi::NetworkReply,
     ) -> bool {
-        (unsafe { RawContext::reply_network_after_event_at(self.raw_address(), request, reply) })
+        (unsafe { ControlPage::reply_network_after_event_at(self.raw_address(), request, reply) })
             && self.invoke(native_service::NETWORK_REPLY)
     }
 
     pub fn network_device_request(&mut self, request: logos_abi::NetworkDeviceRequest) -> bool {
-        (unsafe { RawContext::request_network_device_at(self.raw_address(), request) })
+        (unsafe { ControlPage::request_network_device_at(self.raw_address(), request) })
             && self.invoke(native_service::NETWORK_DEVICE_REQUEST)
     }
 
     pub fn network_device_reply(&self, expected_id: u32) -> Option<logos_abi::NetworkDeviceReply> {
-        unsafe { RawContext::network_device_reply_at(self.raw_address(), expected_id) }
+        unsafe { ControlPage::network_device_reply_at(self.raw_address(), expected_id) }
     }
 
     pub fn network_event(&self) -> Option<logos_abi::NetworkEvent> {
-        unsafe { RawContext::network_event_at(self.raw_address()) }
+        unsafe { ControlPage::network_event_at(self.raw_address()) }
     }
 
     pub fn remote_gate_request(&self) -> Option<native_service::RemoteGateRequest> {
-        unsafe { RawContext::remote_gate_at(self.raw_address()) }
+        unsafe { ControlPage::remote_gate_at(self.raw_address()) }
     }
 
     pub fn remote_gate_reply(&self, expected_id: u32) -> Option<native_service::RemoteGateReply> {
-        unsafe { RawContext::remote_gate_reply_at(self.raw_address(), expected_id) }
+        unsafe { ControlPage::remote_gate_reply_at(self.raw_address(), expected_id) }
     }
 
     pub fn request_remote_gate(&mut self, request: native_service::RemoteGateRequest) -> bool {
-        (unsafe { RawContext::request_remote_gate_at(self.raw_address(), request) })
+        (unsafe { ControlPage::request_remote_gate_at(self.raw_address(), request) })
             && self.invoke(native_service::REMOTE_GATE)
     }
 
     pub fn reply_remote_gate(&mut self, reply: native_service::RemoteGateReply) -> bool {
-        (unsafe { RawContext::reply_remote_gate_at(self.raw_address(), reply) })
+        (unsafe { ControlPage::reply_remote_gate_at(self.raw_address(), reply) })
             && self.invoke(native_service::REMOTE_GATE)
     }
 
     pub fn storage_status(&self) -> Option<u32> {
-        unsafe { RawContext::storage_status_at(self.raw_address()) }
+        unsafe { ControlPage::storage_status_at(self.raw_address()) }
     }
 
     pub fn set_storage_status(&mut self, status: u32) {
@@ -370,7 +370,8 @@ impl BlockClient {
             page: if page { self.page.handle } else { logos_abi::PageHandle(0) },
             deadline: 1_000_000,
         };
-        if !request.valid_shape() || unsafe { !RawContext::request_block_at(self.context, request) }
+        if !request.valid_shape()
+            || unsafe { !ControlPage::request_block_at(self.context, request) }
         {
             return Err(BlockError::Invalid);
         }
@@ -379,7 +380,7 @@ impl BlockClient {
             asm!("int 0x80", options(nostack, preserves_flags));
         }
         let reply =
-            unsafe { RawContext::block_reply_at(self.context, id) }.ok_or(BlockError::Io)?;
+            unsafe { ControlPage::block_reply_at(self.context, id) }.ok_or(BlockError::Io)?;
         match reply.status {
             logos_abi::PersistenceStatus::Complete | logos_abi::PersistenceStatus::Recovered => {
                 Ok(reply)
@@ -471,7 +472,7 @@ fn panic(_info: &PanicInfo) -> ! {
     let address = ACTIVE_CONTEXT.load(Ordering::Acquire);
     if address != 0 {
         unsafe {
-            let raw = address as *mut RawContext;
+            let raw = address as *mut ControlPage;
             (*raw).operation = native_service::PANIC;
             asm!("int 0x80", options(nostack, preserves_flags));
         }

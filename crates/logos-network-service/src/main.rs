@@ -13,7 +13,7 @@ use logos_net::{
     encode_tcp, encode_udp, parse_arp, parse_dhcp, parse_ethernet, parse_icmp_echo, parse_ipv4,
     parse_tcp, parse_udp,
 };
-use logos_service_rt::{Context, Header, ProtocolVersion};
+use logos_service_rt::{Header, ProtocolVersion, ServiceContext};
 
 #[cfg(feature = "test-hooks")]
 fn trace(message: &[u8]) {
@@ -46,12 +46,12 @@ static HEADER: Header =
     Header::new(*b"network\0\0\0\0\0\0\0\0\0", ProtocolVersion::V1, logos_service_entry);
 
 #[unsafe(no_mangle)]
-extern "C" fn logos_service_entry(context: logos_service_rt::EntryContext) -> ! {
+extern "C" fn logos_service_entry(context: logos_service_rt::EntryControlPage) -> ! {
     logos_service_rt::entry(context, run)
 }
 
 #[allow(clippy::collapsible_if)]
-fn run(context: &mut Context) -> ! {
+fn run(context: &mut ServiceContext) -> ! {
     if !context.ready() {
         spin();
     }
@@ -943,7 +943,7 @@ fn inject_failure(id: u32) {
     }
 }
 
-fn issue_info(context: &mut Context, id: u32) -> bool {
+fn issue_info(context: &mut ServiceContext, id: u32) -> bool {
     context.network_device_request(NetworkDeviceRequest {
         id,
         operation: NetworkDeviceOperation::Info,
@@ -959,7 +959,7 @@ enum SubmitDatagram {
 }
 
 fn submit_datagram(
-    context: &mut Context,
+    context: &mut ServiceContext,
     state: &mut NetworkState,
     info: NetworkInfo,
     request: NetworkRequest,
@@ -1066,7 +1066,7 @@ fn submit_datagram(
 }
 
 fn submit_echo(
-    context: &mut Context,
+    context: &mut ServiceContext,
     state: &mut NetworkState,
     info: NetworkInfo,
     request: NetworkRequest,
@@ -1155,7 +1155,7 @@ fn submit_echo(
 
 #[allow(clippy::too_many_arguments)]
 fn submit_action(
-    context: &mut Context,
+    context: &mut ServiceContext,
     state: &NetworkState,
     info: &NetworkInfo,
     action: DhcpAction,
@@ -1326,7 +1326,7 @@ fn submit_action(
 
 #[allow(clippy::too_many_arguments)]
 fn accept_dhcp(
-    context: &Context,
+    context: &ServiceContext,
     length: u16,
     now: u64,
     state: &mut NetworkState,

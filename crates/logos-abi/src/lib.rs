@@ -801,7 +801,7 @@ impl StoreReply {
 }
 
 /// `foundation.session` v1 command request.  The transport stays bounded by
-/// `logos_core::native_service::Context`; this is the shared wire contract.
+/// `logos_core::native_service::ControlPage`; this is the shared wire contract.
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(u32)]
 pub enum Syscall {

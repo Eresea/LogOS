@@ -4,7 +4,7 @@
 use core::mem::MaybeUninit;
 use core::mem::size_of;
 
-use logos_service_rt::{BlockClient, BlockError, Context, Header, ProtocolVersion};
+use logos_service_rt::{BlockClient, BlockError, Header, ProtocolVersion, ServiceContext};
 use logos_store::{Error, Recovery, SECTOR_SIZE, SectorBackend, Store};
 
 use logos_storage_service::protocol::{ReadSelection, ReplaceTransaction};
@@ -33,7 +33,7 @@ struct BlockBackend {
 }
 
 impl BlockBackend {
-    fn new(context: &Context) -> Result<Self, Error> {
+    fn new(context: &ServiceContext) -> Result<Self, Error> {
         let mut client = context.block_client().ok_or(Error::Invalid)?;
         let info = client.info().map_err(map_block_error)?;
         if !info.valid() || info.logical_block_size as usize != SECTOR_SIZE {
@@ -81,7 +81,7 @@ fn map_block_error(error: BlockError) -> Error {
     }
 }
 
-fn start(context: &mut Context) -> Result<(&'static mut RuntimeState, bool), Error> {
+fn start(context: &mut ServiceContext) -> Result<(&'static mut RuntimeState, bool), Error> {
     let mut backend = BlockBackend::new(context)?;
     #[cfg(feature = "block-probe")]
     if !backend.client.probe() {
@@ -134,7 +134,7 @@ fn reply(
 }
 
 fn process(
-    context: &Context,
+    context: &ServiceContext,
     state: &mut RuntimeState,
     request: logos_abi::StoreRequest,
 ) -> logos_abi::StoreReply {
@@ -302,11 +302,11 @@ fn process_abort(
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn logos_service_entry(context: logos_service_rt::EntryContext) -> ! {
+extern "C" fn logos_service_entry(context: logos_service_rt::EntryControlPage) -> ! {
     logos_service_rt::entry(context, run)
 }
 
-fn run(context: &mut Context) -> ! {
+fn run(context: &mut ServiceContext) -> ! {
     if !context.ready() {
         spin();
     }

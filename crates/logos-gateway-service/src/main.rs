@@ -9,7 +9,7 @@ use logos_abi::{
 use logos_remote::{
     FrameDecoder, MAX_FRAME, MAX_FRAME_BUFFER, RemoteMessage, RemoteMessageKind, frame_encode,
 };
-use logos_service_rt::{Context, Header, ProtocolVersion};
+use logos_service_rt::{Header, ProtocolVersion, ServiceContext};
 
 const DEADLINE: u64 = u64::MAX / 2;
 
@@ -19,11 +19,11 @@ static HEADER: Header =
     Header::new(*b"gateway\0\0\0\0\0\0\0\0\0", ProtocolVersion::V1, logos_service_entry);
 
 #[unsafe(no_mangle)]
-extern "C" fn logos_service_entry(context: logos_service_rt::EntryContext) -> ! {
+extern "C" fn logos_service_entry(context: logos_service_rt::EntryControlPage) -> ! {
     logos_service_rt::entry(context, run)
 }
 
-fn run(context: &mut Context) -> ! {
+fn run(context: &mut ServiceContext) -> ! {
     if !context.ready() {
         spin();
     }
@@ -60,7 +60,7 @@ fn run(context: &mut Context) -> ! {
 }
 
 fn serve(
-    context: &mut Context,
+    context: &mut ServiceContext,
     page: logos_abi::PageHandle,
     address: u64,
     _listener: NetworkEndpoint,
@@ -204,7 +204,7 @@ fn serve(
 }
 
 fn gate(
-    context: &mut Context,
+    context: &mut ServiceContext,
     id: &mut u32,
     page: logos_abi::PageHandle,
     address: u64,
@@ -231,7 +231,7 @@ fn gate(
 }
 
 fn write_all(
-    context: &mut Context,
+    context: &mut ServiceContext,
     id: &mut u32,
     page: logos_abi::PageHandle,
     address: u64,
@@ -258,7 +258,7 @@ fn write_all(
 }
 
 fn network(
-    context: &mut Context,
+    context: &mut ServiceContext,
     id: &mut u32,
     operation: NetworkOperation,
     endpoint: NetworkEndpoint,

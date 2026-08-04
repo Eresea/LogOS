@@ -4,7 +4,14 @@ pub mod capabilities;
 pub mod clock;
 pub mod fault;
 pub mod native_service {
-    pub use logos_abi::service::*;
+    pub use logos_abi::service::{
+        ABI, ACKNOWLEDGED, BlockEndpointPage, BlockPage, COMPLETE, ControlPage, DisplayPage,
+        EndpointState, InputPage, NetworkPage, NetworkPages, PANIC, ProtocolVersion, READ_INPUT,
+        READY, REMOTE_GATE, RemoteGateOperation, RemoteGateReply, RemoteGateRequest,
+        RemoteGateStatus, RemotePage, SESSION_EFFECT, SESSION_REPLY, STORAGE_CORRUPT,
+        STORAGE_FORMATTED, STORAGE_IO_FAILED, STORAGE_RECOVERED, STORAGE_RECOVERED_INCOMPLETE,
+        STORAGE_UNAVAILABLE, SessionPage, StoreEndpointPage, self_check,
+    };
 }
 pub mod shared_pages;
 pub mod test_protocol;
