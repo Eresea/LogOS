@@ -329,7 +329,7 @@ fn run(context: &mut ServiceContext) -> ! {
         if let Some(request) = context.store_request() {
             #[cfg(feature = "test-hooks")]
             inject_failure(request.id);
-            let response = process(context, state, request);
+            let response = process(context, state, request.request);
             if !context.store_reply(response) {
                 spin();
             }

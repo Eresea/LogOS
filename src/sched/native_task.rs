@@ -262,6 +262,7 @@ impl DisplayEndpoint {
         self.context_physical
     }
 
+    #[allow(dead_code)]
     pub const fn page(self) -> Option<u64> {
         self.page_physical
     }
@@ -328,10 +329,6 @@ impl StoreClientEndpoint {
 
     pub const fn available(self) -> bool {
         self.page_physical != 0
-    }
-
-    pub const fn context(self) -> u64 {
-        self.context_physical
     }
 
     pub fn request(self) -> Option<logos_abi::StoreRequest> {
@@ -499,27 +496,6 @@ impl StoreServerEndpoint {
         }
     }
 
-    pub fn reply(self, reply: logos_abi::StoreReply) -> bool {
-        if !self.available() {
-            return false;
-        }
-        let accepted = unsafe {
-            logos_abi::service::StoreServerPage::reply_at(
-                self.page_physical,
-                self.service_generation,
-                self.endpoint_generation,
-                reply,
-            )
-        };
-        accepted
-            && unsafe {
-                logos_abi::service::ControlPage::notify_at(
-                    self.context_physical,
-                    logos_abi::service::STORE_REPLY,
-                )
-            }
-    }
-
     pub fn status(self) -> Option<u32> {
         if !self.available() {
             return None;
@@ -557,10 +533,6 @@ impl BlockClientEndpoint {
 
     pub const fn available(self) -> bool {
         self.page_physical != 0
-    }
-
-    pub const fn context(self) -> u64 {
-        self.context_physical
     }
 
     pub fn configure_transfer(self, page: logos_abi::PageHandle) -> bool {
