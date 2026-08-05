@@ -277,51 +277,6 @@ impl SessionsRuntime {
     }
 }
 
-#[allow(dead_code)]
-pub fn relay_native(
-    terminal: crate::sched::native_task::SyscallEndpoint,
-    sessions: Option<crate::sched::native_task::SessionEndpoint>,
-    scheduler: &mut crate::sched::native_task::Scheduler<'_>,
-    sessions_handle: Option<crate::sched::native_task::Handle>,
-    context: crate::ipc::effects::Context<'_, '_>,
-) -> Relay {
-    let Some(request) = terminal.request() else {
-        return Relay::Handled(true);
-    };
-    if !context.session.allows(context.capabilities, CapabilityKind::Session) {
-        return Relay::Handled(terminal.reply(b"permission denied"));
-    }
-    let (Some(sessions), Some(sessions_handle)) = (sessions, sessions_handle) else {
-        return Relay::Handled(terminal.reply(b"session unavailable"));
-    };
-    if !sessions.deliver(request)
-        || !scheduler.wake(sessions_handle)
-        || !scheduler.run(sessions_handle)
-    {
-        return Relay::Handled(false);
-    }
-    let Some(effect) = sessions.effect() else {
-        return Relay::Handled(false);
-    };
-    let result = crate::ipc::effects::execute(effect, context);
-    if !sessions.reply_effect(result)
-        || !scheduler.wake(sessions_handle)
-        || !scheduler.run(sessions_handle)
-    {
-        return Relay::Handled(false);
-    }
-    let Some(reply) = sessions.reply() else {
-        return Relay::Handled(false);
-    };
-    if !terminal.reply(&reply.text[..reply.length])
-        || !scheduler.wake(sessions_handle)
-        || !scheduler.run(sessions_handle)
-    {
-        return Relay::Handled(false);
-    }
-    if result == logos_abi::EffectResult::Recovery { Relay::Recovery } else { Relay::Handled(true) }
-}
-
 pub fn invoke_native(
     request: logos_abi::SessionRequest,
     sessions: Option<crate::sched::native_task::SessionEndpoint>,

@@ -78,16 +78,6 @@ pub struct SessionClientEndpoint {
 }
 
 impl SessionClientEndpoint {
-    pub fn request(self) -> Option<logos_abi::service::SessionClientRequest> {
-        unsafe {
-            logos_abi::service::SessionClientPage::take_request_at(
-                self.page_physical,
-                self.service_generation,
-                self.endpoint_generation,
-            )
-        }
-    }
-
     pub fn reply(
         self,
         id: u32,
@@ -105,21 +95,6 @@ impl SessionClientEndpoint {
             )
         }
     }
-
-    pub fn cancel(self, id: u32) -> bool {
-        unsafe {
-            logos_abi::service::SessionClientPage::cancel_at(
-                self.page_physical,
-                self.service_generation,
-                self.endpoint_generation,
-                id,
-            )
-        }
-    }
-
-    pub const fn generation(self) -> u32 {
-        self.service_generation
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -130,16 +105,6 @@ pub struct SessionServerEndpoint {
 }
 
 impl SessionServerEndpoint {
-    pub fn waiting(self) -> bool {
-        unsafe {
-            logos_abi::service::SessionServerPage::waiting_at(
-                self.page_physical,
-                self.service_generation,
-                self.endpoint_generation,
-            )
-        }
-    }
-
     pub fn deliver(self, id: u32, caller: u64, request: logos_abi::SessionRequest) -> bool {
         unsafe {
             logos_abi::service::SessionServerPage::deliver_at(
@@ -162,10 +127,6 @@ impl SessionServerEndpoint {
                 id,
             )
         }
-    }
-
-    pub const fn generation(self) -> u32 {
-        self.service_generation
     }
 }
 
@@ -208,15 +169,10 @@ impl EffectEndpoint {
             )
         }
     }
-
-    pub const fn generation(self) -> u32 {
-        self.service_generation
-    }
 }
 
 #[derive(Clone, Copy)]
 pub struct SyscallEndpoint {
-    context_physical: u64,
     client: SessionClientEndpoint,
 }
 
@@ -647,10 +603,7 @@ impl<'a> Task<'a> {
     }
 
     pub fn syscall_endpoint(&self) -> SyscallEndpoint {
-        SyscallEndpoint {
-            context_physical: self.context_physical,
-            client: self.session_client_endpoint().unwrap(),
-        }
+        SyscallEndpoint { client: self.session_client_endpoint().unwrap() }
     }
 
     pub fn display_endpoint(&self) -> Option<DisplayEndpoint> {
@@ -911,18 +864,6 @@ impl<'a> Scheduler<'a> {
 
     pub fn display_endpoint(&self, handle: Handle) -> Option<DisplayEndpoint> {
         self.entry(handle)?.task.display_endpoint()
-    }
-
-    pub fn session_client_endpoint(&self, handle: Handle) -> Option<SessionClientEndpoint> {
-        self.entry(handle)?.task.session_client_endpoint()
-    }
-
-    pub fn session_server_endpoint(&self, handle: Handle) -> Option<SessionServerEndpoint> {
-        self.entry(handle)?.task.session_server_endpoint()
-    }
-
-    pub fn effect_endpoint(&self, handle: Handle) -> Option<EffectEndpoint> {
-        self.entry(handle)?.task.effect_endpoint()
     }
 
     pub fn session_endpoint(&self, handle: Handle) -> Option<SessionEndpoint> {
