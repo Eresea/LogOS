@@ -85,6 +85,14 @@ pub struct ControlPage {
 /// Every transition requires both generations and the active request ID. Unknown
 /// states and malformed bounded values are rejected without a write. Reset and
 /// replacement install `Ready` with new generations, invalidating pending work.
+///
+/// Persistence roles use independent pages. Store clients submit `Ready ->
+/// Request -> Waiting`, Core mediates to the Store server's `Ready -> Waiting
+/// -> Request -> Processing` path, and terminal replies reset both pages to
+/// `Ready`. Block clients use `Ready -> Request -> Submitted` and Core writes
+/// a terminal result before the client resets the page. All terminal writes
+/// require the matching generations and request ID; invalid scalar states,
+/// malformed bounded values, and stale identities leave the page unchanged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum EndpointState {
@@ -656,6 +664,7 @@ fn persistence_state(status: logos_abi::PersistenceStatus) -> PersistencePageSta
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn store_request_from_fields(
     id: u32,
     operation: u32,
@@ -699,6 +708,7 @@ fn store_reply_from_fields(
     })
 }
 
+#[allow(clippy::missing_safety_doc)]
 impl StoreClientPage {
     pub const fn new(service_generation: u32, endpoint_generation: u32) -> Self {
         Self {
@@ -941,6 +951,7 @@ impl StoreClientPage {
     }
 }
 
+#[allow(clippy::missing_safety_doc)]
 impl StoreServerPage {
     pub const fn new(service_generation: u32, endpoint_generation: u32) -> Self {
         Self {
@@ -978,6 +989,7 @@ impl StoreServerPage {
         let old = unsafe { (address as *const Self).read_volatile() };
         let mut page = Self::new(service_generation, endpoint_generation);
         page.transfer_page = old.transfer_page;
+        page.service_status = old.service_status;
         unsafe { (address as *mut Self).write_volatile(page) };
         true
     }
@@ -1199,6 +1211,7 @@ impl StoreServerPage {
     }
 }
 
+#[allow(clippy::missing_safety_doc)]
 impl BlockClientPage {
     pub const fn new(service_generation: u32, endpoint_generation: u32) -> Self {
         Self {
@@ -2550,6 +2563,7 @@ fn encode_network_event(bytes: &mut [u8; MAX_TEXT], event: logos_abi::NetworkEve
     write_u64(bytes, 10, event.now);
 }
 
+#[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 impl ControlPage {
     pub const fn new() -> Self {
         Self::with_generation(1)
