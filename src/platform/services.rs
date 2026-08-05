@@ -151,7 +151,7 @@ const VIRTIO_BLOCK_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Resettable,
     profiles: Profiles::NORMAL_RECOVERY,
-    endpoints: EndpointSet::BLOCK,
+    endpoints: EndpointSet::NONE,
 };
 const STORAGE_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Storage,

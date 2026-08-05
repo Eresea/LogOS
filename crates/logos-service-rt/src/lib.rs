@@ -12,8 +12,9 @@ use core::panic::PanicInfo;
 
 use logos_abi::service as native_service;
 pub use logos_abi::service::{
-    BlockPage, ControlPage, DisplayPage, EffectPage, Header, InputPage, MAX_TEXT, NetworkPages,
-    ProtocolVersion, SessionClientPage, SessionServerPage, SessionStatus,
+    BlockClientPage, ControlPage, DisplayPage, EffectPage, Header, InputPage, MAX_TEXT,
+    NetworkPages, ProtocolVersion, SessionClientPage, SessionServerPage, SessionStatus,
+    StoreClientPage, StoreServerPage,
 };
 
 pub type EntryControlPage = *mut ControlPage;
@@ -145,7 +146,14 @@ impl ServiceContext {
     }
 
     pub fn wait_for_request(&mut self) -> bool {
-        self.invoke(native_service::READ_INPUT)
+        let raw = self.raw();
+        if raw.store_server_page != 0 && raw.generation != 0 {
+            (unsafe {
+                StoreServerPage::wait_at(raw.store_server_page, raw.generation, raw.generation)
+            }) && self.invoke(native_service::READ_INPUT)
+        } else {
+            self.invoke(native_service::READ_INPUT)
+        }
     }
 
     pub fn complete(&mut self) -> bool {
@@ -252,33 +260,44 @@ impl ServiceContext {
     }
 
     pub fn store(&mut self, request: logos_abi::StoreRequest) -> Option<logos_abi::StoreReply> {
-        if !request.valid()
-            || unsafe { !ControlPage::request_store_at(self.raw_address(), request) }
+        let (page, generation) = self.store_client_page()?;
+        if !unsafe { !StoreClientPage::request_at(page, generation, generation, request) }
             || !self.invoke(native_service::STORE_REQUEST)
         {
             return None;
         }
-        unsafe { ControlPage::store_reply_at(self.raw_address(), request.id) }
+        unsafe { StoreClientPage::finish_at(page, generation, generation, request.id) }
     }
 
-    pub fn store_request(&self) -> Option<logos_abi::StoreRequest> {
-        unsafe { ControlPage::store_at(self.raw_address()) }
+    pub fn store_request(&self) -> Option<native_service::StoreServerRequest> {
+        let (page, generation) = self.store_server_page()?;
+        unsafe { StoreServerPage::take_at(page, generation, generation) }
     }
 
     pub fn store_reply(&mut self, reply: logos_abi::StoreReply) -> bool {
-        let valid = unsafe { ControlPage::reply_store_at(self.raw_address(), reply) };
+        let Some((page, generation)) = self.store_server_page() else { return false };
+        let valid = unsafe { StoreServerPage::reply_at(page, generation, generation, reply) };
         valid && self.invoke(native_service::STORE_REPLY)
     }
 
     pub fn shared_page(&self) -> Option<SharedPage> {
-        let handle = unsafe { ControlPage::shared_page_at(self.raw_address()) }?;
+        let (page, generation) = self.store_client_page().or_else(|| self.store_server_page())?;
+        let handle = unsafe {
+            if self.raw().store_client_page == page {
+                StoreClientPage::transfer_page_at(page, generation, generation)
+            } else {
+                StoreServerPage::transfer_page_at(page, generation, generation)
+            }
+        }?;
         let address = self.raw_address().checked_sub(logos_abi::PAGE_SIZE as u64)?;
         Some(SharedPage { handle, address })
     }
 
     pub fn block_client(&self) -> Option<BlockClient> {
-        let page = unsafe { ControlPage::block_page_at(self.raw_address()) }?;
-        Some(BlockClient { context: self.raw_address(), page, next_id: 1 })
+        let (page, generation) = self.block_client_page()?;
+        let handle = unsafe { BlockClientPage::transfer_page_at(page, generation, generation) }?;
+        let address = self.raw_address().checked_sub(6 * logos_abi::PAGE_SIZE as u64)?;
+        Some(BlockClient { page, generation, handle, address, next_id: 1 })
     }
 
     pub fn network_wait(&mut self, deadline: u64) -> bool {
@@ -362,11 +381,32 @@ impl ServiceContext {
     }
 
     pub fn storage_status(&self) -> Option<u32> {
-        unsafe { ControlPage::storage_status_at(self.raw_address()) }
+        let (page, generation) = self.store_server_page()?;
+        unsafe { StoreServerPage::status_at(page, generation, generation) }
     }
 
     pub fn set_storage_status(&mut self, status: u32) {
-        self.raw_mut().slot0 = status;
+        if let Some((page, generation)) = self.store_server_page() {
+            let _ = unsafe { StoreServerPage::set_status_at(page, generation, generation, status) };
+        }
+    }
+
+    fn store_client_page(&self) -> Option<(u64, u32)> {
+        let raw = self.raw();
+        (raw.store_client_page != 0 && raw.generation != 0)
+            .then_some((raw.store_client_page, raw.generation))
+    }
+
+    fn store_server_page(&self) -> Option<(u64, u32)> {
+        let raw = self.raw();
+        (raw.store_server_page != 0 && raw.generation != 0)
+            .then_some((raw.store_server_page, raw.generation))
+    }
+
+    fn block_client_page(&self) -> Option<(u64, u32)> {
+        let raw = self.raw();
+        (raw.block_client_page != 0 && raw.generation != 0)
+            .then_some((raw.block_client_page, raw.generation))
     }
 
     pub fn heap_slot<T>(&self) -> Option<&'static mut MaybeUninit<T>> {
@@ -380,8 +420,10 @@ impl ServiceContext {
 }
 
 pub struct BlockClient {
-    context: u64,
-    page: BlockPage,
+    page: u64,
+    generation: u32,
+    handle: logos_abi::PageHandle,
+    address: u64,
     next_id: u32,
 }
 
@@ -393,14 +435,14 @@ impl BlockClient {
     pub fn read_sector(&mut self, sector: usize, output: &mut [u8; 512]) -> Result<(), BlockError> {
         self.request(logos_abi::BlockOperation::Read, sector as u64, 1, true)?;
         // SAFETY: the kernel provides the page as an owned, page-aligned service mapping.
-        let page = unsafe { core::slice::from_raw_parts(self.page.address as *const u8, 4096) };
+        let page = unsafe { core::slice::from_raw_parts(self.address as *const u8, 4096) };
         output.copy_from_slice(&page[..512]);
         Ok(())
     }
 
     pub fn write_sector(&mut self, sector: usize, input: &[u8; 512]) -> Result<(), BlockError> {
         // SAFETY: the kernel provides the page as an owned, writable service mapping.
-        let page = unsafe { core::slice::from_raw_parts_mut(self.page.address as *mut u8, 4096) };
+        let page = unsafe { core::slice::from_raw_parts_mut(self.address as *mut u8, 4096) };
         page.fill(0);
         page[..512].copy_from_slice(input);
         self.request(logos_abi::BlockOperation::Write, sector as u64, 1, true).map(|_| ())
@@ -429,11 +471,13 @@ impl BlockClient {
             operation,
             lba,
             blocks,
-            page: if page { self.page.handle } else { logos_abi::PageHandle(0) },
+            page: if page { self.handle } else { logos_abi::PageHandle(0) },
             deadline: 1_000_000,
         };
         if !request.valid_shape()
-            || unsafe { !ControlPage::request_block_at(self.context, request) }
+            || unsafe {
+                !BlockClientPage::request_at(self.page, self.generation, self.generation, request)
+            }
         {
             return Err(BlockError::Invalid);
         }
@@ -442,7 +486,8 @@ impl BlockClient {
             asm!("int 0x80", options(nostack, preserves_flags));
         }
         let reply =
-            unsafe { ControlPage::block_reply_at(self.context, id) }.ok_or(BlockError::Io)?;
+            unsafe { BlockClientPage::finish_at(self.page, self.generation, self.generation, id) }
+                .ok_or(BlockError::Io)?;
         match reply.status {
             logos_abi::PersistenceStatus::Complete | logos_abi::PersistenceStatus::Recovered => {
                 Ok(reply)

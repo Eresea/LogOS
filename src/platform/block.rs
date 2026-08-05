@@ -22,7 +22,7 @@ pub struct Dispatch {
 }
 
 pub struct DispatchContext<'a> {
-    pub endpoint: crate::sched::native_task::BlockEndpoint,
+    pub endpoint: crate::sched::native_task::BlockClientEndpoint,
     pub pages: &'a mut logos_core::shared_pages::SharedPages,
     pub store_owner: u64,
     pub store_page: logos_abi::PageHandle,
