@@ -780,8 +780,11 @@ pub struct NetworkEvent {
     pub id: u32,
     pub kind: NetworkEventKind,
     pub generation: u16,
+    pub device_generation: u32,
+    pub page: PageHandle,
     pub length: u16,
     pub now: u64,
+    pub metadata: [u8; 16],
 }
 
 impl NetworkEvent {
@@ -789,8 +792,15 @@ impl NetworkEvent {
         self.id != 0
             && self.kind as u8 != 0
             && self.generation != 0
+            && self.device_generation != 0
             && self.length as usize <= PAGE_SIZE
             && self.now != 0
+            && match self.kind {
+                NetworkEventKind::Frame => self.page.0 != 0,
+                NetworkEventKind::Timer | NetworkEventKind::Reset | NetworkEventKind::Cancel => {
+                    self.page.0 == 0 && self.length == 0
+                }
+            }
     }
 }
 

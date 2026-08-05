@@ -62,8 +62,8 @@ pub struct ControlPage {
     pub slot1: u32,
     pub payload_length: u32,
     pub payload: [u8; MAX_TEXT],
-    pub network_rx_page: u32,
-    pub network_tx_page: u32,
+    pub network_device_page: u64,
+    pub network_event_page: u64,
 }
 
 /// Explicit state values shared by typed endpoint pages.
@@ -372,16 +372,95 @@ pub struct BlockClientPage {
     pub max_transfer_blocks: u32,
 }
 
-/// Fixed-size Network endpoint page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum NetworkDevicePageState {
+    Ready = 1,
+    Request = 2,
+    Submitted = 3,
+    Reply = 4,
+}
+
+impl NetworkDevicePageState {
+    pub const fn from_wire(value: u32) -> Option<Self> {
+        Some(match value {
+            1 => Self::Ready,
+            2 => Self::Request,
+            3 => Self::Submitted,
+            4 => Self::Reply,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum NetworkEventPageState {
+    Ready = 1,
+    Waiting = 2,
+    Event = 3,
+    Consumed = 4,
+}
+
+impl NetworkEventPageState {
+    pub const fn from_wire(value: u32) -> Option<Self> {
+        Some(match value {
+            1 => Self::Ready,
+            2 => Self::Waiting,
+            3 => Self::Event,
+            4 => Self::Consumed,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NetworkDeviceMessage {
+    pub request: logos_abi::NetworkDeviceRequest,
+    pub rx_page: logos_abi::PageHandle,
+    pub tx_page: logos_abi::PageHandle,
+}
+
+/// Core-owned Network device endpoint. Only the Network service maps it.
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct NetworkPage {
-    pub generation: u32,
-    pub state: EndpointState,
-    pub request: [u8; NETWORK_REQUEST_BYTES],
-    pub reply: [u8; NETWORK_REPLY_BYTES],
-    pub event: [u8; NETWORK_EVENT_BYTES],
-    pub reserved: [u8; logos_abi::PAGE_SIZE - 208],
+pub struct NetworkDevicePage {
+    pub service_generation: u32,
+    pub endpoint_generation: u32,
+    pub device_generation: u32,
+    pub state: u32,
+    pub request_id: u32,
+    pub operation: u32,
+    pub rx_page: u32,
+    pub tx_page: u32,
+    pub length: u32,
+    pub deadline: u64,
+    pub reply_status: u32,
+    pub reset_generation: u32,
+    pub info: logos_abi::NetworkInfo,
+    pub metadata: [u8; 32],
+    pub reserved: [u8; logos_abi::PAGE_SIZE - 112],
+}
+
+/// Core/Foundation-produced Network event endpoint. It holds one event only.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct NetworkEventPage {
+    pub service_generation: u32,
+    pub endpoint_generation: u32,
+    pub device_generation: u32,
+    pub state: u32,
+    pub sequence: u32,
+    pub kind: u32,
+    pub transfer_page: u32,
+    pub length: u32,
+    pub deadline: u64,
+    pub now: u64,
+    pub generation: u16,
+    pub reserved0: u16,
+    pub metadata: [u8; 32],
+    pub configured_rx_page: u32,
+    pub reserved: [u8; logos_abi::PAGE_SIZE - 88],
 }
 
 /// Fixed-size Remote endpoint page.
@@ -1480,6 +1559,819 @@ pub struct EffectResponse {
     pub reply: logos_abi::EffectReply,
 }
 
+fn valid_network_page_address<T>(address: u64) -> bool {
+    address != 0 && address.is_multiple_of(align_of::<T>() as u64)
+}
+
+fn valid_network_device_identity(
+    page: &NetworkDevicePage,
+    service_generation: u32,
+    endpoint_generation: u32,
+    device_generation: u32,
+) -> bool {
+    page.service_generation == service_generation
+        && page.endpoint_generation == endpoint_generation
+        && page.device_generation == device_generation
+        && service_generation != 0
+        && endpoint_generation != 0
+        && device_generation != 0
+}
+
+fn valid_network_event_identity(
+    page: &NetworkEventPage,
+    service_generation: u32,
+    endpoint_generation: u32,
+    device_generation: u32,
+) -> bool {
+    page.service_generation == service_generation
+        && page.endpoint_generation == endpoint_generation
+        && page.device_generation == device_generation
+        && service_generation != 0
+        && endpoint_generation != 0
+        && device_generation != 0
+}
+
+impl NetworkDevicePage {
+    pub const fn new(
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+    ) -> Self {
+        Self {
+            service_generation,
+            endpoint_generation,
+            device_generation,
+            state: NetworkDevicePageState::Ready as u32,
+            request_id: 0,
+            operation: 0,
+            rx_page: 0,
+            tx_page: 0,
+            length: 0,
+            deadline: 0,
+            reply_status: 0,
+            reset_generation: 0,
+            info: logos_abi::NetworkInfo {
+                mac: [0; 6],
+                mtu: 0,
+                generation: 0,
+                link_up: 0,
+                configuration: 0,
+                ipv4: 0,
+                subnet_mask: 0,
+                router: 0,
+            },
+            metadata: [0; 32],
+            reserved: [0; logos_abi::PAGE_SIZE - 112],
+        }
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned NetworkDevicePage mapping.
+    pub unsafe fn reset_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+        rx_page: logos_abi::PageHandle,
+        tx_page: logos_abi::PageHandle,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address)
+            || rx_page.0 == 0
+            || tx_page.0 == 0
+            || rx_page == tx_page
+        {
+            return false;
+        }
+        unsafe {
+            (address as *mut Self).write_volatile(Self {
+                rx_page: rx_page.0,
+                tx_page: tx_page.0,
+                ..Self::new(service_generation, endpoint_generation, device_generation)
+            })
+        };
+        true
+    }
+
+    /// # Safety
+    /// Core replaces the device generation while publishing the matching reset result.
+    pub unsafe fn reset_with_reply_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+        rx_page: logos_abi::PageHandle,
+        tx_page: logos_abi::PageHandle,
+        reply: logos_abi::NetworkDeviceReply,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address)
+            || device_generation == 0
+            || rx_page.0 == 0
+            || tx_page.0 == 0
+            || rx_page == tx_page
+        {
+            return false;
+        }
+        let old = unsafe { (address as *const Self).read_volatile() };
+        if old.service_generation == 0
+            || old.endpoint_generation == 0
+            || old.device_generation == 0
+            || NetworkDevicePageState::from_wire(old.state)
+                != Some(NetworkDevicePageState::Submitted)
+            || old.request_id == 0
+            || reply.id != old.request_id
+        {
+            return false;
+        }
+        let mut page = Self::new(service_generation, endpoint_generation, device_generation);
+        page.request_id = old.request_id;
+        page.operation = old.operation;
+        page.tx_page = tx_page.0;
+        page.rx_page = rx_page.0;
+        page.length = old.length;
+        page.deadline = old.deadline;
+        page.reply_status = reply.status as u32;
+        page.reset_generation = u32::from(reply.generation);
+        page.info = reply.info;
+        page.state = NetworkDevicePageState::Reply as u32;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// Core replaces the service generation while retaining Core-owned DMA identities.
+    pub unsafe fn reset_generation_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address) {
+            return false;
+        }
+        let old = unsafe { (address as *const Self).read_volatile() };
+        if old.service_generation == 0 || old.endpoint_generation == 0 || old.device_generation == 0
+        {
+            return false;
+        }
+        unsafe {
+            (address as *mut Self).write_volatile(Self {
+                rx_page: old.rx_page,
+                tx_page: old.tx_page,
+                ..Self::new(service_generation, endpoint_generation, old.device_generation)
+            })
+        };
+        true
+    }
+
+    /// # Safety
+    /// Core configures a newly mapped page before the service starts.
+    pub unsafe fn configure_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+        rx_page: logos_abi::PageHandle,
+        tx_page: logos_abi::PageHandle,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address)
+            || rx_page.0 == 0
+            || tx_page.0 == 0
+            || rx_page == tx_page
+        {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !valid_network_device_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) || NetworkDevicePageState::from_wire(page.state) != Some(NetworkDevicePageState::Ready)
+            || page.rx_page != 0
+            || page.tx_page != 0
+        {
+            return false;
+        }
+        page.rx_page = rx_page.0;
+        page.tx_page = tx_page.0;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// The Network service owns request creation.
+    pub unsafe fn request_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+        request: logos_abi::NetworkDeviceRequest,
+    ) -> bool {
+        if !request.valid_shape()
+            || !valid_network_page_address::<Self>(address)
+            || request.generation != 0 && u32::from(request.generation) != device_generation
+        {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !valid_network_device_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) || NetworkDevicePageState::from_wire(page.state) != Some(NetworkDevicePageState::Ready)
+            || page.rx_page == 0
+            || page.tx_page == 0
+        {
+            return false;
+        }
+        page.request_id = request.id;
+        page.operation = request.operation as u32;
+        page.length = u32::from(request.length);
+        page.deadline = request.deadline;
+        page.reply_status = 0;
+        page.reset_generation = 0;
+        page.info = logos_abi::NetworkInfo::default();
+        page.state = NetworkDevicePageState::Request as u32;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// Core consumes a service-created request.
+    pub unsafe fn take_request_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+    ) -> Option<NetworkDeviceMessage> {
+        if !valid_network_page_address::<Self>(address) {
+            return None;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !valid_network_device_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) || NetworkDevicePageState::from_wire(page.state)
+            != Some(NetworkDevicePageState::Request)
+        {
+            return None;
+        }
+        let operation =
+            logos_abi::NetworkDeviceOperation::from_wire(u8::try_from(page.operation).ok()?)?;
+        let length = u16::try_from(page.length).ok()?;
+        let generation = match operation {
+            logos_abi::NetworkDeviceOperation::Info => 0,
+            logos_abi::NetworkDeviceOperation::Transmit
+            | logos_abi::NetworkDeviceOperation::Reset => u16::try_from(device_generation).ok()?,
+        };
+        let request = logos_abi::NetworkDeviceRequest {
+            id: page.request_id,
+            operation,
+            length,
+            generation,
+            deadline: page.deadline,
+        };
+        if !request.valid_shape()
+            || page.request_id == 0
+            || (operation == logos_abi::NetworkDeviceOperation::Transmit && page.tx_page == 0)
+        {
+            return None;
+        }
+        page.state = NetworkDevicePageState::Submitted as u32;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(NetworkDeviceMessage {
+            request,
+            rx_page: logos_abi::PageHandle(page.rx_page),
+            tx_page: logos_abi::PageHandle(page.tx_page),
+        })
+    }
+
+    /// # Safety
+    /// Core completes the current request with a validated driver result.
+    pub unsafe fn complete_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+        reply: logos_abi::NetworkDeviceReply,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address) {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !valid_network_device_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) || NetworkDevicePageState::from_wire(page.state)
+            != Some(NetworkDevicePageState::Submitted)
+        {
+            return false;
+        }
+        let operation = match logos_abi::NetworkDeviceOperation::from_wire(
+            u8::try_from(page.operation).ok().unwrap_or(0),
+        ) {
+            Some(operation) => operation,
+            None => return false,
+        };
+        let request = logos_abi::NetworkDeviceRequest {
+            id: page.request_id,
+            operation,
+            length: u16::try_from(page.length).ok().unwrap_or(0),
+            generation: if operation == logos_abi::NetworkDeviceOperation::Info {
+                0
+            } else {
+                u16::try_from(device_generation).ok().unwrap_or(0)
+            },
+            deadline: page.deadline,
+        };
+        if !request.valid_shape() || !reply.valid_for(request) {
+            return false;
+        }
+        page.reply_status = reply.status as u32;
+        page.reset_generation = u32::from(reply.generation);
+        page.info = reply.info;
+        page.state = NetworkDevicePageState::Reply as u32;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// The Network service consumes only its matching completion.
+    pub unsafe fn take_reply_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+        expected_id: u32,
+    ) -> Option<logos_abi::NetworkDeviceReply> {
+        if !valid_network_page_address::<Self>(address) {
+            return None;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !valid_network_device_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) || NetworkDevicePageState::from_wire(page.state) != Some(NetworkDevicePageState::Reply)
+            || page.request_id != expected_id
+        {
+            return None;
+        }
+        let status = logos_abi::NetworkStatus::from_wire(u8::try_from(page.reply_status).ok()?)?;
+        let reply = logos_abi::NetworkDeviceReply {
+            id: page.request_id,
+            status,
+            generation: u16::try_from(page.reset_generation).ok()?,
+            info: page.info,
+        };
+        page.request_id = 0;
+        page.operation = 0;
+        page.length = 0;
+        page.deadline = 0;
+        page.reply_status = 0;
+        page.reset_generation = 0;
+        page.info = logos_abi::NetworkInfo::default();
+        page.state = NetworkDevicePageState::Ready as u32;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(reply)
+    }
+
+    /// # Safety
+    /// Core reads only scalar state.
+    pub unsafe fn pending_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address) {
+            return false;
+        }
+        let page = unsafe { (address as *const Self).read_volatile() };
+        valid_network_device_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) && matches!(
+            NetworkDevicePageState::from_wire(page.state),
+            Some(NetworkDevicePageState::Request | NetworkDevicePageState::Submitted)
+        )
+    }
+
+    /// # Safety
+    /// Core reads only the generation and state fields from the endpoint mapping.
+    pub unsafe fn active_for_core_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address) {
+            return false;
+        }
+        let page = unsafe { (address as *const Self).read_volatile() };
+        page.service_generation == service_generation
+            && page.endpoint_generation == endpoint_generation
+            && service_generation != 0
+            && endpoint_generation != 0
+            && page.device_generation != 0
+            && matches!(
+                NetworkDevicePageState::from_wire(page.state),
+                Some(
+                    NetworkDevicePageState::Request
+                        | NetworkDevicePageState::Submitted
+                        | NetworkDevicePageState::Reply
+                )
+            )
+    }
+
+    /// # Safety
+    /// Core reads only scalar state.
+    pub unsafe fn reply_pending_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address) {
+            return false;
+        }
+        let page = unsafe { (address as *const Self).read_volatile() };
+        valid_network_device_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) && NetworkDevicePageState::from_wire(page.state) == Some(NetworkDevicePageState::Reply)
+    }
+
+    /// # Safety
+    /// The Network service reads configured DMA identities.
+    pub unsafe fn dma_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+    ) -> Option<(logos_abi::PageHandle, logos_abi::PageHandle)> {
+        if !valid_network_page_address::<Self>(address) {
+            return None;
+        }
+        let page = unsafe { (address as *const Self).read_volatile() };
+        if !valid_network_device_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) || page.rx_page == 0
+            || page.tx_page == 0
+            || page.rx_page == page.tx_page
+        {
+            return None;
+        }
+        Some((logos_abi::PageHandle(page.rx_page), logos_abi::PageHandle(page.tx_page)))
+    }
+}
+
+impl NetworkEventPage {
+    pub const fn new(
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+    ) -> Self {
+        Self {
+            service_generation,
+            endpoint_generation,
+            device_generation,
+            state: NetworkEventPageState::Ready as u32,
+            sequence: 0,
+            kind: 0,
+            transfer_page: 0,
+            length: 0,
+            deadline: 0,
+            now: 0,
+            generation: 0,
+            reserved0: 0,
+            metadata: [0; 32],
+            configured_rx_page: 0,
+            reserved: [0; logos_abi::PAGE_SIZE - 88],
+        }
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned NetworkEventPage mapping.
+    pub unsafe fn reset_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+        rx_page: logos_abi::PageHandle,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address) || rx_page.0 == 0 {
+            return false;
+        }
+        unsafe {
+            (address as *mut Self).write_volatile(Self {
+                configured_rx_page: rx_page.0,
+                ..Self::new(service_generation, endpoint_generation, device_generation)
+            })
+        };
+        true
+    }
+
+    /// # Safety
+    /// Core replaces the service generation while retaining the RX identity.
+    pub unsafe fn reset_generation_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address) {
+            return false;
+        }
+        let old = unsafe { (address as *const Self).read_volatile() };
+        if old.service_generation == 0 || old.endpoint_generation == 0 || old.device_generation == 0
+        {
+            return false;
+        }
+        unsafe {
+            (address as *mut Self).write_volatile(Self {
+                configured_rx_page: old.configured_rx_page,
+                ..Self::new(service_generation, endpoint_generation, old.device_generation)
+            })
+        };
+        true
+    }
+
+    /// # Safety
+    /// Core configures a newly mapped page before the service starts.
+    pub unsafe fn configure_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+        rx_page: logos_abi::PageHandle,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address) || rx_page.0 == 0 {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !valid_network_event_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) || NetworkEventPageState::from_wire(page.state) != Some(NetworkEventPageState::Ready)
+            || page.configured_rx_page != 0
+        {
+            return false;
+        }
+        page.configured_rx_page = rx_page.0;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// The Network service owns wait creation.
+    pub unsafe fn wait_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+        deadline: u64,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address) || deadline == 0 {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !valid_network_event_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) || page.configured_rx_page == 0
+            || NetworkEventPageState::from_wire(page.state) != Some(NetworkEventPageState::Ready)
+        {
+            return false;
+        }
+        page.deadline = deadline;
+        page.state = NetworkEventPageState::Waiting as u32;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// Core reads only scalar state.
+    pub unsafe fn waiting_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address) {
+            return false;
+        }
+        let page = unsafe { (address as *const Self).read_volatile() };
+        valid_network_event_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) && NetworkEventPageState::from_wire(page.state) == Some(NetworkEventPageState::Waiting)
+    }
+
+    /// # Safety
+    /// Core reads only scalar state.
+    pub unsafe fn deadline_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+    ) -> Option<u64> {
+        if !valid_network_page_address::<Self>(address) {
+            return None;
+        }
+        let page = unsafe { (address as *const Self).read_volatile() };
+        (valid_network_event_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) && NetworkEventPageState::from_wire(page.state) == Some(NetworkEventPageState::Waiting))
+        .then_some(page.deadline)
+        .filter(|deadline| *deadline != 0)
+    }
+
+    /// # Safety
+    /// Core delivers one event only while the service is waiting.
+    pub unsafe fn deliver_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+        event: logos_abi::NetworkEvent,
+    ) -> bool {
+        if !event.valid() || !valid_network_page_address::<Self>(address) {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !valid_network_event_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) || NetworkEventPageState::from_wire(page.state) != Some(NetworkEventPageState::Waiting)
+            || event.device_generation != device_generation
+            || event.generation != u16::try_from(device_generation).ok().unwrap_or(0)
+        {
+            return false;
+        }
+        if event.kind == logos_abi::NetworkEventKind::Frame {
+            if event.page.0 != page.configured_rx_page {
+                return false;
+            }
+        } else if event.page.0 != 0 || event.length != 0 {
+            return false;
+        }
+        page.sequence = event.id;
+        page.kind = event.kind as u32;
+        page.transfer_page = event.page.0;
+        page.length = u32::from(event.length);
+        page.now = event.now;
+        page.generation = event.generation;
+        page.metadata = [0; 32];
+        page.metadata[..event.metadata.len()].copy_from_slice(&event.metadata);
+        page.state = NetworkEventPageState::Event as u32;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// The Network service consumes the single delivered event.
+    pub unsafe fn take_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+    ) -> Option<logos_abi::NetworkEvent> {
+        if !valid_network_page_address::<Self>(address) {
+            return None;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !valid_network_event_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) || NetworkEventPageState::from_wire(page.state) != Some(NetworkEventPageState::Event)
+        {
+            return None;
+        }
+        let kind = logos_abi::NetworkEventKind::from_wire(u8::try_from(page.kind).ok()?)?;
+        let event = logos_abi::NetworkEvent {
+            id: page.sequence,
+            kind,
+            generation: page.generation,
+            device_generation,
+            page: logos_abi::PageHandle(page.transfer_page),
+            length: u16::try_from(page.length).ok()?,
+            now: page.now,
+            metadata: page.metadata[..16].try_into().ok()?,
+        };
+        if !event.valid() {
+            return None;
+        }
+        page.state = NetworkEventPageState::Consumed as u32;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(event)
+    }
+
+    /// # Safety
+    /// The Network service acknowledges and releases the event slot.
+    pub unsafe fn acknowledge_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address) {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !valid_network_event_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) || NetworkEventPageState::from_wire(page.state)
+            != Some(NetworkEventPageState::Consumed)
+        {
+            return false;
+        }
+        page.sequence = 0;
+        page.kind = 0;
+        page.transfer_page = 0;
+        page.length = 0;
+        page.deadline = 0;
+        page.now = 0;
+        page.generation = 0;
+        page.metadata = [0; 32];
+        page.state = NetworkEventPageState::Ready as u32;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    /// # Safety
+    /// Core reads only scalar state.
+    pub unsafe fn pending_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        device_generation: u32,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address) {
+            return false;
+        }
+        let page = unsafe { (address as *const Self).read_volatile() };
+        valid_network_event_identity(
+            &page,
+            service_generation,
+            endpoint_generation,
+            device_generation,
+        ) && NetworkEventPageState::from_wire(page.state) == Some(NetworkEventPageState::Event)
+    }
+
+    /// # Safety
+    /// Core reads only the generation and state fields from the endpoint mapping.
+    pub unsafe fn active_for_core_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        if !valid_network_page_address::<Self>(address) {
+            return false;
+        }
+        let page = unsafe { (address as *const Self).read_volatile() };
+        page.service_generation == service_generation
+            && page.endpoint_generation == endpoint_generation
+            && service_generation != 0
+            && endpoint_generation != 0
+            && page.device_generation != 0
+            && matches!(
+                NetworkEventPageState::from_wire(page.state),
+                Some(
+                    NetworkEventPageState::Waiting
+                        | NetworkEventPageState::Event
+                        | NetworkEventPageState::Consumed
+                )
+            )
+    }
+}
+
 impl SessionClientPage {
     pub const fn new(service_generation: u32, endpoint_generation: u32) -> Self {
         Self {
@@ -2215,7 +3107,8 @@ const _: () = assert!(size_of::<EffectPage>() <= logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<StoreClientPage>() <= logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<StoreServerPage>() <= logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<BlockClientPage>() <= logos_abi::PAGE_SIZE);
-const _: () = assert!(size_of::<NetworkPage>() == logos_abi::PAGE_SIZE);
+const _: () = assert!(size_of::<NetworkDevicePage>() == logos_abi::PAGE_SIZE);
+const _: () = assert!(size_of::<NetworkEventPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<RemotePage>() == logos_abi::PAGE_SIZE);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2292,7 +3185,7 @@ pub struct RemoteGateReply {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct NetworkPages {
+pub struct NetworkDmaResources {
     pub rx_handle: logos_abi::PageHandle,
     pub rx_address: u64,
     pub tx_handle: logos_abi::PageHandle,
@@ -2300,10 +3193,8 @@ pub struct NetworkPages {
 }
 
 const NETWORK_REQUEST_BYTES: usize = 34;
+const NETWORK_REQUEST_OWNER_OFFSET: usize = NETWORK_REQUEST_BYTES;
 const NETWORK_REPLY_BYTES: usize = 148;
-const NETWORK_DEVICE_REQUEST_BYTES: usize = 18;
-const NETWORK_DEVICE_REPLY_BYTES: usize = 34;
-const NETWORK_EVENT_BYTES: usize = 18;
 const REMOTE_GATE_REQUEST_BYTES: usize = 24;
 const REMOTE_GATE_REPLY_BYTES: usize = 20;
 
@@ -2425,51 +3316,6 @@ fn encode_network_reply(bytes: &mut [u8; MAX_TEXT], reply: logos_abi::NetworkRep
     encode_network_counters(bytes, 44, reply.counters);
 }
 
-fn decode_network_device_request(bytes: &[u8]) -> Option<logos_abi::NetworkDeviceRequest> {
-    if *bytes.get(5)? != 0 {
-        return None;
-    }
-    Some(logos_abi::NetworkDeviceRequest {
-        id: read_u32(bytes, 0)?,
-        operation: logos_abi::NetworkDeviceOperation::from_wire(*bytes.get(4)?)?,
-        length: read_u16(bytes, 6)?,
-        generation: read_u16(bytes, 8)?,
-        deadline: read_u64(bytes, 10)?,
-    })
-}
-
-fn encode_network_device_request(
-    bytes: &mut [u8; MAX_TEXT],
-    request: logos_abi::NetworkDeviceRequest,
-) {
-    *bytes = [0; MAX_TEXT];
-    write_u32(bytes, 0, request.id);
-    bytes[4] = request.operation as u8;
-    write_u16(bytes, 6, request.length);
-    write_u16(bytes, 8, request.generation);
-    write_u64(bytes, 10, request.deadline);
-}
-
-fn decode_network_device_reply(bytes: &[u8]) -> Option<logos_abi::NetworkDeviceReply> {
-    if *bytes.get(5)? != 0 {
-        return None;
-    }
-    Some(logos_abi::NetworkDeviceReply {
-        id: read_u32(bytes, 0)?,
-        status: logos_abi::NetworkStatus::from_wire(*bytes.get(4)?)?,
-        generation: read_u16(bytes, 6)?,
-        info: decode_network_info(bytes, 8)?,
-    })
-}
-
-fn encode_network_device_reply(bytes: &mut [u8; MAX_TEXT], reply: logos_abi::NetworkDeviceReply) {
-    *bytes = [0; MAX_TEXT];
-    write_u32(bytes, 0, reply.id);
-    bytes[4] = reply.status as u8;
-    write_u16(bytes, 6, reply.generation);
-    encode_network_info(bytes, 8, reply.info);
-}
-
 fn decode_network_info(bytes: &[u8], offset: usize) -> Option<logos_abi::NetworkInfo> {
     let mut mac = [0; 6];
     mac.copy_from_slice(bytes.get(offset..offset + 6)?);
@@ -2541,28 +3387,6 @@ fn encode_network_counters(
     }
 }
 
-fn decode_network_event(bytes: &[u8]) -> Option<logos_abi::NetworkEvent> {
-    if *bytes.get(5)? != 0 {
-        return None;
-    }
-    Some(logos_abi::NetworkEvent {
-        id: read_u32(bytes, 0)?,
-        kind: logos_abi::NetworkEventKind::from_wire(*bytes.get(4)?)?,
-        generation: read_u16(bytes, 6)?,
-        length: read_u16(bytes, 8)?,
-        now: read_u64(bytes, 10)?,
-    })
-}
-
-fn encode_network_event(bytes: &mut [u8; MAX_TEXT], event: logos_abi::NetworkEvent) {
-    *bytes = [0; MAX_TEXT];
-    write_u32(bytes, 0, event.id);
-    bytes[4] = event.kind as u8;
-    write_u16(bytes, 6, event.generation);
-    write_u16(bytes, 8, event.length);
-    write_u64(bytes, 10, event.now);
-}
-
 #[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 impl ControlPage {
     pub const fn new() -> Self {
@@ -2589,8 +3413,8 @@ impl ControlPage {
             slot1: 0,
             payload_length: 0,
             payload: [0; MAX_TEXT],
-            network_rx_page: 0,
-            network_tx_page: 0,
+            network_device_page: 0,
+            network_event_page: 0,
         }
     }
 
@@ -2621,8 +3445,8 @@ impl ControlPage {
         reset.store_client_page = current.store_client_page;
         reset.store_server_page = current.store_server_page;
         reset.block_client_page = current.block_client_page;
-        reset.network_rx_page = current.network_rx_page;
-        reset.network_tx_page = current.network_tx_page;
+        reset.network_device_page = current.network_device_page;
+        reset.network_event_page = current.network_event_page;
         unsafe { (address as *mut Self).write_volatile(reset) };
         true
     }
@@ -2640,6 +3464,8 @@ impl ControlPage {
         store_client_page: Option<u64>,
         store_server_page: Option<u64>,
         block_client_page: Option<u64>,
+        network_device_page: Option<u64>,
+        network_event_page: Option<u64>,
     ) -> bool {
         if generation == 0 {
             return false;
@@ -2658,6 +3484,8 @@ impl ControlPage {
         context.store_client_page = store_client_page.unwrap_or(0);
         context.store_server_page = store_server_page.unwrap_or(0);
         context.block_client_page = block_client_page.unwrap_or(0);
+        context.network_device_page = network_device_page.unwrap_or(0);
+        context.network_event_page = network_event_page.unwrap_or(0);
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -3090,8 +3918,7 @@ impl ControlPage {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
-        context.slot0 = owner as u32;
-        context.slot1 = (owner >> 32) as u32;
+        write_u64(&mut context.payload, NETWORK_REQUEST_OWNER_OFFSET, owner);
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -3101,53 +3928,18 @@ impl ControlPage {
     pub unsafe fn network_owner_at(address: u64) -> Option<u64> {
         let context = unsafe { (address as *const Self).read_volatile() };
         (context.abi == ABI && context.reserved == 0 && context.operation == NETWORK_REQUEST)
-            .then_some(u64::from(context.slot0) | (u64::from(context.slot1) << 32))
+            .then(|| read_u64(&context.payload, NETWORK_REQUEST_OWNER_OFFSET).unwrap_or(0))
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
     pub unsafe fn reply_network_at(address: u64, reply: logos_abi::NetworkReply) -> bool {
         let mut context = unsafe { (address as *mut Self).read_volatile() };
-        let valid = context.operation == NETWORK_REQUEST
-            && decode_network_request(&context.payload)
-                .is_some_and(|request| reply.valid_for(request));
+        let valid =
+            matches!(context.operation, NETWORK_REQUEST | NETWORK_WAIT | NETWORK_DEVICE_REQUEST)
+                && decode_network_request(&context.payload)
+                    .is_some_and(|request| reply.valid_for(request));
         if !valid {
-            return false;
-        }
-        encode_network_reply(&mut context.payload, reply);
-        context.payload_length = NETWORK_REPLY_BYTES as u32;
-        context.operation = NETWORK_REPLY;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by the service.
-    pub unsafe fn reply_network_after_device_at(
-        address: u64,
-        request: logos_abi::NetworkRequest,
-        reply: logos_abi::NetworkReply,
-    ) -> bool {
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.operation != NETWORK_DEVICE_REPLY || !reply.valid_for(request) {
-            return false;
-        }
-        encode_network_reply(&mut context.payload, reply);
-        context.payload_length = NETWORK_REPLY_BYTES as u32;
-        context.operation = NETWORK_REPLY;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by the service.
-    pub unsafe fn reply_network_after_event_at(
-        address: u64,
-        request: logos_abi::NetworkRequest,
-        reply: logos_abi::NetworkReply,
-    ) -> bool {
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.operation != NETWORK_EVENT || !reply.valid_for(request) {
             return false;
         }
         encode_network_reply(&mut context.payload, reply);
@@ -3184,260 +3976,6 @@ impl ControlPage {
             && context.operation == NETWORK_REPLY
             && context.status == ACKNOWLEDGED
             && context.payload_length == NETWORK_REPLY_BYTES as u32
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by the caller.
-    pub unsafe fn network_device_at(address: u64) -> Option<logos_abi::NetworkDeviceRequest> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != NETWORK_DEVICE_REQUEST
-            || context.status != ACKNOWLEDGED
-            || context.payload_length != NETWORK_DEVICE_REQUEST_BYTES as u32
-        {
-            return None;
-        }
-        let request = decode_network_device_request(&context.payload)?;
-        request.valid_shape().then_some(request)
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn network_device_pending_at(address: u64) -> bool {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        context.abi == ABI
-            && context.reserved == 0
-            && context.operation == NETWORK_DEVICE_REQUEST
-            && context.status == ACKNOWLEDGED
-            && context.payload_length == NETWORK_DEVICE_REQUEST_BYTES as u32
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by the caller.
-    pub unsafe fn request_network_device_at(
-        address: u64,
-        request: logos_abi::NetworkDeviceRequest,
-    ) -> bool {
-        if !request.valid_shape() {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.status != ACKNOWLEDGED
-            || !matches!(
-                context.operation,
-                READY
-                    | READ_INPUT
-                    | NETWORK_REQUEST
-                    | NETWORK_REPLY
-                    | NETWORK_EVENT
-                    | NETWORK_DEVICE_REPLY
-            )
-        {
-            return false;
-        }
-        encode_network_device_request(&mut context.payload, request);
-        context.payload_length = NETWORK_DEVICE_REQUEST_BYTES as u32;
-        context.operation = NETWORK_DEVICE_REQUEST;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
-    pub unsafe fn reply_network_device_at(
-        address: u64,
-        reply: logos_abi::NetworkDeviceReply,
-    ) -> bool {
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        let valid = context.operation == NETWORK_DEVICE_REQUEST
-            && decode_network_device_request(&context.payload)
-                .is_some_and(|request| reply.valid_for(request));
-        if !valid {
-            return false;
-        }
-        encode_network_device_reply(&mut context.payload, reply);
-        context.payload_length = NETWORK_DEVICE_REPLY_BYTES as u32;
-        context.operation = NETWORK_DEVICE_REPLY;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn network_device_reply_at(
-        address: u64,
-        expected_id: u32,
-    ) -> Option<logos_abi::NetworkDeviceReply> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != NETWORK_DEVICE_REPLY
-            || context.status != ACKNOWLEDGED
-            || context.payload_length != NETWORK_DEVICE_REPLY_BYTES as u32
-        {
-            return None;
-        }
-        decode_network_device_reply(&context.payload).filter(|reply| reply.id == expected_id)
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
-    pub unsafe fn deliver_network_device_reply_at(
-        address: u64,
-        reply: logos_abi::NetworkDeviceReply,
-    ) -> bool {
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != NETWORK_WAIT
-            || context.status != ACKNOWLEDGED
-        {
-            return false;
-        }
-        encode_network_device_reply(&mut context.payload, reply);
-        context.payload_length = NETWORK_DEVICE_REPLY_BYTES as u32;
-        context.operation = NETWORK_DEVICE_REPLY;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by the caller.
-    pub unsafe fn network_wait_at(address: u64, deadline: u64) -> bool {
-        if deadline == 0 {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.status != ACKNOWLEDGED
-            || !matches!(
-                context.operation,
-                READY
-                    | READ_INPUT
-                    | NETWORK_REQUEST
-                    | NETWORK_REPLY
-                    | NETWORK_EVENT
-                    | NETWORK_DEVICE_REQUEST
-                    | NETWORK_DEVICE_REPLY
-            )
-        {
-            return false;
-        }
-        context.slot0 = deadline as u32;
-        context.slot1 = (deadline >> 32) as u32;
-        context.payload = [0; MAX_TEXT];
-        context.payload_length = 0;
-        context.operation = NETWORK_WAIT;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn network_waiting_at(address: u64) -> bool {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        context.abi == ABI
-            && context.reserved == 0
-            && context.operation == NETWORK_WAIT
-            && context.status == ACKNOWLEDGED
-            && (u64::from(context.slot0) | (u64::from(context.slot1) << 32)) != 0
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn network_deadline_at(address: u64) -> Option<u64> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI
-            && context.reserved == 0
-            && context.operation == NETWORK_WAIT
-            && context.status == ACKNOWLEDGED)
-            .then_some(u64::from(context.slot0) | (u64::from(context.slot1) << 32))
-            .filter(|deadline| *deadline != 0)
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
-    pub unsafe fn deliver_network_event_at(address: u64, event: logos_abi::NetworkEvent) -> bool {
-        if !event.valid() {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != NETWORK_WAIT
-            || context.status != ACKNOWLEDGED
-        {
-            return false;
-        }
-        encode_network_event(&mut context.payload, event);
-        context.payload_length = NETWORK_EVENT_BYTES as u32;
-        context.operation = NETWORK_EVENT;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn network_event_at(address: u64) -> Option<logos_abi::NetworkEvent> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != NETWORK_EVENT
-            || context.status != ACKNOWLEDGED
-            || context.payload_length != NETWORK_EVENT_BYTES as u32
-        {
-            return None;
-        }
-        let event = decode_network_event(&context.payload)?;
-        event.valid().then_some(event)
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping before service startup.
-    pub unsafe fn configure_network_pages_at(
-        address: u64,
-        rx: logos_abi::PageHandle,
-        tx: logos_abi::PageHandle,
-    ) -> bool {
-        if rx.0 == 0 || tx.0 == 0 || rx == tx {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != 0
-            || context.status != 0
-        {
-            return false;
-        }
-        context.network_rx_page = rx.0;
-        context.network_tx_page = tx.0;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn network_pages_at(address: u64) -> Option<NetworkPages> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.network_rx_page == 0
-            || context.network_tx_page == 0
-        {
-            return None;
-        }
-        let rx_address = address.checked_sub(logos_abi::PAGE_SIZE as u64 * 19)?;
-        Some(NetworkPages {
-            rx_handle: logos_abi::PageHandle(context.network_rx_page),
-            rx_address,
-            tx_handle: logos_abi::PageHandle(context.network_tx_page),
-            tx_address: rx_address.checked_sub(logos_abi::PAGE_SIZE as u64)?,
-        })
     }
 
     /// # Safety
@@ -3667,7 +4205,7 @@ mod tests {
     }
 
     #[test]
-    fn network_request_reply_and_deadline_event_are_bounded() {
+    fn network_request_reply_remains_bounded_for_clients() {
         let mut context = ControlPage::new();
         context.operation = READ_INPUT;
         context.status = ACKNOWLEDGED;
@@ -3684,54 +4222,21 @@ mod tests {
         let address = (&mut context as *mut ControlPage) as u64;
         assert!(unsafe { ControlPage::request_network_at(address, request) });
         assert_eq!(unsafe { ControlPage::network_at(address) }, Some(request));
-        let reply = logos_abi::NetworkReply {
-            id: request.id,
-            status: logos_abi::NetworkStatus::Complete,
-            endpoint: logos_abi::NetworkEndpoint::new(1, 1).unwrap(),
-            generation: 1,
-            source_address: 0,
-            source_port: 0,
-            length: 0,
-            info: logos_abi::NetworkInfo { generation: 1, ..Default::default() },
-            counters: logos_abi::NetworkCounters::default(),
-        };
-        assert!(unsafe { ControlPage::reply_network_at(address, reply) });
-        assert_eq!(unsafe { ControlPage::network_reply_at(address, request.id) }, Some(reply));
-        assert!(unsafe { ControlPage::network_wait_at(address, 101) });
-        assert!(unsafe { ControlPage::network_waiting_at(address) });
-        let event = logos_abi::NetworkEvent {
-            id: 12,
-            kind: logos_abi::NetworkEventKind::Timer,
-            generation: 1,
-            length: 0,
-            now: 101,
-        };
-        assert!(unsafe { ControlPage::deliver_network_event_at(address, event) });
-        assert_eq!(unsafe { ControlPage::network_event_at(address) }, Some(event));
-        assert!(unsafe { ControlPage::reply_network_after_event_at(address, request, reply) });
-        assert_eq!(unsafe { ControlPage::network_reply_at(address, request.id) }, Some(reply));
-        assert!(unsafe { !ControlPage::network_wait_at(address, 0) });
-        assert!(unsafe { ControlPage::network_reply_at(address, request.id + 1) }.is_none());
-
-        let mut pages_context = ControlPage::new();
-        let pages_address = (&mut pages_context as *mut ControlPage) as u64;
+        context.operation = READ_INPUT;
+        unsafe { (address as *mut ControlPage).write_volatile(context) };
         assert!(unsafe {
-            ControlPage::configure_network_pages_at(
-                pages_address,
-                logos_abi::PageHandle(1),
-                logos_abi::PageHandle(2),
-            )
+            ControlPage::deliver_network_for_owner_at(address, request, 0x1234_5678)
         });
-        let pages = unsafe { ControlPage::network_pages_at(pages_address) }.unwrap();
-        assert_eq!(pages.tx_address, pages.rx_address - 4096);
+        assert_eq!(unsafe { ControlPage::network_owner_at(address) }, Some(0x1234_5678));
     }
 
     #[test]
-    fn network_device_gate_rejects_mismatch_and_delivers_async_completion() {
-        let mut context = ControlPage::new();
-        context.operation = READ_INPUT;
-        context.status = ACKNOWLEDGED;
-        let address = (&mut context as *mut ControlPage) as u64;
+    fn network_device_and_event_pages_reject_stale_and_unconsumed_transitions() {
+        let mut device = NetworkDevicePage::new(1, 2, 3);
+        let device_address = (&mut device as *mut NetworkDevicePage) as u64;
+        let rx = logos_abi::PageHandle(10);
+        let tx = logos_abi::PageHandle(11);
+        assert!(unsafe { NetworkDevicePage::configure_at(device_address, 1, 2, 3, rx, tx) });
         let request = logos_abi::NetworkDeviceRequest {
             id: 9,
             operation: logos_abi::NetworkDeviceOperation::Info,
@@ -3739,27 +4244,45 @@ mod tests {
             generation: 0,
             deadline: 1,
         };
-        assert!(unsafe { ControlPage::request_network_device_at(address, request) });
+        assert!(unsafe { NetworkDevicePage::request_at(device_address, 1, 2, 3, request) });
+        let message = unsafe { NetworkDevicePage::take_request_at(device_address, 1, 2, 3) };
+        assert_eq!(message.map(|message| message.request), Some(request));
         let reply = logos_abi::NetworkDeviceReply {
             id: request.id,
             status: logos_abi::NetworkStatus::Complete,
-            generation: 1,
-            info: logos_abi::NetworkInfo { generation: 1, ..Default::default() },
+            generation: 3,
+            info: logos_abi::NetworkInfo { generation: 3, ..Default::default() },
         };
-        assert!(!unsafe {
-            ControlPage::reply_network_device_at(
-                address,
-                logos_abi::NetworkDeviceReply { id: 8, ..reply },
-            )
-        });
-        assert!(unsafe { ControlPage::reply_network_device_at(address, reply) });
-        assert!(unsafe { ControlPage::network_wait_at(address, 2) });
-        assert!(unsafe { ControlPage::deliver_network_device_reply_at(address, reply) });
+        assert!(!unsafe { NetworkDevicePage::complete_at(device_address, 1, 2, 4, reply) });
+        assert!(unsafe { NetworkDevicePage::complete_at(device_address, 1, 2, 3, reply) });
         assert_eq!(
-            unsafe { ControlPage::network_device_reply_at(address, request.id) },
+            unsafe { NetworkDevicePage::take_reply_at(device_address, 1, 2, 3, request.id) },
             Some(reply)
         );
-        assert!(unsafe { ControlPage::network_device_reply_at(address, request.id + 1) }.is_none());
+        assert!(unsafe { NetworkDevicePage::reset_generation_at(device_address, 4, 5) });
+
+        let mut event_page = NetworkEventPage::new(1, 2, 3);
+        let event_address = (&mut event_page as *mut NetworkEventPage) as u64;
+        assert!(unsafe { NetworkEventPage::configure_at(event_address, 1, 2, 3, rx) });
+        assert!(unsafe { NetworkEventPage::wait_at(event_address, 1, 2, 3, 7) });
+        let event = logos_abi::NetworkEvent {
+            id: 12,
+            kind: logos_abi::NetworkEventKind::Frame,
+            generation: 3,
+            device_generation: 3,
+            page: rx,
+            length: 64,
+            now: 7,
+            metadata: [0; 16],
+        };
+        assert!(unsafe { NetworkEventPage::deliver_at(event_address, 1, 2, 3, event) });
+        assert!(!unsafe { NetworkEventPage::deliver_at(event_address, 1, 2, 3, event) });
+        assert_eq!(unsafe { NetworkEventPage::take_at(event_address, 1, 2, 3) }, Some(event));
+        assert!(unsafe { NetworkEventPage::acknowledge_at(event_address, 1, 2, 3) });
+        assert!(!unsafe { NetworkEventPage::deliver_at(event_address, 1, 2, 4, event) });
+        let mut fresh_event_page = NetworkEventPage::new(1, 2, 3);
+        let fresh_event_address = (&mut fresh_event_page as *mut NetworkEventPage) as u64;
+        assert!(unsafe { NetworkEventPage::reset_generation_at(fresh_event_address, 4, 5) });
     }
 
     #[test]
