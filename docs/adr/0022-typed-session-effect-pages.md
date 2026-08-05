@@ -1,8 +1,6 @@
 # ADR-0022: Use separate typed Session and Effect pages
 
-## Status
-
-Accepted
+- Status: Accepted
 
 ## Context
 
