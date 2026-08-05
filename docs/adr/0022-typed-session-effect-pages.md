@@ -28,5 +28,5 @@ It does not own allocation, scheduling, supervision, or privileged effects.
 - Terminal and Sessions never share a writable Session protocol page.
 - A replaced Terminal or Sessions task invalidates its own endpoint without
   granting the replacement access to an old request or effect result.
-- Store, Block, Network, and Remote retain their existing transport pending a
-  separate migration.
+- Store and Block now use the persistence-specific page migration in ADR-0023.
+  Network and Remote remain unchanged.

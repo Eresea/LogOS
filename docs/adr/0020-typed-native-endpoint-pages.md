@@ -14,7 +14,8 @@ replaceable service and the QEMU harness dispatched several proofs by root-level
 ## Decision
 
 - The native transport ABI is v4. Every service receives one dedicated mapped `ControlPage`; typed
-  `InputPage`, `DisplayPage`, `SessionPage`, `StoreEndpointPage`, `BlockEndpointPage`, `NetworkPage`,
+  `InputPage`, `DisplayPage`, `SessionClientPage`, `SessionServerPage`, `EffectPage`,
+  `StoreClientPage`, `StoreServerPage`, `BlockClientPage`, `NetworkPage`,
   and `RemotePage` contracts use explicit scalar states, generations, and bounded validation.
 - ABI v4 is an atomic migration. ABI-v3 compatibility aliases, adapters, and parallel registries
   are not provided.

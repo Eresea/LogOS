@@ -16,12 +16,13 @@ explicitly deprecated. See [ADR-0002](adr/0002-test-control-boundary.md).
 ## ABI v4 and native-service ownership
 
 Native service transport uses a dedicated mapped `logos_abi::service::ControlPage` header (ABI v4). The
-Terminal's typed endpoint pages (`InputPage`, `DisplayPage`, `SessionClientPage`) are the active keyboard/display/session transport;
-the header carries lifecycle, generation, and notification state only for those protocols. Typed
-endpoint pages (`InputPage`, `DisplayPage`, `SessionClientPage`, `SessionServerPage`, `EffectPage`, `StoreEndpointPage`,
-`BlockEndpointPage`, `NetworkPage`, and `RemotePage`) carry explicit scalar state, generation, and
-bounded payload fields. Core owns endpoint mappings, capability checks, and reclamation; a service
-receives only the endpoint set declared by its canonical `platform::services::ServiceSpec`.
+header carries lifecycle, generation, and bounded notification state; typed endpoint pages carry
+protocol payloads. Active pages include `InputPage`, `DisplayPage`, `SessionClientPage`,
+`SessionServerPage`, `EffectPage`, independent `StoreClientPage`/`StoreServerPage` pairs, the
+Storage-owned `BlockClientPage`, `NetworkPage`, and `RemotePage`. Every page uses scalar wire
+states, generation checks, and bounded validation. Core owns endpoint mappings, capability checks,
+page loans, and reclamation; a service receives only the endpoint set declared by its canonical
+`platform::services::ServiceSpec`.
 The control page is implicit; `ServiceSpec::endpoints` is the single map for additional Input,
 Display, Session, Store, Block, Network, and Remote pages.
 
@@ -670,7 +671,11 @@ Core retains VirtIO block DMA, interrupts, timeout/reset, and generation-tagged 
 ownership until Ring-1 driver isolation can enforce those resources directly. Shared pages are
 quota-bound, non-executable, owner-checked, temporarily lendable, and reclaimed on service exit.
 
-The restartable Ring-2 Storage service owns the on-disk policy. Two alternating checksummed
+The restartable Ring-2 Storage service owns the on-disk policy and is coordinated by the concrete
+`platform::storage::StorageRuntime`, which owns Store rebinding, relay state, and Block dispatch.
+Store client and server pages are never shared; Core copies validated requests and replies between
+them. Transfer handles name Core-owned loan records, and loans are returned on success, denial,
+timeout, cancellation, fault, and replacement. Two alternating checksummed
 superblocks select one of two append-only arenas. A replace becomes visible only after its payload,
 flush, commit sector, and final flush complete. Recovery ignores incomplete or corrupt records.
 Compaction copies live current/previous versions to the inactive arena before switching the

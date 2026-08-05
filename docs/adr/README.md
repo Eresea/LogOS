@@ -28,4 +28,5 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0020](0020-typed-native-endpoint-pages.md) | Accepted | Use typed ABI-v4 endpoint pages and one canonical native-service specification. |
 | [0021](0021-typed-input-display-pages.md) | Accepted | Make Input and Display typed pages the active Terminal transport with generation-safe replacement. |
 | [0022](0022-typed-session-effect-pages.md) | Accepted | Mediate Session and privileged Effect transport through separate typed pages. |
+| [0023](0023-typed-store-block-pages.md) | Accepted | Mediate Store and Storage-owned Block transport through independent typed pages and a concrete Storage owner. |
 
