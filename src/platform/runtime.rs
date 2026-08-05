@@ -16,10 +16,7 @@ use crate::test_hooks;
 use crate::{boot, debug};
 #[cfg(feature = "test-hooks")]
 use core::cell::Cell;
-use network::{
-    DmaPages as NetworkDmaPages, PendingClient as PendingNetworkClient,
-    PendingDevice as PendingNetworkDevice, Resources as NetworkResources,
-};
+use network::{PendingClient as PendingNetworkClient, Resources as NetworkResources};
 
 use logos_core::capabilities;
 use logos_terminal::{command, display, input, terminal, text};
@@ -327,13 +324,14 @@ pub(crate) fn run(
         fail!(b"block bind");
     };
     let network_pci = network_driver::discover(&devices);
-    let mut network_device = network_pci.and_then(|network_pci| {
+    let network_device = network_pci.and_then(|network_pci| {
         let (bus, slot, _) = network_pci.location();
         let gsi = acpi.and_then(|tables| {
             tables.pci_gsi(bus, slot, network_pci.interrupt_pin().checked_sub(1)?)
         });
         gsi.and_then(|gsi| network_driver::Device::bind(network_pci, gsi, &mut memory))
     });
+    let mut network_runtime = network::NetworkRuntime::new(network_device);
     check!(
         b"block device",
         block_driver::self_check()
@@ -723,13 +721,13 @@ pub(crate) fn run(
         )
     });
     let mut native_network = payloads.network.and_then(|payload| {
-        (network_device.is_some() && network_service_handle.is_some())
+        (network_runtime.device.is_some() && network_service_handle.is_some())
             .then(|| {
                 native_task::Task::load(
                     &mut memory,
                     payload,
                     &privilege,
-                    native_task::EndpointPages::NONE,
+                    native_task::EndpointPages::NETWORK,
                 )
             })
             .flatten()
@@ -758,7 +756,8 @@ pub(crate) fn run(
             && terminal_spec.endpoints.contains(services::EndpointSet::NETWORK)
             && storage_spec.endpoints.contains(services::EndpointSet::STORE)
             && storage_spec.endpoints.contains(services::EndpointSet::BLOCK)
-            && network_spec.endpoints.contains(services::EndpointSet::NETWORK)
+            && network_spec.endpoints.contains(services::EndpointSet::NETWORK_DEVICE)
+            && network_spec.endpoints.contains(services::EndpointSet::NETWORK_EVENT)
             && gateway_spec.endpoints.contains(services::EndpointSet::NETWORK)
             && gateway_spec.endpoints.contains(services::EndpointSet::REMOTE)
             && gateway_spec.endpoints.contains(services::EndpointSet::STORE),
@@ -802,7 +801,7 @@ pub(crate) fn run(
         shared_pages.address(terminal_owner, shared_history).is_some()
     );
     check!(b"shared pages", logos_core::shared_pages::self_check());
-    let mut network_setup = native_network
+    let network_resources = native_network
         .as_mut()
         .and_then(|task| task.map_network_owned(&mut memory))
         .and_then(|((rx_physical, rx_virtual), (tx_physical, tx_virtual))| {
@@ -812,24 +811,16 @@ pub(crate) fn run(
                 let _ = shared_pages.release(owner, rx);
                 return None;
             };
-            Some(NetworkResources {
-                owner,
-                rx,
-                rx_physical,
-                rx_virtual,
-                tx,
-                tx_physical,
-                tx_virtual,
-            })
+            Some(NetworkResources { owner, rx, rx_virtual, tx, tx_virtual })
         });
-    if network_setup.is_none() {
+    if network_resources.is_none() {
         if let Some(task) = native_network.take() {
             let _ = task.release(&mut memory);
         }
     }
     check!(
         b"network service pages",
-        network_device.is_none() || native_network.is_none() || network_setup.is_some()
+        network_runtime.device.is_none() || native_network.is_none() || network_resources.is_some()
     );
     let mut service_task = virtio::ServiceTask::new(
         &mut virtio_service,
@@ -930,22 +921,12 @@ pub(crate) fn run(
         !native_storage_block.available()
             || native_storage_block.configure_transfer(storage_block_page),
     );
-    let mut network_dma = network_setup.map(|resources| NetworkDmaPages {
-        rx_address: resources.rx_physical,
-        tx_address: resources.tx_physical,
-    });
-    let network_pages_ready =
-        native_network_endpoint.zip(network_setup).is_some_and(|(endpoint, resources)| {
-            endpoint.configure(logos_core::native_service::NetworkPages {
-                rx_handle: resources.rx,
-                rx_address: resources.rx_virtual,
-                tx_handle: resources.tx,
-                tx_address: resources.tx_virtual,
-            })
-        });
+    let network_pages_ready = network_resources.is_some();
     check!(
         b"network page configuration",
-        network_device.is_none() || native_network_endpoint.is_none() || network_pages_ready
+        network_runtime.device.is_none()
+            || native_network_endpoint.is_none()
+            || network_pages_ready
     );
     let mut network_client_pending: Option<PendingNetworkClient> = None;
     let mut native_scheduler = native_task::Scheduler::new();
@@ -1085,6 +1066,23 @@ pub(crate) fn run(
     } else {
         let _ = native_services.missing(supervisor::NativeService::Network);
     }
+    let network_bound = network_handle.zip(network_resources).is_some_and(|(handle, resources)| {
+        let Some(device_endpoint) =
+            native_scheduler.network_device_endpoint(handle, network_runtime.device_generation)
+        else {
+            return false;
+        };
+        let Some(event_endpoint) =
+            native_scheduler.network_event_endpoint(handle, network_runtime.device_generation)
+        else {
+            return false;
+        };
+        network_runtime.bind(handle, device_endpoint, event_endpoint, resources)
+    });
+    check!(
+        b"network typed endpoints",
+        network_runtime.device.is_none() || network_handle.is_none() || network_bound,
+    );
     let mut gateway_handle = if remote::gateway_allowed(
         network_handle.is_some(),
         sessions_handle.is_some(),
@@ -1100,7 +1098,6 @@ pub(crate) fn run(
     if gateway_handle.is_none() {
         let _ = native_services.missing(supervisor::NativeService::Gateway);
     }
-    let mut network_pending = None;
     let mut network_probe = Some(0x8000_0001u32);
     let mut network_probe_due = 0;
     let mut network_reported = cfg!(feature = "test-hooks") && gateway_handle.is_some();
@@ -1834,7 +1831,7 @@ pub(crate) fn run(
                 if matches!(value, "assert-network-service-panic" | "assert-network-service-fault")
                 {
                     let (Some(previous), Some(previous_endpoint), Some(resources)) =
-                        (network_handle, native_network_endpoint, network_setup)
+                        (network_handle, native_network_endpoint, network_runtime.resources)
                     else {
                         return false;
                     };
@@ -1860,7 +1857,7 @@ pub(crate) fn run(
                     {
                         return false;
                     }
-                    let Some((restarted, endpoint, resources, dma)) = replace_network(
+                    let Some((restarted, endpoint, resources)) = replace_network(
                         &mut native_scheduler,
                         previous,
                         &mut memory,
@@ -1869,8 +1866,24 @@ pub(crate) fn run(
                     ) else {
                         return false;
                     };
+                    let Some(device_endpoint) = native_scheduler
+                        .network_device_endpoint(restarted, network_runtime.device_generation)
+                    else {
+                        return false;
+                    };
+                    let Some(event_endpoint) = native_scheduler
+                        .network_event_endpoint(restarted, network_runtime.device_generation)
+                    else {
+                        return false;
+                    };
                     if restarted.generation() == previous.generation()
                         || endpoint.context() == previous_endpoint.context()
+                        || !network_runtime.bind(
+                            restarted,
+                            device_endpoint,
+                            event_endpoint,
+                            resources,
+                        )
                         || !native_scheduler.run(restarted)
                         || native_scheduler.wake(previous)
                     {
@@ -1878,9 +1891,6 @@ pub(crate) fn run(
                     }
                     network_handle = Some(restarted);
                     native_network_endpoint = Some(endpoint);
-                    network_setup = Some(resources);
-                    network_dma = Some(dma);
-                    network_pending = None;
                     network_client_pending = None;
                     network_probe = Some(0x8000_0001);
                     network_probe_due = interrupts::ticks();
@@ -2162,12 +2172,9 @@ pub(crate) fn run(
             }
             test_hooks::Action::Poll => {
                 let _ = poll_network(
-                    network_device.as_mut(),
+                    &mut network_runtime,
                     native_network_endpoint,
-                    network_handle,
-                    network_dma,
                     &mut native_scheduler,
-                    &mut network_pending,
                     &mut network_probe,
                     &mut network_probe_due,
                     &mut network_reported,
@@ -2184,12 +2191,9 @@ pub(crate) fn run(
             test_hooks::Action::Advance(ticks) => {
                 for step in 0..ticks.min(4096) {
                     if !poll_network(
-                        network_device.as_mut(),
+                        &mut network_runtime,
                         native_network_endpoint,
-                        network_handle,
-                        network_dma,
                         &mut native_scheduler,
-                        &mut network_pending,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
@@ -2314,11 +2318,8 @@ pub(crate) fn run(
                         request,
                         native_terminal_network,
                         native_network_endpoint,
-                        network_handle,
-                        network_device.as_mut(),
-                        network_dma,
+                        &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_pending,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
@@ -2355,11 +2356,8 @@ pub(crate) fn run(
                         bind,
                         native_terminal_network,
                         native_network_endpoint,
-                        network_handle,
-                        network_device.as_mut(),
-                        network_dma,
+                        &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_pending,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
@@ -2401,11 +2399,8 @@ pub(crate) fn run(
                         send,
                         native_terminal_network,
                         native_network_endpoint,
-                        network_handle,
-                        network_device.as_mut(),
-                        network_dma,
+                        &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_pending,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
@@ -2435,11 +2430,8 @@ pub(crate) fn run(
                         receive,
                         native_terminal_network,
                         native_network_endpoint,
-                        network_handle,
-                        network_device.as_mut(),
-                        network_dma,
+                        &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_pending,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
@@ -2488,11 +2480,8 @@ pub(crate) fn run(
                         bind,
                         native_terminal_network,
                         native_network_endpoint,
-                        network_handle,
-                        network_device.as_mut(),
-                        network_dma,
+                        &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_pending,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
@@ -2518,11 +2507,8 @@ pub(crate) fn run(
                         cancel,
                         native_terminal_network,
                         native_network_endpoint,
-                        network_handle,
-                        network_device.as_mut(),
-                        network_dma,
+                        &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_pending,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
@@ -2548,11 +2534,8 @@ pub(crate) fn run(
                         close,
                         native_terminal_network,
                         native_network_endpoint,
-                        network_handle,
-                        network_device.as_mut(),
-                        network_dma,
+                        &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_pending,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
@@ -2596,11 +2579,8 @@ pub(crate) fn run(
                         first,
                         native_terminal_network,
                         native_network_endpoint,
-                        network_handle,
-                        network_device.as_mut(),
-                        network_dma,
+                        &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_pending,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
@@ -2616,11 +2596,8 @@ pub(crate) fn run(
                         second,
                         native_terminal_network,
                         native_network_endpoint,
-                        network_handle,
-                        network_device.as_mut(),
-                        network_dma,
+                        &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_pending,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
@@ -2659,11 +2636,8 @@ pub(crate) fn run(
                         bind,
                         native_terminal_network,
                         native_network_endpoint,
-                        network_handle,
-                        network_device.as_mut(),
-                        network_dma,
+                        &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_pending,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
@@ -2693,11 +2667,8 @@ pub(crate) fn run(
                         receive,
                         native_terminal_network,
                         native_network_endpoint,
-                        network_handle,
-                        network_device.as_mut(),
-                        network_dma,
+                        &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_pending,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
@@ -2735,11 +2706,8 @@ pub(crate) fn run(
                         request,
                         native_terminal_network,
                         native_network_endpoint,
-                        network_handle,
-                        network_device.as_mut(),
-                        network_dma,
+                        &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_pending,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
@@ -2773,12 +2741,9 @@ pub(crate) fn run(
                     }
                     for step in 0..256 {
                         let _ = poll_network(
-                            network_device.as_mut(),
+                            &mut network_runtime,
                             native_network_endpoint,
-                            network_handle,
-                            network_dma,
                             &mut native_scheduler,
-                            &mut network_pending,
                             &mut network_probe,
                             &mut network_probe_due,
                             &mut network_reported,
@@ -2929,7 +2894,8 @@ pub(crate) fn run(
                     }
                 }
                 if native_services.due(supervisor::NativeService::Network, tick)
-                    && let (Some(failed_network), Some(resources)) = (network_handle, network_setup)
+                    && let (Some(failed_network), Some(resources)) =
+                        (network_handle, network_runtime.resources)
                 {
                     if let Some(pending) = network_client_pending.take() {
                         let _ = native_terminal_network.reply(logos_abi::NetworkReply {
@@ -2944,8 +2910,7 @@ pub(crate) fn run(
                             counters: logos_abi::NetworkCounters::default(),
                         });
                     }
-                    network_pending = None;
-                    if let Some((restarted, endpoint, resources, dma)) = replace_network(
+                    if let Some((restarted, endpoint, resources)) = replace_network(
                         &mut native_scheduler,
                         failed_network,
                         &mut memory,
@@ -2954,15 +2919,24 @@ pub(crate) fn run(
                     ) {
                         network_handle = Some(restarted);
                         native_network_endpoint = Some(endpoint);
-                        network_setup = Some(resources);
-                        network_dma = Some(dma);
                         network_probe = Some(0x8000_0001);
                         network_probe_due = tick;
                         network_reported = false;
-                        if let Some(device) = network_device.as_mut() {
-                            let _ = device.reset();
-                        }
-                        if native_scheduler.run(restarted) {
+                        let bound = native_scheduler
+                            .network_device_endpoint(restarted, network_runtime.device_generation)
+                            .zip(native_scheduler.network_event_endpoint(
+                                restarted,
+                                network_runtime.device_generation,
+                            ))
+                            .is_some_and(|(device_endpoint, event_endpoint)| {
+                                network_runtime.bind(
+                                    restarted,
+                                    device_endpoint,
+                                    event_endpoint,
+                                    resources,
+                                )
+                            });
+                        if bound && native_scheduler.run(restarted) {
                             native_services.ready(supervisor::NativeService::Network);
                             debug::write_line(b"LogOS: Network service restarted");
                         } else {
@@ -2988,12 +2962,9 @@ pub(crate) fn run(
                     debug::write_line(b"LogOS: storage block reply failed");
                 }
                 if !poll_network(
-                    network_device.as_mut(),
+                    &mut network_runtime,
                     native_network_endpoint,
-                    network_handle,
-                    network_dma,
                     &mut native_scheduler,
-                    &mut network_pending,
                     &mut network_probe,
                     &mut network_probe_due,
                     &mut network_reported,
@@ -3416,12 +3387,9 @@ pub(crate) fn run(
                     tick,
                 );
                 let _ = poll_network(
-                    network_device.as_mut(),
+                    &mut network_runtime,
                     native_network_endpoint,
-                    network_handle,
-                    network_dma,
                     &mut native_scheduler,
-                    &mut network_pending,
                     &mut network_probe,
                     &mut network_probe_due,
                     &mut network_reported,
@@ -3470,10 +3438,10 @@ fn relay_network_client(
                 current.request.operation,
                 logos_abi::NetworkOperation::ReceiveFrom | logos_abi::NetworkOperation::Read
             ) && reply.status == logos_abi::NetworkStatus::Complete
-                && let (Some(source), Some(network_pages)) =
-                    (shared_pages.address(terminal_owner, current.request.page), unsafe {
-                        logos_core::native_service::ControlPage::network_pages_at(service.context())
-                    })
+                && let (Some(source), Some(network_pages)) = (
+                    shared_pages.address(terminal_owner, current.request.page),
+                    service.dma_pages(),
+                )
             {
                 let source = source as *const u8;
                 let target = (network_pages.tx_address + NETWORK_PAYLOAD_OFFSET) as *const u8;
@@ -3548,9 +3516,7 @@ fn relay_network_client(
             request.operation,
             logos_abi::NetworkOperation::SendTo | logos_abi::NetworkOperation::Write
         ) {
-            let Some(network_pages) = (unsafe {
-                logos_core::native_service::ControlPage::network_pages_at(service.context())
-            }) else {
+            let Some(network_pages) = service.dma_pages() else {
                 return true;
             };
             unsafe {
@@ -3571,12 +3537,9 @@ fn relay_network_client(
 
 #[allow(clippy::too_many_arguments)]
 fn poll_network(
-    device: Option<&mut network_driver::Device>,
+    runtime: &mut network::NetworkRuntime,
     endpoint: Option<native_task::NetworkEndpoint>,
-    handle: Option<native_task::Handle>,
-    dma: Option<NetworkDmaPages>,
     scheduler: &mut native_task::Scheduler<'_>,
-    pending: &mut Option<PendingNetworkDevice>,
     probe: &mut Option<u32>,
     probe_due: &mut u64,
     reported: &mut bool,
@@ -3588,7 +3551,7 @@ fn poll_network(
     shared_pages: &logos_core::shared_pages::SharedPages,
     terminal_owner: u64,
 ) -> bool {
-    let (Some(device), Some(endpoint), Some(handle)) = (device, endpoint, handle) else {
+    let (Some(endpoint), Some(handle)) = (endpoint, runtime.task) else {
         return true;
     };
     if !relay_network_client(
@@ -3604,151 +3567,8 @@ fn poll_network(
     ) {
         return false;
     }
-    if let Some(request) = pending.as_ref().copied() {
-        if tick >= request.request.deadline {
-            debug::write_line(b"LogOS: network TX timeout");
-            let reset = device.reset();
-            let info = device.info();
-            let reply = logos_abi::NetworkDeviceReply {
-                id: request.request.id,
-                status: if reset {
-                    logos_abi::NetworkStatus::TimedOut
-                } else {
-                    logos_abi::NetworkStatus::Reset
-                },
-                generation: info.generation,
-                info: network_info(info),
-            };
-            let delivered = if unsafe {
-                logos_core::native_service::ControlPage::network_waiting_at(endpoint.context())
-            } {
-                endpoint.deliver_device_reply(reply)
-            } else {
-                endpoint.reply_device(reply)
-            };
-            *pending = None;
-            return delivered && scheduler.wake(handle) && scheduler.run(handle);
-        }
-        match device.complete_transmit() {
-            Ok(Some(())) => {
-                let info = device.info();
-                let reply = logos_abi::NetworkDeviceReply {
-                    id: request.request.id,
-                    status: logos_abi::NetworkStatus::Complete,
-                    generation: info.generation,
-                    info: network_info(info),
-                };
-                let delivered = if unsafe {
-                    logos_core::native_service::ControlPage::network_waiting_at(endpoint.context())
-                } {
-                    endpoint.deliver_device_reply(reply)
-                } else {
-                    endpoint.reply_device(reply)
-                };
-                *pending = None;
-                return delivered && scheduler.wake(handle) && scheduler.run(handle);
-            }
-            Ok(None) => return true,
-            Err(_) => {
-                debug::write_line(b"LogOS: network TX completion invalid");
-                let _ = device.reset();
-                let info = device.info();
-                let reply = logos_abi::NetworkDeviceReply {
-                    id: request.request.id,
-                    status: logos_abi::NetworkStatus::Reset,
-                    generation: info.generation,
-                    info: network_info(info),
-                };
-                let delivered = if unsafe {
-                    logos_core::native_service::ControlPage::network_waiting_at(endpoint.context())
-                } {
-                    endpoint.deliver_device_reply(reply)
-                } else {
-                    endpoint.reply_device(reply)
-                };
-                *pending = None;
-                return delivered && scheduler.wake(handle) && scheduler.run(handle);
-            }
-        }
-    }
-    if unsafe {
-        logos_core::native_service::ControlPage::network_device_pending_at(endpoint.context())
-    } && endpoint.device_request().is_none()
-    {
-        debug::write_line(b"LogOS: invalid network device request");
+    if !runtime.poll(scheduler, tick) {
         return false;
-    }
-    if let Some(request) = endpoint.device_request() {
-        debug::write_line(b"LogOS: network device request");
-        let info = device.info();
-        let response = match request.operation {
-            logos_abi::NetworkDeviceOperation::Info => Some(logos_abi::NetworkDeviceReply {
-                id: request.id,
-                status: logos_abi::NetworkStatus::Complete,
-                generation: info.generation,
-                info: network_info(info),
-            }),
-            logos_abi::NetworkDeviceOperation::Reset => {
-                let status = if request.generation == info.generation && device.reset() {
-                    logos_abi::NetworkStatus::Complete
-                } else {
-                    logos_abi::NetworkStatus::Reset
-                };
-                let info = device.info();
-                Some(logos_abi::NetworkDeviceReply {
-                    id: request.id,
-                    status,
-                    generation: info.generation,
-                    info: network_info(info),
-                })
-            }
-            logos_abi::NetworkDeviceOperation::Transmit => {
-                if request.generation != info.generation {
-                    Some(logos_abi::NetworkDeviceReply {
-                        id: request.id,
-                        status: logos_abi::NetworkStatus::Reset,
-                        generation: info.generation,
-                        info: network_info(info),
-                    })
-                } else {
-                    let Some(dma) = dma else {
-                        return false;
-                    };
-                    let frame = unsafe {
-                        core::slice::from_raw_parts(
-                            dma.tx_address as *const u8,
-                            usize::from(request.length),
-                        )
-                    };
-                    match device.transmit(frame) {
-                        Ok(()) => {
-                            *pending = Some(PendingNetworkDevice { request });
-                            return scheduler.wake(handle) && scheduler.run(handle);
-                        }
-                        Err(error) => Some(logos_abi::NetworkDeviceReply {
-                            id: request.id,
-                            status: match error {
-                                network_driver::NetworkError::Busy => {
-                                    logos_abi::NetworkStatus::Busy
-                                }
-                                network_driver::NetworkError::Length => {
-                                    logos_abi::NetworkStatus::Invalid
-                                }
-                                network_driver::NetworkError::Device => {
-                                    logos_abi::NetworkStatus::Io
-                                }
-                            },
-                            generation: info.generation,
-                            info: network_info(info),
-                        }),
-                    }
-                }
-            }
-        };
-        if let Some(reply) = response {
-            return endpoint.reply_device(reply) && scheduler.wake(handle) && scheduler.run(handle);
-        }
-        return true;
     }
     if let Some(id) = *probe {
         if let Some(reply) = endpoint.response(id) {
@@ -3771,7 +3591,7 @@ fn poll_network(
             return ok;
         }
     }
-    if !unsafe { logos_core::native_service::ControlPage::network_waiting_at(endpoint.context()) } {
+    if !runtime.event_endpoint.waiting() {
         return true;
     }
     if !*reported && tick >= *probe_due {
@@ -3791,38 +3611,7 @@ fn poll_network(
             }
         }
     }
-    if unsafe { logos_core::native_service::ControlPage::network_deadline_at(endpoint.context()) }
-        .is_some_and(|deadline| tick >= deadline)
-    {
-        let event = logos_abi::NetworkEvent {
-            id: tick.try_into().unwrap_or(1).max(1),
-            kind: logos_abi::NetworkEventKind::Timer,
-            generation: device.info().generation,
-            length: 0,
-            now: tick.max(1),
-        };
-        return endpoint.deliver_event(event) && scheduler.wake(handle) && scheduler.run(handle);
-    }
-    let Some(dma) = dma else {
-        return false;
-    };
-    let frame = unsafe {
-        core::slice::from_raw_parts_mut(dma.rx_address as *mut u8, logos_abi::NETWORK_MAX_FRAME)
-    };
-    match device.receive(frame) {
-        Ok(Some(length)) => {
-            let event = logos_abi::NetworkEvent {
-                id: tick.try_into().unwrap_or(1).max(1),
-                kind: logos_abi::NetworkEventKind::Frame,
-                generation: device.info().generation,
-                length: length as u16,
-                now: tick.max(1),
-            };
-            endpoint.deliver_event(event) && scheduler.wake(handle) && scheduler.run(handle)
-        }
-        Ok(None) => true,
-        Err(_) => device.reset(),
-    }
+    true
 }
 
 #[cfg(feature = "test-hooks")]
@@ -3831,11 +3620,8 @@ fn run_network_request(
     request: logos_abi::NetworkRequest,
     terminal: native_task::NetworkEndpoint,
     service: Option<native_task::NetworkEndpoint>,
-    handle: Option<native_task::Handle>,
-    mut device: Option<&mut network_driver::Device>,
-    dma: Option<NetworkDmaPages>,
+    runtime: &mut network::NetworkRuntime,
     scheduler: &mut native_task::Scheduler<'_>,
-    device_pending: &mut Option<PendingNetworkDevice>,
     probe: &mut Option<u32>,
     probe_due: &mut u64,
     reported: &mut bool,
@@ -3851,15 +3637,12 @@ fn run_network_request(
         return None;
     }
     let endpoint = service?;
-    let service_handle = handle?;
+    let _service_handle = runtime.task?;
     for _ in 0..100_000 {
         if !poll_network(
-            device.as_deref_mut(),
+            runtime,
             Some(endpoint),
-            Some(service_handle),
-            dma,
             scheduler,
-            device_pending,
             probe,
             probe_due,
             reported,
@@ -3878,16 +3661,6 @@ fn run_network_request(
         }
     }
     None
-}
-
-fn network_info(info: network_driver::Info) -> logos_abi::NetworkInfo {
-    logos_abi::NetworkInfo {
-        mac: info.mac,
-        mtu: info.mtu,
-        generation: info.generation,
-        link_up: 1,
-        ..logos_abi::NetworkInfo::default()
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4565,8 +4338,7 @@ fn replace_network(
     memory: &mut memory::PhysicalMemory,
     pages: &mut logos_core::shared_pages::SharedPages,
     previous: NetworkResources,
-) -> Option<(native_task::Handle, native_task::NetworkEndpoint, NetworkResources, NetworkDmaPages)>
-{
+) -> Option<(native_task::Handle, native_task::NetworkEndpoint, NetworkResources)> {
     if !scheduler.failed(handle) && !scheduler.fail(handle) {
         return None;
     }
@@ -4580,30 +4352,9 @@ fn replace_network(
     pages.release(previous.owner, previous.tx)?;
     let rx = pages.register(previous.owner, rx_physical, 2)?;
     let tx = pages.register(previous.owner, tx_physical, 2)?;
-    let resources = NetworkResources {
-        owner: previous.owner,
-        rx,
-        rx_physical,
-        rx_virtual,
-        tx,
-        tx_physical,
-        tx_virtual,
-    };
+    let resources = NetworkResources { owner: previous.owner, rx, rx_virtual, tx, tx_virtual };
     let endpoint = scheduler.network_endpoint(replacement)?;
-    if !endpoint.configure(logos_abi::service::NetworkPages {
-        rx_handle: rx,
-        rx_address: rx_virtual,
-        tx_handle: tx,
-        tx_address: tx_virtual,
-    }) {
-        return None;
-    }
-    Some((
-        replacement,
-        endpoint,
-        resources,
-        NetworkDmaPages { rx_address: rx_physical, tx_address: tx_physical },
-    ))
+    Some((replacement, endpoint, resources))
 }
 
 fn replace_gateway(
