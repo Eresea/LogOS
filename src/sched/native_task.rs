@@ -344,6 +344,7 @@ impl StoreClientEndpoint {
         }
     }
 
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub fn deliver(self, request: logos_abi::StoreRequest) -> bool {
         if !self.available() {
             return false;
@@ -365,6 +366,7 @@ impl StoreClientEndpoint {
             }
     }
 
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub fn response(self, expected_id: u32) -> Option<logos_abi::StoreReply> {
         if !self.available() {
             return None;
@@ -442,6 +444,7 @@ impl StoreServerEndpoint {
         self.page_physical != 0
     }
 
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub const fn context(self) -> u64 {
         self.context_physical
     }
@@ -562,6 +565,7 @@ impl BlockClientEndpoint {
         }
     }
 
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub fn deliver(self, request: logos_abi::BlockRequest) -> bool {
         if !self.available() {
             return false;
@@ -604,6 +608,7 @@ impl BlockClientEndpoint {
             }
     }
 
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub fn response(self, expected_id: u32) -> Option<logos_abi::BlockReply> {
         if !self.available() {
             return None;

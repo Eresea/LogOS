@@ -297,7 +297,14 @@ impl ServiceContext {
         let (page, generation) = self.block_client_page()?;
         let handle = unsafe { BlockClientPage::transfer_page_at(page, generation, generation) }?;
         let address = self.raw_address().checked_sub(6 * logos_abi::PAGE_SIZE as u64)?;
-        Some(BlockClient { page, generation, handle, address, next_id: 1 })
+        Some(BlockClient {
+            context: self.raw_address(),
+            page,
+            generation,
+            handle,
+            address,
+            next_id: 1,
+        })
     }
 
     pub fn network_wait(&mut self, deadline: u64) -> bool {
@@ -420,6 +427,7 @@ impl ServiceContext {
 }
 
 pub struct BlockClient {
+    context: u64,
     page: u64,
     generation: u32,
     handle: logos_abi::PageHandle,
@@ -479,6 +487,9 @@ impl BlockClient {
                 !BlockClientPage::request_at(self.page, self.generation, self.generation, request)
             }
         {
+            return Err(BlockError::Invalid);
+        }
+        if !unsafe { ControlPage::notify_at(self.context, native_service::BLOCK_REQUEST) } {
             return Err(BlockError::Invalid);
         }
         #[cfg(target_arch = "x86_64")]

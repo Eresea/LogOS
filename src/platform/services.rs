@@ -268,7 +268,7 @@ pub fn self_check() -> bool {
         && Service::Terminal.spec().endpoints.contains(EndpointSet::SESSION_CLIENT)
         && Service::Sessions.spec().endpoints.contains(EndpointSet::SESSION_SERVER)
         && Service::Sessions.spec().endpoints.contains(EndpointSet::EFFECT)
-        && Service::VirtioBlock.spec().endpoints.contains(EndpointSet::BLOCK)
+        && !Service::VirtioBlock.spec().endpoints.contains(EndpointSet::BLOCK)
         && Service::Gateway.spec().endpoints.contains(EndpointSet::REMOTE)
 }
 

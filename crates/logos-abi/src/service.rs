@@ -3632,6 +3632,12 @@ mod tests {
         page.state = u32::MAX;
         unsafe { (address as *mut BlockClientPage).write_volatile(page) };
         assert!(unsafe { BlockClientPage::take_at(address, 3, 7) }.is_none());
+
+        let mut context = ControlPage::new();
+        context.status = ACKNOWLEDGED;
+        let context_address = (&mut context as *mut ControlPage) as u64;
+        assert!(unsafe { ControlPage::notify_at(context_address, BLOCK_REQUEST) });
+        assert_eq!(context.operation, BLOCK_REQUEST);
     }
 
     #[test]

@@ -15,12 +15,12 @@ pub const AUDIT_NAMESPACE: logos_abi::NamespaceId = logos_abi::NamespaceId(3);
 pub const SECRETS_NAMESPACE: logos_abi::NamespaceId = logos_abi::NamespaceId(4);
 
 pub struct StorageRuntime {
-    pub store_client: crate::sched::native_task::StoreClientEndpoint,
-    pub store_server: crate::sched::native_task::StoreServerEndpoint,
-    pub block_client: crate::sched::native_task::BlockClientEndpoint,
-    pub handle: crate::sched::native_task::Handle,
-    pub dispatch: crate::platform::block::Dispatch,
-    pub relay: RelayState,
+    store_client: crate::sched::native_task::StoreClientEndpoint,
+    store_server: crate::sched::native_task::StoreServerEndpoint,
+    block_client: crate::sched::native_task::BlockClientEndpoint,
+    handle: crate::sched::native_task::Handle,
+    block_dispatch: crate::platform::block::Dispatch,
+    relay: RelayState,
 }
 
 impl StorageRuntime {
@@ -35,7 +35,7 @@ impl StorageRuntime {
             store_server,
             block_client,
             handle,
-            dispatch: crate::platform::block::Dispatch::new(),
+            block_dispatch: crate::platform::block::Dispatch::new(),
             relay: RelayState::new(),
         }
     }
@@ -56,6 +56,196 @@ impl StorageRuntime {
         self.store_client = store_client;
         self.relay.clear();
     }
+
+    fn bind_block_context(&self, context: &mut block::DispatchContext<'_>) {
+        context.endpoint = self.block_client;
+    }
+
+    pub fn poll_block(
+        &mut self,
+        context: &mut block::DispatchContext<'_>,
+        scheduler: &mut native_task::Scheduler<'_>,
+        tick: u64,
+    ) -> bool {
+        if !self.block_client.available() || !self.handle.available() {
+            return true;
+        }
+        let Some(reply) = self.block_reply(context, tick) else { return true };
+        self.block_client.reply(reply) && scheduler.wake(self.handle) && scheduler.run(self.handle)
+    }
+
+    pub fn block_reply(
+        &mut self,
+        context: &mut block::DispatchContext<'_>,
+        tick: u64,
+    ) -> Option<logos_abi::BlockReply> {
+        self.bind_block_context(context);
+        self.block_dispatch.poll(context, tick)
+    }
+
+    pub fn cancel_block(&mut self, context: &mut block::DispatchContext<'_>) {
+        self.bind_block_context(context);
+        self.block_dispatch.cancel_on_exit(context);
+    }
+
+    pub fn startup(
+        &mut self,
+        context: &mut block::DispatchContext<'_>,
+        scheduler: &mut native_task::Scheduler<'_>,
+    ) -> bool {
+        self.bind_block_context(context);
+        run_startup(self.store_server, &mut self.block_dispatch, context, scheduler, self.handle)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn protected_store_read(
+        &mut self,
+        context: &mut block::DispatchContext<'_>,
+        scheduler: &mut native_task::Scheduler<'_>,
+        page: logos_abi::PageHandle,
+        page_address: u64,
+        namespace: logos_abi::NamespaceId,
+        name: &[u8],
+        output: &mut [u8],
+        tick: u64,
+    ) -> logos_abi::PersistenceStatus {
+        self.bind_block_context(context);
+        protected_store_read(
+            self.store_server,
+            &mut self.block_dispatch,
+            context,
+            scheduler,
+            self.handle,
+            page,
+            page_address,
+            namespace,
+            name,
+            output,
+            tick,
+        )
+    }
+
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn relay_store_request(
+        &mut self,
+        terminal: native_task::StoreClientEndpoint,
+        context: &mut block::DispatchContext<'_>,
+        terminal_owner: u64,
+        storage_owner: u64,
+        history_page: logos_abi::PageHandle,
+        scheduler: &mut native_task::Scheduler<'_>,
+        session: &session::Context,
+        capabilities: &capabilities::CapabilityManager,
+        tick: u64,
+    ) -> session::Relay {
+        self.bind_block_context(context);
+        relay_store_request(
+            terminal,
+            self.store_server,
+            &mut self.block_dispatch,
+            context,
+            terminal_owner,
+            storage_owner,
+            history_page,
+            scheduler,
+            self.handle,
+            session,
+            capabilities,
+            &mut self.relay,
+            tick,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn relay_terminal_store_requests(
+        &mut self,
+        terminal: native_task::StoreClientEndpoint,
+        context: &mut block::DispatchContext<'_>,
+        terminal_owner: u64,
+        storage_owner: u64,
+        history_page: logos_abi::PageHandle,
+        scheduler: &mut native_task::Scheduler<'_>,
+        terminal_handle: native_task::Handle,
+        session: &session::Context,
+        capabilities: &capabilities::CapabilityManager,
+        tick: u64,
+    ) -> bool {
+        self.bind_block_context(context);
+        relay_terminal_store_requests(
+            terminal,
+            self.store_server,
+            &mut self.block_dispatch,
+            context,
+            terminal_owner,
+            storage_owner,
+            history_page,
+            scheduler,
+            terminal_handle,
+            self.handle,
+            session,
+            capabilities,
+            &mut self.relay,
+            tick,
+        )
+    }
+
+    pub fn cancel_store_transaction(&self, scheduler: &mut native_task::Scheduler<'_>) -> bool {
+        cancel_store_transaction(self.store_server, scheduler, self.handle)
+    }
+
+    pub fn persist_remote_control(
+        &mut self,
+        state: &mut secrets::RemoteState,
+        context: &mut block::DispatchContext<'_>,
+        scheduler: &mut native_task::Scheduler<'_>,
+        page: logos_abi::PageHandle,
+        owner: u64,
+        tick: u64,
+    ) -> bool {
+        self.bind_block_context(context);
+        persist_remote_control(
+            state,
+            self.store_server,
+            &mut self.block_dispatch,
+            context,
+            scheduler,
+            self.handle,
+            page,
+            owner,
+            tick,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn persist_remote_enrollment(
+        &mut self,
+        state: &mut secrets::RemoteState,
+        bootstrap: Option<logos_remote::Bootstrap>,
+        context: &mut block::DispatchContext<'_>,
+        scheduler: &mut native_task::Scheduler<'_>,
+        page: logos_abi::PageHandle,
+        terminal_owner: u64,
+        tick: u64,
+    ) -> bool {
+        self.bind_block_context(context);
+        persist_remote_enrollment(
+            state,
+            bootstrap,
+            self.store_server,
+            &mut self.block_dispatch,
+            context,
+            scheduler,
+            self.handle,
+            page,
+            terminal_owner,
+            tick,
+        )
+    }
+
+    pub fn reset_relay(&mut self) {
+        self.relay.clear();
+    }
 }
 
 pub struct RelayState {
@@ -74,6 +264,7 @@ impl RelayState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn persist_remote_control(
     state: &mut secrets::RemoteState,
     storage: native_task::StoreServerEndpoint,

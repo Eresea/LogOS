@@ -188,6 +188,7 @@ impl AddressSpace {
         Some(self.base)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn map_context(
         &mut self,
         physical: &mut PhysicalMemory,
