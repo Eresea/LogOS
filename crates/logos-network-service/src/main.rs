@@ -1656,7 +1656,7 @@ fn handle_request(
     state: &mut NetworkState,
     info: NetworkInfo,
     request: NetworkRequest,
-    pages: Option<logos_service_rt::NetworkPages>,
+    pages: Option<logos_service_rt::NetworkDmaResources>,
     counters: logos_abi::NetworkCounters,
 ) -> NetworkReply {
     #[cfg(feature = "test-usernet")]

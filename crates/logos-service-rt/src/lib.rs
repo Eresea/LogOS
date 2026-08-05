@@ -13,8 +13,8 @@ use core::panic::PanicInfo;
 use logos_abi::service as native_service;
 pub use logos_abi::service::{
     BlockClientPage, ControlPage, DisplayPage, EffectPage, Header, InputPage, MAX_TEXT,
-    NetworkPages, ProtocolVersion, SessionClientPage, SessionServerPage, SessionStatus,
-    StoreClientPage, StoreServerPage,
+    NetworkDevicePage, NetworkDmaResources, NetworkEventPage, ProtocolVersion, SessionClientPage,
+    SessionServerPage, SessionStatus, StoreClientPage, StoreServerPage,
 };
 
 pub type EntryControlPage = *mut ControlPage;
@@ -109,6 +109,30 @@ impl ServiceContext {
     fn effect_page(&self) -> Option<(u64, u32)> {
         let raw = self.raw();
         (raw.effect_page != 0 && raw.generation != 0).then_some((raw.effect_page, raw.generation))
+    }
+
+    fn network_device_generation(&self) -> Option<u32> {
+        let raw = self.raw();
+        if raw.network_device_page == 0 || raw.generation == 0 {
+            return None;
+        }
+        let page = unsafe { (raw.network_device_page as *const NetworkDevicePage).read_volatile() };
+        (page.service_generation == raw.generation
+            && page.endpoint_generation == raw.generation
+            && page.device_generation != 0)
+            .then_some(page.device_generation)
+    }
+
+    fn network_event_generation(&self) -> Option<u32> {
+        let raw = self.raw();
+        if raw.network_event_page == 0 || raw.generation == 0 {
+            return None;
+        }
+        let page = unsafe { (raw.network_event_page as *const NetworkEventPage).read_volatile() };
+        (page.service_generation == raw.generation
+            && page.endpoint_generation == raw.generation
+            && page.device_generation != 0)
+            .then_some(page.device_generation)
     }
 
     fn raw(&self) -> &ControlPage {
@@ -308,12 +332,36 @@ impl ServiceContext {
     }
 
     pub fn network_wait(&mut self, deadline: u64) -> bool {
-        (unsafe { ControlPage::network_wait_at(self.raw_address(), deadline) })
-            && self.invoke(native_service::NETWORK_WAIT)
+        let Some(device_generation) = self.network_event_generation() else { return false };
+        (unsafe {
+            NetworkEventPage::wait_at(
+                self.raw().network_event_page,
+                self.raw().generation,
+                self.raw().generation,
+                device_generation,
+                deadline,
+            )
+        }) && self.invoke(native_service::NETWORK_WAIT)
     }
 
-    pub fn network_pages(&self) -> Option<NetworkPages> {
-        unsafe { ControlPage::network_pages_at(self.raw_address()) }
+    pub fn network_pages(&self) -> Option<NetworkDmaResources> {
+        let raw = self.raw();
+        let generation = raw.generation;
+        let device_generation = self.network_device_generation()?;
+        let (rx_handle, tx_handle) = unsafe {
+            NetworkDevicePage::dma_at(
+                raw.network_device_page,
+                generation,
+                generation,
+                device_generation,
+            )?
+        };
+        Some(NetworkDmaResources {
+            rx_handle,
+            rx_address: self.raw_address().checked_sub(19 * logos_abi::PAGE_SIZE as u64)?,
+            tx_handle,
+            tx_address: self.raw_address().checked_sub(20 * logos_abi::PAGE_SIZE as u64)?,
+        })
     }
 
     pub fn network_request(&self) -> Option<logos_abi::NetworkRequest> {
@@ -343,8 +391,8 @@ impl ServiceContext {
         request: logos_abi::NetworkRequest,
         reply: logos_abi::NetworkReply,
     ) -> bool {
-        (unsafe { ControlPage::reply_network_after_device_at(self.raw_address(), request, reply) })
-            && self.invoke(native_service::NETWORK_REPLY)
+        let _ = request;
+        self.network_reply(reply)
     }
 
     pub fn network_reply_after_event(
@@ -352,21 +400,59 @@ impl ServiceContext {
         request: logos_abi::NetworkRequest,
         reply: logos_abi::NetworkReply,
     ) -> bool {
-        (unsafe { ControlPage::reply_network_after_event_at(self.raw_address(), request, reply) })
-            && self.invoke(native_service::NETWORK_REPLY)
+        let _ = request;
+        self.network_reply(reply)
     }
 
     pub fn network_device_request(&mut self, request: logos_abi::NetworkDeviceRequest) -> bool {
-        (unsafe { ControlPage::request_network_device_at(self.raw_address(), request) })
-            && self.invoke(native_service::NETWORK_DEVICE_REQUEST)
+        let Some(device_generation) = self.network_device_generation() else { return false };
+        (unsafe {
+            NetworkDevicePage::request_at(
+                self.raw().network_device_page,
+                self.raw().generation,
+                self.raw().generation,
+                device_generation,
+                request,
+            )
+        }) && self.invoke(native_service::NETWORK_DEVICE_REQUEST)
     }
 
     pub fn network_device_reply(&self, expected_id: u32) -> Option<logos_abi::NetworkDeviceReply> {
-        unsafe { ControlPage::network_device_reply_at(self.raw_address(), expected_id) }
+        let raw = self.raw();
+        let generation = raw.generation;
+        let device_generation = self.network_device_generation()?;
+        unsafe {
+            NetworkDevicePage::take_reply_at(
+                raw.network_device_page,
+                generation,
+                generation,
+                device_generation,
+                expected_id,
+            )
+        }
     }
 
     pub fn network_event(&self) -> Option<logos_abi::NetworkEvent> {
-        unsafe { ControlPage::network_event_at(self.raw_address()) }
+        let raw = self.raw();
+        let generation = raw.generation;
+        let device_generation = self.network_event_generation()?;
+        let event = unsafe {
+            NetworkEventPage::take_at(
+                raw.network_event_page,
+                generation,
+                generation,
+                device_generation,
+            )
+        }?;
+        unsafe {
+            NetworkEventPage::acknowledge_at(
+                raw.network_event_page,
+                generation,
+                generation,
+                device_generation,
+            )
+        }
+        .then_some(event)
     }
 
     pub fn remote_gate_request(&self) -> Option<native_service::RemoteGateRequest> {
