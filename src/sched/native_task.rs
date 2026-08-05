@@ -14,6 +14,9 @@ pub struct EndpointPages {
     pub session_client: bool,
     pub session_server: bool,
     pub effect: bool,
+    pub store_client: bool,
+    pub store_server: bool,
+    pub block_client: bool,
 }
 
 impl EndpointPages {
@@ -23,10 +26,14 @@ impl EndpointPages {
         session_client: false,
         session_server: false,
         effect: false,
+        store_client: false,
+        store_server: false,
+        block_client: false,
     };
     pub const TERMINAL: Self =
-        Self { input: true, display: true, session_client: true, ..Self::NONE };
+        Self { input: true, display: true, session_client: true, store_client: true, ..Self::NONE };
     pub const SESSIONS: Self = Self { session_server: true, effect: true, ..Self::NONE };
+    pub const STORAGE: Self = Self { store_server: true, block_client: true, ..Self::NONE };
 }
 
 pub struct Task<'a> {
@@ -41,6 +48,9 @@ pub struct Task<'a> {
     session_client_page_physical: Option<u64>,
     session_server_page_physical: Option<u64>,
     effect_page_physical: Option<u64>,
+    store_client_page_physical: Option<u64>,
+    store_server_page_physical: Option<u64>,
+    block_client_page_physical: Option<u64>,
     endpoint_pages: EndpointPages,
     generation: u32,
     started: bool,
@@ -177,15 +187,27 @@ pub struct SyscallEndpoint {
 }
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
-pub struct StoreEndpoint {
+pub struct StoreClientEndpoint {
     context_physical: u64,
+    page_physical: u64,
+    service_generation: u32,
+    endpoint_generation: u32,
 }
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
-pub struct BlockEndpoint {
+pub struct StoreServerEndpoint {
     context_physical: u64,
+    page_physical: u64,
+    service_generation: u32,
+    endpoint_generation: u32,
+}
+
+#[derive(Clone, Copy)]
+pub struct BlockClientEndpoint {
+    context_physical: u64,
+    page_physical: u64,
+    service_generation: u32,
+    endpoint_generation: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -294,13 +316,18 @@ impl SyscallEndpoint {
     }
 }
 
-impl StoreEndpoint {
+impl StoreClientEndpoint {
     pub const fn unavailable() -> Self {
-        Self { context_physical: 0 }
+        Self {
+            context_physical: 0,
+            page_physical: 0,
+            service_generation: 0,
+            endpoint_generation: 0,
+        }
     }
 
     pub const fn available(self) -> bool {
-        self.context_physical != 0
+        self.page_physical != 0
     }
 
     pub const fn context(self) -> u64 {
@@ -311,19 +338,34 @@ impl StoreEndpoint {
         if !self.available() {
             return None;
         }
-        unsafe { logos_core::native_service::ControlPage::store_at(self.context_physical) }
+        unsafe {
+            logos_abi::service::StoreClientPage::current_request_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
+        }
     }
 
     pub fn deliver(self, request: logos_abi::StoreRequest) -> bool {
         if !self.available() {
             return false;
         }
-        unsafe {
-            logos_core::native_service::ControlPage::deliver_store_at(
-                self.context_physical,
+        let accepted = unsafe {
+            logos_abi::service::StoreClientPage::request_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
                 request,
             )
-        }
+        };
+        accepted
+            && unsafe {
+                logos_abi::service::ControlPage::notify_at(
+                    self.context_physical,
+                    logos_abi::service::STORE_REQUEST,
+                )
+            }
     }
 
     pub fn response(self, expected_id: u32) -> Option<logos_abi::StoreReply> {
@@ -331,8 +373,10 @@ impl StoreEndpoint {
             return None;
         }
         unsafe {
-            logos_core::native_service::ControlPage::store_reply_at(
-                self.context_physical,
+            logos_abi::service::StoreClientPage::finish_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
                 expected_id,
             )
         }
@@ -342,73 +386,263 @@ impl StoreEndpoint {
         if !self.available() {
             return false;
         }
-        unsafe {
-            logos_core::native_service::ControlPage::reply_store_at(self.context_physical, reply)
-        }
+        let accepted = unsafe {
+            logos_abi::service::StoreClientPage::reply_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                reply,
+            )
+        };
+        accepted
+            && unsafe {
+                logos_abi::service::ControlPage::notify_at(
+                    self.context_physical,
+                    logos_abi::service::STORE_REPLY,
+                )
+            }
     }
 
-    pub fn configure_shared_page(self, page: logos_abi::PageHandle) -> bool {
+    pub fn configure_transfer(self, page: logos_abi::PageHandle) -> bool {
         if !self.available() {
             return false;
         }
         unsafe {
-            logos_core::native_service::ControlPage::configure_shared_page_at(
-                self.context_physical,
+            logos_abi::service::StoreClientPage::configure_transfer_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
                 page,
             )
         }
     }
 
-    pub fn remap_shared_page(self, page: logos_abi::PageHandle) -> bool {
+    pub fn transfer_page(self) -> Option<logos_abi::PageHandle> {
         if !self.available() {
-            return false;
+            return None;
         }
         unsafe {
-            logos_abi::service::ControlPage::remap_shared_page_at(self.context_physical, page)
+            logos_abi::service::StoreClientPage::transfer_page_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
         }
     }
 }
 
-impl BlockEndpoint {
+impl StoreServerEndpoint {
     pub const fn unavailable() -> Self {
-        Self { context_physical: 0 }
+        Self {
+            context_physical: 0,
+            page_physical: 0,
+            service_generation: 0,
+            endpoint_generation: 0,
+        }
     }
 
     pub const fn available(self) -> bool {
-        self.context_physical != 0
+        self.page_physical != 0
     }
 
     pub const fn context(self) -> u64 {
         self.context_physical
     }
 
-    pub fn configure(self, page: logos_core::native_service::BlockPage) -> bool {
+    pub fn deliver(self, request: logos_abi::StoreRequest, caller: u64) -> bool {
+        if !self.available() {
+            return false;
+        }
+        let accepted = unsafe {
+            logos_abi::service::StoreServerPage::deliver_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                caller,
+                request,
+            )
+        };
+        accepted
+            && unsafe {
+                logos_abi::service::ControlPage::notify_at(
+                    self.context_physical,
+                    logos_abi::service::STORE_REQUEST,
+                )
+            }
+    }
+
+    pub fn response(self, expected_id: u32) -> Option<logos_abi::StoreReply> {
+        if !self.available() {
+            return None;
+        }
+        unsafe {
+            logos_abi::service::StoreServerPage::take_reply_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                expected_id,
+            )
+        }
+    }
+
+    pub fn configure_transfer(self, page: logos_abi::PageHandle) -> bool {
         if !self.available() {
             return false;
         }
         unsafe {
-            logos_core::native_service::ControlPage::configure_block_page_at(
-                self.context_physical,
+            logos_abi::service::StoreServerPage::configure_transfer_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
                 page,
             )
         }
     }
 
-    #[allow(dead_code)]
-    pub fn request(self) -> Option<logos_abi::BlockRequest> {
+    pub fn reply(self, reply: logos_abi::StoreReply) -> bool {
+        if !self.available() {
+            return false;
+        }
+        let accepted = unsafe {
+            logos_abi::service::StoreServerPage::reply_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                reply,
+            )
+        };
+        accepted
+            && unsafe {
+                logos_abi::service::ControlPage::notify_at(
+                    self.context_physical,
+                    logos_abi::service::STORE_REPLY,
+                )
+            }
+    }
+
+    pub fn status(self) -> Option<u32> {
         if !self.available() {
             return None;
         }
-        unsafe { logos_core::native_service::ControlPage::block_at(self.context_physical) }
+        unsafe {
+            logos_abi::service::StoreServerPage::status_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
+        }
     }
 
-    #[allow(dead_code)]
-    pub fn reply(self, reply: logos_abi::BlockReply) -> bool {
+    pub fn waiting(self) -> bool {
+        self.available()
+            && unsafe {
+                logos_abi::service::StoreServerPage::waiting_at(
+                    self.page_physical,
+                    self.service_generation,
+                    self.endpoint_generation,
+                )
+            }
+    }
+}
+
+impl BlockClientEndpoint {
+    pub const fn unavailable() -> Self {
+        Self {
+            context_physical: 0,
+            page_physical: 0,
+            service_generation: 0,
+            endpoint_generation: 0,
+        }
+    }
+
+    pub const fn available(self) -> bool {
+        self.page_physical != 0
+    }
+
+    pub const fn context(self) -> u64 {
+        self.context_physical
+    }
+
+    pub fn configure_transfer(self, page: logos_abi::PageHandle) -> bool {
         if !self.available() {
             return false;
         }
         unsafe {
-            logos_core::native_service::ControlPage::reply_block_at(self.context_physical, reply)
+            logos_abi::service::BlockClientPage::configure_transfer_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                page,
+            )
+        }
+    }
+
+    pub fn request(self) -> Option<logos_abi::BlockRequest> {
+        if !self.available() {
+            return None;
+        }
+        unsafe {
+            logos_abi::service::BlockClientPage::take_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
+        }
+    }
+
+    pub fn deliver(self, request: logos_abi::BlockRequest) -> bool {
+        if !self.available() {
+            return false;
+        }
+        let accepted = unsafe {
+            logos_abi::service::BlockClientPage::request_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                request,
+            )
+        };
+        accepted
+            && unsafe {
+                logos_abi::service::ControlPage::notify_at(
+                    self.context_physical,
+                    logos_abi::service::BLOCK_REQUEST,
+                )
+            }
+    }
+
+    pub fn reply(self, reply: logos_abi::BlockReply) -> bool {
+        if !self.available() {
+            return false;
+        }
+        let accepted = unsafe {
+            logos_abi::service::BlockClientPage::reply_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                reply,
+            )
+        };
+        accepted
+            && unsafe {
+                logos_abi::service::ControlPage::notify_at(
+                    self.context_physical,
+                    logos_abi::service::BLOCK_REPLY,
+                )
+            }
+    }
+
+    pub fn response(self, expected_id: u32) -> Option<logos_abi::BlockReply> {
+        if !self.available() {
+            return None;
+        }
+        unsafe {
+            logos_abi::service::BlockClientPage::finish_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                expected_id,
+            )
         }
     }
 }
@@ -562,6 +796,9 @@ impl<'a> Task<'a> {
             endpoint_pages.session_client,
             endpoint_pages.session_server,
             endpoint_pages.effect,
+            endpoint_pages.store_client,
+            endpoint_pages.store_server,
+            endpoint_pages.block_client,
         ) else {
             let _ = space.release(memory);
             return None;
@@ -579,6 +816,9 @@ impl<'a> Task<'a> {
             session_client_page_physical: mapping.session_client.map(|(physical, _)| physical),
             session_server_page_physical: mapping.session_server.map(|(physical, _)| physical),
             effect_page_physical: mapping.effect.map(|(physical, _)| physical),
+            store_client_page_physical: mapping.store_client.map(|(physical, _)| physical),
+            store_server_page_physical: mapping.store_server.map(|(physical, _)| physical),
+            block_client_page_physical: mapping.block_client.map(|(physical, _)| physical),
             endpoint_pages,
             generation: 1,
             started: false,
@@ -683,6 +923,27 @@ impl<'a> Task<'a> {
                 return false;
             }
         }
+        if let Some(page) = self.store_client_page_physical {
+            if !unsafe {
+                logos_core::native_service::StoreClientPage::reset_at(page, generation, generation)
+            } {
+                return false;
+            }
+        }
+        if let Some(page) = self.store_server_page_physical {
+            if !unsafe {
+                logos_core::native_service::StoreServerPage::reset_at(page, generation, generation)
+            } {
+                return false;
+            }
+        }
+        if let Some(page) = self.block_client_page_physical {
+            if !unsafe {
+                logos_core::native_service::BlockClientPage::reset_at(page, generation, generation)
+            } {
+                return false;
+            }
+        }
         self.generation = generation;
         true
     }
@@ -695,14 +956,31 @@ impl<'a> Task<'a> {
         }
     }
 
-    #[allow(dead_code)]
-    pub const fn store_endpoint(&self) -> StoreEndpoint {
-        StoreEndpoint { context_physical: self.context_physical }
+    pub fn store_client_endpoint(&self) -> Option<StoreClientEndpoint> {
+        self.store_client_page_physical.map(|page_physical| StoreClientEndpoint {
+            context_physical: self.context_physical,
+            page_physical,
+            service_generation: self.generation,
+            endpoint_generation: self.generation,
+        })
     }
 
-    #[allow(dead_code)]
-    pub const fn block_endpoint(&self) -> BlockEndpoint {
-        BlockEndpoint { context_physical: self.context_physical }
+    pub fn store_server_endpoint(&self) -> Option<StoreServerEndpoint> {
+        self.store_server_page_physical.map(|page_physical| StoreServerEndpoint {
+            context_physical: self.context_physical,
+            page_physical,
+            service_generation: self.generation,
+            endpoint_generation: self.generation,
+        })
+    }
+
+    pub fn block_client_endpoint(&self) -> Option<BlockClientEndpoint> {
+        self.block_client_page_physical.map(|page_physical| BlockClientEndpoint {
+            context_physical: self.context_physical,
+            page_physical,
+            service_generation: self.generation,
+            endpoint_generation: self.generation,
+        })
     }
 
     #[allow(dead_code)]
@@ -870,16 +1148,20 @@ impl<'a> Scheduler<'a> {
         Some(self.entry(handle)?.task.session_endpoint())
     }
 
-    pub fn store_endpoint(&self, handle: Handle) -> Option<StoreEndpoint> {
-        Some(self.entry(handle)?.task.store_endpoint())
+    pub fn store_client_endpoint(&self, handle: Handle) -> Option<StoreClientEndpoint> {
+        self.entry(handle)?.task.store_client_endpoint()
+    }
+
+    pub fn store_server_endpoint(&self, handle: Handle) -> Option<StoreServerEndpoint> {
+        self.entry(handle)?.task.store_server_endpoint()
     }
 
     pub fn remote_endpoint(&self, handle: Handle) -> Option<RemoteEndpoint> {
         Some(self.entry(handle)?.task.remote_endpoint())
     }
 
-    pub fn block_endpoint(&self, handle: Handle) -> Option<BlockEndpoint> {
-        Some(self.entry(handle)?.task.block_endpoint())
+    pub fn block_client_endpoint(&self, handle: Handle) -> Option<BlockClientEndpoint> {
+        self.entry(handle)?.task.block_client_endpoint()
     }
 
     pub fn network_endpoint(&self, handle: Handle) -> Option<NetworkEndpoint> {

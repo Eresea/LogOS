@@ -22,6 +22,9 @@ const INPUT_PAGE: usize = ENTRIES - 27;
 const SESSION_CLIENT_PAGE: usize = ENTRIES - 28;
 const SESSION_SERVER_PAGE: usize = ENTRIES - 29;
 const EFFECT_PAGE: usize = ENTRIES - 30;
+const STORE_CLIENT_PAGE: usize = ENTRIES - 31;
+const STORE_SERVER_PAGE: usize = ENTRIES - 32;
+const BLOCK_CLIENT_PAGE: usize = ENTRIES - 33;
 const STACK_TOP: usize = BLOCK_PAGE;
 const STACK_PAGES: usize = 12;
 const STACK_BASE: usize = STACK_TOP - STACK_PAGES;
@@ -53,6 +56,9 @@ pub struct ContextMapping {
     pub session_client: Option<(u64, u64)>,
     pub session_server: Option<(u64, u64)>,
     pub effect: Option<(u64, u64)>,
+    pub store_client: Option<(u64, u64)>,
+    pub store_server: Option<(u64, u64)>,
+    pub block_client: Option<(u64, u64)>,
 }
 
 impl AddressSpace {
@@ -190,6 +196,9 @@ impl AddressSpace {
         session_client: bool,
         session_server: bool,
         effect: bool,
+        store_client: bool,
+        store_server: bool,
+        block_client: bool,
     ) -> Option<ContextMapping> {
         if self.mapping(CONTEXT_PAGE).is_some()
             || input && self.mapping(INPUT_PAGE).is_some()
@@ -197,6 +206,9 @@ impl AddressSpace {
             || session_client && self.mapping(SESSION_CLIENT_PAGE).is_some()
             || session_server && self.mapping(SESSION_SERVER_PAGE).is_some()
             || effect && self.mapping(EFFECT_PAGE).is_some()
+            || store_client && self.mapping(STORE_CLIENT_PAGE).is_some()
+            || store_server && self.mapping(STORE_SERVER_PAGE).is_some()
+            || block_client && self.mapping(BLOCK_CLIENT_PAGE).is_some()
         {
             return None;
         }
@@ -276,12 +288,87 @@ impl AddressSpace {
         } else {
             None
         };
+        let store_client_page = if store_client {
+            match physical.allocate_owned() {
+                Some(page) => Some(page),
+                None => {
+                    for page in [
+                        input_page,
+                        display_page,
+                        session_client_page,
+                        session_server_page,
+                        effect_page,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let _ = physical.release_page(page);
+                    }
+                    let _ = physical.release_page(context);
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+        let store_server_page = if store_server {
+            match physical.allocate_owned() {
+                Some(page) => Some(page),
+                None => {
+                    for page in [
+                        input_page,
+                        display_page,
+                        session_client_page,
+                        session_server_page,
+                        effect_page,
+                        store_client_page,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let _ = physical.release_page(page);
+                    }
+                    let _ = physical.release_page(context);
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+        let block_client_page = if block_client {
+            match physical.allocate_owned() {
+                Some(page) => Some(page),
+                None => {
+                    for page in [
+                        input_page,
+                        display_page,
+                        session_client_page,
+                        session_server_page,
+                        effect_page,
+                        store_client_page,
+                        store_server_page,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let _ = physical.release_page(page);
+                    }
+                    let _ = physical.release_page(context);
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
         let context_address = context.address();
         let input_address = input_page.as_ref().map(Page::address);
         let display_address = display_page.as_ref().map(Page::address);
         let session_client_address = session_client_page.as_ref().map(Page::address);
         let session_server_address = session_server_page.as_ref().map(Page::address);
         let effect_address = effect_page.as_ref().map(Page::address);
+        let store_client_address = store_client_page.as_ref().map(Page::address);
+        let store_server_address = store_server_page.as_ref().map(Page::address);
+        let block_client_address = block_client_page.as_ref().map(Page::address);
         let input_virtual = input_page.as_ref().map(|_| self.base + PAGE_SIZE * INPUT_PAGE as u64);
         let display_virtual =
             display_page.as_ref().map(|_| self.base + PAGE_SIZE * DISPLAY_PAGE as u64);
@@ -293,6 +380,12 @@ impl AddressSpace {
             .map(|_| self.base + PAGE_SIZE * SESSION_SERVER_PAGE as u64);
         let effect_virtual =
             effect_page.as_ref().map(|_| self.base + PAGE_SIZE * EFFECT_PAGE as u64);
+        let store_client_virtual =
+            store_client_page.as_ref().map(|_| self.base + PAGE_SIZE * STORE_CLIENT_PAGE as u64);
+        let store_server_virtual =
+            store_server_page.as_ref().map(|_| self.base + PAGE_SIZE * STORE_SERVER_PAGE as u64);
+        let block_client_virtual =
+            block_client_page.as_ref().map(|_| self.base + PAGE_SIZE * BLOCK_CLIENT_PAGE as u64);
         unsafe {
             ptr::write_bytes(context_address as *mut u8, 0, PAGE_SIZE as usize);
             (context_address as *mut logos_core::native_service::ControlPage)
@@ -309,8 +402,16 @@ impl AddressSpace {
             if let Some(page) = display_page {
                 let _ = physical.release_page(page);
             }
-            for page in
-                [session_client_page, session_server_page, effect_page].into_iter().flatten()
+            for page in [
+                session_client_page,
+                session_server_page,
+                effect_page,
+                store_client_page,
+                store_server_page,
+                block_client_page,
+            ]
+            .into_iter()
+            .flatten()
             {
                 let _ = physical.release_page(page);
             }
@@ -322,6 +423,9 @@ impl AddressSpace {
             (session_client.then_some(SESSION_CLIENT_PAGE), session_client_page),
             (session_server.then_some(SESSION_SERVER_PAGE), session_server_page),
             (effect.then_some(EFFECT_PAGE), effect_page),
+            (store_client.then_some(STORE_CLIENT_PAGE), store_client_page),
+            (store_server.then_some(STORE_SERVER_PAGE), store_server_page),
+            (block_client.then_some(BLOCK_CLIENT_PAGE), block_client_page),
         ] {
             let (Some(index), Some(page)) = (index, page) else { continue };
             let address = page.address();
@@ -339,9 +443,18 @@ impl AddressSpace {
                 } else if index == SESSION_SERVER_PAGE {
                     (address as *mut logos_core::native_service::SessionServerPage)
                         .write_volatile(logos_core::native_service::SessionServerPage::new(1, 1));
-                } else {
+                } else if index == EFFECT_PAGE {
                     (address as *mut logos_core::native_service::EffectPage)
                         .write_volatile(logos_core::native_service::EffectPage::new(1, 1));
+                } else if index == STORE_CLIENT_PAGE {
+                    (address as *mut logos_core::native_service::StoreClientPage)
+                        .write_volatile(logos_core::native_service::StoreClientPage::new(1, 1));
+                } else if index == STORE_SERVER_PAGE {
+                    (address as *mut logos_core::native_service::StoreServerPage)
+                        .write_volatile(logos_core::native_service::StoreServerPage::new(1, 1));
+                } else {
+                    (address as *mut logos_core::native_service::BlockClientPage)
+                        .write_volatile(logos_core::native_service::BlockClientPage::new(1, 1));
                 }
                 (self.pt.address() as *mut u64)
                     .add(index)
@@ -355,6 +468,9 @@ impl AddressSpace {
                 self.unmap_index(SESSION_CLIENT_PAGE, physical);
                 self.unmap_index(SESSION_SERVER_PAGE, physical);
                 self.unmap_index(EFFECT_PAGE, physical);
+                self.unmap_index(STORE_CLIENT_PAGE, physical);
+                self.unmap_index(STORE_SERVER_PAGE, physical);
+                self.unmap_index(BLOCK_CLIENT_PAGE, physical);
                 return None;
             }
         }
@@ -368,6 +484,9 @@ impl AddressSpace {
                 session_client_virtual,
                 session_server_virtual,
                 effect_virtual,
+                store_client_virtual,
+                store_server_virtual,
+                block_client_virtual,
             )
         } {
             self.unmap_index(CONTEXT_PAGE, physical);
@@ -376,6 +495,9 @@ impl AddressSpace {
             self.unmap_index(SESSION_CLIENT_PAGE, physical);
             self.unmap_index(SESSION_SERVER_PAGE, physical);
             self.unmap_index(EFFECT_PAGE, physical);
+            self.unmap_index(STORE_CLIENT_PAGE, physical);
+            self.unmap_index(STORE_SERVER_PAGE, physical);
+            self.unmap_index(BLOCK_CLIENT_PAGE, physical);
             return None;
         }
         Some(ContextMapping {
@@ -385,6 +507,9 @@ impl AddressSpace {
             session_client: session_client_address.zip(session_client_virtual),
             session_server: session_server_address.zip(session_server_virtual),
             effect: effect_address.zip(effect_virtual),
+            store_client: store_client_address.zip(store_client_virtual),
+            store_server: store_server_address.zip(store_server_virtual),
+            block_client: block_client_address.zip(block_client_virtual),
         })
     }
 

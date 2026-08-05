@@ -278,20 +278,21 @@ extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
         return 2;
     }
     if context != 0
-        && unsafe { logos_core::native_service::ControlPage::store_at(context) }.is_some()
+        && unsafe { logos_core::native_service::ControlPage::store_client_pending_at(context) }
         && save_user_frame(frame, true, false)
     {
         return 2;
     }
     if context != 0
-        && unsafe { logos_core::native_service::ControlPage::store_reply_pending_at(context) }
-            .is_some()
+        && unsafe {
+            logos_core::native_service::ControlPage::store_client_reply_pending_at(context)
+        }
         && save_user_frame(frame, true, false)
     {
         return 2;
     }
     if context != 0
-        && unsafe { logos_core::native_service::ControlPage::block_at(context) }.is_some()
+        && unsafe { logos_core::native_service::ControlPage::block_client_pending_at(context) }
         && save_user_frame(frame, true, false)
     {
         return 2;
