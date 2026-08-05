@@ -55,12 +55,13 @@ pub struct ControlPage {
     pub session_client_page: u64,
     pub session_server_page: u64,
     pub effect_page: u64,
+    pub store_client_page: u64,
+    pub store_server_page: u64,
+    pub block_client_page: u64,
     pub slot0: u32,
     pub slot1: u32,
-    pub slot2: u32,
     pub payload_length: u32,
     pub payload: [u8; MAX_TEXT],
-    pub shared_page: u32,
     pub network_rx_page: u32,
     pub network_tx_page: u32,
 }
@@ -257,26 +258,110 @@ pub struct EffectPage {
     pub reply: [u8; MAX_TEXT],
 }
 
-/// Fixed-size Store endpoint page.
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct StoreEndpointPage {
-    pub generation: u32,
-    pub state: EndpointState,
-    pub request: [u8; STORE_REQUEST_BYTES],
-    pub reply: [u8; STORE_REPLY_BYTES],
-    pub reserved: [u8; logos_abi::PAGE_SIZE - 127],
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum PersistencePageState {
+    Ready = 1,
+    Waiting = 2,
+    Request = 3,
+    Processing = 4,
+    Submitted = 5,
+    Reply = 6,
+    Denied = 7,
+    Failed = 8,
+    Cancelled = 9,
+    TimedOut = 10,
 }
 
-/// Fixed-size Block endpoint page.
+impl PersistencePageState {
+    pub const fn wire(self) -> u32 {
+        self as u32
+    }
+
+    pub const fn from_wire(value: u32) -> Option<Self> {
+        Some(match value {
+            1 => Self::Ready,
+            2 => Self::Waiting,
+            3 => Self::Request,
+            4 => Self::Processing,
+            5 => Self::Submitted,
+            6 => Self::Reply,
+            7 => Self::Denied,
+            8 => Self::Failed,
+            9 => Self::Cancelled,
+            10 => Self::TimedOut,
+            _ => return None,
+        })
+    }
+}
+
+/// Core-mediated Store client page. Only the owning client service maps it.
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct BlockEndpointPage {
-    pub generation: u32,
-    pub state: EndpointState,
-    pub request: [u8; BLOCK_REQUEST_BYTES],
-    pub reply: [u8; BLOCK_REPLY_BYTES],
-    pub reserved: [u8; logos_abi::PAGE_SIZE - 61],
+pub struct StoreClientPage {
+    pub service_generation: u32,
+    pub endpoint_generation: u32,
+    pub state: u32,
+    pub request_id: u32,
+    pub operation: u32,
+    pub namespace: u32,
+    pub name_length: u32,
+    pub name: [u8; logos_abi::MAX_OBJECT_NAME],
+    pub version: u32,
+    pub offset: u64,
+    pub length: u32,
+    pub page: u32,
+    pub deadline: u64,
+    pub transfer_page: u32,
+    pub reply_status: u32,
+    pub reply_version: u64,
+    pub reply_length: u32,
+}
+
+/// Core-mediated Store server page. Only Storage maps it.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct StoreServerPage {
+    pub service_generation: u32,
+    pub endpoint_generation: u32,
+    pub state: u32,
+    pub request_id: u32,
+    pub caller_low: u32,
+    pub caller_high: u32,
+    pub operation: u32,
+    pub namespace: u32,
+    pub name_length: u32,
+    pub name: [u8; logos_abi::MAX_OBJECT_NAME],
+    pub version: u32,
+    pub offset: u64,
+    pub length: u32,
+    pub page: u32,
+    pub deadline: u64,
+    pub transfer_page: u32,
+    pub reply_status: u32,
+    pub reply_version: u64,
+    pub reply_length: u32,
+    pub service_status: u32,
+}
+
+/// Core-mediated Block client page. Only Storage maps it.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct BlockClientPage {
+    pub service_generation: u32,
+    pub endpoint_generation: u32,
+    pub state: u32,
+    pub request_id: u32,
+    pub operation: u32,
+    pub lba: u64,
+    pub blocks: u32,
+    pub page: u32,
+    pub deadline: u64,
+    pub transfer_page: u32,
+    pub reply_status: u32,
+    pub logical_block_size: u32,
+    pub block_count: u64,
+    pub max_transfer_blocks: u32,
 }
 
 /// Fixed-size Network endpoint page.
@@ -550,6 +635,797 @@ pub struct DisplayRequest {
     pub color: logos_abi::DisplayColor,
     pub text: [u8; MAX_TEXT],
     pub length: usize,
+}
+
+#[derive(Clone, Copy)]
+pub struct StoreServerRequest {
+    pub id: u32,
+    pub caller: u64,
+    pub request: logos_abi::StoreRequest,
+}
+
+fn persistence_state(status: logos_abi::PersistenceStatus) -> PersistencePageState {
+    match status {
+        logos_abi::PersistenceStatus::Complete | logos_abi::PersistenceStatus::Recovered => {
+            PersistencePageState::Reply
+        }
+        logos_abi::PersistenceStatus::Denied => PersistencePageState::Denied,
+        logos_abi::PersistenceStatus::Cancelled => PersistencePageState::Cancelled,
+        logos_abi::PersistenceStatus::TimedOut => PersistencePageState::TimedOut,
+        _ => PersistencePageState::Failed,
+    }
+}
+
+fn store_request_from_fields(
+    id: u32,
+    operation: u32,
+    namespace: u32,
+    name_length: u32,
+    name: [u8; logos_abi::MAX_OBJECT_NAME],
+    version: u32,
+    offset: u64,
+    length: u32,
+    page: u32,
+    deadline: u64,
+) -> Option<logos_abi::StoreRequest> {
+    let operation = logos_abi::StoreOperation::from_wire(u8::try_from(operation).ok()?)?;
+    let version = logos_abi::VersionSelector::from_wire(u8::try_from(version).ok()?)?;
+    let request = logos_abi::StoreRequest {
+        id,
+        operation,
+        namespace: logos_abi::NamespaceId(namespace),
+        name,
+        name_length: u8::try_from(name_length).ok()?,
+        version,
+        offset,
+        length,
+        page: logos_abi::PageHandle(page),
+        deadline,
+    };
+    request.valid().then_some(request)
+}
+
+fn store_reply_from_fields(
+    id: u32,
+    status: u32,
+    version: u64,
+    length: u32,
+) -> Option<logos_abi::StoreReply> {
+    Some(logos_abi::StoreReply {
+        id,
+        status: logos_abi::PersistenceStatus::from_wire(u8::try_from(status).ok()?)?,
+        version,
+        length,
+    })
+}
+
+impl StoreClientPage {
+    pub const fn new(service_generation: u32, endpoint_generation: u32) -> Self {
+        Self {
+            service_generation,
+            endpoint_generation,
+            state: PersistencePageState::Ready.wire(),
+            request_id: 0,
+            operation: 0,
+            namespace: 0,
+            name_length: 0,
+            name: [0; logos_abi::MAX_OBJECT_NAME],
+            version: 0,
+            offset: 0,
+            length: 0,
+            page: 0,
+            deadline: 0,
+            transfer_page: 0,
+            reply_status: 0,
+            reply_version: 0,
+            reply_length: 0,
+        }
+    }
+
+    pub unsafe fn reset_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        if !valid_page_identity::<Self>(address, service_generation, endpoint_generation) {
+            return false;
+        }
+        let old = unsafe { (address as *const Self).read_volatile() };
+        let mut page = Self::new(service_generation, endpoint_generation);
+        page.transfer_page = old.transfer_page;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn configure_transfer_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        handle: logos_abi::PageHandle,
+    ) -> bool {
+        if handle.0 == 0 {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || PersistencePageState::from_wire(page.state) != Some(PersistencePageState::Ready)
+        {
+            return false;
+        }
+        page.transfer_page = handle.0;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn transfer_page_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<logos_abi::PageHandle> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        (client_identity(&page, service_generation, endpoint_generation) && page.transfer_page != 0)
+            .then_some(logos_abi::PageHandle(page.transfer_page))
+    }
+
+    pub unsafe fn request_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        request: logos_abi::StoreRequest,
+    ) -> bool {
+        if request.id == 0 || !request.valid() {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || PersistencePageState::from_wire(page.state) != Some(PersistencePageState::Ready)
+        {
+            return false;
+        }
+        page.request_id = request.id;
+        page.operation = request.operation as u32;
+        page.namespace = request.namespace.0;
+        page.name_length = u32::from(request.name_length);
+        page.name = request.name;
+        page.version = request.version as u32;
+        page.offset = request.offset;
+        page.length = request.length;
+        page.page = request.page.0;
+        page.deadline = request.deadline;
+        page.reply_status = 0;
+        page.reply_version = 0;
+        page.reply_length = 0;
+        page.state = PersistencePageState::Request.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn current_request_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<logos_abi::StoreRequest> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        let state = PersistencePageState::from_wire(page.state)?;
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || !matches!(state, PersistencePageState::Request | PersistencePageState::Waiting)
+        {
+            return None;
+        }
+        let request = store_request_from_fields(
+            page.request_id,
+            page.operation,
+            page.namespace,
+            page.name_length,
+            page.name,
+            page.version,
+            page.offset,
+            page.length,
+            page.page,
+            page.deadline,
+        )?;
+        if state == PersistencePageState::Request {
+            page.state = PersistencePageState::Waiting.wire();
+            unsafe { (address as *mut Self).write_volatile(page) };
+        }
+        Some(request)
+    }
+
+    pub unsafe fn pending_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        client_identity(&page, service_generation, endpoint_generation)
+            && PersistencePageState::from_wire(page.state) == Some(PersistencePageState::Request)
+    }
+
+    pub unsafe fn reply_pending_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        client_identity(&page, service_generation, endpoint_generation)
+            && matches!(
+                PersistencePageState::from_wire(page.state),
+                Some(
+                    PersistencePageState::Reply
+                        | PersistencePageState::Denied
+                        | PersistencePageState::Failed
+                        | PersistencePageState::Cancelled
+                        | PersistencePageState::TimedOut
+                )
+            )
+    }
+
+    pub unsafe fn reply_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        reply: logos_abi::StoreReply,
+    ) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        let Some(request) =
+            (unsafe { Self::current_request_at(address, service_generation, endpoint_generation) })
+        else {
+            return false;
+        };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || !reply.valid_for(request)
+        {
+            return false;
+        }
+        page.reply_status = reply.status as u32;
+        page.reply_version = reply.version;
+        page.reply_length = reply.length;
+        page.state = persistence_state(reply.status).wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn finish_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        id: u32,
+    ) -> Option<logos_abi::StoreReply> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        let state = PersistencePageState::from_wire(page.state)?;
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || page.request_id != id
+            || !matches!(
+                state,
+                PersistencePageState::Reply
+                    | PersistencePageState::Denied
+                    | PersistencePageState::Failed
+                    | PersistencePageState::Cancelled
+                    | PersistencePageState::TimedOut
+            )
+        {
+            return None;
+        }
+        let reply = store_reply_from_fields(
+            page.request_id,
+            page.reply_status,
+            page.reply_version,
+            page.reply_length,
+        )?;
+        unsafe { Self::reset_at(address, service_generation, endpoint_generation) };
+        Some(reply)
+    }
+
+    pub unsafe fn cancel_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        id: u32,
+    ) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || page.request_id != id
+            || !matches!(
+                PersistencePageState::from_wire(page.state),
+                Some(PersistencePageState::Request | PersistencePageState::Waiting)
+            )
+        {
+            return false;
+        }
+        page.reply_status = logos_abi::PersistenceStatus::Cancelled as u32;
+        page.reply_version = 0;
+        page.reply_length = 0;
+        page.state = PersistencePageState::Cancelled.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+}
+
+impl StoreServerPage {
+    pub const fn new(service_generation: u32, endpoint_generation: u32) -> Self {
+        Self {
+            service_generation,
+            endpoint_generation,
+            state: PersistencePageState::Ready.wire(),
+            request_id: 0,
+            caller_low: 0,
+            caller_high: 0,
+            operation: 0,
+            namespace: 0,
+            name_length: 0,
+            name: [0; logos_abi::MAX_OBJECT_NAME],
+            version: 0,
+            offset: 0,
+            length: 0,
+            page: 0,
+            deadline: 0,
+            transfer_page: 0,
+            reply_status: 0,
+            reply_version: 0,
+            reply_length: 0,
+            service_status: STORAGE_UNAVAILABLE,
+        }
+    }
+
+    pub unsafe fn reset_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        if !valid_page_identity::<Self>(address, service_generation, endpoint_generation) {
+            return false;
+        }
+        let old = unsafe { (address as *const Self).read_volatile() };
+        let mut page = Self::new(service_generation, endpoint_generation);
+        page.transfer_page = old.transfer_page;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn configure_transfer_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        handle: logos_abi::PageHandle,
+    ) -> bool {
+        if handle.0 == 0 {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || PersistencePageState::from_wire(page.state) != Some(PersistencePageState::Ready)
+        {
+            return false;
+        }
+        page.transfer_page = handle.0;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn transfer_page_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<logos_abi::PageHandle> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        (server_identity(&page, service_generation, endpoint_generation) && page.transfer_page != 0)
+            .then_some(logos_abi::PageHandle(page.transfer_page))
+    }
+
+    pub unsafe fn wait_at(address: u64, service_generation: u32, endpoint_generation: u32) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || PersistencePageState::from_wire(page.state) != Some(PersistencePageState::Ready)
+        {
+            return false;
+        }
+        page.state = PersistencePageState::Waiting.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn waiting_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        server_identity(&page, service_generation, endpoint_generation)
+            && PersistencePageState::from_wire(page.state) == Some(PersistencePageState::Waiting)
+    }
+
+    pub unsafe fn deliver_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        caller: u64,
+        request: logos_abi::StoreRequest,
+    ) -> bool {
+        if request.id == 0 || !request.valid() {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || PersistencePageState::from_wire(page.state) != Some(PersistencePageState::Waiting)
+        {
+            return false;
+        }
+        page.request_id = request.id;
+        page.caller_low = caller as u32;
+        page.caller_high = (caller >> 32) as u32;
+        page.operation = request.operation as u32;
+        page.namespace = request.namespace.0;
+        page.name_length = u32::from(request.name_length);
+        page.name = request.name;
+        page.version = request.version as u32;
+        page.offset = request.offset;
+        page.length = request.length;
+        page.page = request.page.0;
+        page.deadline = request.deadline;
+        page.reply_status = 0;
+        page.reply_version = 0;
+        page.reply_length = 0;
+        page.state = PersistencePageState::Request.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn take_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<StoreServerRequest> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || PersistencePageState::from_wire(page.state) != Some(PersistencePageState::Request)
+        {
+            return None;
+        }
+        let request = store_request_from_fields(
+            page.request_id,
+            page.operation,
+            page.namespace,
+            page.name_length,
+            page.name,
+            page.version,
+            page.offset,
+            page.length,
+            page.page,
+            page.deadline,
+        )?;
+        page.state = PersistencePageState::Processing.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(StoreServerRequest {
+            id: page.request_id,
+            caller: u64::from(page.caller_low) | (u64::from(page.caller_high) << 32),
+            request,
+        })
+    }
+
+    pub unsafe fn reply_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        reply: logos_abi::StoreReply,
+    ) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        let Some(request) = store_request_from_fields(
+            page.request_id,
+            page.operation,
+            page.namespace,
+            page.name_length,
+            page.name,
+            page.version,
+            page.offset,
+            page.length,
+            page.page,
+            page.deadline,
+        ) else {
+            return false;
+        };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || PersistencePageState::from_wire(page.state) != Some(PersistencePageState::Processing)
+            || !reply.valid_for(request)
+        {
+            return false;
+        }
+        page.reply_status = reply.status as u32;
+        page.reply_version = reply.version;
+        page.reply_length = reply.length;
+        page.state = persistence_state(reply.status).wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn take_reply_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        expected_id: u32,
+    ) -> Option<logos_abi::StoreReply> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || page.request_id != expected_id
+            || !matches!(
+                PersistencePageState::from_wire(page.state),
+                Some(
+                    PersistencePageState::Reply
+                        | PersistencePageState::Denied
+                        | PersistencePageState::Failed
+                        | PersistencePageState::Cancelled
+                        | PersistencePageState::TimedOut
+                )
+            )
+        {
+            return None;
+        }
+        let reply = store_reply_from_fields(
+            page.request_id,
+            page.reply_status,
+            page.reply_version,
+            page.reply_length,
+        )?;
+        unsafe { Self::reset_at(address, service_generation, endpoint_generation) };
+        Some(reply)
+    }
+
+    pub unsafe fn set_status_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        status: u32,
+    ) -> bool {
+        if !(STORAGE_FORMATTED..=STORAGE_UNAVAILABLE).contains(&status) {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !server_identity(&page, service_generation, endpoint_generation) {
+            return false;
+        }
+        page.service_status = status;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn status_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<u32> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        (server_identity(&page, service_generation, endpoint_generation)
+            && (STORAGE_FORMATTED..=STORAGE_UNAVAILABLE).contains(&page.service_status))
+        .then_some(page.service_status)
+    }
+}
+
+impl BlockClientPage {
+    pub const fn new(service_generation: u32, endpoint_generation: u32) -> Self {
+        Self {
+            service_generation,
+            endpoint_generation,
+            state: PersistencePageState::Ready.wire(),
+            request_id: 0,
+            operation: 0,
+            lba: 0,
+            blocks: 0,
+            page: 0,
+            deadline: 0,
+            transfer_page: 0,
+            reply_status: 0,
+            logical_block_size: 0,
+            block_count: 0,
+            max_transfer_blocks: 0,
+        }
+    }
+
+    pub unsafe fn reset_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        if !valid_page_identity::<Self>(address, service_generation, endpoint_generation) {
+            return false;
+        }
+        let old = unsafe { (address as *const Self).read_volatile() };
+        let mut page = Self::new(service_generation, endpoint_generation);
+        page.transfer_page = old.transfer_page;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn configure_transfer_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        handle: logos_abi::PageHandle,
+    ) -> bool {
+        if handle.0 == 0 {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || PersistencePageState::from_wire(page.state) != Some(PersistencePageState::Ready)
+        {
+            return false;
+        }
+        page.transfer_page = handle.0;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn transfer_page_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<logos_abi::PageHandle> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        (client_identity(&page, service_generation, endpoint_generation) && page.transfer_page != 0)
+            .then_some(logos_abi::PageHandle(page.transfer_page))
+    }
+
+    pub unsafe fn request_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        request: logos_abi::BlockRequest,
+    ) -> bool {
+        if request.id == 0 || !request.valid_shape() {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || PersistencePageState::from_wire(page.state) != Some(PersistencePageState::Ready)
+        {
+            return false;
+        }
+        page.request_id = request.id;
+        page.operation = request.operation as u32;
+        page.lba = request.lba;
+        page.blocks = request.blocks;
+        page.page = request.page.0;
+        page.deadline = request.deadline;
+        page.reply_status = 0;
+        page.logical_block_size = 0;
+        page.block_count = 0;
+        page.max_transfer_blocks = 0;
+        page.state = PersistencePageState::Request.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn take_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<logos_abi::BlockRequest> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || PersistencePageState::from_wire(page.state) != Some(PersistencePageState::Request)
+        {
+            return None;
+        }
+        let request = block_request_from_fields(
+            page.request_id,
+            page.operation,
+            page.lba,
+            page.blocks,
+            page.page,
+            page.deadline,
+        )?;
+        page.state = PersistencePageState::Submitted.wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(request)
+    }
+
+    pub unsafe fn request_at_current(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<logos_abi::BlockRequest> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || PersistencePageState::from_wire(page.state) != Some(PersistencePageState::Submitted)
+        {
+            return None;
+        }
+        block_request_from_fields(
+            page.request_id,
+            page.operation,
+            page.lba,
+            page.blocks,
+            page.page,
+            page.deadline,
+        )
+    }
+
+    pub unsafe fn pending_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        client_identity(&page, service_generation, endpoint_generation)
+            && PersistencePageState::from_wire(page.state) == Some(PersistencePageState::Request)
+    }
+
+    pub unsafe fn reply_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        reply: logos_abi::BlockReply,
+    ) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        let Some(request) =
+            (unsafe { Self::request_at_current(address, service_generation, endpoint_generation) })
+        else {
+            return false;
+        };
+        if !reply.valid_for(request) {
+            return false;
+        }
+        page.reply_status = reply.status as u32;
+        page.logical_block_size = reply.info.logical_block_size;
+        page.block_count = reply.info.blocks;
+        page.max_transfer_blocks = reply.info.max_transfer_blocks;
+        page.state = persistence_state(reply.status).wire();
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn finish_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        id: u32,
+    ) -> Option<logos_abi::BlockReply> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || page.request_id != id
+            || !matches!(
+                PersistencePageState::from_wire(page.state),
+                Some(
+                    PersistencePageState::Reply
+                        | PersistencePageState::Denied
+                        | PersistencePageState::Failed
+                        | PersistencePageState::Cancelled
+                        | PersistencePageState::TimedOut
+                )
+            )
+        {
+            return None;
+        }
+        let reply = logos_abi::BlockReply {
+            id: page.request_id,
+            status: logos_abi::PersistenceStatus::from_wire(u8::try_from(page.reply_status).ok()?)?,
+            info: logos_abi::BlockInfo {
+                logical_block_size: page.logical_block_size,
+                blocks: page.block_count,
+                max_transfer_blocks: page.max_transfer_blocks,
+            },
+        };
+        unsafe { Self::reset_at(address, service_generation, endpoint_generation) };
+        Some(reply)
+    }
+}
+
+fn block_request_from_fields(
+    id: u32,
+    operation: u32,
+    lba: u64,
+    blocks: u32,
+    page: u32,
+    deadline: u64,
+) -> Option<logos_abi::BlockRequest> {
+    let request = logos_abi::BlockRequest {
+        id,
+        operation: logos_abi::BlockOperation::from_wire(u8::try_from(operation).ok()?)?,
+        lba,
+        blocks,
+        page: logos_abi::PageHandle(page),
+        deadline,
+    };
+    request.valid_shape().then_some(request)
 }
 
 #[derive(Clone, Copy)]
@@ -1204,20 +2080,77 @@ fn valid_page_identity<T>(address: u64, service_generation: u32, endpoint_genera
         && address.is_multiple_of(align_of::<T>() as u64)
 }
 
-fn client_identity(
-    page: &SessionClientPage,
-    service_generation: u32,
-    endpoint_generation: u32,
-) -> bool {
-    page.service_generation == service_generation && page.endpoint_generation == endpoint_generation
+trait GenerationPage {
+    fn service_generation(&self) -> u32;
+    fn endpoint_generation(&self) -> u32;
 }
 
-fn server_identity(
-    page: &SessionServerPage,
+impl GenerationPage for SessionClientPage {
+    fn service_generation(&self) -> u32 {
+        self.service_generation
+    }
+
+    fn endpoint_generation(&self) -> u32 {
+        self.endpoint_generation
+    }
+}
+
+impl GenerationPage for StoreClientPage {
+    fn service_generation(&self) -> u32 {
+        self.service_generation
+    }
+
+    fn endpoint_generation(&self) -> u32 {
+        self.endpoint_generation
+    }
+}
+
+impl GenerationPage for BlockClientPage {
+    fn service_generation(&self) -> u32 {
+        self.service_generation
+    }
+
+    fn endpoint_generation(&self) -> u32 {
+        self.endpoint_generation
+    }
+}
+
+impl GenerationPage for SessionServerPage {
+    fn service_generation(&self) -> u32 {
+        self.service_generation
+    }
+
+    fn endpoint_generation(&self) -> u32 {
+        self.endpoint_generation
+    }
+}
+
+impl GenerationPage for StoreServerPage {
+    fn service_generation(&self) -> u32 {
+        self.service_generation
+    }
+
+    fn endpoint_generation(&self) -> u32 {
+        self.endpoint_generation
+    }
+}
+
+fn client_identity<T: GenerationPage>(
+    page: &T,
     service_generation: u32,
     endpoint_generation: u32,
 ) -> bool {
-    page.service_generation == service_generation && page.endpoint_generation == endpoint_generation
+    page.service_generation() == service_generation
+        && page.endpoint_generation() == endpoint_generation
+}
+
+fn server_identity<T: GenerationPage>(
+    page: &T,
+    service_generation: u32,
+    endpoint_generation: u32,
+) -> bool {
+    page.service_generation() == service_generation
+        && page.endpoint_generation() == endpoint_generation
 }
 
 fn effect_identity(page: &EffectPage, service_generation: u32, endpoint_generation: u32) -> bool {
@@ -1266,8 +2199,9 @@ const _: () = assert!(size_of::<DisplayPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<SessionClientPage>() <= logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<SessionServerPage>() <= logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<EffectPage>() <= logos_abi::PAGE_SIZE);
-const _: () = assert!(size_of::<StoreEndpointPage>() == logos_abi::PAGE_SIZE);
-const _: () = assert!(size_of::<BlockEndpointPage>() == logos_abi::PAGE_SIZE);
+const _: () = assert!(size_of::<StoreClientPage>() <= logos_abi::PAGE_SIZE);
+const _: () = assert!(size_of::<StoreServerPage>() <= logos_abi::PAGE_SIZE);
+const _: () = assert!(size_of::<BlockClientPage>() <= logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<NetworkPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<RemotePage>() == logos_abi::PAGE_SIZE);
 
@@ -1345,12 +2279,6 @@ pub struct RemoteGateReply {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BlockPage {
-    pub handle: logos_abi::PageHandle,
-    pub address: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NetworkPages {
     pub rx_handle: logos_abi::PageHandle,
     pub rx_address: u64,
@@ -1358,10 +2286,6 @@ pub struct NetworkPages {
     pub tx_address: u64,
 }
 
-const BLOCK_REQUEST_BYTES: usize = 32;
-const STORE_REQUEST_BYTES: usize = 102;
-const BLOCK_REPLY_BYTES: usize = 21;
-const STORE_REPLY_BYTES: usize = 17;
 const NETWORK_REQUEST_BYTES: usize = 34;
 const NETWORK_REPLY_BYTES: usize = 148;
 const NETWORK_DEVICE_REQUEST_BYTES: usize = 18;
@@ -1428,96 +2352,6 @@ fn encode_remote_gate_reply(bytes: &mut [u8; MAX_TEXT], reply: RemoteGateReply) 
     write_u32(bytes, 4, reply.status as u32);
     write_u16(bytes, 8, reply.length);
     write_u64(bytes, 12, reply.cursor);
-}
-
-fn decode_block_request(bytes: &[u8]) -> Option<logos_abi::BlockRequest> {
-    Some(logos_abi::BlockRequest {
-        id: read_u32(bytes, 0)?,
-        operation: logos_abi::BlockOperation::from_wire(*bytes.get(4)?)?,
-        lba: read_u64(bytes, 8)?,
-        blocks: read_u32(bytes, 16)?,
-        page: logos_abi::PageHandle(read_u32(bytes, 20)?),
-        deadline: read_u64(bytes, 24)?,
-    })
-}
-
-fn encode_block_request(bytes: &mut [u8; MAX_TEXT], request: logos_abi::BlockRequest) {
-    *bytes = [0; MAX_TEXT];
-    write_u32(bytes, 0, request.id);
-    bytes[4] = request.operation as u8;
-    write_u64(bytes, 8, request.lba);
-    write_u32(bytes, 16, request.blocks);
-    write_u32(bytes, 20, request.page.0);
-    write_u64(bytes, 24, request.deadline);
-}
-
-fn decode_store_request(bytes: &[u8]) -> Option<logos_abi::StoreRequest> {
-    let mut name = [0; logos_abi::MAX_OBJECT_NAME];
-    name.copy_from_slice(bytes.get(14..14 + logos_abi::MAX_OBJECT_NAME)?);
-    Some(logos_abi::StoreRequest {
-        id: read_u32(bytes, 0)?,
-        operation: logos_abi::StoreOperation::from_wire(*bytes.get(4)?)?,
-        namespace: logos_abi::NamespaceId(read_u32(bytes, 8)?),
-        name,
-        name_length: *bytes.get(12)?,
-        version: logos_abi::VersionSelector::from_wire(*bytes.get(13)?)?,
-        offset: read_u64(bytes, 78)?,
-        length: read_u32(bytes, 86)?,
-        page: logos_abi::PageHandle(read_u32(bytes, 90)?),
-        deadline: read_u64(bytes, 94)?,
-    })
-}
-
-fn encode_store_request(bytes: &mut [u8; MAX_TEXT], request: logos_abi::StoreRequest) {
-    *bytes = [0; MAX_TEXT];
-    write_u32(bytes, 0, request.id);
-    bytes[4] = request.operation as u8;
-    write_u32(bytes, 8, request.namespace.0);
-    bytes[12] = request.name_length;
-    bytes[13] = request.version as u8;
-    bytes[14..14 + logos_abi::MAX_OBJECT_NAME].copy_from_slice(&request.name);
-    write_u64(bytes, 78, request.offset);
-    write_u32(bytes, 86, request.length);
-    write_u32(bytes, 90, request.page.0);
-    write_u64(bytes, 94, request.deadline);
-}
-
-fn decode_block_reply(bytes: &[u8]) -> Option<logos_abi::BlockReply> {
-    Some(logos_abi::BlockReply {
-        id: read_u32(bytes, 0)?,
-        status: logos_abi::PersistenceStatus::from_wire(*bytes.get(4)?)?,
-        info: logos_abi::BlockInfo {
-            logical_block_size: read_u32(bytes, 5)?,
-            blocks: read_u64(bytes, 9)?,
-            max_transfer_blocks: read_u32(bytes, 17)?,
-        },
-    })
-}
-
-fn encode_block_reply(bytes: &mut [u8; MAX_TEXT], reply: logos_abi::BlockReply) {
-    *bytes = [0; MAX_TEXT];
-    write_u32(bytes, 0, reply.id);
-    bytes[4] = reply.status as u8;
-    write_u32(bytes, 5, reply.info.logical_block_size);
-    write_u64(bytes, 9, reply.info.blocks);
-    write_u32(bytes, 17, reply.info.max_transfer_blocks);
-}
-
-fn decode_store_reply(bytes: &[u8]) -> Option<logos_abi::StoreReply> {
-    Some(logos_abi::StoreReply {
-        id: read_u32(bytes, 0)?,
-        status: logos_abi::PersistenceStatus::from_wire(*bytes.get(4)?)?,
-        version: read_u64(bytes, 5)?,
-        length: read_u32(bytes, 13)?,
-    })
-}
-
-fn encode_store_reply(bytes: &mut [u8; MAX_TEXT], reply: logos_abi::StoreReply) {
-    *bytes = [0; MAX_TEXT];
-    write_u32(bytes, 0, reply.id);
-    bytes[4] = reply.status as u8;
-    write_u64(bytes, 5, reply.version);
-    write_u32(bytes, 13, reply.length);
 }
 
 fn decode_network_request(bytes: &[u8]) -> Option<logos_abi::NetworkRequest> {
@@ -1734,12 +2568,13 @@ impl ControlPage {
             session_client_page: 0,
             session_server_page: 0,
             effect_page: 0,
+            store_client_page: 0,
+            store_server_page: 0,
+            block_client_page: 0,
             slot0: 0,
             slot1: 0,
-            slot2: 0,
             payload_length: 0,
             payload: [0; MAX_TEXT],
-            shared_page: 0,
             network_rx_page: 0,
             network_tx_page: 0,
         }
@@ -1769,7 +2604,9 @@ impl ControlPage {
         reset.session_client_page = current.session_client_page;
         reset.session_server_page = current.session_server_page;
         reset.effect_page = current.effect_page;
-        reset.shared_page = current.shared_page;
+        reset.store_client_page = current.store_client_page;
+        reset.store_server_page = current.store_server_page;
+        reset.block_client_page = current.block_client_page;
         reset.network_rx_page = current.network_rx_page;
         reset.network_tx_page = current.network_tx_page;
         unsafe { (address as *mut Self).write_volatile(reset) };
@@ -1786,6 +2623,9 @@ impl ControlPage {
         session_client_page: Option<u64>,
         session_server_page: Option<u64>,
         effect_page: Option<u64>,
+        store_client_page: Option<u64>,
+        store_server_page: Option<u64>,
+        block_client_page: Option<u64>,
     ) -> bool {
         if generation == 0 {
             return false;
@@ -1801,6 +2641,9 @@ impl ControlPage {
         context.session_client_page = session_client_page.unwrap_or(0);
         context.session_server_page = session_server_page.unwrap_or(0);
         context.effect_page = effect_page.unwrap_or(0);
+        context.store_client_page = store_client_page.unwrap_or(0);
+        context.store_server_page = store_server_page.unwrap_or(0);
+        context.block_client_page = block_client_page.unwrap_or(0);
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -1819,9 +2662,24 @@ impl ControlPage {
         context.lifecycle = LIFECYCLE_STARTING;
         context.operation = 0;
         context.status = 0;
-        // slot0..2 may hold a configured block page; keep endpoint configuration across reset.
+        // Keep typed endpoint addresses and network page configuration across reset.
         context.payload_length = 0;
         context.payload = [0; MAX_TEXT];
+        unsafe { (address as *mut Self).write_volatile(context) };
+        true
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
+    pub unsafe fn notify_at(address: u64, operation: u32) -> bool {
+        if !matches!(operation, STORE_REQUEST | STORE_REPLY | BLOCK_REQUEST | BLOCK_REPLY) {
+            return false;
+        }
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI || context.reserved != 0 || context.status != ACKNOWLEDGED {
+            return false;
+        }
+        context.operation = operation;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -2006,14 +2864,70 @@ impl ControlPage {
         (reply.id == expected_id).then_some(reply)
     }
 
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn storage_status_at(address: u64) -> Option<u32> {
+    pub unsafe fn store_client_page_at(address: u64) -> Option<u64> {
         let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI
+        (context.abi == ABI && context.reserved == 0 && context.store_client_page != 0)
+            .then_some(context.store_client_page)
+    }
+
+    pub unsafe fn store_server_page_at(address: u64) -> Option<u64> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.store_server_page != 0)
+            .then_some(context.store_server_page)
+    }
+
+    pub unsafe fn block_client_page_at(address: u64) -> Option<u64> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.block_client_page != 0)
+            .then_some(context.block_client_page)
+    }
+
+    pub unsafe fn store_client_pending_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
             && context.reserved == 0
-            && (STORAGE_FORMATTED..=STORAGE_IO_FAILED).contains(&context.slot0))
-        .then_some(context.slot0)
+            && context.operation == STORE_REQUEST
+            && context.status == ACKNOWLEDGED
+            && context.store_client_page != 0
+            && unsafe {
+                StoreClientPage::pending_at(
+                    context.store_client_page,
+                    context.generation,
+                    context.generation,
+                )
+            }
+    }
+
+    pub unsafe fn block_client_pending_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == BLOCK_REQUEST
+            && context.status == ACKNOWLEDGED
+            && context.block_client_page != 0
+            && unsafe {
+                BlockClientPage::pending_at(
+                    context.block_client_page,
+                    context.generation,
+                    context.generation,
+                )
+            }
+    }
+
+    pub unsafe fn store_client_reply_pending_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == STORE_REPLY
+            && context.status == ACKNOWLEDGED
+            && context.store_client_page != 0
+            && unsafe {
+                StoreClientPage::reply_pending_at(
+                    context.store_client_page,
+                    context.generation,
+                    context.generation,
+                )
+            }
     }
 
     /// # Safety
@@ -2082,111 +2996,6 @@ impl ControlPage {
             && unsafe {
                 EffectPage::pending_at(context.effect_page, context.generation, context.generation)
             }
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn store_at(address: u64) -> Option<logos_abi::StoreRequest> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != STORE_REQUEST
-            || context.status != ACKNOWLEDGED
-            || context.payload_length != STORE_REQUEST_BYTES as u32
-        {
-            return None;
-        }
-        let request = decode_store_request(&context.payload)?;
-        request.valid().then_some(request)
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by the caller.
-    pub unsafe fn request_store_at(address: u64, request: logos_abi::StoreRequest) -> bool {
-        if !request.valid() {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.status != ACKNOWLEDGED
-            || !matches!(context.operation, READY | READ_INPUT | STORE_REPLY)
-        {
-            return false;
-        }
-        encode_store_request(&mut context.payload, request);
-        context.payload_length = STORE_REQUEST_BYTES as u32;
-        context.operation = STORE_REQUEST;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn deliver_store_at(address: u64, request: logos_abi::StoreRequest) -> bool {
-        if !request.valid() {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != READ_INPUT
-            || context.status != ACKNOWLEDGED
-        {
-            return false;
-        }
-        context.payload = [0; MAX_TEXT];
-        encode_store_request(&mut context.payload, request);
-        context.payload_length = STORE_REQUEST_BYTES as u32;
-        context.operation = STORE_REQUEST;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn reply_store_at(address: u64, reply: logos_abi::StoreReply) -> bool {
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        let valid = match context.operation {
-            STORE_REQUEST => decode_store_request(&context.payload)
-                .is_some_and(|request| reply.valid_for(request)),
-            BLOCK_REPLY => {
-                reply.length as usize <= logos_abi::PAGE_SIZE && context.slot2 == reply.id
-            }
-            _ => false,
-        };
-        if !valid {
-            return false;
-        }
-        context.operation = STORE_REPLY;
-        context.slot2 = 0;
-        encode_store_reply(&mut context.payload, reply);
-        context.payload_length = STORE_REPLY_BYTES as u32;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn store_reply_at(address: u64, expected_id: u32) -> Option<logos_abi::StoreReply> {
-        let reply = unsafe { Self::store_reply_pending_at(address) }?;
-        (reply.id == expected_id).then_some(reply)
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn store_reply_pending_at(address: u64) -> Option<logos_abi::StoreReply> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != STORE_REPLY
-            || context.status != ACKNOWLEDGED
-            || context.payload_length != STORE_REPLY_BYTES as u32
-        {
-            return None;
-        }
-        decode_store_reply(&context.payload)
-            .filter(|reply| reply.length as usize <= logos_abi::PAGE_SIZE)
     }
 
     /// # Safety
@@ -2574,80 +3383,6 @@ impl ControlPage {
     }
 
     /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn block_at(address: u64) -> Option<logos_abi::BlockRequest> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != BLOCK_REQUEST
-            || context.status != ACKNOWLEDGED
-            || context.payload_length != BLOCK_REQUEST_BYTES as u32
-        {
-            return None;
-        }
-        let request = decode_block_request(&context.payload)?;
-        request.valid_shape().then_some(request)
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping before service startup.
-    pub unsafe fn configure_block_page_at(address: u64, page: BlockPage) -> bool {
-        if page.handle.0 == 0
-            || page.address == 0
-            || !page.address.is_multiple_of(logos_abi::PAGE_SIZE as u64)
-        {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != 0
-            || context.status != 0
-        {
-            return false;
-        }
-        context.slot0 = page.handle.0;
-        context.slot1 = page.address as u32;
-        context.slot2 = (page.address >> 32) as u32;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping before service startup.
-    pub unsafe fn configure_shared_page_at(address: u64, page: logos_abi::PageHandle) -> bool {
-        if page.0 == 0 {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != 0
-            || context.status != 0
-        {
-            return false;
-        }
-        context.shared_page = page.0;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
-    pub unsafe fn remap_shared_page_at(address: u64, page: logos_abi::PageHandle) -> bool {
-        if page.0 == 0 {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI || context.reserved != 0 || context.shared_page == 0 {
-            return false;
-        }
-        context.shared_page = page.0;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping before service startup.
     pub unsafe fn configure_network_pages_at(
         address: u64,
@@ -2673,14 +3408,6 @@ impl ControlPage {
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn shared_page_at(address: u64) -> Option<logos_abi::PageHandle> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI && context.reserved == 0 && context.shared_page != 0)
-            .then_some(logos_abi::PageHandle(context.shared_page))
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn network_pages_at(address: u64) -> Option<NetworkPages> {
         let context = unsafe { (address as *const Self).read_volatile() };
         if context.abi != ABI
@@ -2697,91 +3424,6 @@ impl ControlPage {
             tx_handle: logos_abi::PageHandle(context.network_tx_page),
             tx_address: rx_address.checked_sub(logos_abi::PAGE_SIZE as u64)?,
         })
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn block_page_at(address: u64) -> Option<BlockPage> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        let page = BlockPage {
-            handle: logos_abi::PageHandle(context.slot0),
-            address: u64::from(context.slot1) | (u64::from(context.slot2) << 32),
-        };
-        (context.abi == ABI
-            && context.reserved == 0
-            && page.handle.0 != 0
-            && page.address != 0
-            && page.address.is_multiple_of(logos_abi::PAGE_SIZE as u64))
-        .then_some(page)
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by the caller.
-    pub unsafe fn request_block_at(address: u64, request: logos_abi::BlockRequest) -> bool {
-        if !request.valid_shape() {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.status != ACKNOWLEDGED
-            || !matches!(context.operation, READY | READ_INPUT | STORE_REQUEST | BLOCK_REPLY)
-        {
-            return false;
-        }
-        let parent_store_id = if context.operation == STORE_REQUEST {
-            let Some(parent) = decode_store_request(&context.payload) else {
-                return false;
-            };
-            Some(parent.id)
-        } else {
-            None
-        };
-        if let Some(id) = parent_store_id {
-            // `color` is free while a Block request is active and preserves the
-            // Store request ID across the nested Block round trip.
-            context.slot2 = id;
-        } else if context.operation != BLOCK_REPLY {
-            context.slot2 = 0;
-        }
-        encode_block_request(&mut context.payload, request);
-        context.payload_length = BLOCK_REQUEST_BYTES as u32;
-        context.operation = BLOCK_REQUEST;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn reply_block_at(address: u64, reply: logos_abi::BlockReply) -> bool {
-        let Some(request) = (unsafe { Self::block_at(address) }) else {
-            return false;
-        };
-        if !reply.valid_for(request) {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        context.operation = BLOCK_REPLY;
-        encode_block_reply(&mut context.payload, reply);
-        context.payload_length = BLOCK_REPLY_BYTES as u32;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn block_reply_at(address: u64, expected_id: u32) -> Option<logos_abi::BlockReply> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != BLOCK_REPLY
-            || context.status != ACKNOWLEDGED
-            || context.payload_length != BLOCK_REPLY_BYTES as u32
-        {
-            return None;
-        }
-        let reply = decode_block_reply(&context.payload)?;
-        (reply.id == expected_id).then_some(reply)
     }
 
     /// # Safety
@@ -2897,11 +3539,8 @@ mod tests {
     }
 
     #[test]
-    fn persistence_replies_round_trip_and_match_ids() {
-        let mut context = ControlPage::new();
-        context.operation = READ_INPUT;
-        context.status = ACKNOWLEDGED;
-        let store = logos_abi::StoreRequest {
+    fn typed_store_pages_round_trip_and_reject_stale_state() {
+        let request = logos_abi::StoreRequest {
             id: 7,
             operation: logos_abi::StoreOperation::Commit,
             namespace: logos_abi::NamespaceId(0),
@@ -2913,92 +3552,72 @@ mod tests {
             page: logos_abi::PageHandle(0),
             deadline: 0,
         };
-        let address = (&mut context as *mut ControlPage) as u64;
-        assert!(unsafe { ControlPage::request_store_at(address, store) });
-        assert!(unsafe {
-            ControlPage::store_at(address).is_some_and(|request| {
-                request.id == store.id && request.operation == store.operation
-            })
-        });
-        let block = logos_abi::BlockRequest {
-            id: 9,
-            operation: logos_abi::BlockOperation::Flush,
-            lba: 0,
-            blocks: 0,
-            page: logos_abi::PageHandle(0),
-            deadline: 0,
-        };
-        assert!(unsafe { ControlPage::request_block_at(address, block) });
-        assert_eq!(unsafe { ControlPage::block_at(address) }, Some(block));
-        let block_reply = logos_abi::BlockReply {
-            id: 9,
-            status: logos_abi::PersistenceStatus::Complete,
-            info: logos_abi::BlockInfo::default(),
-        };
-        assert!(unsafe { ControlPage::reply_block_at(address, block_reply) });
-        assert!(unsafe { ControlPage::block_reply_at(address, 9) }.is_some());
-        assert!(unsafe {
-            !ControlPage::reply_store_at(
-                address,
-                logos_abi::StoreReply {
-                    id: 8,
-                    status: logos_abi::PersistenceStatus::Complete,
-                    version: 3,
-                    length: 0,
-                },
-            )
-        });
-        let store_reply = logos_abi::StoreReply {
+        let mut client = StoreClientPage::new(2, 5);
+        let client_address = (&mut client as *mut StoreClientPage) as u64;
+        assert!(unsafe { StoreClientPage::request_at(client_address, 2, 5, request) });
+        assert!(unsafe { StoreClientPage::current_request_at(client_address, 1, 5) }.is_none());
+        assert_eq!(
+            unsafe { StoreClientPage::current_request_at(client_address, 2, 5) }
+                .map(|request| (request.id, request.operation)),
+            Some((request.id, request.operation))
+        );
+        let reply = logos_abi::StoreReply {
             id: 7,
             status: logos_abi::PersistenceStatus::Complete,
             version: 3,
             length: 0,
         };
-        assert!(unsafe { ControlPage::reply_store_at(address, store_reply) });
-        assert!(unsafe { ControlPage::store_reply_at(address, 8) }.is_none());
-        assert_eq!(unsafe { ControlPage::store_reply_at(address, 7) }, Some(store_reply));
-
-        context.operation = 0;
-        context.status = 0;
-        unsafe { (address as *mut ControlPage).write_volatile(context) };
-        assert!(unsafe {
-            ControlPage::configure_shared_page_at(address, logos_abi::PageHandle(0x10001))
-        });
-        assert_eq!(
-            unsafe { ControlPage::shared_page_at(address) },
-            Some(logos_abi::PageHandle(0x10001))
-        );
-        context.operation = READY;
-        context.status = ACKNOWLEDGED;
-        unsafe { (address as *mut ControlPage).write_volatile(context) };
-        assert!(unsafe { ControlPage::request_store_at(address, store) });
-        assert!(
-            unsafe { ControlPage::store_at(address) }.is_some_and(
-                |request| request.id == store.id && request.operation == store.operation
+        assert!(!unsafe {
+            StoreClientPage::reply_at(
+                client_address,
+                2,
+                5,
+                logos_abi::StoreReply { id: 8, ..reply },
             )
-        );
+        });
+        assert!(unsafe { StoreClientPage::reply_at(client_address, 2, 5, reply) });
+        assert!(unsafe { StoreClientPage::finish_at(client_address, 2, 4, 7) }.is_none());
+        assert_eq!(unsafe { StoreClientPage::finish_at(client_address, 2, 5, 7) }, Some(reply));
 
-        context.operation = READ_INPUT;
-        context.status = ACKNOWLEDGED;
-        unsafe { (address as *mut ControlPage).write_volatile(context) };
-        let block = logos_abi::BlockRequest {
+        let mut server = StoreServerPage::new(4, 9);
+        let server_address = (&mut server as *mut StoreServerPage) as u64;
+        assert!(unsafe { StoreServerPage::wait_at(server_address, 4, 9) });
+        assert!(unsafe { StoreServerPage::deliver_at(server_address, 4, 9, 0x1234, request) });
+        let delivered = unsafe { StoreServerPage::take_at(server_address, 4, 9) }.unwrap();
+        assert_eq!(delivered.caller, 0x1234);
+        assert_eq!(delivered.request.id, request.id);
+        assert_eq!(delivered.request.operation, request.operation);
+        assert!(!unsafe { StoreServerPage::reply_at(server_address, 4, 8, reply) });
+        assert!(unsafe { StoreServerPage::reply_at(server_address, 4, 9, reply) });
+        assert!(unsafe { StoreServerPage::take_reply_at(server_address, 4, 8, 7) }.is_none());
+        assert_eq!(unsafe { StoreServerPage::take_reply_at(server_address, 4, 9, 7) }, Some(reply));
+    }
+
+    #[test]
+    fn typed_block_page_round_trip_and_rejects_malformed_state() {
+        let request = logos_abi::BlockRequest {
             id: 9,
             operation: logos_abi::BlockOperation::Flush,
             lba: 0,
             blocks: 0,
             page: logos_abi::PageHandle(0),
-            deadline: 0,
+            deadline: 1,
         };
-        assert!(unsafe { ControlPage::request_block_at(address, block) });
-        assert_eq!(unsafe { ControlPage::block_at(address) }, Some(block));
-        let block_reply = logos_abi::BlockReply {
-            id: 9,
+        let mut page = BlockClientPage::new(3, 7);
+        let address = (&mut page as *mut BlockClientPage) as u64;
+        assert!(unsafe { BlockClientPage::request_at(address, 3, 7, request) });
+        assert!(unsafe { BlockClientPage::take_at(address, 2, 7) }.is_none());
+        assert_eq!(unsafe { BlockClientPage::take_at(address, 3, 7) }, Some(request));
+        let reply = logos_abi::BlockReply {
+            id: request.id,
             status: logos_abi::PersistenceStatus::Complete,
             info: logos_abi::BlockInfo::default(),
         };
-        assert!(unsafe { ControlPage::reply_block_at(address, block_reply) });
-        assert!(unsafe { ControlPage::block_reply_at(address, 10) }.is_none());
-        assert_eq!(unsafe { ControlPage::block_reply_at(address, 9) }, Some(block_reply));
+        assert!(unsafe { BlockClientPage::reply_at(address, 3, 7, reply) });
+        assert_eq!(unsafe { BlockClientPage::finish_at(address, 3, 7, request.id) }, Some(reply));
+        page.state = u32::MAX;
+        unsafe { (address as *mut BlockClientPage).write_volatile(page) };
+        assert!(unsafe { BlockClientPage::take_at(address, 3, 7) }.is_none());
     }
 
     #[test]
@@ -3025,44 +3644,6 @@ mod tests {
         assert!(unsafe { ControlPage::reply_remote_gate_at(address, reply) });
         assert_eq!(unsafe { ControlPage::remote_gate_reply_at(address, request.id) }, Some(reply));
         assert!(unsafe { ControlPage::remote_gate_reply_at(address, request.id + 1) }.is_none());
-    }
-
-    #[test]
-    fn block_page_is_configured_and_reply_ids_are_checked() {
-        let mut context = ControlPage::new();
-        let address = (&mut context as *mut ControlPage) as u64;
-        let page = BlockPage { handle: logos_abi::PageHandle(7), address: 0x2000 };
-        assert!(unsafe { ControlPage::configure_block_page_at(address, page) });
-        assert_eq!(unsafe { ControlPage::block_page_at(address) }, Some(page));
-        assert!(unsafe { ControlPage::set_generation_at(address, 2) });
-        assert_eq!(unsafe { ControlPage::block_page_at(address) }, Some(page));
-        let mut ready = unsafe { (address as *const ControlPage).read_volatile() };
-        ready.operation = READY;
-        ready.status = ACKNOWLEDGED;
-        unsafe { (address as *mut ControlPage).write_volatile(ready) };
-        let request = logos_abi::BlockRequest {
-            id: 3,
-            operation: logos_abi::BlockOperation::Info,
-            lba: 0,
-            blocks: 0,
-            page: logos_abi::PageHandle(0),
-            deadline: 1,
-        };
-        assert!(unsafe { ControlPage::request_block_at(address, request) });
-        assert!(!unsafe {
-            ControlPage::reply_block_at(
-                address,
-                logos_abi::BlockReply {
-                    id: 4,
-                    status: logos_abi::PersistenceStatus::Complete,
-                    info: logos_abi::BlockInfo {
-                        logical_block_size: 512,
-                        blocks: 1,
-                        max_transfer_blocks: 1,
-                    },
-                },
-            )
-        });
     }
 
     #[test]
