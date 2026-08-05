@@ -29,4 +29,5 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0021](0021-typed-input-display-pages.md) | Accepted | Make Input and Display typed pages the active Terminal transport with generation-safe replacement. |
 | [0022](0022-typed-session-effect-pages.md) | Accepted | Mediate Session and privileged Effect transport through separate typed pages. |
 | [0023](0023-typed-store-block-pages.md) | Accepted | Mediate Store and Storage-owned Block transport through independent typed pages and a concrete Storage owner. |
+| [0024](0024-typed-network-device-event-transport.md) | Accepted | Move Network device/event payloads and DMA identities to generation-safe typed pages owned by NetworkRuntime. |
 

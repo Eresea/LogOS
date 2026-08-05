@@ -19,12 +19,14 @@ Native service transport uses a dedicated mapped `logos_abi::service::ControlPag
 header carries lifecycle, generation, and bounded notification state; typed endpoint pages carry
 protocol payloads. Active pages include `InputPage`, `DisplayPage`, `SessionClientPage`,
 `SessionServerPage`, `EffectPage`, independent `StoreClientPage`/`StoreServerPage` pairs, the
-Storage-owned `BlockClientPage`, `NetworkPage`, and `RemotePage`. Every page uses scalar wire
+Storage-owned `BlockClientPage`, distinct `NetworkDevicePage` and `NetworkEventPage`, and `RemotePage`. Every page uses scalar wire
 states, generation checks, and bounded validation. Core owns endpoint mappings, capability checks,
 page loans, and reclamation; a service receives only the endpoint set declared by its canonical
 `platform::services::ServiceSpec`.
 The control page is implicit; `ServiceSpec::endpoints` is the single map for additional Input,
-Display, Session, Store, Block, Network, and Remote pages.
+Display, Session, Store, Block, Network device/event, and Remote pages. `ControlPage` carries only
+lifecycle and notification state for Network; device payloads, event payloads, deadlines, and DMA
+handles live in the typed Network pages.
 
 Input transitions `Ready -> Waiting -> Reply -> Ready`; Display transitions `Ready -> Request ->
 Complete -> Ready`. Core and services validate scalar state and generation on every transition. Native
@@ -705,16 +707,21 @@ Applications consume asynchronous connection and datagram interfaces through the
 They do not own network drivers.
 
 Network v1 uses the boundary accepted in [ADR-0015](adr/0015-network-v1-boundary.md). Core owns
-VirtIO negotiation, DMA queues and bounce buffers, interrupts, timeout, reset, and reclamation. It
-copies complete Ethernet frames through two fixed Network-owned pages and multiplexes frame events,
-client requests, and finite timer wakeups through the service's existing context gate. Core and the
-service validate request IDs, endpoint/interface generations, operation shape, page bounds, and deadlines.
+VirtIO negotiation, DMA queues and bounce buffers, interrupts, timeout, reset, and reclamation. The
+typed `NetworkDevicePage` and `NetworkEventPage` carry device requests/replies, one bounded event,
+deadlines, generations, and validated DMA handles; `ControlPage` supplies only lifecycle
+notifications. `platform::network::NetworkRuntime` owns this device-facing lifecycle while Core
+continues to own physical pages, mappings, queues, and capability checks.
 For passive TCP, Core stamps the calling native-service owner into the trusted delivery context;
 the public `NetworkRequest` never carries an owner. The Network service applies that owner to
 listener, accepted-stream, read, write, and close operations.
 The Ring-2 Network service owns Ethernet, ARP, IPv4, ICMP echo, DHCP, UDP, and generation-tagged datagram
 endpoints. Clients receive no raw-frame access. The hermetic QEMU peer supplies independent DHCP, ARP,
 ICMP, UDP, malformed-frame, cancellation, timeout, and reconnect proofs.
+
+This tranche intentionally leaves normal Network client request/reply transport on its older
+bounded context path. Terminal and Gateway receive no Network device/event endpoints; migrating
+that client path is the next ABI-v4 tranche.
 
 Bind, send, and receive authority are separate. Each grant carries an exact protocol/local-port or
 protocol/remote-IPv4-and-port scope; wildcard and CIDR policy remain future firewall work. Network

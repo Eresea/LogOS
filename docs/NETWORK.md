@@ -1,11 +1,13 @@
 # Network
 
-> **Status:** Network v1 complete — bounded protocol core, DHCP/ARP/UDP service path, Core relay,
+> **Status:** Network v1 device/event ABI tranche complete — typed Core/Foundation transport,
+> bounded protocol core, DHCP/ARP/UDP service path, and restart cleanup complete. Normal Network
+> client request/reply transport remains the next ABI-v4 tranche.
 > hermetic QEMU resilience proofs, and restart cleanup complete
 >
 > **Owner:** Foundation network driver and System Network service
 
-> **Milestone:** Network v1 complete; all promoted network proofs pass in the hermetic QEMU suite.
+> **Milestone:** Network v1 device-facing ABI complete; client transport migration remains open.
 
 ## Goal
 
@@ -36,7 +38,8 @@ items in dependency order.
   and physical-address translation.
 - The Ring-2 Network service owns Ethernet, ARP, IPv4, ICMP echo, DHCP, UDP, endpoint state, and
   protocol timers.
-- Core passes complete Ethernet frames through two Network-owned shared pages. The device never
+- Core passes complete Ethernet frames through two Core-owned DMA pages mapped for the Network
+  service. The device never
   DMA-writes service or client memory.
 - Clients receive generation-tagged UDP endpoint handles, not raw packet access or POSIX sockets.
 - `NetworkBind`, `NetworkSend`, and `NetworkReceive` are separate revocable capability kinds.
@@ -67,12 +70,13 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
 
 ## Current implementation
 
-- `logos-abi`, `logos-core`, and `logos-service-rt` contain the bounded Network request, reply,
-  capability, wait, event, and fixed-page contracts.
+- `logos-abi`, `logos-core`, and `logos-service-rt` contain the bounded Network client contract and
+  the typed `NetworkDevicePage`/`NetworkEventPage` device contract.
 - `logos-net` contains allocation-free Ethernet, ARP, IPv4, UDP, ICMP, DHCP parsing/encoding, and
   bounded endpoint, ARP, datagram, pending-operation, reset, and DHCP state.
-- The kernel binds the legacy VirtIO network device when available, maps two Network-owned pages,
-  loads the Ring-2 payload, and delivers one validated RX frame event at a time.
+- The kernel binds the legacy VirtIO network device when available, maps Core-owned RX/TX resources,
+  maps distinct typed device/event pages only into the Network service, and delivers one validated
+  RX frame event at a time.
 - `logos-network-service` handles bounded device transport, DHCP acquisition, ARP resolution,
   `Status`, `Bind`, `SendTo`, `ReceiveFrom`, `Close`, and `Cancel` state operations. Core validates
   capability scope and copies client payloads through the fixed Network TX page. Cancellation,
@@ -81,6 +85,25 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   DHCP peer drives `network/configuration`; `network/device-bind` exercises a real Bind request
   through the Core capability and service relay, and `network/unauthorized-operation` proves
   denied Bind/SendTo/ReceiveFrom requests stop in Core.
+
+### ABI-v4 device transport milestone
+
+`NetworkDevicePage` carries scalar-validated operation, request ID, deadline, device generation,
+reply status, bounded `NetworkInfo`, and configured RX/TX `PageHandle` identities. `NetworkEventPage`
+is a one-slot state machine: `Ready -> Waiting -> Event -> Consumed -> Ready`. Core/Foundation may
+deliver only while the service is waiting; a second event is rejected until the service consumes
+and acknowledges the first. Replacement or NIC reset changes the relevant generation and makes old
+requests, events, endpoints, and handles fail deterministically.
+
+`NetworkRuntime` owns the active device endpoint, event endpoint, device generation, pending device
+request, deadline, reset/rebind state, and DMA identities. Physical allocation, page tables,
+VirtIO queues, interrupts, and capability enforcement remain Core-owned. DMA handles are validated
+against the configured owner and generation; raw physical addresses do not cross the ABI.
+
+The Network service's `Info` request now returns typed `NetworkInfo` through `NetworkDevicePage`,
+and DHCP proceeds through the same typed path. Normal client request/reply relay remains on the
+legacy bounded context path for this tranche; Terminal and Gateway are not granted device/event
+pages. That client migration is explicitly deferred to the next tranche.
 
 ### Transport milestone: DHCP over Core-owned VirtIO
 
@@ -269,7 +292,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
 - [x] Add checked wire conversion for every enum and status.
 - [x] Add Network request/reply encoding to the native-service context without changing its page
       size.
-- [x] Add the finite-deadline Network wait/event operation to the existing service gate.
+- [x] Add finite-deadline wait signalling and typed Network event delivery.
 - [x] Match replies by request ID, endpoint generation, owner, and interface generation.
 - [x] Add `logos-abi` tests covering every accepted operation shape and exact scope encoding.
 - [x] Add rejection tests for unknown enums, reserved fields, zero IDs, stale handles, invalid page
@@ -354,7 +377,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
 - [x] Give it one RX page and one TX page, mapped writable and non-executable.
 - [x] Configure both pages with the Network service's real principal; use no numeric owner literals.
 - [x] Complete the service handshake before accepting a frame or client request.
-- [x] Multiplex frame and client events through the single context gate.
+- [x] Keep lifecycle notifications on the context gate while typed pages carry device/event data.
 - [x] Alternate ready frame and client delivery; deliver at most one event per wake.
 - [x] Drive DHCP using the next-deadline wakeup and report state without busy-spinning.
 - [x] Return to the wait gate while offline; do not block Terminal or recovery startup.
