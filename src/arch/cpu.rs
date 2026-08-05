@@ -292,6 +292,14 @@ extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
         return 2;
     }
     if context != 0
+        && unsafe {
+            logos_core::native_service::ControlPage::store_server_reply_pending_at(context)
+        }
+        && save_user_frame(frame, true, false)
+    {
+        return 2;
+    }
+    if context != 0
         && unsafe { logos_core::native_service::ControlPage::block_client_pending_at(context) }
         && save_user_frame(frame, true, false)
     {
@@ -317,17 +325,8 @@ extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
                 logos_core::native_service::ControlPage::network_reply_pending_at(context)
             }
             || unsafe {
-                let page =
-                    (context as *const logos_core::native_service::ControlPage).read_volatile();
-                logos_core::native_service::NetworkDevicePage::active_for_core_at(
-                    page.network_device_page,
-                    page.generation,
-                    page.generation,
-                ) || logos_core::native_service::NetworkEventPage::active_for_core_at(
-                    page.network_event_page,
-                    page.generation,
-                    page.generation,
-                )
+                logos_core::native_service::ControlPage::network_device_pending_at(context)
+                    || logos_core::native_service::ControlPage::network_event_pending_at(context)
             })
         && save_user_frame(frame, true, false)
     {

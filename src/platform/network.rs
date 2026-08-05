@@ -185,11 +185,12 @@ impl NetworkRuntime {
                 }
             }
         }
-        if self.device_endpoint.pending() && self.device_endpoint.request().is_none() {
+        let device_message = self.device_endpoint.request();
+        if device_message.is_none() && self.device_endpoint.pending() {
             self.degraded = true;
             return false;
         }
-        if let Some(message) = self.device_endpoint.request() {
+        if let Some(message) = device_message {
             let request = message.request;
             let info = device.info();
             let response = match request.operation {

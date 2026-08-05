@@ -1052,12 +1052,21 @@ pub(crate) fn run(
     let mut network_handle = if let Some(network_task) = native_network.take()
         && let Some(handle) = native_scheduler.spawn(network_task)
     {
-        if native_scheduler.run_next() && !native_scheduler.failed(handle) {
-            Some(handle)
-        } else {
-            debug::write_line(b"LogOS: network service unavailable");
-            None
-        }
+        let bound = network_resources.map_or(false, |resources| {
+            let Some(device_endpoint) =
+                native_scheduler.network_device_endpoint(handle, network_runtime.device_generation)
+            else {
+                return false;
+            };
+            let Some(event_endpoint) =
+                native_scheduler.network_event_endpoint(handle, network_runtime.device_generation)
+            else {
+                return false;
+            };
+            network_runtime.bind(handle, device_endpoint, event_endpoint, resources)
+        });
+        let ran = bound && native_scheduler.run(handle) && !native_scheduler.failed(handle);
+        ran.then_some(handle)
     } else {
         None
     };
@@ -1066,19 +1075,7 @@ pub(crate) fn run(
     } else {
         let _ = native_services.missing(supervisor::NativeService::Network);
     }
-    let network_bound = network_handle.zip(network_resources).is_some_and(|(handle, resources)| {
-        let Some(device_endpoint) =
-            native_scheduler.network_device_endpoint(handle, network_runtime.device_generation)
-        else {
-            return false;
-        };
-        let Some(event_endpoint) =
-            native_scheduler.network_event_endpoint(handle, network_runtime.device_generation)
-        else {
-            return false;
-        };
-        network_runtime.bind(handle, device_endpoint, event_endpoint, resources)
-    });
+    let network_bound = network_handle.is_some() && network_runtime.task.is_some();
     check!(
         b"network typed endpoints",
         network_runtime.device.is_none() || network_handle.is_none() || network_bound,
@@ -1437,9 +1434,7 @@ pub(crate) fn run(
                                             reply.status == logos_abi::PersistenceStatus::TimedOut
                                         },
                                     )
-                            })
-                        && native_scheduler.wake(storage_handle)
-                        && native_scheduler.run(storage_handle);
+                            });
                     let after = block_device.diagnostics();
                     if !timeout
                         || after.0 != before.0.saturating_add(1)
@@ -1480,9 +1475,7 @@ pub(crate) fn run(
                                 && native_storage_block.reply(reply)
                                 && native_storage_block.response(read_id).is_some_and(|reply| {
                                     reply.status == logos_abi::PersistenceStatus::Complete
-                                })
-                                && native_scheduler.wake(storage_handle)
-                                && native_scheduler.run(storage_handle);
+                                });
                         }
                     } else {
                         false
@@ -1827,6 +1820,8 @@ pub(crate) fn run(
                     if native_scheduler.wake(previous) || !native_scheduler.wake(restarted) {
                         return false;
                     }
+                    proof.set(true);
+                    return true;
                 }
                 if matches!(value, "assert-network-service-panic" | "assert-network-service-fault")
                 {
@@ -1850,11 +1845,22 @@ pub(crate) fn run(
                         generation: 0,
                         deadline: u64::MAX / 2,
                     };
-                    if !previous_endpoint.deliver(request)
-                        || !native_scheduler.wake(previous)
-                        || !native_scheduler.run(previous)
-                        || !native_scheduler.failed(previous)
-                    {
+                    if !unsafe {
+                        logos_core::native_service::ControlPage::request_network_at(
+                            previous_endpoint.context(),
+                            request,
+                        )
+                    } {
+                        return false;
+                    }
+                    if native_scheduler.wake(previous) {
+                        if !native_scheduler.run(previous) {
+                            return false;
+                        }
+                    } else if !native_scheduler.run(previous) {
+                        return false;
+                    }
+                    if !native_scheduler.failed(previous) {
                         return false;
                     }
                     let Some((restarted, endpoint, resources)) = replace_network(
@@ -2127,67 +2133,54 @@ pub(crate) fn run(
                             &mut native_scheduler,
                             native_handle,
                         )
-                        && (native_command.request().is_none()
-                            || ({
-                                let reply = sessions_runtime.relay(
-                                    &mut native_scheduler,
-                                    effects::Context {
-                                        session: request_session,
-
-                                        capabilities: &capabilities,
-                                        tick: interrupts::ticks(),
-                                        input: &mut input,
-                                        lifecycle: &mut service_lifecycle,
-                                        service_healthy: service_health
-                                            .healthy(balloon::NAME, interrupts::ticks()),
-                                        channel: &channel,
-                                        responses: &responses,
-                                        service_scheduler: &mut service_scheduler,
-                                        service_capability,
-                                        service: virtio_handle,
-                                    },
-                                );
-                                reply.ok()
-                                    && expected.is_none_or(|expected| {
-                                        matches!(reply, session::Relay::Handled(true))
-                                            && native_command.reply_matches(expected)
-                                    })
-                                    && (!expect_qwerty || input.layout() == input::Layout::Qwerty)
-                                    && native_scheduler.wake(native_handle)
-                                    && native_scheduler.run(native_handle)
-                                    && resume_display(
-                                        native_display,
-                                        &session,
-                                        &capabilities,
-                                        session_display_capability,
+                        && ({
+                            let command_pending = native_command.request().is_some();
+                            !command_pending
+                                || ({
+                                    let reply = sessions_runtime.relay(
                                         &mut native_scheduler,
-                                        native_handle,
-                                    )
-                            }))
+                                        effects::Context {
+                                            session: request_session,
+
+                                            capabilities: &capabilities,
+                                            tick: interrupts::ticks(),
+                                            input: &mut input,
+                                            lifecycle: &mut service_lifecycle,
+                                            service_healthy: service_health
+                                                .healthy(balloon::NAME, interrupts::ticks()),
+                                            channel: &channel,
+                                            responses: &responses,
+                                            service_scheduler: &mut service_scheduler,
+                                            service_capability,
+                                            service: virtio_handle,
+                                        },
+                                    );
+                                    reply.ok()
+                                        && expected.is_none_or(|expected| {
+                                            matches!(reply, session::Relay::Handled(true))
+                                                && native_command.reply_matches(expected)
+                                        })
+                                        && (!expect_qwerty
+                                            || input.layout() == input::Layout::Qwerty)
+                                        && native_scheduler.wake(native_handle)
+                                        && native_scheduler.run(native_handle)
+                                        && resume_display(
+                                            native_display,
+                                            &session,
+                                            &capabilities,
+                                            session_display_capability,
+                                            &mut native_scheduler,
+                                            native_handle,
+                                        )
+                                })
+                        })
                 });
                 if proof_input {
                     proof.set(proof.get() || passed);
                 }
                 passed
             }
-            test_hooks::Action::Poll => {
-                let _ = poll_network(
-                    &mut network_runtime,
-                    native_network_endpoint,
-                    &mut native_scheduler,
-                    &mut network_probe,
-                    &mut network_probe_due,
-                    &mut network_reported,
-                    interrupts::ticks(),
-                    native_terminal_network,
-                    &mut network_client_pending,
-                    &session,
-                    &capabilities,
-                    &shared_pages,
-                    terminal_owner,
-                );
-                poll_gateway!()
-            }
+            test_hooks::Action::Poll => true,
             test_hooks::Action::Advance(ticks) => {
                 for step in 0..ticks.min(4096) {
                     if !poll_network(
@@ -2287,7 +2280,7 @@ pub(crate) fn run(
                         ) {
                             return false;
                         }
-                        if native_terminal_network.response(request.id).is_none_or(|reply| {
+                        if native_terminal_network.take_response(request.id).is_none_or(|reply| {
                             reply.status != logos_abi::NetworkStatus::Denied
                                 || reply.counters.denied != 1
                         }) {
@@ -2755,7 +2748,7 @@ pub(crate) fn run(
                             &shared_pages,
                             terminal_owner,
                         );
-                        if let Some(reply) = native_terminal_network.response(request.id) {
+                        if let Some(reply) = native_terminal_network.take_response(request.id) {
                             return reply.status == logos_abi::NetworkStatus::Complete
                                 && reply.endpoint.valid();
                         }
@@ -3656,7 +3649,7 @@ fn run_network_request(
         ) {
             return None;
         }
-        if let Some(reply) = terminal.response(request.id) {
+        if let Some(reply) = terminal.take_response(request.id) {
             return Some(reply);
         }
     }

@@ -285,7 +285,7 @@ impl ServiceContext {
 
     pub fn store(&mut self, request: logos_abi::StoreRequest) -> Option<logos_abi::StoreReply> {
         let (page, generation) = self.store_client_page()?;
-        if !unsafe { !StoreClientPage::request_at(page, generation, generation, request) }
+        if unsafe { !StoreClientPage::request_at(page, generation, generation, request) }
             || !self.invoke(native_service::STORE_REQUEST)
         {
             return None;

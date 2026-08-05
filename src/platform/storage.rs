@@ -401,6 +401,18 @@ pub fn relay_store_request(
         });
         return session::Relay::Handled(replied);
     }
+    if !storage.waiting() {
+        if scheduler.wake(storage_handle) {
+            if !scheduler.run(storage_handle) {
+                return session::Relay::Handled(false);
+            }
+        } else if !scheduler.run(storage_handle) {
+            return session::Relay::Handled(false);
+        }
+        if !storage.waiting() {
+            return session::Relay::Handled(false);
+        }
+    }
     let needs_page = matches!(
         request.operation,
         logos_abi::StoreOperation::ReadChunk | logos_abi::StoreOperation::WriteChunk
@@ -437,7 +449,8 @@ pub fn relay_store_request(
         }
         return session::Relay::Handled(false);
     }
-    if !scheduler.wake(storage_handle) || !scheduler.run(storage_handle) {
+    let storage_ready = scheduler.wake(storage_handle) && scheduler.run(storage_handle);
+    if !storage_ready {
         if loaned {
             let _ = block_context.pages.return_loan(storage_owner, request.page);
         }
@@ -450,14 +463,10 @@ pub fn relay_store_request(
                 let _ = block_context.pages.return_loan(storage_owner, request.page);
             }
             update_store_state(state, request, reply.status);
-            return session::Relay::Handled(
-                scheduler.wake(storage_handle)
-                    && scheduler.run(storage_handle)
-                    && terminal.reply(reply),
-            );
-        }
-        if scheduler.run_next() {
-            continue;
+            let terminal_replied = scheduler.wake(storage_handle)
+                && scheduler.run(storage_handle)
+                && terminal.reply(reply);
+            return session::Relay::Handled(terminal_replied);
         }
         if scheduler.failed(storage_handle) {
             if loaned {
@@ -494,7 +503,13 @@ fn protected_store_request(
     request: logos_abi::StoreRequest,
     tick: u64,
 ) -> Option<logos_abi::StoreReply> {
-    if !storage.available() || !storage.deliver(request, 0) || !scheduler.wake(storage_handle) {
+    if !storage.available() {
+        return None;
+    }
+    if !storage.deliver(request, 0) {
+        return None;
+    }
+    if !scheduler.wake(storage_handle) {
         return None;
     }
     let mut current_tick = tick.max(1);
@@ -503,7 +518,8 @@ fn protected_store_request(
     }
     loop {
         if let Some(reply) = storage.response(request.id) {
-            return Some(reply);
+            let ready = scheduler.wake(storage_handle) && scheduler.run(storage_handle);
+            return ready.then_some(reply);
         }
         if scheduler.run_next() {
             continue;
@@ -774,7 +790,7 @@ pub fn relay_terminal_store_requests(
     tick: u64,
 ) -> bool {
     while terminal.request().is_some() {
-        if !relay_store_request(
+        let relayed = relay_store_request(
             terminal,
             storage,
             dispatch,
@@ -789,8 +805,8 @@ pub fn relay_terminal_store_requests(
             state,
             tick,
         )
-        .ok()
-        {
+        .ok();
+        if !relayed {
             let Some(request) = terminal.request() else { return false };
             if !terminal.reply(logos_abi::StoreReply {
                 id: request.id,
@@ -801,7 +817,8 @@ pub fn relay_terminal_store_requests(
                 return false;
             }
         }
-        if !scheduler.wake(terminal_handle) || !scheduler.run(terminal_handle) {
+        let terminal_ready = scheduler.wake(terminal_handle) && scheduler.run(terminal_handle);
+        if !terminal_ready {
             return false;
         }
     }

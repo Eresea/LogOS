@@ -702,6 +702,15 @@ impl NetworkEndpoint {
             )
         }
     }
+
+    pub fn take_response(self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
+        unsafe {
+            logos_core::native_service::ControlPage::take_network_reply_at(
+                self.context_physical,
+                expected_id,
+            )
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

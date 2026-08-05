@@ -1084,7 +1084,10 @@ impl StoreServerPage {
         }
         let mut page = unsafe { (address as *mut Self).read_volatile() };
         if !server_identity(&page, service_generation, endpoint_generation)
-            || PersistencePageState::from_wire(page.state) != Some(PersistencePageState::Ready)
+            || !matches!(
+                PersistencePageState::from_wire(page.state),
+                Some(PersistencePageState::Ready | PersistencePageState::Waiting)
+            )
         {
             return false;
         }
@@ -1258,6 +1261,25 @@ impl StoreServerPage {
         )?;
         unsafe { Self::reset_at(address, service_generation, endpoint_generation) };
         Some(reply)
+    }
+
+    pub unsafe fn reply_pending_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        server_identity(&page, service_generation, endpoint_generation)
+            && matches!(
+                PersistencePageState::from_wire(page.state),
+                Some(
+                    PersistencePageState::Reply
+                        | PersistencePageState::Denied
+                        | PersistencePageState::Failed
+                        | PersistencePageState::Cancelled
+                        | PersistencePageState::TimedOut
+                )
+            )
     }
 
     pub unsafe fn set_status_at(
@@ -3772,6 +3794,22 @@ impl ControlPage {
             }
     }
 
+    pub unsafe fn store_server_reply_pending_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == STORE_REPLY
+            && context.status == ACKNOWLEDGED
+            && context.store_server_page != 0
+            && unsafe {
+                StoreServerPage::reply_pending_at(
+                    context.store_server_page,
+                    context.generation,
+                    context.generation,
+                )
+            }
+    }
+
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn session_client_pending_at(address: u64) -> bool {
@@ -3856,6 +3894,22 @@ impl ControlPage {
         request.valid_shape().then_some(request)
     }
 
+    pub unsafe fn network_device_pending_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == NETWORK_DEVICE_REQUEST
+            && context.status == ACKNOWLEDGED
+    }
+
+    pub unsafe fn network_event_pending_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == NETWORK_EVENT
+            && context.status == ACKNOWLEDGED
+    }
+
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping owned by the caller.
     pub unsafe fn request_network_at(address: u64, request: logos_abi::NetworkRequest) -> bool {
@@ -3872,6 +3926,7 @@ impl ControlPage {
                     | READ_INPUT
                     | NETWORK_REPLY
                     | NETWORK_EVENT
+                    | NETWORK_DEVICE_REQUEST
                     | NETWORK_DEVICE_REPLY
                     | NETWORK_WAIT
                     | NETWORK_REQUEST
@@ -3965,6 +4020,27 @@ impl ControlPage {
             return None;
         }
         decode_network_reply(&context.payload).filter(|reply| reply.id == expected_id)
+    }
+
+    pub unsafe fn take_network_reply_at(
+        address: u64,
+        expected_id: u32,
+    ) -> Option<logos_abi::NetworkReply> {
+        let mut context = unsafe { (address as *mut Self).read_volatile() };
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.operation != NETWORK_REPLY
+            || context.status != ACKNOWLEDGED
+            || context.payload_length != NETWORK_REPLY_BYTES as u32
+        {
+            return None;
+        }
+        let reply =
+            decode_network_reply(&context.payload).filter(|reply| reply.id == expected_id)?;
+        context.operation = READY;
+        context.payload_length = 0;
+        unsafe { (address as *mut Self).write_volatile(context) };
+        Some(reply)
     }
 
     /// # Safety
@@ -4294,7 +4370,7 @@ mod tests {
         assert!(!unsafe { InputPage::deliver_at(address, 8, b'x') });
         assert!(unsafe { InputPage::deliver_at(address, 7, b'x') });
         assert_eq!(unsafe { InputPage::take_at(address, 7) }, Some(b'x'));
-        assert!(!unsafe { InputPage::take_at(address, 7) }.is_some());
+        assert!(unsafe { InputPage::take_at(address, 7) }.is_none());
         assert!(!unsafe { InputPage::deliver_at(address, 7, b'y') });
         assert!(unsafe { InputPage::reset_at(address, 8) });
         assert!(!unsafe { InputPage::wait_at(address, 7) });
