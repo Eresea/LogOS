@@ -74,6 +74,8 @@ impl EndpointSet {
     const BLOCK_BIT: u16 = 1 << 6;
     const NETWORK_BIT: u16 = 1 << 7;
     const REMOTE_BIT: u16 = 1 << 8;
+    const NETWORK_DEVICE_BIT: u16 = 1 << 9;
+    const NETWORK_EVENT_BIT: u16 = 1 << 10;
 
     pub const NONE: Self = Self(0);
     pub const INPUT: Self = Self(Self::INPUT_BIT);
@@ -85,6 +87,8 @@ impl EndpointSet {
     pub const BLOCK: Self = Self(Self::BLOCK_BIT);
     pub const NETWORK: Self = Self(Self::NETWORK_BIT);
     pub const REMOTE: Self = Self(Self::REMOTE_BIT);
+    pub const NETWORK_DEVICE: Self = Self(Self::NETWORK_DEVICE_BIT);
+    pub const NETWORK_EVENT: Self = Self(Self::NETWORK_EVENT_BIT);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -209,7 +213,7 @@ const NETWORK_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
-    endpoints: EndpointSet::NETWORK,
+    endpoints: EndpointSet::NETWORK_DEVICE.union(EndpointSet::NETWORK_EVENT),
 };
 const GATEWAY_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Gateway,
@@ -268,6 +272,12 @@ pub fn self_check() -> bool {
         && Service::Terminal.spec().endpoints.contains(EndpointSet::SESSION_CLIENT)
         && Service::Sessions.spec().endpoints.contains(EndpointSet::SESSION_SERVER)
         && Service::Sessions.spec().endpoints.contains(EndpointSet::EFFECT)
+        && Service::Network.spec().endpoints.contains(EndpointSet::NETWORK_DEVICE)
+        && Service::Network.spec().endpoints.contains(EndpointSet::NETWORK_EVENT)
+        && !Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_DEVICE)
+        && !Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_EVENT)
+        && !Service::Gateway.spec().endpoints.contains(EndpointSet::NETWORK_DEVICE)
+        && !Service::Gateway.spec().endpoints.contains(EndpointSet::NETWORK_EVENT)
         && !Service::VirtioBlock.spec().endpoints.contains(EndpointSet::BLOCK)
         && Service::Gateway.spec().endpoints.contains(EndpointSet::REMOTE)
 }
