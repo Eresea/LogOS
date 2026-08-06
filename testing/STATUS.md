@@ -1,12 +1,13 @@
 # Test Status
 
-Last verification: 2026-08-06. Final SHA: `fc576fb51046408e523261b4eee717dec83b8d72`.
-ABI-v4 build and completed-layer regression closure is verified; Network-client and Remote
-behavior remains open as previously scoped.
+Last verification: 2026-08-06. Starting SHA: `aea2ee6293063220567b46816bbe232ccca199d9`.
+Typed Network-client transport implementation and focused proofs are verified; four higher-level Network-client fixtures
+and the Remote/Gateway boundary remain open.
 
 - Toolchain: Rust `1.93.0`, Cargo `1.93.0`, target `x86_64-unknown-uefi` installed.
 - Host: `scripts/check.ps1 -Stage host` passed; format, clippy, host tests, architecture,
-  documentation links, and ADR index checks passed.
+  documentation links, and ADR index checks passed; `logos-abi` focused transport tests: 30
+  passed.
 - UEFI debug: `scripts/check.ps1 -Stage uefi` passed; all six images built.
 - UEFI release: `scripts/check.ps1 -Stage uefi -Release` passed; all six images built.
 - ESP debug and release contents are exactly `BOOTX64.EFI`, `TERMINAL.EFI`, `SESSIONS.EFI`,
@@ -14,7 +15,7 @@ behavior remains open as previously scoped.
 - QEMU: `C:\Program Files\qemu\qemu-system-x86_64.exe`, version `11.0.50`; OVMF:
   `C:\Program Files\qemu\share\edk2-x86_64-code.fd`. Headless boot reached `startup self
   check passed`, `check network typed endpoints passed`, and `native terminal active`.
-- Catalog: 83 proofs; 52 ready; 31 intentionally skipped. No proof IDs were removed, renamed,
+- Catalog: 84 proofs; 53 ready; 31 intentionally skipped. No proof IDs were removed, renamed,
   weakened, or newly skipped.
 - Fixed seed: `LOGOS_TEST_SEED=1`, one QEMU job.
 
@@ -26,17 +27,21 @@ Per-suite totals:
 | console | 12 | 0 | 3 |
 | platform | 16 | 0 | 16 |
 | persistence | 8 | 0 | 0 |
-| network | 6 | 4 | 0 |
+| network | 7 | 4 | 0 |
 | remote | 0 | 8 | 0 |
-| main | 43 | 12 | 28 |
+| main | 44 | 12 | 28 |
 
 Required completed-layer status: **PASS** for all implemented completed-layer proofs. Normal boot,
 Display, Terminal replacement and containment, Sessions/Effect, Store/Block, Storage
 replacement, terminal history, persistence interruption/recovery/corruption/denial, Network
 device information/binding, DHCP/configuration, timeout/reset, Network service replacement and
-containment remained green where implemented by the fixed-seed catalog and headless boot checks.
+containment, plus the simultaneous Terminal/Gateway Busy proof, remained green where implemented
+by the fixed-seed catalog and headless boot checks.
 The permanent `core/boot-recovery` and `console/recovery-handoff` IDs remain intentionally skipped
 because their semantic proofs are not implemented; they are not reported as passes.
+
+`network/simultaneous-client-busy` passed: the Gateway client received a typed `Busy` reply while
+the Terminal transaction remained active.
 
 Remaining Network-client failures:
 
