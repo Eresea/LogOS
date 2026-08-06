@@ -46,6 +46,13 @@ ALLOWED = {
     "logosctl": {"logos-remote"},
 }
 
+# Dependencies flow toward lower rings. Boot/test adapters are explicit
+# exceptions because they assemble outer services without owning them.
+RING_EXCEPTIONS = {
+    ("logos-uefi", "logos-terminal"),
+    ("logos-uefi", "logos-remote"),
+}
+
 
 def metadata() -> dict:
     return json.loads(
@@ -75,6 +82,18 @@ def violations(data: dict) -> list[str]:
         unexpected = dependencies - ALLOWED.get(package, set())
         for dependency in sorted(unexpected):
             errors.append(f"{package} depends on unapproved internal package {dependency}")
+        package_ring = ROLES.get(package, (99, "unknown"))[0]
+        for dependency in sorted(dependencies):
+            dependency_ring = ROLES.get(dependency, (99, "unknown"))[0]
+            if (
+                dependency_ring < 99
+                and package_ring < 99
+                and dependency_ring > package_ring
+                and (package, dependency) not in RING_EXCEPTIONS
+            ):
+                errors.append(
+                    f"{package} ring {package_ring} imports outer {dependency} ring {dependency_ring}"
+                )
     for package in (
         "logos-network-service",
         "logos-terminal-service",
