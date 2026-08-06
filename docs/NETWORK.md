@@ -1,13 +1,13 @@
 # Network
 
-> **Status:** Network v1 device/event ABI tranche complete — typed Core/Foundation transport,
-> bounded protocol core, DHCP/ARP/UDP service path, and restart cleanup complete. Normal Network
-> client request/reply transport remains the next ABI-v4 tranche.
-> hermetic QEMU resilience proofs, and restart cleanup complete
+> **Status:** Network v1 typed device/event and client transport implementation complete; QEMU
+> operational closure remains open for four Network-client scenarios. Results are recorded in
+> [testing status](../testing/STATUS.md).
 >
 > **Owner:** Foundation network driver and System Network service
 
-> **Milestone:** Network v1 device-facing ABI complete; client transport migration remains open.
+> **Milestone:** Network v1 typed device-facing and client transport ABI implemented; behavioral
+> proof closure pending.
 
 ## Goal
 
@@ -81,10 +81,21 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   `Status`, `Bind`, `SendTo`, `ReceiveFrom`, `Close`, and `Cancel` state operations. Core validates
   capability scope and copies client payloads through the fixed Network TX page. Cancellation,
   close, reset, and ARP single-flight cleanup release pending client state.
+- `NetworkClientPage` and `NetworkServerPage` are the only client/server boundary. Core configures
+  Terminal and Gateway transfer-page authority, admits one global transaction, returns `Busy` to a
+  competing client, and publishes only exact request/generation replies.
+- Client submission is transactional: validate authority and the configured page, copy TX bytes,
+  deliver to Network, mark the client `Processing`, then wake the Network service. Any failed step
+  rolls the client and server pages back. Completion copies RX bytes only from the configured
+  Network TX scratch offset; timeout, cancel, reset, and replacement clear the exact association.
 - QEMU uses deterministic user-mode DHCP for the transport proof. The independent raw-Ethernet
   DHCP peer drives `network/configuration`; `network/device-bind` exercises a real Bind request
-  through the Core capability and service relay, and `network/unauthorized-operation` proves
-  denied Bind/SendTo/ReceiveFrom requests stop in Core.
+  through the Core capability and service relay, `network/unauthorized-operation` proves denied
+  Bind/SendTo/ReceiveFrom requests stop in Core, and `network/simultaneous-client-busy` proves
+  Terminal/Gateway contention does not overwrite the active transaction.
+- Behavioral closure remains gated on `network/icmp-echo`, `network/udp-round-trip`,
+  `network/backpressure-cancel`, and `network/packet-loss`; these currently stop at the existing
+  Network service/device scheduling boundary.
 
 ### ABI-v4 device transport milestone
 
@@ -101,9 +112,21 @@ VirtIO queues, interrupts, and capability enforcement remain Core-owned. DMA han
 against the configured owner and generation; raw physical addresses do not cross the ABI.
 
 The Network service's `Info` request now returns typed `NetworkInfo` through `NetworkDevicePage`,
-and DHCP proceeds through the same typed path. Normal client request/reply relay remains on the
-legacy bounded context path for this tranche; Terminal and Gateway are not granted device/event
-pages. That client migration is explicitly deferred to the next tranche.
+and DHCP proceeds through the same typed path. Terminal and Gateway use typed client pages; neither
+client receives Network device/event pages.
+
+### ABI-v4 client transport
+
+`NetworkRuntime` owns one global `active_client` association. The association records the client
+slot, exact client/server endpoints, request, owner, and task handle; it is never queued or inferred
+from a page alone. A second Terminal/Gateway request receives `Busy` without touching the active
+server page.
+
+The transfer page is configured when each client mapping is installed and is retained across client
+page reset. Data requests must name that exact handle and stay within the fixed page payload window.
+TX copies occur before server delivery; RX copies occur only after an exact ID/generation reply is
+validated. Old task mappings are invalidated before replacement and the active association is
+completed with `Cancelled` or `Reset` before its pages are released.
 
 ### Transport milestone: DHCP over Core-owned VirtIO
 
@@ -395,6 +418,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
 - [x] Check wire shape, capability kind, exact scope, owner, endpoint generation, page direction,
       and deadline before waking Network.
 - [x] Implement bind, send, receive, cancel, close, and status in the service.
+- [x] Add the simultaneous Terminal/Gateway contention proof and assert a typed `Busy` reply.
 - [x] Return exact source metadata and payload length on receive.
 - [x] Return page loans after the payload is copied, even while ARP or TX completion remains pending.
 - [x] Reject a second pending operation as `Busy` without altering the first.

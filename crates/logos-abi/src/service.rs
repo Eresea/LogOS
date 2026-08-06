@@ -767,6 +767,16 @@ impl NetworkClientPage {
         {
             return false;
         }
+        if matches!(
+            request.operation,
+            logos_abi::NetworkOperation::SendTo
+                | logos_abi::NetworkOperation::ReceiveFrom
+                | logos_abi::NetworkOperation::Read
+                | logos_abi::NetworkOperation::Write
+        ) && page.transfer_page != request.page.0
+        {
+            return false;
+        }
         page.request_id = request.id;
         page.operation = request.operation as u32;
         page.endpoint = request.endpoint.0;
@@ -859,6 +869,41 @@ impl NetworkClientPage {
                 NetworkPageState::from_wire(page.state),
                 Some(NetworkPageState::Processing)
             )
+        {
+            return false;
+        }
+        set_network_reply(
+            &mut page.state,
+            &mut page.reply_status,
+            &mut page.reply_endpoint,
+            &mut page.reply_generation,
+            &mut page.reply_source_address,
+            &mut page.reply_source_port,
+            &mut page.reply_length,
+            &mut page.reply_info,
+            &mut page.reply_counters,
+            request,
+            reply,
+        ) && unsafe {
+            (address as *mut Self).write_volatile(page);
+            true
+        }
+    }
+
+    pub unsafe fn reply_request_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        reply: logos_abi::NetworkReply,
+    ) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        let Some(request) =
+            (unsafe { Self::request_at_page(address, service_generation, endpoint_generation) })
+        else {
+            return false;
+        };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || NetworkPageState::from_wire(page.state) != Some(NetworkPageState::Request)
         {
             return false;
         }
@@ -4411,6 +4456,64 @@ extern "C" fn self_check_entry(_: *mut ControlPage) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use logos_abi::{NetworkEndpoint, NetworkProtocol, NetworkScope, PageHandle};
+
+    fn bind_request(id: u32) -> logos_abi::NetworkRequest {
+        logos_abi::NetworkRequest {
+            id,
+            operation: logos_abi::NetworkOperation::Bind,
+            endpoint: NetworkEndpoint(0),
+            peer: NetworkScope::new(NetworkProtocol::Udp, 0, 4000),
+            page: PageHandle(0),
+            length: 0,
+            generation: 0,
+            deadline: 100,
+        }
+    }
+
+    fn send_request(id: u32, page: PageHandle) -> logos_abi::NetworkRequest {
+        logos_abi::NetworkRequest {
+            id,
+            operation: logos_abi::NetworkOperation::SendTo,
+            endpoint: NetworkEndpoint::new(1, 1).unwrap(),
+            peer: NetworkScope::new(NetworkProtocol::Udp, 0x0a00_0202, 4001),
+            page,
+            length: 4,
+            generation: 1,
+            deadline: 100,
+        }
+    }
+
+    fn error_reply(
+        request: logos_abi::NetworkRequest,
+        status: logos_abi::NetworkStatus,
+    ) -> logos_abi::NetworkReply {
+        logos_abi::NetworkReply {
+            id: request.id,
+            status,
+            endpoint: NetworkEndpoint(0),
+            generation: 0,
+            source_address: 0,
+            source_port: 0,
+            length: 0,
+            info: logos_abi::NetworkInfo::default(),
+            counters: logos_abi::NetworkCounters::default(),
+        }
+    }
+
+    fn bind_reply(request: logos_abi::NetworkRequest) -> logos_abi::NetworkReply {
+        logos_abi::NetworkReply {
+            id: request.id,
+            status: logos_abi::NetworkStatus::Complete,
+            endpoint: NetworkEndpoint::new(1, 1).unwrap(),
+            generation: 1,
+            source_address: 0,
+            source_port: 0,
+            length: 0,
+            info: logos_abi::NetworkInfo::default(),
+            counters: logos_abi::NetworkCounters::default(),
+        }
+    }
 
     #[test]
     fn abi_self_check_covers_header_and_control_reset() {
@@ -4575,6 +4678,210 @@ mod tests {
             unsafe { NetworkServerPage::finish_at(server_address, 1, 1, request.id) },
             Some(reply)
         );
+    }
+
+    #[test]
+    fn network_client_transfer_page_is_generation_bound() {
+        let mut page = NetworkClientPage::new(1, 2);
+        let address = (&mut page as *mut NetworkClientPage) as u64;
+        assert!(!unsafe { NetworkClientPage::configure_transfer_at(address, 1, 2, PageHandle(0)) });
+        assert!(!unsafe { NetworkClientPage::configure_transfer_at(address, 2, 2, PageHandle(3)) });
+        assert!(unsafe { NetworkClientPage::configure_transfer_at(address, 1, 2, PageHandle(3)) });
+        assert_eq!(
+            unsafe { NetworkClientPage::transfer_page_at(address, 1, 2) },
+            Some(PageHandle(3))
+        );
+        assert_eq!(unsafe { NetworkClientPage::transfer_page_at(address, 1, 3) }, None);
+    }
+
+    #[test]
+    fn network_client_rejects_data_request_on_wrong_transfer_page() {
+        let request = send_request(1, PageHandle(4));
+        let mut page = NetworkClientPage::new(1, 2);
+        let address = (&mut page as *mut NetworkClientPage) as u64;
+        assert!(!unsafe { NetworkClientPage::request_at(address, 1, 2, request) });
+        assert!(unsafe { NetworkClientPage::configure_transfer_at(address, 1, 2, PageHandle(3)) });
+        assert!(!unsafe { NetworkClientPage::request_at(address, 1, 2, request) });
+        assert!(unsafe {
+            NetworkClientPage::request_at(address, 1, 2, send_request(request.id, PageHandle(3)))
+        });
+    }
+
+    #[test]
+    fn network_client_rejects_oversized_data_request() {
+        let mut page = NetworkClientPage::new(1, 2);
+        let address = (&mut page as *mut NetworkClientPage) as u64;
+        assert!(unsafe { NetworkClientPage::configure_transfer_at(address, 1, 2, PageHandle(3)) });
+        let request = logos_abi::NetworkRequest {
+            length: (logos_abi::MAX_NETWORK_PAYLOAD + 1) as u16,
+            ..send_request(1, PageHandle(3))
+        };
+        assert!(!unsafe { NetworkClientPage::request_at(address, 1, 2, request) });
+    }
+
+    #[test]
+    fn network_client_rejects_duplicate_request_while_processing() {
+        let request = bind_request(1);
+        let mut page = NetworkClientPage::new(1, 2);
+        let address = (&mut page as *mut NetworkClientPage) as u64;
+        assert!(unsafe { NetworkClientPage::request_at(address, 1, 2, request) });
+        assert!(unsafe { NetworkClientPage::mark_processing_at(address, 1, 2) });
+        assert!(!unsafe { NetworkClientPage::request_at(address, 1, 2, bind_request(2)) });
+    }
+
+    #[test]
+    fn network_client_can_rollback_request_before_processing() {
+        let request = bind_request(1);
+        let mut page = NetworkClientPage::new(1, 2);
+        let address = (&mut page as *mut NetworkClientPage) as u64;
+        let reply = error_reply(request, logos_abi::NetworkStatus::TimedOut);
+        assert!(unsafe { NetworkClientPage::request_at(address, 1, 2, request) });
+        assert!(unsafe { NetworkClientPage::reply_request_at(address, 1, 2, reply) });
+        assert_eq!(unsafe { NetworkClientPage::finish_at(address, 1, 2, request.id) }, Some(reply));
+    }
+
+    #[test]
+    fn network_client_reply_requires_exact_request_id() {
+        let request = bind_request(1);
+        let mut page = NetworkClientPage::new(1, 2);
+        let address = (&mut page as *mut NetworkClientPage) as u64;
+        assert!(unsafe { NetworkClientPage::request_at(address, 1, 2, request) });
+        assert!(unsafe { NetworkClientPage::mark_processing_at(address, 1, 2) });
+        assert!(!unsafe {
+            NetworkClientPage::reply_at(address, 1, 2, bind_reply(bind_request(2)))
+        });
+        assert!(unsafe { NetworkClientPage::reply_at(address, 1, 2, bind_reply(request)) });
+    }
+
+    #[test]
+    fn network_client_reply_requires_exact_page_identity() {
+        let request = bind_request(1);
+        let mut page = NetworkClientPage::new(1, 2);
+        let address = (&mut page as *mut NetworkClientPage) as u64;
+        assert!(unsafe { NetworkClientPage::request_at(address, 1, 2, request) });
+        assert!(unsafe { NetworkClientPage::mark_processing_at(address, 1, 2) });
+        assert!(!unsafe { NetworkClientPage::reply_at(address, 1, 3, bind_reply(request)) });
+        assert!(unsafe { NetworkClientPage::reply_at(address, 1, 2, bind_reply(request)) });
+    }
+
+    #[test]
+    fn network_client_finish_requires_exact_identity() {
+        let request = bind_request(1);
+        let mut page = NetworkClientPage::new(1, 2);
+        let address = (&mut page as *mut NetworkClientPage) as u64;
+        assert!(unsafe { NetworkClientPage::request_at(address, 1, 2, request) });
+        assert!(unsafe { NetworkClientPage::mark_processing_at(address, 1, 2) });
+        let reply = bind_reply(request);
+        assert!(unsafe { NetworkClientPage::reply_at(address, 1, 2, reply) });
+        assert!(unsafe { NetworkClientPage::finish_at(address, 2, 2, request.id) }.is_none());
+        assert!(unsafe { NetworkClientPage::finish_at(address, 1, 3, request.id) }.is_none());
+        assert_eq!(unsafe { NetworkClientPage::finish_at(address, 1, 2, request.id) }, Some(reply));
+    }
+
+    #[test]
+    fn network_client_finish_requires_exact_request_id() {
+        let request = bind_request(1);
+        let mut page = NetworkClientPage::new(1, 2);
+        let address = (&mut page as *mut NetworkClientPage) as u64;
+        assert!(unsafe { NetworkClientPage::request_at(address, 1, 2, request) });
+        assert!(unsafe { NetworkClientPage::mark_processing_at(address, 1, 2) });
+        let reply = bind_reply(request);
+        assert!(unsafe { NetworkClientPage::reply_at(address, 1, 2, reply) });
+        assert!(unsafe { NetworkClientPage::finish_at(address, 1, 2, 2) }.is_none());
+        assert_eq!(unsafe { NetworkClientPage::finish_at(address, 1, 2, request.id) }, Some(reply));
+    }
+
+    #[test]
+    fn network_client_finish_preserves_configured_transfer_page() {
+        let request = send_request(1, PageHandle(3));
+        let mut page = NetworkClientPage::new(1, 2);
+        let address = (&mut page as *mut NetworkClientPage) as u64;
+        assert!(unsafe { NetworkClientPage::configure_transfer_at(address, 1, 2, PageHandle(3)) });
+        assert!(unsafe { NetworkClientPage::request_at(address, 1, 2, request) });
+        assert!(unsafe { NetworkClientPage::mark_processing_at(address, 1, 2) });
+        let reply = error_reply(request, logos_abi::NetworkStatus::Cancelled);
+        assert!(unsafe { NetworkClientPage::reply_at(address, 1, 2, reply) });
+        assert_eq!(unsafe { NetworkClientPage::finish_at(address, 1, 2, request.id) }, Some(reply));
+        assert_eq!(
+            unsafe { NetworkClientPage::transfer_page_at(address, 1, 2) },
+            Some(PageHandle(3))
+        );
+    }
+
+    #[test]
+    fn network_server_accepts_only_one_request_until_reset() {
+        let mut page = NetworkServerPage::new(1, 2);
+        let address = (&mut page as *mut NetworkServerPage) as u64;
+        assert!(unsafe { NetworkServerPage::deliver_at(address, 1, 2, 7, bind_request(1)) });
+        assert!(!unsafe { NetworkServerPage::deliver_at(address, 1, 2, 7, bind_request(2)) });
+        assert!(unsafe { NetworkServerPage::take_at(address, 1, 2) }.is_some());
+        assert!(!unsafe { NetworkServerPage::deliver_at(address, 1, 2, 7, bind_request(2)) });
+        assert!(unsafe { NetworkServerPage::reset_at(address, 1, 2) });
+        assert!(unsafe { NetworkServerPage::deliver_at(address, 1, 2, 7, bind_request(2)) });
+    }
+
+    #[test]
+    fn network_server_preserves_caller_identity() {
+        let request = bind_request(1);
+        let mut page = NetworkServerPage::new(1, 2);
+        let address = (&mut page as *mut NetworkServerPage) as u64;
+        assert!(unsafe {
+            NetworkServerPage::deliver_at(address, 1, 2, 0x1234_5678_9abc_def0, request)
+        });
+        let message = unsafe { NetworkServerPage::take_at(address, 1, 2) }.unwrap();
+        assert_eq!(message.caller, 0x1234_5678_9abc_def0);
+        assert_eq!(message.request, request);
+    }
+
+    #[test]
+    fn network_server_reply_rejects_invalid_reply_identity() {
+        let request = bind_request(1);
+        let mut page = NetworkServerPage::new(1, 2);
+        let address = (&mut page as *mut NetworkServerPage) as u64;
+        assert!(unsafe { NetworkServerPage::deliver_at(address, 1, 2, 7, request) });
+        assert!(unsafe { NetworkServerPage::take_at(address, 1, 2) }.is_some());
+        assert!(!unsafe {
+            NetworkServerPage::reply_at(address, 1, 2, bind_reply(bind_request(2)))
+        });
+        assert!(unsafe { NetworkServerPage::reply_at(address, 1, 2, bind_reply(request)) });
+    }
+
+    #[test]
+    fn network_server_finish_requires_exact_request_id() {
+        let request = bind_request(1);
+        let mut page = NetworkServerPage::new(1, 2);
+        let address = (&mut page as *mut NetworkServerPage) as u64;
+        assert!(unsafe { NetworkServerPage::deliver_at(address, 1, 2, 7, request) });
+        assert!(unsafe { NetworkServerPage::take_at(address, 1, 2) }.is_some());
+        let reply = bind_reply(request);
+        assert!(unsafe { NetworkServerPage::reply_at(address, 1, 2, reply) });
+        assert!(unsafe { NetworkServerPage::finish_at(address, 1, 2, 2) }.is_none());
+        assert_eq!(unsafe { NetworkServerPage::finish_at(address, 1, 2, request.id) }, Some(reply));
+    }
+
+    #[test]
+    fn network_server_reset_clears_previous_transaction() {
+        let mut page = NetworkServerPage::new(1, 2);
+        let address = (&mut page as *mut NetworkServerPage) as u64;
+        assert!(unsafe { NetworkServerPage::deliver_at(address, 1, 2, 7, bind_request(1)) });
+        assert!(unsafe { NetworkServerPage::reset_at(address, 1, 2) });
+        assert!(unsafe { NetworkServerPage::deliver_at(address, 1, 2, 7, bind_request(2)) });
+        assert_eq!(unsafe { NetworkServerPage::take_at(address, 1, 2) }.unwrap().id, 2);
+    }
+
+    #[test]
+    fn network_client_cancel_and_timeout_replies_are_typed() {
+        let mut page = NetworkClientPage::new(1, 2);
+        let address = (&mut page as *mut NetworkClientPage) as u64;
+        for (id, status) in
+            [(1, logos_abi::NetworkStatus::Cancelled), (2, logos_abi::NetworkStatus::TimedOut)]
+        {
+            let request = bind_request(id);
+            let reply = error_reply(request, status);
+            assert!(unsafe { NetworkClientPage::request_at(address, 1, 2, request) });
+            assert!(unsafe { NetworkClientPage::reply_request_at(address, 1, 2, reply) });
+            assert_eq!(unsafe { NetworkClientPage::finish_at(address, 1, 2, id) }, Some(reply));
+        }
     }
 
     #[test]
