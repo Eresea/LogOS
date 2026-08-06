@@ -195,7 +195,7 @@ pub struct NetworkEndpoint {
     context_physical: u64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct NetworkClientEndpoint {
     page_physical: u64,
     service_generation: u32,
@@ -203,6 +203,27 @@ pub struct NetworkClientEndpoint {
 }
 
 impl NetworkClientEndpoint {
+    pub fn configure_transfer(self, handle: logos_abi::PageHandle) -> bool {
+        unsafe {
+            logos_core::native_service::NetworkClientPage::configure_transfer_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                handle,
+            )
+        }
+    }
+
+    pub fn transfer_page(self) -> Option<logos_abi::PageHandle> {
+        unsafe {
+            logos_core::native_service::NetworkClientPage::transfer_page_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
+        }
+    }
+
     pub fn issue(self, request: logos_abi::NetworkRequest) -> bool {
         unsafe {
             logos_core::native_service::NetworkClientPage::request_at(
@@ -245,6 +266,17 @@ impl NetworkClientEndpoint {
         }
     }
 
+    pub fn reply_request(self, reply: logos_abi::NetworkReply) -> bool {
+        unsafe {
+            logos_core::native_service::NetworkClientPage::reply_request_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                reply,
+            )
+        }
+    }
+
     pub fn response(self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
         unsafe {
             logos_core::native_service::NetworkClientPage::finish_at(
@@ -257,7 +289,7 @@ impl NetworkClientEndpoint {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct NetworkServerEndpoint {
     context_physical: u64,
     page_physical: u64,
