@@ -54,6 +54,13 @@ Deferred Core candidates: APIC/HPET timing, MSI/MSI-X, SMP and per-CPU state, ar
 - AI agents as trusted kernel actors; full real-hardware coverage before QEMU contracts stabilize.
 - Unmeasured preemption, a monolithic shell, or thematic names that erase subsystem boundaries.
 
+## ABI v4 freeze rule
+
+After ABI v4 stabilization, one bounded Network-client migration, and one bounded Remote
+migration, ABI v4 structure is frozen. Further work returns to capability development: Remote
+verification when the hardware proof environment is available, otherwise Safe System Artifacts /
+Persistence v2. Any exception requires a new ADR and an explicit compatibility milestone.
+
 ## Maintenance
 
 Update the active milestone and exit criteria when implementation changes understanding. Update [Architecture](architecture.md) when ownership moves, [Naming](NAMING.md) when subsystem vocabulary changes, and add an [ADR](adr/README.md) for irreversible or cross-ring decisions. Preserve completed criteria as evidence; never rewrite past scope to disguise incomplete work.

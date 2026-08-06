@@ -25,8 +25,8 @@ page loans, and reclamation; a service receives only the endpoint set declared b
 `platform::services::ServiceSpec`.
 The control page is implicit; `ServiceSpec::endpoints` is the single map for additional Input,
 Display, Session, Store, Block, Network device/event, and Remote pages. `ControlPage` carries only
-lifecycle and notification state for Network; device payloads, event payloads, deadlines, and DMA
-handles live in the typed Network pages.
+lifecycle and notification state for Network and Remote; device payloads, event payloads, deadlines,
+DMA handles, and remote request/reply scalars live in typed endpoint pages.
 
 Input transitions `Ready -> Waiting -> Reply -> Ready`; Display transitions `Ready -> Request ->
 Complete -> Ready`. Core and services validate scalar state and generation on every transition. Native
@@ -55,6 +55,14 @@ cell. Access is restricted to raw pointers under the bootstrap single-CPU invari
 shared with interrupt paths uses atomics. SMP requires replacing these cells with per-CPU state.
 
 The ring model is architectural, not a direct representation of CPU privilege levels.
+
+Cargo package edges are checked against this inward ring direction by
+`scripts/arch-deps.py --check`; boot and test assembly exceptions are listed in
+that checker rather than becoming implicit imports.
+
+ABI v4 keeps endpoint ownership in the canonical service `EndpointSet`; task mapping consumes
+that set directly. Remote transport pages are isolated in the Remote protocol module, and proof
+state is owned by the test-hook proof module rather than the platform composition root.
 
 ## 2. Ring model
 

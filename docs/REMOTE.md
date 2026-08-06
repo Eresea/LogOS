@@ -1,6 +1,7 @@
 # Remote
 
-> **Status:** Remote Foundation v1 implementation complete; QEMU verification is the remaining gate
+> **Status:** Remote Foundation v1 implementation complete; fixed-seed QEMU reaches the registered
+> fixtures, while Network-client and Remote migration failures remain deferred to their bounded cycles
 
 ## Goal
 
@@ -54,11 +55,12 @@ client can reconnect and invoke the existing typed `ping` command.
   `invoke` consumes the enrollment descriptor rather than a hard-coded generation.
 - [x] Local command ABI recognizes `remote-key`, `enroll <64-hex-key>`, and `unenroll`; the
   machine key is available when the firmware root is present.
-- [ ] QEMU restart, corruption, and typed-invocation proofs (run the registered `remote/*` IDs when
-  QEMU and OVMF are available).
+- [ ] QEMU restart, corruption, and typed-invocation proofs (the fixed-seed run currently stops at
+  Gateway startup until the bounded Network-client and Remote migrations land).
 
 The remote proof IDs are registered in `logos-test`; the current host run reaches the registered
-proofs but reports QEMU/peer availability timeouts, so they remain an explicit verification gate.
+proofs but reports the expected Gateway/peer availability timeout at the current migration boundary,
+so they remain explicit verification work rather than environment-gated work.
 UEFI builds use target-scoped Fiat Curve25519 and software ChaCha20/Poly1305 backends so the full
 payload set builds consistently on the supported host toolchains.
 

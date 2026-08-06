@@ -35,7 +35,7 @@ page even when physical page allocation reuses the same address.
 - The native task handle carries the typed page address and generation; the control address remains
   available for lifecycle and non-migrated protocols.
 - Session and Effect now follow the same page ownership pattern in ADR-0022; Store and Block follow
-  the persistence-specific ownership pattern in ADR-0023. Network and Remote remain outside those
-  migrations.
+  the persistence-specific ownership pattern in ADR-0023. Network and Remote now use the same
+  generation-safe typed-page pattern; ABI v4 has no remaining legacy Remote transport.
 - Later endpoint migrations should copy this concrete pattern: a fixed page, scalar validation,
   generation check, deterministic reset, and ownership through `AddressSpace::release`.

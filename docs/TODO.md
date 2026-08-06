@@ -17,12 +17,11 @@
       ADR-0020 and consumed by payload staging, supervisor planning, and service lookup.
 - [x] The QEMU harness uses suite-selected runners rather than root-level scenario-ID branches.
 
-## 2. Current milestone: Remote Foundation v1
+## 2. Current milestone: ABI v4 stabilization and migration closeout
 
-Network v1 is complete. Remote Foundation v1 is tracked in [REMOTE.md](REMOTE.md); its Gateway,
-Sessions, protected-state, and typed remote-gate implementation is present. The registered remote
-proofs remain permanent regression contracts and need a QEMU/OVMF run whenever the environment
-provides those tools.
+Network v1 and the Remote Foundation implementation are complete. ABI v4 restructuring is closed
+for the bounded migration sequence. The registered proof IDs remain permanent regression contracts;
+the fixed-seed QEMU run records completed-layer passes and migration-deferred failures.
 
 1. [x] Define the minimal versioned Input, Display, and Session capability contracts required by
    `logos-terminal`.
@@ -32,6 +31,31 @@ provides those tools.
 4. [x] Prove Terminal and Sessions failure, restart, capability denial, and recovery handoff in
    the supported QEMU harness when available.
 5. Keep the recovery console kernel-owned while Remote Foundation advances.
+
+### Resolved Phase 3 Network typed-page gap
+
+- [x] Replace the legacy Network-client page boundary with scalar-validated, generation-safe typed
+      Network pages and restore the canonical service mapping; the client relay remains deferred.
+
+### Phase 5 cleanup
+
+- [x] Move proof state semantics out of the platform composition root.
+- [x] Split QEMU catalogs and suite runner policy by suite.
+- [x] Use the canonical service endpoint set directly for page mapping.
+- [x] Split the Remote ABI protocol into `service/remote.rs`.
+- [x] Privatize Network and Remote runtime state behind accessors.
+- [x] Enforce inward package-ring imports in `scripts/arch-deps.py`.
+- [x] Reconcile milestone records with the fixed-seed QEMU evidence and deferred migration IDs.
+
+### Next bounded cycles
+
+- [x] Stabilization cycle: validate and repair the completed typed layers against the main suite;
+      fixed-fixture QEMU run records 43 passed, 12 migration-deferred, and 28 skipped.
+- [ ] **Next: Network-client cycle:** complete one bounded client transport migration.
+- [ ] Remote cycle: complete one bounded Remote transport migration after Network-client completion.
+- [x] Stop restructuring ABI v4 after those cycles; require a new ADR for any exception.
+- [ ] Resume capability development: complete Remote verification or begin Safe System
+      Artifacts / Persistence v2.
 
 ## 3. Documentation debt
 
