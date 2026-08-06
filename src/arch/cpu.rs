@@ -320,20 +320,18 @@ extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
         return 2;
     }
     if context != 0
-        && (unsafe { logos_core::native_service::ControlPage::network_at(context) }.is_some()
-            || unsafe {
-                logos_core::native_service::ControlPage::network_reply_pending_at(context)
-            }
-            || unsafe {
-                logos_core::native_service::ControlPage::network_device_pending_at(context)
-                    || logos_core::native_service::ControlPage::network_event_pending_at(context)
-            })
+        && (unsafe {
+            logos_core::native_service::ControlPage::network_client_pending_at(context)
+                || logos_core::native_service::ControlPage::network_server_pending_at(context)
+                || logos_core::native_service::ControlPage::network_device_pending_at(context)
+                || logos_core::native_service::ControlPage::network_event_pending_at(context)
+        })
         && save_user_frame(frame, true, false)
     {
         return 2;
     }
     if context != 0
-        && unsafe { logos_core::native_service::ControlPage::remote_gate_at(context) }.is_some()
+        && unsafe { logos_core::native_service::ControlPage::remote_pending_at(context) }
         && save_user_frame(frame, true, false)
     {
         return 2;

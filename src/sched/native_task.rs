@@ -1,3 +1,4 @@
+use crate::platform::services::EndpointSet;
 use crate::{
     arch::cpu::{EntryState, Privilege},
     mm::{address_space::AddressSpace, memory::PhysicalMemory},
@@ -7,39 +8,7 @@ use crate::{
 
 const TASKS: usize = 5;
 
-#[derive(Clone, Copy, Default)]
-pub struct EndpointPages {
-    pub input: bool,
-    pub display: bool,
-    pub session_client: bool,
-    pub session_server: bool,
-    pub effect: bool,
-    pub store_client: bool,
-    pub store_server: bool,
-    pub block_client: bool,
-    pub network_device: bool,
-    pub network_event: bool,
-}
-
-impl EndpointPages {
-    pub const NONE: Self = Self {
-        input: false,
-        display: false,
-        session_client: false,
-        session_server: false,
-        effect: false,
-        store_client: false,
-        store_server: false,
-        block_client: false,
-        network_device: false,
-        network_event: false,
-    };
-    pub const TERMINAL: Self =
-        Self { input: true, display: true, session_client: true, store_client: true, ..Self::NONE };
-    pub const SESSIONS: Self = Self { session_server: true, effect: true, ..Self::NONE };
-    pub const STORAGE: Self = Self { store_server: true, block_client: true, ..Self::NONE };
-    pub const NETWORK: Self = Self { network_device: true, network_event: true, ..Self::NONE };
-}
+pub type EndpointPages = EndpointSet;
 
 pub struct Task<'a> {
     privilege: &'a Privilege,
@@ -56,8 +25,11 @@ pub struct Task<'a> {
     store_client_page_physical: Option<u64>,
     store_server_page_physical: Option<u64>,
     block_client_page_physical: Option<u64>,
+    remote_page_physical: Option<u64>,
     network_device_page_physical: Option<u64>,
     network_event_page_physical: Option<u64>,
+    network_client_page_physical: Option<u64>,
+    network_server_page_physical: Option<u64>,
     endpoint_pages: EndpointPages,
     generation: u32,
     started: bool,
@@ -224,19 +196,139 @@ pub struct NetworkEndpoint {
 }
 
 #[derive(Clone, Copy)]
-pub struct RemoteEndpoint {
+pub struct NetworkClientEndpoint {
+    page_physical: u64,
+    service_generation: u32,
+    endpoint_generation: u32,
+}
+
+impl NetworkClientEndpoint {
+    pub fn issue(self, request: logos_abi::NetworkRequest) -> bool {
+        unsafe {
+            logos_core::native_service::NetworkClientPage::request_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                request,
+            )
+        }
+    }
+
+    pub fn request(self) -> Option<logos_abi::NetworkRequest> {
+        unsafe {
+            logos_core::native_service::NetworkClientPage::request_at_page(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
+        }
+    }
+
+    pub fn mark_processing(self) -> bool {
+        unsafe {
+            logos_core::native_service::NetworkClientPage::mark_processing_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
+        }
+    }
+
+    pub fn reply(self, reply: logos_abi::NetworkReply) -> bool {
+        unsafe {
+            logos_core::native_service::NetworkClientPage::reply_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                reply,
+            )
+        }
+    }
+
+    pub fn response(self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
+        unsafe {
+            logos_core::native_service::NetworkClientPage::finish_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                expected_id,
+            )
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct NetworkServerEndpoint {
     context_physical: u64,
+    page_physical: u64,
+    service_generation: u32,
+    endpoint_generation: u32,
+}
+
+impl NetworkServerEndpoint {
+    pub fn deliver(self, caller: u64, request: logos_abi::NetworkRequest) -> bool {
+        (unsafe {
+            logos_core::native_service::NetworkServerPage::deliver_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                caller,
+                request,
+            )
+        }) && unsafe {
+            logos_abi::service::ControlPage::notify_at(
+                self.context_physical,
+                logos_abi::service::NETWORK_REQUEST,
+            )
+        }
+    }
+
+    pub fn response(self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
+        unsafe {
+            logos_core::native_service::NetworkServerPage::finish_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                expected_id,
+            )
+        }
+    }
+
+    pub fn reset(self) -> bool {
+        unsafe {
+            logos_core::native_service::NetworkServerPage::reset_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct RemoteEndpoint {
+    page_physical: u64,
+    service_generation: u32,
+    endpoint_generation: u32,
 }
 
 impl RemoteEndpoint {
-    pub fn request(self) -> Option<logos_core::native_service::RemoteGateRequest> {
-        unsafe { logos_core::native_service::ControlPage::remote_gate_at(self.context_physical) }
+    pub fn request(self) -> Option<logos_core::native_service::RemotePageRequest> {
+        unsafe {
+            logos_core::native_service::RemotePage::take_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
+        }
     }
 
-    pub fn reply(self, reply: logos_core::native_service::RemoteGateReply) -> bool {
+    pub fn reply(self, reply: logos_core::native_service::RemotePageReply) -> bool {
         unsafe {
-            logos_core::native_service::ControlPage::reply_remote_gate_at(
-                self.context_physical,
+            logos_core::native_service::RemotePage::reply_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
                 reply,
             )
         }
@@ -636,81 +728,6 @@ impl NetworkEndpoint {
     pub const fn context(self) -> u64 {
         self.context_physical
     }
-
-    pub fn dma_pages(self) -> Option<logos_core::native_service::NetworkDmaResources> {
-        let raw = unsafe {
-            (self.context_physical as *const logos_core::native_service::ControlPage)
-                .read_volatile()
-        };
-        let page = raw.network_device_page;
-        if page == 0 || raw.generation == 0 {
-            return None;
-        }
-        let device = unsafe {
-            (page as *const logos_core::native_service::NetworkDevicePage).read_volatile()
-        };
-        let (rx_handle, tx_handle) = unsafe {
-            logos_core::native_service::NetworkDevicePage::dma_at(
-                page,
-                raw.generation,
-                raw.generation,
-                device.device_generation,
-            )?
-        };
-        Some(logos_core::native_service::NetworkDmaResources {
-            rx_handle,
-            rx_address: self.context_physical.checked_sub(19 * logos_abi::PAGE_SIZE as u64)?,
-            tx_handle,
-            tx_address: self.context_physical.checked_sub(20 * logos_abi::PAGE_SIZE as u64)?,
-        })
-    }
-
-    pub fn request(self) -> Option<logos_abi::NetworkRequest> {
-        unsafe { logos_core::native_service::ControlPage::network_at(self.context_physical) }
-    }
-
-    pub fn deliver(self, request: logos_abi::NetworkRequest) -> bool {
-        unsafe {
-            logos_core::native_service::ControlPage::deliver_network_at(
-                self.context_physical,
-                request,
-            )
-        }
-    }
-
-    pub fn deliver_for_owner(self, request: logos_abi::NetworkRequest, owner: u64) -> bool {
-        unsafe {
-            logos_abi::service::ControlPage::deliver_network_for_owner_at(
-                self.context_physical,
-                request,
-                owner,
-            )
-        }
-    }
-
-    pub fn reply(self, reply: logos_abi::NetworkReply) -> bool {
-        unsafe {
-            logos_core::native_service::ControlPage::reply_network_at(self.context_physical, reply)
-        }
-    }
-
-    pub fn response(self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
-        unsafe {
-            logos_core::native_service::ControlPage::network_reply_at(
-                self.context_physical,
-                expected_id,
-            )
-        }
-    }
-
-    pub fn take_response(self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
-        unsafe {
-            logos_core::native_service::ControlPage::take_network_reply_at(
-                self.context_physical,
-                expected_id,
-            )
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -760,6 +777,46 @@ impl NetworkDeviceEndpoint {
                 self.service_generation,
                 self.endpoint_generation,
                 self.device_generation,
+            )
+        })?
+    }
+
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    pub fn issue(self, request: logos_abi::NetworkDeviceRequest) -> bool {
+        if !self.available() {
+            return false;
+        }
+        let page = self.page_physical as *const logos_abi::service::NetworkDevicePage;
+        let page = unsafe { page.read_volatile() };
+        if page.service_generation != self.service_generation
+            || page.endpoint_generation != self.endpoint_generation
+            || page.device_generation != self.device_generation
+        {
+            return false;
+        }
+        if page.state != 1 {
+            return false;
+        }
+        unsafe {
+            logos_abi::service::NetworkDevicePage::request_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                self.device_generation,
+                request,
+            )
+        }
+    }
+
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    pub fn response(self, expected_id: u32) -> Option<logos_abi::NetworkDeviceReply> {
+        self.available().then(|| unsafe {
+            logos_abi::service::NetworkDevicePage::take_reply_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                self.device_generation,
+                expected_id,
             )
         })?
     }
@@ -973,16 +1030,19 @@ impl<'a> Task<'a> {
         };
         let Some(mapping) = space.map_context(
             memory,
-            endpoint_pages.input,
-            endpoint_pages.display,
-            endpoint_pages.session_client,
-            endpoint_pages.session_server,
-            endpoint_pages.effect,
-            endpoint_pages.store_client,
-            endpoint_pages.store_server,
-            endpoint_pages.block_client,
-            endpoint_pages.network_device,
-            endpoint_pages.network_event,
+            endpoint_pages.contains(EndpointSet::INPUT),
+            endpoint_pages.contains(EndpointSet::DISPLAY),
+            endpoint_pages.contains(EndpointSet::SESSION_CLIENT),
+            endpoint_pages.contains(EndpointSet::SESSION_SERVER),
+            endpoint_pages.contains(EndpointSet::EFFECT),
+            endpoint_pages.contains(EndpointSet::STORE_CLIENT),
+            endpoint_pages.contains(EndpointSet::STORE_SERVER),
+            endpoint_pages.contains(EndpointSet::BLOCK_CLIENT),
+            endpoint_pages.contains(EndpointSet::REMOTE),
+            endpoint_pages.contains(EndpointSet::NETWORK_CLIENT),
+            endpoint_pages.contains(EndpointSet::NETWORK_SERVER),
+            endpoint_pages.contains(EndpointSet::NETWORK_DEVICE),
+            endpoint_pages.contains(EndpointSet::NETWORK_EVENT),
         ) else {
             let _ = space.release(memory);
             return None;
@@ -1003,6 +1063,9 @@ impl<'a> Task<'a> {
             store_client_page_physical: mapping.store_client.map(|(physical, _)| physical),
             store_server_page_physical: mapping.store_server.map(|(physical, _)| physical),
             block_client_page_physical: mapping.block_client.map(|(physical, _)| physical),
+            remote_page_physical: mapping.remote.map(|(physical, _)| physical),
+            network_client_page_physical: mapping.network_client.map(|(physical, _)| physical),
+            network_server_page_physical: mapping.network_server.map(|(physical, _)| physical),
             network_device_page_physical: mapping.network_device.map(|(physical, _)| physical),
             network_event_page_physical: mapping.network_event.map(|(physical, _)| physical),
             endpoint_pages,
@@ -1130,9 +1193,34 @@ impl<'a> Task<'a> {
                 return false;
             }
         }
+        if let Some(page) = self.remote_page_physical {
+            if !unsafe {
+                logos_core::native_service::RemotePage::reset_at(page, generation, generation)
+            } {
+                return false;
+            }
+        }
         if let Some(page) = self.network_device_page_physical {
             if !unsafe {
                 logos_core::native_service::NetworkDevicePage::reset_generation_at(
+                    page, generation, generation,
+                )
+            } {
+                return false;
+            }
+        }
+        if let Some(page) = self.network_client_page_physical {
+            if !unsafe {
+                logos_core::native_service::NetworkClientPage::reset_at(
+                    page, generation, generation,
+                )
+            } {
+                return false;
+            }
+        }
+        if let Some(page) = self.network_server_page_physical {
+            if !unsafe {
+                logos_core::native_service::NetworkServerPage::reset_at(
                     page, generation, generation,
                 )
             } {
@@ -1192,6 +1280,23 @@ impl<'a> Task<'a> {
         NetworkEndpoint { context_physical: self.context_physical }
     }
 
+    pub fn network_client_endpoint(&self) -> Option<NetworkClientEndpoint> {
+        self.network_client_page_physical.map(|page_physical| NetworkClientEndpoint {
+            page_physical,
+            service_generation: self.generation,
+            endpoint_generation: self.generation,
+        })
+    }
+
+    pub fn network_server_endpoint(&self) -> Option<NetworkServerEndpoint> {
+        self.network_server_page_physical.map(|page_physical| NetworkServerEndpoint {
+            context_physical: self.context_physical,
+            page_physical,
+            service_generation: self.generation,
+            endpoint_generation: self.generation,
+        })
+    }
+
     pub fn network_device_endpoint(&self, device_generation: u32) -> Option<NetworkDeviceEndpoint> {
         self.network_device_page_physical.map(|page_physical| NetworkDeviceEndpoint {
             page_physical,
@@ -1210,8 +1315,12 @@ impl<'a> Task<'a> {
         })
     }
 
-    pub const fn remote_endpoint(&self) -> RemoteEndpoint {
-        RemoteEndpoint { context_physical: self.context_physical }
+    pub fn remote_endpoint(&self) -> Option<RemoteEndpoint> {
+        self.remote_page_physical.map(|page_physical| RemoteEndpoint {
+            page_physical,
+            service_generation: self.generation,
+            endpoint_generation: self.generation,
+        })
     }
 
     pub fn map_shared_owned(&mut self, memory: &mut PhysicalMemory) -> Option<u64> {
@@ -1379,7 +1488,7 @@ impl<'a> Scheduler<'a> {
     }
 
     pub fn remote_endpoint(&self, handle: Handle) -> Option<RemoteEndpoint> {
-        Some(self.entry(handle)?.task.remote_endpoint())
+        self.entry(handle)?.task.remote_endpoint()
     }
 
     pub fn block_client_endpoint(&self, handle: Handle) -> Option<BlockClientEndpoint> {
@@ -1388,6 +1497,14 @@ impl<'a> Scheduler<'a> {
 
     pub fn network_endpoint(&self, handle: Handle) -> Option<NetworkEndpoint> {
         Some(self.entry(handle)?.task.network_endpoint())
+    }
+
+    pub fn network_client_endpoint(&self, handle: Handle) -> Option<NetworkClientEndpoint> {
+        self.entry(handle)?.task.network_client_endpoint()
+    }
+
+    pub fn network_server_endpoint(&self, handle: Handle) -> Option<NetworkServerEndpoint> {
+        self.entry(handle)?.task.network_server_endpoint()
     }
 
     pub fn network_device_endpoint(

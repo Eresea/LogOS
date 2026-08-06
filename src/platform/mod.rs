@@ -9,6 +9,8 @@ pub mod mode;
 pub mod network;
 pub mod payload;
 pub mod pe;
+#[cfg(feature = "test-hooks")]
+pub mod proofs;
 pub mod remote;
 pub mod root_key;
 pub mod runtime;

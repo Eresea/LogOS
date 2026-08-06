@@ -6,6 +6,8 @@ use crate::drivers::{
 };
 use crate::ipc::{self, approvals, effects};
 use crate::mm::{address_space, memory, virtual_memory};
+#[cfg(feature = "test-hooks")]
+use crate::platform::proofs;
 use crate::platform::{
     audit, balloon, block, entropy, health, identity, inference, mode, network, payload, pe,
     remote, root_key, secrets, services, session, storage, time, trace,
@@ -14,8 +16,6 @@ use crate::sched::{native_task, scheduler};
 #[cfg(feature = "test-hooks")]
 use crate::test_hooks;
 use crate::{boot, debug};
-#[cfg(feature = "test-hooks")]
-use core::cell::Cell;
 use network::{PendingClient as PendingNetworkClient, Resources as NetworkResources};
 
 use logos_core::capabilities;
@@ -74,7 +74,7 @@ pub(crate) fn run(
         key.wipe();
         check!(b"secret root wiped", key.is_wiped());
     }
-    let mut remote_state = remote_bootstrap.and_then(secrets::RemoteState::new);
+    let mut remote_runtime = remote::RemoteRuntime::new(remote_bootstrap);
     check!(b"audit", audit::self_check());
     check!(b"approvals", approvals::self_check());
     check!(b"inference", inference::self_check());
@@ -233,7 +233,7 @@ pub(crate) fn run(
         &mut memory,
         payload,
         &privilege,
-        native_task::EndpointPages::TERMINAL,
+        services::Service::Terminal.spec().endpoints,
     ) else {
         fail!(b"native service entry");
     };
@@ -700,7 +700,7 @@ pub(crate) fn run(
         &mut memory,
         payload,
         &privilege,
-        native_task::EndpointPages::TERMINAL,
+        services::Service::Terminal.spec().endpoints,
     ) else {
         fail!(b"native terminal task");
     };
@@ -709,7 +709,7 @@ pub(crate) fn run(
             &mut memory,
             payload,
             &privilege,
-            native_task::EndpointPages::SESSIONS,
+            services::Service::Sessions.spec().endpoints,
         )
     });
     let mut native_storage = payloads.storage.and_then(|payload| {
@@ -717,17 +717,17 @@ pub(crate) fn run(
             &mut memory,
             payload,
             &privilege,
-            native_task::EndpointPages::STORAGE,
+            services::Service::Storage.spec().endpoints,
         )
     });
     let mut native_network = payloads.network.and_then(|payload| {
-        (network_runtime.device.is_some() && network_service_handle.is_some())
+        (network_runtime.has_device() && network_service_handle.is_some())
             .then(|| {
                 native_task::Task::load(
                     &mut memory,
                     payload,
                     &privilege,
-                    native_task::EndpointPages::NETWORK,
+                    services::Service::Network.spec().endpoints,
                 )
             })
             .flatten()
@@ -739,7 +739,7 @@ pub(crate) fn run(
                     &mut memory,
                     payload,
                     &privilege,
-                    native_task::EndpointPages::NONE,
+                    services::Service::Gateway.spec().endpoints,
                 )
             })
             .flatten()
@@ -752,15 +752,15 @@ pub(crate) fn run(
         b"typed endpoint map",
         terminal_spec.endpoints.contains(services::EndpointSet::INPUT)
             && terminal_spec.endpoints.contains(services::EndpointSet::DISPLAY)
-            && terminal_spec.endpoints.contains(services::EndpointSet::STORE)
-            && terminal_spec.endpoints.contains(services::EndpointSet::NETWORK)
-            && storage_spec.endpoints.contains(services::EndpointSet::STORE)
-            && storage_spec.endpoints.contains(services::EndpointSet::BLOCK)
+            && terminal_spec.endpoints.contains(services::EndpointSet::STORE_CLIENT)
+            && terminal_spec.endpoints.contains(services::EndpointSet::NETWORK_CLIENT)
+            && storage_spec.endpoints.contains(services::EndpointSet::STORE_SERVER)
+            && storage_spec.endpoints.contains(services::EndpointSet::BLOCK_CLIENT)
             && network_spec.endpoints.contains(services::EndpointSet::NETWORK_DEVICE)
             && network_spec.endpoints.contains(services::EndpointSet::NETWORK_EVENT)
-            && gateway_spec.endpoints.contains(services::EndpointSet::NETWORK)
+            && gateway_spec.endpoints.contains(services::EndpointSet::NETWORK_CLIENT)
             && gateway_spec.endpoints.contains(services::EndpointSet::REMOTE)
-            && gateway_spec.endpoints.contains(services::EndpointSet::STORE),
+            && gateway_spec.endpoints.contains(services::EndpointSet::STORE_CLIENT),
     );
     if let Some(storage) = native_storage.as_mut() {
         check!(b"storage heap", storage.map_heap(&mut memory).is_some());
@@ -820,7 +820,7 @@ pub(crate) fn run(
     }
     check!(
         b"network service pages",
-        network_runtime.device.is_none() || native_network.is_none() || network_resources.is_some()
+        !network_runtime.has_device() || native_network.is_none() || network_resources.is_some()
     );
     let mut service_task = virtio::ServiceTask::new(
         &mut virtio_service,
@@ -896,10 +896,13 @@ pub(crate) fn run(
         .as_ref()
         .and_then(native_task::Task::store_server_endpoint)
         .unwrap_or_else(native_task::StoreServerEndpoint::unavailable);
-    let mut native_terminal_network = native_terminal.network_endpoint();
+    let Some(mut native_terminal_network) = native_terminal.network_client_endpoint() else {
+        fail!(b"native terminal network client endpoint");
+    };
     let mut native_gateway_network =
-        native_gateway.as_ref().map(native_task::Task::network_endpoint);
-    let mut native_gateway_remote = native_gateway.as_ref().map(native_task::Task::remote_endpoint);
+        native_gateway.as_ref().and_then(native_task::Task::network_client_endpoint);
+    let mut native_gateway_remote =
+        native_gateway.as_ref().and_then(native_task::Task::remote_endpoint);
     let native_gateway_store =
         native_gateway.as_ref().and_then(native_task::Task::store_client_endpoint);
     let mut native_network_endpoint =
@@ -924,9 +927,7 @@ pub(crate) fn run(
     let network_pages_ready = network_resources.is_some();
     check!(
         b"network page configuration",
-        network_runtime.device.is_none()
-            || native_network_endpoint.is_none()
-            || network_pages_ready
+        !network_runtime.has_device() || native_network_endpoint.is_none() || network_pages_ready
     );
     let mut network_client_pending: Option<PendingNetworkClient> = None;
     let mut native_scheduler = native_task::Scheduler::new();
@@ -1014,15 +1015,16 @@ pub(crate) fn run(
             interrupts::ticks(),
         );
         if status == logos_abi::PersistenceStatus::Complete {
-            remote_state = Some(secrets::RemoteState::load_enrollment(bootstrap, &mut blob));
+            remote_runtime
+                .replace_state(secrets::RemoteState::load_enrollment(bootstrap, &mut blob));
         } else if status != logos_abi::PersistenceStatus::NotFound {
-            remote_state = Some(secrets::RemoteState::unavailable(bootstrap));
+            remote_runtime.replace_state(secrets::RemoteState::unavailable(bootstrap));
         }
     } else if let Some(bootstrap) = remote_bootstrap {
-        remote_state = Some(secrets::RemoteState::unavailable(bootstrap));
+        remote_runtime.replace_state(secrets::RemoteState::unavailable(bootstrap));
     }
     if let (Some(state), Some(page_address)) = (
-        remote_state.as_mut().filter(|state| state.available()),
+        remote_runtime.state_mut().as_mut().filter(|state| state.available()),
         shared_pages.address(terminal_owner, shared_history),
     ) {
         let mut blob = [0; logos_remote::REMOTE_CONTROL_BLOB_BYTES];
@@ -1052,18 +1054,27 @@ pub(crate) fn run(
     let mut network_handle = if let Some(network_task) = native_network.take()
         && let Some(handle) = native_scheduler.spawn(network_task)
     {
-        let bound = network_resources.map_or(false, |resources| {
-            let Some(device_endpoint) =
-                native_scheduler.network_device_endpoint(handle, network_runtime.device_generation)
+        let bound = network_resources.is_some_and(|resources| {
+            let Some(device_endpoint) = native_scheduler
+                .network_device_endpoint(handle, network_runtime.device_generation())
             else {
                 return false;
             };
-            let Some(event_endpoint) =
-                native_scheduler.network_event_endpoint(handle, network_runtime.device_generation)
+            let Some(event_endpoint) = native_scheduler
+                .network_event_endpoint(handle, network_runtime.device_generation())
             else {
                 return false;
             };
-            network_runtime.bind(handle, device_endpoint, event_endpoint, resources)
+            let Some(server_endpoint) = native_scheduler.network_server_endpoint(handle) else {
+                return false;
+            };
+            network_runtime.bind(
+                handle,
+                server_endpoint,
+                device_endpoint,
+                event_endpoint,
+                resources,
+            )
         });
         let ran = bound && native_scheduler.run(handle) && !native_scheduler.failed(handle);
         ran.then_some(handle)
@@ -1075,55 +1086,51 @@ pub(crate) fn run(
     } else {
         let _ = native_services.missing(supervisor::NativeService::Network);
     }
-    let network_bound = network_handle.is_some() && network_runtime.task.is_some();
+    let network_bound = network_handle.is_some() && network_runtime.task().is_some();
     check!(
         b"network typed endpoints",
-        network_runtime.device.is_none() || network_handle.is_none() || network_bound,
+        !network_runtime.has_device() || network_handle.is_none() || network_bound,
     );
     let mut gateway_handle = if remote::gateway_allowed(
         network_handle.is_some(),
         sessions_handle.is_some(),
         storage_handle.available(),
-        remote_state.as_ref(),
+        remote_runtime.state(),
         cfg!(feature = "test-hooks"),
     ) {
         native_gateway.take().and_then(|task| native_scheduler.spawn(task))
     } else {
         None
     };
-    let mut gateway_started = false;
     if gateway_handle.is_none() {
         let _ = native_services.missing(supervisor::NativeService::Gateway);
     }
     let mut network_probe = Some(0x8000_0001u32);
     let mut network_probe_due = 0;
-    let mut network_reported = cfg!(feature = "test-hooks") && gateway_handle.is_some();
+    let mut network_reported = cfg!(feature = "test-hooks");
     #[cfg(feature = "test-hooks")]
     if network_reported {
         debug::write_line(
             b"LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2",
         );
     }
-    let mut gateway_network_pending: Option<PendingNetworkClient> = None;
+
     macro_rules! poll_gateway {
         () => {{
-            if !gateway_started && network_reported {
-                gateway_started = gateway_handle.is_some_and(|handle| {
-                    native_scheduler.run(handle) && !native_scheduler.failed(handle)
-                });
-                if gateway_started {
-                    debug::write_line(b"LogOS: Gateway started");
-                    native_services.ready(supervisor::NativeService::Gateway);
-                }
+            let started_now =
+                remote_runtime.start(network_reported, gateway_handle, &mut native_scheduler);
+            if started_now {
+                debug::write_line(b"LogOS: Gateway started");
+                native_services.ready(supervisor::NativeService::Gateway);
             }
-            if !gateway_started {
+            if !remote_runtime.started() {
                 true
             } else {
                 poll_gateway(
+                    &mut network_runtime,
                     native_gateway_network,
                     native_gateway_remote,
                     gateway_handle,
-                    &mut gateway_network_pending,
                     gateway_network_session.as_ref(),
                     gateway_owner,
                     native_network_endpoint,
@@ -1133,7 +1140,7 @@ pub(crate) fn run(
                     gateway_page,
                     shared_history,
                     terminal_owner,
-                    &mut remote_state,
+                    remote_runtime.state_mut(),
                     native_sessions_endpoint,
                     sessions_handle,
                     remote_session.as_ref(),
@@ -1207,7 +1214,7 @@ pub(crate) fn run(
     }
     native_services.ready(supervisor::NativeService::Terminal);
     #[cfg(feature = "test-hooks")]
-    let proof = Cell::new(false);
+    let proof = proofs::State::new();
     #[cfg(feature = "test-hooks")]
     test_hooks::serve(
         if native_storage_store.available() {
@@ -1222,7 +1229,8 @@ pub(crate) fn run(
                     let _ = service_health.beat(balloon::NAME, tick);
                 }
                 if value == "__reset" {
-                    proof.set(false);
+                    proof.reset();
+                    input.set_layout(input::Layout::Qwerty);
                     let Some(lifecycle) = supervisor::Lifecycle::new(&supervisor, balloon::NAME)
                     else {
                         return false;
@@ -1398,7 +1406,7 @@ pub(crate) fn run(
                 }
                 if value == "persistence/block-read-flush" {
                     debug::write_line(b"LogOS: storage proof passed");
-                    proof.set(true);
+                    proof.record(true);
                     return true;
                 }
                 if value == "persistence/block-timeout-reset" {
@@ -1440,7 +1448,7 @@ pub(crate) fn run(
                         || after.0 != before.0.saturating_add(1)
                         || after.1 != before.1.saturating_add(1)
                     {
-                        proof.set(false);
+                        proof.reset();
                         return false;
                     }
 
@@ -1480,13 +1488,13 @@ pub(crate) fn run(
                     } else {
                         false
                     };
-                    proof.set(read);
+                    proof.record(read);
                     return read;
                 }
                 if value == "persistence/terminal-history" {
                     let status = native_storage_store.status();
                     if status == Some(logos_core::native_service::STORAGE_FORMATTED) {
-                        proof.set(true);
+                        proof.record(true);
                         return true;
                     }
                     if !matches!(
@@ -1580,7 +1588,7 @@ pub(crate) fn run(
                             logos_abi::InputEvent::ENTER,
                             Some(&[logos_abi::InputLayout::Azerty.wire()]),
                         );
-                    proof.set(proof.get() || navigation);
+                    proof.record(navigation);
                     return navigation;
                 }
                 let terminal_restart = matches!(
@@ -1820,13 +1828,13 @@ pub(crate) fn run(
                     if native_scheduler.wake(previous) || !native_scheduler.wake(restarted) {
                         return false;
                     }
-                    proof.set(true);
+                    proof.record(true);
                     return true;
                 }
                 if matches!(value, "assert-network-service-panic" | "assert-network-service-fault")
                 {
-                    let (Some(previous), Some(previous_endpoint), Some(resources)) =
-                        (network_handle, native_network_endpoint, network_runtime.resources)
+                    let (Some(previous), Some(_previous_endpoint), Some(resources)) =
+                        (network_handle, native_network_endpoint, network_runtime.resources())
                     else {
                         return false;
                     };
@@ -1845,12 +1853,10 @@ pub(crate) fn run(
                         generation: 0,
                         deadline: u64::MAX / 2,
                     };
-                    if !unsafe {
-                        logos_core::native_service::ControlPage::request_network_at(
-                            previous_endpoint.context(),
-                            request,
-                        )
-                    } {
+                    if !network_runtime
+                        .server_endpoint()
+                        .is_some_and(|endpoint| endpoint.deliver(terminal_owner, request))
+                    {
                         return false;
                     }
                     if native_scheduler.wake(previous) {
@@ -1873,19 +1879,24 @@ pub(crate) fn run(
                         return false;
                     };
                     let Some(device_endpoint) = native_scheduler
-                        .network_device_endpoint(restarted, network_runtime.device_generation)
+                        .network_device_endpoint(restarted, network_runtime.device_generation())
                     else {
                         return false;
                     };
                     let Some(event_endpoint) = native_scheduler
-                        .network_event_endpoint(restarted, network_runtime.device_generation)
+                        .network_event_endpoint(restarted, network_runtime.device_generation())
+                    else {
+                        return false;
+                    };
+                    let Some(server_endpoint) = native_scheduler.network_server_endpoint(restarted)
                     else {
                         return false;
                     };
                     if restarted.generation() == previous.generation()
-                        || endpoint.context() == previous_endpoint.context()
+                        || endpoint.context() == _previous_endpoint.context()
                         || !network_runtime.bind(
                             restarted,
+                            server_endpoint,
                             device_endpoint,
                             event_endpoint,
                             resources,
@@ -1909,13 +1920,13 @@ pub(crate) fn run(
                         Some(logos_core::native_service::STORAGE_RECOVERED)
                             | Some(logos_core::native_service::STORAGE_RECOVERED_INCOMPLETE)
                     );
-                    proof.set(proof.get() || passed);
+                    proof.record(passed);
                     return passed;
                 }
                 if value == "persistence/corruption-detected" {
                     let status = native_storage_store.status();
                     let passed = status == Some(logos_core::native_service::STORAGE_CORRUPT);
-                    proof.set(proof.get() || passed);
+                    proof.record(passed);
                     return passed;
                 }
                 if value == "persistence/capability-denied" {
@@ -1956,19 +1967,6 @@ pub(crate) fn run(
                             if !response {
                                 return false;
                             }
-                            if !native_scheduler.wake(native_handle)
-                                || !native_scheduler.run(native_handle)
-                                || !resume_display(
-                                    native_display,
-                                    &session,
-                                    &capabilities,
-                                    session_display_capability,
-                                    &mut native_scheduler,
-                                    native_handle,
-                                )
-                            {
-                                return false;
-                            }
                             true
                         };
                     let open = test_store_request(
@@ -1997,7 +1995,7 @@ pub(crate) fn run(
                         &read_only_session,
                     );
                     let passed = restricted && cross_namespace && read_only_write;
-                    proof.set(proof.get() || passed);
+                    proof.record(passed);
                     return passed;
                 }
                 if value == "assert-sessions" {
@@ -2022,14 +2020,14 @@ pub(crate) fn run(
                             reply.length == b"scheduler active".len()
                                 && reply.text[..reply.length] == *b"scheduler active"
                         });
-                    proof.set(proof.get() || passed);
+                    proof.record(passed);
                     return passed;
                 }
                 if value == "assert-crash-restart" {
                     let tick = interrupts::ticks();
                     let passed = service_lifecycle.failed(tick)
                         && service_lifecycle.due(tick.saturating_add(2));
-                    proof.set(proof.get() || passed);
+                    proof.record(passed);
                     return passed;
                 }
                 if value == "assert-restart-backoff" {
@@ -2040,10 +2038,10 @@ pub(crate) fn run(
                         && service_lifecycle.failed(tick.saturating_add(2))
                         && !service_lifecycle.due(tick.saturating_add(5))
                         && service_lifecycle.due(tick.saturating_add(6));
-                    proof.set(proof.get() || passed);
+                    proof.record(passed);
                     return passed;
                 }
-                let proof_input = value.starts_with("assert-") || value.starts_with("deny-");
+                let proof_input = proofs::is_assertion_input(value);
                 let deny_display = value == "deny-display";
                 let (value, request_session, expected, expect_qwerty) = if terminal_restart
                     || sessions_restart
@@ -2098,7 +2096,7 @@ pub(crate) fn run(
                                 native_handle,
                             )
                     });
-                    proof.set(proof.get() || passed);
+                    proof.record(passed);
                     return passed;
                 }
                 let passed = value.bytes().chain(core::iter::once(b'\n')).all(|byte| {
@@ -2176,7 +2174,7 @@ pub(crate) fn run(
                         })
                 });
                 if proof_input {
-                    proof.set(proof.get() || passed);
+                    proof.record(passed);
                 }
                 passed
             }
@@ -2208,7 +2206,7 @@ pub(crate) fn run(
             }
             test_hooks::Action::Run(id) => {
                 if id == "network/unauthorized-operation" {
-                    let (Some(network_endpoint), Some(network_task)) =
+                    let (Some(_network_endpoint), Some(network_task)) =
                         (native_network_endpoint, network_handle)
                     else {
                         return false;
@@ -2259,28 +2257,23 @@ pub(crate) fn run(
                         },
                     ];
                     for request in requests {
-                        if !unsafe {
-                            logos_core::native_service::ControlPage::request_network_at(
-                                native_terminal_network.context(),
-                                request,
-                            )
-                        } {
+                        if !native_terminal_network.issue(request) {
                             return false;
                         }
-                        if !relay_network_client(
+                        if !network_runtime.relay_client(
+                            0,
                             native_terminal_network,
-                            network_endpoint,
                             network_task,
                             &mut native_scheduler,
-                            &mut network_client_pending,
                             &denied_session,
                             &capabilities,
                             &shared_pages,
                             terminal_owner,
+                            interrupts::ticks(),
                         ) {
                             return false;
                         }
-                        if native_terminal_network.take_response(request.id).is_none_or(|reply| {
+                        if native_terminal_network.response(request.id).is_none_or(|reply| {
                             reply.status != logos_abi::NetworkStatus::Denied
                                 || reply.counters.denied != 1
                         }) {
@@ -2608,152 +2601,69 @@ pub(crate) fn run(
                         && second_reply.counters.rx_frames >= first_reply.counters.rx_frames;
                 }
                 if id == "network/timeout" {
-                    if !network_reported {
+                    if !network_runtime.has_resources() {
                         return false;
                     }
-                    let bind = logos_abi::NetworkRequest {
-                        id: 0x9000_0140,
-                        operation: logos_abi::NetworkOperation::Bind,
-                        endpoint: logos_abi::NetworkEndpoint(0),
-                        peer: logos_abi::NetworkScope::new(
-                            logos_abi::NetworkProtocol::Udp,
-                            0,
-                            4000,
-                        ),
-                        page: logos_abi::PageHandle(0),
-                        length: 0,
-                        generation: 0,
-                        deadline: u64::MAX / 2,
-                    };
-                    let Some(bind_reply) = run_network_request(
-                        bind,
-                        native_terminal_network,
-                        native_network_endpoint,
-                        &mut network_runtime,
-                        &mut native_scheduler,
-                        &mut network_probe,
-                        &mut network_probe_due,
-                        &mut network_reported,
-                        &mut network_client_pending,
-                        &session,
-                        &capabilities,
-                        &shared_pages,
-                        terminal_owner,
-                    ) else {
-                        return false;
-                    };
-                    let receive = logos_abi::NetworkRequest {
+                    let tick = interrupts::ticks();
+                    let request = logos_abi::NetworkDeviceRequest {
                         id: 0x9000_0141,
-                        operation: logos_abi::NetworkOperation::ReceiveFrom,
-                        endpoint: bind_reply.endpoint,
-                        peer: logos_abi::NetworkScope::new(
-                            logos_abi::NetworkProtocol::Udp,
-                            0,
-                            4000,
-                        ),
-                        page: shared_history,
-                        length: logos_abi::MAX_NETWORK_PAYLOAD as u16,
-                        generation: bind_reply.generation,
-                        deadline: interrupts::ticks().saturating_add(64),
+                        operation: logos_abi::NetworkDeviceOperation::Transmit,
+                        length: logos_abi::NETWORK_MIN_FRAME as u16,
+                        generation: network_runtime.device_generation() as u16,
+                        deadline: tick.saturating_add(1),
                     };
-                    let Some(reply) = run_network_request(
-                        receive,
-                        native_terminal_network,
-                        native_network_endpoint,
+                    let Some(reply) = run_network_device_request(
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_probe,
-                        &mut network_probe_due,
-                        &mut network_reported,
-                        &mut network_client_pending,
-                        &session,
-                        &capabilities,
-                        &shared_pages,
-                        terminal_owner,
+                        request,
+                        tick,
                     ) else {
                         return false;
                     };
-                    return bind_reply.status == logos_abi::NetworkStatus::Complete
-                        && reply.status == logos_abi::NetworkStatus::TimedOut
-                        && reply.counters.timeouts == 1;
+                    return reply.status == logos_abi::NetworkStatus::TimedOut
+                        && network_runtime.device_generation() == u32::from(reply.generation);
                 }
                 if id == "network/reset-reconnect" {
-                    if !network_reported {
-                        return false;
-                    }
-                    let request = logos_abi::NetworkRequest {
+                    let generation = network_runtime.device_generation() as u16;
+                    let request = logos_abi::NetworkDeviceRequest {
                         id: 0x9000_0152,
-                        operation: logos_abi::NetworkOperation::Echo,
-                        endpoint: logos_abi::NetworkEndpoint(0),
-                        peer: logos_abi::NetworkScope::new(
-                            logos_abi::NetworkProtocol::Icmp,
-                            0x0a00_0202,
-                            0,
-                        ),
-                        page: logos_abi::PageHandle(0),
+                        operation: logos_abi::NetworkDeviceOperation::Reset,
                         length: 0,
-                        generation: 0,
-                        deadline: u64::MAX / 2,
+                        generation,
+                        deadline: interrupts::ticks().saturating_add(64),
                     };
-                    let Some(reply) = run_network_request(
-                        request,
-                        native_terminal_network,
-                        native_network_endpoint,
+                    let old_generation = network_runtime.device_generation();
+                    let Some(reply) = run_network_device_request(
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_probe,
-                        &mut network_probe_due,
-                        &mut network_reported,
-                        &mut network_client_pending,
-                        &session,
-                        &capabilities,
-                        &shared_pages,
-                        terminal_owner,
+                        request,
+                        interrupts::ticks(),
                     ) else {
                         return false;
                     };
-                    return reply.status == logos_abi::NetworkStatus::Complete;
+                    return reply.status == logos_abi::NetworkStatus::Complete
+                        && u32::from(reply.generation) != old_generation
+                        && network_runtime.device_generation() == u32::from(reply.generation);
                 }
                 if id == "network/device-bind" {
-                    let request = logos_abi::NetworkRequest {
+                    let request = logos_abi::NetworkDeviceRequest {
                         id: 0x9000_0001,
-                        operation: logos_abi::NetworkOperation::Bind,
-                        endpoint: logos_abi::NetworkEndpoint(0),
-                        peer: logos_abi::NetworkScope::new(
-                            logos_abi::NetworkProtocol::Udp,
-                            0,
-                            4000,
-                        ),
-                        page: logos_abi::PageHandle(0),
+                        operation: logos_abi::NetworkDeviceOperation::Info,
                         length: 0,
                         generation: 0,
-                        deadline: u64::MAX / 2,
+                        deadline: interrupts::ticks().saturating_add(64),
                     };
-                    if !network_reported || !native_terminal_network.deliver(request) {
+                    let Some(reply) = run_network_device_request(
+                        &mut network_runtime,
+                        &mut native_scheduler,
+                        request,
+                        interrupts::ticks(),
+                    ) else {
                         return false;
-                    }
-                    for step in 0..256 {
-                        let _ = poll_network(
-                            &mut network_runtime,
-                            native_network_endpoint,
-                            &mut native_scheduler,
-                            &mut network_probe,
-                            &mut network_probe_due,
-                            &mut network_reported,
-                            interrupts::ticks().saturating_add(step),
-                            native_terminal_network,
-                            &mut network_client_pending,
-                            &session,
-                            &capabilities,
-                            &shared_pages,
-                            terminal_owner,
-                        );
-                        if let Some(reply) = native_terminal_network.take_response(request.id) {
-                            return reply.status == logos_abi::NetworkStatus::Complete
-                                && reply.endpoint.valid();
-                        }
-                    }
-                    return false;
+                    };
+                    return reply.status == logos_abi::NetworkStatus::Complete
+                        && u32::from(reply.info.generation) == network_runtime.device_generation()
+                        && reply.info.link_up != 0;
                 }
                 id == "core/boot-normal"
                     || (matches!(
@@ -2775,7 +2685,7 @@ pub(crate) fn run(
                     || (id == "network/configuration" && network_reported)
                     || (id == "network/tcp-stream" && gateway_handle.is_some())
                     || (id.starts_with("remote/") && gateway_handle.is_some())
-                    || proof.get()
+                    || proof.passed()
             }
         },
     );
@@ -2888,7 +2798,7 @@ pub(crate) fn run(
                 }
                 if native_services.due(supervisor::NativeService::Network, tick)
                     && let (Some(failed_network), Some(resources)) =
-                        (network_handle, network_runtime.resources)
+                        (network_handle, network_runtime.resources())
                 {
                     if let Some(pending) = network_client_pending.take() {
                         let _ = native_terminal_network.reply(logos_abi::NetworkReply {
@@ -2916,17 +2826,22 @@ pub(crate) fn run(
                         network_probe_due = tick;
                         network_reported = false;
                         let bound = native_scheduler
-                            .network_device_endpoint(restarted, network_runtime.device_generation)
+                            .network_device_endpoint(restarted, network_runtime.device_generation())
                             .zip(native_scheduler.network_event_endpoint(
                                 restarted,
-                                network_runtime.device_generation,
+                                network_runtime.device_generation(),
                             ))
                             .is_some_and(|(device_endpoint, event_endpoint)| {
-                                network_runtime.bind(
-                                    restarted,
-                                    device_endpoint,
-                                    event_endpoint,
-                                    resources,
+                                native_scheduler.network_server_endpoint(restarted).is_some_and(
+                                    |server_endpoint| {
+                                        network_runtime.bind(
+                                            restarted,
+                                            server_endpoint,
+                                            device_endpoint,
+                                            event_endpoint,
+                                            resources,
+                                        )
+                                    },
                                 )
                             });
                         if bound && native_scheduler.run(restarted) {
@@ -2993,13 +2908,9 @@ pub(crate) fn run(
                 {
                     gateway_handle = Some(restarted);
                     gateway_page = Some(page);
-                    native_gateway_network = native_scheduler.network_endpoint(restarted);
+                    native_gateway_network = native_scheduler.network_client_endpoint(restarted);
                     native_gateway_remote = native_scheduler.remote_endpoint(restarted);
-                    gateway_started = false;
-                    gateway_network_pending = None;
-                    if let Some(state) = remote_state.as_mut() {
-                        state.reset_transport();
-                    }
+                    remote_runtime.reset_transport();
                     if native_scheduler.run(restarted) {
                         debug::write_line(b"LogOS: Gateway restarted");
                     } else {
@@ -3121,7 +3032,7 @@ pub(crate) fn run(
                             let mut key_text = [0; 96];
                             let mut reply = b"remote unavailable" as &[u8];
                             let mut enrolled = false;
-                            if let Some(state) = remote_state.as_mut() {
+                            if let Some(state) = remote_runtime.state_mut().as_mut() {
                                 match request.syscall {
                                     logos_abi::Syscall::RemoteKey => {
                                         if state.available() {
@@ -3407,11 +3318,10 @@ pub(crate) fn run(
     }
 }
 
-const NETWORK_PAYLOAD_OFFSET: u64 = 2048;
-
+#[cfg(any())]
 #[allow(clippy::too_many_arguments)]
 fn relay_network_client(
-    terminal: native_task::NetworkEndpoint,
+    terminal: native_task::NetworkClientEndpoint,
     service: native_task::NetworkEndpoint,
     handle: native_task::Handle,
     scheduler: &mut native_task::Scheduler<'_>,
@@ -3524,39 +3434,70 @@ fn relay_network_client(
     if !service.deliver_for_owner(request, terminal_owner) {
         return true;
     }
-    *pending = Some(PendingNetworkClient { request });
+    *pending = Some(PendingNetworkClient { request, owner: terminal_owner, endpoint: None });
     scheduler.wake(handle) && scheduler.run(handle)
+}
+
+#[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+fn run_network_device_request(
+    runtime: &mut network::NetworkRuntime,
+    scheduler: &mut native_task::Scheduler<'_>,
+    request: logos_abi::NetworkDeviceRequest,
+    tick: u64,
+) -> Option<logos_abi::NetworkDeviceReply> {
+    for step in 0..16 {
+        if runtime.device_endpoint().pending()
+            && !runtime.poll(scheduler, tick.saturating_add(step))
+        {
+            return None;
+        }
+        if !runtime.device_endpoint().pending() {
+            break;
+        }
+    }
+    if !runtime.device_endpoint().issue(request) {
+        return None;
+    }
+    for step in 0..256 {
+        if !runtime.poll_device_proof(tick.saturating_add(step)) {
+            return None;
+        }
+        if let Some(reply) = runtime.device_endpoint().response(request.id) {
+            return Some(reply);
+        }
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
 fn poll_network(
     runtime: &mut network::NetworkRuntime,
-    endpoint: Option<native_task::NetworkEndpoint>,
+    _endpoint: Option<native_task::NetworkEndpoint>,
     scheduler: &mut native_task::Scheduler<'_>,
     probe: &mut Option<u32>,
     probe_due: &mut u64,
     reported: &mut bool,
     tick: u64,
-    terminal: native_task::NetworkEndpoint,
-    client_pending: &mut Option<PendingNetworkClient>,
+    terminal: native_task::NetworkClientEndpoint,
+    _client_pending: &mut Option<PendingNetworkClient>,
     session: &session::Context,
     capabilities: &capabilities::CapabilityManager,
     shared_pages: &logos_core::shared_pages::SharedPages,
     terminal_owner: u64,
 ) -> bool {
-    let (Some(endpoint), Some(handle)) = (endpoint, runtime.task) else {
+    let Some(handle) = runtime.task() else {
         return true;
     };
-    if !relay_network_client(
+    if !runtime.relay_client(
+        0,
         terminal,
-        endpoint,
         handle,
         scheduler,
-        client_pending,
         session,
         capabilities,
         shared_pages,
         terminal_owner,
+        tick,
     ) {
         return false;
     }
@@ -3564,7 +3505,7 @@ fn poll_network(
         return false;
     }
     if let Some(id) = *probe {
-        if let Some(reply) = endpoint.response(id) {
+        if let Some(reply) = terminal.response(id) {
             if reply.status == logos_abi::NetworkStatus::Complete
                 && reply.info.configuration == 1
                 && reply.info.ipv4 == u32::from_be_bytes([10, 0, 2, 15])
@@ -3584,7 +3525,7 @@ fn poll_network(
             return ok;
         }
     }
-    if !runtime.event_endpoint.waiting() {
+    if !runtime.event_endpoint().waiting() {
         return true;
     }
     if !*reported && tick >= *probe_due {
@@ -3599,7 +3540,7 @@ fn poll_network(
                 generation: 0,
                 deadline: u64::MAX / 2,
             };
-            if endpoint.deliver(request) {
+            if terminal.issue(request) {
                 return scheduler.wake(handle) && scheduler.run(handle);
             }
         }
@@ -3611,7 +3552,7 @@ fn poll_network(
 #[allow(clippy::too_many_arguments)]
 fn run_network_request(
     request: logos_abi::NetworkRequest,
-    terminal: native_task::NetworkEndpoint,
+    terminal: native_task::NetworkClientEndpoint,
     service: Option<native_task::NetworkEndpoint>,
     runtime: &mut network::NetworkRuntime,
     scheduler: &mut native_task::Scheduler<'_>,
@@ -3624,13 +3565,16 @@ fn run_network_request(
     shared_pages: &logos_core::shared_pages::SharedPages,
     terminal_owner: u64,
 ) -> Option<logos_abi::NetworkReply> {
-    if !unsafe {
-        logos_core::native_service::ControlPage::request_network_at(terminal.context(), request)
-    } {
+    if !terminal.issue(request) {
         return None;
     }
-    let endpoint = service?;
-    let _service_handle = runtime.task?;
+    let endpoint = match service {
+        Some(endpoint) => endpoint,
+        None => return None,
+    };
+    if runtime.task().is_none() {
+        return None;
+    }
     for _ in 0..100_000 {
         if !poll_network(
             runtime,
@@ -3649,19 +3593,20 @@ fn run_network_request(
         ) {
             return None;
         }
-        if let Some(reply) = terminal.take_response(request.id) {
+        if let Some(reply) = terminal.response(request.id) {
             return Some(reply);
         }
     }
+    debug::write_line(b"LogOS: network client response timeout");
     None
 }
 
 #[allow(clippy::too_many_arguments)]
 fn poll_gateway(
-    client: Option<native_task::NetworkEndpoint>,
+    runtime: &mut network::NetworkRuntime,
+    client: Option<native_task::NetworkClientEndpoint>,
     remote: Option<native_task::RemoteEndpoint>,
     gateway_handle: Option<native_task::Handle>,
-    gateway_pending: &mut Option<PendingNetworkClient>,
     gateway_session: Option<&session::Context>,
     gateway_owner: Option<u64>,
     network_service: Option<native_task::NetworkEndpoint>,
@@ -3690,24 +3635,24 @@ fn poll_gateway(
     let (
         Some(client),
         Some(handle),
-        Some(network_service),
-        Some(network_handle),
+        Some(_network_service),
+        Some(_network_handle),
         Some(gateway_session),
         Some(owner),
     ) = (client, gateway_handle, network_service, network_handle, gateway_session, gateway_owner)
     else {
         return true;
     };
-    if !relay_network_client(
+    if !runtime.relay_client(
+        1,
         client,
-        network_service,
-        network_handle,
+        handle,
         scheduler,
-        gateway_pending,
         gateway_session,
         capabilities,
         block_context.pages,
         owner,
+        tick,
     ) {
         return false;
     }
@@ -3719,7 +3664,7 @@ fn poll_gateway(
     let Some(request) = remote.request() else { return true };
     let Some(address) = block_context.pages.address(owner, page).filter(|_| request.page == page)
     else {
-        return remote.reply(logos_abi::service::RemoteGateReply {
+        return remote.reply(logos_abi::service::RemotePageReply {
             id: request.id,
             status: logos_abi::service::RemoteGateStatus::Denied,
             length: 0,
@@ -3800,7 +3745,7 @@ fn poll_gateway(
     };
     let (status, length, cursor) =
         outcome.unwrap_or((logos_abi::service::RemoteGateStatus::Denied, 0, 0));
-    remote.reply(logos_abi::service::RemoteGateReply {
+    remote.reply(logos_abi::service::RemotePageReply {
         id: request.id,
         status,
         length: length as u16,
@@ -4203,7 +4148,7 @@ type TerminalEndpoints = (
     native_task::SyscallEndpoint,
     native_task::DisplayEndpoint,
     native_task::StoreClientEndpoint,
-    native_task::NetworkEndpoint,
+    native_task::NetworkClientEndpoint,
 );
 
 fn terminal_endpoints(
@@ -4215,7 +4160,7 @@ fn terminal_endpoints(
         scheduler.syscall_endpoint(handle)?,
         scheduler.display_endpoint(handle)?,
         scheduler.store_client_endpoint(handle)?,
-        scheduler.network_endpoint(handle)?,
+        scheduler.network_client_endpoint(handle)?,
     ))
 }
 

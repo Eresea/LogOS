@@ -70,12 +70,14 @@ impl EndpointSet {
     const SESSION_CLIENT_BIT: u16 = 1 << 2;
     const SESSION_SERVER_BIT: u16 = 1 << 3;
     const EFFECT_BIT: u16 = 1 << 4;
-    const STORE_BIT: u16 = 1 << 5;
-    const BLOCK_BIT: u16 = 1 << 6;
-    const NETWORK_BIT: u16 = 1 << 7;
+    const STORE_CLIENT_BIT: u16 = 1 << 5;
+    const STORE_SERVER_BIT: u16 = 1 << 6;
+    const BLOCK_CLIENT_BIT: u16 = 1 << 7;
     const REMOTE_BIT: u16 = 1 << 8;
     const NETWORK_DEVICE_BIT: u16 = 1 << 9;
     const NETWORK_EVENT_BIT: u16 = 1 << 10;
+    const NETWORK_CLIENT_BIT: u16 = 1 << 11;
+    const NETWORK_SERVER_BIT: u16 = 1 << 12;
 
     pub const NONE: Self = Self(0);
     pub const INPUT: Self = Self(Self::INPUT_BIT);
@@ -83,12 +85,14 @@ impl EndpointSet {
     pub const SESSION_CLIENT: Self = Self(Self::SESSION_CLIENT_BIT);
     pub const SESSION_SERVER: Self = Self(Self::SESSION_SERVER_BIT);
     pub const EFFECT: Self = Self(Self::EFFECT_BIT);
-    pub const STORE: Self = Self(Self::STORE_BIT);
-    pub const BLOCK: Self = Self(Self::BLOCK_BIT);
-    pub const NETWORK: Self = Self(Self::NETWORK_BIT);
+    pub const STORE_CLIENT: Self = Self(Self::STORE_CLIENT_BIT);
+    pub const STORE_SERVER: Self = Self(Self::STORE_SERVER_BIT);
+    pub const BLOCK_CLIENT: Self = Self(Self::BLOCK_CLIENT_BIT);
     pub const REMOTE: Self = Self(Self::REMOTE_BIT);
     pub const NETWORK_DEVICE: Self = Self(Self::NETWORK_DEVICE_BIT);
     pub const NETWORK_EVENT: Self = Self(Self::NETWORK_EVENT_BIT);
+    pub const NETWORK_CLIENT: Self = Self(Self::NETWORK_CLIENT_BIT);
+    pub const NETWORK_SERVER: Self = Self(Self::NETWORK_SERVER_BIT);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -171,7 +175,7 @@ const STORAGE_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_RECOVERY,
-    endpoints: EndpointSet::STORE.union(EndpointSet::BLOCK),
+    endpoints: EndpointSet::STORE_SERVER.union(EndpointSet::BLOCK_CLIENT),
 };
 const TERMINAL_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Terminal,
@@ -185,8 +189,8 @@ const TERMINAL_SPEC: ServiceSpec = ServiceSpec {
     endpoints: EndpointSet::INPUT
         .union(EndpointSet::DISPLAY)
         .union(EndpointSet::SESSION_CLIENT)
-        .union(EndpointSet::STORE)
-        .union(EndpointSet::NETWORK),
+        .union(EndpointSet::STORE_CLIENT)
+        .union(EndpointSet::NETWORK_CLIENT),
 };
 const SESSIONS_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Sessions,
@@ -213,7 +217,9 @@ const NETWORK_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
-    endpoints: EndpointSet::NETWORK_DEVICE.union(EndpointSet::NETWORK_EVENT),
+    endpoints: EndpointSet::NETWORK_SERVER
+        .union(EndpointSet::NETWORK_DEVICE)
+        .union(EndpointSet::NETWORK_EVENT),
 };
 const GATEWAY_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Gateway,
@@ -229,7 +235,9 @@ const GATEWAY_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
-    endpoints: EndpointSet::NETWORK.union(EndpointSet::REMOTE).union(EndpointSet::STORE),
+    endpoints: EndpointSet::NETWORK_CLIENT
+        .union(EndpointSet::REMOTE)
+        .union(EndpointSet::STORE_CLIENT),
 };
 
 /// The single typed service specification consumed by boot planning, payload
@@ -268,17 +276,21 @@ pub fn self_check() -> bool {
     SERVICE_SPECS.iter().all(|spec| spec.service.spec().name == spec.name)
         && SERVICE_SPECS.len() == SERVICES
         && Service::Terminal.spec().protocol == Protocol { abi: 1, version: 0 }
-        && Service::Storage.spec().endpoints.contains(EndpointSet::STORE)
+        && Service::Storage.spec().endpoints.contains(EndpointSet::STORE_SERVER)
         && Service::Terminal.spec().endpoints.contains(EndpointSet::SESSION_CLIENT)
         && Service::Sessions.spec().endpoints.contains(EndpointSet::SESSION_SERVER)
         && Service::Sessions.spec().endpoints.contains(EndpointSet::EFFECT)
         && Service::Network.spec().endpoints.contains(EndpointSet::NETWORK_DEVICE)
         && Service::Network.spec().endpoints.contains(EndpointSet::NETWORK_EVENT)
+        && Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_CLIENT)
+        && Service::Network.spec().endpoints.contains(EndpointSet::NETWORK_SERVER)
         && !Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_DEVICE)
         && !Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_EVENT)
+        && !Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_SERVER)
         && !Service::Gateway.spec().endpoints.contains(EndpointSet::NETWORK_DEVICE)
         && !Service::Gateway.spec().endpoints.contains(EndpointSet::NETWORK_EVENT)
-        && !Service::VirtioBlock.spec().endpoints.contains(EndpointSet::BLOCK)
+        && !Service::Gateway.spec().endpoints.contains(EndpointSet::NETWORK_SERVER)
+        && Service::Storage.spec().endpoints.contains(EndpointSet::BLOCK_CLIENT)
         && Service::Gateway.spec().endpoints.contains(EndpointSet::REMOTE)
 }
 

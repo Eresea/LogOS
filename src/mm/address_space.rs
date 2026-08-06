@@ -27,6 +27,9 @@ const STORE_SERVER_PAGE: usize = ENTRIES - 32;
 const BLOCK_CLIENT_PAGE: usize = ENTRIES - 33;
 const NETWORK_DEVICE_ENDPOINT_PAGE: usize = ENTRIES - 34;
 const NETWORK_EVENT_ENDPOINT_PAGE: usize = ENTRIES - 35;
+const NETWORK_CLIENT_PAGE: usize = ENTRIES - 36;
+const NETWORK_SERVER_PAGE: usize = ENTRIES - 37;
+const REMOTE_PAGE: usize = ENTRIES - 38;
 const STACK_TOP: usize = BLOCK_PAGE;
 const STACK_PAGES: usize = 12;
 const STACK_BASE: usize = STACK_TOP - STACK_PAGES;
@@ -61,6 +64,9 @@ pub struct ContextMapping {
     pub store_client: Option<(u64, u64)>,
     pub store_server: Option<(u64, u64)>,
     pub block_client: Option<(u64, u64)>,
+    pub remote: Option<(u64, u64)>,
+    pub network_client: Option<(u64, u64)>,
+    pub network_server: Option<(u64, u64)>,
     pub network_device: Option<(u64, u64)>,
     pub network_event: Option<(u64, u64)>,
 }
@@ -204,6 +210,9 @@ impl AddressSpace {
         store_client: bool,
         store_server: bool,
         block_client: bool,
+        remote: bool,
+        network_client: bool,
+        network_server: bool,
         network_device: bool,
         network_event: bool,
     ) -> Option<ContextMapping> {
@@ -216,6 +225,9 @@ impl AddressSpace {
             || store_client && self.mapping(STORE_CLIENT_PAGE).is_some()
             || store_server && self.mapping(STORE_SERVER_PAGE).is_some()
             || block_client && self.mapping(BLOCK_CLIENT_PAGE).is_some()
+            || remote && self.mapping(REMOTE_PAGE).is_some()
+            || network_client && self.mapping(NETWORK_CLIENT_PAGE).is_some()
+            || network_server && self.mapping(NETWORK_SERVER_PAGE).is_some()
             || network_device && self.mapping(NETWORK_DEVICE_ENDPOINT_PAGE).is_some()
             || network_event && self.mapping(NETWORK_EVENT_ENDPOINT_PAGE).is_some()
         {
@@ -369,6 +381,32 @@ impl AddressSpace {
         } else {
             None
         };
+        let remote_page = if remote {
+            match physical.allocate_owned() {
+                Some(page) => Some(page),
+                None => {
+                    for page in [
+                        input_page,
+                        display_page,
+                        session_client_page,
+                        session_server_page,
+                        effect_page,
+                        store_client_page,
+                        store_server_page,
+                        block_client_page,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let _ = physical.release_page(page);
+                    }
+                    let _ = physical.release_page(context);
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
         let network_device_page = if network_device {
             match physical.allocate_owned() {
                 Some(page) => Some(page),
@@ -382,6 +420,64 @@ impl AddressSpace {
                         store_client_page,
                         store_server_page,
                         block_client_page,
+                        remote_page,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let _ = physical.release_page(page);
+                    }
+                    let _ = physical.release_page(context);
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+        let network_client_page = if network_client {
+            match physical.allocate_owned() {
+                Some(page) => Some(page),
+                None => {
+                    for page in [
+                        input_page,
+                        display_page,
+                        session_client_page,
+                        session_server_page,
+                        effect_page,
+                        store_client_page,
+                        store_server_page,
+                        block_client_page,
+                        remote_page,
+                        network_device_page,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let _ = physical.release_page(page);
+                    }
+                    let _ = physical.release_page(context);
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+        let network_server_page = if network_server {
+            match physical.allocate_owned() {
+                Some(page) => Some(page),
+                None => {
+                    for page in [
+                        input_page,
+                        display_page,
+                        session_client_page,
+                        session_server_page,
+                        effect_page,
+                        store_client_page,
+                        store_server_page,
+                        block_client_page,
+                        remote_page,
+                        network_device_page,
+                        network_client_page,
                     ]
                     .into_iter()
                     .flatten()
@@ -409,6 +505,8 @@ impl AddressSpace {
                         store_server_page,
                         block_client_page,
                         network_device_page,
+                        network_client_page,
+                        network_server_page,
                     ]
                     .into_iter()
                     .flatten()
@@ -431,6 +529,9 @@ impl AddressSpace {
         let store_client_address = store_client_page.as_ref().map(Page::address);
         let store_server_address = store_server_page.as_ref().map(Page::address);
         let block_client_address = block_client_page.as_ref().map(Page::address);
+        let remote_address = remote_page.as_ref().map(Page::address);
+        let network_client_address = network_client_page.as_ref().map(Page::address);
+        let network_server_address = network_server_page.as_ref().map(Page::address);
         let network_device_address = network_device_page.as_ref().map(Page::address);
         let network_event_address = network_event_page.as_ref().map(Page::address);
         let input_virtual = input_page.as_ref().map(|_| self.base + PAGE_SIZE * INPUT_PAGE as u64);
@@ -450,6 +551,14 @@ impl AddressSpace {
             store_server_page.as_ref().map(|_| self.base + PAGE_SIZE * STORE_SERVER_PAGE as u64);
         let block_client_virtual =
             block_client_page.as_ref().map(|_| self.base + PAGE_SIZE * BLOCK_CLIENT_PAGE as u64);
+        let remote_virtual =
+            remote_page.as_ref().map(|_| self.base + PAGE_SIZE * REMOTE_PAGE as u64);
+        let network_client_virtual = network_client_page
+            .as_ref()
+            .map(|_| self.base + PAGE_SIZE * NETWORK_CLIENT_PAGE as u64);
+        let network_server_virtual = network_server_page
+            .as_ref()
+            .map(|_| self.base + PAGE_SIZE * NETWORK_SERVER_PAGE as u64);
         let network_device_virtual = network_device_page
             .as_ref()
             .map(|_| self.base + PAGE_SIZE * NETWORK_DEVICE_ENDPOINT_PAGE as u64);
@@ -479,6 +588,9 @@ impl AddressSpace {
                 store_client_page,
                 store_server_page,
                 block_client_page,
+                remote_page,
+                network_client_page,
+                network_server_page,
                 network_device_page,
                 network_event_page,
             ]
@@ -498,6 +610,9 @@ impl AddressSpace {
             (store_client.then_some(STORE_CLIENT_PAGE), store_client_page),
             (store_server.then_some(STORE_SERVER_PAGE), store_server_page),
             (block_client.then_some(BLOCK_CLIENT_PAGE), block_client_page),
+            (remote.then_some(REMOTE_PAGE), remote_page),
+            (network_client.then_some(NETWORK_CLIENT_PAGE), network_client_page),
+            (network_server.then_some(NETWORK_SERVER_PAGE), network_server_page),
             (network_device.then_some(NETWORK_DEVICE_ENDPOINT_PAGE), network_device_page),
             (network_event.then_some(NETWORK_EVENT_ENDPOINT_PAGE), network_event_page),
         ] {
@@ -533,6 +648,15 @@ impl AddressSpace {
                 } else if index == NETWORK_EVENT_ENDPOINT_PAGE {
                     (address as *mut logos_core::native_service::NetworkEventPage)
                         .write_volatile(logos_core::native_service::NetworkEventPage::new(1, 1, 1));
+                } else if index == NETWORK_CLIENT_PAGE {
+                    (address as *mut logos_core::native_service::NetworkClientPage)
+                        .write_volatile(logos_core::native_service::NetworkClientPage::new(1, 1));
+                } else if index == NETWORK_SERVER_PAGE {
+                    (address as *mut logos_core::native_service::NetworkServerPage)
+                        .write_volatile(logos_core::native_service::NetworkServerPage::new(1, 1));
+                } else if index == REMOTE_PAGE {
+                    (address as *mut logos_core::native_service::RemotePage)
+                        .write_volatile(logos_core::native_service::RemotePage::new(1, 1));
                 } else {
                     (address as *mut logos_core::native_service::BlockClientPage)
                         .write_volatile(logos_core::native_service::BlockClientPage::new(1, 1));
@@ -552,6 +676,9 @@ impl AddressSpace {
                 self.unmap_index(STORE_CLIENT_PAGE, physical);
                 self.unmap_index(STORE_SERVER_PAGE, physical);
                 self.unmap_index(BLOCK_CLIENT_PAGE, physical);
+                self.unmap_index(REMOTE_PAGE, physical);
+                self.unmap_index(NETWORK_CLIENT_PAGE, physical);
+                self.unmap_index(NETWORK_SERVER_PAGE, physical);
                 self.unmap_index(NETWORK_DEVICE_ENDPOINT_PAGE, physical);
                 self.unmap_index(NETWORK_EVENT_ENDPOINT_PAGE, physical);
                 return None;
@@ -570,6 +697,9 @@ impl AddressSpace {
                 store_client_virtual,
                 store_server_virtual,
                 block_client_virtual,
+                remote_virtual,
+                network_client_virtual,
+                network_server_virtual,
                 network_device_virtual,
                 network_event_virtual,
             )
@@ -583,6 +713,9 @@ impl AddressSpace {
             self.unmap_index(STORE_CLIENT_PAGE, physical);
             self.unmap_index(STORE_SERVER_PAGE, physical);
             self.unmap_index(BLOCK_CLIENT_PAGE, physical);
+            self.unmap_index(REMOTE_PAGE, physical);
+            self.unmap_index(NETWORK_CLIENT_PAGE, physical);
+            self.unmap_index(NETWORK_SERVER_PAGE, physical);
             self.unmap_index(NETWORK_DEVICE_ENDPOINT_PAGE, physical);
             self.unmap_index(NETWORK_EVENT_ENDPOINT_PAGE, physical);
             return None;
@@ -597,6 +730,9 @@ impl AddressSpace {
             store_client: store_client_address.zip(store_client_virtual),
             store_server: store_server_address.zip(store_server_virtual),
             block_client: block_client_address.zip(block_client_virtual),
+            remote: remote_address.zip(remote_virtual),
+            network_client: network_client_address.zip(network_client_virtual),
+            network_server: network_server_address.zip(network_server_virtual),
             network_device: network_device_address.zip(network_device_virtual),
             network_event: network_event_address.zip(network_event_virtual),
         })
