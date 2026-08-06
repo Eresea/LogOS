@@ -8,11 +8,20 @@ use crate::sched::native_task::{
 use logos_abi::{NetworkOperation, NetworkRequest};
 use logos_core::capabilities::CapabilityKind;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkClientSlot {
+    Terminal,
+    Gateway,
+}
+
 #[derive(Clone, Copy)]
 pub struct PendingClient {
+    pub slot: NetworkClientSlot,
     pub request: logos_abi::NetworkRequest,
     pub owner: u64,
-    pub endpoint: Option<NetworkClientEndpoint>,
+    pub endpoint: NetworkClientEndpoint,
+    pub server: NetworkServerEndpoint,
+    pub handle: Handle,
 }
 
 #[derive(Clone, Copy)]
@@ -34,7 +43,7 @@ pub struct NetworkRuntime {
     device_endpoint: NetworkDeviceEndpoint,
     event_endpoint: NetworkEventEndpoint,
     server_endpoint: Option<NetworkServerEndpoint>,
-    clients: [Option<PendingClient>; 2],
+    active_client: Option<PendingClient>,
     device: Option<network::Device>,
     resources: Option<Resources>,
     pending: Option<PendingDevice>,
@@ -86,7 +95,7 @@ impl NetworkRuntime {
             device_endpoint: NetworkDeviceEndpoint::unavailable(),
             event_endpoint: NetworkEventEndpoint::unavailable(),
             server_endpoint: None,
-            clients: [None, None],
+            active_client: None,
             device,
             resources: None,
             pending: None,
@@ -104,6 +113,9 @@ impl NetworkRuntime {
         event_endpoint: NetworkEventEndpoint,
         resources: Resources,
     ) -> bool {
+        if self.active_client.is_some() {
+            return false;
+        }
         let device_generation = self.device_generation;
         let device_endpoint = device_endpoint.with_device_generation(device_generation);
         let event_endpoint = event_endpoint.with_device_generation(device_generation);
@@ -147,7 +159,6 @@ impl NetworkRuntime {
         self.device_endpoint = device_endpoint;
         self.event_endpoint = event_endpoint;
         self.pending = None;
-        self.clients = [None, None];
         scheduler.wake(task) && scheduler.run(task)
     }
 
@@ -187,7 +198,6 @@ impl NetworkRuntime {
         self.device_endpoint = old_endpoint.with_device_generation(generation);
         self.event_endpoint = event_endpoint;
         self.pending = None;
-        self.clients = [None, None];
         scheduler.wake(task) && scheduler.run(task)
     }
 
@@ -475,10 +485,173 @@ impl NetworkRuntime {
         true
     }
 
+    fn validate_request(
+        client: NetworkClientEndpoint,
+        request: NetworkRequest,
+        session: &crate::platform::session::Context,
+        capabilities: &logos_core::capabilities::CapabilityManager,
+        shared_pages: &logos_core::shared_pages::SharedPages,
+        owner: u64,
+    ) -> Result<Option<(logos_abi::PageHandle, u64)>, logos_abi::NetworkStatus> {
+        if !request.valid_shape() {
+            return Err(logos_abi::NetworkStatus::Invalid);
+        }
+        if let Some((kind, scope)) = capability(request)
+            && !session.allows_scoped64(capabilities, kind, scope)
+        {
+            return Err(logos_abi::NetworkStatus::Denied);
+        }
+        if !matches!(
+            request.operation,
+            NetworkOperation::SendTo
+                | NetworkOperation::Write
+                | NetworkOperation::ReceiveFrom
+                | NetworkOperation::Read
+        ) {
+            return Ok(None);
+        }
+        let Some(transfer_page) = client.transfer_page() else {
+            return Err(logos_abi::NetworkStatus::Invalid);
+        };
+        if transfer_page != request.page
+            || request.length as usize > logos_abi::PAGE_SIZE - NETWORK_PAYLOAD_OFFSET as usize
+        {
+            return Err(logos_abi::NetworkStatus::Invalid);
+        }
+        let Some(address) = shared_pages.address(owner, transfer_page) else {
+            return Err(logos_abi::NetworkStatus::Invalid);
+        };
+        Ok(Some((transfer_page, address)))
+    }
+
+    fn reply_request(
+        client: NetworkClientEndpoint,
+        handle: Handle,
+        request: NetworkRequest,
+        status: logos_abi::NetworkStatus,
+        scheduler: &mut native_task::Scheduler<'_>,
+    ) -> bool {
+        let published = client.mark_processing() && client.reply(error_reply(request, status));
+        if published && !scheduler.failed(handle) {
+            let woke = scheduler.wake(handle);
+            if woke
+                && !matches!(
+                    status,
+                    logos_abi::NetworkStatus::Denied | logos_abi::NetworkStatus::Busy
+                )
+            {
+                let _ = scheduler.run(handle);
+            }
+        }
+        published
+    }
+
+    fn reply_unprocessed_request(
+        client: NetworkClientEndpoint,
+        handle: Handle,
+        request: NetworkRequest,
+        status: logos_abi::NetworkStatus,
+        scheduler: &mut native_task::Scheduler<'_>,
+    ) -> bool {
+        let published = client.reply_request(error_reply(request, status));
+        if published && !scheduler.failed(handle) {
+            let woke = scheduler.wake(handle);
+            if woke
+                && !matches!(
+                    status,
+                    logos_abi::NetworkStatus::Denied | logos_abi::NetworkStatus::Busy
+                )
+            {
+                let _ = scheduler.run(handle);
+            }
+        }
+        published
+    }
+
+    fn finish_active(
+        &mut self,
+        reply: logos_abi::NetworkReply,
+        scheduler: &mut native_task::Scheduler<'_>,
+    ) -> bool {
+        let Some(current) = self.active_client.take() else { return false };
+        let published = current.endpoint.reply(reply);
+        if published && !scheduler.failed(current.handle) {
+            if scheduler.wake(current.handle) {
+                let _ = scheduler.run(current.handle);
+            }
+        }
+        let reset = current.server.reset();
+        published && reset
+    }
+
+    pub fn invalidate_client(
+        &mut self,
+        slot: NetworkClientSlot,
+        scheduler: &mut native_task::Scheduler<'_>,
+        status: logos_abi::NetworkStatus,
+    ) -> bool {
+        let Some(current) = self.active_client else { return true };
+        if current.slot != slot {
+            return true;
+        }
+        self.finish_active(error_reply(current.request, status), scheduler)
+    }
+
+    pub fn invalidate_active(
+        &mut self,
+        scheduler: &mut native_task::Scheduler<'_>,
+        status: logos_abi::NetworkStatus,
+    ) -> bool {
+        let Some(current) = self.active_client else { return true };
+        self.finish_active(error_reply(current.request, status), scheduler)
+    }
+
+    fn completed_reply(
+        &self,
+        current: PendingClient,
+        reply: logos_abi::NetworkReply,
+        shared_pages: &logos_core::shared_pages::SharedPages,
+    ) -> logos_abi::NetworkReply {
+        if !reply.valid_for(current.request) {
+            return error_reply(current.request, logos_abi::NetworkStatus::Invalid);
+        }
+        if reply.status != logos_abi::NetworkStatus::Complete
+            || !matches!(
+                current.request.operation,
+                NetworkOperation::ReceiveFrom | NetworkOperation::Read
+            )
+        {
+            return reply;
+        }
+        let Some(transfer_page) = current.endpoint.transfer_page() else {
+            return error_reply(current.request, logos_abi::NetworkStatus::Invalid);
+        };
+        if transfer_page != current.request.page
+            || reply.length > current.request.length
+            || reply.length as usize > logos_abi::PAGE_SIZE - NETWORK_PAYLOAD_OFFSET as usize
+        {
+            return error_reply(current.request, logos_abi::NetworkStatus::Invalid);
+        }
+        let Some(destination) = shared_pages.address(current.owner, transfer_page) else {
+            return error_reply(current.request, logos_abi::NetworkStatus::Invalid);
+        };
+        let Some(resources) = self.resources else {
+            return error_reply(current.request, logos_abi::NetworkStatus::Invalid);
+        };
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                (resources.tx_virtual + NETWORK_PAYLOAD_OFFSET) as *const u8,
+                destination as *mut u8,
+                reply.length as usize,
+            );
+        }
+        reply
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn relay_client(
         &mut self,
-        slot: usize,
+        slot: NetworkClientSlot,
         client: NetworkClientEndpoint,
         handle: Handle,
         scheduler: &mut native_task::Scheduler<'_>,
@@ -490,85 +663,66 @@ impl NetworkRuntime {
     ) -> bool {
         let Some(server) = self.server_endpoint else { return true };
         let Some(service_handle) = self.task else { return true };
-        let Some(slot) = self.clients.get_mut(slot) else { return false };
-        if let Some(current) = *slot {
-            if tick >= current.request.deadline {
-                *slot = None;
-                let reply = error_reply(current.request, logos_abi::NetworkStatus::TimedOut);
-                let _ = server.reset();
-                return current.endpoint.is_some_and(|endpoint| endpoint.reply(reply))
-                    && scheduler.wake(handle)
-                    && scheduler.run(handle);
+        if let Some(current) = self.active_client {
+            if self.server_endpoint != Some(current.server) {
+                return self.finish_active(
+                    error_reply(current.request, logos_abi::NetworkStatus::Reset),
+                    scheduler,
+                );
             }
-            if let Some(reply) = server.response(current.request.id) {
-                if !reply.valid_for(current.request) {
-                    return false;
-                }
-                *slot = None;
-                if matches!(
-                    current.request.operation,
-                    NetworkOperation::ReceiveFrom | NetworkOperation::Read
-                ) && reply.status == logos_abi::NetworkStatus::Complete
-                    && let (Some(source), Some(network_pages)) = (
-                        shared_pages.address(current.owner, current.request.page),
-                        self.resources
-                            .as_ref()
-                            .map(|resources| (resources.tx, resources.tx_virtual)),
-                    )
-                {
-                    let _ = source;
-                    let target = network_pages.1 + NETWORK_PAYLOAD_OFFSET;
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            target as *const u8,
-                            source as *mut u8,
-                            reply.length as usize,
-                        );
-                    }
-                }
-                return current.endpoint.is_some_and(|endpoint| endpoint.reply(reply))
-                    && scheduler.wake(handle)
-                    && scheduler.run(handle);
+            if current.slot != slot {
+                let Some(request) = client.request() else { return true };
+                let status = match Self::validate_request(
+                    client,
+                    request,
+                    session,
+                    capabilities,
+                    shared_pages,
+                    owner,
+                ) {
+                    Ok(_) => logos_abi::NetworkStatus::Busy,
+                    Err(status) => status,
+                };
+                return Self::reply_request(client, handle, request, status, scheduler);
+            }
+            if current.endpoint != client {
+                return false;
+            }
+            if tick >= current.request.deadline {
+                return self.finish_active(
+                    error_reply(current.request, logos_abi::NetworkStatus::TimedOut),
+                    scheduler,
+                );
+            }
+            if let Some(reply) = current.server.response(current.request.id) {
+                return self
+                    .finish_active(self.completed_reply(current, reply, shared_pages), scheduler);
             }
             return true;
         }
         let Some(request) = client.request() else { return true };
-        if !request.valid_shape() {
-            return client.mark_processing()
-                && client.reply(error_reply(request, status_for(request, false)))
-                && scheduler.wake(handle)
-                && scheduler.run(handle);
-        }
-        if let Some((kind, scope)) = capability(request)
-            && !session.allows_scoped64(capabilities, kind, scope)
-        {
-            return client.mark_processing()
-                && client.reply(denied_reply(request))
-                && scheduler.wake(handle)
-                && scheduler.run(handle);
-        }
-        let page = (request.page.0 != 0).then_some(request.page);
-        if matches!(
-            request.operation,
-            NetworkOperation::SendTo
-                | NetworkOperation::Write
-                | NetworkOperation::ReceiveFrom
-                | NetworkOperation::Read
-        ) && page.is_none()
-        {
-            return client.mark_processing()
-                && client.reply(error_reply(request, logos_abi::NetworkStatus::Invalid))
-                && scheduler.wake(handle)
-                && scheduler.run(handle);
-        }
+        let transfer = match Self::validate_request(
+            client,
+            request,
+            session,
+            capabilities,
+            shared_pages,
+            owner,
+        ) {
+            Ok(transfer) => transfer,
+            Err(status) => return Self::reply_request(client, handle, request, status, scheduler),
+        };
         if matches!(request.operation, NetworkOperation::SendTo | NetworkOperation::Write) {
-            let Some(source) = page.and_then(|page| shared_pages.address(owner, page)) else {
-                return client.mark_processing()
-                    && client.reply(error_reply(request, logos_abi::NetworkStatus::Invalid))
-                    && scheduler.wake(handle)
-                    && scheduler.run(handle);
+            let Some((_, source)) = transfer else { return false };
+            let Some(resources) = self.resources else {
+                return Self::reply_request(
+                    client,
+                    handle,
+                    request,
+                    logos_abi::NetworkStatus::Io,
+                    scheduler,
+                );
             };
-            let Some(resources) = self.resources else { return true };
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     source as *const u8,
@@ -577,14 +731,35 @@ impl NetworkRuntime {
                 );
             }
         }
-        if !client.mark_processing() {
-            return false;
-        }
         if !server.deliver(owner, request) {
-            return true;
+            let reset = server.reset();
+            let reply = Self::reply_unprocessed_request(
+                client,
+                handle,
+                request,
+                logos_abi::NetworkStatus::Io,
+                scheduler,
+            );
+            return reset && reply;
         }
-        *slot = Some(PendingClient { request, owner, endpoint: Some(client) });
-        scheduler.wake(service_handle) && scheduler.run(service_handle)
+        if !client.mark_processing() {
+            let reset = server.reset();
+            let reply = Self::reply_unprocessed_request(
+                client,
+                handle,
+                request,
+                logos_abi::NetworkStatus::Io,
+                scheduler,
+            );
+            return reset && reply;
+        }
+        self.active_client =
+            Some(PendingClient { slot, request, owner, endpoint: client, server, handle });
+        if !scheduler.wake(service_handle) || !scheduler.run(service_handle) {
+            return self
+                .finish_active(error_reply(request, logos_abi::NetworkStatus::Io), scheduler);
+        }
+        true
     }
 }
 
@@ -594,6 +769,10 @@ fn error_reply(
     request: NetworkRequest,
     status: logos_abi::NetworkStatus,
 ) -> logos_abi::NetworkReply {
+    let mut counters = logos_abi::NetworkCounters::default();
+    if status == logos_abi::NetworkStatus::Denied {
+        counters.denied = 1;
+    }
     logos_abi::NetworkReply {
         id: request.id,
         status,
@@ -603,14 +782,8 @@ fn error_reply(
         source_port: 0,
         length: 0,
         info: logos_abi::NetworkInfo::default(),
-        counters: logos_abi::NetworkCounters::default(),
+        counters,
     }
-}
-
-fn denied_reply(request: NetworkRequest) -> logos_abi::NetworkReply {
-    let mut reply = error_reply(request, logos_abi::NetworkStatus::Denied);
-    reply.counters.denied = 1;
-    reply
 }
 
 fn network_info(info: network::Info) -> logos_abi::NetworkInfo {
@@ -638,16 +811,6 @@ pub fn capability(request: NetworkRequest) -> Option<(CapabilityKind, u64)> {
     }
 }
 
-pub fn status_for(request: NetworkRequest, allowed: bool) -> logos_abi::NetworkStatus {
-    if !request.valid_shape() {
-        logos_abi::NetworkStatus::Invalid
-    } else if !allowed {
-        logos_abi::NetworkStatus::Denied
-    } else {
-        logos_abi::NetworkStatus::Complete
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,6 +829,9 @@ mod tests {
             deadline: 1,
         };
         assert_eq!(capability(request), Some((CapabilityKind::NetworkSend, request.peer.0)));
-        assert_eq!(status_for(request, false), logos_abi::NetworkStatus::Denied);
+        assert_eq!(
+            error_reply(request, logos_abi::NetworkStatus::Denied).status,
+            logos_abi::NetworkStatus::Denied
+        );
     }
 }
