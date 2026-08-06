@@ -19,317 +19,13 @@ use logos_terminal::terminal::{HISTORY_BYTES, Model, Submission};
 mod network_peer;
 mod suites;
 use network_peer::NetworkPeer;
-use suites::Runner;
+use suites::{Fixture, Runner, SCENARIOS, Scenario};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
     Passed,
     Failed,
     Skipped,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Fixture {
-    Shared,
-    Fresh,
-    Persistence,
-    MissingSessions,
-    MissingTerminal,
-    IncompatibleSessions,
-    MissingStore,
-    MissingNetwork,
-}
-
-#[derive(Clone, Copy)]
-struct Scenario {
-    id: &'static str,
-    suite: &'static str,
-    timeout: u64,
-    implemented: bool,
-    setup: &'static [&'static str],
-    fixture: Fixture,
-    runner: Runner,
-}
-
-const SCENARIOS: &[Scenario] = &[
-    configured("core/boot-normal", "core", &[], Fixture::Fresh),
-    configured("platform/missing-sessions", "platform", &[], Fixture::MissingSessions),
-    configured("platform/missing-terminal", "platform", &[], Fixture::MissingTerminal),
-    configured("platform/incompatible-sessions", "platform", &[], Fixture::IncompatibleSessions),
-    configured("platform/missing-store", "platform", &[], Fixture::MissingStore),
-    configured("platform/missing-network", "platform", &[], Fixture::MissingNetwork),
-    scenario("core/boot-recovery", "core", Fixture::Fresh),
-    scenario("core/ipc-request-reply", "core", Fixture::Fresh),
-    scenario("core/ipc-cancellation", "core", Fixture::Fresh),
-    scenario("core/task-block-wake", "core", Fixture::Fresh),
-    scenario("core/capability-denied", "core", Fixture::Fresh),
-    scenario("core/capability-revoked", "core", Fixture::Fresh),
-    scenario("core/driver-reset-recovery", "core", Fixture::Fresh),
-    scenario("core/resource-reclamation", "core", Fixture::Fresh),
-    scenario("core/panic-diagnostics", "core", Fixture::Fresh),
-    configured(
-        "console/input-qwerty",
-        "console",
-        &["layout qwerty", "assert-input"],
-        Fixture::Shared,
-    ),
-    configured(
-        "console/input-azerty",
-        "console",
-        &["layout azerty", "assert-input"],
-        Fixture::Shared,
-    ),
-    scenario("console/editing-utf8", "console", Fixture::Shared),
-    scenario("console/history", "console", Fixture::Shared),
-    configured(
-        "console/structured-command",
-        "console",
-        &["assert-tasks", "assert-sessions"],
-        Fixture::Shared,
-    ),
-    configured("console/capability-denied", "console", &["deny-recovery"], Fixture::Shared),
-    configured("console/input-capability-denied", "console", &["deny-layout"], Fixture::Shared),
-    configured("console/display-capability-denied", "console", &["deny-display"], Fixture::Shared),
-    configured("console/session-capability-denied", "console", &["deny-session"], Fixture::Shared),
-    configured("console/cancellation", "console", &["assert-cancel"], Fixture::Shared),
-    configured(
-        "console/display-restart",
-        "console",
-        &["assert-display", "assert-terminal-service-restart"],
-        Fixture::Shared,
-    ),
-    configured("console/input-service-restart", "console", &["assert-restart"], Fixture::Shared),
-    configured(
-        "console/terminal-service-restart",
-        "console",
-        &["assert-terminal-service-restart"],
-        Fixture::Shared,
-    ),
-    configured(
-        "console/sessions-service-restart",
-        "console",
-        &["assert-sessions-service-restart"],
-        Fixture::Shared,
-    ),
-    configured(
-        "persistence/storage-service-restart",
-        "persistence",
-        &["assert-storage-service-restart"],
-        Fixture::Shared,
-    ),
-    configured(
-        "platform/terminal-panic-containment",
-        "platform",
-        &["assert-terminal-service-panic"],
-        Fixture::Fresh,
-    ),
-    configured(
-        "platform/terminal-fault-containment",
-        "platform",
-        &["assert-terminal-service-fault"],
-        Fixture::Fresh,
-    ),
-    configured(
-        "platform/sessions-panic-containment",
-        "platform",
-        &["assert-sessions-service-panic"],
-        Fixture::Fresh,
-    ),
-    configured(
-        "platform/sessions-fault-containment",
-        "platform",
-        &["assert-sessions-service-fault"],
-        Fixture::Fresh,
-    ),
-    configured(
-        "platform/store-panic-containment",
-        "platform",
-        &["assert-storage-service-panic"],
-        Fixture::Fresh,
-    ),
-    configured(
-        "platform/store-fault-containment",
-        "platform",
-        &["assert-storage-service-fault"],
-        Fixture::Fresh,
-    ),
-    configured(
-        "platform/network-panic-containment",
-        "platform",
-        &["assert-network-service-panic"],
-        Fixture::Fresh,
-    ),
-    configured(
-        "platform/network-fault-containment",
-        "platform",
-        &["assert-network-service-fault"],
-        Fixture::Fresh,
-    ),
-    configured_with_runner(
-        "persistence/block-read-flush",
-        "persistence",
-        &[],
-        Fixture::Persistence,
-        Runner::PersistenceFixture,
-    ),
-    configured_with_runner(
-        "persistence/terminal-history",
-        "persistence",
-        &["layout azerty", "layout qwerty", "persistence/terminal-history"],
-        Fixture::Persistence,
-        Runner::PersistenceTerminalHistory,
-    ),
-    configured_with_runner(
-        "persistence/block-timeout-reset",
-        "persistence",
-        &[],
-        Fixture::Persistence,
-        Runner::PersistenceTimeoutReset,
-    ),
-    configured_with_runner(
-        "persistence/capability-denied",
-        "persistence",
-        &["persistence/capability-denied"],
-        Fixture::Persistence,
-        Runner::PersistenceCapabilityDenied,
-    ),
-    scenario("console/recovery-handoff", "console", Fixture::Fresh),
-    scenario("platform/manifest-valid", "platform", Fixture::Fresh),
-    scenario("platform/manifest-invalid", "platform", Fixture::Fresh),
-    scenario("platform/dependency-order", "platform", Fixture::Shared),
-    scenario("platform/dependency-cycle-rejected", "platform", Fixture::Shared),
-    scenario("platform/startup-failure", "platform", Fixture::Fresh),
-    configured(
-        "platform/runtime-crash-restart",
-        "platform",
-        &["assert-crash-restart"],
-        Fixture::Shared,
-    ),
-    scenario("platform/dependency-loss", "platform", Fixture::Shared),
-    configured(
-        "platform/restart-backoff",
-        "platform",
-        &["assert-restart-backoff"],
-        Fixture::Shared,
-    ),
-    scenario("platform/resource-reclamation", "platform", Fixture::Shared),
-    scenario("platform/protocol-compatible", "platform", Fixture::Shared),
-    scenario("platform/protocol-incompatible", "platform", Fixture::Shared),
-    scenario("platform/unauthorized-capability", "platform", Fixture::Shared),
-    scenario("platform/diagnostics", "platform", Fixture::Shared),
-    scenario("platform/native-payload-staged", "platform", Fixture::Fresh),
-    scenario("platform/service-address-space", "platform", Fixture::Fresh),
-    scenario("platform/native-image-mapped", "platform", Fixture::Fresh),
-    scenario("platform/service-privilege-setup", "platform", Fixture::Fresh),
-    scenario("platform/service-ring3-transition", "platform", Fixture::Fresh),
-    configured(
-        "platform/native-service-ready",
-        "platform",
-        &[
-            "health",
-            "assert-ping",
-            "tasks",
-            "assert-services",
-            "assert-drivers",
-            "trace",
-            "assert-inspect",
-            "restart virtio-balloon",
-            "cancel virtio-balloon",
-            "layout azerty",
-            "layout qwerty",
-            "echo hello",
-            "help clear",
-            "commands",
-            "clear",
-        ],
-        Fixture::Shared,
-    ),
-    persistence_scenario("persistence/write-interruption", Runner::PersistenceWriteInterruption),
-    persistence_scenario("persistence/recovery", Runner::PersistenceRecovery),
-    persistence_scenario("persistence/corruption-detected", Runner::PersistenceCorruption),
-    configured("network/transport-dhcp", "network", &[], Fixture::Fresh),
-    configured("network/device-bind", "network", &[], Fixture::Fresh),
-    configured_with_runner(
-        "network/configuration",
-        "network",
-        &[],
-        Fixture::Fresh,
-        Runner::NetworkConfiguration,
-    ),
-    configured("network/unauthorized-operation", "network", &[], Fixture::Fresh),
-    configured("network/icmp-echo", "network", &[], Fixture::Fresh),
-    configured("network/udp-round-trip", "network", &[], Fixture::Fresh),
-    configured("network/backpressure-cancel", "network", &[], Fixture::Fresh),
-    configured("network/packet-loss", "network", &[], Fixture::Fresh),
-    configured("network/timeout", "network", &[], Fixture::Fresh),
-    configured("network/reset-reconnect", "network", &[], Fixture::Fresh),
-    configured("network/tcp-stream", "remote", &[], Fixture::Fresh),
-    configured("remote/enrollment-persistence", "remote", &[], Fixture::Persistence),
-    configured_with_runner(
-        "remote/auth-denied",
-        "remote",
-        &[],
-        Fixture::Fresh,
-        Runner::RemoteAuthDenied,
-    ),
-    configured_with_runner(
-        "remote/typed-invoke",
-        "remote",
-        &[],
-        Fixture::Fresh,
-        Runner::RemoteTypedInvoke,
-    ),
-    configured("remote/reconnect-replay", "remote", &[], Fixture::Persistence),
-    configured("remote/pending-after-reset", "remote", &[], Fixture::Persistence),
-    configured("remote/gateway-restart", "remote", &[], Fixture::Fresh),
-    configured("remote/protected-state-corrupt", "remote", &[], Fixture::Persistence),
-];
-
-const fn scenario(id: &'static str, suite: &'static str, fixture: Fixture) -> Scenario {
-    future(id, suite, fixture)
-}
-
-const fn configured(
-    id: &'static str,
-    suite: &'static str,
-    setup: &'static [&'static str],
-    fixture: Fixture,
-) -> Scenario {
-    configured_with_runner(id, suite, setup, fixture, Runner::Default)
-}
-
-const fn configured_with_runner(
-    id: &'static str,
-    suite: &'static str,
-    setup: &'static [&'static str],
-    fixture: Fixture,
-    runner: Runner,
-) -> Scenario {
-    Scenario { id, suite, timeout: 20, implemented: true, setup, fixture, runner }
-}
-
-const fn future(id: &'static str, suite: &'static str, fixture: Fixture) -> Scenario {
-    Scenario {
-        id,
-        suite,
-        timeout: 20,
-        implemented: false,
-        setup: &[],
-        fixture,
-        runner: Runner::Default,
-    }
-}
-
-const fn persistence_scenario(id: &'static str, runner: Runner) -> Scenario {
-    Scenario {
-        id,
-        suite: "persistence",
-        timeout: 60,
-        implemented: true,
-        setup: &[],
-        fixture: Fixture::Persistence,
-        runner,
-    }
 }
 
 struct ResultRecord {
@@ -673,6 +369,7 @@ struct Harness {
     report: BootReport,
     serial: String,
     deadline: Instant,
+    timeout: Duration,
     network_peer: Option<NetworkPeer>,
     remote_port: u16,
     logosctl: PathBuf,
@@ -829,6 +526,7 @@ impl Harness {
             report: BootReport { session: 0, storage: String::new() },
             serial: String::new(),
             deadline,
+            timeout: Duration::from_secs(timeout),
             network_peer,
             remote_port,
             logosctl: profile.logosctl.clone(),
@@ -852,11 +550,13 @@ impl Harness {
     }
 
     fn reset(&mut self, scenario: &str) -> Result<(), String> {
+        self.renew_deadline();
         self.send(&format!("LOGOS/1 RESET {scenario}\n"))?;
         self.wait("LOGOS/1 RESULT reset=accepted")
     }
 
     fn run(&mut self, scenario: Scenario) -> Result<(), String> {
+        self.renew_deadline();
         if let Some(peer) = &self.network_peer {
             peer.set_scenario(scenario.id);
         }
@@ -871,8 +571,7 @@ impl Harness {
     }
 
     fn run_remote(&mut self, scenario: Scenario) -> Result<(), String> {
-        let client_secret =
-            if matches!(scenario.runner, Runner::RemoteAuthDenied) { [7; 32] } else { [8; 32] };
+        let client_secret = suites::remote::client_secret(scenario.runner);
         let enrolled_secret = [8; 32];
         let client_public =
             x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(enrolled_secret));
@@ -888,11 +587,7 @@ impl Harness {
         let key = fixture.join("logosctl.key");
         fs::write(&key, hex_bytes(&client_secret)).map_err(io_error)?;
         let descriptor = format!("{}:2", hex_bytes(machine.as_bytes()));
-        let input = if matches!(scenario.runner, Runner::RemoteTypedInvoke) {
-            "ping\ntasks\nservices\nquit\n"
-        } else {
-            "ping\nquit\n"
-        };
+        let input = suites::remote::typed_input(scenario.runner);
         let mut child = Command::new(&self.logosctl)
             .args([
                 "session",
@@ -922,7 +617,7 @@ impl Harness {
         }
         let output = child.wait_with_output().map_err(io_error)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let passed = if matches!(scenario.runner, Runner::RemoteAuthDenied) {
+        let passed = if suites::remote::auth_denied(scenario.runner) {
             !output.status.success()
         } else {
             output.status.success() && stdout.contains("pong")
@@ -951,6 +646,7 @@ impl Harness {
     }
 
     fn shutdown(&mut self) -> Result<(), String> {
+        self.renew_deadline();
         self.send("LOGOS/1 SHUTDOWN\n")?;
         wait_child(&mut self.child, self.deadline)?;
         wait_disk_available(&self.disk, self.deadline)
@@ -961,6 +657,10 @@ impl Harness {
         self.serial.clear();
         write!(self.transcript, "> {value}").map_err(io_error)?;
         self.stream.write_all(value.as_bytes()).map_err(io_error)
+    }
+
+    fn renew_deadline(&mut self) {
+        self.deadline = Instant::now() + self.timeout;
     }
 
     fn wait(&mut self, expected: &str) -> Result<(), String> {
@@ -1240,7 +940,7 @@ fn run_one(id: &str) -> i32 {
     } else {
         &profiles.standard
     };
-    if matches!(scenario.runner, Runner::NetworkConfiguration) {
+    if suites::network::is_configuration(scenario.runner) {
         progress.start(scenario.id);
         let result = run_network_configuration(&run_dir, profile, scenario, seed);
         progress.record(&result);
@@ -1250,16 +950,7 @@ fn run_one(id: &str) -> i32 {
         return report(&result);
     }
     let mut results = Vec::new();
-    if matches!(
-        scenario.runner,
-        Runner::PersistenceWriteInterruption
-            | Runner::PersistenceRecovery
-            | Runner::PersistenceCorruption
-            | Runner::PersistenceFixture
-            | Runner::PersistenceTimeoutReset
-            | Runner::PersistenceTerminalHistory
-            | Runner::PersistenceCapabilityDenied
-    ) {
+    if suites::persistence::is_proof(scenario.runner) {
         results.push(run_persistence_proof(&root, &run_dir, profile, scenario, seed, &progress));
     } else {
         results.extend(run_fixture(
