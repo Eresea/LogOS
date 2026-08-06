@@ -16,7 +16,7 @@ use crate::sched::{native_task, scheduler};
 #[cfg(feature = "test-hooks")]
 use crate::test_hooks;
 use crate::{boot, debug};
-use network::{PendingClient as PendingNetworkClient, Resources as NetworkResources};
+use network::{NetworkClientSlot, Resources as NetworkResources};
 
 use logos_core::capabilities;
 use logos_terminal::{command, display, input, terminal, text};
@@ -920,6 +920,13 @@ pub(crate) fn run(
             .is_none_or(|(endpoint, page)| endpoint.configure_transfer(page)),
     );
     check!(
+        b"network client transfer pages",
+        native_terminal_network.configure_transfer(shared_history)
+            && native_gateway_network
+                .zip(gateway_page)
+                .is_none_or(|(endpoint, page)| endpoint.configure_transfer(page)),
+    );
+    check!(
         b"storage block page",
         !native_storage_block.available()
             || native_storage_block.configure_transfer(storage_block_page),
@@ -929,7 +936,6 @@ pub(crate) fn run(
         b"network page configuration",
         !network_runtime.has_device() || native_network_endpoint.is_none() || network_pages_ready
     );
-    let mut network_client_pending: Option<PendingNetworkClient> = None;
     let mut native_scheduler = native_task::Scheduler::new();
     let Some(mut native_handle) = native_scheduler.spawn(native_terminal) else {
         fail!(b"native terminal task");
@@ -1243,6 +1249,7 @@ pub(crate) fn run(
                     }
                     let Some((restarted_terminal, endpoints, history)) = replace_terminal(
                         &mut native_scheduler,
+                        &mut network_runtime,
                         previous_terminal,
                         storage_handle,
                         &mut memory,
@@ -1630,6 +1637,7 @@ pub(crate) fn run(
                     }
                     let Some((restarted, endpoints, history)) = replace_terminal(
                         &mut native_scheduler,
+                        &mut network_runtime,
                         previous,
                         storage_handle,
                         &mut memory,
@@ -1871,6 +1879,7 @@ pub(crate) fn run(
                     }
                     let Some((restarted, endpoint, resources)) = replace_network(
                         &mut native_scheduler,
+                        &mut network_runtime,
                         previous,
                         &mut memory,
                         &mut shared_pages,
@@ -1908,7 +1917,6 @@ pub(crate) fn run(
                     }
                     network_handle = Some(restarted);
                     native_network_endpoint = Some(endpoint);
-                    network_client_pending = None;
                     network_probe = Some(0x8000_0001);
                     network_probe_due = interrupts::ticks();
                     network_reported = false;
@@ -2190,7 +2198,7 @@ pub(crate) fn run(
                         &mut network_reported,
                         interrupts::ticks().saturating_add(step),
                         native_terminal_network,
-                        &mut network_client_pending,
+                        native_handle,
                         &session,
                         &capabilities,
                         &shared_pages,
@@ -2205,12 +2213,89 @@ pub(crate) fn run(
                 true
             }
             test_hooks::Action::Run(id) => {
-                if id == "network/unauthorized-operation" {
-                    let (Some(_network_endpoint), Some(network_task)) =
-                        (native_network_endpoint, network_handle)
+                if id == "network/simultaneous-client-busy" {
+                    let (
+                        Some(gateway_client),
+                        Some(gateway_task),
+                        Some(gateway_session),
+                        Some(gateway_owner),
+                    ) = (
+                        native_gateway_network,
+                        gateway_handle,
+                        gateway_network_session.as_ref(),
+                        gateway_owner,
+                    )
                     else {
                         return false;
                     };
+                    let terminal_request = logos_abi::NetworkRequest {
+                        id: 0x9000_0200,
+                        operation: logos_abi::NetworkOperation::Status,
+                        endpoint: logos_abi::NetworkEndpoint(0),
+                        peer: logos_abi::NetworkScope(0),
+                        page: logos_abi::PageHandle(0),
+                        length: 0,
+                        generation: 0,
+                        deadline: u64::MAX / 2,
+                    };
+                    let gateway_request = logos_abi::NetworkRequest {
+                        id: 0x9000_0201,
+                        operation: logos_abi::NetworkOperation::Listen,
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Tcp,
+                            0,
+                            logos_abi::REMOTE_TCP_PORT,
+                        ),
+                        ..terminal_request
+                    };
+                    if !native_terminal_network.issue(terminal_request) {
+                        return false;
+                    }
+                    if !network_runtime.relay_client(
+                        NetworkClientSlot::Terminal,
+                        native_terminal_network,
+                        native_handle,
+                        &mut native_scheduler,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                        interrupts::ticks(),
+                    ) {
+                        return false;
+                    }
+                    if !gateway_client.issue(gateway_request) {
+                        return false;
+                    }
+                    let _ = network_runtime.relay_client(
+                        NetworkClientSlot::Gateway,
+                        gateway_client,
+                        gateway_task,
+                        &mut native_scheduler,
+                        gateway_session,
+                        &capabilities,
+                        &shared_pages,
+                        gateway_owner,
+                        interrupts::ticks(),
+                    );
+                    let Some(busy) = gateway_client.response(gateway_request.id) else {
+                        return false;
+                    };
+                    if busy.status != logos_abi::NetworkStatus::Busy {
+                        return false;
+                    }
+                    if !network_runtime.invalidate_client(
+                        NetworkClientSlot::Terminal,
+                        &mut native_scheduler,
+                        logos_abi::NetworkStatus::Cancelled,
+                    ) {
+                        return false;
+                    }
+                    return native_terminal_network
+                        .response(terminal_request.id)
+                        .is_some_and(|reply| reply.status == logos_abi::NetworkStatus::Cancelled);
+                }
+                if id == "network/unauthorized-operation" {
                     let endpoint = logos_abi::NetworkEndpoint(0x0001_0001);
                     let requests = [
                         logos_abi::NetworkRequest {
@@ -2236,7 +2321,7 @@ pub(crate) fn run(
                                 0x0a00_0202,
                                 4001,
                             ),
-                            page: logos_abi::PageHandle(1),
+                            page: shared_history,
                             length: 1,
                             generation: 1,
                             deadline: u64::MAX / 2,
@@ -2250,7 +2335,7 @@ pub(crate) fn run(
                                 0,
                                 4000,
                             ),
-                            page: logos_abi::PageHandle(1),
+                            page: shared_history,
                             length: logos_abi::MAX_NETWORK_PAYLOAD as u16,
                             generation: 1,
                             deadline: u64::MAX / 2,
@@ -2261,9 +2346,9 @@ pub(crate) fn run(
                             return false;
                         }
                         if !network_runtime.relay_client(
-                            0,
+                            NetworkClientSlot::Terminal,
                             native_terminal_network,
-                            network_task,
+                            native_handle,
                             &mut native_scheduler,
                             &denied_session,
                             &capabilities,
@@ -2273,10 +2358,12 @@ pub(crate) fn run(
                         ) {
                             return false;
                         }
-                        if native_terminal_network.response(request.id).is_none_or(|reply| {
-                            reply.status != logos_abi::NetworkStatus::Denied
-                                || reply.counters.denied != 1
-                        }) {
+                        let Some(reply) = native_terminal_network.response(request.id) else {
+                            return false;
+                        };
+                        if reply.status != logos_abi::NetworkStatus::Denied
+                            || reply.counters.denied != 1
+                        {
                             return false;
                         }
                     }
@@ -2303,22 +2390,25 @@ pub(crate) fn run(
                     let reply = run_network_request(
                         request,
                         native_terminal_network,
+                        native_handle,
                         native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
-                        &mut network_client_pending,
                         &session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
                     );
-                    return reply.is_some_and(|reply| {
-                        reply.status == logos_abi::NetworkStatus::Complete
-                            && reply.source_address == 0x0a00_0202
-                    });
+                    let Some(reply) = reply else {
+                        return false;
+                    };
+                    if reply.status != logos_abi::NetworkStatus::Complete {
+                        return false;
+                    }
+                    return reply.source_address == 0x0a00_0202;
                 }
                 if id == "network/udp-round-trip" {
                     if !network_reported {
@@ -2341,13 +2431,13 @@ pub(crate) fn run(
                     let Some(bind_reply) = run_network_request(
                         bind,
                         native_terminal_network,
+                        native_handle,
                         native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
-                        &mut network_client_pending,
                         &session,
                         &capabilities,
                         &shared_pages,
@@ -2384,13 +2474,13 @@ pub(crate) fn run(
                     let Some(send_reply) = run_network_request(
                         send,
                         native_terminal_network,
+                        native_handle,
                         native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
-                        &mut network_client_pending,
                         &session,
                         &capabilities,
                         &shared_pages,
@@ -2415,13 +2505,13 @@ pub(crate) fn run(
                     let Some(receive_reply) = run_network_request(
                         receive,
                         native_terminal_network,
+                        native_handle,
                         native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
-                        &mut network_client_pending,
                         &session,
                         &capabilities,
                         &shared_pages,
@@ -2465,13 +2555,13 @@ pub(crate) fn run(
                     let Some(bind_reply) = run_network_request(
                         bind,
                         native_terminal_network,
+                        native_handle,
                         native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
-                        &mut network_client_pending,
                         &session,
                         &capabilities,
                         &shared_pages,
@@ -2492,13 +2582,13 @@ pub(crate) fn run(
                     let Some(cancel_reply) = run_network_request(
                         cancel,
                         native_terminal_network,
+                        native_handle,
                         native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
-                        &mut network_client_pending,
                         &session,
                         &capabilities,
                         &shared_pages,
@@ -2519,13 +2609,13 @@ pub(crate) fn run(
                     let Some(close_reply) = run_network_request(
                         close,
                         native_terminal_network,
+                        native_handle,
                         native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
-                        &mut network_client_pending,
                         &session,
                         &capabilities,
                         &shared_pages,
@@ -2564,13 +2654,13 @@ pub(crate) fn run(
                     let Some(first_reply) = run_network_request(
                         first,
                         native_terminal_network,
+                        native_handle,
                         native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
-                        &mut network_client_pending,
                         &session,
                         &capabilities,
                         &shared_pages,
@@ -2581,13 +2671,13 @@ pub(crate) fn run(
                     let Some(second_reply) = run_network_request(
                         second,
                         native_terminal_network,
+                        native_handle,
                         native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
                         &mut network_probe,
                         &mut network_probe_due,
                         &mut network_reported,
-                        &mut network_client_pending,
                         &session,
                         &capabilities,
                         &shared_pages,
@@ -2800,21 +2890,9 @@ pub(crate) fn run(
                     && let (Some(failed_network), Some(resources)) =
                         (network_handle, network_runtime.resources())
                 {
-                    if let Some(pending) = network_client_pending.take() {
-                        let _ = native_terminal_network.reply(logos_abi::NetworkReply {
-                            id: pending.request.id,
-                            status: logos_abi::NetworkStatus::Reset,
-                            endpoint: logos_abi::NetworkEndpoint(0),
-                            generation: pending.request.generation,
-                            source_address: 0,
-                            source_port: 0,
-                            length: 0,
-                            info: logos_abi::NetworkInfo::default(),
-                            counters: logos_abi::NetworkCounters::default(),
-                        });
-                    }
                     if let Some((restarted, endpoint, resources)) = replace_network(
                         &mut native_scheduler,
+                        &mut network_runtime,
                         failed_network,
                         &mut memory,
                         &mut shared_pages,
@@ -2878,7 +2956,7 @@ pub(crate) fn run(
                     &mut network_reported,
                     tick,
                     native_terminal_network,
-                    &mut network_client_pending,
+                    native_handle,
                     &session,
                     &capabilities,
                     &shared_pages,
@@ -2899,6 +2977,7 @@ pub(crate) fn run(
                     && let Some(failed) = gateway_handle
                     && let Some((restarted, page)) = replace_gateway(
                         &mut native_scheduler,
+                        &mut network_runtime,
                         failed,
                         &mut memory,
                         &mut shared_pages,
@@ -2911,7 +2990,10 @@ pub(crate) fn run(
                     native_gateway_network = native_scheduler.network_client_endpoint(restarted);
                     native_gateway_remote = native_scheduler.remote_endpoint(restarted);
                     remote_runtime.reset_transport();
-                    if native_scheduler.run(restarted) {
+                    if native_gateway_network
+                        .is_none_or(|endpoint| endpoint.configure_transfer(page))
+                        && native_scheduler.run(restarted)
+                    {
                         debug::write_line(b"LogOS: Gateway restarted");
                     } else {
                         let _ = native_services.failed(supervisor::NativeService::Gateway, tick);
@@ -2942,6 +3024,7 @@ pub(crate) fn run(
                                 }
                                 if let Some((restarted, endpoints, history)) = replace_terminal(
                                     &mut native_scheduler,
+                                    &mut network_runtime,
                                     native_handle,
                                     storage_handle,
                                     &mut memory,
@@ -3113,6 +3196,15 @@ pub(crate) fn run(
                                     && let Some(task) = native_gateway.take()
                                 {
                                     gateway_handle = native_scheduler.spawn(task);
+                                    if let Some(handle) = gateway_handle {
+                                        native_gateway_network =
+                                            native_scheduler.network_client_endpoint(handle);
+                                        if !native_gateway_network.zip(gateway_page).is_none_or(
+                                            |(endpoint, page)| endpoint.configure_transfer(page),
+                                        ) {
+                                            gateway_handle = None;
+                                        }
+                                    }
                                     if gateway_handle.is_some() {
                                         network_reported = true;
                                         native_services.ready(supervisor::NativeService::Gateway);
@@ -3234,6 +3326,7 @@ pub(crate) fn run(
                     if storage_runtime.cancel_store_transaction(&mut native_scheduler)
                         && let Some((restarted, endpoints, history)) = replace_terminal(
                             &mut native_scheduler,
+                            &mut network_runtime,
                             native_handle,
                             storage_handle,
                             &mut memory,
@@ -3299,7 +3392,7 @@ pub(crate) fn run(
                     &mut network_reported,
                     tick,
                     native_terminal_network,
-                    &mut network_client_pending,
+                    native_handle,
                     &session,
                     &capabilities,
                     &shared_pages,
@@ -3316,126 +3409,6 @@ pub(crate) fn run(
     loop {
         unsafe { core::arch::asm!("cli", "hlt") };
     }
-}
-
-#[cfg(any())]
-#[allow(clippy::too_many_arguments)]
-fn relay_network_client(
-    terminal: native_task::NetworkClientEndpoint,
-    service: native_task::NetworkEndpoint,
-    handle: native_task::Handle,
-    scheduler: &mut native_task::Scheduler<'_>,
-    pending: &mut Option<PendingNetworkClient>,
-    session: &session::Context,
-    capabilities: &capabilities::CapabilityManager,
-    shared_pages: &logos_core::shared_pages::SharedPages,
-    terminal_owner: u64,
-) -> bool {
-    if let Some(current) = *pending {
-        if let Some(reply) = service.response(current.request.id) {
-            if !reply.valid_for(current.request) {
-                return false;
-            }
-            *pending = None;
-            if matches!(
-                current.request.operation,
-                logos_abi::NetworkOperation::ReceiveFrom | logos_abi::NetworkOperation::Read
-            ) && reply.status == logos_abi::NetworkStatus::Complete
-                && let (Some(source), Some(network_pages)) = (
-                    shared_pages.address(terminal_owner, current.request.page),
-                    service.dma_pages(),
-                )
-            {
-                let source = source as *const u8;
-                let target = (network_pages.tx_address + NETWORK_PAYLOAD_OFFSET) as *const u8;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        target,
-                        source as *mut u8,
-                        reply.length as usize,
-                    );
-                }
-            }
-            return terminal.reply(reply) && scheduler.wake(handle) && scheduler.run(handle);
-        }
-        return true;
-    }
-    let Some(request) = terminal.request() else {
-        return true;
-    };
-    if !request.valid_shape() {
-        return terminal.reply(logos_abi::NetworkReply {
-            id: request.id,
-            status: crate::platform::network::status_for(request, false),
-            endpoint: logos_abi::NetworkEndpoint(0),
-            generation: 0,
-            source_address: 0,
-            source_port: 0,
-            length: 0,
-            info: logos_abi::NetworkInfo::default(),
-            counters: logos_abi::NetworkCounters::default(),
-        });
-    }
-    if let Some((kind, scope)) = crate::platform::network::capability(request)
-        && !session.allows_scoped64(capabilities, kind, scope)
-    {
-        return terminal.reply(logos_abi::NetworkReply {
-            id: request.id,
-            status: crate::platform::network::status_for(request, false),
-            endpoint: logos_abi::NetworkEndpoint(0),
-            generation: request.generation,
-            source_address: 0,
-            source_port: 0,
-            length: 0,
-            info: logos_abi::NetworkInfo::default(),
-            counters: logos_abi::NetworkCounters {
-                denied: 1,
-                ..logos_abi::NetworkCounters::default()
-            },
-        });
-    }
-    if matches!(
-        request.operation,
-        logos_abi::NetworkOperation::SendTo
-            | logos_abi::NetworkOperation::Write
-            | logos_abi::NetworkOperation::ReceiveFrom
-            | logos_abi::NetworkOperation::Read
-    ) {
-        let Some(client) = shared_pages.address(terminal_owner, request.page) else {
-            return terminal.reply(logos_abi::NetworkReply {
-                id: request.id,
-                status: logos_abi::NetworkStatus::Invalid,
-                endpoint: logos_abi::NetworkEndpoint(0),
-                generation: request.generation,
-                source_address: 0,
-                source_port: 0,
-                length: 0,
-                info: logos_abi::NetworkInfo::default(),
-                counters: logos_abi::NetworkCounters::default(),
-            }) && scheduler.wake(handle)
-                && scheduler.run(handle);
-        };
-        if matches!(
-            request.operation,
-            logos_abi::NetworkOperation::SendTo | logos_abi::NetworkOperation::Write
-        ) {
-            let Some(network_pages) = service.dma_pages() else {
-                return true;
-            };
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    client as *const u8,
-                    (network_pages.tx_address + NETWORK_PAYLOAD_OFFSET) as *mut u8,
-                    request.length as usize,
-                );
-            }
-        }
-    }
-    if !service.deliver_for_owner(request, terminal_owner) {
-        return true;
-    }
-    *pending = Some(PendingNetworkClient { request, owner: terminal_owner, endpoint: None });
-    scheduler.wake(handle) && scheduler.run(handle)
 }
 
 #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
@@ -3479,7 +3452,7 @@ fn poll_network(
     reported: &mut bool,
     tick: u64,
     terminal: native_task::NetworkClientEndpoint,
-    _client_pending: &mut Option<PendingNetworkClient>,
+    terminal_handle: native_task::Handle,
     session: &session::Context,
     capabilities: &capabilities::CapabilityManager,
     shared_pages: &logos_core::shared_pages::SharedPages,
@@ -3489,9 +3462,9 @@ fn poll_network(
         return true;
     };
     if !runtime.relay_client(
-        0,
+        NetworkClientSlot::Terminal,
         terminal,
-        handle,
+        terminal_handle,
         scheduler,
         session,
         capabilities,
@@ -3553,13 +3526,13 @@ fn poll_network(
 fn run_network_request(
     request: logos_abi::NetworkRequest,
     terminal: native_task::NetworkClientEndpoint,
+    terminal_handle: native_task::Handle,
     service: Option<native_task::NetworkEndpoint>,
     runtime: &mut network::NetworkRuntime,
     scheduler: &mut native_task::Scheduler<'_>,
     probe: &mut Option<u32>,
     probe_due: &mut u64,
     reported: &mut bool,
-    client_pending: &mut Option<PendingNetworkClient>,
     session: &session::Context,
     capabilities: &capabilities::CapabilityManager,
     shared_pages: &logos_core::shared_pages::SharedPages,
@@ -3585,7 +3558,7 @@ fn run_network_request(
             reported,
             interrupts::ticks(),
             terminal,
-            client_pending,
+            terminal_handle,
             session,
             capabilities,
             shared_pages,
@@ -3644,7 +3617,7 @@ fn poll_gateway(
         return true;
     };
     if !runtime.relay_client(
-        1,
+        NetworkClientSlot::Gateway,
         client,
         handle,
         scheduler,
@@ -4167,6 +4140,7 @@ fn terminal_endpoints(
 #[allow(clippy::too_many_arguments)]
 fn replace_terminal(
     scheduler: &mut native_task::Scheduler<'_>,
+    network_runtime: &mut network::NetworkRuntime,
     handle: native_task::Handle,
     storage_handle: native_task::Handle,
     memory: &mut memory::PhysicalMemory,
@@ -4175,6 +4149,13 @@ fn replace_terminal(
     _storage_owner: u64,
     history: logos_abi::PageHandle,
 ) -> Option<(native_task::Handle, TerminalEndpoints, logos_abi::PageHandle)> {
+    if !network_runtime.invalidate_client(
+        NetworkClientSlot::Terminal,
+        scheduler,
+        logos_abi::NetworkStatus::Cancelled,
+    ) {
+        return None;
+    }
     if !scheduler.failed(handle) && !scheduler.fail(handle) {
         debug::write_line(b"LogOS: terminal replacement quarantine failed");
         return None;
@@ -4213,6 +4194,9 @@ fn replace_terminal(
         return None;
     };
     if !endpoints.3.configure_transfer(new_history) {
+        return None;
+    }
+    if !endpoints.4.configure_transfer(new_history) {
         return None;
     }
     if storage_handle.available() {
@@ -4272,11 +4256,15 @@ fn replace_storage(
 
 fn replace_network(
     scheduler: &mut native_task::Scheduler<'_>,
+    network_runtime: &mut network::NetworkRuntime,
     handle: native_task::Handle,
     memory: &mut memory::PhysicalMemory,
     pages: &mut logos_core::shared_pages::SharedPages,
     previous: NetworkResources,
 ) -> Option<(native_task::Handle, native_task::NetworkEndpoint, NetworkResources)> {
+    if !network_runtime.invalidate_active(scheduler, logos_abi::NetworkStatus::Reset) {
+        return None;
+    }
     if !scheduler.failed(handle) && !scheduler.fail(handle) {
         return None;
     }
@@ -4297,12 +4285,20 @@ fn replace_network(
 
 fn replace_gateway(
     scheduler: &mut native_task::Scheduler<'_>,
+    network_runtime: &mut network::NetworkRuntime,
     handle: native_task::Handle,
     memory: &mut memory::PhysicalMemory,
     pages: &mut logos_core::shared_pages::SharedPages,
     owner: Option<u64>,
     previous: Option<logos_abi::PageHandle>,
 ) -> Option<(native_task::Handle, logos_abi::PageHandle)> {
+    if !network_runtime.invalidate_client(
+        NetworkClientSlot::Gateway,
+        scheduler,
+        logos_abi::NetworkStatus::Cancelled,
+    ) {
+        return None;
+    }
     let owner = owner?;
     let previous = previous?;
     if !scheduler.failed(handle) && !scheduler.fail(handle) {
