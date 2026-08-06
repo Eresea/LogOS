@@ -13,8 +13,9 @@ use core::panic::PanicInfo;
 use logos_abi::service as native_service;
 pub use logos_abi::service::{
     BlockClientPage, ControlPage, DisplayPage, EffectPage, Header, InputPage, MAX_TEXT,
-    NetworkDevicePage, NetworkDmaResources, NetworkEventPage, ProtocolVersion, SessionClientPage,
-    SessionServerPage, SessionStatus, StoreClientPage, StoreServerPage,
+    NetworkClientPage, NetworkDevicePage, NetworkDmaResources, NetworkEventPage, NetworkServerPage,
+    NetworkServerRequest, ProtocolVersion, RemotePage, RemotePageReply, RemotePageRequest,
+    SessionClientPage, SessionServerPage, SessionStatus, StoreClientPage, StoreServerPage,
 };
 
 pub type EntryControlPage = *mut ControlPage;
@@ -364,25 +365,54 @@ impl ServiceContext {
         })
     }
 
+    pub fn network_server_request(&self) -> Option<NetworkServerRequest> {
+        let raw = self.raw();
+        (raw.network_server_page != 0).then(|| unsafe {
+            NetworkServerPage::take_at(raw.network_server_page, raw.generation, raw.generation)
+        })?
+    }
+
     pub fn network_request(&self) -> Option<logos_abi::NetworkRequest> {
-        unsafe { ControlPage::network_at(self.raw_address()) }
+        self.network_server_request().map(|message| message.request)
     }
 
     pub fn network_response(&self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
-        unsafe { ControlPage::network_reply_at(self.raw_address(), expected_id) }
-    }
-
-    pub fn network_owner(&self) -> Option<u64> {
-        unsafe { ControlPage::network_owner_at(self.raw_address()) }
+        let raw = self.raw();
+        (raw.network_client_page != 0).then(|| unsafe {
+            NetworkClientPage::finish_at(
+                raw.network_client_page,
+                raw.generation,
+                raw.generation,
+                expected_id,
+            )
+        })?
     }
 
     pub fn request_network(&mut self, request: logos_abi::NetworkRequest) -> bool {
-        (unsafe { ControlPage::request_network_at(self.raw_address(), request) })
+        let raw = self.raw();
+        (raw.network_client_page != 0
+            && unsafe {
+                NetworkClientPage::request_at(
+                    raw.network_client_page,
+                    raw.generation,
+                    raw.generation,
+                    request,
+                )
+            })
             && self.invoke(native_service::NETWORK_REQUEST)
     }
 
     pub fn network_reply(&mut self, reply: logos_abi::NetworkReply) -> bool {
-        (unsafe { ControlPage::reply_network_at(self.raw_address(), reply) })
+        let raw = self.raw();
+        (raw.network_server_page != 0
+            && unsafe {
+                NetworkServerPage::reply_at(
+                    raw.network_server_page,
+                    raw.generation,
+                    raw.generation,
+                    reply,
+                )
+            })
             && self.invoke(native_service::NETWORK_REPLY)
     }
 
@@ -455,21 +485,35 @@ impl ServiceContext {
         .then_some(event)
     }
 
-    pub fn remote_gate_request(&self) -> Option<native_service::RemoteGateRequest> {
-        unsafe { ControlPage::remote_gate_at(self.raw_address()) }
+    pub fn remote_gate_request(&self) -> Option<RemotePageRequest> {
+        let raw = self.raw();
+        (raw.remote_page != 0).then(|| unsafe {
+            RemotePage::take_at(raw.remote_page, raw.generation, raw.generation)
+        })?
     }
 
-    pub fn remote_gate_reply(&self, expected_id: u32) -> Option<native_service::RemoteGateReply> {
-        unsafe { ControlPage::remote_gate_reply_at(self.raw_address(), expected_id) }
+    pub fn remote_gate_reply(&self, expected_id: u32) -> Option<RemotePageReply> {
+        let raw = self.raw();
+        (raw.remote_page != 0).then(|| unsafe {
+            RemotePage::finish_at(raw.remote_page, raw.generation, raw.generation, expected_id)
+        })?
     }
 
-    pub fn request_remote_gate(&mut self, request: native_service::RemoteGateRequest) -> bool {
-        (unsafe { ControlPage::request_remote_gate_at(self.raw_address(), request) })
+    pub fn request_remote_gate(&mut self, request: RemotePageRequest) -> bool {
+        let raw = self.raw();
+        (raw.remote_page != 0
+            && unsafe {
+                RemotePage::request_at(raw.remote_page, raw.generation, raw.generation, request)
+            })
             && self.invoke(native_service::REMOTE_GATE)
     }
 
-    pub fn reply_remote_gate(&mut self, reply: native_service::RemoteGateReply) -> bool {
-        (unsafe { ControlPage::reply_remote_gate_at(self.raw_address(), reply) })
+    pub fn reply_remote_gate(&mut self, reply: RemotePageReply) -> bool {
+        let raw = self.raw();
+        (raw.remote_page != 0
+            && unsafe {
+                RemotePage::reply_at(raw.remote_page, raw.generation, raw.generation, reply)
+            })
             && self.invoke(native_service::REMOTE_GATE)
     }
 

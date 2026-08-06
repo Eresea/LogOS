@@ -1,6 +1,18 @@
 use crate as logos_abi;
 use core::mem::{align_of, size_of};
 
+pub mod block;
+pub mod display;
+pub mod input;
+pub mod network;
+pub mod remote;
+pub mod session;
+pub mod storage;
+pub use remote::{
+    RemoteGateOperation, RemoteGateStatus, RemotePage, RemotePageReply, RemotePageRequest,
+    RemotePageState,
+};
+
 pub const MAGIC: [u8; 4] = *b"LGSV";
 pub const ABI: u16 = 4;
 pub const MAX_TEXT: usize = 256;
@@ -58,10 +70,11 @@ pub struct ControlPage {
     pub store_client_page: u64,
     pub store_server_page: u64,
     pub block_client_page: u64,
+    pub remote_page: u64,
+    pub network_client_page: u64,
+    pub network_server_page: u64,
     pub slot0: u32,
     pub slot1: u32,
-    pub payload_length: u32,
-    pub payload: [u8; MAX_TEXT],
     pub network_device_page: u64,
     pub network_event_page: u64,
 }
@@ -463,15 +476,665 @@ pub struct NetworkEventPage {
     pub reserved: [u8; logos_abi::PAGE_SIZE - 88],
 }
 
-/// Fixed-size Remote endpoint page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum NetworkPageState {
+    Ready = 1,
+    Request = 2,
+    Processing = 3,
+    Reply = 4,
+    Denied = 5,
+    Failed = 6,
+    Cancelled = 7,
+    TimedOut = 8,
+}
+
+impl NetworkPageState {
+    pub const fn from_wire(value: u32) -> Option<Self> {
+        Some(match value {
+            1 => Self::Ready,
+            2 => Self::Request,
+            3 => Self::Processing,
+            4 => Self::Reply,
+            5 => Self::Denied,
+            6 => Self::Failed,
+            7 => Self::Cancelled,
+            8 => Self::TimedOut,
+            _ => return None,
+        })
+    }
+}
+
+/// Client-owned Network request/reply page.
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct RemotePage {
-    pub generation: u32,
-    pub state: EndpointState,
-    pub request: [u8; REMOTE_GATE_REQUEST_BYTES],
-    pub reply: [u8; REMOTE_GATE_REPLY_BYTES],
-    pub reserved: [u8; logos_abi::PAGE_SIZE - 52],
+pub struct NetworkClientPage {
+    pub service_generation: u32,
+    pub endpoint_generation: u32,
+    pub state: u32,
+    pub request_id: u32,
+    pub operation: u32,
+    pub endpoint: u32,
+    pub peer: u64,
+    pub page: u32,
+    pub length: u16,
+    pub generation: u16,
+    pub deadline: u64,
+    pub transfer_page: u32,
+    pub reply_status: u32,
+    pub reply_endpoint: u32,
+    pub reply_generation: u16,
+    pub reply_source_port: u16,
+    pub reply_source_address: u32,
+    pub reply_length: u16,
+    pub reserved0: u16,
+    pub reply_info: logos_abi::NetworkInfo,
+    pub reply_counters: logos_abi::NetworkCounters,
+}
+
+/// Network-owned server request/reply page.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct NetworkServerPage {
+    pub service_generation: u32,
+    pub endpoint_generation: u32,
+    pub state: u32,
+    pub request_id: u32,
+    pub caller_low: u32,
+    pub caller_high: u32,
+    pub operation: u32,
+    pub endpoint: u32,
+    pub peer: u64,
+    pub page: u32,
+    pub length: u16,
+    pub generation: u16,
+    pub deadline: u64,
+    pub transfer_page: u32,
+    pub reply_status: u32,
+    pub reply_endpoint: u32,
+    pub reply_generation: u16,
+    pub reply_source_port: u16,
+    pub reply_source_address: u32,
+    pub reply_length: u16,
+    pub reserved0: u16,
+    pub reply_info: logos_abi::NetworkInfo,
+    pub reply_counters: logos_abi::NetworkCounters,
+}
+
+#[derive(Clone, Copy)]
+pub struct NetworkServerRequest {
+    pub id: u32,
+    pub caller: u64,
+    pub request: logos_abi::NetworkRequest,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn network_request_from_fields(
+    id: u32,
+    operation: u32,
+    endpoint: u32,
+    peer: u64,
+    page: u32,
+    length: u16,
+    generation: u16,
+    deadline: u64,
+) -> Option<logos_abi::NetworkRequest> {
+    let request = logos_abi::NetworkRequest {
+        id,
+        operation: logos_abi::NetworkOperation::from_wire(u8::try_from(operation).ok()?)?,
+        endpoint: logos_abi::NetworkEndpoint(endpoint),
+        peer: logos_abi::NetworkScope(peer),
+        page: logos_abi::PageHandle(page),
+        length,
+        generation,
+        deadline,
+    };
+    request.valid_shape().then_some(request)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn network_reply_from_page(
+    id: u32,
+    status: u32,
+    endpoint: u32,
+    generation: u16,
+    source_address: u32,
+    source_port: u16,
+    length: u16,
+    info: logos_abi::NetworkInfo,
+    counters: logos_abi::NetworkCounters,
+) -> Option<logos_abi::NetworkReply> {
+    Some(logos_abi::NetworkReply {
+        id,
+        status: logos_abi::NetworkStatus::from_wire(u8::try_from(status).ok()?)?,
+        endpoint: logos_abi::NetworkEndpoint(endpoint),
+        generation,
+        source_address,
+        source_port,
+        length,
+        info,
+        counters,
+    })
+}
+
+fn network_reply_state(status: logos_abi::NetworkStatus) -> NetworkPageState {
+    match status {
+        logos_abi::NetworkStatus::Complete => NetworkPageState::Reply,
+        logos_abi::NetworkStatus::Denied => NetworkPageState::Denied,
+        logos_abi::NetworkStatus::Cancelled => NetworkPageState::Cancelled,
+        logos_abi::NetworkStatus::TimedOut => NetworkPageState::TimedOut,
+        _ => NetworkPageState::Failed,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn set_network_reply(
+    state: &mut u32,
+    reply_status: &mut u32,
+    reply_endpoint: &mut u32,
+    reply_generation: &mut u16,
+    reply_source_address: &mut u32,
+    reply_source_port: &mut u16,
+    reply_length: &mut u16,
+    reply_info: &mut logos_abi::NetworkInfo,
+    reply_counters: &mut logos_abi::NetworkCounters,
+    request: logos_abi::NetworkRequest,
+    reply: logos_abi::NetworkReply,
+) -> bool {
+    if !reply.valid_for(request) {
+        return false;
+    }
+    *reply_status = reply.status as u32;
+    *reply_endpoint = reply.endpoint.0;
+    *reply_generation = reply.generation;
+    *reply_source_address = reply.source_address;
+    *reply_source_port = reply.source_port;
+    *reply_length = reply.length;
+    *reply_info = reply.info;
+    *reply_counters = reply.counters;
+    *state = network_reply_state(reply.status) as u32;
+    true
+}
+
+#[allow(clippy::missing_safety_doc)]
+impl NetworkClientPage {
+    pub const fn new(service_generation: u32, endpoint_generation: u32) -> Self {
+        Self {
+            service_generation,
+            endpoint_generation,
+            state: NetworkPageState::Ready as u32,
+            request_id: 0,
+            operation: 0,
+            endpoint: 0,
+            peer: 0,
+            page: 0,
+            length: 0,
+            generation: 0,
+            deadline: 0,
+            transfer_page: 0,
+            reply_status: 0,
+            reply_endpoint: 0,
+            reply_generation: 0,
+            reply_source_port: 0,
+            reply_source_address: 0,
+            reply_length: 0,
+            reserved0: 0,
+            reply_info: logos_abi::NetworkInfo {
+                mac: [0; 6],
+                mtu: 0,
+                generation: 0,
+                link_up: 0,
+                configuration: 0,
+                ipv4: 0,
+                subnet_mask: 0,
+                router: 0,
+            },
+            reply_counters: logos_abi::NetworkCounters {
+                rx_frames: 0,
+                tx_frames: 0,
+                rx_bytes: 0,
+                tx_bytes: 0,
+                malformed: 0,
+                unsupported: 0,
+                rx_dropped: 0,
+                udp_no_endpoint: 0,
+                udp_queue_dropped: 0,
+                timeouts: 0,
+                cancellations: 0,
+                resets: 0,
+                denied: 0,
+            },
+        }
+    }
+
+    pub unsafe fn reset_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        if !valid_page_identity::<Self>(address, service_generation, endpoint_generation) {
+            return false;
+        }
+        let old = unsafe { (address as *const Self).read_volatile() };
+        let mut page = Self::new(service_generation, endpoint_generation);
+        page.transfer_page = old.transfer_page;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn configure_transfer_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        handle: logos_abi::PageHandle,
+    ) -> bool {
+        if handle.0 == 0 {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || NetworkPageState::from_wire(page.state) != Some(NetworkPageState::Ready)
+        {
+            return false;
+        }
+        page.transfer_page = handle.0;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn transfer_page_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<logos_abi::PageHandle> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        (client_identity(&page, service_generation, endpoint_generation) && page.transfer_page != 0)
+            .then_some(logos_abi::PageHandle(page.transfer_page))
+    }
+
+    pub unsafe fn request_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        request: logos_abi::NetworkRequest,
+    ) -> bool {
+        if !request.valid_shape() {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || NetworkPageState::from_wire(page.state) != Some(NetworkPageState::Ready)
+        {
+            return false;
+        }
+        page.request_id = request.id;
+        page.operation = request.operation as u32;
+        page.endpoint = request.endpoint.0;
+        page.peer = request.peer.0;
+        page.page = request.page.0;
+        page.length = request.length;
+        page.generation = request.generation;
+        page.deadline = request.deadline;
+        page.reply_status = 0;
+        page.state = NetworkPageState::Request as u32;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn pending_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        client_identity(&page, service_generation, endpoint_generation)
+            && NetworkPageState::from_wire(page.state) == Some(NetworkPageState::Request)
+    }
+
+    pub unsafe fn request_at_page(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<logos_abi::NetworkRequest> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || NetworkPageState::from_wire(page.state) != Some(NetworkPageState::Request)
+        {
+            return None;
+        }
+        network_request_from_fields(
+            page.request_id,
+            page.operation,
+            page.endpoint,
+            page.peer,
+            page.page,
+            page.length,
+            page.generation,
+            page.deadline,
+        )
+    }
+
+    pub unsafe fn mark_processing_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || NetworkPageState::from_wire(page.state) != Some(NetworkPageState::Request)
+        {
+            return false;
+        }
+        page.state = NetworkPageState::Processing as u32;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn reply_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        reply: logos_abi::NetworkReply,
+    ) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        let Some(request) =
+            unsafe { Self::request_at_page(address, service_generation, endpoint_generation) }
+                .or_else(|| {
+                    network_request_from_fields(
+                        page.request_id,
+                        page.operation,
+                        page.endpoint,
+                        page.peer,
+                        page.page,
+                        page.length,
+                        page.generation,
+                        page.deadline,
+                    )
+                })
+        else {
+            return false;
+        };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || !matches!(
+                NetworkPageState::from_wire(page.state),
+                Some(NetworkPageState::Processing)
+            )
+        {
+            return false;
+        }
+        set_network_reply(
+            &mut page.state,
+            &mut page.reply_status,
+            &mut page.reply_endpoint,
+            &mut page.reply_generation,
+            &mut page.reply_source_address,
+            &mut page.reply_source_port,
+            &mut page.reply_length,
+            &mut page.reply_info,
+            &mut page.reply_counters,
+            request,
+            reply,
+        ) && unsafe {
+            (address as *mut Self).write_volatile(page);
+            true
+        }
+    }
+
+    pub unsafe fn finish_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        expected_id: u32,
+    ) -> Option<logos_abi::NetworkReply> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        if !client_identity(&page, service_generation, endpoint_generation)
+            || page.request_id != expected_id
+            || !matches!(
+                NetworkPageState::from_wire(page.state),
+                Some(
+                    NetworkPageState::Reply
+                        | NetworkPageState::Denied
+                        | NetworkPageState::Failed
+                        | NetworkPageState::Cancelled
+                        | NetworkPageState::TimedOut
+                )
+            )
+        {
+            return None;
+        }
+        let reply = network_reply_from_page(
+            page.request_id,
+            page.reply_status,
+            page.reply_endpoint,
+            page.reply_generation,
+            page.reply_source_address,
+            page.reply_source_port,
+            page.reply_length,
+            page.reply_info,
+            page.reply_counters,
+        )?;
+        unsafe { Self::reset_at(address, service_generation, endpoint_generation) };
+        Some(reply)
+    }
+}
+
+#[allow(clippy::missing_safety_doc)]
+impl NetworkServerPage {
+    pub const fn new(service_generation: u32, endpoint_generation: u32) -> Self {
+        Self {
+            service_generation,
+            endpoint_generation,
+            state: NetworkPageState::Ready as u32,
+            request_id: 0,
+            caller_low: 0,
+            caller_high: 0,
+            operation: 0,
+            endpoint: 0,
+            peer: 0,
+            page: 0,
+            length: 0,
+            generation: 0,
+            deadline: 0,
+            transfer_page: 0,
+            reply_status: 0,
+            reply_endpoint: 0,
+            reply_generation: 0,
+            reply_source_port: 0,
+            reply_source_address: 0,
+            reply_length: 0,
+            reserved0: 0,
+            reply_info: logos_abi::NetworkInfo {
+                mac: [0; 6],
+                mtu: 0,
+                generation: 0,
+                link_up: 0,
+                configuration: 0,
+                ipv4: 0,
+                subnet_mask: 0,
+                router: 0,
+            },
+            reply_counters: logos_abi::NetworkCounters {
+                rx_frames: 0,
+                tx_frames: 0,
+                rx_bytes: 0,
+                tx_bytes: 0,
+                malformed: 0,
+                unsupported: 0,
+                rx_dropped: 0,
+                udp_no_endpoint: 0,
+                udp_queue_dropped: 0,
+                timeouts: 0,
+                cancellations: 0,
+                resets: 0,
+                denied: 0,
+            },
+        }
+    }
+
+    pub unsafe fn reset_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        if !valid_page_identity::<Self>(address, service_generation, endpoint_generation) {
+            return false;
+        }
+        unsafe {
+            (address as *mut Self)
+                .write_volatile(Self::new(service_generation, endpoint_generation))
+        };
+        true
+    }
+
+    pub unsafe fn deliver_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        caller: u64,
+        request: logos_abi::NetworkRequest,
+    ) -> bool {
+        if !request.valid_shape() {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || NetworkPageState::from_wire(page.state) != Some(NetworkPageState::Ready)
+        {
+            return false;
+        }
+        page.request_id = request.id;
+        page.caller_low = caller as u32;
+        page.caller_high = (caller >> 32) as u32;
+        page.operation = request.operation as u32;
+        page.endpoint = request.endpoint.0;
+        page.peer = request.peer.0;
+        page.page = request.page.0;
+        page.length = request.length;
+        page.generation = request.generation;
+        page.deadline = request.deadline;
+        page.state = NetworkPageState::Request as u32;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn take_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<NetworkServerRequest> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || NetworkPageState::from_wire(page.state) != Some(NetworkPageState::Request)
+        {
+            return None;
+        }
+        let request = network_request_from_fields(
+            page.request_id,
+            page.operation,
+            page.endpoint,
+            page.peer,
+            page.page,
+            page.length,
+            page.generation,
+            page.deadline,
+        )?;
+        page.state = NetworkPageState::Processing as u32;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(NetworkServerRequest {
+            id: request.id,
+            caller: u64::from(page.caller_low) | (u64::from(page.caller_high) << 32),
+            request,
+        })
+    }
+
+    pub unsafe fn pending_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        server_identity(&page, service_generation, endpoint_generation)
+            && NetworkPageState::from_wire(page.state) == Some(NetworkPageState::Request)
+    }
+
+    pub unsafe fn reply_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        reply: logos_abi::NetworkReply,
+    ) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        let Some(request) = network_request_from_fields(
+            page.request_id,
+            page.operation,
+            page.endpoint,
+            page.peer,
+            page.page,
+            page.length,
+            page.generation,
+            page.deadline,
+        ) else {
+            return false;
+        };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || NetworkPageState::from_wire(page.state) != Some(NetworkPageState::Processing)
+        {
+            return false;
+        }
+        set_network_reply(
+            &mut page.state,
+            &mut page.reply_status,
+            &mut page.reply_endpoint,
+            &mut page.reply_generation,
+            &mut page.reply_source_address,
+            &mut page.reply_source_port,
+            &mut page.reply_length,
+            &mut page.reply_info,
+            &mut page.reply_counters,
+            request,
+            reply,
+        ) && unsafe {
+            (address as *mut Self).write_volatile(page);
+            true
+        }
+    }
+
+    pub unsafe fn finish_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        expected_id: u32,
+    ) -> Option<logos_abi::NetworkReply> {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        if !server_identity(&page, service_generation, endpoint_generation)
+            || page.request_id != expected_id
+            || !matches!(
+                NetworkPageState::from_wire(page.state),
+                Some(
+                    NetworkPageState::Reply
+                        | NetworkPageState::Denied
+                        | NetworkPageState::Failed
+                        | NetworkPageState::Cancelled
+                        | NetworkPageState::TimedOut
+                )
+            )
+        {
+            return None;
+        }
+        let reply = network_reply_from_page(
+            page.request_id,
+            page.reply_status,
+            page.reply_endpoint,
+            page.reply_generation,
+            page.reply_source_address,
+            page.reply_source_port,
+            page.reply_length,
+            page.reply_info,
+            page.reply_counters,
+        )?;
+        unsafe { Self::reset_at(address, service_generation, endpoint_generation) };
+        Some(reply)
+    }
 }
 
 impl InputPage {
@@ -3062,6 +3725,34 @@ impl GenerationPage for StoreServerPage {
     }
 }
 
+impl GenerationPage for NetworkClientPage {
+    fn service_generation(&self) -> u32 {
+        self.service_generation
+    }
+    fn endpoint_generation(&self) -> u32 {
+        self.endpoint_generation
+    }
+}
+
+impl GenerationPage for NetworkServerPage {
+    fn service_generation(&self) -> u32 {
+        self.service_generation
+    }
+    fn endpoint_generation(&self) -> u32 {
+        self.endpoint_generation
+    }
+}
+
+impl GenerationPage for RemotePage {
+    fn service_generation(&self) -> u32 {
+        self.service_generation
+    }
+
+    fn endpoint_generation(&self) -> u32 {
+        self.endpoint_generation
+    }
+}
+
 fn client_identity<T: GenerationPage>(
     page: &T,
     service_generation: u32,
@@ -3134,279 +3825,11 @@ const _: () = assert!(size_of::<NetworkEventPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<RemotePage>() == logos_abi::PAGE_SIZE);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum RemoteGateOperation {
-    Handshake = 1,
-    Open,
-    Invoke,
-    Seal,
-    Subscribe,
-    Credit,
-    Acknowledge,
-    Reset,
-}
-
-impl RemoteGateOperation {
-    fn from_wire(value: u32) -> Option<Self> {
-        Some(match value {
-            1 => Self::Handshake,
-            2 => Self::Open,
-            3 => Self::Invoke,
-            4 => Self::Seal,
-            5 => Self::Subscribe,
-            6 => Self::Credit,
-            7 => Self::Acknowledge,
-            8 => Self::Reset,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum RemoteGateStatus {
-    Complete = 1,
-    Busy,
-    Denied,
-    Invalid,
-    Unavailable,
-    Indeterminate,
-}
-
-impl RemoteGateStatus {
-    fn from_wire(value: u32) -> Option<Self> {
-        Some(match value {
-            1 => Self::Complete,
-            2 => Self::Busy,
-            3 => Self::Denied,
-            4 => Self::Invalid,
-            5 => Self::Unavailable,
-            6 => Self::Indeterminate,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(C)]
-pub struct RemoteGateRequest {
-    pub id: u32,
-    pub operation: RemoteGateOperation,
-    pub page: logos_abi::PageHandle,
-    pub length: u16,
-    pub deadline: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(C)]
-pub struct RemoteGateReply {
-    pub id: u32,
-    pub status: RemoteGateStatus,
-    pub length: u16,
-    pub cursor: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NetworkDmaResources {
     pub rx_handle: logos_abi::PageHandle,
     pub rx_address: u64,
     pub tx_handle: logos_abi::PageHandle,
     pub tx_address: u64,
-}
-
-const NETWORK_REQUEST_BYTES: usize = 34;
-const NETWORK_REQUEST_OWNER_OFFSET: usize = NETWORK_REQUEST_BYTES;
-const NETWORK_REPLY_BYTES: usize = 148;
-const REMOTE_GATE_REQUEST_BYTES: usize = 24;
-const REMOTE_GATE_REPLY_BYTES: usize = 20;
-
-fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?))
-}
-
-fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?))
-}
-
-fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
-    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-}
-fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
-    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
-}
-fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
-    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-
-fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(bytes.get(offset..offset + 2)?.try_into().ok()?))
-}
-
-fn decode_remote_gate_request(bytes: &[u8]) -> Option<RemoteGateRequest> {
-    (bytes.len() >= REMOTE_GATE_REQUEST_BYTES && bytes[14..16] == [0; 2]).then_some(())?;
-    Some(RemoteGateRequest {
-        id: read_u32(bytes, 0)?,
-        operation: RemoteGateOperation::from_wire(read_u32(bytes, 4)?)?,
-        page: logos_abi::PageHandle(read_u32(bytes, 8)?),
-        length: read_u16(bytes, 12)?,
-        deadline: read_u64(bytes, 16)?,
-    })
-}
-
-fn encode_remote_gate_request(bytes: &mut [u8; MAX_TEXT], request: RemoteGateRequest) {
-    *bytes = [0; MAX_TEXT];
-    write_u32(bytes, 0, request.id);
-    write_u32(bytes, 4, request.operation as u32);
-    write_u32(bytes, 8, request.page.0);
-    write_u16(bytes, 12, request.length);
-    write_u64(bytes, 16, request.deadline);
-}
-
-fn decode_remote_gate_reply(bytes: &[u8]) -> Option<RemoteGateReply> {
-    (bytes.len() >= REMOTE_GATE_REPLY_BYTES && bytes[10..12] == [0; 2]).then_some(())?;
-    Some(RemoteGateReply {
-        id: read_u32(bytes, 0)?,
-        status: RemoteGateStatus::from_wire(read_u32(bytes, 4)?)?,
-        length: read_u16(bytes, 8)?,
-        cursor: read_u64(bytes, 12)?,
-    })
-}
-
-fn encode_remote_gate_reply(bytes: &mut [u8; MAX_TEXT], reply: RemoteGateReply) {
-    *bytes = [0; MAX_TEXT];
-    write_u32(bytes, 0, reply.id);
-    write_u32(bytes, 4, reply.status as u32);
-    write_u16(bytes, 8, reply.length);
-    write_u64(bytes, 12, reply.cursor);
-}
-
-fn decode_network_request(bytes: &[u8]) -> Option<logos_abi::NetworkRequest> {
-    if *bytes.get(5)? != 0 {
-        return None;
-    }
-    Some(logos_abi::NetworkRequest {
-        id: read_u32(bytes, 0)?,
-        operation: logos_abi::NetworkOperation::from_wire(*bytes.get(4)?)?,
-        endpoint: logos_abi::NetworkEndpoint(read_u32(bytes, 6)?),
-        peer: logos_abi::NetworkScope(read_u64(bytes, 10)?),
-        page: logos_abi::PageHandle(read_u32(bytes, 18)?),
-        length: read_u16(bytes, 22)?,
-        generation: read_u16(bytes, 24)?,
-        deadline: read_u64(bytes, 26)?,
-    })
-}
-
-fn encode_network_request(bytes: &mut [u8; MAX_TEXT], request: logos_abi::NetworkRequest) {
-    *bytes = [0; MAX_TEXT];
-    write_u32(bytes, 0, request.id);
-    bytes[4] = request.operation as u8;
-    write_u32(bytes, 6, request.endpoint.0);
-    write_u64(bytes, 10, request.peer.0);
-    write_u32(bytes, 18, request.page.0);
-    write_u16(bytes, 22, request.length);
-    write_u16(bytes, 24, request.generation);
-    write_u64(bytes, 26, request.deadline);
-}
-
-fn decode_network_reply(bytes: &[u8]) -> Option<logos_abi::NetworkReply> {
-    if *bytes.get(5)? != 0 {
-        return None;
-    }
-    Some(logos_abi::NetworkReply {
-        id: read_u32(bytes, 0)?,
-        status: logos_abi::NetworkStatus::from_wire(*bytes.get(4)?)?,
-        endpoint: logos_abi::NetworkEndpoint(read_u32(bytes, 6)?),
-        generation: read_u16(bytes, 10)?,
-        source_address: read_u32(bytes, 12)?,
-        source_port: read_u16(bytes, 16)?,
-        length: read_u16(bytes, 18)?,
-        info: decode_network_info(bytes, 20)?,
-        counters: decode_network_counters(bytes, 44)?,
-    })
-}
-
-fn encode_network_reply(bytes: &mut [u8; MAX_TEXT], reply: logos_abi::NetworkReply) {
-    *bytes = [0; MAX_TEXT];
-    write_u32(bytes, 0, reply.id);
-    bytes[4] = reply.status as u8;
-    write_u32(bytes, 6, reply.endpoint.0);
-    write_u16(bytes, 10, reply.generation);
-    write_u32(bytes, 12, reply.source_address);
-    write_u16(bytes, 16, reply.source_port);
-    write_u16(bytes, 18, reply.length);
-    encode_network_info(bytes, 20, reply.info);
-    encode_network_counters(bytes, 44, reply.counters);
-}
-
-fn decode_network_info(bytes: &[u8], offset: usize) -> Option<logos_abi::NetworkInfo> {
-    let mut mac = [0; 6];
-    mac.copy_from_slice(bytes.get(offset..offset + 6)?);
-    Some(logos_abi::NetworkInfo {
-        mac,
-        mtu: read_u16(bytes, offset + 6)?,
-        generation: read_u16(bytes, offset + 8)?,
-        link_up: *bytes.get(offset + 10)?,
-        configuration: *bytes.get(offset + 11)?,
-        ipv4: read_u32(bytes, offset + 12)?,
-        subnet_mask: read_u32(bytes, offset + 16)?,
-        router: read_u32(bytes, offset + 20)?,
-    })
-}
-
-fn encode_network_info(bytes: &mut [u8; MAX_TEXT], offset: usize, info: logos_abi::NetworkInfo) {
-    bytes[offset..offset + 6].copy_from_slice(&info.mac);
-    write_u16(bytes, offset + 6, info.mtu);
-    write_u16(bytes, offset + 8, info.generation);
-    bytes[offset + 10] = info.link_up;
-    bytes[offset + 11] = info.configuration;
-    write_u32(bytes, offset + 12, info.ipv4);
-    write_u32(bytes, offset + 16, info.subnet_mask);
-    write_u32(bytes, offset + 20, info.router);
-}
-
-fn decode_network_counters(bytes: &[u8], offset: usize) -> Option<logos_abi::NetworkCounters> {
-    Some(logos_abi::NetworkCounters {
-        rx_frames: read_u64(bytes, offset)?,
-        tx_frames: read_u64(bytes, offset + 8)?,
-        rx_bytes: read_u64(bytes, offset + 16)?,
-        tx_bytes: read_u64(bytes, offset + 24)?,
-        malformed: read_u64(bytes, offset + 32)?,
-        unsupported: read_u64(bytes, offset + 40)?,
-        rx_dropped: read_u64(bytes, offset + 48)?,
-        udp_no_endpoint: read_u64(bytes, offset + 56)?,
-        udp_queue_dropped: read_u64(bytes, offset + 64)?,
-        timeouts: read_u64(bytes, offset + 72)?,
-        cancellations: read_u64(bytes, offset + 80)?,
-        resets: read_u64(bytes, offset + 88)?,
-        denied: read_u64(bytes, offset + 96)?,
-    })
-}
-
-fn encode_network_counters(
-    bytes: &mut [u8; MAX_TEXT],
-    offset: usize,
-    counters: logos_abi::NetworkCounters,
-) {
-    for (index, value) in [
-        counters.rx_frames,
-        counters.tx_frames,
-        counters.rx_bytes,
-        counters.tx_bytes,
-        counters.malformed,
-        counters.unsupported,
-        counters.rx_dropped,
-        counters.udp_no_endpoint,
-        counters.udp_queue_dropped,
-        counters.timeouts,
-        counters.cancellations,
-        counters.resets,
-        counters.denied,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        write_u64(bytes, offset + index * 8, value);
-    }
 }
 
 #[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
@@ -3431,10 +3854,11 @@ impl ControlPage {
             store_client_page: 0,
             store_server_page: 0,
             block_client_page: 0,
+            remote_page: 0,
+            network_client_page: 0,
+            network_server_page: 0,
             slot0: 0,
             slot1: 0,
-            payload_length: 0,
-            payload: [0; MAX_TEXT],
             network_device_page: 0,
             network_event_page: 0,
         }
@@ -3467,6 +3891,9 @@ impl ControlPage {
         reset.store_client_page = current.store_client_page;
         reset.store_server_page = current.store_server_page;
         reset.block_client_page = current.block_client_page;
+        reset.remote_page = current.remote_page;
+        reset.network_client_page = current.network_client_page;
+        reset.network_server_page = current.network_server_page;
         reset.network_device_page = current.network_device_page;
         reset.network_event_page = current.network_event_page;
         unsafe { (address as *mut Self).write_volatile(reset) };
@@ -3486,6 +3913,9 @@ impl ControlPage {
         store_client_page: Option<u64>,
         store_server_page: Option<u64>,
         block_client_page: Option<u64>,
+        remote_page: Option<u64>,
+        network_client_page: Option<u64>,
+        network_server_page: Option<u64>,
         network_device_page: Option<u64>,
         network_event_page: Option<u64>,
     ) -> bool {
@@ -3506,6 +3936,9 @@ impl ControlPage {
         context.store_client_page = store_client_page.unwrap_or(0);
         context.store_server_page = store_server_page.unwrap_or(0);
         context.block_client_page = block_client_page.unwrap_or(0);
+        context.remote_page = remote_page.unwrap_or(0);
+        context.network_client_page = network_client_page.unwrap_or(0);
+        context.network_server_page = network_server_page.unwrap_or(0);
         context.network_device_page = network_device_page.unwrap_or(0);
         context.network_event_page = network_event_page.unwrap_or(0);
         unsafe { (address as *mut Self).write_volatile(context) };
@@ -3527,8 +3960,6 @@ impl ControlPage {
         context.operation = 0;
         context.status = 0;
         // Keep typed endpoint addresses and network page configuration across reset.
-        context.payload_length = 0;
-        context.payload = [0; MAX_TEXT];
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -3536,7 +3967,10 @@ impl ControlPage {
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
     pub unsafe fn notify_at(address: u64, operation: u32) -> bool {
-        if !matches!(operation, STORE_REQUEST | STORE_REPLY | BLOCK_REQUEST | BLOCK_REPLY) {
+        if !matches!(
+            operation,
+            STORE_REQUEST | STORE_REPLY | BLOCK_REQUEST | BLOCK_REPLY | NETWORK_REQUEST
+        ) {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
@@ -3650,84 +4084,6 @@ impl ControlPage {
             || unsafe { InputPage::waiting_at(context.input_page, context.generation) }
     }
 
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
-    pub unsafe fn request_remote_gate_at(address: u64, request: RemoteGateRequest) -> bool {
-        if request.length as usize > MAX_TEXT {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.status != ACKNOWLEDGED
-            || !matches!(context.operation, READY | READ_INPUT | REMOTE_GATE)
-        {
-            return false;
-        }
-        encode_remote_gate_request(&mut context.payload, request);
-        context.payload_length = REMOTE_GATE_REQUEST_BYTES as u32;
-        context.operation = REMOTE_GATE;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
-    pub unsafe fn deliver_remote_gate_at(address: u64, request: RemoteGateRequest) -> bool {
-        if !unsafe { Self::request_remote_gate_at(address, request) } {
-            return false;
-        }
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn remote_gate_at(address: u64) -> Option<RemoteGateRequest> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != REMOTE_GATE
-            || context.status != ACKNOWLEDGED
-            || context.payload_length != REMOTE_GATE_REQUEST_BYTES as u32
-        {
-            return None;
-        }
-        let request = decode_remote_gate_request(&context.payload)?;
-        (request.length as usize <= MAX_TEXT).then_some(request)
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned ControlPage mapping owned by the service.
-    pub unsafe fn reply_remote_gate_at(address: u64, reply: RemoteGateReply) -> bool {
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        let valid = unsafe { Self::remote_gate_at(address) }
-            .is_some_and(|request| request.id == reply.id && reply.length as usize <= MAX_TEXT);
-        if !valid {
-            return false;
-        }
-        encode_remote_gate_reply(&mut context.payload, reply);
-        context.payload_length = REMOTE_GATE_REPLY_BYTES as u32;
-        context.operation = REMOTE_GATE;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn remote_gate_reply_at(address: u64, expected_id: u32) -> Option<RemoteGateReply> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != REMOTE_GATE
-            || context.status != ACKNOWLEDGED
-            || context.payload_length != REMOTE_GATE_REPLY_BYTES as u32
-        {
-            return None;
-        }
-        let reply = decode_remote_gate_reply(&context.payload)?;
-        (reply.id == expected_id).then_some(reply)
-    }
-
     pub unsafe fn store_client_page_at(address: u64) -> Option<u64> {
         let context = unsafe { (address as *const Self).read_volatile() };
         (context.abi == ABI && context.reserved == 0 && context.store_client_page != 0)
@@ -3744,6 +4100,61 @@ impl ControlPage {
         let context = unsafe { (address as *const Self).read_volatile() };
         (context.abi == ABI && context.reserved == 0 && context.block_client_page != 0)
             .then_some(context.block_client_page)
+    }
+
+    pub unsafe fn network_client_page_at(address: u64) -> Option<u64> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.network_client_page != 0)
+            .then_some(context.network_client_page)
+    }
+
+    pub unsafe fn network_server_page_at(address: u64) -> Option<u64> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.network_server_page != 0)
+            .then_some(context.network_server_page)
+    }
+
+    pub unsafe fn remote_pending_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.remote_page != 0
+            && context.generation != 0
+            && unsafe {
+                RemotePage::pending_at(context.remote_page, context.generation, context.generation)
+            }
+    }
+
+    pub unsafe fn network_client_pending_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == NETWORK_REQUEST
+            && context.status == ACKNOWLEDGED
+            && context.network_client_page != 0
+            && unsafe {
+                NetworkClientPage::pending_at(
+                    context.network_client_page,
+                    context.generation,
+                    context.generation,
+                )
+            }
+    }
+
+    pub unsafe fn network_server_pending_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == NETWORK_REQUEST
+            && context.status == ACKNOWLEDGED
+            && context.network_server_page != 0
+            && unsafe {
+                NetworkServerPage::pending_at(
+                    context.network_server_page,
+                    context.generation,
+                    context.generation,
+                )
+            }
     }
 
     pub unsafe fn store_client_pending_at(address: u64) -> bool {
@@ -3878,22 +4289,6 @@ impl ControlPage {
             }
     }
 
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn network_at(address: u64) -> Option<logos_abi::NetworkRequest> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != NETWORK_REQUEST
-            || context.status != ACKNOWLEDGED
-            || context.payload_length != NETWORK_REQUEST_BYTES as u32
-        {
-            return None;
-        }
-        let request = decode_network_request(&context.payload)?;
-        request.valid_shape().then_some(request)
-    }
-
     pub unsafe fn network_device_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
         context.abi == ABI
@@ -3908,150 +4303,6 @@ impl ControlPage {
             && context.reserved == 0
             && context.operation == NETWORK_EVENT
             && context.status == ACKNOWLEDGED
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by the caller.
-    pub unsafe fn request_network_at(address: u64, request: logos_abi::NetworkRequest) -> bool {
-        if !request.valid_shape() {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.status != ACKNOWLEDGED
-            || !matches!(
-                context.operation,
-                READY
-                    | READ_INPUT
-                    | NETWORK_REPLY
-                    | NETWORK_EVENT
-                    | NETWORK_DEVICE_REQUEST
-                    | NETWORK_DEVICE_REPLY
-                    | NETWORK_WAIT
-                    | NETWORK_REQUEST
-            )
-        {
-            return false;
-        }
-        encode_network_request(&mut context.payload, request);
-        context.payload_length = NETWORK_REQUEST_BYTES as u32;
-        context.operation = NETWORK_REQUEST;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
-    pub unsafe fn deliver_network_at(address: u64, request: logos_abi::NetworkRequest) -> bool {
-        if !request.valid_shape() {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || !matches!(context.operation, READ_INPUT | NETWORK_WAIT)
-            || context.status != ACKNOWLEDGED
-        {
-            return false;
-        }
-        encode_network_request(&mut context.payload, request);
-        context.payload_length = NETWORK_REQUEST_BYTES as u32;
-        context.operation = NETWORK_REQUEST;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live Network service context owned by Core.
-    pub unsafe fn deliver_network_for_owner_at(
-        address: u64,
-        request: logos_abi::NetworkRequest,
-        owner: u64,
-    ) -> bool {
-        if !unsafe { Self::deliver_network_at(address, request) } {
-            return false;
-        }
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        write_u64(&mut context.payload, NETWORK_REQUEST_OWNER_OFFSET, owner);
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live Network service context.
-    pub unsafe fn network_owner_at(address: u64) -> Option<u64> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI && context.reserved == 0 && context.operation == NETWORK_REQUEST)
-            .then(|| read_u64(&context.payload, NETWORK_REQUEST_OWNER_OFFSET).unwrap_or(0))
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
-    pub unsafe fn reply_network_at(address: u64, reply: logos_abi::NetworkReply) -> bool {
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        let valid =
-            matches!(context.operation, NETWORK_REQUEST | NETWORK_WAIT | NETWORK_DEVICE_REQUEST)
-                && decode_network_request(&context.payload)
-                    .is_some_and(|request| reply.valid_for(request));
-        if !valid {
-            return false;
-        }
-        encode_network_reply(&mut context.payload, reply);
-        context.payload_length = NETWORK_REPLY_BYTES as u32;
-        context.operation = NETWORK_REPLY;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        true
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn network_reply_at(
-        address: u64,
-        expected_id: u32,
-    ) -> Option<logos_abi::NetworkReply> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != NETWORK_REPLY
-            || context.status != ACKNOWLEDGED
-            || context.payload_length != NETWORK_REPLY_BYTES as u32
-        {
-            return None;
-        }
-        decode_network_reply(&context.payload).filter(|reply| reply.id == expected_id)
-    }
-
-    pub unsafe fn take_network_reply_at(
-        address: u64,
-        expected_id: u32,
-    ) -> Option<logos_abi::NetworkReply> {
-        let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.operation != NETWORK_REPLY
-            || context.status != ACKNOWLEDGED
-            || context.payload_length != NETWORK_REPLY_BYTES as u32
-        {
-            return None;
-        }
-        let reply =
-            decode_network_reply(&context.payload).filter(|reply| reply.id == expected_id)?;
-        context.operation = READY;
-        context.payload_length = 0;
-        unsafe { (address as *mut Self).write_volatile(context) };
-        Some(reply)
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn network_reply_pending_at(address: u64) -> bool {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        context.abi == ABI
-            && context.reserved == 0
-            && context.operation == NETWORK_REPLY
-            && context.status == ACKNOWLEDGED
-            && context.payload_length == NETWORK_REPLY_BYTES as u32
     }
 
     /// # Safety
@@ -4255,36 +4506,38 @@ mod tests {
     }
 
     #[test]
-    fn remote_gate_request_and_reply_round_trip() {
-        let mut context = ControlPage::new();
-        context.operation = READ_INPUT;
-        context.status = ACKNOWLEDGED;
-        let address = (&mut context as *mut ControlPage) as u64;
-        let request = RemoteGateRequest {
-            id: 3,
+    fn remote_page_is_scalar_generation_safe_and_replay_bound() {
+        let mut page = RemotePage::new(4, 9);
+        let address = (&mut page as *mut RemotePage) as u64;
+        let request = RemotePageRequest {
+            id: 7,
             operation: RemoteGateOperation::Invoke,
-            page: logos_abi::PageHandle(8),
-            length: 42,
+            page: logos_abi::PageHandle(3),
+            length: 12,
             deadline: 99,
         };
-        assert!(unsafe { ControlPage::request_remote_gate_at(address, request) });
-        assert_eq!(unsafe { ControlPage::remote_gate_at(address) }, Some(request));
-        let reply = RemoteGateReply {
+        assert!(unsafe { RemotePage::request_at(address, 4, 9, request) });
+        assert!(unsafe { RemotePage::take_at(address, 4, 8) }.is_none());
+        assert_eq!(unsafe { RemotePage::take_at(address, 4, 9) }, Some(request));
+        let reply = RemotePageReply {
             id: request.id,
             status: RemoteGateStatus::Complete,
-            length: 7,
+            length: 5,
             cursor: 11,
         };
-        assert!(unsafe { ControlPage::reply_remote_gate_at(address, reply) });
-        assert_eq!(unsafe { ControlPage::remote_gate_reply_at(address, request.id) }, Some(reply));
-        assert!(unsafe { ControlPage::remote_gate_reply_at(address, request.id + 1) }.is_none());
+        assert!(!unsafe {
+            RemotePage::reply_at(address, 4, 9, RemotePageReply { id: 8, ..reply })
+        });
+        assert!(unsafe { RemotePage::reply_at(address, 4, 9, reply) });
+        assert!(unsafe { RemotePage::finish_at(address, 4, 8, request.id) }.is_none());
+        assert_eq!(unsafe { RemotePage::finish_at(address, 4, 9, request.id) }, Some(reply));
+        page.state = u32::MAX;
+        unsafe { (address as *mut RemotePage).write_volatile(page) };
+        assert!(unsafe { RemotePage::take_at(address, 4, 9) }.is_none());
     }
 
     #[test]
-    fn network_request_reply_remains_bounded_for_clients() {
-        let mut context = ControlPage::new();
-        context.operation = READ_INPUT;
-        context.status = ACKNOWLEDGED;
+    fn network_client_server_pages_associate_replies() {
         let request = logos_abi::NetworkRequest {
             id: 11,
             operation: logos_abi::NetworkOperation::Bind,
@@ -4295,15 +4548,33 @@ mod tests {
             generation: 0,
             deadline: 100,
         };
-        let address = (&mut context as *mut ControlPage) as u64;
-        assert!(unsafe { ControlPage::request_network_at(address, request) });
-        assert_eq!(unsafe { ControlPage::network_at(address) }, Some(request));
-        context.operation = READ_INPUT;
-        unsafe { (address as *mut ControlPage).write_volatile(context) };
+        let mut client = NetworkClientPage::new(1, 1);
+        let mut server = NetworkServerPage::new(1, 1);
+        let client_address = (&mut client as *mut NetworkClientPage) as u64;
+        let server_address = (&mut server as *mut NetworkServerPage) as u64;
+        assert!(unsafe { NetworkClientPage::request_at(client_address, 1, 1, request) });
+        assert!(unsafe { NetworkClientPage::mark_processing_at(client_address, 1, 1) });
         assert!(unsafe {
-            ControlPage::deliver_network_for_owner_at(address, request, 0x1234_5678)
+            NetworkServerPage::deliver_at(server_address, 1, 1, 0x1234_5678, request)
         });
-        assert_eq!(unsafe { ControlPage::network_owner_at(address) }, Some(0x1234_5678));
+        let message = unsafe { NetworkServerPage::take_at(server_address, 1, 1) }.unwrap();
+        assert_eq!(message.caller, 0x1234_5678);
+        let reply = logos_abi::NetworkReply {
+            id: request.id,
+            status: logos_abi::NetworkStatus::Complete,
+            endpoint: logos_abi::NetworkEndpoint::new(1, 1).unwrap(),
+            generation: 1,
+            source_address: 0,
+            source_port: 0,
+            length: 0,
+            info: logos_abi::NetworkInfo::default(),
+            counters: logos_abi::NetworkCounters::default(),
+        };
+        assert!(unsafe { NetworkServerPage::reply_at(server_address, 1, 1, reply) });
+        assert_eq!(
+            unsafe { NetworkServerPage::finish_at(server_address, 1, 1, request.id) },
+            Some(reply)
+        );
     }
 
     #[test]
