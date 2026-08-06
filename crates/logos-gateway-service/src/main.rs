@@ -4,7 +4,7 @@
 use logos_abi::{
     MAX_TCP_PAYLOAD, NetworkEndpoint, NetworkOperation, NetworkProtocol, NetworkRequest,
     NetworkScope, NetworkStatus, REMOTE_TCP_PORT,
-    service::{RemoteGateOperation, RemoteGateRequest, RemoteGateStatus},
+    service::{RemoteGateOperation, RemoteGateStatus, RemotePageRequest},
 };
 use logos_remote::{
     FrameDecoder, MAX_FRAME, MAX_FRAME_BUFFER, RemoteMessage, RemoteMessageKind, frame_encode,
@@ -217,7 +217,7 @@ fn gate(
     unsafe { core::ptr::copy_nonoverlapping(input.as_ptr(), address as *mut u8, input.len()) };
     let request_id = *id;
     *id = id.wrapping_add(1).max(1);
-    if !context.request_remote_gate(RemoteGateRequest {
+    if !context.request_remote_gate(RemotePageRequest {
         id: request_id,
         operation,
         page,

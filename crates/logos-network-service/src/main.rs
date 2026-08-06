@@ -264,8 +264,9 @@ fn run(context: &mut ServiceContext) -> ! {
             }
         }
 
-        if let Some(request) = context.network_request() {
-            let owner = context.network_owner().unwrap_or(0);
+        if let Some(message) = context.network_server_request() {
+            let request = message.request;
+            let owner = message.caller;
             #[cfg(feature = "test-hooks")]
             inject_failure(request.id);
             if matches!(request.operation, NetworkOperation::Cancel | NetworkOperation::Close) {
