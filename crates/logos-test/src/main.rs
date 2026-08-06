@@ -1951,6 +1951,7 @@ mod tests {
                         | "network/device-bind"
                         | "network/configuration"
                         | "network/unauthorized-operation"
+                        | "network/simultaneous-client-busy"
                         | "network/icmp-echo"
                         | "network/udp-round-trip"
                         | "network/backpressure-cancel"

@@ -206,6 +206,7 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
         Runner::NetworkConfiguration,
     ),
     configured("network/unauthorized-operation", "network", &[], Fixture::Fresh),
+    configured("network/simultaneous-client-busy", "network", &[], Fixture::Fresh),
     configured("network/icmp-echo", "network", &[], Fixture::Fresh),
     configured("network/udp-round-trip", "network", &[], Fixture::Fresh),
     configured("network/backpressure-cancel", "network", &[], Fixture::Fresh),
