@@ -370,6 +370,7 @@ struct Harness {
     serial: String,
     deadline: Instant,
     timeout: Duration,
+    network_marker_offset: usize,
     network_peer: Option<NetworkPeer>,
     remote_port: u16,
     logosctl: PathBuf,
@@ -527,6 +528,7 @@ impl Harness {
             serial: String::new(),
             deadline,
             timeout: Duration::from_secs(timeout),
+            network_marker_offset: 0,
             network_peer,
             remote_port,
             logosctl: profile.logosctl.clone(),
@@ -546,13 +548,18 @@ impl Harness {
         harness.wait("LOGOS/1 READY")?;
         harness.send("LOGOS/1 HELLO\n")?;
         harness.wait("LOGOS/1 RESULT hello=ok")?;
+        harness.network_marker_offset =
+            fs::metadata(&harness.debug_log).map(|metadata| metadata.len() as usize).unwrap_or(0);
         Ok(harness)
     }
 
     fn reset(&mut self, scenario: &str) -> Result<(), String> {
         self.renew_deadline();
         self.send(&format!("LOGOS/1 RESET {scenario}\n"))?;
-        self.wait("LOGOS/1 RESULT reset=accepted")
+        self.wait("LOGOS/1 RESULT reset=accepted")?;
+        self.network_marker_offset =
+            fs::metadata(&self.debug_log).map(|metadata| metadata.len() as usize).unwrap_or(0);
+        Ok(())
     }
 
     fn run(&mut self, scenario: Scenario) -> Result<(), String> {
@@ -578,7 +585,7 @@ impl Harness {
         self.send(&format!("LOGOS/1 INPUT enroll {}\n", hex_bytes(client_public.as_bytes())))?;
         self.wait("LOGOS/1 RESULT input=accepted")?;
         self.wait_network_bound()?;
-        self.wait("LogOS: Gateway started")?;
+        self.wait_debug("LogOS: Gateway started")?;
         let bootstrap = logos_remote::Bootstrap::from_root(&[9; 32], &[9; 32])
             .map_err(|error| format!("bootstrap: {error:?}"))?;
         let machine =
@@ -694,6 +701,22 @@ impl Harness {
 
     fn wait_network_bound(&mut self) -> Result<(), String> {
         let expected = "LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2";
+        while Instant::now() < self.deadline {
+            let contents = fs::read_to_string(&self.debug_log).map_err(io_error)?;
+            if contents
+                .get(self.network_marker_offset..)
+                .is_some_and(|tail| tail.lines().any(|line| line.starts_with(expected)))
+            {
+                self.network_marker_offset = contents.len();
+                return Ok(());
+            }
+            self.send("LOGOS/1 ADVANCE 64\n")?;
+            let _ = self.wait("LOGOS/1 RESULT advance=accepted");
+        }
+        Err(format!("timeout waiting for {expected}"))
+    }
+
+    fn wait_debug(&mut self, expected: &str) -> Result<(), String> {
         while Instant::now() < self.deadline {
             if fs::read_to_string(&self.debug_log)
                 .map_err(io_error)?
@@ -988,7 +1011,6 @@ fn run_network_configuration(
             scenario.timeout,
             "LogOS: storage formatted",
         )?;
-        harness.wait_network_bound()?;
         harness.run_id(scenario.id)?;
         harness.shutdown()
     })();
