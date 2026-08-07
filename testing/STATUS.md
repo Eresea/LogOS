@@ -1,8 +1,9 @@
 # Test Status
 
-Last verification: 2026-08-06. Starting SHA: `aea2ee6293063220567b46816bbe232ccca199d9`.
-Typed Network-client transport implementation and focused proofs are verified; four higher-level Network-client fixtures
-and the Remote/Gateway boundary remain open.
+Last verification: 2026-08-07. Starting SHA: `98c67bc5a791d0caef71ca3769933a1c38208634`.
+Typed Network-client transport implementation and focused proofs are present; full serial Network
+and Remote closure remains open. The current working-tree verification was intentionally paused
+before ABI-v4 freeze.
 
 - Toolchain: Rust `1.93.0`, Cargo `1.93.0`, target `x86_64-unknown-uefi` installed.
 - Host: `scripts/check.ps1 -Stage host` passed; format, clippy, host tests, architecture,
@@ -18,6 +19,11 @@ and the Remote/Gateway boundary remain open.
 - Catalog: 84 proofs; 53 ready; 31 intentionally skipped. No proof IDs were removed, renamed,
   weakened, or newly skipped.
 - Fixed seed: `LOGOS_TEST_SEED=1`, one QEMU job.
+
+Current task checkpoint: host checks passed before the final RX-buffer adjustment; individual
+fixed-seed transport and packet-loss runs passed. The second full serial Network rerun was stopped
+after intermittent RX-ring exhaustion remained under investigation. No Remote suite or clean-tree
+verification is claimed here.
 
 Per-suite totals:
 
@@ -61,6 +67,5 @@ Remaining Remote failures:
   Classified as Gateway startup/Remote coordination behavior, not missing typed transport.
 
 The remaining failures are implementation-boundary behavior in Network-client/Gateway/Remote
-coordination. They are not compilation, architecture, documentation, UEFI, QEMU installation, or
-lower-layer completed-boundary failures. Typed Network-client, Network-server, and Remote pages
-and their canonical mappings are present.
+coordination. They are not missing typed pages or a request to expand the ABI. Typed Network-client,
+Network-server, and Remote pages and their canonical mappings are present; ABI v4 is not yet frozen.

@@ -1,7 +1,7 @@
 # LogOS Architecture Annex
 
 > **Status:** Living architecture reference  
-> **Updated:** 2026-08-04
+> **Updated:** 2026-08-07
 
 ## Testing boundary
 
@@ -63,6 +63,12 @@ that checker rather than becoming implicit imports.
 ABI v4 keeps endpoint ownership in the canonical service `EndpointSet`; task mapping consumes
 that set directly. Remote transport pages are isolated in the Remote protocol module, and proof
 state is owned by the test-hook proof module rather than the platform composition root.
+
+The current Remote migration checkpoint is deliberately partial: `RemoteRuntime` owns RemoteState,
+local trust commands, transport reset/start state, and the enrollment gate. The composition root
+still owns Gateway endpoint bindings, Remote request processing, protected persistence context,
+deadlines, and replacement composition. ABI v4 remains unfrozen until the Network and Remote QEMU
+proofs are green and that coordination has moved behind concrete RemoteRuntime methods.
 
 ## 2. Ring model
 
@@ -727,9 +733,9 @@ The Ring-2 Network service owns Ethernet, ARP, IPv4, ICMP echo, DHCP, UDP, and g
 endpoints. Clients receive no raw-frame access. The hermetic QEMU peer supplies independent DHCP, ARP,
 ICMP, UDP, malformed-frame, cancellation, timeout, and reconnect proofs.
 
-This tranche intentionally leaves normal Network client request/reply transport on its older
-bounded context path. Terminal and Gateway receive no Network device/event endpoints; migrating
-that client path is the next ABI-v4 tranche.
+Terminal and Gateway use typed, generation-bound Network client pages. They receive no Network
+device/event endpoints; `platform::network::NetworkRuntime` owns the single active association,
+while `platform::runtime` retains only top-level polling and composition.
 
 Bind, send, and receive authority are separate. Each grant carries an exact protocol/local-port or
 protocol/remote-IPv4-and-port scope; wildcard and CIDR policy remain future firewall work. Network

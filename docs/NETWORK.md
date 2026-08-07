@@ -1,7 +1,7 @@
 # Network
 
 > **Status:** Network v1 typed device/event and client transport implementation complete; QEMU
-> operational closure remains open for four Network-client scenarios. Results are recorded in
+> operational closure remains open at the Network/Gateway scheduling boundary. Results are recorded in
 > [testing status](../testing/STATUS.md).
 >
 > **Owner:** Foundation network driver and System Network service
@@ -52,7 +52,7 @@ items in dependency order.
   control-queue, or multiqueue offload in v1.
 - Use a 1500-byte IPv4 MTU, 1514-byte Ethernet frames without FCS, and UDP payloads of at most 1472
   bytes. Do not send or reassemble IPv4 fragments.
-- Keep four Core-owned RX frame buffers, one Core-owned TX frame buffer, eight UDP endpoint slots,
+- Keep sixteen Core-owned RX frame buffers, one Core-owned TX frame buffer, eight UDP endpoint slots,
   eight ARP entries, four queued UDP datagrams, and one pending client operation globally.
 - Return `Busy` instead of allocating or growing a queue when a fixed in-flight limit is reached.
 - The Network service remains allocation-free after startup; all tables and packet buffers are
@@ -93,9 +93,9 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   through the Core capability and service relay, `network/unauthorized-operation` proves denied
   Bind/SendTo/ReceiveFrom requests stop in Core, and `network/simultaneous-client-busy` proves
   Terminal/Gateway contention does not overwrite the active transaction.
-- Behavioral closure remains gated on `network/icmp-echo`, `network/udp-round-trip`,
-  `network/backpressure-cancel`, and `network/packet-loss`; these currently stop at the existing
-  Network service/device scheduling boundary.
+- Behavioral closure remains gated on the registered Network-client scenarios. Full serial runs can
+  still exhaust the old four-buffer RX assumption; the current driver posts sixteen buffers while
+  preserving descriptor and generation validation.
 
 ### ABI-v4 device transport milestone
 
@@ -181,7 +181,7 @@ Core exposes a bounded frame interface only to the Network service:
   fail and reset the device.
 - RX DMA pages are zeroed before every post. Core copies only the validated frame length and clears
   the unused portion of the Network RX page before delivery.
-- Core keeps completed frames in the four-buffer RX pool until delivery. When all four are occupied,
+- Core keeps completed frames in the sixteen-buffer RX pool until delivery. When all sixteen are occupied,
   it drops new frames, increments `rx_dropped`, and keeps the device and service live.
 - Core alternates ready RX delivery with client request delivery so sustained input cannot starve
   endpoint operations.
@@ -372,7 +372,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
       ownership.
 - [x] Use the existing checked contiguous VirtQueue allocation; unwind the first queue if the second
       queue or any DMA page allocation fails.
-- [x] Allocate four RX DMA pages and one TX DMA page, each containing a separate VirtIO header and
+- [x] Allocate sixteen RX DMA pages and one TX DMA page, each containing a separate VirtIO header and
       frame descriptor as required by the legacy layout.
 - [x] Zero headers and RX data, post all RX buffers, then activate the device.
 - [x] Keep offload fields zero and reject a device requiring unsupported behavior.
@@ -487,7 +487,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
 | Proof ID | Layer | Required semantic assertion |
 | --- | --- | --- |
 | `network/transport-dhcp` | QEMU | Core TX submits Discover/Request; RX delivers Offer/Ack; final configuration is `10.0.2.15/24` via `10.0.2.2`; malformed/stale DHCP is not bound |
-| `network/device-bind` | QEMU | Exact NIC class/MAC, four posted RX buffers, and one received host frame |
+| `network/device-bind` | QEMU | Exact NIC class/MAC, sixteen posted RX buffers, and one received host frame |
 | `network/configuration` | QEMU | Valid DHCP acquisition, dropped-offer retry, and exact address/mask/router/lease |
 | `network/icmp-echo` | QEMU | Valid echo in both directions with matching ID/sequence and checksum |
 | `network/udp-round-trip` | QEMU | Exact payload and source/destination endpoints in both directions |

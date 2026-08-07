@@ -1,7 +1,8 @@
 # Remote
 
-> **Status:** Remote Foundation v1 implementation complete; fixed-seed QEMU reaches the registered
-> fixtures, while Network-client and Remote migration failures remain deferred to their bounded cycles
+> **Status:** Remote Foundation v1 behavior and ownership extraction remain in progress; the typed
+> Remote path and local enrollment coordination are present, while fixed-seed Network/Remote proof
+> closure is still pending
 
 ## Goal
 
@@ -49,18 +50,26 @@ client can reconnect and invoke the existing typed `ping` command.
   accepted stream, read, write, and close ownership is enforced there.
 - [x] Protected Store enrollment, local trust commands, root-derived device/storage keys, and
   fail-closed corruption recovery.
-- [x] Gateway attachment and `logosctl` end-to-end invocation are wired through the typed Core
-  remote gate; proof execution remains an environment-dependent verification step.
+- [ ] Gateway attachment and `logosctl` end-to-end invocation are wired through the typed Core
+  remote gate; proof execution remains pending until the Network/Gateway boundary is stable.
 - [x] Host `logosctl keygen` and pinned Noise IK typed `invoke` client with bounded reconnects;
   `invoke` consumes the enrollment descriptor rather than a hard-coded generation.
-- [x] Local command ABI recognizes `remote-key`, `enroll <64-hex-key>`, and `unenroll`; the
-  machine key is available when the firmware root is present.
-- [ ] QEMU restart, corruption, and typed-invocation proofs (the fixed-seed run currently stops at
-  Gateway startup until the bounded Network-client and Remote migrations land).
+- [x] `RemoteRuntime` coordinates `remote-key`, `enroll <64-hex-key>`, and `unenroll`; the machine
+  key is available when the firmware root is present and enrollment persistence remains protected.
+- [ ] QEMU restart, corruption, and typed-invocation proofs (the fixed-seed run remains open at the
+  Network/Gateway scheduling boundary).
 
-The remote proof IDs are registered in `logos-test`; the current host run reaches the registered
-proofs but reports the expected Gateway/peer availability timeout at the current migration boundary,
-so they remain explicit verification work rather than environment-gated work.
+The remote proof IDs are registered in `logos-test`. They remain explicit verification work rather
+than environment-gated work. ABI v4 is not frozen until the full Network suite, all Remote proofs,
+and the remaining ownership extraction pass together.
+
+## Current ownership checkpoint
+
+`RemoteRuntime` currently owns `RemoteState`, local trust commands, the enrollment gate, transport
+start/reset state, and the Gateway start predicate. `platform::runtime` still owns Gateway endpoint
+bindings, Remote request polling, deadline/reply lifecycle, protected persistence context, and
+replacement composition. Moving those responsibilities is the next bounded cycle after Network
+proof closure.
 UEFI builds use target-scoped Fiat Curve25519 and software ChaCha20/Poly1305 backends so the full
 payload set builds consistently on the supported host toolchains.
 
