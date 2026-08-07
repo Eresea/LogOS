@@ -811,7 +811,13 @@ pub(crate) fn run(
                 let _ = shared_pages.release(owner, rx);
                 return None;
             };
-            Some(NetworkResources { owner, rx, rx_virtual, tx, tx_virtual })
+            Some(NetworkResources {
+                owner,
+                rx,
+                rx_virtual: rx_physical,
+                tx,
+                tx_virtual: tx_physical,
+            })
         });
     if network_resources.is_none() {
         if let Some(task) = native_network.take() {
@@ -903,7 +909,7 @@ pub(crate) fn run(
         native_gateway.as_ref().and_then(native_task::Task::network_client_endpoint);
     let mut native_gateway_remote =
         native_gateway.as_ref().and_then(native_task::Task::remote_endpoint);
-    let native_gateway_store =
+    let mut native_gateway_store =
         native_gateway.as_ref().and_then(native_task::Task::store_client_endpoint);
     let mut native_network_endpoint =
         native_network.as_ref().map(native_task::Task::network_endpoint);
@@ -1113,13 +1119,7 @@ pub(crate) fn run(
     }
     let mut network_probe = Some(0x8000_0001u32);
     let mut network_probe_due = 0;
-    let mut network_reported = cfg!(feature = "test-hooks");
-    #[cfg(feature = "test-hooks")]
-    if network_reported {
-        debug::write_line(
-            b"LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2",
-        );
-    }
+    let mut network_reported = false;
 
     macro_rules! poll_gateway {
         () => {{
@@ -1409,6 +1409,9 @@ pub(crate) fn run(
                     ) {
                         return false;
                     }
+                    network_probe = Some(0x8000_0001);
+                    network_probe_due = 0;
+                    network_reported = false;
                     return true;
                 }
                 if value == "persistence/block-read-flush" {
@@ -1918,7 +1921,7 @@ pub(crate) fn run(
                     network_handle = Some(restarted);
                     native_network_endpoint = Some(endpoint);
                     network_probe = Some(0x8000_0001);
-                    network_probe_due = interrupts::ticks();
+                    network_probe_due = 0;
                     network_reported = false;
                 }
                 if value == "persistence/write-interruption" || value == "persistence/recovery" {
@@ -2140,45 +2143,149 @@ pub(crate) fn run(
                             native_handle,
                         )
                         && ({
-                            let command_pending = native_command.request().is_some();
-                            !command_pending
-                                || ({
-                                    let reply = sessions_runtime.relay(
-                                        &mut native_scheduler,
-                                        effects::Context {
-                                            session: request_session,
-
-                                            capabilities: &capabilities,
-                                            tick: interrupts::ticks(),
-                                            input: &mut input,
-                                            lifecycle: &mut service_lifecycle,
-                                            service_healthy: service_health
-                                                .healthy(balloon::NAME, interrupts::ticks()),
-                                            channel: &channel,
-                                            responses: &responses,
-                                            service_scheduler: &mut service_scheduler,
-                                            service_capability,
-                                            service: virtio_handle,
-                                        },
-                                    );
-                                    reply.ok()
-                                        && expected.is_none_or(|expected| {
-                                            matches!(reply, session::Relay::Handled(true))
-                                                && native_command.reply_matches(expected)
-                                        })
-                                        && (!expect_qwerty
-                                            || input.layout() == input::Layout::Qwerty)
-                                        && native_scheduler.wake(native_handle)
-                                        && native_scheduler.run(native_handle)
-                                        && resume_display(
-                                            native_display,
-                                            &session,
-                                            &capabilities,
-                                            session_display_capability,
-                                            &mut native_scheduler,
-                                            native_handle,
+                            let request = native_command.request();
+                            let remote_command = request.filter(|request| {
+                                matches!(
+                                    request.syscall,
+                                    logos_abi::Syscall::RemoteKey
+                                        | logos_abi::Syscall::Enroll
+                                        | logos_abi::Syscall::Unenroll
+                                )
+                            });
+                            if let Some(request) = remote_command {
+                                debug::write_line(b"LogOS: test remote local command");
+                                debug::write_line(
+                                    if remote_runtime
+                                        .state()
+                                        .is_some_and(secrets::RemoteState::available)
+                                    {
+                                        b"LogOS: test remote state available"
+                                    } else {
+                                        b"LogOS: test remote state unavailable"
+                                    },
+                                );
+                                debug::write_line(
+                                    if remote_bootstrap.is_some()
+                                        && shared_pages
+                                            .address(terminal_owner, shared_history)
+                                            .is_some()
+                                    {
+                                        b"LogOS: test remote persistence inputs"
+                                    } else {
+                                        b"LogOS: test remote persistence inputs missing"
+                                    },
+                                );
+                                let local = remote_runtime.local_command(
+                                    request,
+                                    remote_bootstrap,
+                                    &mut storage_runtime,
+                                    &mut block::DispatchContext {
+                                        endpoint: native_storage_block,
+                                        pages: &mut shared_pages,
+                                        store_owner: storage_owner,
+                                        store_page: storage_block_page,
+                                        device: &mut block_device,
+                                        memory: &mut memory,
+                                    },
+                                    &mut native_scheduler,
+                                    shared_history,
+                                    terminal_owner,
+                                    interrupts::ticks(),
+                                );
+                                debug::write_line(if local.enrolled {
+                                    b"LogOS: test remote enrollment passed"
+                                } else {
+                                    b"LogOS: test remote enrollment failed"
+                                });
+                                let gateway_ready = if local.enrolled
+                                    && gateway_handle.is_none()
+                                    && network_handle.is_some()
+                                    && let Some(task) = native_gateway.take()
+                                {
+                                    gateway_handle = native_scheduler.spawn(task);
+                                    if let Some(handle) = gateway_handle {
+                                        native_gateway_network =
+                                            native_scheduler.network_client_endpoint(handle);
+                                        native_gateway_remote =
+                                            native_scheduler.remote_endpoint(handle);
+                                        native_gateway_store =
+                                            native_scheduler.store_client_endpoint(handle);
+                                        native_gateway_network.zip(gateway_page).is_none_or(
+                                            |(endpoint, page)| endpoint.configure_transfer(page),
+                                        ) && native_gateway_store.zip(gateway_page).is_none_or(
+                                            |(endpoint, page)| endpoint.configure_transfer(page),
                                         )
-                                })
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    true
+                                };
+                                let started = remote_runtime.started()
+                                    || remote_runtime.start(
+                                        network_reported,
+                                        gateway_handle,
+                                        &mut native_scheduler,
+                                    );
+                                debug::write_line(if started {
+                                    b"LogOS: test remote gateway start passed"
+                                } else {
+                                    b"LogOS: test remote gateway start failed"
+                                });
+                                let gateway_ready = gateway_ready && started;
+                                if remote_runtime.started() {
+                                    debug::write_line(b"LogOS: Gateway started");
+                                }
+                                gateway_ready
+                                    && native_command.reply(&local.reply.text[..local.reply.length])
+                                    && native_scheduler.wake(native_handle)
+                                    && native_scheduler.run(native_handle)
+                                    && resume_display(
+                                        native_display,
+                                        &session,
+                                        &capabilities,
+                                        session_display_capability,
+                                        &mut native_scheduler,
+                                        native_handle,
+                                    )
+                            } else if request.is_none() {
+                                true
+                            } else {
+                                let reply = sessions_runtime.relay(
+                                    &mut native_scheduler,
+                                    effects::Context {
+                                        session: request_session,
+
+                                        capabilities: &capabilities,
+                                        tick: interrupts::ticks(),
+                                        input: &mut input,
+                                        lifecycle: &mut service_lifecycle,
+                                        service_healthy: service_health
+                                            .healthy(balloon::NAME, interrupts::ticks()),
+                                        channel: &channel,
+                                        responses: &responses,
+                                        service_scheduler: &mut service_scheduler,
+                                        service_capability,
+                                        service: virtio_handle,
+                                    },
+                                );
+                                reply.ok()
+                                    && expected.is_none_or(|expected| {
+                                        matches!(reply, session::Relay::Handled(true))
+                                            && native_command.reply_matches(expected)
+                                    })
+                                    && (!expect_qwerty || input.layout() == input::Layout::Qwerty)
+                                    && native_scheduler.wake(native_handle)
+                                    && native_scheduler.run(native_handle)
+                                    && resume_display(
+                                        native_display,
+                                        &session,
+                                        &capabilities,
+                                        session_display_capability,
+                                        &mut native_scheduler,
+                                        native_handle,
+                                    )
+                            }
                         })
                 });
                 if proof_input {
@@ -2214,6 +2321,32 @@ pub(crate) fn run(
             }
             test_hooks::Action::Run(id) => {
                 if id == "network/simultaneous-client-busy" {
+                    if gateway_handle.is_none() {
+                        let Some(task) = native_gateway.take() else {
+                            return false;
+                        };
+                        gateway_handle = native_scheduler.spawn(task);
+                        let Some(handle) = gateway_handle else {
+                            return false;
+                        };
+                        native_gateway_network = native_scheduler.network_client_endpoint(handle);
+                        native_gateway_remote = native_scheduler.remote_endpoint(handle);
+                        native_gateway_store = native_scheduler.store_client_endpoint(handle);
+                        if !native_gateway_network
+                            .zip(gateway_page)
+                            .is_none_or(|(endpoint, page)| endpoint.configure_transfer(page))
+                            || !native_gateway_store
+                                .zip(gateway_page)
+                                .is_none_or(|(endpoint, page)| endpoint.configure_transfer(page))
+                            || !remote_runtime.start(
+                                network_reported,
+                                gateway_handle,
+                                &mut native_scheduler,
+                            )
+                        {
+                            return false;
+                        }
+                    }
                     let (
                         Some(gateway_client),
                         Some(gateway_task),
@@ -2238,16 +2371,19 @@ pub(crate) fn run(
                         generation: 0,
                         deadline: u64::MAX / 2,
                     };
-                    let gateway_request = logos_abi::NetworkRequest {
-                        id: 0x9000_0201,
-                        operation: logos_abi::NetworkOperation::Listen,
-                        peer: logos_abi::NetworkScope::new(
-                            logos_abi::NetworkProtocol::Tcp,
-                            0,
-                            logos_abi::REMOTE_TCP_PORT,
-                        ),
-                        ..terminal_request
-                    };
+                    if !network_runtime.relay_client(
+                        NetworkClientSlot::Gateway,
+                        gateway_client,
+                        gateway_task,
+                        &mut native_scheduler,
+                        gateway_session,
+                        &capabilities,
+                        &shared_pages,
+                        gateway_owner,
+                        interrupts::ticks(),
+                    ) {
+                        return false;
+                    }
                     if !native_terminal_network.issue(terminal_request) {
                         return false;
                     }
@@ -2264,36 +2400,48 @@ pub(crate) fn run(
                     ) {
                         return false;
                     }
-                    if !gateway_client.issue(gateway_request) {
-                        return false;
+                    if let Some(busy) = native_terminal_network.response(terminal_request.id) {
+                        return busy.status == logos_abi::NetworkStatus::Busy
+                            && network_runtime.invalidate_client(
+                                NetworkClientSlot::Gateway,
+                                &mut native_scheduler,
+                                logos_abi::NetworkStatus::Cancelled,
+                            );
                     }
-                    let _ = network_runtime.relay_client(
-                        NetworkClientSlot::Gateway,
-                        gateway_client,
-                        gateway_task,
-                        &mut native_scheduler,
-                        gateway_session,
-                        &capabilities,
-                        &shared_pages,
-                        gateway_owner,
-                        interrupts::ticks(),
-                    );
-                    let Some(busy) = gateway_client.response(gateway_request.id) else {
-                        return false;
+                    let gateway_request = logos_abi::NetworkRequest {
+                        id: 0x9000_0201,
+                        operation: logos_abi::NetworkOperation::Listen,
+                        peer: logos_abi::NetworkScope::new(
+                            logos_abi::NetworkProtocol::Tcp,
+                            0,
+                            logos_abi::REMOTE_TCP_PORT,
+                        ),
+                        ..terminal_request
                     };
-                    if busy.status != logos_abi::NetworkStatus::Busy {
+                    if !gateway_client.issue(gateway_request)
+                        || !network_runtime.relay_client(
+                            NetworkClientSlot::Gateway,
+                            gateway_client,
+                            gateway_task,
+                            &mut native_scheduler,
+                            gateway_session,
+                            &capabilities,
+                            &shared_pages,
+                            gateway_owner,
+                            interrupts::ticks(),
+                        )
+                    {
                         return false;
                     }
-                    if !network_runtime.invalidate_client(
-                        NetworkClientSlot::Terminal,
-                        &mut native_scheduler,
-                        logos_abi::NetworkStatus::Cancelled,
-                    ) {
-                        return false;
-                    }
-                    return native_terminal_network
-                        .response(terminal_request.id)
-                        .is_some_and(|reply| reply.status == logos_abi::NetworkStatus::Cancelled);
+                    let passed = gateway_client.response(gateway_request.id).is_some_and(|reply| {
+                        reply.status == logos_abi::NetworkStatus::Busy
+                            && network_runtime.invalidate_client(
+                                NetworkClientSlot::Terminal,
+                                &mut native_scheduler,
+                                logos_abi::NetworkStatus::Cancelled,
+                            )
+                    });
+                    return passed;
                 }
                 if id == "network/unauthorized-operation" {
                     let endpoint = logos_abi::NetworkEndpoint(0x0001_0001);
@@ -3112,6 +3260,7 @@ pub(crate) fn run(
                             )
                         }) {
                             let request = native_command.request().unwrap();
+                            debug::write_line(b"LogOS: remote local command");
                             let mut key_text = [0; 96];
                             let mut reply = b"remote unavailable" as &[u8];
                             let mut enrolled = false;
@@ -3127,28 +3276,36 @@ pub(crate) fn run(
                                     }
                                     logos_abi::Syscall::Enroll => {
                                         let mut client_key = [0; 32];
-                                        if request.length == 64
+                                        let key_ok = request.length == 64
                                             && hex_decode_key(
                                                 &request.argument[..request.length],
                                                 &mut client_key,
-                                            )
+                                            );
+                                        if key_ok
                                             && state.enroll(client_key).is_some_and(|_| {
-                                                storage_runtime.persist_remote_enrollment(
-                                                    state,
-                                                    remote_bootstrap,
-                                                    &mut block::DispatchContext {
-                                                        endpoint: native_storage_block,
-                                                        pages: &mut shared_pages,
-                                                        store_owner: storage_owner,
-                                                        store_page: storage_block_page,
-                                                        device: &mut block_device,
-                                                        memory: &mut memory,
-                                                    },
-                                                    &mut native_scheduler,
-                                                    shared_history,
-                                                    terminal_owner,
-                                                    tick,
-                                                )
+                                                let persisted = storage_runtime
+                                                    .persist_remote_enrollment(
+                                                        state,
+                                                        remote_bootstrap,
+                                                        &mut block::DispatchContext {
+                                                            endpoint: native_storage_block,
+                                                            pages: &mut shared_pages,
+                                                            store_owner: storage_owner,
+                                                            store_page: storage_block_page,
+                                                            device: &mut block_device,
+                                                            memory: &mut memory,
+                                                        },
+                                                        &mut native_scheduler,
+                                                        shared_history,
+                                                        terminal_owner,
+                                                        tick,
+                                                    );
+                                                debug::write_line(if persisted {
+                                                    b"LogOS: remote enrollment persisted"
+                                                } else {
+                                                    b"LogOS: remote enrollment persistence failed"
+                                                });
+                                                persisted
                                             })
                                         {
                                             let mut machine_key = [0; 64];
@@ -3195,11 +3352,18 @@ pub(crate) fn run(
                                     && network_handle.is_some()
                                     && let Some(task) = native_gateway.take()
                                 {
+                                    debug::write_line(b"LogOS: Gateway enrollment spawn");
                                     gateway_handle = native_scheduler.spawn(task);
                                     if let Some(handle) = gateway_handle {
                                         native_gateway_network =
                                             native_scheduler.network_client_endpoint(handle);
+                                        native_gateway_remote =
+                                            native_scheduler.remote_endpoint(handle);
+                                        native_gateway_store =
+                                            native_scheduler.store_client_endpoint(handle);
                                         if !native_gateway_network.zip(gateway_page).is_none_or(
+                                            |(endpoint, page)| endpoint.configure_transfer(page),
+                                        ) || !native_gateway_store.zip(gateway_page).is_none_or(
                                             |(endpoint, page)| endpoint.configure_transfer(page),
                                         ) {
                                             gateway_handle = None;
@@ -3208,8 +3372,11 @@ pub(crate) fn run(
                                     if gateway_handle.is_some() {
                                         network_reported = true;
                                         native_services.ready(supervisor::NativeService::Gateway);
+                                        debug::write_line(b"LogOS: Gateway enrollment ready");
                                     }
                                 }
+                            } else {
+                                debug::write_line(b"LogOS: remote state missing");
                             };
                             if !native_command.reply(reply)
                                 || !native_scheduler.wake(native_handle)
@@ -3458,9 +3625,9 @@ fn poll_network(
     shared_pages: &logos_core::shared_pages::SharedPages,
     terminal_owner: u64,
 ) -> bool {
-    let Some(handle) = runtime.task() else {
+    if runtime.task().is_none() {
         return true;
-    };
+    }
     if !runtime.relay_client(
         NetworkClientSlot::Terminal,
         terminal,
@@ -3476,6 +3643,22 @@ fn poll_network(
     }
     if !runtime.poll(scheduler, tick) {
         return false;
+    }
+    if !runtime.relay_client(
+        NetworkClientSlot::Terminal,
+        terminal,
+        terminal_handle,
+        scheduler,
+        session,
+        capabilities,
+        shared_pages,
+        terminal_owner,
+        tick,
+    ) {
+        return false;
+    }
+    if !runtime.event_endpoint().waiting() {
+        return true;
     }
     if let Some(id) = *probe {
         if let Some(reply) = terminal.response(id) {
@@ -3494,12 +3677,8 @@ fn poll_network(
                 *probe = Some(id.wrapping_add(1).max(1));
                 *probe_due = tick.saturating_add(64);
             }
-            let ok = scheduler.wake(handle) && scheduler.run(handle);
-            return ok;
+            return true;
         }
-    }
-    if !runtime.event_endpoint().waiting() {
-        return true;
     }
     if !*reported && tick >= *probe_due {
         if let Some(id) = *probe {
@@ -3514,7 +3693,17 @@ fn poll_network(
                 deadline: u64::MAX / 2,
             };
             if terminal.issue(request) {
-                return scheduler.wake(handle) && scheduler.run(handle);
+                return runtime.relay_client(
+                    NetworkClientSlot::Terminal,
+                    terminal,
+                    terminal_handle,
+                    scheduler,
+                    session,
+                    capabilities,
+                    shared_pages,
+                    terminal_owner,
+                    tick,
+                );
             }
         }
     }
@@ -3548,7 +3737,7 @@ fn run_network_request(
     if runtime.task().is_none() {
         return None;
     }
-    for _ in 0..100_000 {
+    for _ in 0..1_000_000 {
         if !poll_network(
             runtime,
             Some(endpoint),
@@ -3570,7 +3759,6 @@ fn run_network_request(
             return Some(reply);
         }
     }
-    debug::write_line(b"LogOS: network client response timeout");
     None
 }
 
@@ -4273,12 +4461,18 @@ fn replace_network(
         mapped = task.map_network_owned(memory);
         mapped.is_some()
     })?;
-    let ((rx_physical, rx_virtual), (tx_physical, tx_virtual)) = mapped?;
+    let ((rx_physical, _rx_virtual), (tx_physical, _tx_virtual)) = mapped?;
     pages.release(previous.owner, previous.rx)?;
     pages.release(previous.owner, previous.tx)?;
     let rx = pages.register(previous.owner, rx_physical, 2)?;
     let tx = pages.register(previous.owner, tx_physical, 2)?;
-    let resources = NetworkResources { owner: previous.owner, rx, rx_virtual, tx, tx_virtual };
+    let resources = NetworkResources {
+        owner: previous.owner,
+        rx,
+        rx_virtual: rx_physical,
+        tx,
+        tx_virtual: tx_physical,
+    };
     let endpoint = scheduler.network_endpoint(replacement)?;
     Some((replacement, endpoint, resources))
 }

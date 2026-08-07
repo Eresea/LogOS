@@ -504,16 +504,20 @@ fn protected_store_request(
     tick: u64,
 ) -> Option<logos_abi::StoreReply> {
     if !storage.available() {
+        debug::write_line(b"LogOS: remote persistence endpoint unavailable");
         return None;
     }
     if !storage.deliver(request, 0) {
+        debug::write_line(b"LogOS: remote persistence deliver failed");
         return None;
     }
     if !scheduler.wake(storage_handle) {
+        debug::write_line(b"LogOS: remote persistence wake failed");
         return None;
     }
     let mut current_tick = tick.max(1);
     if !scheduler.run(storage_handle) {
+        debug::write_line(b"LogOS: remote persistence run failed");
         return None;
     }
     loop {
@@ -525,6 +529,7 @@ fn protected_store_request(
             continue;
         }
         if scheduler.failed(storage_handle) {
+            debug::write_line(b"LogOS: remote persistence service failed");
             return None;
         }
         if let Some(reply) = dispatch.poll(block_context, current_tick) {
@@ -532,6 +537,7 @@ fn protected_store_request(
                 || !scheduler.wake(storage_handle)
                 || !scheduler.run(storage_handle)
             {
+                debug::write_line(b"LogOS: remote persistence block relay failed");
                 return None;
             }
         } else if dispatch.accepts_new_request() {
@@ -743,12 +749,17 @@ pub fn persist_remote_enrollment(
     terminal_owner: u64,
     tick: u64,
 ) -> bool {
-    let Some(bootstrap) = bootstrap else { return false };
+    let Some(bootstrap) = bootstrap else {
+        debug::write_line(b"LogOS: remote persistence no bootstrap");
+        return false;
+    };
     let Some(page_address) = block_context.pages.address(terminal_owner, page) else {
+        debug::write_line(b"LogOS: remote persistence no page");
         return false;
     };
     let mut blob = [0; logos_remote::ENROLLMENT_BLOB_BYTES];
     if !state.seal_enrollment_random(&mut blob) {
+        debug::write_line(b"LogOS: remote persistence seal failed");
         return false;
     }
     let status = protected_store_replace(
@@ -765,8 +776,23 @@ pub fn persist_remote_enrollment(
         tick,
     );
     if status == logos_abi::PersistenceStatus::Complete {
+        debug::write_line(b"LogOS: remote persistence complete");
         true
     } else {
+        debug::write_line(match status {
+            logos_abi::PersistenceStatus::Unavailable => b"LogOS: remote persistence unavailable",
+            logos_abi::PersistenceStatus::Denied => b"LogOS: remote persistence denied",
+            logos_abi::PersistenceStatus::Invalid => b"LogOS: remote persistence invalid",
+            logos_abi::PersistenceStatus::Cancelled => b"LogOS: remote persistence cancelled",
+            logos_abi::PersistenceStatus::NotFound => b"LogOS: remote persistence not found",
+            logos_abi::PersistenceStatus::Corrupt => b"LogOS: remote persistence corrupt",
+            logos_abi::PersistenceStatus::TimedOut => b"LogOS: remote persistence timed out",
+            logos_abi::PersistenceStatus::Io => b"LogOS: remote persistence io",
+            logos_abi::PersistenceStatus::Recovered => b"LogOS: remote persistence recovered",
+            logos_abi::PersistenceStatus::OutOfMemory => b"LogOS: remote persistence out of memory",
+            logos_abi::PersistenceStatus::Full => b"LogOS: remote persistence full",
+            logos_abi::PersistenceStatus::Complete => b"LogOS: remote persistence complete",
+        });
         *state = secrets::RemoteState::unavailable(bootstrap);
         false
     }

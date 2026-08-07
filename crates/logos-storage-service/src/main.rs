@@ -328,7 +328,7 @@ fn run(context: &mut ServiceContext) -> ! {
         }
         if let Some(request) = context.store_request() {
             #[cfg(feature = "test-hooks")]
-            inject_failure(request.id);
+            inject_failure(request.request);
             let response = process(context, state, request.request);
             if !context.store_reply(response) {
                 spin();
@@ -339,11 +339,14 @@ fn run(context: &mut ServiceContext) -> ! {
 }
 
 #[cfg(feature = "test-hooks")]
-fn inject_failure(id: u32) {
-    if id == u32::MAX - 1 {
+fn inject_failure(request: logos_abi::StoreRequest) {
+    if request.operation != logos_abi::StoreOperation::Cancel {
+        return;
+    }
+    if request.id == u32::MAX - 1 {
         panic!("test panic");
     }
-    if id == u32::MAX - 2 {
+    if request.id == u32::MAX - 2 {
         let address = core::hint::black_box(1usize);
         unsafe { (address as *mut u8).write_volatile(1) };
     }

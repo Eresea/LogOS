@@ -3,7 +3,7 @@ use crate::{display, input, text};
 const ACCENT: [u8; 3] = [255; 3];
 const BACKGROUND: [u8; 3] = [0; 3];
 const ORIGIN: (usize, usize) = (32, 32);
-const CELLS: usize = 64;
+const CELLS: usize = 96;
 const SCROLLBACK: usize = 8;
 pub const HISTORY_BYTES: usize = 1 + SCROLLBACK * (1 + CELLS);
 
