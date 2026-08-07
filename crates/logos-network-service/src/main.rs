@@ -15,12 +15,6 @@ use logos_net::{
 };
 use logos_service_rt::{Header, ProtocolVersion, ServiceContext};
 
-#[cfg(feature = "test-hooks")]
-fn trace(message: &[u8]) {
-    logos_service_rt::debug(message);
-}
-
-#[cfg(not(feature = "test-hooks"))]
 fn trace(_: &[u8]) {}
 
 const DHCP_CLIENT: u16 = 68;

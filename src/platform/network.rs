@@ -290,7 +290,7 @@ impl NetworkRuntime {
                         match device.transmit(frame) {
                             Ok(()) => {
                                 self.pending = Some(PendingDevice { request });
-                                return scheduler.wake(task) && scheduler.run(task);
+                                return true;
                             }
                             Err(error) => Some(logos_abi::NetworkDeviceReply {
                                 id: request.id,
@@ -309,9 +309,10 @@ impl NetworkRuntime {
                 }
             };
             if let Some(reply) = response {
-                return self.device_endpoint.reply(reply)
+                let ok = self.device_endpoint.reply(reply)
                     && scheduler.wake(task)
                     && scheduler.run(task);
+                return ok;
             }
             return true;
         }
@@ -329,9 +330,9 @@ impl NetworkRuntime {
                 now: tick.max(1),
                 metadata: [0; 16],
             };
-            return self.event_endpoint.deliver(event)
-                && scheduler.wake(task)
-                && scheduler.run(task);
+            let ok =
+                self.event_endpoint.deliver(event) && scheduler.wake(task) && scheduler.run(task);
+            return ok;
         }
         let frame = unsafe {
             core::slice::from_raw_parts_mut(
@@ -351,10 +352,16 @@ impl NetworkRuntime {
                     now: tick.max(1),
                     metadata: [0; 16],
                 };
-                self.event_endpoint.deliver(event) && scheduler.wake(task) && scheduler.run(task)
+                let ok = self.event_endpoint.deliver(event)
+                    && scheduler.wake(task)
+                    && scheduler.run(task);
+                ok
             }
             Ok(None) => true,
-            Err(_) => self.reset(scheduler),
+            Err(_) => {
+                crate::debug::write_line(b"LogOS: network driver reset");
+                self.reset(scheduler)
+            }
         }
     }
 
@@ -575,7 +582,10 @@ impl NetworkRuntime {
     ) -> bool {
         let Some(current) = self.active_client.take() else { return false };
         let published = current.endpoint.reply(reply);
-        if published && !scheduler.failed(current.handle) {
+        if published
+            && current.slot == NetworkClientSlot::Gateway
+            && !scheduler.failed(current.handle)
+        {
             if scheduler.wake(current.handle) {
                 let _ = scheduler.run(current.handle);
             }
