@@ -1102,6 +1102,25 @@ impl NetworkServerPage {
             && NetworkPageState::from_wire(page.state) == Some(NetworkPageState::Request)
     }
 
+    pub unsafe fn reply_pending_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        server_identity(&page, service_generation, endpoint_generation)
+            && matches!(
+                NetworkPageState::from_wire(page.state),
+                Some(
+                    NetworkPageState::Reply
+                        | NetworkPageState::Denied
+                        | NetworkPageState::Failed
+                        | NetworkPageState::Cancelled
+                        | NetworkPageState::TimedOut
+                )
+            )
+    }
+
     pub unsafe fn reply_at(
         address: u64,
         service_generation: u32,
@@ -4234,6 +4253,22 @@ impl ControlPage {
             }
     }
 
+    pub unsafe fn network_server_reply_pending_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == NETWORK_REPLY
+            && context.status == ACKNOWLEDGED
+            && context.network_server_page != 0
+            && unsafe {
+                NetworkServerPage::reply_pending_at(
+                    context.network_server_page,
+                    context.generation,
+                    context.generation,
+                )
+            }
+    }
+
     pub unsafe fn store_client_reply_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
         context.abi == ABI
@@ -4346,8 +4381,8 @@ impl ControlPage {
         let context = unsafe { (address as *const Self).read_volatile() };
         context.abi == ABI
             && context.reserved == 0
-            && context.operation == NETWORK_EVENT
             && context.status == ACKNOWLEDGED
+            && context.operation == NETWORK_WAIT
     }
 
     /// # Safety

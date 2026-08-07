@@ -323,6 +323,7 @@ extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
         && (unsafe {
             logos_core::native_service::ControlPage::network_client_pending_at(context)
                 || logos_core::native_service::ControlPage::network_server_pending_at(context)
+                || logos_core::native_service::ControlPage::network_server_reply_pending_at(context)
                 || logos_core::native_service::ControlPage::network_device_pending_at(context)
                 || logos_core::native_service::ControlPage::network_event_pending_at(context)
         })

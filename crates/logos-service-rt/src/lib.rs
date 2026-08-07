@@ -118,10 +118,13 @@ impl ServiceContext {
             return None;
         }
         let page = unsafe { (raw.network_device_page as *const NetworkDevicePage).read_volatile() };
-        (page.service_generation == raw.generation
-            && page.endpoint_generation == raw.generation
-            && page.device_generation != 0)
-            .then_some(page.device_generation)
+        let service_generation = page.service_generation;
+        let endpoint_generation = page.endpoint_generation;
+        let device_generation = page.device_generation;
+        (service_generation == raw.generation
+            && endpoint_generation == raw.generation
+            && device_generation != 0)
+            .then_some(device_generation)
     }
 
     fn network_event_generation(&self) -> Option<u32> {
@@ -341,6 +344,13 @@ impl ServiceContext {
                 self.raw().generation,
                 device_generation,
                 deadline,
+            )
+        } || unsafe {
+            NetworkEventPage::waiting_at(
+                self.raw().network_event_page,
+                self.raw().generation,
+                self.raw().generation,
+                device_generation,
             )
         }) && self.invoke(native_service::NETWORK_WAIT)
     }
