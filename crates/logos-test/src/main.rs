@@ -664,7 +664,7 @@ impl Harness {
     fn wait(&mut self, expected: &str) -> Result<(), String> {
         while Instant::now() < self.deadline {
             self.drain_serial()?;
-            if has_response(&self.serial, expected) {
+            if has_line_prefix(&self.serial, expected) {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -1925,6 +1925,10 @@ fn io_error(error: std::io::Error) -> String {
 
 fn has_response(serial: &str, expected: &str) -> bool {
     serial.lines().any(|line| line == expected)
+}
+
+fn has_line_prefix(serial: &str, prefix: &str) -> bool {
+    serial.lines().any(|line| line.starts_with(prefix))
 }
 
 fn make_protocol_incompatible(path: &Path) -> Result<(), String> {
