@@ -2,7 +2,8 @@
 
 > **Status:** Remote Foundation v1 behavior and ownership extraction remain in progress. Network
 > readiness now belongs to NetworkRuntime and Gateway startup no longer probes through Terminal;
-> fixed-seed Network/Remote proof closure remains pending after the scheduling repair.
+> the QEMU harness now uses structured Network readiness and host-side Remote authority; fixed-seed
+> Network/Remote proof closure remains pending.
 
 ## Goal
 
@@ -51,14 +52,14 @@ client can reconnect and invoke the existing typed `ping` command.
 - [x] Protected Store enrollment, local trust commands, root-derived device/storage keys, and
   fail-closed corruption recovery.
 - [ ] Gateway attachment and `logosctl` end-to-end invocation are wired through the typed Core
-  remote gate; proof execution remains pending until the repaired Network/Gateway scheduling
-  boundary is re-verified.
+  remote gate; the harness runs the real bounded `logosctl` operation as the sole Remote proof
+  authority and does not execute a second label-only Core scenario.
 - [x] Host `logosctl keygen` and pinned Noise IK typed `invoke` client with bounded reconnects;
   `invoke` consumes the enrollment descriptor rather than a hard-coded generation.
 - [x] `RemoteRuntime` coordinates `remote-key`, `enroll <64-hex-key>`, and `unenroll`; the machine
   key is available when the firmware root is present and enrollment persistence remains protected.
 - [ ] QEMU restart, corruption, and typed-invocation proofs (the fixed-seed run remains open at the
-  Network/Gateway scheduling boundary).
+  Network/Gateway scheduling boundary; Gateway readiness is no longer synchronized by debug text).
 
 The remote proof IDs are registered in `logos-test`. They remain explicit verification work rather
 than environment-gated work. ABI v4 is not frozen until the full Network suite, all Remote proofs,

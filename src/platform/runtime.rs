@@ -2298,6 +2298,9 @@ pub(crate) fn run(
                 passed
             }
             test_hooks::Action::Poll => true,
+            test_hooks::Action::Query(query) => {
+                matches!(query, "network/configured") && network_runtime.configured()
+            }
             test_hooks::Action::Advance(ticks) => {
                 for step in 0..ticks.min(4096) {
                     if !poll_network(

@@ -89,6 +89,8 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   submits an internal `Status` request through the Network server endpoint, caches the returned
   `NetworkInfo`, and exposes `configured()`/`info()` to the runtime. Gateway startup does not use
   Terminal as a readiness probe.
+- The QEMU harness polls `QUERY network/configured` over COM2. The debugcon DHCP line remains a
+  diagnostic artifact only and cannot gate a scenario.
 - Client submission is transactional: validate authority and the configured page, copy TX bytes,
   deliver to Network, mark the client `Processing`, then wake the Network service. Any failed step
   rolls the client and server pages back. Completion copies RX bytes only from the configured

@@ -48,6 +48,9 @@ failures.
 - [x] Move Network readiness ownership into `NetworkRuntime`'s direct server `Status` transaction.
 - [x] Make every production Network reply wake and run its blocked caller for every status.
 - [x] Give white-box QEMU probes an explicit test-only completion target.
+- [x] Replace Network debug-log readiness waits with structured `QUERY network/configured` polling.
+- [x] Make bounded `logosctl` success the Gateway-listening proof.
+- [x] Make Remote host operations authoritative; remove duplicate label-only Core scenario runs.
 - [x] Move proof state semantics out of the platform composition root.
 - [x] Split QEMU catalogs and suite runner policy by suite.
 - [x] Use the canonical service endpoint set directly for page mapping.
