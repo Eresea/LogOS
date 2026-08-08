@@ -54,6 +54,8 @@ failures.
 - [x] Mark the five unfinished Remote proofs skipped while retaining their permanent IDs.
 - [ ] Implement each skipped Remote proof with real multi-boot/reconnect/restart orchestration and
       a precise persisted-state postcondition.
+- [x] Consolidate `remote-key`, `enroll`, and `unenroll` through one `RemoteRuntime::local_command`.
+- [x] Remove external `RemoteRuntime::state_mut()` access; defer `poll_gateway` extraction.
 - [x] Move proof state semantics out of the platform composition root.
 - [x] Split QEMU catalogs and suite runner policy by suite.
 - [x] Use the canonical service endpoint set directly for page mapping.

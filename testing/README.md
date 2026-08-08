@@ -18,6 +18,7 @@ Test builds use bounded ASCII `LOGOS/1` frames over COM2. Requests are `HELLO`, 
   debug text.
 - Remote scenarios have one authority: the host operation, or a structured postcondition query;
   Core does not run a second label-only copy of the scenario.
+- Test-driven Terminal input uses the same `RemoteRuntime::local_command` path as production input.
 - Register the roadmap criterion and retain completed v1 proofs until its contract is deprecated.
 - Future contracts must skip, never pass or expected-fail.
 

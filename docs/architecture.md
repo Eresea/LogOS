@@ -66,10 +66,12 @@ that set directly. Remote transport pages are isolated in the Remote protocol mo
 state is owned by the test-hook proof module rather than the platform composition root.
 
 The current Remote migration checkpoint is deliberately partial: `RemoteRuntime` owns RemoteState,
-local trust commands, transport reset/start state, and the enrollment gate. The composition root
-still owns Gateway endpoint bindings, Remote request processing, protected persistence context,
-deadlines, and replacement composition. ABI v4 remains unfrozen until the Network and Remote QEMU
-proofs are green and that coordination has moved behind concrete RemoteRuntime methods.
+local trust commands through one `local_command` path, transport reset/start state, protected
+control loading, and the enrollment gate. Production and test-driven Terminal input share that path;
+mutable RemoteState is not exposed to callers. The composition root still owns Gateway endpoint
+bindings, the large Remote request polling loop, protected persistence context, deadlines, and
+replacement composition. ABI v4 remains unfrozen until the Network and Remote QEMU proofs are green;
+extracting the polling loop is deferred until this consolidation is stable.
 
 ## 2. Ring model
 

@@ -1035,10 +1035,9 @@ pub(crate) fn run(
     } else if let Some(bootstrap) = remote_bootstrap {
         remote_runtime.replace_state(secrets::RemoteState::unavailable(bootstrap));
     }
-    if let (Some(state), Some(page_address)) = (
-        remote_runtime.state_mut().as_mut().filter(|state| state.available()),
-        shared_pages.address(terminal_owner, shared_history),
-    ) {
+    if remote_runtime.state().is_some_and(secrets::RemoteState::available)
+        && let Some(page_address) = shared_pages.address(terminal_owner, shared_history)
+    {
         let mut blob = [0; logos_remote::REMOTE_CONTROL_BLOB_BYTES];
         let status = storage_runtime.protected_store_read(
             &mut block::DispatchContext {
@@ -1058,9 +1057,9 @@ pub(crate) fn run(
             interrupts::ticks(),
         );
         if status == logos_abi::PersistenceStatus::Complete {
-            let _ = state.load_control(&mut blob);
+            let _ = remote_runtime.load_control(&mut blob);
         } else if status != logos_abi::PersistenceStatus::NotFound {
-            state.disable();
+            remote_runtime.disable();
         }
     }
     let mut network_handle = if let Some(network_task) = native_network.take()
@@ -1148,7 +1147,7 @@ pub(crate) fn run(
                     gateway_page,
                     shared_history,
                     terminal_owner,
-                    remote_runtime.state_mut(),
+                    &mut remote_runtime,
                     native_sessions_endpoint,
                     sessions_handle,
                     remote_session.as_ref(),
@@ -3208,124 +3207,49 @@ pub(crate) fn run(
                             )
                         }) {
                             let request = native_command.request().unwrap();
-                            debug::write_line(b"LogOS: remote local command");
-                            let mut key_text = [0; 96];
-                            let mut reply = b"remote unavailable" as &[u8];
-                            let mut enrolled = false;
-                            if let Some(state) = remote_runtime.state_mut().as_mut() {
-                                match request.syscall {
-                                    logos_abi::Syscall::RemoteKey => {
-                                        if state.available() {
-                                            let mut machine_key = [0; 64];
-                                            hex_key(&state.machine_public(), &mut machine_key);
-                                            key_text[..64].copy_from_slice(&machine_key);
-                                            reply = &key_text[..64];
-                                        }
-                                    }
-                                    logos_abi::Syscall::Enroll => {
-                                        let mut client_key = [0; 32];
-                                        let key_ok = request.length == 64
-                                            && hex_decode_key(
-                                                &request.argument[..request.length],
-                                                &mut client_key,
-                                            );
-                                        if key_ok
-                                            && state.enroll(client_key).is_some_and(|_| {
-                                                let persisted = storage_runtime
-                                                    .persist_remote_enrollment(
-                                                        state,
-                                                        remote_bootstrap,
-                                                        &mut block::DispatchContext {
-                                                            endpoint: native_storage_block,
-                                                            pages: &mut shared_pages,
-                                                            store_owner: storage_owner,
-                                                            store_page: storage_block_page,
-                                                            device: &mut block_device,
-                                                            memory: &mut memory,
-                                                        },
-                                                        &mut native_scheduler,
-                                                        shared_history,
-                                                        terminal_owner,
-                                                        tick,
-                                                    );
-                                                debug::write_line(if persisted {
-                                                    b"LogOS: remote enrollment persisted"
-                                                } else {
-                                                    b"LogOS: remote enrollment persistence failed"
-                                                });
-                                                persisted
-                                            })
-                                        {
-                                            let mut machine_key = [0; 64];
-                                            hex_key(&state.machine_public(), &mut machine_key);
-                                            key_text[..64].copy_from_slice(&machine_key);
-                                            key_text[64] = b':';
-                                            let generation = state.enrollment().generation;
-                                            let mut digits = [0; 20];
-                                            let length = decimal_u64(generation, &mut digits);
-                                            key_text[65..65 + length]
-                                                .copy_from_slice(&digits[..length]);
-                                            reply = &key_text[..65 + length];
-                                            enrolled = true;
-                                        } else {
-                                            reply = b"invalid enrollment key";
-                                        }
-                                    }
-                                    logos_abi::Syscall::Unenroll => {
-                                        if state.unenroll().is_some_and(|_| {
-                                            storage_runtime.persist_remote_enrollment(
-                                                state,
-                                                remote_bootstrap,
-                                                &mut block::DispatchContext {
-                                                    endpoint: native_storage_block,
-                                                    pages: &mut shared_pages,
-                                                    store_owner: storage_owner,
-                                                    store_page: storage_block_page,
-                                                    device: &mut block_device,
-                                                    memory: &mut memory,
-                                                },
-                                                &mut native_scheduler,
-                                                shared_history,
-                                                terminal_owner,
-                                                tick,
-                                            )
-                                        }) {
-                                            reply = b"remote unenrolled";
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                if enrolled
-                                    && gateway_handle.is_none()
-                                    && network_handle.is_some()
-                                    && let Some(task) = native_gateway.take()
-                                {
-                                    debug::write_line(b"LogOS: Gateway enrollment spawn");
-                                    gateway_handle = native_scheduler.spawn(task);
-                                    if let Some(handle) = gateway_handle {
-                                        native_gateway_network =
-                                            native_scheduler.network_client_endpoint(handle);
-                                        native_gateway_remote =
-                                            native_scheduler.remote_endpoint(handle);
-                                        native_gateway_store =
-                                            native_scheduler.store_client_endpoint(handle);
-                                        if !native_gateway_network.zip(gateway_page).is_none_or(
-                                            |(endpoint, page)| endpoint.configure_transfer(page),
-                                        ) || !native_gateway_store.zip(gateway_page).is_none_or(
-                                            |(endpoint, page)| endpoint.configure_transfer(page),
-                                        ) {
-                                            gateway_handle = None;
-                                        }
-                                    }
-                                    if gateway_handle.is_some() {
-                                        native_services.ready(supervisor::NativeService::Gateway);
-                                        debug::write_line(b"LogOS: Gateway enrollment ready");
+                            let local = remote_runtime.local_command(
+                                request,
+                                remote_bootstrap,
+                                &mut storage_runtime,
+                                &mut block::DispatchContext {
+                                    endpoint: native_storage_block,
+                                    pages: &mut shared_pages,
+                                    store_owner: storage_owner,
+                                    store_page: storage_block_page,
+                                    device: &mut block_device,
+                                    memory: &mut memory,
+                                },
+                                &mut native_scheduler,
+                                shared_history,
+                                terminal_owner,
+                                tick,
+                            );
+                            if local.enrolled
+                                && gateway_handle.is_none()
+                                && network_handle.is_some()
+                                && let Some(task) = native_gateway.take()
+                            {
+                                gateway_handle = native_scheduler.spawn(task);
+                                if let Some(handle) = gateway_handle {
+                                    native_gateway_network =
+                                        native_scheduler.network_client_endpoint(handle);
+                                    native_gateway_remote =
+                                        native_scheduler.remote_endpoint(handle);
+                                    native_gateway_store =
+                                        native_scheduler.store_client_endpoint(handle);
+                                    if !native_gateway_network.zip(gateway_page).is_none_or(
+                                        |(endpoint, page)| endpoint.configure_transfer(page),
+                                    ) || !native_gateway_store.zip(gateway_page).is_none_or(
+                                        |(endpoint, page)| endpoint.configure_transfer(page),
+                                    ) {
+                                        gateway_handle = None;
                                     }
                                 }
-                            } else {
-                                debug::write_line(b"LogOS: remote state missing");
-                            };
-                            if !native_command.reply(reply)
+                                if gateway_handle.is_some() {
+                                    native_services.ready(supervisor::NativeService::Gateway);
+                                }
+                            }
+                            if !native_command.reply(&local.reply.text[..local.reply.length])
                                 || !native_scheduler.wake(native_handle)
                                 || !native_scheduler.run(native_handle)
                                 || !resume_display(
@@ -3682,7 +3606,7 @@ fn poll_gateway(
     gateway_page: Option<logos_abi::PageHandle>,
     persistence_page: logos_abi::PageHandle,
     persistence_owner: u64,
-    remote_state: &mut Option<secrets::RemoteState>,
+    remote_runtime: &mut remote::RemoteRuntime,
     sessions: Option<native_task::SessionEndpoint>,
     sessions_handle: Option<native_task::Handle>,
     remote_session: Option<&session::Context>,
@@ -3722,8 +3646,7 @@ fn poll_gateway(
     ) {
         return false;
     }
-    let (Some(remote), Some(page), Some(remote_state), Some(remote_session)) =
-        (remote, gateway_page, remote_state.as_mut(), remote_session)
+    let (Some(remote), Some(page), Some(remote_session)) = (remote, gateway_page, remote_session)
     else {
         return true;
     };
@@ -3745,70 +3668,76 @@ fn poll_gateway(
         return false;
     }
     source[..length].copy_from_slice(bytes);
-    let outcome = match request.operation {
-        logos_abi::service::RemoteGateOperation::Handshake => {
-            let mut output = [0; logos_remote::MAX_FRAME];
-            remote_state.handshake(&source[..length], &mut output).map(|length| {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(output.as_ptr(), address as *mut u8, length)
-                };
-                (logos_abi::service::RemoteGateStatus::Complete, length, 0)
-            })
-        }
-        logos_abi::service::RemoteGateOperation::Open => {
-            let plaintext_length = length.checked_sub(16);
-            plaintext_length
-                .filter(|length| {
-                    remote_state
-                        .open(&source[..request.length as usize], output_page(address, *length))
-                })
-                .map(|length| (logos_abi::service::RemoteGateStatus::Complete, length, 0))
-        }
-        logos_abi::service::RemoteGateOperation::Seal => {
-            let mut output = [0; logos_remote::MAX_FRAME];
-            let sealed = length.checked_add(16).filter(|sealed| *sealed <= output.len());
-            sealed
-                .filter(|sealed| remote_state.seal(&source[..length], &mut output[..*sealed]))
-                .map(|sealed| {
+    let outcome = remote_runtime
+        .handle_request(|remote_state| match request.operation {
+            logos_abi::service::RemoteGateOperation::Handshake => {
+                let mut output = [0; logos_remote::MAX_FRAME];
+                remote_state.handshake(&source[..length], &mut output).map(|length| {
                     unsafe {
-                        core::ptr::copy_nonoverlapping(output.as_ptr(), address as *mut u8, sealed)
+                        core::ptr::copy_nonoverlapping(output.as_ptr(), address as *mut u8, length)
                     };
-                    (logos_abi::service::RemoteGateStatus::Complete, sealed, 0)
+                    (logos_abi::service::RemoteGateStatus::Complete, length, 0)
                 })
-        }
-        logos_abi::service::RemoteGateOperation::Invoke => remote_invoke(
-            remote_state,
-            &source[..length],
-            address,
-            storage_runtime,
-            block_context,
-            scheduler,
-            persistence_page,
-            persistence_owner,
-            tick,
-            sessions,
-            sessions_handle,
-            remote_session,
-            capabilities,
-            input,
-            lifecycle,
-            service_healthy,
-            channel,
-            responses,
-            service_scheduler,
-            service_capability,
-            service,
-        ),
-        logos_abi::service::RemoteGateOperation::Subscribe
-        | logos_abi::service::RemoteGateOperation::Credit
-        | logos_abi::service::RemoteGateOperation::Acknowledge => {
-            remote_subscription(remote_state, &source[..length], address, request.operation)
-        }
-        logos_abi::service::RemoteGateOperation::Reset => {
-            remote_state.reset_transport();
-            Some((logos_abi::service::RemoteGateStatus::Complete, 0, 0))
-        }
-    };
+            }
+            logos_abi::service::RemoteGateOperation::Open => {
+                let plaintext_length = length.checked_sub(16);
+                plaintext_length
+                    .filter(|length| {
+                        remote_state
+                            .open(&source[..request.length as usize], output_page(address, *length))
+                    })
+                    .map(|length| (logos_abi::service::RemoteGateStatus::Complete, length, 0))
+            }
+            logos_abi::service::RemoteGateOperation::Seal => {
+                let mut output = [0; logos_remote::MAX_FRAME];
+                let sealed = length.checked_add(16).filter(|sealed| *sealed <= output.len());
+                sealed
+                    .filter(|sealed| remote_state.seal(&source[..length], &mut output[..*sealed]))
+                    .map(|sealed| {
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                output.as_ptr(),
+                                address as *mut u8,
+                                sealed,
+                            )
+                        };
+                        (logos_abi::service::RemoteGateStatus::Complete, sealed, 0)
+                    })
+            }
+            logos_abi::service::RemoteGateOperation::Invoke => remote_invoke(
+                remote_state,
+                &source[..length],
+                address,
+                storage_runtime,
+                block_context,
+                scheduler,
+                persistence_page,
+                persistence_owner,
+                tick,
+                sessions,
+                sessions_handle,
+                remote_session,
+                capabilities,
+                input,
+                lifecycle,
+                service_healthy,
+                channel,
+                responses,
+                service_scheduler,
+                service_capability,
+                service,
+            ),
+            logos_abi::service::RemoteGateOperation::Subscribe
+            | logos_abi::service::RemoteGateOperation::Credit
+            | logos_abi::service::RemoteGateOperation::Acknowledge => {
+                remote_subscription(remote_state, &source[..length], address, request.operation)
+            }
+            logos_abi::service::RemoteGateOperation::Reset => {
+                remote_state.reset_transport();
+                Some((logos_abi::service::RemoteGateStatus::Complete, 0, 0))
+            }
+        })
+        .flatten();
     let (status, length, cursor) =
         outcome.unwrap_or((logos_abi::service::RemoteGateStatus::Denied, 0, 0));
     remote.reply(logos_abi::service::RemotePageReply {
@@ -4422,50 +4351,6 @@ fn restart_native_service(
         return None;
     }
     scheduler.replace(handle, memory, |_, _| true)
-}
-
-fn hex_key(key: &[u8; 32], output: &mut [u8; 64]) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for (index, byte) in key.iter().copied().enumerate() {
-        output[index * 2] = HEX[(byte >> 4) as usize];
-        output[index * 2 + 1] = HEX[(byte & 0x0f) as usize];
-    }
-}
-
-fn hex_decode_key(input: &[u8], output: &mut [u8; 32]) -> bool {
-    if input.len() != 64 {
-        return false;
-    }
-    for (index, chunk) in input.chunks_exact(2).enumerate() {
-        let Some(high) = hex_value(chunk[0]) else { return false };
-        let Some(low) = hex_value(chunk[1]) else { return false };
-        output[index] = (high << 4) | low;
-    }
-    !output.iter().all(|byte| *byte == 0)
-}
-
-fn decimal_u64(mut value: u64, output: &mut [u8; 20]) -> usize {
-    let mut position = output.len();
-    loop {
-        position -= 1;
-        output[position] = b'0' + (value % 10) as u8;
-        value /= 10;
-        if value == 0 {
-            break;
-        }
-    }
-    let length = output.len() - position;
-    output.copy_within(position.., 0);
-    length
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {

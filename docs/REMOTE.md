@@ -75,12 +75,15 @@ and the remaining ownership extraction pass together.
 ## Current ownership checkpoint
 
 `RemoteRuntime` currently owns `RemoteState`, local trust commands, the enrollment gate, transport
-start/reset state, and the Gateway start predicate. The predicate consumes
+start/reset state, protected control loading, and the Gateway start predicate. Both production and
+test-driven Terminal input call `RemoteRuntime::local_command`; no second `remote-key`, `enroll`,
+or `unenroll` implementation exists. External callers observe `state()` and narrow transport,
+control, and request methods; mutable RemoteState is not exposed. The predicate consumes
 `NetworkRuntime::configured()`, which is backed by Network's internal server `Status` transaction;
 it does not depend on the Terminal client page. `platform::runtime` still owns Gateway endpoint
-bindings, Remote request polling, deadline/reply lifecycle, protected persistence context, and
-replacement composition. Moving those responsibilities is the next bounded cycle after Network
-proof closure.
+bindings, the large Remote request polling loop, deadline/reply lifecycle, protected persistence
+context, and replacement composition. Extracting that polling loop remains deferred until this
+consolidation is stable.
 UEFI builds use target-scoped Fiat Curve25519 and software ChaCha20/Poly1305 backends so the full
 payload set builds consistently on the supported host toolchains.
 
