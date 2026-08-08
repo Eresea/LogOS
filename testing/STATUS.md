@@ -34,7 +34,9 @@ Post-repair spot checks on this branch pass for `network/transport-dhcp`,
 `network/configuration` now proves readiness through `QUERY network/configured`, not debugcon. The
 first Phase 2 `remote/typed-invoke` run reached structured Network readiness and Gateway start,
 then stalled during the first host-client advancement; no duplicate Core `RUN remote/typed-invoke`
-was executed.
+was executed. The five unfinished Remote proofs are now explicitly skipped/unimplemented while
+their permanent IDs remain registered: enrollment persistence, reconnect replay, pending-after-reset,
+Gateway restart, and protected-state corruption.
 The first full Network-suite run after the repair recorded 4/11 passed; remaining failures are
 reset/packet-loss and simultaneous-client/Gateway coordination cases pending further isolation.
 
@@ -72,11 +74,13 @@ Baseline Network-client failures (pre-repair; rerun pending):
 - `network/tcp-stream`: Gateway startup signal is absent; classified at the Network/Remote
   Gateway startup boundary.
 
-Baseline Remote failures (pre-repair; rerun pending):
+Baseline Remote failures (pre-repair; superseded by explicit skips for five unfinished proofs):
 
-- `remote/enrollment-persistence`, `remote/auth-denied`, `remote/typed-invoke`,
-  `remote/reconnect-replay`, `remote/pending-after-reset`, `remote/gateway-restart`, and
-  `remote/protected-state-corrupt`: all time out waiting for `LogOS: Gateway started`.
+- `remote/auth-denied` and `remote/typed-invoke`: previously timed out waiting for
+  `LogOS: Gateway started`; the harness now uses structured readiness and host-side authority.
+- `remote/enrollment-persistence`, `remote/reconnect-replay`, `remote/pending-after-reset`,
+  `remote/gateway-restart`, and `remote/protected-state-corrupt`: explicitly skipped/unimplemented;
+  no partial proof is claimed.
   Classified as Gateway startup/Remote coordination behavior, not missing typed transport.
 
 The remaining failures are implementation-boundary behavior in Network-client/Gateway/Remote

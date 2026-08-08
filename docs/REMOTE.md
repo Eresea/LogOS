@@ -37,6 +37,12 @@ client can reconnect and invoke the existing typed `ping` command.
 - `remote/gateway-restart`
 - `remote/protected-state-corrupt`
 
+The following five IDs remain permanent catalog entries but are currently explicitly skipped as
+unimplemented: `remote/enrollment-persistence`, `remote/reconnect-replay`,
+`remote/pending-after-reset`, `remote/gateway-restart`, and `remote/protected-state-corrupt`.
+They return only after their individual multi-boot/restart orchestration and semantic postconditions
+are implemented.
+
 ### Implementation checkpoints
 
 - [x] Bounded Noise IK, HKDF key separation, XChaCha protected-record primitive, fail-closed trust
@@ -58,8 +64,9 @@ client can reconnect and invoke the existing typed `ping` command.
   `invoke` consumes the enrollment descriptor rather than a hard-coded generation.
 - [x] `RemoteRuntime` coordinates `remote-key`, `enroll <64-hex-key>`, and `unenroll`; the machine
   key is available when the firmware root is present and enrollment persistence remains protected.
-- [ ] QEMU restart, corruption, and typed-invocation proofs (the fixed-seed run remains open at the
-  Network/Gateway scheduling boundary; Gateway readiness is no longer synchronized by debug text).
+- [ ] QEMU typed-invocation proof after the Network/Gateway scheduling boundary is repaired.
+- [ ] Reintroduce the five skipped proofs only with their documented clean-shutdown, reconnect,
+  reset, restart, or protected-corruption orchestration.
 
 The remote proof IDs are registered in `logos-test`. They remain explicit verification work rather
 than environment-gated work. ABI v4 is not frozen until the full Network suite, all Remote proofs,

@@ -51,6 +51,9 @@ failures.
 - [x] Replace Network debug-log readiness waits with structured `QUERY network/configured` polling.
 - [x] Make bounded `logosctl` success the Gateway-listening proof.
 - [x] Make Remote host operations authoritative; remove duplicate label-only Core scenario runs.
+- [x] Mark the five unfinished Remote proofs skipped while retaining their permanent IDs.
+- [ ] Implement each skipped Remote proof with real multi-boot/reconnect/restart orchestration and
+      a precise persisted-state postcondition.
 - [x] Move proof state semantics out of the platform composition root.
 - [x] Split QEMU catalogs and suite runner policy by suite.
 - [x] Use the canonical service endpoint set directly for page mapping.
