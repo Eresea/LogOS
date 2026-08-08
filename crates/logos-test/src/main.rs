@@ -664,7 +664,7 @@ impl Harness {
     fn wait(&mut self, expected: &str) -> Result<(), String> {
         while Instant::now() < self.deadline {
             self.drain_serial()?;
-            if self.serial.lines().any(|line| line.starts_with(expected)) {
+            if has_response(&self.serial, expected) {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -698,7 +698,7 @@ impl Harness {
                 return Ok(());
             }
             self.drain_serial()?;
-            if self.serial.lines().any(|line| line.starts_with(expected)) {
+            if has_response(&self.serial, expected) {
                 return Ok(());
             }
             self.send("LOGOS/1 ADVANCE 64\n")?;
@@ -713,7 +713,7 @@ impl Harness {
         let end = (Instant::now() + duration).min(self.deadline);
         while Instant::now() < end {
             self.drain_serial()?;
-            if self.serial.lines().any(|line| line.starts_with(expected)) {
+            if has_response(&self.serial, expected) {
                 return Ok(true);
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -1923,6 +1923,10 @@ fn io_error(error: std::io::Error) -> String {
     error.to_string()
 }
 
+fn has_response(serial: &str, expected: &str) -> bool {
+    serial.lines().any(|line| line == expected)
+}
+
 fn make_protocol_incompatible(path: &Path) -> Result<(), String> {
     let mut image = fs::read(path).map_err(io_error)?;
     let mut changed = false;
@@ -2003,6 +2007,20 @@ mod tests {
     fn report_escaping_is_valid() {
         assert_eq!(escape("a\n\"b"), "a\\n\\\"b");
         assert_eq!(xml("a&b"), "a&amp;b");
+    }
+
+    #[test]
+    fn structured_response_matching_requires_the_complete_line() {
+        let serial = "LOGOS/1 RESULT query=network/configured status=pending\nLOGOS/1 RESULT query=network/configured status=ready\n";
+        assert!(has_response(serial, "LOGOS/1 RESULT query=network/configured status=ready"));
+        assert!(!has_response(
+            serial,
+            "LOGOS/1 RESULT query=network/configured status=ready extra"
+        ));
+        assert!(!has_response(
+            "LOGOS/1 RESULT query=network/configured status=ready-old\n",
+            "LOGOS/1 RESULT query=network/configured status=ready"
+        ));
     }
 
     #[test]
