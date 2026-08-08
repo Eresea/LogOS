@@ -130,6 +130,14 @@ fn line(value: &[u8]) {
     write(b"\r\n");
     debug::write_line(value);
 }
+
+#[cfg(feature = "test-hooks")]
+pub fn event(id: &str, state: &str) {
+    write(b"LOGOS/1 EVENT id=");
+    write(id.as_bytes());
+    write(b" state=");
+    line(state.as_bytes());
+}
 fn write(value: &[u8]) {
     for &byte in value {
         while input(COM2 + 5) & 0x20 == 0 {

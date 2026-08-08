@@ -4,7 +4,7 @@ use std::{
     cell::Cell,
     env, fs,
     io::{self, BufRead, BufReader, IsTerminal, Read, Seek, SeekFrom, Write},
-    net::{TcpListener, TcpStream},
+    net::{Shutdown, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     rc::Rc,
@@ -566,7 +566,19 @@ impl Harness {
         if scenario.suite == "remote" {
             return self.run_remote(scenario);
         }
+        if matches!(scenario.runner, Runner::NetworkTcpStream) {
+            return self.run_tcp_stream(scenario.id);
+        }
         self.run_id(scenario.id)
+    }
+
+    fn run_tcp_stream(&mut self, id: &str) -> Result<(), String> {
+        let port = self.remote_port;
+        let peer = thread::spawn(move || tcp_stream_peer(port));
+        self.send(&format!("LOGOS/1 RUN {id}\n"))?;
+        let outcome = self.wait(&format!("LOGOS/1 RESULT scenario={id} status=passed"));
+        let peer_outcome = peer.join().map_err(|_| "TCP peer panicked".to_string())?;
+        outcome.and(peer_outcome)
     }
 
     fn run_remote(&mut self, scenario: Scenario) -> Result<(), String> {
@@ -936,7 +948,9 @@ fn run_one(id: &str) -> i32 {
             return 1;
         }
     };
-    let profile = if scenario.suite == "remote" {
+    let profile = if matches!(scenario.runner, Runner::NetworkTcpStream) {
+        &profiles.tcp
+    } else if scenario.suite == "remote" {
         if scenario.fixture == Fixture::Persistence {
             &profiles.remote_persistence
         } else {
@@ -950,6 +964,15 @@ fn run_one(id: &str) -> i32 {
     if suites::network::is_configuration(scenario.runner) {
         progress.start(scenario.id);
         let result = run_network_configuration(&run_dir, profile, scenario, seed);
+        progress.record(&result);
+        progress.finish();
+        let _ = write_reports(&run_dir, std::slice::from_ref(&result));
+        cleanup_bulk_artifacts(&run_dir);
+        return report(&result);
+    }
+    if matches!(scenario.runner, Runner::NetworkTcpStream) {
+        progress.start(scenario.id);
+        let result = run_tcp_stream_fixture(&run_dir, profile, scenario, seed);
         progress.record(&result);
         progress.finish();
         let _ = write_reports(&run_dir, std::slice::from_ref(&result));
@@ -997,6 +1020,40 @@ fn run_network_configuration(
         )?;
         harness.run_id(scenario.id)?;
         harness.shutdown()
+    })();
+    cleanup_fixture_artifacts(&fixture_dir, result.is_err());
+    ResultRecord {
+        id: scenario.id.into(),
+        status: if result.is_ok() { Status::Passed } else { Status::Failed },
+        duration_ms: started.elapsed().as_millis(),
+        seed,
+        failure: result.err(),
+        artifacts: run_dir.to_path_buf(),
+    }
+}
+
+fn run_tcp_stream_fixture(
+    run_dir: &Path,
+    profile: &ImageProfile,
+    scenario: Scenario,
+    seed: u64,
+) -> ResultRecord {
+    let started = Instant::now();
+    let fixture_dir = run_dir.join("fixtures").join("network-tcp-stream");
+    let result = (|| -> Result<(), String> {
+        fs::create_dir_all(&fixture_dir).map_err(io_error)?;
+        let (qemu, ovmf) = qemu_paths()?;
+        let mut harness = Harness::boot(
+            &qemu,
+            &ovmf,
+            profile,
+            &fixture_dir,
+            scenario.timeout,
+            "LogOS: storage formatted",
+        )?;
+        let outcome = harness.run(scenario);
+        let shutdown = harness.shutdown();
+        outcome.and(shutdown)
     })();
     cleanup_fixture_artifacts(&fixture_dir, result.is_err());
     ResultRecord {
@@ -1121,7 +1178,9 @@ fn run_independent_one(
     seed: u64,
     progress: &Progress,
 ) -> Vec<ResultRecord> {
-    let profile = if item.suite == "remote" {
+    let profile = if matches!(item.runner, Runner::NetworkTcpStream) {
+        &profiles.tcp
+    } else if item.suite == "remote" {
         if item.fixture == Fixture::Persistence {
             &profiles.remote_persistence
         } else {
@@ -1132,7 +1191,9 @@ fn run_independent_one(
     } else {
         &profiles.standard
     };
-    if item.fixture == Fixture::Persistence {
+    if matches!(item.runner, Runner::NetworkTcpStream) {
+        vec![run_tcp_stream_fixture(run_dir, profile, item, seed)]
+    } else if item.fixture == Fixture::Persistence {
         vec![run_persistence_proof(root, run_dir, profile, item, seed, progress)]
     } else {
         run_fixture(root, run_dir, profile, item.id, std::slice::from_ref(&item), seed, progress)
@@ -1567,6 +1628,7 @@ fn run_fixture(
 struct Profiles {
     standard: ImageProfile,
     persistence: ImageProfile,
+    tcp: ImageProfile,
     remote: ImageProfile,
     remote_persistence: ImageProfile,
 }
@@ -1575,6 +1637,9 @@ fn build_profiles(root: &Path, run_dir: &Path, persistence: bool) -> Result<Prof
     let profiles_dir = run_dir.join("profiles");
     fs::create_dir_all(&profiles_dir).map_err(io_error)?;
     let standard = build_profile(root, &profiles_dir.join("standard"), false, false)?;
+    let mut tcp = build_profile(root, &profiles_dir.join("tcp"), false, true)?;
+    tcp.sessions = None;
+    tcp.gateway = None;
     let persistence_profile = if persistence {
         build_profile(root, &profiles_dir.join("persistence"), true, false)?
     } else {
@@ -1586,7 +1651,7 @@ fn build_profiles(root: &Path, run_dir: &Path, persistence: bool) -> Result<Prof
     } else {
         remote.clone()
     };
-    Ok(Profiles { standard, persistence: persistence_profile, remote, remote_persistence })
+    Ok(Profiles { standard, persistence: persistence_profile, tcp, remote, remote_persistence })
 }
 
 fn build_profile(
@@ -1814,6 +1879,42 @@ fn free_port() -> Result<u16, String> {
     Ok(TcpListener::bind("127.0.0.1:0").map_err(io_error)?.local_addr().map_err(io_error)?.port())
 }
 
+fn tcp_stream_peer(port: u16) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut stream = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => break stream,
+            Err(error) if Instant::now() < deadline => {
+                let _ = error;
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(format!("TCP peer connect: {error}")),
+        }
+    };
+    stream.set_nodelay(true).map_err(io_error)?;
+    stream.set_read_timeout(Some(Duration::from_secs(10))).map_err(io_error)?;
+    stream.write_all(b"hello").map_err(io_error)?;
+    let mut small = [0; 5];
+    stream.read_exact(&mut small).map_err(io_error)?;
+    if small != *b"world" {
+        return Err(format!("TCP peer received {:?}, expected world", small));
+    }
+
+    let mut input = [0; 512];
+    for (index, byte) in input.iter_mut().enumerate() {
+        *byte = (index as u8).wrapping_mul(37).wrapping_add(11);
+    }
+    stream.write_all(&input).map_err(io_error)?;
+    let mut output = [0; 512];
+    stream.read_exact(&mut output).map_err(io_error)?;
+    for (index, byte) in output.iter().enumerate() {
+        if *byte != input[index] ^ 0xa5 {
+            return Err(format!("TCP peer transform mismatch at byte {index}"));
+        }
+    }
+    stream.shutdown(Shutdown::Write).map_err(io_error)
+}
+
 fn accept_until(
     listener: &TcpListener,
     child: &mut Child,
@@ -1972,6 +2073,7 @@ mod tests {
                         | "network/packet-loss"
                         | "network/timeout"
                         | "network/reset-reconnect"
+                        | "network/tcp-stream"
                         | "remote/enrollment-persistence"
                         | "remote/auth-denied"
                         | "remote/typed-invoke"

@@ -213,7 +213,13 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
     configured("network/packet-loss", "network", &[], Fixture::Fresh),
     configured("network/timeout", "network", &[], Fixture::Fresh),
     configured("network/reset-reconnect", "network", &[], Fixture::Fresh),
-    scenario("network/tcp-stream", "network", Fixture::Fresh),
+    configured_with_runner(
+        "network/tcp-stream",
+        "network",
+        &[],
+        Fixture::Fresh,
+        Runner::NetworkTcpStream,
+    ),
     scenario("remote/enrollment-persistence", "remote", Fixture::Persistence),
     configured_with_runner(
         "remote/auth-denied",

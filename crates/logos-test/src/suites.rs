@@ -32,6 +32,7 @@ pub(crate) use catalog::SCENARIOS;
 pub(crate) enum Runner {
     Default,
     NetworkConfiguration,
+    NetworkTcpStream,
     PersistenceWriteInterruption,
     PersistenceRecovery,
     PersistenceCorruption,

@@ -436,7 +436,10 @@ fn run(context: &mut ServiceContext) -> ! {
                 let result = logos_net::EndpointId::from_wire(request.endpoint.0)
                     .ok_or(logos_net::TcpStateError::Invalid)
                     .and_then(|endpoint| state.tcp_mut().accept(owner, endpoint));
-                if matches!(result, Err(logos_net::TcpStateError::Busy)) {
+                if matches!(
+                    result,
+                    Err(logos_net::TcpStateError::Busy | logos_net::TcpStateError::NoData)
+                ) {
                     waiting_accept = Some((request, owner));
                     if !context.network_wait(request.deadline) {
                         spin();
@@ -536,10 +539,13 @@ fn run(context: &mut ServiceContext) -> ! {
                                     next_id,
                                 )
                             {
-                                NetworkStatus::Complete
-                            } else {
-                                NetworkStatus::Io
+                                waiting_send = Some(request);
+                                waiting_send_arp = false;
+                                pending = next_id;
+                                next_id = next_id.wrapping_add(1).max(1);
+                                continue;
                             }
+                            NetworkStatus::Io
                         } else {
                             NetworkStatus::Busy
                         }

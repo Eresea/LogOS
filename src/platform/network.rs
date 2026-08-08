@@ -680,8 +680,7 @@ impl NetworkRuntime {
         let Some(current) = self.active_client.take() else { return false };
         let published = current.endpoint.reply(reply);
         let reset = current.server.reset();
-        let completed = published && reset && self.complete_target(current.target);
-        completed
+        published && reset && self.complete_target(current.target)
     }
 
     pub fn invalidate_client(
