@@ -361,7 +361,6 @@ fn superblocks(path: &Path) -> Result<String, String> {
 struct Harness {
     child: Child,
     stream: TcpStream,
-    debug_log: PathBuf,
     disk: PathBuf,
     qmp_port: u16,
     qmp_log: PathBuf,
@@ -370,7 +369,6 @@ struct Harness {
     serial: String,
     deadline: Instant,
     timeout: Duration,
-    network_marker_offset: usize,
     network_peer: Option<NetworkPeer>,
     remote_port: u16,
     logosctl: PathBuf,
@@ -518,7 +516,6 @@ impl Harness {
         let mut harness = Self {
             child,
             stream,
-            debug_log,
             disk,
             qmp_port,
             qmp_log,
@@ -528,7 +525,6 @@ impl Harness {
             serial: String::new(),
             deadline,
             timeout: Duration::from_secs(timeout),
-            network_marker_offset: 0,
             network_peer,
             remote_port,
             logosctl: profile.logosctl.clone(),
@@ -548,8 +544,6 @@ impl Harness {
         harness.wait("LOGOS/1 READY")?;
         harness.send("LOGOS/1 HELLO\n")?;
         harness.wait("LOGOS/1 RESULT hello=ok")?;
-        harness.network_marker_offset =
-            fs::metadata(&harness.debug_log).map(|metadata| metadata.len() as usize).unwrap_or(0);
         Ok(harness)
     }
 
@@ -557,8 +551,6 @@ impl Harness {
         self.renew_deadline();
         self.send(&format!("LOGOS/1 RESET {scenario}\n"))?;
         self.wait("LOGOS/1 RESULT reset=accepted")?;
-        self.network_marker_offset =
-            fs::metadata(&self.debug_log).map(|metadata| metadata.len() as usize).unwrap_or(0);
         Ok(())
     }
 
@@ -572,20 +564,19 @@ impl Harness {
             self.wait("LOGOS/1 RESULT input=accepted")?;
         }
         if scenario.suite == "remote" {
-            self.run_remote(scenario)?;
+            return self.run_remote(scenario);
         }
         self.run_id(scenario.id)
     }
 
     fn run_remote(&mut self, scenario: Scenario) -> Result<(), String> {
+        self.wait_network_configured()?;
         let client_secret = suites::remote::client_secret(scenario.runner);
         let enrolled_secret = [8; 32];
         let client_public =
             x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(enrolled_secret));
         self.send(&format!("LOGOS/1 INPUT enroll {}\n", hex_bytes(client_public.as_bytes())))?;
         self.wait("LOGOS/1 RESULT input=accepted")?;
-        self.wait_network_bound()?;
-        self.wait_debug("LogOS: Gateway started")?;
         let bootstrap = logos_remote::Bootstrap::from_root(&[9; 32], &[9; 32])
             .map_err(|error| format!("bootstrap: {error:?}"))?;
         let machine =
@@ -640,7 +631,7 @@ impl Harness {
 
     fn run_id(&mut self, id: &str) -> Result<(), String> {
         if id.starts_with("network/") {
-            self.wait_network_bound()?;
+            self.wait_network_configured()?;
         }
         self.send(&format!("LOGOS/1 RUN {id}\n"))?;
         self.wait(&format!("LOGOS/1 RESULT scenario={id} status=passed"))
@@ -699,58 +690,47 @@ impl Harness {
         Ok(())
     }
 
-    fn wait_network_bound(&mut self) -> Result<(), String> {
-        let expected = "LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2";
+    fn wait_network_configured(&mut self) -> Result<(), String> {
+        let expected = "LOGOS/1 RESULT query=network/configured status=ready";
         while Instant::now() < self.deadline {
-            let contents = fs::read_to_string(&self.debug_log).map_err(io_error)?;
-            if contents
-                .get(self.network_marker_offset..)
-                .is_some_and(|tail| tail.lines().any(|line| line.starts_with(expected)))
-            {
-                self.network_marker_offset = contents.len();
+            self.send("LOGOS/1 QUERY network/configured\n")?;
+            if self.wait_for(expected, Duration::from_secs(1))? {
                 return Ok(());
             }
             self.send("LOGOS/1 ADVANCE 64\n")?;
-            let _ = self.wait("LOGOS/1 RESULT advance=accepted");
+            if !self.wait_for("LOGOS/1 RESULT advance=accepted", Duration::from_secs(1))? {
+                return Err("timeout waiting for structured advance response".into());
+            }
         }
         Err(format!("timeout waiting for {expected}"))
     }
 
-    fn wait_debug(&mut self, expected: &str) -> Result<(), String> {
-        while Instant::now() < self.deadline {
-            if fs::read_to_string(&self.debug_log)
-                .map_err(io_error)?
-                .lines()
-                .any(|line| line.starts_with(expected))
-            {
-                return Ok(());
+    fn wait_for(&mut self, expected: &str, duration: Duration) -> Result<bool, String> {
+        let end = (Instant::now() + duration).min(self.deadline);
+        while Instant::now() < end {
+            self.drain_serial()?;
+            if self.serial.lines().any(|line| line.starts_with(expected)) {
+                return Ok(true);
             }
-            self.send("LOGOS/1 ADVANCE 64\n")?;
-            let _ = self.wait("LOGOS/1 RESULT advance=accepted");
+            std::thread::sleep(Duration::from_millis(10));
         }
-        Err(format!("timeout waiting for {expected}"))
+        Ok(false)
     }
 
     fn wait_boot_report(&mut self) -> Result<BootReport, String> {
         let mut report = None;
         while Instant::now() < self.deadline {
-            if let Ok(contents) = fs::read_to_string(&self.debug_log) {
-                for line in contents
-                    .split_inclusive('\n')
-                    .filter(|line| line.ends_with('\n'))
-                    .map(str::trim_end)
-                    .filter(|line| line.starts_with("LOGOS/1 BOOT "))
-                {
-                    let parsed = parse_boot_report(line)?;
-                    if report.replace(parsed).is_some() {
-                        return Err("duplicate boot report/session ID".into());
-                    }
+            self.drain_serial()?;
+            for line in self.serial.lines().filter(|line| line.starts_with("LOGOS/1 BOOT ")) {
+                let parsed = parse_boot_report(line)?;
+                if report.replace(parsed).is_some() {
+                    return Err("duplicate boot report/session ID".into());
                 }
-                if let Some(report) = report {
-                    return (report.session == 1)
-                        .then_some(report)
-                        .ok_or_else(|| "mismatched boot/session ID".into());
-                }
+            }
+            if let Some(report) = report {
+                return (report.session == 1)
+                    .then_some(report)
+                    .ok_or_else(|| "mismatched boot/session ID".into());
             }
             std::thread::sleep(Duration::from_millis(20));
         }

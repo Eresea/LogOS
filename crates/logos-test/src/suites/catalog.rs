@@ -214,7 +214,7 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
     configured("network/timeout", "network", &[], Fixture::Fresh),
     configured("network/reset-reconnect", "network", &[], Fixture::Fresh),
     configured("network/tcp-stream", "remote", &[], Fixture::Fresh),
-    configured("remote/enrollment-persistence", "remote", &[], Fixture::Persistence),
+    scenario("remote/enrollment-persistence", "remote", Fixture::Persistence),
     configured_with_runner(
         "remote/auth-denied",
         "remote",
@@ -229,10 +229,10 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
         Fixture::Fresh,
         Runner::RemoteTypedInvoke,
     ),
-    configured("remote/reconnect-replay", "remote", &[], Fixture::Persistence),
-    configured("remote/pending-after-reset", "remote", &[], Fixture::Persistence),
-    configured("remote/gateway-restart", "remote", &[], Fixture::Fresh),
-    configured("remote/protected-state-corrupt", "remote", &[], Fixture::Persistence),
+    scenario("remote/reconnect-replay", "remote", Fixture::Persistence),
+    scenario("remote/pending-after-reset", "remote", Fixture::Persistence),
+    scenario("remote/gateway-restart", "remote", Fixture::Fresh),
+    scenario("remote/protected-state-corrupt", "remote", Fixture::Persistence),
 ];
 
 const fn scenario(id: &'static str, suite: &'static str, fixture: Fixture) -> Scenario {

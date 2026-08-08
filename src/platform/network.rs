@@ -15,13 +15,20 @@ pub enum NetworkClientSlot {
 }
 
 #[derive(Clone, Copy)]
-pub struct PendingClient {
-    pub slot: NetworkClientSlot,
-    pub request: logos_abi::NetworkRequest,
-    pub owner: u64,
-    pub endpoint: NetworkClientEndpoint,
-    pub server: NetworkServerEndpoint,
-    pub handle: Handle,
+enum CompletionTarget {
+    Task(Handle),
+    #[cfg(feature = "test-hooks")]
+    Probe,
+}
+
+#[derive(Clone, Copy)]
+struct PendingClient {
+    slot: Option<NetworkClientSlot>,
+    request: logos_abi::NetworkRequest,
+    owner: u64,
+    endpoint: NetworkClientEndpoint,
+    server: NetworkServerEndpoint,
+    target: CompletionTarget,
 }
 
 #[derive(Clone, Copy)]
@@ -38,6 +45,24 @@ pub struct Resources {
     pub tx_virtual: u64,
 }
 
+#[derive(Clone, Copy)]
+struct NetworkReadiness {
+    info: Option<logos_abi::NetworkInfo>,
+    probe_pending: Option<u32>,
+    probe_due: u64,
+    next_probe_id: u32,
+}
+
+impl NetworkReadiness {
+    const fn new() -> Self {
+        Self { info: None, probe_pending: None, probe_due: 0, next_probe_id: 0x8000_0001 }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
 pub struct NetworkRuntime {
     task: Option<Handle>,
     device_endpoint: NetworkDeviceEndpoint,
@@ -50,6 +75,7 @@ pub struct NetworkRuntime {
     device_generation: u32,
     failures: u32,
     degraded: bool,
+    readiness: NetworkReadiness,
 }
 
 impl NetworkRuntime {
@@ -59,10 +85,6 @@ impl NetworkRuntime {
 
     pub const fn device_endpoint(&self) -> NetworkDeviceEndpoint {
         self.device_endpoint
-    }
-
-    pub const fn event_endpoint(&self) -> NetworkEventEndpoint {
-        self.event_endpoint
     }
 
     #[cfg(feature = "test-hooks")]
@@ -76,6 +98,18 @@ impl NetworkRuntime {
 
     pub const fn has_device(&self) -> bool {
         self.device.is_some()
+    }
+
+    pub const fn configured(&self) -> bool {
+        match self.readiness.info {
+            Some(info) => info.configuration != 0,
+            None => false,
+        }
+    }
+
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    pub const fn info(&self) -> Option<logos_abi::NetworkInfo> {
+        self.readiness.info
     }
 
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
@@ -102,6 +136,7 @@ impl NetworkRuntime {
             device_generation,
             failures: 0,
             degraded: false,
+            readiness: NetworkReadiness::new(),
         }
     }
 
@@ -131,6 +166,7 @@ impl NetworkRuntime {
         self.event_endpoint = event_endpoint;
         self.resources = Some(resources);
         self.degraded = false;
+        self.readiness.reset();
         true
     }
 
@@ -159,6 +195,7 @@ impl NetworkRuntime {
         self.device_endpoint = device_endpoint;
         self.event_endpoint = event_endpoint;
         self.pending = None;
+        self.readiness.reset();
         scheduler.wake(task) && scheduler.run(task)
     }
 
@@ -198,10 +235,56 @@ impl NetworkRuntime {
         self.device_endpoint = old_endpoint.with_device_generation(generation);
         self.event_endpoint = event_endpoint;
         self.pending = None;
+        self.readiness.reset();
         scheduler.wake(task) && scheduler.run(task)
     }
 
+    fn poll_readiness(&mut self, scheduler: &mut native_task::Scheduler<'_>, tick: u64) -> bool {
+        let Some(server) = self.server_endpoint else { return true };
+        let Some(task) = self.task else { return true };
+        if let Some(id) = self.readiness.probe_pending {
+            if let Some(reply) = server.response(id) {
+                self.readiness.info = Some(reply.info);
+                self.readiness.probe_pending = None;
+                self.readiness.probe_due = tick.saturating_add(64);
+            }
+            return true;
+        }
+        if self.configured() || self.active_client.is_some() || tick < self.readiness.probe_due {
+            return true;
+        }
+        let id = self.readiness.next_probe_id;
+        self.readiness.next_probe_id = id.wrapping_add(1).max(1);
+        let request = logos_abi::NetworkRequest {
+            id,
+            operation: NetworkOperation::Status,
+            endpoint: logos_abi::NetworkEndpoint(0),
+            peer: logos_abi::NetworkScope(0),
+            page: logos_abi::PageHandle(0),
+            length: 0,
+            generation: 0,
+            deadline: u64::MAX / 2,
+        };
+        if !server.deliver(0, request) {
+            self.readiness.probe_due = tick.saturating_add(64);
+            let _ = server.reset();
+            return true;
+        }
+        self.readiness.probe_pending = Some(id);
+        if scheduler.wake(task) && scheduler.run(task) {
+            true
+        } else {
+            self.readiness.probe_pending = None;
+            self.readiness.probe_due = tick.saturating_add(64);
+            let _ = server.reset();
+            true
+        }
+    }
+
     pub fn poll(&mut self, scheduler: &mut native_task::Scheduler<'_>, tick: u64) -> bool {
+        if !self.device_endpoint.pending() && !self.poll_readiness(scheduler, tick) {
+            return false;
+        }
         let (Some(device), Some(resources), Some(task)) =
             (self.device.as_mut(), self.resources, self.task)
         else {
@@ -533,46 +616,37 @@ impl NetworkRuntime {
 
     fn reply_request(
         client: NetworkClientEndpoint,
-        handle: Handle,
+        target: CompletionTarget,
         request: NetworkRequest,
         status: logos_abi::NetworkStatus,
         scheduler: &mut native_task::Scheduler<'_>,
     ) -> bool {
         let published = client.mark_processing() && client.reply(error_reply(request, status));
-        if published && !scheduler.failed(handle) {
-            let woke = scheduler.wake(handle);
-            if woke
-                && !matches!(
-                    status,
-                    logos_abi::NetworkStatus::Denied | logos_abi::NetworkStatus::Busy
-                )
-            {
-                let _ = scheduler.run(handle);
-            }
-        }
-        published
+        published && Self::complete_target(target, scheduler)
     }
 
     fn reply_unprocessed_request(
         client: NetworkClientEndpoint,
-        handle: Handle,
+        target: CompletionTarget,
         request: NetworkRequest,
         status: logos_abi::NetworkStatus,
         scheduler: &mut native_task::Scheduler<'_>,
     ) -> bool {
         let published = client.reply_request(error_reply(request, status));
-        if published && !scheduler.failed(handle) {
-            let woke = scheduler.wake(handle);
-            if woke
-                && !matches!(
-                    status,
-                    logos_abi::NetworkStatus::Denied | logos_abi::NetworkStatus::Busy
-                )
-            {
-                let _ = scheduler.run(handle);
+        published && Self::complete_target(target, scheduler)
+    }
+
+    fn complete_target(
+        target: CompletionTarget,
+        scheduler: &mut native_task::Scheduler<'_>,
+    ) -> bool {
+        match target {
+            CompletionTarget::Task(handle) => {
+                !scheduler.failed(handle) && scheduler.wake(handle) && scheduler.run(handle)
             }
+            #[cfg(feature = "test-hooks")]
+            CompletionTarget::Probe => true,
         }
-        published
     }
 
     fn finish_active(
@@ -582,16 +656,9 @@ impl NetworkRuntime {
     ) -> bool {
         let Some(current) = self.active_client.take() else { return false };
         let published = current.endpoint.reply(reply);
-        if published
-            && current.slot == NetworkClientSlot::Gateway
-            && !scheduler.failed(current.handle)
-        {
-            if scheduler.wake(current.handle) {
-                let _ = scheduler.run(current.handle);
-            }
-        }
+        let completed = published && Self::complete_target(current.target, scheduler);
         let reset = current.server.reset();
-        published && reset
+        completed && reset
     }
 
     pub fn invalidate_client(
@@ -601,7 +668,7 @@ impl NetworkRuntime {
         status: logos_abi::NetworkStatus,
     ) -> bool {
         let Some(current) = self.active_client else { return true };
-        if current.slot != slot {
+        if current.slot != Some(slot) {
             return true;
         }
         self.finish_active(error_reply(current.request, status), scheduler)
@@ -659,11 +726,11 @@ impl NetworkRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn relay_client(
+    fn relay(
         &mut self,
-        slot: NetworkClientSlot,
+        slot: Option<NetworkClientSlot>,
+        target: CompletionTarget,
         client: NetworkClientEndpoint,
-        handle: Handle,
         scheduler: &mut native_task::Scheduler<'_>,
         session: &crate::platform::session::Context,
         capabilities: &logos_core::capabilities::CapabilityManager,
@@ -673,6 +740,9 @@ impl NetworkRuntime {
     ) -> bool {
         let Some(server) = self.server_endpoint else { return true };
         let Some(service_handle) = self.task else { return true };
+        if self.readiness.probe_pending.is_some() {
+            return true;
+        }
         if let Some(current) = self.active_client {
             if self.server_endpoint != Some(current.server) {
                 return self.finish_active(
@@ -693,7 +763,7 @@ impl NetworkRuntime {
                     Ok(_) => logos_abi::NetworkStatus::Busy,
                     Err(status) => status,
                 };
-                return Self::reply_request(client, handle, request, status, scheduler);
+                return Self::reply_request(client, target, request, status, scheduler);
             }
             if current.endpoint != client {
                 return false;
@@ -720,14 +790,14 @@ impl NetworkRuntime {
             owner,
         ) {
             Ok(transfer) => transfer,
-            Err(status) => return Self::reply_request(client, handle, request, status, scheduler),
+            Err(status) => return Self::reply_request(client, target, request, status, scheduler),
         };
         if matches!(request.operation, NetworkOperation::SendTo | NetworkOperation::Write) {
             let Some((_, source)) = transfer else { return false };
             let Some(resources) = self.resources else {
                 return Self::reply_request(
                     client,
-                    handle,
+                    target,
                     request,
                     logos_abi::NetworkStatus::Io,
                     scheduler,
@@ -745,7 +815,7 @@ impl NetworkRuntime {
             let reset = server.reset();
             let reply = Self::reply_unprocessed_request(
                 client,
-                handle,
+                target,
                 request,
                 logos_abi::NetworkStatus::Io,
                 scheduler,
@@ -756,7 +826,7 @@ impl NetworkRuntime {
             let reset = server.reset();
             let reply = Self::reply_unprocessed_request(
                 client,
-                handle,
+                target,
                 request,
                 logos_abi::NetworkStatus::Io,
                 scheduler,
@@ -764,12 +834,63 @@ impl NetworkRuntime {
             return reset && reply;
         }
         self.active_client =
-            Some(PendingClient { slot, request, owner, endpoint: client, server, handle });
+            Some(PendingClient { slot, request, owner, endpoint: client, server, target });
         if !scheduler.wake(service_handle) || !scheduler.run(service_handle) {
             return self
                 .finish_active(error_reply(request, logos_abi::NetworkStatus::Io), scheduler);
         }
         true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn relay_client(
+        &mut self,
+        slot: NetworkClientSlot,
+        client: NetworkClientEndpoint,
+        handle: Handle,
+        scheduler: &mut native_task::Scheduler<'_>,
+        session: &crate::platform::session::Context,
+        capabilities: &logos_core::capabilities::CapabilityManager,
+        shared_pages: &logos_core::shared_pages::SharedPages,
+        owner: u64,
+        tick: u64,
+    ) -> bool {
+        self.relay(
+            Some(slot),
+            CompletionTarget::Task(handle),
+            client,
+            scheduler,
+            session,
+            capabilities,
+            shared_pages,
+            owner,
+            tick,
+        )
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn relay_probe(
+        &mut self,
+        client: NetworkClientEndpoint,
+        scheduler: &mut native_task::Scheduler<'_>,
+        session: &crate::platform::session::Context,
+        capabilities: &logos_core::capabilities::CapabilityManager,
+        shared_pages: &logos_core::shared_pages::SharedPages,
+        owner: u64,
+        tick: u64,
+    ) -> bool {
+        self.relay(
+            None,
+            CompletionTarget::Probe,
+            client,
+            scheduler,
+            session,
+            capabilities,
+            shared_pages,
+            owner,
+            tick,
+        )
     }
 }
 

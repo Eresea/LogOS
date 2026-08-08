@@ -63,6 +63,10 @@ mod tests {
         assert_eq!(parse(b"LOGOS/1 INPUT echo hello"), Ok(Request::Input("echo hello")));
         assert_eq!(parse(b"LOGOS/1 RESET shared"), Ok(Request::Reset("shared")));
         assert_eq!(parse(b"LOGOS/1 SHUTDOWN"), Ok(Request::Shutdown));
+        assert_eq!(
+            parse(b"LOGOS/1 QUERY network/configured"),
+            Ok(Request::Query("network/configured"))
+        );
         assert_eq!(parse(b"LOGOS/2 HELLO"), Err(Error::BadVersion));
         assert_eq!(parse(&[b'x'; MAX_FRAME + 1]), Err(Error::TooLong));
         assert_eq!(parse(b"LOGOS/1 ADVANCE nope"), Err(Error::Malformed));

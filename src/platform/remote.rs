@@ -30,11 +30,11 @@ impl RemoteRuntime {
 
     pub fn start(
         &mut self,
-        network_reported: bool,
+        network_configured: bool,
         gateway: Option<crate::sched::native_task::Handle>,
         scheduler: &mut crate::sched::native_task::Scheduler<'_>,
     ) -> bool {
-        if !self.gateway_started && network_reported {
+        if !self.gateway_started && network_configured {
             self.gateway_started =
                 gateway.is_some_and(|handle| scheduler.run(handle) && !scheduler.failed(handle));
             return self.gateway_started;

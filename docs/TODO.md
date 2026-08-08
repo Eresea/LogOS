@@ -45,6 +45,15 @@ failures.
 
 ### Phase 5 cleanup
 
+- [x] Move Network readiness ownership into `NetworkRuntime`'s direct server `Status` transaction.
+- [x] Make every production Network reply wake and run its blocked caller for every status.
+- [x] Give white-box QEMU probes an explicit test-only completion target.
+- [x] Replace Network debug-log readiness waits with structured `QUERY network/configured` polling.
+- [x] Make bounded `logosctl` success the Gateway-listening proof.
+- [x] Make Remote host operations authoritative; remove duplicate label-only Core scenario runs.
+- [x] Mark the five unfinished Remote proofs skipped while retaining their permanent IDs.
+- [ ] Implement each skipped Remote proof with real multi-boot/reconnect/restart orchestration and
+      a precise persisted-state postcondition.
 - [x] Move proof state semantics out of the platform composition root.
 - [x] Split QEMU catalogs and suite runner policy by suite.
 - [x] Use the canonical service endpoint set directly for page mapping.
@@ -57,8 +66,8 @@ failures.
 
 - [x] Stabilization cycle: validate and repair the completed typed layers against the main suite;
       fixed-fixture QEMU run records 43 passed, 12 migration-deferred, and 28 skipped.
-- [ ] **Network-client cycle:** complete one bounded client transport migration and close its QEMU
-      scheduling boundary.
+- [ ] **Network-client cycle:** re-run the QEMU Network/Remote proofs after the completed readiness
+      ownership and production caller-wake repair; close the remaining scheduling boundary.
 - [ ] Remote cycle: complete one bounded Remote transport migration after Network-client completion.
 - [ ] Stop restructuring ABI v4 after those cycles; require a new ADR for any exception.
 - [ ] Resume capability development: complete Remote verification or begin Safe System

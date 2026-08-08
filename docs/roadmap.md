@@ -1,6 +1,6 @@
 # LogOS Roadmap
 
-> **Updated:** 2026-08-07
+> **Updated:** 2026-08-08
 >
 > **Current milestone:** ABI v4 stabilization and migration closeout
 >
@@ -39,8 +39,8 @@ and an explicit compatibility milestone.
 | 2 | Local typed operation | [Console v1](CONSOLE.md), [Sessions v1](SESSIONS.md) | Complete: normal terminal and recovery console are independent |
 | 3 | Replaceable services | [Platform v1](PLATFORM.md) | Complete: services negotiate, fail, and restart independently |
 | 4 | Durable bounded state | [Persistence v1](PERSISTENCE.md) | Complete: scoped state survives interrupted writes and resets |
-| 5 | Bounded packet connectivity | [Network v1](NETWORK.md) | Typed transport implementation complete; QEMU Network-client closure remains open at the service/device scheduling boundary |
-| 6 | Remote foundation | [Remote Foundation v1](REMOTE.md#foundation-v1): Network v2 transport slice, [Platform v2](PLATFORM.md) trust slice, [Persistence v2](PERSISTENCE.md) protected-state slice, [Sessions v2](SESSIONS.md) attachment slice | Network client transport implementation complete; Network operational closure and the Remote/Gateway proof boundary remain |
+| 5 | Bounded packet connectivity | [Network v1](NETWORK.md) | Typed transport and production scheduling repair complete; QEMU Network-client closure remains pending re-verification |
+| 6 | Remote foundation | [Remote Foundation v1](REMOTE.md#foundation-v1): Network v2 transport slice, [Platform v2](PLATFORM.md) trust slice, [Persistence v2](PERSISTENCE.md) protected-state slice, [Sessions v2](SESSIONS.md) attachment slice | Network readiness ownership and production wake invariant repaired; Network/Remote proof boundary remains pending |
 | 7 | Remote administration | [Remote v1](REMOTE.md) | Headless authenticated administration works through existing contracts |
 | 8 | Safe system artifacts | Complete Persistence v2 | Large signed artifacts and durable configuration are safe to stage |
 | 9 | Atomic system evolution | [Update v1](UPDATE.md) | A signed system bundle activates or rolls back atomically |
