@@ -656,9 +656,9 @@ impl NetworkRuntime {
     ) -> bool {
         let Some(current) = self.active_client.take() else { return false };
         let published = current.endpoint.reply(reply);
-        let completed = published && Self::complete_target(current.target, scheduler);
         let reset = current.server.reset();
-        completed && reset
+        let completed = published && reset && Self::complete_target(current.target, scheduler);
+        completed
     }
 
     pub fn invalidate_client(
