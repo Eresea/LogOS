@@ -483,12 +483,6 @@ impl TcpState {
                     established.local_seq = established.local_seq.wrapping_add(1);
                     self.connection = Some(established);
                     self.last = None;
-                    self.arm_ack(
-                        source,
-                        packet.source_port,
-                        established.local_seq,
-                        established.remote_seq,
-                    );
                     return Ok(());
                 }
                 return Ok(());
@@ -502,6 +496,7 @@ impl TcpState {
                 connection.write_pending = false;
                 self.last = None;
             }
+            let mut acknowledge = false;
             if packet.sequence == connection.remote_seq {
                 if packet.payload.len() > MAX_TCP_STREAM - usize::from(connection.read_length) {
                     self.arm_ack(
@@ -518,13 +513,22 @@ impl TcpState {
                 connection.read_length = (start + packet.payload.len()) as u16;
                 connection.remote_seq =
                     connection.remote_seq.wrapping_add(packet.payload.len() as u32);
+                acknowledge = !packet.payload.is_empty();
             }
             if packet.flags & TCP_FLAG_FIN != 0 && packet.sequence == connection.remote_seq {
                 connection.remote_seq = connection.remote_seq.wrapping_add(1);
                 connection.phase = TcpPhase::CloseWait;
+                acknowledge = true;
             }
             self.connection = Some(connection);
-            self.arm_ack(source, packet.source_port, connection.local_seq, connection.remote_seq);
+            if acknowledge {
+                self.arm_ack(
+                    source,
+                    packet.source_port,
+                    connection.local_seq,
+                    connection.remote_seq,
+                );
+            }
             return Ok(());
         }
         if self.listener.is_some()
@@ -1847,10 +1851,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let handshake_ack = state.take_tx().unwrap();
-        assert_eq!(handshake_ack.header.sequence, 101);
-        assert_eq!(handshake_ack.header.acknowledgement, 201);
-        assert_eq!(handshake_ack.header.flags, TCP_FLAG_ACK);
+        assert_eq!(state.take_tx(), None);
         let stream = state.accept(7, listener).unwrap();
 
         state
@@ -1896,10 +1897,31 @@ mod tests {
                 },
             )
             .unwrap();
-        let write_ack = state.take_tx().unwrap();
-        assert_eq!(write_ack.header.sequence, 106);
-        assert_eq!(write_ack.header.acknowledgement, 206);
-        assert_eq!(write_ack.header.flags, TCP_FLAG_ACK);
+        assert_eq!(state.take_tx(), None);
+
+        state.write(7, stream, b"again").unwrap();
+        let second_write = state.take_tx().unwrap();
+        assert_eq!(second_write.header.sequence, 106);
+        assert_eq!(second_write.header.acknowledgement, 206);
+        assert_eq!(&second_write.payload[..usize::from(second_write.length)], b"again");
+
+        for _ in 0..2 {
+            state
+                .ingest(
+                    PEER_IP,
+                    Tcp {
+                        source_port: 50000,
+                        destination_port: 7443,
+                        sequence: 206,
+                        acknowledgement: 111,
+                        flags: TCP_FLAG_ACK,
+                        window: 1024,
+                        payload: &[],
+                    },
+                )
+                .unwrap();
+            assert_eq!(state.take_tx(), None);
+        }
 
         state
             .ingest(
@@ -1908,7 +1930,7 @@ mod tests {
                     source_port: 50000,
                     destination_port: 7443,
                     sequence: 206,
-                    acknowledgement: 106,
+                    acknowledgement: 111,
                     flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
                     window: 1024,
                     payload: &[],
@@ -1916,9 +1938,73 @@ mod tests {
             )
             .unwrap();
         let fin_ack = state.take_tx().unwrap();
-        assert_eq!(fin_ack.header.sequence, 106);
+        assert_eq!(fin_ack.header.sequence, 111);
         assert_eq!(fin_ack.header.acknowledgement, 207);
         assert_eq!(fin_ack.header.flags, TCP_FLAG_ACK);
+    }
+
+    #[test]
+    fn tcp_state_retransmits_boundedly_and_resets_on_rst() {
+        let mut state = TcpState::new();
+        let listener = state.listen(7, 7443, 100).unwrap();
+        state
+            .ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 50000,
+                    destination_port: 7443,
+                    sequence: 200,
+                    acknowledgement: 0,
+                    flags: TCP_FLAG_SYN,
+                    window: 1024,
+                    payload: &[],
+                },
+            )
+            .unwrap();
+        let syn_ack = state.take_tx().unwrap();
+        assert!(!state.tick(100));
+        assert!(state.tick(101));
+        assert_eq!(state.take_tx(), Some(syn_ack));
+        assert!(state.tick(103));
+        assert_eq!(state.take_tx(), Some(syn_ack));
+        assert!(state.tick(107));
+        assert_eq!(state.take_tx(), Some(syn_ack));
+        assert!(!state.tick(115));
+        assert_eq!(state.accept(7, listener), Err(TcpStateError::NoData));
+
+        let mut state = TcpState::new();
+        let listener = state.listen(7, 7443, 100).unwrap();
+        state
+            .ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 50000,
+                    destination_port: 7443,
+                    sequence: 200,
+                    acknowledgement: 0,
+                    flags: TCP_FLAG_SYN,
+                    window: 1024,
+                    payload: &[],
+                },
+            )
+            .unwrap();
+        let _ = state.take_tx();
+        assert_eq!(
+            state.ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 50000,
+                    destination_port: 7443,
+                    sequence: 201,
+                    acknowledgement: 101,
+                    flags: TCP_FLAG_ACK | TCP_FLAG_RST,
+                    window: 1024,
+                    payload: &[],
+                },
+            ),
+            Err(TcpStateError::Reset)
+        );
+        assert_eq!(state.accept(7, listener), Err(TcpStateError::NoData));
     }
 
     #[test]
