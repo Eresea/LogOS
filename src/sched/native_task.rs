@@ -224,6 +224,7 @@ impl NetworkClientEndpoint {
         }
     }
 
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub fn issue(self, request: logos_abi::NetworkRequest) -> bool {
         unsafe {
             logos_core::native_service::NetworkClientPage::request_at(
@@ -277,6 +278,7 @@ impl NetworkClientEndpoint {
         }
     }
 
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub fn response(self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
         unsafe {
             logos_core::native_service::NetworkClientPage::finish_at(
