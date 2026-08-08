@@ -2,7 +2,7 @@
 
 use core::{
     arch::asm,
-    sync::atomic::{AtomicBool, AtomicU16, Ordering, compiler_fence},
+    sync::atomic::{AtomicU16, Ordering, compiler_fence},
 };
 
 use logos_core::capabilities::CapabilityKind;
@@ -22,7 +22,6 @@ const RX_BUFFERS: usize = 16;
 const MTU: usize = 1500;
 const MAX_FRAME: usize = 1514;
 static ISR_PORT: AtomicU16 = AtomicU16::new(0);
-static COMPLETE: AtomicBool = AtomicBool::new(false);
 
 const NETWORK: crate::drivers::device::DriverManifest = crate::drivers::device::DriverManifest {
     interface: crate::drivers::device::Interface::new(crate::drivers::device::Class::Network),
@@ -201,20 +200,13 @@ impl Device {
     }
 
     pub fn complete_transmit(&mut self) -> Result<Option<()>, NetworkError> {
-        if !self.tx_pending {
-            return Ok(None);
-        }
         let used = self.used_index(self.tx_queue.address(), self.tx_queue_size);
-        if used == self.tx_used && !COMPLETE.swap(false, Ordering::AcqRel) {
+        let complete = tx_completion(self.tx_pending, used, self.tx_used, || unsafe {
+            let entry = used_entry(self.tx_queue.address(), self.tx_queue_size, self.tx_used);
+            (entry as *const u32).read_volatile()
+        })?;
+        if complete.is_none() {
             return Ok(None);
-        }
-        if used.wrapping_sub(self.tx_used) != 1 {
-            return Err(NetworkError::Device);
-        }
-        let entry = used_entry(self.tx_queue.address(), self.tx_queue_size, self.tx_used);
-        let id = unsafe { (entry as *const u32).read_volatile() };
-        if id != 0 {
-            return Err(NetworkError::Device);
         }
         self.tx_used = used;
         self.tx_pending = false;
@@ -224,7 +216,6 @@ impl Device {
     pub fn receive(&mut self, output: &mut [u8]) -> Result<Option<usize>, NetworkError> {
         let used = self.used_index(self.rx_queue.address(), self.queue_size);
         if used == self.rx_used {
-            COMPLETE.swap(false, Ordering::AcqRel);
             return Ok(None);
         }
         let progress = used.wrapping_sub(self.rx_used);
@@ -396,8 +387,59 @@ fn release_pages<const N: usize>(pages: [Page; N], memory: &mut PhysicalMemory) 
 
 pub fn interrupt() {
     let port = ISR_PORT.load(Ordering::Acquire);
-    if port != 0 && unsafe { inb(port) } & 1 != 0 {
-        COMPLETE.store(true, Ordering::Release);
+    if port != 0 {
+        let _ = unsafe { inb(port) } & 1;
+    }
+}
+
+fn tx_completion(
+    pending: bool,
+    used: u16,
+    completed: u16,
+    entry_id: impl FnOnce() -> u32,
+) -> Result<Option<()>, NetworkError> {
+    if !pending {
+        return Ok(None);
+    }
+    let progress = used.wrapping_sub(completed);
+    if progress == 0 {
+        return Ok(None);
+    }
+    if progress != 1 || entry_id() != 0 {
+        return Err(NetworkError::Device);
+    }
+    Ok(Some(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rx_progress_does_not_complete_outstanding_tx() {
+        let mut rx_used = 0;
+        let tx_used = 0;
+        let tx_pending = true;
+
+        rx_used = rx_used.wrapping_add(1);
+        assert_eq!(
+            tx_completion(tx_pending, tx_used, tx_used, || 0),
+            Ok(None),
+            "RX used-ring progress must not infer TX completion"
+        );
+
+        assert_eq!(
+            tx_completion(tx_pending, tx_used.wrapping_add(1), tx_used, || 0),
+            Ok(Some(())),
+            "TX completes only after TX used-ring progress"
+        );
+        assert_eq!(rx_used, 1);
+    }
+
+    #[test]
+    fn tx_completion_rejects_invalid_used_progress() {
+        assert_eq!(tx_completion(true, 2, 0, || 0), Err(NetworkError::Device));
+        assert_eq!(tx_completion(true, 1, 0, || 1), Err(NetworkError::Device));
     }
 }
 
