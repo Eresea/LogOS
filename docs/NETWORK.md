@@ -1,13 +1,14 @@
 # Network
 
-> **Status:** Network v1 typed device/event and client transport implementation complete; QEMU
-> operational closure remains open at the Network/Gateway scheduling boundary. Results are recorded in
+> **Status:** Network v1 typed device/event and client transport implementation complete. Production
+> readiness ownership and client wake semantics are repaired; QEMU closure is pending re-verification.
+> Results are recorded in
 > [testing status](../testing/STATUS.md).
 >
 > **Owner:** Foundation network driver and System Network service
 
 > **Milestone:** Network v1 typed device-facing and client transport ABI implemented; behavioral
-> proof closure pending.
+> proof closure pending after the scheduling-boundary repair.
 
 ## Goal
 
@@ -84,6 +85,10 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
 - `NetworkClientPage` and `NetworkServerPage` are the only client/server boundary. Core configures
   Terminal and Gateway transfer-page authority, admits one global transaction, returns `Busy` to a
   competing client, and publishes only exact request/generation replies.
+- `NetworkRuntime` owns readiness separately from client pages. Once Network is bound and idle it
+  submits an internal `Status` request through the Network server endpoint, caches the returned
+  `NetworkInfo`, and exposes `configured()`/`info()` to the runtime. Gateway startup does not use
+  Terminal as a readiness probe.
 - Client submission is transactional: validate authority and the configured page, copy TX bytes,
   deliver to Network, mark the client `Processing`, then wake the Network service. Any failed step
   rolls the client and server pages back. Completion copies RX bytes only from the configured
@@ -93,9 +98,8 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   through the Core capability and service relay, `network/unauthorized-operation` proves denied
   Bind/SendTo/ReceiveFrom requests stop in Core, and `network/simultaneous-client-busy` proves
   Terminal/Gateway contention does not overwrite the active transaction.
-- Behavioral closure remains gated on the registered Network-client scenarios. Full serial runs can
-  still exhaust the old four-buffer RX assumption; the current driver posts sixteen buffers while
-  preserving descriptor and generation validation.
+- Behavioral closure remains gated on the registered Network-client scenarios. The scheduling
+  boundary repair requires a fresh serial Network and Remote proof run.
 
 ### ABI-v4 device transport milestone
 
@@ -117,10 +121,14 @@ client receives Network device/event pages.
 
 ### ABI-v4 client transport
 
-`NetworkRuntime` owns one global `active_client` association. The association records the client
-slot, exact client/server endpoints, request, owner, and task handle; it is never queued or inferred
-from a page alone. A second Terminal/Gateway request receives `Busy` without touching the active
-server page.
+`NetworkRuntime` owns one global `active_client` association. The association records the optional
+production client slot, exact client/server endpoints, request, owner, and explicit completion
+target; it is never queued or inferred from a page alone. A second Terminal/Gateway request
+receives `Busy` without touching the active server page.
+
+Every production completion wakes and runs the requesting task, including `Busy`, `Denied`,
+`Invalid`, timeout, cancellation, reset, and I/O replies. Test-only white-box probes use an
+explicit probe target and never stand in for a live Terminal or Gateway caller.
 
 The transfer page is configured when each client mapping is installed and is retained across client
 page reset. Data requests must name that exact handle and stay within the fixed page payload window.
@@ -152,7 +160,7 @@ configuration and client paths. Host tests cover fixed-slot exhaustion, ARP expi
 and failure cleanup. The `Bind`/`SendTo`/`ReceiveFrom`/`Echo` relay, capability gate, cancellation,
 timeout, malformed-frame, and reconnect paths are live.
 
-### Milestone close
+### Milestone close — pending verification
 
 The permanent Network suite is `cargo run -p logos-test -- suite network`; the PR suite includes it.
 Each promoted proof requires a structured reply and exact endpoint or payload assertion. Fault-heavy
@@ -461,23 +469,23 @@ and never cast untrusted bytes to Rust enums or packed structs.
 - [x] Make every implemented Network proof fail if its semantic assertion is unavailable; no
       unconditional success marker or skipped scenario satisfies a checklist item.
 - [x] Add completed Network proofs to the PR suite and keep fault-heavy repeats in nightly.
-- [x] Run `cargo run -p logos-test -- suite network`.
-- [x] Run `cargo run -p logos-test -- suite pr`.
+- [ ] Re-run `cargo run -p logos-test -- suite network` after the scheduling repair.
+- [ ] Re-run `cargo run -p logos-test -- suite pr` after the scheduling repair.
 - [x] Commit the Network v1 resilience proof.
 
 ### Phase 8: close the milestone
 
-- [x] Check every v1 scope item and exit criterion against a passing proof ID.
+- [ ] Check every v1 scope item and exit criterion against a passing proof ID after the scheduling repair.
 - [x] Update `docs/ARCHITECTURE.md` if implementation changed the accepted boundary.
 - [x] Update `docs/boot-sequence.md` with Network dependencies, non-blocking offline boot, and
       restart path.
 - [x] Update `docs/security.md` with the implemented exact endpoint capability enforcement.
-- [x] Update `docs/ROADMAP.md` to mark Network v1 complete.
-- [x] Change this document's status to complete.
+- [ ] Update `docs/ROADMAP.md` to mark Network v1 complete after proof closure.
+- [ ] Change this document's status to complete.
 - [x] Run `cargo fmt --check`.
 - [x] Run the prescribed host clippy checks with `-D warnings`.
 - [x] Run the prescribed host-compatible workspace tests.
-- [x] Run `cargo run -p logos-test -- suite network`.
+- [ ] Run `cargo run -p logos-test -- suite network` after the scheduling repair.
 - [x] Run `scripts/run.ps1 -Headless` and verify local services remain usable while the peer is absent.
 - [x] Run `scripts/check.ps1`.
 - [x] Commit the documentation-only milestone close separately.

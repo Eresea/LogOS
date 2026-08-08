@@ -1,9 +1,11 @@
 # Test Status
 
-Last verification: 2026-08-07. Starting SHA: `98c67bc5a791d0caef71ca3769933a1c38208634`.
-Typed Network-client transport implementation and focused proofs are present; full serial Network
-and Remote closure remains open. The current working-tree verification was intentionally paused
-before ABI-v4 freeze.
+Last baseline verification: 2026-08-07. Current work is on `codex/repair-network-invariants` from
+`5aa995c`; this working tree has not completed a post-repair QEMU verification yet.
+Typed Network-client transport is present. NetworkRuntime now owns readiness through an internal
+server `Status` request, production replies always resume their blocked caller, and white-box
+probes use an explicit test-only completion target. Full serial Network and Remote closure remains
+open until those changes are re-tested.
 
 - Toolchain: Rust `1.93.0`, Cargo `1.93.0`, target `x86_64-unknown-uefi` installed.
 - Host: `scripts/check.ps1 -Stage host` passed; format, clippy, host tests, architecture,
@@ -20,10 +22,16 @@ before ABI-v4 freeze.
   weakened, or newly skipped.
 - Fixed seed: `LOGOS_TEST_SEED=1`, one QEMU job.
 
-Current task checkpoint: host checks passed before the final RX-buffer adjustment; individual
-fixed-seed transport and packet-loss runs passed. The second full serial Network rerun was stopped
-after intermittent RX-ring exhaustion remained under investigation. No Remote suite or clean-tree
-verification is claimed here.
+Current task checkpoint: the repository baseline above predates the readiness and scheduling repair.
+`cargo check --workspace` remains unsuitable for this no-std UEFI workspace without the configured
+panic strategy; focused UEFI checking reaches that pre-existing limitation. No post-repair QEMU or
+Remote suite result is claimed here; focused Network spot checks are recorded below.
+
+Post-repair spot checks on this branch pass for `network/transport-dhcp`,
+`network/device-bind`, `network/configuration`, `network/unauthorized-operation`,
+`network/icmp-echo`, `network/udp-round-trip`, and `network/backpressure-cancel`.
+The first full Network-suite run after the repair recorded 4/11 passed; remaining failures are
+reset/packet-loss and simultaneous-client/Gateway coordination cases pending further isolation.
 
 Per-suite totals:
 
@@ -49,7 +57,7 @@ because their semantic proofs are not implemented; they are not reported as pass
 `network/simultaneous-client-busy` passed: the Gateway client received a typed `Busy` reply while
 the Terminal transaction remained active.
 
-Remaining Network-client failures:
+Baseline Network-client failures (pre-repair; rerun pending):
 
 - `network/icmp-echo`: request completion timeout; kernel reports `network client response
   timeout`, harness times out waiting for the passed result.
@@ -59,7 +67,7 @@ Remaining Network-client failures:
 - `network/tcp-stream`: Gateway startup signal is absent; classified at the Network/Remote
   Gateway startup boundary.
 
-Remaining Remote failures:
+Baseline Remote failures (pre-repair; rerun pending):
 
 - `remote/enrollment-persistence`, `remote/auth-denied`, `remote/typed-invoke`,
   `remote/reconnect-replay`, `remote/pending-after-reset`, `remote/gateway-restart`, and

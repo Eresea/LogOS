@@ -1,7 +1,7 @@
 # LogOS Architecture Annex
 
 > **Status:** Living architecture reference  
-> **Updated:** 2026-08-07
+> **Updated:** 2026-08-08
 
 ## Testing boundary
 
@@ -735,7 +735,13 @@ ICMP, UDP, malformed-frame, cancellation, timeout, and reconnect proofs.
 
 Terminal and Gateway use typed, generation-bound Network client pages. They receive no Network
 device/event endpoints; `platform::network::NetworkRuntime` owns the single active association,
-while `platform::runtime` retains only top-level polling and composition.
+readiness cache, and completion target. Once the Network service is bound and idle, NetworkRuntime
+submits `Status` directly to the Network server endpoint; Terminal is not a readiness dependency.
+`platform::runtime` retains only top-level polling and composition.
+
+Every production Network completion wakes and runs its blocked caller task for both successful and
+error statuses. QEMU white-box requests use an explicit test-only probe target, so test completion
+cannot encode Terminal as a fake caller or weaken the production scheduler invariant.
 
 Bind, send, and receive authority are separate. Each grant carries an exact protocol/local-port or
 protocol/remote-IPv4-and-port scope; wildcard and CIDR policy remain future firewall work. Network
