@@ -53,10 +53,16 @@ struct NetworkReadiness {
     next_probe_id: u32,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct WakeSet<T> {
     service: Option<T>,
     client: Option<T>,
+}
+
+impl<T> Default for WakeSet<T> {
+    fn default() -> Self {
+        Self { service: None, client: None }
+    }
 }
 
 impl<T: Copy> WakeSet<T> {
