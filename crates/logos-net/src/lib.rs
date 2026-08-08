@@ -486,8 +486,8 @@ impl TcpState {
                     self.arm_ack(
                         source,
                         packet.source_port,
-                        established.remote_seq,
                         established.local_seq,
+                        established.remote_seq,
                     );
                     return Ok(());
                 }
@@ -507,8 +507,8 @@ impl TcpState {
                     self.arm_ack(
                         source,
                         packet.source_port,
-                        connection.remote_seq,
                         connection.local_seq,
+                        connection.remote_seq,
                     );
                     return Err(TcpStateError::MessageTooLarge);
                 }
@@ -524,7 +524,7 @@ impl TcpState {
                 connection.phase = TcpPhase::CloseWait;
             }
             self.connection = Some(connection);
-            self.arm_ack(source, packet.source_port, connection.remote_seq, connection.local_seq);
+            self.arm_ack(source, packet.source_port, connection.local_seq, connection.remote_seq);
             return Ok(());
         }
         if self.listener.is_some()
@@ -1807,6 +1807,118 @@ mod tests {
         state.reset();
         assert_ne!(state.generation(), 1);
         assert_eq!(state.read(7, stream, &mut output), Err(TcpStateError::NotFound));
+    }
+
+    #[test]
+    fn tcp_state_tracks_sequence_and_acknowledgement_numbers() {
+        let mut state = TcpState::new();
+        let listener = state.listen(7, 7443, 100).unwrap();
+
+        state
+            .ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 50000,
+                    destination_port: 7443,
+                    sequence: 200,
+                    acknowledgement: 0,
+                    flags: TCP_FLAG_SYN,
+                    window: 1024,
+                    payload: &[],
+                },
+            )
+            .unwrap();
+        let syn_ack = state.take_tx().unwrap();
+        assert_eq!(syn_ack.header.sequence, 100);
+        assert_eq!(syn_ack.header.acknowledgement, 201);
+        assert_eq!(syn_ack.header.flags, TCP_FLAG_SYN | TCP_FLAG_ACK);
+
+        state
+            .ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 50000,
+                    destination_port: 7443,
+                    sequence: 201,
+                    acknowledgement: 101,
+                    flags: TCP_FLAG_ACK,
+                    window: 1024,
+                    payload: &[],
+                },
+            )
+            .unwrap();
+        let handshake_ack = state.take_tx().unwrap();
+        assert_eq!(handshake_ack.header.sequence, 101);
+        assert_eq!(handshake_ack.header.acknowledgement, 201);
+        assert_eq!(handshake_ack.header.flags, TCP_FLAG_ACK);
+        let stream = state.accept(7, listener).unwrap();
+
+        state
+            .ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 50000,
+                    destination_port: 7443,
+                    sequence: 201,
+                    acknowledgement: 101,
+                    flags: TCP_FLAG_ACK,
+                    window: 1024,
+                    payload: b"hello",
+                },
+            )
+            .unwrap();
+        let payload_ack = state.take_tx().unwrap();
+        assert_eq!(payload_ack.header.sequence, 101);
+        assert_eq!(payload_ack.header.acknowledgement, 206);
+        assert_eq!(payload_ack.header.flags, TCP_FLAG_ACK);
+
+        let mut output = [0; 5];
+        assert_eq!(state.read(7, stream, &mut output), Ok(5));
+        assert_eq!(&output, b"hello");
+        state.write(7, stream, b"world").unwrap();
+        let server_write = state.take_tx().unwrap();
+        assert_eq!(server_write.header.sequence, 101);
+        assert_eq!(server_write.header.acknowledgement, 206);
+        assert_eq!(server_write.header.flags, TCP_FLAG_ACK);
+        assert_eq!(&server_write.payload[..usize::from(server_write.length)], b"world");
+
+        state
+            .ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 50000,
+                    destination_port: 7443,
+                    sequence: 206,
+                    acknowledgement: 106,
+                    flags: TCP_FLAG_ACK,
+                    window: 1024,
+                    payload: &[],
+                },
+            )
+            .unwrap();
+        let write_ack = state.take_tx().unwrap();
+        assert_eq!(write_ack.header.sequence, 106);
+        assert_eq!(write_ack.header.acknowledgement, 206);
+        assert_eq!(write_ack.header.flags, TCP_FLAG_ACK);
+
+        state
+            .ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 50000,
+                    destination_port: 7443,
+                    sequence: 206,
+                    acknowledgement: 106,
+                    flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
+                    window: 1024,
+                    payload: &[],
+                },
+            )
+            .unwrap();
+        let fin_ack = state.take_tx().unwrap();
+        assert_eq!(fin_ack.header.sequence, 106);
+        assert_eq!(fin_ack.header.acknowledgement, 207);
+        assert_eq!(fin_ack.header.flags, TCP_FLAG_ACK);
     }
 
     #[test]
