@@ -2378,7 +2378,6 @@ pub(crate) fn run(
                         NetworkClientSlot::Gateway,
                         gateway_client,
                         gateway_task,
-                        &mut native_scheduler,
                         gateway_session,
                         &capabilities,
                         &shared_pages,
@@ -2402,10 +2401,12 @@ pub(crate) fn run(
                     if busy.status != logos_abi::NetworkStatus::Busy
                         || !network_runtime.invalidate_client(
                             NetworkClientSlot::Gateway,
-                            &mut native_scheduler,
                             logos_abi::NetworkStatus::Cancelled,
                         )
                     {
+                        return false;
+                    }
+                    if !drain_network_wakes(&mut network_runtime, &mut native_scheduler) {
                         return false;
                     }
                     let gateway_request = logos_abi::NetworkRequest {
@@ -2423,7 +2424,6 @@ pub(crate) fn run(
                             NetworkClientSlot::Gateway,
                             gateway_client,
                             gateway_task,
-                            &mut native_scheduler,
                             gateway_session,
                             &capabilities,
                             &shared_pages,
@@ -2433,14 +2433,17 @@ pub(crate) fn run(
                     {
                         return false;
                     }
-                    let passed = gateway_client.response(gateway_request.id).is_some_and(|reply| {
-                        reply.status == logos_abi::NetworkStatus::Busy
-                            && network_runtime.invalidate_client(
-                                NetworkClientSlot::Terminal,
-                                &mut native_scheduler,
-                                logos_abi::NetworkStatus::Cancelled,
-                            )
-                    });
+                    if !drain_network_wakes(&mut network_runtime, &mut native_scheduler) {
+                        return false;
+                    }
+                    let passed = gateway_client
+                        .response(gateway_request.id)
+                        .is_some_and(|reply| reply.status == logos_abi::NetworkStatus::Busy)
+                        && network_runtime.invalidate_client(
+                            NetworkClientSlot::Terminal,
+                            logos_abi::NetworkStatus::Cancelled,
+                        )
+                        && drain_network_wakes(&mut network_runtime, &mut native_scheduler);
                     return passed;
                 }
                 if id == "network/unauthorized-operation" {
@@ -3454,9 +3457,10 @@ fn run_network_device_request(
     tick: u64,
 ) -> Option<logos_abi::NetworkDeviceReply> {
     for step in 0..16 {
-        if runtime.device_endpoint().pending()
-            && !runtime.poll(scheduler, tick.saturating_add(step))
-        {
+        if runtime.device_endpoint().pending() && !runtime.poll(tick.saturating_add(step)) {
+            return None;
+        }
+        if !drain_network_wakes(runtime, scheduler) {
             return None;
         }
         if !runtime.device_endpoint().pending() {
@@ -3478,6 +3482,19 @@ fn run_network_device_request(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn drain_network_wakes(
+    runtime: &mut network::NetworkRuntime,
+    scheduler: &mut native_task::Scheduler<'_>,
+) -> bool {
+    while let Some(handle) = runtime.take_wake() {
+        if scheduler.failed(handle) || !scheduler.wake(handle) || !scheduler.run(handle) {
+            return false;
+        }
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
 fn poll_network(
     runtime: &mut network::NetworkRuntime,
     scheduler: &mut native_task::Scheduler<'_>,
@@ -3496,7 +3513,6 @@ fn poll_network(
         NetworkClientSlot::Terminal,
         terminal,
         terminal_handle,
-        scheduler,
         session,
         capabilities,
         shared_pages,
@@ -3505,20 +3521,25 @@ fn poll_network(
     ) {
         return false;
     }
-    if !runtime.poll(scheduler, tick) {
+    if !drain_network_wakes(runtime, scheduler) || !runtime.poll(tick) {
+        return false;
+    }
+    if !drain_network_wakes(runtime, scheduler) {
         return false;
     }
     if !runtime.relay_client(
         NetworkClientSlot::Terminal,
         terminal,
         terminal_handle,
-        scheduler,
         session,
         capabilities,
         shared_pages,
         terminal_owner,
         tick,
     ) {
+        return false;
+    }
+    if !drain_network_wakes(runtime, scheduler) {
         return false;
     }
     true
@@ -3562,25 +3583,25 @@ fn run_network_request(
     }
     for _ in 0..1_000_000 {
         let tick = interrupts::ticks();
-        if !runtime.relay_probe(
+        let progressed = runtime.relay_probe(
             terminal,
-            scheduler,
             session,
             capabilities,
             shared_pages,
             terminal_owner,
             tick,
-        ) || !runtime.poll(scheduler, tick)
-            || !runtime.relay_probe(
+        ) && drain_network_wakes(runtime, scheduler)
+            && runtime.poll(tick)
+            && runtime.relay_probe(
                 terminal,
-                scheduler,
                 session,
                 capabilities,
                 shared_pages,
                 terminal_owner,
                 tick,
             )
-        {
+            && drain_network_wakes(runtime, scheduler);
+        if !progressed {
             return None;
         }
         if let Some(reply) = terminal.response(request.id) {
@@ -3636,13 +3657,15 @@ fn poll_gateway(
         NetworkClientSlot::Gateway,
         client,
         handle,
-        scheduler,
         gateway_session,
         capabilities,
         block_context.pages,
         owner,
         tick,
     ) {
+        return false;
+    }
+    if !drain_network_wakes(runtime, scheduler) {
         return false;
     }
     let (Some(remote), Some(page), Some(remote_session)) = (remote, gateway_page, remote_session)
@@ -4170,11 +4193,12 @@ fn replace_terminal(
     _storage_owner: u64,
     history: logos_abi::PageHandle,
 ) -> Option<(native_task::Handle, TerminalEndpoints, logos_abi::PageHandle)> {
-    if !network_runtime.invalidate_client(
-        NetworkClientSlot::Terminal,
-        scheduler,
-        logos_abi::NetworkStatus::Cancelled,
-    ) {
+    if !network_runtime
+        .invalidate_client(NetworkClientSlot::Terminal, logos_abi::NetworkStatus::Cancelled)
+    {
+        return None;
+    }
+    if !drain_network_wakes(network_runtime, scheduler) {
         return None;
     }
     if !scheduler.failed(handle) && !scheduler.fail(handle) {
@@ -4283,7 +4307,10 @@ fn replace_network(
     pages: &mut logos_core::shared_pages::SharedPages,
     previous: NetworkResources,
 ) -> Option<(native_task::Handle, native_task::NetworkEndpoint, NetworkResources)> {
-    if !network_runtime.invalidate_active(scheduler, logos_abi::NetworkStatus::Reset) {
+    if !network_runtime.invalidate_active(logos_abi::NetworkStatus::Reset) {
+        return None;
+    }
+    if !drain_network_wakes(network_runtime, scheduler) {
         return None;
     }
     if !scheduler.failed(handle) && !scheduler.fail(handle) {
@@ -4319,11 +4346,12 @@ fn replace_gateway(
     owner: Option<u64>,
     previous: Option<logos_abi::PageHandle>,
 ) -> Option<(native_task::Handle, logos_abi::PageHandle)> {
-    if !network_runtime.invalidate_client(
-        NetworkClientSlot::Gateway,
-        scheduler,
-        logos_abi::NetworkStatus::Cancelled,
-    ) {
+    if !network_runtime
+        .invalidate_client(NetworkClientSlot::Gateway, logos_abi::NetworkStatus::Cancelled)
+    {
+        return None;
+    }
+    if !drain_network_wakes(network_runtime, scheduler) {
         return None;
     }
     let owner = owner?;

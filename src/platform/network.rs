@@ -2,7 +2,7 @@ pub const SERVICE: crate::platform::services::Service = crate::platform::service
 
 use crate::drivers::network;
 use crate::sched::native_task::{
-    self, Handle, NetworkClientEndpoint, NetworkDeviceEndpoint, NetworkEventEndpoint,
+    Handle, NetworkClientEndpoint, NetworkDeviceEndpoint, NetworkEventEndpoint,
     NetworkServerEndpoint,
 };
 use logos_abi::{NetworkOperation, NetworkRequest};
@@ -76,6 +76,8 @@ pub struct NetworkRuntime {
     failures: u32,
     degraded: bool,
     readiness: NetworkReadiness,
+    service_wake: Option<Handle>,
+    client_wake: Option<Handle>,
 }
 
 impl NetworkRuntime {
@@ -121,6 +123,18 @@ impl NetworkRuntime {
         self.resources
     }
 
+    pub fn take_wake(&mut self) -> Option<Handle> {
+        self.service_wake.take().or_else(|| self.client_wake.take())
+    }
+
+    fn wake_service(&mut self) {
+        self.service_wake = self.task;
+    }
+
+    fn wake_client(&mut self, handle: Handle) {
+        self.client_wake = Some(handle);
+    }
+
     pub fn new(device: Option<network::Device>) -> Self {
         let device_generation =
             device.as_ref().map_or(0, |device| u32::from(device.info().generation));
@@ -137,6 +151,8 @@ impl NetworkRuntime {
             failures: 0,
             degraded: false,
             readiness: NetworkReadiness::new(),
+            service_wake: None,
+            client_wake: None,
         }
     }
 
@@ -170,10 +186,8 @@ impl NetworkRuntime {
         true
     }
 
-    pub fn reset(&mut self, scheduler: &mut native_task::Scheduler<'_>) -> bool {
-        let (Some(device), Some(resources), Some(task)) =
-            (self.device.as_mut(), self.resources, self.task)
-        else {
+    pub fn reset(&mut self) -> bool {
+        let (Some(device), Some(resources)) = (self.device.as_mut(), self.resources) else {
             return false;
         };
         if !device.reset() {
@@ -196,18 +210,16 @@ impl NetworkRuntime {
         self.event_endpoint = event_endpoint;
         self.pending = None;
         self.readiness.reset();
-        scheduler.wake(task) && scheduler.run(task)
+        self.wake_service();
+        true
     }
 
     fn reset_with_reply(
         &mut self,
         request: logos_abi::NetworkDeviceRequest,
         status: logos_abi::NetworkStatus,
-        scheduler: &mut native_task::Scheduler<'_>,
     ) -> bool {
-        let (Some(device), Some(resources), Some(task)) =
-            (self.device.as_ref(), self.resources, self.task)
-        else {
+        let (Some(device), Some(resources)) = (self.device.as_ref(), self.resources) else {
             return false;
         };
         let info = device.info();
@@ -236,12 +248,15 @@ impl NetworkRuntime {
         self.event_endpoint = event_endpoint;
         self.pending = None;
         self.readiness.reset();
-        scheduler.wake(task) && scheduler.run(task)
+        self.wake_service();
+        true
     }
 
-    fn poll_readiness(&mut self, scheduler: &mut native_task::Scheduler<'_>, tick: u64) -> bool {
+    fn poll_readiness(&mut self, tick: u64) -> bool {
         let Some(server) = self.server_endpoint else { return true };
-        let Some(task) = self.task else { return true };
+        if self.task.is_none() {
+            return true;
+        }
         if let Some(id) = self.readiness.probe_pending {
             if let Some(reply) = server.response(id) {
                 self.readiness.info = Some(reply.info);
@@ -271,23 +286,15 @@ impl NetworkRuntime {
             return true;
         }
         self.readiness.probe_pending = Some(id);
-        if scheduler.wake(task) && scheduler.run(task) {
-            true
-        } else {
-            self.readiness.probe_pending = None;
-            self.readiness.probe_due = tick.saturating_add(64);
-            let _ = server.reset();
-            true
-        }
+        self.wake_service();
+        true
     }
 
-    pub fn poll(&mut self, scheduler: &mut native_task::Scheduler<'_>, tick: u64) -> bool {
-        if !self.device_endpoint.pending() && !self.poll_readiness(scheduler, tick) {
+    pub fn poll(&mut self, tick: u64) -> bool {
+        if !self.device_endpoint.pending() && !self.poll_readiness(tick) {
             return false;
         }
-        let (Some(device), Some(resources), Some(task)) =
-            (self.device.as_mut(), self.resources, self.task)
-        else {
+        let (Some(device), Some(resources)) = (self.device.as_mut(), self.resources) else {
             return true;
         };
         if let Some(pending) = self.pending {
@@ -298,7 +305,7 @@ impl NetworkRuntime {
                 } else {
                     logos_abi::NetworkStatus::Reset
                 };
-                return self.reset_with_reply(pending.request, status, scheduler);
+                return self.reset_with_reply(pending.request, status);
             }
             match device.complete_transmit() {
                 Ok(Some(())) => {
@@ -310,18 +317,16 @@ impl NetworkRuntime {
                         info: network_info(info),
                     };
                     self.pending = None;
-                    return self.device_endpoint.reply(reply)
-                        && scheduler.wake(task)
-                        && scheduler.run(task);
+                    let replied = self.device_endpoint.reply(reply);
+                    if replied {
+                        self.wake_service();
+                    }
+                    return replied;
                 }
                 Ok(None) => return true,
                 Err(_) => {
                     let _ = device.reset();
-                    return self.reset_with_reply(
-                        pending.request,
-                        logos_abi::NetworkStatus::Reset,
-                        scheduler,
-                    );
+                    return self.reset_with_reply(pending.request, logos_abi::NetworkStatus::Reset);
                 }
             }
         }
@@ -342,11 +347,7 @@ impl NetworkRuntime {
                 }),
                 logos_abi::NetworkDeviceOperation::Reset => {
                     if request.generation == info.generation && device.reset() {
-                        return self.reset_with_reply(
-                            request,
-                            logos_abi::NetworkStatus::Complete,
-                            scheduler,
-                        );
+                        return self.reset_with_reply(request, logos_abi::NetworkStatus::Complete);
                     }
                     Some(logos_abi::NetworkDeviceReply {
                         id: request.id,
@@ -392,9 +393,10 @@ impl NetworkRuntime {
                 }
             };
             if let Some(reply) = response {
-                let ok = self.device_endpoint.reply(reply)
-                    && scheduler.wake(task)
-                    && scheduler.run(task);
+                let ok = self.device_endpoint.reply(reply);
+                if ok {
+                    self.wake_service();
+                }
                 return ok;
             }
             return true;
@@ -413,8 +415,10 @@ impl NetworkRuntime {
                 now: tick.max(1),
                 metadata: [0; 16],
             };
-            let ok =
-                self.event_endpoint.deliver(event) && scheduler.wake(task) && scheduler.run(task);
+            let ok = self.event_endpoint.deliver(event);
+            if ok {
+                self.wake_service();
+            }
             return ok;
         }
         let frame = unsafe {
@@ -435,15 +439,16 @@ impl NetworkRuntime {
                     now: tick.max(1),
                     metadata: [0; 16],
                 };
-                let ok = self.event_endpoint.deliver(event)
-                    && scheduler.wake(task)
-                    && scheduler.run(task);
+                let ok = self.event_endpoint.deliver(event);
+                if ok {
+                    self.wake_service();
+                }
                 ok
             }
             Ok(None) => true,
             Err(_) => {
                 crate::debug::write_line(b"LogOS: network driver reset");
-                self.reset(scheduler)
+                self.reset()
             }
         }
     }
@@ -619,10 +624,10 @@ impl NetworkRuntime {
         target: CompletionTarget,
         request: NetworkRequest,
         status: logos_abi::NetworkStatus,
-        scheduler: &mut native_task::Scheduler<'_>,
+        runtime: &mut Self,
     ) -> bool {
         let published = client.mark_processing() && client.reply(error_reply(request, status));
-        published && Self::complete_target(target, scheduler)
+        published && runtime.complete_target(target)
     }
 
     fn reply_unprocessed_request(
@@ -630,57 +635,44 @@ impl NetworkRuntime {
         target: CompletionTarget,
         request: NetworkRequest,
         status: logos_abi::NetworkStatus,
-        scheduler: &mut native_task::Scheduler<'_>,
+        runtime: &mut Self,
     ) -> bool {
         let published = client.reply_request(error_reply(request, status));
-        published && Self::complete_target(target, scheduler)
+        published && runtime.complete_target(target)
     }
 
-    fn complete_target(
-        target: CompletionTarget,
-        scheduler: &mut native_task::Scheduler<'_>,
-    ) -> bool {
+    fn complete_target(&mut self, target: CompletionTarget) -> bool {
         match target {
-            CompletionTarget::Task(handle) => {
-                !scheduler.failed(handle) && scheduler.wake(handle) && scheduler.run(handle)
-            }
+            CompletionTarget::Task(handle) => self.wake_client(handle),
             #[cfg(feature = "test-hooks")]
-            CompletionTarget::Probe => true,
+            CompletionTarget::Probe => return true,
         }
+        true
     }
 
-    fn finish_active(
-        &mut self,
-        reply: logos_abi::NetworkReply,
-        scheduler: &mut native_task::Scheduler<'_>,
-    ) -> bool {
+    fn finish_active(&mut self, reply: logos_abi::NetworkReply) -> bool {
         let Some(current) = self.active_client.take() else { return false };
         let published = current.endpoint.reply(reply);
         let reset = current.server.reset();
-        let completed = published && reset && Self::complete_target(current.target, scheduler);
+        let completed = published && reset && self.complete_target(current.target);
         completed
     }
 
     pub fn invalidate_client(
         &mut self,
         slot: NetworkClientSlot,
-        scheduler: &mut native_task::Scheduler<'_>,
         status: logos_abi::NetworkStatus,
     ) -> bool {
         let Some(current) = self.active_client else { return true };
         if current.slot != Some(slot) {
             return true;
         }
-        self.finish_active(error_reply(current.request, status), scheduler)
+        self.finish_active(error_reply(current.request, status))
     }
 
-    pub fn invalidate_active(
-        &mut self,
-        scheduler: &mut native_task::Scheduler<'_>,
-        status: logos_abi::NetworkStatus,
-    ) -> bool {
+    pub fn invalidate_active(&mut self, status: logos_abi::NetworkStatus) -> bool {
         let Some(current) = self.active_client else { return true };
-        self.finish_active(error_reply(current.request, status), scheduler)
+        self.finish_active(error_reply(current.request, status))
     }
 
     fn completed_reply(
@@ -731,7 +723,6 @@ impl NetworkRuntime {
         slot: Option<NetworkClientSlot>,
         target: CompletionTarget,
         client: NetworkClientEndpoint,
-        scheduler: &mut native_task::Scheduler<'_>,
         session: &crate::platform::session::Context,
         capabilities: &logos_core::capabilities::CapabilityManager,
         shared_pages: &logos_core::shared_pages::SharedPages,
@@ -739,16 +730,16 @@ impl NetworkRuntime {
         tick: u64,
     ) -> bool {
         let Some(server) = self.server_endpoint else { return true };
-        let Some(service_handle) = self.task else { return true };
+        if self.task.is_none() {
+            return true;
+        }
         if self.readiness.probe_pending.is_some() {
             return true;
         }
         if let Some(current) = self.active_client {
             if self.server_endpoint != Some(current.server) {
-                return self.finish_active(
-                    error_reply(current.request, logos_abi::NetworkStatus::Reset),
-                    scheduler,
-                );
+                return self
+                    .finish_active(error_reply(current.request, logos_abi::NetworkStatus::Reset));
             }
             if current.slot != slot {
                 let Some(request) = client.request() else { return true };
@@ -763,20 +754,19 @@ impl NetworkRuntime {
                     Ok(_) => logos_abi::NetworkStatus::Busy,
                     Err(status) => status,
                 };
-                return Self::reply_request(client, target, request, status, scheduler);
+                return Self::reply_request(client, target, request, status, self);
             }
             if current.endpoint != client {
                 return false;
             }
             if tick >= current.request.deadline {
-                return self.finish_active(
-                    error_reply(current.request, logos_abi::NetworkStatus::TimedOut),
-                    scheduler,
-                );
+                return self.finish_active(error_reply(
+                    current.request,
+                    logos_abi::NetworkStatus::TimedOut,
+                ));
             }
             if let Some(reply) = current.server.response(current.request.id) {
-                return self
-                    .finish_active(self.completed_reply(current, reply, shared_pages), scheduler);
+                return self.finish_active(self.completed_reply(current, reply, shared_pages));
             }
             return true;
         }
@@ -790,7 +780,7 @@ impl NetworkRuntime {
             owner,
         ) {
             Ok(transfer) => transfer,
-            Err(status) => return Self::reply_request(client, target, request, status, scheduler),
+            Err(status) => return Self::reply_request(client, target, request, status, self),
         };
         if matches!(request.operation, NetworkOperation::SendTo | NetworkOperation::Write) {
             let Some((_, source)) = transfer else { return false };
@@ -800,7 +790,7 @@ impl NetworkRuntime {
                     target,
                     request,
                     logos_abi::NetworkStatus::Io,
-                    scheduler,
+                    self,
                 );
             };
             unsafe {
@@ -818,7 +808,7 @@ impl NetworkRuntime {
                 target,
                 request,
                 logos_abi::NetworkStatus::Io,
-                scheduler,
+                self,
             );
             return reset && reply;
         }
@@ -829,16 +819,13 @@ impl NetworkRuntime {
                 target,
                 request,
                 logos_abi::NetworkStatus::Io,
-                scheduler,
+                self,
             );
             return reset && reply;
         }
         self.active_client =
             Some(PendingClient { slot, request, owner, endpoint: client, server, target });
-        if !scheduler.wake(service_handle) || !scheduler.run(service_handle) {
-            return self
-                .finish_active(error_reply(request, logos_abi::NetworkStatus::Io), scheduler);
-        }
+        self.wake_service();
         true
     }
 
@@ -848,7 +835,6 @@ impl NetworkRuntime {
         slot: NetworkClientSlot,
         client: NetworkClientEndpoint,
         handle: Handle,
-        scheduler: &mut native_task::Scheduler<'_>,
         session: &crate::platform::session::Context,
         capabilities: &logos_core::capabilities::CapabilityManager,
         shared_pages: &logos_core::shared_pages::SharedPages,
@@ -859,7 +845,6 @@ impl NetworkRuntime {
             Some(slot),
             CompletionTarget::Task(handle),
             client,
-            scheduler,
             session,
             capabilities,
             shared_pages,
@@ -873,7 +858,6 @@ impl NetworkRuntime {
     pub fn relay_probe(
         &mut self,
         client: NetworkClientEndpoint,
-        scheduler: &mut native_task::Scheduler<'_>,
         session: &crate::platform::session::Context,
         capabilities: &logos_core::capabilities::CapabilityManager,
         shared_pages: &logos_core::shared_pages::SharedPages,
@@ -884,7 +868,6 @@ impl NetworkRuntime {
             None,
             CompletionTarget::Probe,
             client,
-            scheduler,
             session,
             capabilities,
             shared_pages,
