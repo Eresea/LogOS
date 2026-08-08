@@ -57,6 +57,8 @@ completed-layer passes and current boundary failures.
 - [x] Consolidate `remote-key`, `enroll`, and `unenroll` through one `RemoteRuntime::local_command`.
 - [x] Remove external `RemoteRuntime::state_mut()` access; defer `poll_gateway` extraction.
 - [x] Move proof state semantics out of the platform composition root.
+- [x] Add deterministic TcpState evidence for sequence/acknowledgement arithmetic, bounded
+      retransmission, duplicate ACKs, FIN/CloseWait, and RST.
 - [x] Split QEMU catalogs and suite runner policy by suite.
 - [x] Use the canonical service endpoint set directly for page mapping.
 - [x] Split the Remote ABI protocol into `service/remote.rs`.

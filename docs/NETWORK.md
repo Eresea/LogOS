@@ -146,6 +146,14 @@ TX copies occur before server delivery; RX copies occur only after an exact ID/g
 validated. Old task mappings are invalidated before replacement and the active association is
 completed with `Cancelled` or `Reset` before its pages are released.
 
+### TCP foundation (prototype only)
+
+`logos-net::TcpState` is a bounded one-listener/one-connection prototype. Host tests now cover
+SYN/SYN-ACK/ACK establishment, exact sequence and acknowledgement arithmetic, ordered payload
+acknowledgements, server writes, duplicate ACKs, bounded retransmission, FIN/CloseWait, and RST.
+The post-handshake pure ACK does not generate a redundant ACK. No QEMU TCP-stream proof exists yet,
+and this prototype is not the scalable Network architecture.
+
 ### Transport milestone: DHCP over Core-owned VirtIO
 
 This milestone completes transport only. The native service gate now carries bounded `Info`,
@@ -570,7 +578,8 @@ crates unless a real dependency boundary requires it.
 
 ## Deferred
 
-- TCP, DNS, TLS, trust stores, certificate validation, and secure enrollment.
+- Production TCP, DNS, TLS, trust stores, certificate validation, and secure enrollment. The bounded
+  TCP foundation prototype is host-tested but not yet proven through the Network service in QEMU.
 - IPv6, IP fragmentation/reassembly, IPv4 multicast, VLANs, jumbo frames, raw sockets, and packet
   capture APIs.
 - VirtIO modern transport, checksum/segmentation offloads, mergeable RX buffers, control queues,

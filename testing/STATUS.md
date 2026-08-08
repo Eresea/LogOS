@@ -1,12 +1,14 @@
 # Test Status
 
-Last baseline verification: 2026-08-07. Current work is on `codex/repair-network-invariants` from
-`5aa995c`; Phase 2 now routes readiness through structured COM2 queries and removes duplicate
-Remote scenario execution.
+Last baseline verification: 2026-08-08. Current work is on `codex/repair-network-invariants`;
+the checkpoint includes the structured readiness race repair, bounded wake-set coverage, and TCP
+prototype tests.
 Typed Network bootstrap transport is present. NetworkRuntime now owns readiness through an internal
 server `Status` request, production replies always resume their blocked caller, and white-box
 probes use an explicit test-only completion target. The current client path remains globally
 serialized; async per-connection Network architecture and full Network/Remote closure remain open.
+TCP foundation evidence is host-only: 15 `logos-net` tests cover handshake, data/write arithmetic,
+duplicate ACKs, bounded retransmission, FIN/CloseWait, and RST.
 
 - Toolchain: Rust `1.93.0`, Cargo `1.93.0`, target `x86_64-unknown-uefi` installed.
 - Host: `scripts/check.ps1 -Stage host` passed; format, clippy, host tests, architecture,
@@ -19,26 +21,20 @@ serialized; async per-connection Network architecture and full Network/Remote cl
 - QEMU: `C:\Program Files\qemu\qemu-system-x86_64.exe`, version `11.0.50`; OVMF:
   `C:\Program Files\qemu\share\edk2-x86_64-code.fd`. Headless boot reached `startup self
   check passed`, `check network typed endpoints passed`, and `native terminal active`.
-- Catalog: 84 proofs; 53 ready; 31 intentionally skipped. No proof IDs were removed, renamed,
+- Catalog: 84 proofs; 50 ready; 34 intentionally skipped. No proof IDs were removed, renamed,
   weakened, or newly skipped.
 - Fixed seed: `LOGOS_TEST_SEED=1`, one QEMU job.
 
-Current task checkpoint: the repository baseline above predates the Phase 2 harness repair.
-`cargo check --workspace` remains unsuitable for this no-std UEFI workspace without the configured
-panic strategy; focused UEFI checking reaches that pre-existing limitation. No post-repair QEMU or
-Remote suite closure is not claimed here; focused Phase 2 checks are recorded below.
-
-Post-repair spot checks on this branch pass for `network/transport-dhcp`,
-`network/device-bind`, `network/configuration`, `network/unauthorized-operation`,
-`network/icmp-echo`, `network/udp-round-trip`, and `network/backpressure-cancel`.
-`network/configuration` now proves readiness through `QUERY network/configured`, not debugcon. The
-first Phase 2 `remote/typed-invoke` run reached structured Network readiness and Gateway start,
-then stalled during the first host-client advancement; no duplicate Core `RUN remote/typed-invoke`
-was executed. The five unfinished Remote proofs are now explicitly skipped/unimplemented while
+Current task checkpoint: the finalization host and UEFI build checks pass. `cargo check --workspace`
+remains unsuitable for this no-std UEFI workspace without the configured panic strategy; target-
+scoped UEFI checks pass. The Network QEMU suite was rerun after the repair: boot and structured
+`ADVANCE` responses succeeded, but all 11 implemented Network scenarios remained pending and timed
+out before configuration; the transport-DHCP artifact shows one submitted transmit and no peer
+frame. This is an unresolved bootstrap proof failure, not a claimed pass.
+`network/configuration` uses `QUERY network/configured`, not debugcon. The five unfinished Remote
+proofs are explicitly skipped/unimplemented while
 their permanent IDs remain registered: enrollment persistence, reconnect replay, pending-after-reset,
 Gateway restart, and protected-state corruption.
-The first full Network-suite run after the repair recorded 4/11 passed; remaining failures are
-reset/packet-loss and simultaneous-client/Gateway coordination cases pending further isolation.
 `network/tcp-stream` is explicitly skipped/unimplemented until a real host-to-guest TCP exchange
 passes without Remote. No debug-log readiness or Gateway-start string is a proof source.
 
@@ -50,7 +46,7 @@ Per-suite totals:
 | console | 12 | 0 | 3 |
 | platform | 16 | 0 | 16 |
 | persistence | 8 | 0 | 0 |
-| network | 7 | 4 | 0 |
+| network | 0 | 11 | 1 |
 | remote | 0 | 8 | 0 |
 | main | 44 | 12 | 28 |
 
