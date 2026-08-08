@@ -2869,7 +2869,6 @@ pub(crate) fn run(
                     || (cfg!(feature = "block-probe") && id == "persistence/block-read-flush")
                     || (id == "network/transport-dhcp" && network_qemu_asserted)
                     || (id == "network/configuration" && network_qemu_asserted)
-                    || (id == "network/tcp-stream" && gateway_handle.is_some())
                     || (id.starts_with("remote/") && gateway_handle.is_some())
                     || proof.passed()
             }
