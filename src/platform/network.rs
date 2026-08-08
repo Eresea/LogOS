@@ -53,6 +53,26 @@ struct NetworkReadiness {
     next_probe_id: u32,
 }
 
+#[derive(Clone, Copy, Default)]
+struct WakeSet<T> {
+    service: Option<T>,
+    client: Option<T>,
+}
+
+impl<T: Copy> WakeSet<T> {
+    fn service(&mut self, handle: T) {
+        self.service = Some(handle);
+    }
+
+    fn client(&mut self, handle: T) {
+        self.client = Some(handle);
+    }
+
+    fn take(&mut self) -> Option<T> {
+        self.service.take().or_else(|| self.client.take())
+    }
+}
+
 impl NetworkReadiness {
     const fn new() -> Self {
         Self { info: None, probe_pending: None, probe_due: 0, next_probe_id: 0x8000_0001 }
@@ -76,8 +96,7 @@ pub struct NetworkRuntime {
     failures: u32,
     degraded: bool,
     readiness: NetworkReadiness,
-    service_wake: Option<Handle>,
-    client_wake: Option<Handle>,
+    wakes: WakeSet<Handle>,
 }
 
 impl NetworkRuntime {
@@ -124,15 +143,17 @@ impl NetworkRuntime {
     }
 
     pub fn take_wake(&mut self) -> Option<Handle> {
-        self.service_wake.take().or_else(|| self.client_wake.take())
+        self.wakes.take()
     }
 
     fn wake_service(&mut self) {
-        self.service_wake = self.task;
+        if let Some(task) = self.task {
+            self.wakes.service(task);
+        }
     }
 
     fn wake_client(&mut self, handle: Handle) {
-        self.client_wake = Some(handle);
+        self.wakes.client(handle);
     }
 
     pub fn new(device: Option<network::Device>) -> Self {
@@ -151,8 +172,7 @@ impl NetworkRuntime {
             failures: 0,
             degraded: false,
             readiness: NetworkReadiness::new(),
-            service_wake: None,
-            client_wake: None,
+            wakes: WakeSet::default(),
         }
     }
 
@@ -874,6 +894,33 @@ impl NetworkRuntime {
             owner,
             tick,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WakeSet;
+
+    #[test]
+    fn wake_set_preserves_service_and_client_notifications() {
+        let mut wakes = WakeSet::default();
+        wakes.service(1u8);
+        wakes.client(2u8);
+        assert_eq!(wakes.take(), Some(1));
+        assert_eq!(wakes.take(), Some(2));
+        assert_eq!(wakes.take(), None);
+    }
+
+    #[test]
+    fn wake_set_deduplicates_each_bounded_target() {
+        let mut wakes = WakeSet::default();
+        wakes.service(1u8);
+        wakes.service(1u8);
+        wakes.client(2u8);
+        wakes.client(2u8);
+        assert_eq!(wakes.take(), Some(1));
+        assert_eq!(wakes.take(), Some(2));
+        assert_eq!(wakes.take(), None);
     }
 }
 
