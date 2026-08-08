@@ -104,6 +104,12 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   through the Core capability and service relay, `network/unauthorized-operation` proves denied
   Bind/SendTo/ReceiveFrom requests stop in Core, and `network/simultaneous-client-busy` proves
   Terminal/Gateway contention does not overwrite the active transaction.
+- Client behavior proofs use the independent `test-usernet` profile and a dedicated Network
+  client session. `network/icmp-echo` sends Echo through the typed client page to the deterministic
+  host peer; `network/udp-round-trip` performs Bind, SendTo, and ReceiveFrom against the host UDP
+  peer. Backpressure, packet-loss, timeout, reset/reconnect, device binding, and authorization
+  proofs use the same direct-client boundary and do not gate execution on `QUERY network/configured`
+  or Terminal input orchestration. DHCP and configuration remain the bootstrap-specific proofs.
 - Behavioral closure remains gated on the registered Network-client scenarios. The scheduling
   boundary repair requires a fresh serial Network and Remote proof run.
 
@@ -169,6 +175,16 @@ write before the second server write, and host FIN closure. Structured events ar
 This proves the bounded TCP foundation only. Multiple listeners, multiple connections, queued
 per-connection RX/TX, asynchronous readiness, congestion-control completeness, and scalable
 service scheduling remain deferred.
+
+### Direct Network-client proof boundary
+
+The permanent ICMP, UDP, device-bind, authorization, backpressure, packet-loss, timeout, and
+reset/reconnect IDs now run like `network/tcp-stream`: a minimal UEFI image starts Terminal,
+Storage, and Network only; Core grants a dedicated test session the exact Network capability
+scopes; the typed client endpoint submits the request; and a deterministic host peer supplies the
+wire response. The harness sends only `RUN <proof-id>` and waits for the structured result. The
+multi-client Busy proof remains a Gateway-slot contract until Core exposes a second independent
+Network client without the Remote composition path.
 
 ### Transport milestone: DHCP over Core-owned VirtIO
 

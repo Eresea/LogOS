@@ -569,7 +569,15 @@ impl Harness {
         if matches!(scenario.runner, Runner::NetworkTcpStream) {
             return self.run_tcp_stream(scenario.id);
         }
+        if matches!(scenario.runner, Runner::NetworkClient) {
+            return self.run_network_client(scenario.id);
+        }
         self.run_id(scenario.id)
+    }
+
+    fn run_network_client(&mut self, id: &str) -> Result<(), String> {
+        self.send(&format!("LOGOS/1 RUN {id}\n"))?;
+        self.wait(&format!("LOGOS/1 RESULT scenario={id} status=passed"))
     }
 
     fn run_tcp_stream(&mut self, id: &str) -> Result<(), String> {
@@ -948,7 +956,7 @@ fn run_one(id: &str) -> i32 {
             return 1;
         }
     };
-    let profile = if matches!(scenario.runner, Runner::NetworkTcpStream) {
+    let profile = if matches!(scenario.runner, Runner::NetworkClient | Runner::NetworkTcpStream) {
         &profiles.tcp
     } else if scenario.suite == "remote" {
         if scenario.fixture == Fixture::Persistence {
@@ -973,6 +981,15 @@ fn run_one(id: &str) -> i32 {
     if matches!(scenario.runner, Runner::NetworkTcpStream) {
         progress.start(scenario.id);
         let result = run_tcp_stream_fixture(&run_dir, profile, scenario, seed);
+        progress.record(&result);
+        progress.finish();
+        let _ = write_reports(&run_dir, std::slice::from_ref(&result));
+        cleanup_bulk_artifacts(&run_dir);
+        return report(&result);
+    }
+    if matches!(scenario.runner, Runner::NetworkClient) {
+        progress.start(scenario.id);
+        let result = run_network_client_fixture(&run_dir, profile, scenario, seed);
         progress.record(&result);
         progress.finish();
         let _ = write_reports(&run_dir, std::slice::from_ref(&result));
@@ -1044,6 +1061,40 @@ fn run_tcp_stream_fixture(
         fs::create_dir_all(&fixture_dir).map_err(io_error)?;
         let (qemu, ovmf) = qemu_paths()?;
         let mut harness = Harness::boot(
+            &qemu,
+            &ovmf,
+            profile,
+            &fixture_dir,
+            scenario.timeout,
+            "LogOS: storage formatted",
+        )?;
+        let outcome = harness.run(scenario);
+        let shutdown = harness.shutdown();
+        outcome.and(shutdown)
+    })();
+    cleanup_fixture_artifacts(&fixture_dir, result.is_err());
+    ResultRecord {
+        id: scenario.id.into(),
+        status: if result.is_ok() { Status::Passed } else { Status::Failed },
+        duration_ms: started.elapsed().as_millis(),
+        seed,
+        failure: result.err(),
+        artifacts: run_dir.to_path_buf(),
+    }
+}
+
+fn run_network_client_fixture(
+    run_dir: &Path,
+    profile: &ImageProfile,
+    scenario: Scenario,
+    seed: u64,
+) -> ResultRecord {
+    let started = Instant::now();
+    let fixture_dir = run_dir.join("fixtures").join(scenario.id.replace('/', "-"));
+    let result = (|| -> Result<(), String> {
+        fs::create_dir_all(&fixture_dir).map_err(io_error)?;
+        let (qemu, ovmf) = qemu_paths()?;
+        let mut harness = Harness::boot_with_peer(
             &qemu,
             &ovmf,
             profile,
@@ -1178,7 +1229,7 @@ fn run_independent_one(
     seed: u64,
     progress: &Progress,
 ) -> Vec<ResultRecord> {
-    let profile = if matches!(item.runner, Runner::NetworkTcpStream) {
+    let profile = if matches!(item.runner, Runner::NetworkClient | Runner::NetworkTcpStream) {
         &profiles.tcp
     } else if item.suite == "remote" {
         if item.fixture == Fixture::Persistence {
@@ -1193,6 +1244,8 @@ fn run_independent_one(
     };
     if matches!(item.runner, Runner::NetworkTcpStream) {
         vec![run_tcp_stream_fixture(run_dir, profile, item, seed)]
+    } else if matches!(item.runner, Runner::NetworkClient) {
+        vec![run_network_client_fixture(run_dir, profile, item, seed)]
     } else if item.fixture == Fixture::Persistence {
         vec![run_persistence_proof(root, run_dir, profile, item, seed, progress)]
     } else {

@@ -491,6 +491,19 @@ pub(crate) fn run(
         fail!(b"session");
     };
     #[cfg(feature = "test-hooks")]
+    let Some(network_test_session) = session::Context::new(
+        session::Id(6),
+        session::Principal::LOCAL,
+        &[
+            network_bind_capability,
+            network_send_capability,
+            network_icmp_capability,
+            network_receive_capability,
+        ],
+    ) else {
+        fail!(b"session");
+    };
+    #[cfg(feature = "test-hooks")]
     let Some(read_only_session) = session::Context::new(
         session::Id(4),
         session::Principal::LOCAL,
@@ -2570,9 +2583,7 @@ pub(crate) fn run(
                     return true;
                 }
                 if id == "network/icmp-echo" {
-                    if !network_runtime.configured() {
-                        return false;
-                    }
+                    test_hooks::event(id, "starting");
                     let request = logos_abi::NetworkRequest {
                         id: 0x9000_0100,
                         operation: logos_abi::NetworkOperation::Echo,
@@ -2592,23 +2603,25 @@ pub(crate) fn run(
                         native_terminal_network,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
                     );
                     let Some(reply) = reply else {
+                        test_hooks::event(id, "request_failed");
                         return false;
                     };
                     if reply.status != logos_abi::NetworkStatus::Complete {
+                        test_hooks::event(id, network_status_label(reply.status));
                         return false;
                     }
-                    return reply.source_address == 0x0a00_0202;
+                    let passed = reply.source_address == 0x0a00_0202;
+                    test_hooks::event(id, if passed { "passed" } else { "source_invalid" });
+                    return passed;
                 }
                 if id == "network/udp-round-trip" {
-                    if !network_runtime.configured() {
-                        return false;
-                    }
+                    test_hooks::event(id, "starting");
                     let bind = logos_abi::NetworkRequest {
                         id: 0x9000_0110,
                         operation: logos_abi::NetworkOperation::Bind,
@@ -2628,11 +2641,12 @@ pub(crate) fn run(
                         native_terminal_network,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
                     ) else {
+                        test_hooks::event(id, "bind_failed");
                         return false;
                     };
                     let payload = b"logos-network-v1";
@@ -2666,11 +2680,12 @@ pub(crate) fn run(
                         native_terminal_network,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
                     ) else {
+                        test_hooks::event(id, "send_failed");
                         return false;
                     };
                     let receive = logos_abi::NetworkRequest {
@@ -2692,11 +2707,12 @@ pub(crate) fn run(
                         native_terminal_network,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
                     ) else {
+                        test_hooks::event(id, "receive_failed");
                         return false;
                     };
                     let received = unsafe {
@@ -2705,7 +2721,7 @@ pub(crate) fn run(
                             receive_reply.length as usize,
                         )
                     };
-                    return bind_reply.status == logos_abi::NetworkStatus::Complete
+                    let passed = bind_reply.status == logos_abi::NetworkStatus::Complete
                         && send_reply.status == logos_abi::NetworkStatus::Complete
                         && receive_reply.status == logos_abi::NetworkStatus::Complete
                         && receive_reply.source_address == 0x0a00_0202
@@ -2713,11 +2729,10 @@ pub(crate) fn run(
                         && send_reply.counters.tx_frames > 0
                         && receive_reply.counters.rx_frames > 0
                         && received == payload;
+                    test_hooks::event(id, if passed { "passed" } else { "payload_invalid" });
+                    return passed;
                 }
                 if id == "network/backpressure-cancel" {
-                    if !network_runtime.configured() {
-                        return false;
-                    }
                     let bind = logos_abi::NetworkRequest {
                         id: 0x9000_0120,
                         operation: logos_abi::NetworkOperation::Bind,
@@ -2737,7 +2752,7 @@ pub(crate) fn run(
                         native_terminal_network,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
@@ -2759,7 +2774,7 @@ pub(crate) fn run(
                         native_terminal_network,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
@@ -2781,7 +2796,7 @@ pub(crate) fn run(
                         native_terminal_network,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
@@ -2794,9 +2809,6 @@ pub(crate) fn run(
                         && close_reply.status == logos_abi::NetworkStatus::Complete;
                 }
                 if id == "network/packet-loss" {
-                    if !network_runtime.configured() {
-                        return false;
-                    }
                     let first = logos_abi::NetworkRequest {
                         id: 0x9000_0130,
                         operation: logos_abi::NetworkOperation::Echo,
@@ -2821,7 +2833,7 @@ pub(crate) fn run(
                         native_terminal_network,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
@@ -2833,7 +2845,7 @@ pub(crate) fn run(
                         native_terminal_network,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
