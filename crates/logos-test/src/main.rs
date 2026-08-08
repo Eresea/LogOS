@@ -1964,7 +1964,6 @@ mod tests {
                         | "network/packet-loss"
                         | "network/timeout"
                         | "network/reset-reconnect"
-                        | "network/tcp-stream"
                         | "remote/enrollment-persistence"
                         | "remote/auth-denied"
                         | "remote/typed-invoke"
@@ -1979,6 +1978,19 @@ mod tests {
                         | "platform/missing-network"
                 )
         }));
+    }
+
+    #[test]
+    fn unfinished_remote_proofs_are_explicitly_skipped() {
+        for id in [
+            "remote/enrollment-persistence",
+            "remote/reconnect-replay",
+            "remote/pending-after-reset",
+            "remote/gateway-restart",
+            "remote/protected-state-corrupt",
+        ] {
+            assert!(!SCENARIOS.iter().find(|item| item.id == id).unwrap().implemented);
+        }
     }
 
     #[test]
