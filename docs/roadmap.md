@@ -22,9 +22,9 @@ See [Architecture](architecture.md), [security constraints](security.md), and [b
 The project spends one bounded cycle per step, then stops restructuring ABI v4:
 
 1. Stabilize and repair the completed typed layers, using the main suite as the gate.
-2. Complete one bounded Network-client migration. **In progress:** typed Terminal/Gateway transport,
-   one global transaction, rollback, replacement cleanup, and QEMU scheduling closure.
-3. Complete one bounded Remote migration.
+2. Close the Network bootstrap proofs, then begin the asynchronous Network architecture: queued
+   per-connection work, bounded RX/TX service budgets, and scheduler integration outside Network.
+3. Prove one genuine TCP stream without Remote, then prove Gateway and `logosctl` through it.
 4. Freeze ABI v4 structure and resume capability development—first Remote verification if the
    QEMU environment is available, otherwise Safe System Artifacts / Persistence v2.
 
@@ -39,8 +39,8 @@ and an explicit compatibility milestone.
 | 2 | Local typed operation | [Console v1](CONSOLE.md), [Sessions v1](SESSIONS.md) | Complete: normal terminal and recovery console are independent |
 | 3 | Replaceable services | [Platform v1](PLATFORM.md) | Complete: services negotiate, fail, and restart independently |
 | 4 | Durable bounded state | [Persistence v1](PERSISTENCE.md) | Complete: scoped state survives interrupted writes and resets |
-| 5 | Bounded packet connectivity | [Network v1](NETWORK.md) | Typed transport and production scheduling repair complete; QEMU Network-client closure remains pending re-verification |
-| 6 | Remote foundation | [Remote Foundation v1](REMOTE.md#foundation-v1): Network v2 transport slice, [Platform v2](PLATFORM.md) trust slice, [Persistence v2](PERSISTENCE.md) protected-state slice, [Sessions v2](SESSIONS.md) attachment slice | Network readiness ownership and production wake invariant repaired; Network/Remote proof boundary remains pending |
+| 5 | Bounded packet connectivity | [Network v1](NETWORK.md) | Bootstrap device/datagram boundary complete; scalable TCP/socket architecture and remaining QEMU client proofs are open |
+| 6 | Remote foundation | [Remote Foundation v1](REMOTE.md#foundation-v1): Network v2 transport slice, [Platform v2](PLATFORM.md) trust slice, [Persistence v2](PERSISTENCE.md) protected-state slice, [Sessions v2](SESSIONS.md) attachment slice | Depends on a real TCP stream proof; five Remote proofs remain explicitly skipped |
 | 7 | Remote administration | [Remote v1](REMOTE.md) | Headless authenticated administration works through existing contracts |
 | 8 | Safe system artifacts | Complete Persistence v2 | Large signed artifacts and durable configuration are safe to stage |
 | 9 | Atomic system evolution | [Update v1](UPDATE.md) | A signed system bundle activates or rolls back atomically |

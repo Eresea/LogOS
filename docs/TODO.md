@@ -19,10 +19,10 @@
 
 ## 2. Current milestone: ABI v4 stabilization and migration closeout
 
-Network v1 typed transport is implemented, but its full QEMU closure and the Remote Foundation
-proofs remain open. ABI v4 restructuring is not frozen. The registered proof IDs remain permanent
-regression contracts; the fixed-seed QEMU run records completed-layer passes and current boundary
-failures.
+Network bootstrap transport is implemented, but the scalable Network architecture, its full QEMU
+closure, and the Remote Foundation proofs remain open. ABI v4 restructuring is not frozen. The
+registered proof IDs remain permanent regression contracts; the fixed-seed QEMU run records
+completed-layer passes and current boundary failures.
 
 1. [x] Define the minimal versioned Input, Display, and Session capability contracts required by
    `logos-terminal`.
@@ -68,9 +68,11 @@ failures.
 
 - [x] Stabilization cycle: validate and repair the completed typed layers against the main suite;
       fixed-fixture QEMU run records 43 passed, 12 migration-deferred, and 28 skipped.
-- [ ] **Network-client cycle:** re-run the QEMU Network/Remote proofs after the completed readiness
-      ownership and production caller-wake repair; close the remaining scheduling boundary.
-- [ ] Remote cycle: complete one bounded Remote transport migration after Network-client completion.
+- [ ] **Network architecture cycle:** add queued per-connection TX/RX work and bounded service
+      budgets without Gateway- or Remote-specific scheduling.
+- [ ] Prove a genuine Network TCP stream without Remote, then run `remote/typed-invoke` through the
+      real Gateway and `logosctl` path.
+- [ ] Remote cycle: implement the five skipped proofs with their documented orchestration.
 - [ ] Stop restructuring ABI v4 after those cycles; require a new ADR for any exception.
 - [ ] Resume capability development: complete Remote verification or begin Safe System
       Artifacts / Persistence v2.

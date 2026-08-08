@@ -3,10 +3,10 @@
 Last baseline verification: 2026-08-07. Current work is on `codex/repair-network-invariants` from
 `5aa995c`; Phase 2 now routes readiness through structured COM2 queries and removes duplicate
 Remote scenario execution.
-Typed Network-client transport is present. NetworkRuntime now owns readiness through an internal
+Typed Network bootstrap transport is present. NetworkRuntime now owns readiness through an internal
 server `Status` request, production replies always resume their blocked caller, and white-box
-probes use an explicit test-only completion target. Full serial Network and Remote closure remains
-open until those changes are re-tested.
+probes use an explicit test-only completion target. The current client path remains globally
+serialized; async per-connection Network architecture and full Network/Remote closure remain open.
 
 - Toolchain: Rust `1.93.0`, Cargo `1.93.0`, target `x86_64-unknown-uefi` installed.
 - Host: `scripts/check.ps1 -Stage host` passed; format, clippy, host tests, architecture,
@@ -39,6 +39,8 @@ their permanent IDs remain registered: enrollment persistence, reconnect replay,
 Gateway restart, and protected-state corruption.
 The first full Network-suite run after the repair recorded 4/11 passed; remaining failures are
 reset/packet-loss and simultaneous-client/Gateway coordination cases pending further isolation.
+`network/tcp-stream` is explicitly skipped/unimplemented until a real host-to-guest TCP exchange
+passes without Remote. No debug-log readiness or Gateway-start string is a proof source.
 
 Per-suite totals:
 
@@ -71,8 +73,8 @@ Baseline Network-client failures (pre-repair; rerun pending):
 - `network/udp-round-trip`: same Network-client response-state timeout.
 - `network/backpressure-cancel`: same Network-client response-state timeout.
 - `network/packet-loss`: same Network-client response-state timeout.
-- `network/tcp-stream`: Gateway startup signal is absent; classified at the Network/Remote
-  Gateway startup boundary.
+- `network/tcp-stream`: the former Gateway-backed scenario was removed from the implemented set;
+  the permanent ID is currently skipped until the independent TCP proof exists.
 
 Baseline Remote failures (pre-repair; superseded by explicit skips for five unfinished proofs):
 

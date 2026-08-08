@@ -1,14 +1,16 @@
 # Network
 
-> **Status:** Network v1 typed device/event and client transport implementation complete. Production
-> readiness ownership and client wake semantics are repaired; QEMU closure is pending re-verification.
+> **Status:** Network bootstrap v1 is complete: typed device transport, safe DMA ownership,
+> Ethernet/ARP/IPv4/DHCP/UDP, and the basic capability model are implemented. The scalable Network
+> architecture is not complete: asynchronous TX, bounded batched scheduling, a scalable socket
+> model, robust TCP, and multiqueue readiness remain future work. QEMU client closure is pending.
 > Results are recorded in
 > [testing status](../testing/STATUS.md).
 >
 > **Owner:** Foundation network driver and System Network service
 
-> **Milestone:** Network v1 typed device-facing and client transport ABI implemented; behavioral
-> proof closure pending after the scheduling-boundary repair.
+> **Milestone:** Bootstrap transport is implemented; the current single-transaction client path is
+> a compatibility boundary, not the final Network architecture.
 
 ## Goal
 
@@ -121,7 +123,7 @@ The Network service's `Info` request now returns typed `NetworkInfo` through `Ne
 and DHCP proceeds through the same typed path. Terminal and Gateway use typed client pages; neither
 client receives Network device/event pages.
 
-### ABI-v4 client transport
+### ABI-v4 client transport (bootstrap compatibility path)
 
 `NetworkRuntime` owns one global `active_client` association. The association records the optional
 production client slot, exact client/server endpoints, request, owner, and explicit completion
@@ -131,6 +133,12 @@ receives `Busy` without touching the active server page.
 Every production completion wakes and runs the requesting task, including `Busy`, `Denied`,
 `Invalid`, timeout, cancellation, reset, and I/O replies. Test-only white-box probes use an
 explicit probe target and never stand in for a live Terminal or Gateway caller.
+
+This path still serializes client work through one global active association and performs scheduler
+integration at the Core composition boundary. It is retained to preserve the typed bootstrap ABI;
+it does not provide the intended asynchronous socket architecture. Future Network work must move
+application writes into per-connection TX buffers, drain RX packets with bounded service budgets,
+and notify readable connections without Gateway- or Remote-specific scheduling.
 
 The transfer page is configured when each client mapping is installed and is retained across client
 page reset. Data requests must name that exact handle and stay within the fixed page payload window.
@@ -475,15 +483,15 @@ and never cast untrusted bytes to Rust enums or packed structs.
 - [ ] Re-run `cargo run -p logos-test -- suite pr` after the scheduling repair.
 - [x] Commit the Network v1 resilience proof.
 
-### Phase 8: close the milestone
+### Phase 8: close the bootstrap milestone
 
 - [ ] Check every v1 scope item and exit criterion against a passing proof ID after the scheduling repair.
 - [x] Update `docs/ARCHITECTURE.md` if implementation changed the accepted boundary.
 - [x] Update `docs/boot-sequence.md` with Network dependencies, non-blocking offline boot, and
       restart path.
 - [x] Update `docs/security.md` with the implemented exact endpoint capability enforcement.
-- [ ] Update `docs/ROADMAP.md` to mark Network v1 complete after proof closure.
-- [ ] Change this document's status to complete.
+- [x] Record the bootstrap transport boundary and its deferred architecture work.
+- [ ] Close the remaining Network client QEMU proofs.
 - [x] Run `cargo fmt --check`.
 - [x] Run the prescribed host clippy checks with `-D warnings`.
 - [x] Run the prescribed host-compatible workspace tests.
@@ -534,7 +542,8 @@ assertions; matching a diagnostic line alone is insufficient.
 
 ## Exit proof
 
-Network v1 is complete only when permanent automated tests prove all of the following in QEMU:
+Network bootstrap v1 is complete for the implemented device and datagram boundary. The remaining
+QEMU client proofs are still required before that boundary is treated as closed:
 
 - LogOS acquires the exact DHCP configuration from the hermetic host peer.
 - Host-to-guest and guest-to-host ICMP echo succeed.
@@ -582,11 +591,11 @@ See [Architecture](architecture.md#12-networking-model),
 
 ### V2 — Stream connectivity
 
-- Remote Foundation has completed the portable TCP ABI and checksum-validated TCP codec. The
-  bounded one-listener/one-stream TCP state model now also covers SYN/ACK establishment, owner
-  checks, ordered payload buffering, bounded writes, reset, and generation invalidation. The
-  Network-service frame parsing/transmit and Core payload copying now consume TCP operations;
-  owner multiplexing and Gateway remain.
+- The host TCP codec has deterministic sequence/acknowledgement tests, but a genuine host-to-guest
+  TCP stream proof is not yet implemented. The current service path is not a scalable asynchronous
+  socket architecture and must not be represented as one.
+- Add per-connection TX/RX ownership, asynchronous NIC completion, bounded packet/service budgets,
+  isolated connection failure, and readiness notifications before promoting TCP to production.
 - Capability-scoped TCP connect, listen, accept, close, and bounded stream I/O.
 - Remote Foundation constrains TCP capability scopes to the exact local port `7443`.
 - Concurrent operations, ephemeral ports, connected endpoint state, and DNS resolution.

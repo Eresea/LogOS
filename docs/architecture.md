@@ -719,7 +719,9 @@ The compatibility view must not force every native service to use path-based API
 
 ## 12. Networking model
 
-Applications consume asynchronous connection and datagram interfaces through the network service.
+Applications consume bounded datagram interfaces through the Network service. The bootstrap path
+is typed and asynchronous at the ABI boundary, but its current client implementation still uses a
+single global transaction; a scalable socket architecture is not yet complete.
 
 They do not own network drivers.
 
@@ -744,7 +746,11 @@ submits `Status` directly to the Network server endpoint; Terminal is not a read
 
 Every production Network completion wakes and runs its blocked caller task for both successful and
 error statuses. QEMU white-box requests use an explicit test-only probe target, so test completion
-cannot encode Terminal as a fake caller or weaken the production scheduler invariant.
+cannot encode Terminal as a fake caller or weaken the production scheduler invariant. The intended
+next architecture is queue-based: application writes enqueue to connection-owned TX buffers,
+bounded Network work produces segments, NIC completion reclaims buffers, and RX processing fills
+bounded per-connection buffers and publishes readiness. Network must not wake or run Gateway or
+Remote as part of protocol processing; scheduler composition belongs above the Network service.
 
 Bind, send, and receive authority are separate. Each grant carries an exact protocol/local-port or
 protocol/remote-IPv4-and-port scope; wildcard and CIDR policy remain future firewall work. Network
@@ -759,10 +765,9 @@ Policy is separated from mechanism:
 - identity/trust: peer authentication;
 - session gateway: remote LogOS protocol.
 
-Remote Foundation adds only passive, bounded TCP to the Network service: one listener, one accepted
-stream, fixed buffers, finite retransmission, and no DNS or outbound connect. Gateway receives
-capabilities scoped to its exact local TCP port; the authenticated stream handle remains owner- and
-generation-bound.
+Remote Foundation currently consumes the bootstrap TCP slice but does not constitute a production
+TCP architecture proof. A genuine TCP stream proof must pass through the Network service without
+Remote. Only after that path is green may Gateway and `logosctl` be used as the next vertical proof.
 
 ## 12.1 Inference model
 
