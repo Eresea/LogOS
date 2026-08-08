@@ -697,6 +697,10 @@ impl Harness {
             if self.wait_for(expected, Duration::from_secs(1))? {
                 return Ok(());
             }
+            self.drain_serial()?;
+            if self.serial.lines().any(|line| line.starts_with(expected)) {
+                return Ok(());
+            }
             self.send("LOGOS/1 ADVANCE 64\n")?;
             if !self.wait_for("LOGOS/1 RESULT advance=accepted", Duration::from_secs(1))? {
                 return Err("timeout waiting for structured advance response".into());
