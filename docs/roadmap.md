@@ -24,7 +24,7 @@ The project spends one bounded cycle per step, then stops restructuring ABI v4:
 1. Stabilize and repair the completed typed layers, using the main suite as the gate.
 2. Close the Network bootstrap proofs, then begin the asynchronous Network architecture: queued
    per-connection work, bounded RX/TX service budgets, and scheduler integration outside Network.
-3. Prove one genuine TCP stream without Remote, then prove Gateway and `logosctl` through it.
+3. Promote the independent TCP foundation proof, then prove Gateway and `logosctl` through it.
 4. Freeze ABI v4 structure and resume capability development—first Remote verification if the
    QEMU environment is available, otherwise Safe System Artifacts / Persistence v2.
 

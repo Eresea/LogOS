@@ -3,7 +3,8 @@
 > **Status:** Network bootstrap v1 is complete: typed device transport, safe DMA ownership,
 > Ethernet/ARP/IPv4/DHCP/UDP, and the basic capability model are implemented. The scalable Network
 > architecture is not complete: asynchronous TX, bounded batched scheduling, a scalable socket
-> model, robust TCP, and multiqueue readiness remain future work. QEMU client closure is pending.
+> model, robust/scalable TCP, and multiqueue readiness remain future work. Remaining QEMU datagram
+> client closure is pending.
 > Results are recorded in
 > [testing status](../testing/STATUS.md).
 >
@@ -81,9 +82,10 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   maps distinct typed device/event pages only into the Network service, and delivers one validated
   RX frame event at a time.
 - `logos-network-service` handles bounded device transport, DHCP acquisition, ARP resolution,
-  `Status`, `Bind`, `SendTo`, `ReceiveFrom`, `Close`, and `Cancel` state operations. Core validates
-  capability scope and copies client payloads through the fixed Network TX page. Cancellation,
-  close, reset, and ARP single-flight cleanup release pending client state.
+  `Status`, `Bind`, `SendTo`, `ReceiveFrom`, `Listen`, `Accept`, `Read`, `Write`, `Close`, and
+  `Cancel` state operations. Core validates capability scope and copies client payloads through the
+  fixed Network TX page. Cancellation, close, reset, and ARP single-flight cleanup release pending
+  client state.
 - `NetworkClientPage` and `NetworkServerPage` are the only client/server boundary. Core configures
   Terminal and Gateway transfer-page authority, admits one global transaction, returns `Busy` to a
   competing client, and publishes only exact request/generation replies.
@@ -146,13 +148,27 @@ TX copies occur before server delivery; RX copies occur only after an exact ID/g
 validated. Old task mappings are invalidated before replacement and the active association is
 completed with `Cancelled` or `Reset` before its pages are released.
 
-### TCP foundation (prototype only)
+### TCP foundation (independent proof)
 
-`logos-net::TcpState` is a bounded one-listener/one-connection prototype. Host tests now cover
+`logos-net::TcpState` is a bounded one-listener/one-connection foundation. Host tests cover
 SYN/SYN-ACK/ACK establishment, exact sequence and acknowledgement arithmetic, ordered payload
 acknowledgements, server writes, duplicate ACKs, bounded retransmission, FIN/CloseWait, and RST.
-The post-handshake pure ACK does not generate a redundant ACK. No QEMU TCP-stream proof exists yet,
-and this prototype is not the scalable Network architecture.
+The post-handshake pure ACK does not generate a redundant ACK. The Network service waits for a
+pre-SYN `Accept`, retires TCP writes only after the VirtIO TX completion, and relays the typed
+`Listen`/`Accept`/`Read`/`Write` operations through the normal Core Network boundary.
+
+`network/tcp-stream` is the independent QEMU proof. It uses a deterministic host TCP peer through
+QEMU host forwarding to port 7443, a test-only exact TCP capability scope, the real VirtIO driver,
+the real Network service, and no Gateway, Sessions, Remote, enrollment, persistence, Noise, or
+`logosctl` runtime path. The TCP ESP contains only Terminal, Storage, and Network payloads. The
+exchange asserts `hello`/`world`, a deterministic 512-byte transform, the ACK of the first server
+write before the second server write, and host FIN closure. Structured events are emitted for
+`listener_waiting`, `connection_established`, `connection_readable`, `write_pending`,
+`write_acknowledged`, and `connection_closed`.
+
+This proves the bounded TCP foundation only. Multiple listeners, multiple connections, queued
+per-connection RX/TX, asynchronous readiness, congestion-control completeness, and scalable
+service scheduling remain deferred.
 
 ### Transport milestone: DHCP over Core-owned VirtIO
 
@@ -522,6 +538,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
 | `network/packet-loss` | QEMU | Deterministic DHCP loss and malformed/duplicate ICMP traffic produce bounded progress |
 | `network/timeout` | QEMU | Virtual deadline produces one timeout reply and no held resources |
 | `network/reset-reconnect` | QEMU | Reset leaves DHCP-bound Network usable and echo succeeds without reboot |
+| `network/tcp-stream` | QEMU | Independent host TCP peer completes typed Listen/Accept/Read/Write with exact payloads and structured close state |
 
 Host tests remain the primary proof for parsers, checksums, state transitions, bounds, and malformed
 input. QEMU tests prove the real PCI, interrupt, DMA, service-gate, capability, and recovery paths.
@@ -579,7 +596,8 @@ crates unless a real dependency boundary requires it.
 ## Deferred
 
 - Production TCP, DNS, TLS, trust stores, certificate validation, and secure enrollment. The bounded
-  TCP foundation prototype is host-tested but not yet proven through the Network service in QEMU.
+  TCP foundation is proven through the Network service in QEMU; scalable stream architecture is
+  deferred.
 - IPv6, IP fragmentation/reassembly, IPv4 multicast, VLANs, jumbo frames, raw sockets, and packet
   capture APIs.
 - VirtIO modern transport, checksum/segmentation offloads, mergeable RX buffers, control queues,
@@ -600,12 +618,11 @@ See [Architecture](architecture.md#12-networking-model),
 
 ### V2 — Stream connectivity
 
-- The host TCP codec has deterministic sequence/acknowledgement tests, but a genuine host-to-guest
-  TCP stream proof is not yet implemented. The current service path is not a scalable asynchronous
-  socket architecture and must not be represented as one.
+- The bounded host-to-guest TCP stream foundation is proven, but the current service path is not a
+  scalable asynchronous socket architecture and must not be represented as one.
 - Add per-connection TX/RX ownership, asynchronous NIC completion, bounded packet/service budgets,
   isolated connection failure, and readiness notifications before promoting TCP to production.
-- Capability-scoped TCP connect, listen, accept, close, and bounded stream I/O.
+- Scalable capability-scoped TCP connect, listen, accept, close, and bounded stream I/O.
 - Remote Foundation constrains TCP capability scopes to the exact local port `7443`.
 - Concurrent operations, ephemeral ports, connected endpoint state, and DNS resolution.
 - Authenticated-transport integration; identity, trust policy, and key ownership stay in their System services.
