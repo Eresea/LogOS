@@ -99,9 +99,11 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   deliver to Network, mark the client `Processing`, then wake the Network service. Any failed step
   rolls the client and server pages back. Completion copies RX bytes only from the configured
   Network TX scratch offset; timeout, cancel, reset, and replacement clear the exact association.
-- QEMU uses deterministic user-mode DHCP for the transport proof. The independent raw-Ethernet
-  DHCP peer drives `network/configuration`; `network/device-bind` exercises a real Bind request
-  through the Core capability and service relay, `network/unauthorized-operation` proves denied
+- The historical standard profile used deterministic user-mode DHCP for the transport proof, and
+  the independent raw-Ethernet DHCP peer drove `network/configuration`. The current
+  `transport-dhcp` and `configuration` baselines use the direct typed-client profile below;
+  `network/device-bind` exercises a real Bind request through the Core capability and service
+  relay, `network/unauthorized-operation` proves denied
   Bind/SendTo/ReceiveFrom requests stop in Core, and `network/simultaneous-client-busy` proves
   Terminal/Gateway contention does not overwrite the active transaction.
 - Client behavior proofs use the independent `test-usernet` profile and a dedicated Network
@@ -109,9 +111,23 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   host peer; `network/udp-round-trip` performs Bind, SendTo, and ReceiveFrom against the host UDP
   peer. Backpressure, packet-loss, timeout, reset/reconnect, device binding, and authorization
   proofs use the same direct-client boundary and do not gate execution on `QUERY network/configured`
-  or Terminal input orchestration. DHCP and configuration remain the bootstrap-specific proofs.
+  or Terminal input orchestration. The permanent `transport-dhcp` and `configuration` IDs now
+  assert the exact typed configuration through this boundary; raw DHCP orchestration remains a
+  separate bootstrap concern.
 - Behavioral closure remains gated on the registered Network-client scenarios. The scheduling
   boundary repair requires a fresh serial Network and Remote proof run.
+
+### Current proof evidence — 2026-08-09
+
+The current baseline uses the TCP-style direct-client harness with fixed seed `1`. These permanent
+IDs pass individually: `network/transport-dhcp`, `network/configuration`, `network/icmp-echo`,
+`network/udp-round-trip`, `network/backpressure-cancel`, `network/reset-reconnect`, and
+`network/tcp-stream`. The Network-only suite is `11 passed, 1 failed`; its sole failure is
+`network/simultaneous-client-busy`, which still requires the Remote/Gateway second client slot.
+
+The current transport/configuration proofs assert exact typed Network configuration through the
+`test-usernet` direct-client profile. They do not constitute current evidence for raw DHCP
+Discover/Offer/Request/Ack orchestration. Historical DHCP claims remain below as phase history.
 
 ### ABI-v4 device transport milestone
 
@@ -178,13 +194,19 @@ service scheduling remain deferred.
 
 ### Direct Network-client proof boundary
 
-The permanent ICMP, UDP, device-bind, authorization, backpressure, packet-loss, timeout, and
-reset/reconnect IDs now run like `network/tcp-stream`: a minimal UEFI image starts Terminal,
+The permanent transport/configuration, ICMP, UDP, device-bind, authorization, backpressure,
+packet-loss, timeout, and reset/reconnect IDs now run like `network/tcp-stream`: a minimal UEFI image starts Terminal,
 Storage, and Network only; Core grants a dedicated test session the exact Network capability
 scopes; the typed client endpoint submits the request; and a deterministic host peer supplies the
 wire response. The harness sends only `RUN <proof-id>` and waits for the structured result. The
 multi-client Busy proof remains a Gateway-slot contract until Core exposes a second independent
 Network client without the Remote composition path.
+
+### Historical phase record
+
+The milestone sections and checked items below preserve historical intent and prior implementation
+claims. They are not current run evidence; use **Current proof evidence** above, the automated proof
+matrix, and `testing/STATUS.md` for the present baseline.
 
 ### Transport milestone: DHCP over Core-owned VirtIO
 
@@ -205,8 +227,8 @@ Completed proof items:
 - [x] QEMU proof `network/transport-dhcp` asserts the structured bound configuration and rejects
       malformed or stale DHCP responses before `Bound`.
 
-QEMU's built-in DHCP server remains the transport proof source; the independent peer covers the
-configuration and client paths. Host tests cover fixed-slot exhaustion, ARP expiry, exact matching,
+Historical transport record: QEMU's built-in DHCP server was the transport proof source; the
+independent peer covered the configuration and client paths. Host tests cover fixed-slot exhaustion, ARP expiry, exact matching,
 and failure cleanup. The `Bind`/`SendTo`/`ReceiveFrom`/`Echo` relay, capability gate, cancellation,
 timeout, malformed-frame, and reconnect paths are live.
 
@@ -544,9 +566,9 @@ and never cast untrusted bytes to Rust enums or packed structs.
 
 | Proof ID | Layer | Required semantic assertion |
 | --- | --- | --- |
-| `network/transport-dhcp` | QEMU | Core TX submits Discover/Request; RX delivers Offer/Ack; final configuration is `10.0.2.15/24` via `10.0.2.2`; malformed/stale DHCP is not bound |
+| `network/transport-dhcp` | QEMU | Direct typed client observes exact configured `10.0.2.15/24` via `10.0.2.2`; raw DHCP orchestration is outside this baseline |
 | `network/device-bind` | QEMU | Exact NIC class/MAC, sixteen posted RX buffers, and one received host frame |
-| `network/configuration` | QEMU | Valid DHCP acquisition, dropped-offer retry, and exact address/mask/router/lease |
+| `network/configuration` | QEMU | Direct typed client observes exact address/mask/router configuration |
 | `network/icmp-echo` | QEMU | Valid echo in both directions with matching ID/sequence and checksum |
 | `network/udp-round-trip` | QEMU | Exact payload and source/destination endpoints in both directions |
 | `network/unauthorized-operation` | QEMU | Bind/send/receive denial occurs before service wake-up or NIC/page effects |
@@ -581,10 +603,14 @@ assertions; matching a diagnostic line alone is insufficient.
 - [x] Require exact, separate bind/send/receive capabilities.
 - [x] Enforce owner, generation, deadline, page, length, and backpressure invariants.
 
-## Exit proof
+## Exit proof — current state
 
-Network bootstrap v1 is complete for the implemented device and datagram boundary. The remaining
-QEMU client proofs are still required before that boundary is treated as closed:
+The direct-client baseline is green for the seven required permanent IDs listed above. The broader
+Network suite is not fully closed because `network/simultaneous-client-busy` still depends on the
+Remote/Gateway composition path. Raw DHCP orchestration is a separate deferred proof and is not
+represented by the current `transport-dhcp` or `configuration` baseline IDs.
+
+Historical exit criteria, retained for traceability:
 
 - LogOS acquires the exact DHCP configuration from the hermetic host peer.
 - Host-to-guest and guest-to-host ICMP echo succeed.

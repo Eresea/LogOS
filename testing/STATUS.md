@@ -1,9 +1,9 @@
 # Test Status
 
-Last verification: 2026-08-09. Starting checkpoint for this TCP slice:
-`bf89ce730988feac54e81228db1cef2159e5762e` on `codex/repair-network-invariants`.
-The slice includes the structured readiness race repair, bounded wake-set coverage, and TCP
-prototype tests.
+Last verification: 2026-08-09. Current direct-client baseline on `codex/repair-network-invariants`.
+Historical checkpoint material is retained below only where explicitly labeled.
+The opening architecture notes are retained context; **Current evidence** is the authoritative
+run ledger.
 Typed Network bootstrap transport is present. NetworkRuntime now owns readiness through an internal
 server `Status` request, production replies always resume their blocked caller, and white-box
 probes use an explicit test-only completion target. The current client path remains globally
@@ -23,30 +23,32 @@ arithmetic, duplicate ACKs, bounded retransmission, FIN/CloseWait, and RST; the 
 - QEMU: `C:\Program Files\qemu\qemu-system-x86_64.exe`, version `11.0.50`; OVMF:
   `C:\Program Files\qemu\share\edk2-x86_64-code.fd`. Headless boot reached `startup self
   check passed`, `check network typed endpoints passed`, and `native terminal active`.
-- Catalog: 84 proofs; 51 ready; 33 intentionally skipped. No proof IDs were removed, renamed,
+- Historical catalog snapshot: 84 proofs; 51 ready; 33 intentionally skipped. No proof IDs were removed, renamed,
   weakened, or newly skipped.
 - Fixed seed: `LOGOS_TEST_SEED=1`, one QEMU job.
 
-Current task checkpoint: the dedicated TCP QEMU proof and the direct Network-client proofs pass
-individually with seed 1. Their structured event sequence is
+## Current evidence
+
+With `LOGOS_TEST_SEED=1` and one QEMU job, the dedicated TCP QEMU proof and the direct Network-client
+proofs pass individually. The TCP structured event sequence is
 `starting -> listener_waiting -> connection_established -> connection_readable -> write_pending ->
 write_acknowledged -> connection_closed -> passed`. Its ESP contains only `TERMINAL.EFI`,
 `STORAGE.EFI`, and `NETWORK.EFI`; no Sessions, Gateway, Remote, enrollment, persistence, Noise, or
 `logosctl` runtime path is involved. `cargo check --workspace` remains unsuitable for this no-std
 UEFI workspace without the configured panic strategy; target-scoped UEFI checks pass.
-The direct-client proofs now run through the TCP-style `test-usernet` image and host peer. The
-remaining suite failures are deliberately isolated: `network/transport-dhcp` and
-`network/configuration` are bootstrap/DHCP contracts, while `network/simultaneous-client-busy`
-still depends on the Gateway slot for its second real client. They are reported separately from
-the passing direct Network contracts.
-`network/configuration` uses `QUERY network/configured`, not debugcon. The five unfinished Remote
+The direct-client proofs run through the TCP-style `test-usernet` image and host peer. The
+remaining suite failure is deliberately isolated: `network/simultaneous-client-busy` still
+depends on the Gateway slot for its second real client. The permanent transport/configuration
+IDs are direct typed-client baseline proofs; raw DHCP orchestration remains outside this baseline.
+The baseline `network/transport-dhcp` and `network/configuration` proofs use typed Network status,
+not debugcon or the legacy readiness query. The five unfinished Remote
 proofs are explicitly skipped/unimplemented while
 their permanent IDs remain registered: enrollment persistence, reconnect replay, pending-after-reset,
 Gateway restart, and protected-state corruption.
 `network/tcp-stream` is implemented and passes independently without Remote. No debug-log readiness
 or Gateway-start string is a proof source.
 
-Per-suite totals:
+Historical full-catalog totals from the earlier mixed-era run:
 
 | Suite | Passed | Failed | Skipped |
 | --- | ---: | ---: | ---: |
@@ -58,28 +60,33 @@ Per-suite totals:
 | remote | 0 | 8 | 0 |
 | main | 44 | 12 | 28 |
 
-Required completed-layer status: **PASS** for all implemented completed-layer proofs. Normal boot,
+Current Network-only result: **11 passed, 1 failed**. The seven required baseline IDs are green
+individually; the only suite failure is `network/simultaneous-client-busy`, which remains a
+Gateway-slot contract.
+
+Historical completed-layer summary: **PASS** for all implemented completed-layer proofs. Normal boot,
 Display, Terminal replacement and containment, Sessions/Effect, Store/Block, Storage
 replacement, terminal history, persistence interruption/recovery/corruption/denial, Network
-device information/binding, DHCP/configuration, timeout/reset, Network service replacement and
-containment, plus the simultaneous Terminal/Gateway Busy proof, remained green where implemented
-by the fixed-seed catalog and headless boot checks.
+device information/binding, DHCP/configuration, timeout/reset, and Network service replacement
+and containment remained green in the fixed-seed catalog and headless boot checks. The separate
+Terminal/Gateway Busy proof remains the only Network suite failure.
 The permanent `core/boot-recovery` and `console/recovery-handoff` IDs remain intentionally skipped
 because their semantic proofs are not implemented; they are not reported as passes.
 
-`network/simultaneous-client-busy` remains a Gateway-slot contract and is not part of the direct
-client profile; its current failure is the unavailable Remote/Gateway composition path.
+Current exception: `network/simultaneous-client-busy` remains a Gateway-slot contract and is not
+part of the direct client profile; its failure is the unavailable Remote/Gateway composition path.
 
-Direct Network-client results:
+Current direct Network-client results:
 
 - `network/device-bind`, `network/icmp-echo`, `network/udp-round-trip`,
   `network/unauthorized-operation`, `network/backpressure-cancel`, `network/packet-loss`,
-  `network/timeout`, and `network/reset-reconnect`: pass independently through real VirtIO, the
+  `network/transport-dhcp`, `network/configuration`, `network/timeout`, and
+  `network/reset-reconnect`: pass independently through real VirtIO, the
   Network service, typed client requests, and the deterministic host peer.
 - `network/tcp-stream`: passes independently through real VirtIO, the Network service, typed
   Listen/Accept/Read/Write requests, and a deterministic host TCP peer.
 
-Baseline Remote failures (pre-repair; superseded by explicit skips for five unfinished proofs):
+Historical Remote failures (pre-repair; superseded by explicit skips for five unfinished proofs):
 
 - `remote/auth-denied` and `remote/typed-invoke`: previously timed out waiting for
   `LogOS: Gateway started`; the harness now uses structured readiness and host-side authority.
@@ -88,6 +95,6 @@ Baseline Remote failures (pre-repair; superseded by explicit skips for five unfi
   no partial proof is claimed.
   Classified as Gateway startup/Remote coordination behavior, not missing typed transport.
 
-The remaining failures are implementation-boundary behavior in Network-client/Gateway/Remote
-coordination. They are not missing typed pages or a request to expand the ABI. Typed Network-client,
-Network-server, and Remote pages and their canonical mappings are present; ABI v4 is not yet frozen.
+Current remaining issue: the Network-only suite's Gateway-dependent `network/simultaneous-client-busy`
+proof. Historical Remote failures are listed above and are now explicit skips where unfinished.
+They are not missing typed pages or a request to expand the ABI; ABI v4 is not yet frozen.
