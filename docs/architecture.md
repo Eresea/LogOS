@@ -1,14 +1,15 @@
 # LogOS Architecture Annex
 
 > **Status:** Living architecture reference  
-> **Updated:** 2026-08-07
+> **Updated:** 2026-08-08
 
 ## Testing boundary
 
 Repository testing is not an OS ring or runtime service. Host tests prove portable models; the
 `logos-test` harness proves assembled contracts in QEMU. Test builds alone expose `LOGOS/1` over
 COM2, semantic fault controls, virtual time, deterministic `RESET`, and debug-exit completion.
-Production builds expose none of that control surface. Pure protocol/state-machine logic runs on
+Production builds expose none of that control surface. Readiness and postconditions use structured
+COM2 queries; debugcon is diagnostic only. Pure protocol/state-machine logic runs on
 the host; QEMU proves target boot, interrupts, memory, devices, isolation, and recovery. Completed
 milestone proof IDs remain regression contracts until the corresponding public contract is
 explicitly deprecated. See [ADR-0002](adr/0002-test-control-boundary.md).
@@ -65,10 +66,12 @@ that set directly. Remote transport pages are isolated in the Remote protocol mo
 state is owned by the test-hook proof module rather than the platform composition root.
 
 The current Remote migration checkpoint is deliberately partial: `RemoteRuntime` owns RemoteState,
-local trust commands, transport reset/start state, and the enrollment gate. The composition root
-still owns Gateway endpoint bindings, Remote request processing, protected persistence context,
-deadlines, and replacement composition. ABI v4 remains unfrozen until the Network and Remote QEMU
-proofs are green and that coordination has moved behind concrete RemoteRuntime methods.
+local trust commands through one `local_command` path, transport reset/start state, protected
+control loading, and the enrollment gate. Production and test-driven Terminal input share that path;
+mutable RemoteState is not exposed to callers. The composition root still owns Gateway endpoint
+bindings, the large Remote request polling loop, protected persistence context, deadlines, and
+replacement composition. ABI v4 remains unfrozen until the Network and Remote QEMU proofs are green;
+extracting the polling loop is deferred until this consolidation is stable.
 
 ## 2. Ring model
 
@@ -716,7 +719,9 @@ The compatibility view must not force every native service to use path-based API
 
 ## 12. Networking model
 
-Applications consume asynchronous connection and datagram interfaces through the network service.
+Applications consume bounded datagram interfaces through the Network service. The bootstrap path
+is typed and asynchronous at the ABI boundary, but its current client implementation still uses a
+single global transaction; a scalable socket architecture is not yet complete.
 
 They do not own network drivers.
 
@@ -735,7 +740,17 @@ ICMP, UDP, malformed-frame, cancellation, timeout, and reconnect proofs.
 
 Terminal and Gateway use typed, generation-bound Network client pages. They receive no Network
 device/event endpoints; `platform::network::NetworkRuntime` owns the single active association,
-while `platform::runtime` retains only top-level polling and composition.
+readiness cache, and completion target. Once the Network service is bound and idle, NetworkRuntime
+submits `Status` directly to the Network server endpoint; Terminal is not a readiness dependency.
+`platform::runtime` retains only top-level polling and composition.
+
+Every production Network completion wakes and runs its blocked caller task for both successful and
+error statuses. QEMU white-box requests use an explicit test-only probe target, so test completion
+cannot encode Terminal as a fake caller or weaken the production scheduler invariant. The intended
+next architecture is queue-based: application writes enqueue to connection-owned TX buffers,
+bounded Network work produces segments, NIC completion reclaims buffers, and RX processing fills
+bounded per-connection buffers and publishes readiness. Network must not wake or run Gateway or
+Remote as part of protocol processing; scheduler composition belongs above the Network service.
 
 Bind, send, and receive authority are separate. Each grant carries an exact protocol/local-port or
 protocol/remote-IPv4-and-port scope; wildcard and CIDR policy remain future firewall work. Network
@@ -750,10 +765,9 @@ Policy is separated from mechanism:
 - identity/trust: peer authentication;
 - session gateway: remote LogOS protocol.
 
-Remote Foundation adds only passive, bounded TCP to the Network service: one listener, one accepted
-stream, fixed buffers, finite retransmission, and no DNS or outbound connect. Gateway receives
-capabilities scoped to its exact local TCP port; the authenticated stream handle remains owner- and
-generation-bound.
+Remote Foundation currently consumes the bootstrap TCP slice but does not constitute a production
+TCP architecture proof. A genuine TCP stream proof must pass through the Network service without
+Remote. Only after that path is green may Gateway and `logosctl` be used as the next vertical proof.
 
 ## 12.1 Inference model
 

@@ -16,12 +16,25 @@ impl RemoteRuntime {
         self.state.as_ref()
     }
 
-    pub fn state_mut(&mut self) -> &mut Option<RemoteState> {
-        &mut self.state
-    }
-
     pub fn replace_state(&mut self, state: RemoteState) {
         self.state = Some(state);
+    }
+
+    pub fn load_control(
+        &mut self,
+        input: &mut [u8; logos_remote::REMOTE_CONTROL_BLOB_BYTES],
+    ) -> bool {
+        self.state.as_mut().is_some_and(|state| state.load_control(input))
+    }
+
+    pub fn disable(&mut self) {
+        if let Some(state) = self.state.as_mut() {
+            state.disable();
+        }
+    }
+
+    pub fn handle_request<T>(&mut self, handler: impl FnOnce(&mut RemoteState) -> T) -> Option<T> {
+        self.state.as_mut().map(handler)
     }
 
     pub fn new(bootstrap: Option<logos_remote::Bootstrap>) -> Self {
@@ -30,11 +43,11 @@ impl RemoteRuntime {
 
     pub fn start(
         &mut self,
-        network_reported: bool,
+        network_configured: bool,
         gateway: Option<crate::sched::native_task::Handle>,
         scheduler: &mut crate::sched::native_task::Scheduler<'_>,
     ) -> bool {
-        if !self.gateway_started && network_reported {
+        if !self.gateway_started && network_configured {
             self.gateway_started =
                 gateway.is_some_and(|handle| scheduler.run(handle) && !scheduler.failed(handle));
             return self.gateway_started;

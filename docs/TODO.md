@@ -19,10 +19,10 @@
 
 ## 2. Current milestone: ABI v4 stabilization and migration closeout
 
-Network v1 typed transport is implemented, but its full QEMU closure and the Remote Foundation
-proofs remain open. ABI v4 restructuring is not frozen. The registered proof IDs remain permanent
-regression contracts; the fixed-seed QEMU run records completed-layer passes and current boundary
-failures.
+Network bootstrap transport is implemented, but the scalable Network architecture, its full QEMU
+closure, and the Remote Foundation proofs remain open. ABI v4 restructuring is not frozen. The
+registered proof IDs remain permanent regression contracts; the fixed-seed QEMU run records
+completed-layer passes and current boundary failures.
 
 1. [x] Define the minimal versioned Input, Display, and Session capability contracts required by
    `logos-terminal`.
@@ -45,7 +45,20 @@ failures.
 
 ### Phase 5 cleanup
 
+- [x] Move Network readiness ownership into `NetworkRuntime`'s direct server `Status` transaction.
+- [x] Make every production Network reply wake and run its blocked caller for every status.
+- [x] Give white-box QEMU probes an explicit test-only completion target.
+- [x] Replace Network debug-log readiness waits with structured `QUERY network/configured` polling.
+- [x] Make bounded `logosctl` success the Gateway-listening proof.
+- [x] Make Remote host operations authoritative; remove duplicate label-only Core scenario runs.
+- [x] Mark the five unfinished Remote proofs skipped while retaining their permanent IDs.
+- [ ] Implement each skipped Remote proof with real multi-boot/reconnect/restart orchestration and
+      a precise persisted-state postcondition.
+- [x] Consolidate `remote-key`, `enroll`, and `unenroll` through one `RemoteRuntime::local_command`.
+- [x] Remove external `RemoteRuntime::state_mut()` access; defer `poll_gateway` extraction.
 - [x] Move proof state semantics out of the platform composition root.
+- [x] Add deterministic TcpState evidence for sequence/acknowledgement arithmetic, bounded
+      retransmission, duplicate ACKs, FIN/CloseWait, and RST.
 - [x] Split QEMU catalogs and suite runner policy by suite.
 - [x] Use the canonical service endpoint set directly for page mapping.
 - [x] Split the Remote ABI protocol into `service/remote.rs`.
@@ -57,9 +70,11 @@ failures.
 
 - [x] Stabilization cycle: validate and repair the completed typed layers against the main suite;
       fixed-fixture QEMU run records 43 passed, 12 migration-deferred, and 28 skipped.
-- [ ] **Network-client cycle:** complete one bounded client transport migration and close its QEMU
-      scheduling boundary.
-- [ ] Remote cycle: complete one bounded Remote transport migration after Network-client completion.
+- [ ] **Network architecture cycle:** add queued per-connection TX/RX work and bounded service
+      budgets without Gateway- or Remote-specific scheduling.
+- [ ] Prove a genuine Network TCP stream without Remote, then run `remote/typed-invoke` through the
+      real Gateway and `logosctl` path.
+- [ ] Remote cycle: implement the five skipped proofs with their documented orchestration.
 - [ ] Stop restructuring ABI v4 after those cycles; require a new ADR for any exception.
 - [ ] Resume capability development: complete Remote verification or begin Safe System
       Artifacts / Persistence v2.

@@ -8,6 +8,7 @@ const DEBUG_EXIT: u16 = 0xf4;
 pub enum Action<'a> {
     Input(&'a str),
     Advance(u64),
+    Query(&'a str),
     Poll,
     Run(&'a str),
 }
@@ -64,7 +65,16 @@ pub fn serve(storage: u32, mut handle: impl FnMut(Action<'_>) -> bool) -> ! {
                 line(b"LOGOS/1 RESULT advance=accepted")
             }
             Ok(Request::Advance(_)) => line(b"LOGOS/1 ERROR advance=rejected"),
-            Ok(Request::Query(_)) => line(b"LOGOS/1 RESULT query=available"),
+            Ok(Request::Query(query)) if handle(Action::Query(query)) => {
+                write(b"LOGOS/1 RESULT query=");
+                write(query.as_bytes());
+                line(b" status=ready")
+            }
+            Ok(Request::Query(query)) => {
+                write(b"LOGOS/1 RESULT query=");
+                write(query.as_bytes());
+                line(b" status=pending")
+            }
             Ok(Request::Input(value)) if handle(Action::Input(value)) => {
                 line(b"LOGOS/1 RESULT input=accepted")
             }
@@ -119,6 +129,14 @@ fn line(value: &[u8]) {
     write(value);
     write(b"\r\n");
     debug::write_line(value);
+}
+
+#[cfg(feature = "test-hooks")]
+pub fn event(id: &str, state: &str) {
+    write(b"LOGOS/1 EVENT id=");
+    write(id.as_bytes());
+    write(b" state=");
+    line(state.as_bytes());
 }
 fn write(value: &[u8]) {
     for &byte in value {

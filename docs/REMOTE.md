@@ -1,8 +1,9 @@
 # Remote
 
-> **Status:** Remote Foundation v1 behavior and ownership extraction remain in progress; the typed
-> Remote path and local enrollment coordination are present, while fixed-seed Network/Remote proof
-> closure is still pending
+> **Status:** Remote Foundation v1 behavior and ownership extraction remain in progress. Network
+> readiness now belongs to NetworkRuntime and Gateway startup no longer probes through Terminal;
+> the QEMU harness now uses structured Network readiness and host-side Remote authority; fixed-seed
+> Network/Remote proof closure remains pending.
 
 ## Goal
 
@@ -36,6 +37,12 @@ client can reconnect and invoke the existing typed `ping` command.
 - `remote/gateway-restart`
 - `remote/protected-state-corrupt`
 
+The following five IDs remain permanent catalog entries but are currently explicitly skipped as
+unimplemented: `remote/enrollment-persistence`, `remote/reconnect-replay`,
+`remote/pending-after-reset`, `remote/gateway-restart`, and `remote/protected-state-corrupt`.
+They return only after their individual multi-boot/restart orchestration and semantic postconditions
+are implemented.
+
 ### Implementation checkpoints
 
 - [x] Bounded Noise IK, HKDF key separation, XChaCha protected-record primitive, fail-closed trust
@@ -51,13 +58,15 @@ client can reconnect and invoke the existing typed `ping` command.
 - [x] Protected Store enrollment, local trust commands, root-derived device/storage keys, and
   fail-closed corruption recovery.
 - [ ] Gateway attachment and `logosctl` end-to-end invocation are wired through the typed Core
-  remote gate; proof execution remains pending until the Network/Gateway boundary is stable.
+  remote gate; the harness runs the real bounded `logosctl` operation as the sole Remote proof
+  authority and does not execute a second label-only Core scenario.
 - [x] Host `logosctl keygen` and pinned Noise IK typed `invoke` client with bounded reconnects;
   `invoke` consumes the enrollment descriptor rather than a hard-coded generation.
 - [x] `RemoteRuntime` coordinates `remote-key`, `enroll <64-hex-key>`, and `unenroll`; the machine
   key is available when the firmware root is present and enrollment persistence remains protected.
-- [ ] QEMU restart, corruption, and typed-invocation proofs (the fixed-seed run remains open at the
-  Network/Gateway scheduling boundary).
+- [ ] QEMU typed-invocation proof after the Network/Gateway scheduling boundary is repaired.
+- [ ] Reintroduce the five skipped proofs only with their documented clean-shutdown, reconnect,
+  reset, restart, or protected-corruption orchestration.
 
 The remote proof IDs are registered in `logos-test`. They remain explicit verification work rather
 than environment-gated work. ABI v4 is not frozen until the full Network suite, all Remote proofs,
@@ -66,10 +75,15 @@ and the remaining ownership extraction pass together.
 ## Current ownership checkpoint
 
 `RemoteRuntime` currently owns `RemoteState`, local trust commands, the enrollment gate, transport
-start/reset state, and the Gateway start predicate. `platform::runtime` still owns Gateway endpoint
-bindings, Remote request polling, deadline/reply lifecycle, protected persistence context, and
-replacement composition. Moving those responsibilities is the next bounded cycle after Network
-proof closure.
+start/reset state, protected control loading, and the Gateway start predicate. Both production and
+test-driven Terminal input call `RemoteRuntime::local_command`; no second `remote-key`, `enroll`,
+or `unenroll` implementation exists. External callers observe `state()` and narrow transport,
+control, and request methods; mutable RemoteState is not exposed. The predicate consumes
+`NetworkRuntime::configured()`, which is backed by Network's internal server `Status` transaction;
+it does not depend on the Terminal client page. `platform::runtime` still owns Gateway endpoint
+bindings, the large Remote request polling loop, deadline/reply lifecycle, protected persistence
+context, and replacement composition. Extracting that polling loop remains deferred until this
+consolidation is stable.
 UEFI builds use target-scoped Fiat Curve25519 and software ChaCha20/Poly1305 backends so the full
 payload set builds consistently on the supported host toolchains.
 

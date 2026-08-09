@@ -411,6 +411,42 @@ pub(crate) fn run(
     ) else {
         fail!(b"capabilities");
     };
+    #[cfg(feature = "test-hooks")]
+    let Some(tcp_test_bind_capability) = capabilities.grant_scoped64(
+        capabilities::CapabilityKind::NetworkBind,
+        logos_abi::NetworkScope::new(
+            logos_abi::NetworkProtocol::Tcp,
+            0,
+            logos_abi::REMOTE_TCP_PORT,
+        )
+        .0,
+    ) else {
+        fail!(b"capabilities");
+    };
+    #[cfg(feature = "test-hooks")]
+    let Some(tcp_test_send_capability) = capabilities.grant_scoped64(
+        capabilities::CapabilityKind::NetworkSend,
+        logos_abi::NetworkScope::new(
+            logos_abi::NetworkProtocol::Tcp,
+            0,
+            logos_abi::REMOTE_TCP_PORT,
+        )
+        .0,
+    ) else {
+        fail!(b"capabilities");
+    };
+    #[cfg(feature = "test-hooks")]
+    let Some(tcp_test_receive_capability) = capabilities.grant_scoped64(
+        capabilities::CapabilityKind::NetworkReceive,
+        logos_abi::NetworkScope::new(
+            logos_abi::NetworkProtocol::Tcp,
+            0,
+            logos_abi::REMOTE_TCP_PORT,
+        )
+        .0,
+    ) else {
+        fail!(b"capabilities");
+    };
     let Some(recovery_capability) = capabilities.grant(capabilities::CapabilityKind::Recovery)
     else {
         fail!(b"capabilities");
@@ -444,6 +480,27 @@ pub(crate) fn run(
     let Some(restricted_session) =
         session::Context::new(session::Id(3), session::Principal::LOCAL, &[session_capability])
     else {
+        fail!(b"session");
+    };
+    #[cfg(feature = "test-hooks")]
+    let Some(tcp_test_session) = session::Context::new(
+        session::Id(5),
+        session::Principal::LOCAL,
+        &[tcp_test_bind_capability, tcp_test_send_capability, tcp_test_receive_capability],
+    ) else {
+        fail!(b"session");
+    };
+    #[cfg(feature = "test-hooks")]
+    let Some(network_test_session) = session::Context::new(
+        session::Id(6),
+        session::Principal::LOCAL,
+        &[
+            network_bind_capability,
+            network_send_capability,
+            network_icmp_capability,
+            network_receive_capability,
+        ],
+    ) else {
         fail!(b"session");
     };
     #[cfg(feature = "test-hooks")]
@@ -804,7 +861,7 @@ pub(crate) fn run(
     let network_resources = native_network
         .as_mut()
         .and_then(|task| task.map_network_owned(&mut memory))
-        .and_then(|((rx_physical, rx_virtual), (tx_physical, tx_virtual))| {
+        .and_then(|((rx_physical, _rx_virtual), (tx_physical, _tx_virtual))| {
             let owner = network_owner?;
             let rx = shared_pages.register(owner, rx_physical, 2)?;
             let Some(tx) = shared_pages.register(owner, tx_physical, 2) else {
@@ -1035,10 +1092,9 @@ pub(crate) fn run(
     } else if let Some(bootstrap) = remote_bootstrap {
         remote_runtime.replace_state(secrets::RemoteState::unavailable(bootstrap));
     }
-    if let (Some(state), Some(page_address)) = (
-        remote_runtime.state_mut().as_mut().filter(|state| state.available()),
-        shared_pages.address(terminal_owner, shared_history),
-    ) {
+    if remote_runtime.state().is_some_and(secrets::RemoteState::available)
+        && let Some(page_address) = shared_pages.address(terminal_owner, shared_history)
+    {
         let mut blob = [0; logos_remote::REMOTE_CONTROL_BLOB_BYTES];
         let status = storage_runtime.protected_store_read(
             &mut block::DispatchContext {
@@ -1058,9 +1114,9 @@ pub(crate) fn run(
             interrupts::ticks(),
         );
         if status == logos_abi::PersistenceStatus::Complete {
-            let _ = state.load_control(&mut blob);
+            let _ = remote_runtime.load_control(&mut blob);
         } else if status != logos_abi::PersistenceStatus::NotFound {
-            state.disable();
+            remote_runtime.disable();
         }
     }
     let mut network_handle = if let Some(network_task) = native_network.take()
@@ -1117,14 +1173,16 @@ pub(crate) fn run(
     if gateway_handle.is_none() {
         let _ = native_services.missing(supervisor::NativeService::Gateway);
     }
-    let mut network_probe = Some(0x8000_0001u32);
-    let mut network_probe_due = 0;
-    let mut network_reported = false;
+    #[cfg(feature = "test-hooks")]
+    let mut network_qemu_asserted = false;
 
     macro_rules! poll_gateway {
         () => {{
-            let started_now =
-                remote_runtime.start(network_reported, gateway_handle, &mut native_scheduler);
+            let started_now = remote_runtime.start(
+                network_runtime.configured(),
+                gateway_handle,
+                &mut native_scheduler,
+            );
             if started_now {
                 debug::write_line(b"LogOS: Gateway started");
                 native_services.ready(supervisor::NativeService::Gateway);
@@ -1146,7 +1204,7 @@ pub(crate) fn run(
                     gateway_page,
                     shared_history,
                     terminal_owner,
-                    remote_runtime.state_mut(),
+                    &mut remote_runtime,
                     native_sessions_endpoint,
                     sessions_handle,
                     remote_session.as_ref(),
@@ -1409,9 +1467,10 @@ pub(crate) fn run(
                     ) {
                         return false;
                     }
-                    network_probe = Some(0x8000_0001);
-                    network_probe_due = 0;
-                    network_reported = false;
+                    #[cfg(feature = "test-hooks")]
+                    {
+                        network_qemu_asserted = false;
+                    }
                     return true;
                 }
                 if value == "persistence/block-read-flush" {
@@ -1920,9 +1979,10 @@ pub(crate) fn run(
                     }
                     network_handle = Some(restarted);
                     native_network_endpoint = Some(endpoint);
-                    network_probe = Some(0x8000_0001);
-                    network_probe_due = 0;
-                    network_reported = false;
+                    #[cfg(feature = "test-hooks")]
+                    {
+                        network_qemu_asserted = false;
+                    }
                 }
                 if value == "persistence/write-interruption" || value == "persistence/recovery" {
                     let status = native_storage_store.status();
@@ -2223,7 +2283,7 @@ pub(crate) fn run(
                                 };
                                 let started = remote_runtime.started()
                                     || remote_runtime.start(
-                                        network_reported,
+                                        network_runtime.configured(),
                                         gateway_handle,
                                         &mut native_scheduler,
                                     );
@@ -2294,15 +2354,14 @@ pub(crate) fn run(
                 passed
             }
             test_hooks::Action::Poll => true,
+            test_hooks::Action::Query(query) => {
+                matches!(query, "network/configured") && network_runtime.configured()
+            }
             test_hooks::Action::Advance(ticks) => {
                 for step in 0..ticks.min(4096) {
                     if !poll_network(
                         &mut network_runtime,
-                        native_network_endpoint,
                         &mut native_scheduler,
-                        &mut network_probe,
-                        &mut network_probe_due,
-                        &mut network_reported,
                         interrupts::ticks().saturating_add(step),
                         native_terminal_network,
                         native_handle,
@@ -2313,6 +2372,7 @@ pub(crate) fn run(
                     ) {
                         return false;
                     }
+                    assert_qemu_network_configuration(&network_runtime, &mut network_qemu_asserted);
                     if !poll_gateway!() {
                         return false;
                     }
@@ -2320,6 +2380,18 @@ pub(crate) fn run(
                 true
             }
             test_hooks::Action::Run(id) => {
+                if id == "network/tcp-stream" {
+                    return run_network_tcp_stream(
+                        native_terminal_network,
+                        &mut network_runtime,
+                        &mut native_scheduler,
+                        &tcp_test_session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                        shared_history,
+                    );
+                }
                 if id == "network/simultaneous-client-busy" {
                     if gateway_handle.is_none() {
                         let Some(task) = native_gateway.take() else {
@@ -2339,7 +2411,7 @@ pub(crate) fn run(
                                 .zip(gateway_page)
                                 .is_none_or(|(endpoint, page)| endpoint.configure_transfer(page))
                             || !remote_runtime.start(
-                                network_reported,
+                                network_runtime.configured(),
                                 gateway_handle,
                                 &mut native_scheduler,
                             )
@@ -2375,7 +2447,6 @@ pub(crate) fn run(
                         NetworkClientSlot::Gateway,
                         gateway_client,
                         gateway_task,
-                        &mut native_scheduler,
                         gateway_session,
                         &capabilities,
                         &shared_pages,
@@ -2384,29 +2455,28 @@ pub(crate) fn run(
                     ) {
                         return false;
                     }
-                    if !native_terminal_network.issue(terminal_request) {
-                        return false;
-                    }
-                    if !network_runtime.relay_client(
-                        NetworkClientSlot::Terminal,
+                    let Some(busy) = run_network_request(
+                        terminal_request,
                         native_terminal_network,
-                        native_handle,
+                        &mut network_runtime,
                         &mut native_scheduler,
                         &session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
-                        interrupts::ticks(),
-                    ) {
+                    ) else {
+                        return false;
+                    };
+                    if busy.status != logos_abi::NetworkStatus::Busy
+                        || !network_runtime.invalidate_client(
+                            NetworkClientSlot::Gateway,
+                            logos_abi::NetworkStatus::Cancelled,
+                        )
+                    {
                         return false;
                     }
-                    if let Some(busy) = native_terminal_network.response(terminal_request.id) {
-                        return busy.status == logos_abi::NetworkStatus::Busy
-                            && network_runtime.invalidate_client(
-                                NetworkClientSlot::Gateway,
-                                &mut native_scheduler,
-                                logos_abi::NetworkStatus::Cancelled,
-                            );
+                    if !drain_network_wakes(&mut network_runtime, &mut native_scheduler) {
+                        return false;
                     }
                     let gateway_request = logos_abi::NetworkRequest {
                         id: 0x9000_0201,
@@ -2423,7 +2493,6 @@ pub(crate) fn run(
                             NetworkClientSlot::Gateway,
                             gateway_client,
                             gateway_task,
-                            &mut native_scheduler,
                             gateway_session,
                             &capabilities,
                             &shared_pages,
@@ -2433,14 +2502,17 @@ pub(crate) fn run(
                     {
                         return false;
                     }
-                    let passed = gateway_client.response(gateway_request.id).is_some_and(|reply| {
-                        reply.status == logos_abi::NetworkStatus::Busy
-                            && network_runtime.invalidate_client(
-                                NetworkClientSlot::Terminal,
-                                &mut native_scheduler,
-                                logos_abi::NetworkStatus::Cancelled,
-                            )
-                    });
+                    if !drain_network_wakes(&mut network_runtime, &mut native_scheduler) {
+                        return false;
+                    }
+                    let passed = gateway_client
+                        .response(gateway_request.id)
+                        .is_some_and(|reply| reply.status == logos_abi::NetworkStatus::Busy)
+                        && network_runtime.invalidate_client(
+                            NetworkClientSlot::Terminal,
+                            logos_abi::NetworkStatus::Cancelled,
+                        )
+                        && drain_network_wakes(&mut network_runtime, &mut native_scheduler);
                     return passed;
                 }
                 if id == "network/unauthorized-operation" {
@@ -2490,23 +2562,16 @@ pub(crate) fn run(
                         },
                     ];
                     for request in requests {
-                        if !native_terminal_network.issue(request) {
-                            return false;
-                        }
-                        if !network_runtime.relay_client(
-                            NetworkClientSlot::Terminal,
+                        let Some(reply) = run_network_request(
+                            request,
                             native_terminal_network,
-                            native_handle,
+                            &mut network_runtime,
                             &mut native_scheduler,
                             &denied_session,
                             &capabilities,
                             &shared_pages,
                             terminal_owner,
-                            interrupts::ticks(),
-                        ) {
-                            return false;
-                        }
-                        let Some(reply) = native_terminal_network.response(request.id) else {
+                        ) else {
                             return false;
                         };
                         if reply.status != logos_abi::NetworkStatus::Denied
@@ -2518,9 +2583,7 @@ pub(crate) fn run(
                     return true;
                 }
                 if id == "network/icmp-echo" {
-                    if !network_reported {
-                        return false;
-                    }
+                    test_hooks::event(id, "starting");
                     let request = logos_abi::NetworkRequest {
                         id: 0x9000_0100,
                         operation: logos_abi::NetworkOperation::Echo,
@@ -2538,30 +2601,27 @@ pub(crate) fn run(
                     let reply = run_network_request(
                         request,
                         native_terminal_network,
-                        native_handle,
-                        native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_probe,
-                        &mut network_probe_due,
-                        &mut network_reported,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
                     );
                     let Some(reply) = reply else {
+                        test_hooks::event(id, "request_failed");
                         return false;
                     };
                     if reply.status != logos_abi::NetworkStatus::Complete {
+                        test_hooks::event(id, network_status_label(reply.status));
                         return false;
                     }
-                    return reply.source_address == 0x0a00_0202;
+                    let passed = reply.source_address == 0x0a00_0202;
+                    test_hooks::event(id, if passed { "passed" } else { "source_invalid" });
+                    return passed;
                 }
                 if id == "network/udp-round-trip" {
-                    if !network_reported {
-                        return false;
-                    }
+                    test_hooks::event(id, "starting");
                     let bind = logos_abi::NetworkRequest {
                         id: 0x9000_0110,
                         operation: logos_abi::NetworkOperation::Bind,
@@ -2579,18 +2639,14 @@ pub(crate) fn run(
                     let Some(bind_reply) = run_network_request(
                         bind,
                         native_terminal_network,
-                        native_handle,
-                        native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_probe,
-                        &mut network_probe_due,
-                        &mut network_reported,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
                     ) else {
+                        test_hooks::event(id, "bind_failed");
                         return false;
                     };
                     let payload = b"logos-network-v1";
@@ -2622,18 +2678,14 @@ pub(crate) fn run(
                     let Some(send_reply) = run_network_request(
                         send,
                         native_terminal_network,
-                        native_handle,
-                        native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_probe,
-                        &mut network_probe_due,
-                        &mut network_reported,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
                     ) else {
+                        test_hooks::event(id, "send_failed");
                         return false;
                     };
                     let receive = logos_abi::NetworkRequest {
@@ -2653,18 +2705,14 @@ pub(crate) fn run(
                     let Some(receive_reply) = run_network_request(
                         receive,
                         native_terminal_network,
-                        native_handle,
-                        native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_probe,
-                        &mut network_probe_due,
-                        &mut network_reported,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
                     ) else {
+                        test_hooks::event(id, "receive_failed");
                         return false;
                     };
                     let received = unsafe {
@@ -2673,7 +2721,7 @@ pub(crate) fn run(
                             receive_reply.length as usize,
                         )
                     };
-                    return bind_reply.status == logos_abi::NetworkStatus::Complete
+                    let passed = bind_reply.status == logos_abi::NetworkStatus::Complete
                         && send_reply.status == logos_abi::NetworkStatus::Complete
                         && receive_reply.status == logos_abi::NetworkStatus::Complete
                         && receive_reply.source_address == 0x0a00_0202
@@ -2681,11 +2729,10 @@ pub(crate) fn run(
                         && send_reply.counters.tx_frames > 0
                         && receive_reply.counters.rx_frames > 0
                         && received == payload;
+                    test_hooks::event(id, if passed { "passed" } else { "payload_invalid" });
+                    return passed;
                 }
                 if id == "network/backpressure-cancel" {
-                    if !network_reported {
-                        return false;
-                    }
                     let bind = logos_abi::NetworkRequest {
                         id: 0x9000_0120,
                         operation: logos_abi::NetworkOperation::Bind,
@@ -2703,14 +2750,9 @@ pub(crate) fn run(
                     let Some(bind_reply) = run_network_request(
                         bind,
                         native_terminal_network,
-                        native_handle,
-                        native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_probe,
-                        &mut network_probe_due,
-                        &mut network_reported,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
@@ -2730,14 +2772,9 @@ pub(crate) fn run(
                     let Some(cancel_reply) = run_network_request(
                         cancel,
                         native_terminal_network,
-                        native_handle,
-                        native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_probe,
-                        &mut network_probe_due,
-                        &mut network_reported,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
@@ -2757,14 +2794,9 @@ pub(crate) fn run(
                     let Some(close_reply) = run_network_request(
                         close,
                         native_terminal_network,
-                        native_handle,
-                        native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_probe,
-                        &mut network_probe_due,
-                        &mut network_reported,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
@@ -2777,9 +2809,6 @@ pub(crate) fn run(
                         && close_reply.status == logos_abi::NetworkStatus::Complete;
                 }
                 if id == "network/packet-loss" {
-                    if !network_reported {
-                        return false;
-                    }
                     let first = logos_abi::NetworkRequest {
                         id: 0x9000_0130,
                         operation: logos_abi::NetworkOperation::Echo,
@@ -2802,14 +2831,9 @@ pub(crate) fn run(
                     let Some(first_reply) = run_network_request(
                         first,
                         native_terminal_network,
-                        native_handle,
-                        native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_probe,
-                        &mut network_probe_due,
-                        &mut network_reported,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
@@ -2819,14 +2843,9 @@ pub(crate) fn run(
                     let Some(second_reply) = run_network_request(
                         second,
                         native_terminal_network,
-                        native_handle,
-                        native_network_endpoint,
                         &mut network_runtime,
                         &mut native_scheduler,
-                        &mut network_probe,
-                        &mut network_probe_due,
-                        &mut network_reported,
-                        &session,
+                        &network_test_session,
                         &capabilities,
                         &shared_pages,
                         terminal_owner,
@@ -2919,9 +2938,8 @@ pub(crate) fn run(
                             == supervisor::NativeState::Missing
                         && network_handle.is_none())
                     || (cfg!(feature = "block-probe") && id == "persistence/block-read-flush")
-                    || (id == "network/transport-dhcp" && network_reported)
-                    || (id == "network/configuration" && network_reported)
-                    || (id == "network/tcp-stream" && gateway_handle.is_some())
+                    || (id == "network/transport-dhcp" && network_qemu_asserted)
+                    || (id == "network/configuration" && network_qemu_asserted)
                     || (id.starts_with("remote/") && gateway_handle.is_some())
                     || proof.passed()
             }
@@ -3048,9 +3066,10 @@ pub(crate) fn run(
                     ) {
                         network_handle = Some(restarted);
                         native_network_endpoint = Some(endpoint);
-                        network_probe = Some(0x8000_0001);
-                        network_probe_due = tick;
-                        network_reported = false;
+                        #[cfg(feature = "test-hooks")]
+                        {
+                            network_qemu_asserted = false;
+                        }
                         let bound = native_scheduler
                             .network_device_endpoint(restarted, network_runtime.device_generation())
                             .zip(native_scheduler.network_event_endpoint(
@@ -3097,11 +3116,7 @@ pub(crate) fn run(
                 }
                 if !poll_network(
                     &mut network_runtime,
-                    native_network_endpoint,
                     &mut native_scheduler,
-                    &mut network_probe,
-                    &mut network_probe_due,
-                    &mut network_reported,
                     tick,
                     native_terminal_network,
                     native_handle,
@@ -3115,6 +3130,8 @@ pub(crate) fn run(
                         let _ = native_services.failed(supervisor::NativeService::Network, tick);
                     }
                 }
+                #[cfg(feature = "test-hooks")]
+                assert_qemu_network_configuration(&network_runtime, &mut network_qemu_asserted);
                 if !poll_gateway!() {
                     debug::write_line(b"LogOS: Gateway service unavailable");
                     if gateway_handle.is_some() {
@@ -3260,125 +3277,49 @@ pub(crate) fn run(
                             )
                         }) {
                             let request = native_command.request().unwrap();
-                            debug::write_line(b"LogOS: remote local command");
-                            let mut key_text = [0; 96];
-                            let mut reply = b"remote unavailable" as &[u8];
-                            let mut enrolled = false;
-                            if let Some(state) = remote_runtime.state_mut().as_mut() {
-                                match request.syscall {
-                                    logos_abi::Syscall::RemoteKey => {
-                                        if state.available() {
-                                            let mut machine_key = [0; 64];
-                                            hex_key(&state.machine_public(), &mut machine_key);
-                                            key_text[..64].copy_from_slice(&machine_key);
-                                            reply = &key_text[..64];
-                                        }
-                                    }
-                                    logos_abi::Syscall::Enroll => {
-                                        let mut client_key = [0; 32];
-                                        let key_ok = request.length == 64
-                                            && hex_decode_key(
-                                                &request.argument[..request.length],
-                                                &mut client_key,
-                                            );
-                                        if key_ok
-                                            && state.enroll(client_key).is_some_and(|_| {
-                                                let persisted = storage_runtime
-                                                    .persist_remote_enrollment(
-                                                        state,
-                                                        remote_bootstrap,
-                                                        &mut block::DispatchContext {
-                                                            endpoint: native_storage_block,
-                                                            pages: &mut shared_pages,
-                                                            store_owner: storage_owner,
-                                                            store_page: storage_block_page,
-                                                            device: &mut block_device,
-                                                            memory: &mut memory,
-                                                        },
-                                                        &mut native_scheduler,
-                                                        shared_history,
-                                                        terminal_owner,
-                                                        tick,
-                                                    );
-                                                debug::write_line(if persisted {
-                                                    b"LogOS: remote enrollment persisted"
-                                                } else {
-                                                    b"LogOS: remote enrollment persistence failed"
-                                                });
-                                                persisted
-                                            })
-                                        {
-                                            let mut machine_key = [0; 64];
-                                            hex_key(&state.machine_public(), &mut machine_key);
-                                            key_text[..64].copy_from_slice(&machine_key);
-                                            key_text[64] = b':';
-                                            let generation = state.enrollment().generation;
-                                            let mut digits = [0; 20];
-                                            let length = decimal_u64(generation, &mut digits);
-                                            key_text[65..65 + length]
-                                                .copy_from_slice(&digits[..length]);
-                                            reply = &key_text[..65 + length];
-                                            enrolled = true;
-                                        } else {
-                                            reply = b"invalid enrollment key";
-                                        }
-                                    }
-                                    logos_abi::Syscall::Unenroll => {
-                                        if state.unenroll().is_some_and(|_| {
-                                            storage_runtime.persist_remote_enrollment(
-                                                state,
-                                                remote_bootstrap,
-                                                &mut block::DispatchContext {
-                                                    endpoint: native_storage_block,
-                                                    pages: &mut shared_pages,
-                                                    store_owner: storage_owner,
-                                                    store_page: storage_block_page,
-                                                    device: &mut block_device,
-                                                    memory: &mut memory,
-                                                },
-                                                &mut native_scheduler,
-                                                shared_history,
-                                                terminal_owner,
-                                                tick,
-                                            )
-                                        }) {
-                                            reply = b"remote unenrolled";
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                if enrolled
-                                    && gateway_handle.is_none()
-                                    && network_handle.is_some()
-                                    && let Some(task) = native_gateway.take()
-                                {
-                                    debug::write_line(b"LogOS: Gateway enrollment spawn");
-                                    gateway_handle = native_scheduler.spawn(task);
-                                    if let Some(handle) = gateway_handle {
-                                        native_gateway_network =
-                                            native_scheduler.network_client_endpoint(handle);
-                                        native_gateway_remote =
-                                            native_scheduler.remote_endpoint(handle);
-                                        native_gateway_store =
-                                            native_scheduler.store_client_endpoint(handle);
-                                        if !native_gateway_network.zip(gateway_page).is_none_or(
-                                            |(endpoint, page)| endpoint.configure_transfer(page),
-                                        ) || !native_gateway_store.zip(gateway_page).is_none_or(
-                                            |(endpoint, page)| endpoint.configure_transfer(page),
-                                        ) {
-                                            gateway_handle = None;
-                                        }
-                                    }
-                                    if gateway_handle.is_some() {
-                                        network_reported = true;
-                                        native_services.ready(supervisor::NativeService::Gateway);
-                                        debug::write_line(b"LogOS: Gateway enrollment ready");
+                            let local = remote_runtime.local_command(
+                                request,
+                                remote_bootstrap,
+                                &mut storage_runtime,
+                                &mut block::DispatchContext {
+                                    endpoint: native_storage_block,
+                                    pages: &mut shared_pages,
+                                    store_owner: storage_owner,
+                                    store_page: storage_block_page,
+                                    device: &mut block_device,
+                                    memory: &mut memory,
+                                },
+                                &mut native_scheduler,
+                                shared_history,
+                                terminal_owner,
+                                tick,
+                            );
+                            if local.enrolled
+                                && gateway_handle.is_none()
+                                && network_handle.is_some()
+                                && let Some(task) = native_gateway.take()
+                            {
+                                gateway_handle = native_scheduler.spawn(task);
+                                if let Some(handle) = gateway_handle {
+                                    native_gateway_network =
+                                        native_scheduler.network_client_endpoint(handle);
+                                    native_gateway_remote =
+                                        native_scheduler.remote_endpoint(handle);
+                                    native_gateway_store =
+                                        native_scheduler.store_client_endpoint(handle);
+                                    if !native_gateway_network.zip(gateway_page).is_none_or(
+                                        |(endpoint, page)| endpoint.configure_transfer(page),
+                                    ) || !native_gateway_store.zip(gateway_page).is_none_or(
+                                        |(endpoint, page)| endpoint.configure_transfer(page),
+                                    ) {
+                                        gateway_handle = None;
                                     }
                                 }
-                            } else {
-                                debug::write_line(b"LogOS: remote state missing");
-                            };
-                            if !native_command.reply(reply)
+                                if gateway_handle.is_some() {
+                                    native_services.ready(supervisor::NativeService::Gateway);
+                                }
+                            }
+                            if !native_command.reply(&local.reply.text[..local.reply.length])
                                 || !native_scheduler.wake(native_handle)
                                 || !native_scheduler.run(native_handle)
                                 || !resume_display(
@@ -3552,11 +3493,7 @@ pub(crate) fn run(
                 );
                 let _ = poll_network(
                     &mut network_runtime,
-                    native_network_endpoint,
                     &mut native_scheduler,
-                    &mut network_probe,
-                    &mut network_probe_due,
-                    &mut network_reported,
                     tick,
                     native_terminal_network,
                     native_handle,
@@ -3565,6 +3502,8 @@ pub(crate) fn run(
                     &shared_pages,
                     terminal_owner,
                 );
+                #[cfg(feature = "test-hooks")]
+                assert_qemu_network_configuration(&network_runtime, &mut network_qemu_asserted);
                 let _ = poll_gateway!();
                 false
             });
@@ -3586,9 +3525,10 @@ fn run_network_device_request(
     tick: u64,
 ) -> Option<logos_abi::NetworkDeviceReply> {
     for step in 0..16 {
-        if runtime.device_endpoint().pending()
-            && !runtime.poll(scheduler, tick.saturating_add(step))
-        {
+        if runtime.device_endpoint().pending() && !runtime.poll(tick.saturating_add(step)) {
+            return None;
+        }
+        if !drain_network_wakes(runtime, scheduler) {
             return None;
         }
         if !runtime.device_endpoint().pending() {
@@ -3610,13 +3550,22 @@ fn run_network_device_request(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn drain_network_wakes(
+    runtime: &mut network::NetworkRuntime,
+    scheduler: &mut native_task::Scheduler<'_>,
+) -> bool {
+    while let Some(handle) = runtime.take_wake() {
+        if scheduler.failed(handle) || !scheduler.wake(handle) || !scheduler.run(handle) {
+            return false;
+        }
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
 fn poll_network(
     runtime: &mut network::NetworkRuntime,
-    _endpoint: Option<native_task::NetworkEndpoint>,
     scheduler: &mut native_task::Scheduler<'_>,
-    probe: &mut Option<u32>,
-    probe_due: &mut u64,
-    reported: &mut bool,
     tick: u64,
     terminal: native_task::NetworkClientEndpoint,
     terminal_handle: native_task::Handle,
@@ -3628,11 +3577,13 @@ fn poll_network(
     if runtime.task().is_none() {
         return true;
     }
+    if !runtime.poll(tick) || !drain_network_wakes(runtime, scheduler) {
+        return false;
+    }
     if !runtime.relay_client(
         NetworkClientSlot::Terminal,
         terminal,
         terminal_handle,
-        scheduler,
         session,
         capabilities,
         shared_pages,
@@ -3641,14 +3592,16 @@ fn poll_network(
     ) {
         return false;
     }
-    if !runtime.poll(scheduler, tick) {
+    if !drain_network_wakes(runtime, scheduler) || !runtime.poll(tick) {
+        return false;
+    }
+    if !drain_network_wakes(runtime, scheduler) {
         return false;
     }
     if !runtime.relay_client(
         NetworkClientSlot::Terminal,
         terminal,
         terminal_handle,
-        scheduler,
         session,
         capabilities,
         shared_pages,
@@ -3657,57 +3610,28 @@ fn poll_network(
     ) {
         return false;
     }
-    if !runtime.event_endpoint().waiting() {
-        return true;
-    }
-    if let Some(id) = *probe {
-        if let Some(reply) = terminal.response(id) {
-            if reply.status == logos_abi::NetworkStatus::Complete
-                && reply.info.configuration == 1
-                && reply.info.ipv4 == u32::from_be_bytes([10, 0, 2, 15])
-                && reply.info.subnet_mask == u32::from_be_bytes([255, 255, 255, 0])
-                && reply.info.router == u32::from_be_bytes([10, 0, 2, 2])
-            {
-                debug::write_line(
-                    b"LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2",
-                );
-                *reported = true;
-                *probe = None;
-            } else {
-                *probe = Some(id.wrapping_add(1).max(1));
-                *probe_due = tick.saturating_add(64);
-            }
-            return true;
-        }
-    }
-    if !*reported && tick >= *probe_due {
-        if let Some(id) = *probe {
-            let request = logos_abi::NetworkRequest {
-                id,
-                operation: logos_abi::NetworkOperation::Status,
-                endpoint: logos_abi::NetworkEndpoint(0),
-                peer: logos_abi::NetworkScope(0),
-                page: logos_abi::PageHandle(0),
-                length: 0,
-                generation: 0,
-                deadline: u64::MAX / 2,
-            };
-            if terminal.issue(request) {
-                return runtime.relay_client(
-                    NetworkClientSlot::Terminal,
-                    terminal,
-                    terminal_handle,
-                    scheduler,
-                    session,
-                    capabilities,
-                    shared_pages,
-                    terminal_owner,
-                    tick,
-                );
-            }
-        }
+    if !drain_network_wakes(runtime, scheduler) {
+        return false;
     }
     true
+}
+
+#[cfg(feature = "test-hooks")]
+fn assert_qemu_network_configuration(runtime: &network::NetworkRuntime, asserted: &mut bool) {
+    if *asserted {
+        return;
+    }
+    let Some(info) = runtime.info() else { return };
+    if info.configuration == 1
+        && info.ipv4 == u32::from_be_bytes([10, 0, 2, 15])
+        && info.subnet_mask == u32::from_be_bytes([255, 255, 255, 0])
+        && info.router == u32::from_be_bytes([10, 0, 2, 2])
+    {
+        debug::write_line(
+            b"LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2",
+        );
+        *asserted = true;
+    }
 }
 
 #[cfg(feature = "test-hooks")]
@@ -3715,13 +3639,8 @@ fn poll_network(
 fn run_network_request(
     request: logos_abi::NetworkRequest,
     terminal: native_task::NetworkClientEndpoint,
-    terminal_handle: native_task::Handle,
-    service: Option<native_task::NetworkEndpoint>,
     runtime: &mut network::NetworkRuntime,
     scheduler: &mut native_task::Scheduler<'_>,
-    probe: &mut Option<u32>,
-    probe_due: &mut u64,
-    reported: &mut bool,
     session: &session::Context,
     capabilities: &capabilities::CapabilityManager,
     shared_pages: &logos_core::shared_pages::SharedPages,
@@ -3730,29 +3649,25 @@ fn run_network_request(
     if !terminal.issue(request) {
         return None;
     }
-    let endpoint = match service {
-        Some(endpoint) => endpoint,
-        None => return None,
-    };
-    if runtime.task().is_none() {
-        return None;
-    }
+    runtime.task()?;
     for _ in 0..1_000_000 {
-        if !poll_network(
-            runtime,
-            Some(endpoint),
-            scheduler,
-            probe,
-            probe_due,
-            reported,
-            interrupts::ticks(),
-            terminal,
-            terminal_handle,
-            session,
-            capabilities,
-            shared_pages,
-            terminal_owner,
-        ) {
+        let tick = interrupts::ticks();
+        if !runtime.poll(tick) {
+            return None;
+        }
+        if !drain_network_wakes(runtime, scheduler) {
+            return None;
+        }
+        if !runtime.relay_probe(terminal, session, capabilities, shared_pages, terminal_owner, tick)
+        {
+            return None;
+        }
+        if !drain_network_wakes(runtime, scheduler) || !runtime.poll(tick) {
+            return None;
+        }
+        if !runtime.relay_probe(terminal, session, capabilities, shared_pages, terminal_owner, tick)
+            || !drain_network_wakes(runtime, scheduler)
+        {
             return None;
         }
         if let Some(reply) = terminal.response(request.id) {
@@ -3760,6 +3675,257 @@ fn run_network_request(
         }
     }
     None
+}
+
+#[cfg(feature = "test-hooks")]
+#[allow(clippy::too_many_arguments)]
+fn run_network_tcp_stream(
+    client: native_task::NetworkClientEndpoint,
+    runtime: &mut network::NetworkRuntime,
+    scheduler: &mut native_task::Scheduler<'_>,
+    session: &session::Context,
+    capabilities: &capabilities::CapabilityManager,
+    shared_pages: &logos_core::shared_pages::SharedPages,
+    owner: u64,
+    page: logos_abi::PageHandle,
+) -> bool {
+    const ID: &str = "network/tcp-stream";
+    const DEADLINE: u64 = u64::MAX / 2;
+    const PORT: u16 = logos_abi::REMOTE_TCP_PORT;
+    let scope = logos_abi::NetworkScope::new(logos_abi::NetworkProtocol::Tcp, 0, PORT);
+    let request = |id, operation, endpoint, page, length, generation| logos_abi::NetworkRequest {
+        id,
+        operation,
+        endpoint,
+        peer: logos_abi::NetworkScope::new(logos_abi::NetworkProtocol::Tcp, 0, PORT),
+        page,
+        length,
+        generation,
+        deadline: DEADLINE,
+    };
+    test_hooks::event(ID, "starting");
+    if !runtime.has_device() {
+        test_hooks::event(ID, "network_device_unavailable");
+        return false;
+    }
+    if runtime.resources().is_none() {
+        test_hooks::event(ID, "network_resources_unavailable");
+        return false;
+    }
+    if runtime.task().is_none() {
+        test_hooks::event(ID, "network_unavailable");
+        return false;
+    }
+
+    let listen = request(
+        0x9000_0300,
+        logos_abi::NetworkOperation::Listen,
+        logos_abi::NetworkEndpoint(0),
+        logos_abi::PageHandle(0),
+        0,
+        0,
+    );
+    let Some(listen_reply) = run_network_request(
+        listen,
+        client,
+        runtime,
+        scheduler,
+        session,
+        capabilities,
+        shared_pages,
+        owner,
+    ) else {
+        test_hooks::event(ID, "listener_failed");
+        return false;
+    };
+    if listen_reply.status != logos_abi::NetworkStatus::Complete {
+        test_hooks::event(ID, network_status_label(listen_reply.status));
+        return false;
+    }
+    if !listen_reply.endpoint.valid() || listen_reply.generation == 0 {
+        test_hooks::event(ID, "listener_shape_invalid");
+        return false;
+    }
+    test_hooks::event(ID, "listener_waiting");
+
+    let accept = request(
+        0x9000_0301,
+        logos_abi::NetworkOperation::Accept,
+        listen_reply.endpoint,
+        logos_abi::PageHandle(0),
+        0,
+        0,
+    );
+    let Some(accept_reply) = run_network_request(
+        accept,
+        client,
+        runtime,
+        scheduler,
+        session,
+        capabilities,
+        shared_pages,
+        owner,
+    ) else {
+        test_hooks::event(ID, "accept_failed");
+        return false;
+    };
+    if accept_reply.status != logos_abi::NetworkStatus::Complete
+        || !accept_reply.endpoint.valid()
+        || accept_reply.generation != listen_reply.generation
+        || accept_reply.source_address == 0
+        || accept_reply.source_port == 0
+    {
+        test_hooks::event(ID, network_status_label(accept_reply.status));
+        return false;
+    }
+    test_hooks::event(ID, "connection_established");
+
+    let address = match shared_pages.address(owner, page) {
+        Some(address) => address,
+        None => return false,
+    };
+    let read = request(
+        0x9000_0302,
+        logos_abi::NetworkOperation::Read,
+        accept_reply.endpoint,
+        page,
+        logos_abi::MAX_TCP_PAYLOAD as u16,
+        accept_reply.generation,
+    );
+    let Some(read_reply) = run_network_request(
+        read,
+        client,
+        runtime,
+        scheduler,
+        session,
+        capabilities,
+        shared_pages,
+        owner,
+    ) else {
+        return false;
+    };
+    let hello =
+        unsafe { core::slice::from_raw_parts(address as *const u8, read_reply.length as usize) };
+    if read_reply.status != logos_abi::NetworkStatus::Complete || hello != b"hello" {
+        return false;
+    }
+    test_hooks::event(ID, "connection_readable");
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(b"world".as_ptr(), address as *mut u8, 5);
+    }
+    test_hooks::event(ID, "write_pending");
+    let write = request(
+        0x9000_0303,
+        logos_abi::NetworkOperation::Write,
+        accept_reply.endpoint,
+        page,
+        5,
+        accept_reply.generation,
+    );
+    let Some(write_reply) = run_network_request(
+        write,
+        client,
+        runtime,
+        scheduler,
+        session,
+        capabilities,
+        shared_pages,
+        owner,
+    ) else {
+        return false;
+    };
+    if write_reply.status != logos_abi::NetworkStatus::Complete
+        || write_reply.endpoint != accept_reply.endpoint
+    {
+        return false;
+    }
+
+    let mut expected = [0; logos_abi::MAX_TCP_PAYLOAD];
+    for (index, byte) in expected.iter_mut().take(512).enumerate() {
+        *byte = (index as u8).wrapping_mul(37).wrapping_add(11);
+    }
+    let large_read = request(
+        0x9000_0304,
+        logos_abi::NetworkOperation::Read,
+        accept_reply.endpoint,
+        page,
+        logos_abi::MAX_TCP_PAYLOAD as u16,
+        accept_reply.generation,
+    );
+    let Some(large_read_reply) = run_network_request(
+        large_read,
+        client,
+        runtime,
+        scheduler,
+        session,
+        capabilities,
+        shared_pages,
+        owner,
+    ) else {
+        return false;
+    };
+    let received = unsafe {
+        core::slice::from_raw_parts(address as *const u8, large_read_reply.length as usize)
+    };
+    if large_read_reply.status != logos_abi::NetworkStatus::Complete || received != &expected[..512]
+    {
+        return false;
+    }
+    test_hooks::event(ID, "write_acknowledged");
+
+    unsafe {
+        for byte in core::slice::from_raw_parts_mut(address as *mut u8, 512) {
+            *byte ^= 0xa5;
+        }
+    }
+    let write_large = request(
+        0x9000_0305,
+        logos_abi::NetworkOperation::Write,
+        accept_reply.endpoint,
+        page,
+        512,
+        accept_reply.generation,
+    );
+    let Some(write_large_reply) = run_network_request(
+        write_large,
+        client,
+        runtime,
+        scheduler,
+        session,
+        capabilities,
+        shared_pages,
+        owner,
+    ) else {
+        test_hooks::event(ID, "large_write_failed");
+        return false;
+    };
+    if write_large_reply.status != logos_abi::NetworkStatus::Complete {
+        test_hooks::event(ID, network_status_label(write_large_reply.status));
+        return false;
+    }
+
+    test_hooks::event(ID, "connection_closed");
+    scope.valid()
+}
+
+#[cfg(feature = "test-hooks")]
+const fn network_status_label(status: logos_abi::NetworkStatus) -> &'static str {
+    match status {
+        logos_abi::NetworkStatus::Complete => "complete",
+        logos_abi::NetworkStatus::Denied => "denied",
+        logos_abi::NetworkStatus::Invalid => "invalid",
+        logos_abi::NetworkStatus::Busy => "busy",
+        logos_abi::NetworkStatus::Full => "full",
+        logos_abi::NetworkStatus::Offline => "offline",
+        logos_abi::NetworkStatus::NoRoute => "no_route",
+        logos_abi::NetworkStatus::AddressInUse => "address_in_use",
+        logos_abi::NetworkStatus::MessageTooLarge => "message_too_large",
+        logos_abi::NetworkStatus::TimedOut => "timed_out",
+        logos_abi::NetworkStatus::Cancelled => "cancelled",
+        logos_abi::NetworkStatus::Reset => "reset",
+        logos_abi::NetworkStatus::Io => "io",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3777,7 +3943,7 @@ fn poll_gateway(
     gateway_page: Option<logos_abi::PageHandle>,
     persistence_page: logos_abi::PageHandle,
     persistence_owner: u64,
-    remote_state: &mut Option<secrets::RemoteState>,
+    remote_runtime: &mut remote::RemoteRuntime,
     sessions: Option<native_task::SessionEndpoint>,
     sessions_handle: Option<native_task::Handle>,
     remote_session: Option<&session::Context>,
@@ -3808,7 +3974,6 @@ fn poll_gateway(
         NetworkClientSlot::Gateway,
         client,
         handle,
-        scheduler,
         gateway_session,
         capabilities,
         block_context.pages,
@@ -3817,8 +3982,10 @@ fn poll_gateway(
     ) {
         return false;
     }
-    let (Some(remote), Some(page), Some(remote_state), Some(remote_session)) =
-        (remote, gateway_page, remote_state.as_mut(), remote_session)
+    if !drain_network_wakes(runtime, scheduler) {
+        return false;
+    }
+    let (Some(remote), Some(page), Some(remote_session)) = (remote, gateway_page, remote_session)
     else {
         return true;
     };
@@ -3840,70 +4007,76 @@ fn poll_gateway(
         return false;
     }
     source[..length].copy_from_slice(bytes);
-    let outcome = match request.operation {
-        logos_abi::service::RemoteGateOperation::Handshake => {
-            let mut output = [0; logos_remote::MAX_FRAME];
-            remote_state.handshake(&source[..length], &mut output).map(|length| {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(output.as_ptr(), address as *mut u8, length)
-                };
-                (logos_abi::service::RemoteGateStatus::Complete, length, 0)
-            })
-        }
-        logos_abi::service::RemoteGateOperation::Open => {
-            let plaintext_length = length.checked_sub(16);
-            plaintext_length
-                .filter(|length| {
-                    remote_state
-                        .open(&source[..request.length as usize], output_page(address, *length))
-                })
-                .map(|length| (logos_abi::service::RemoteGateStatus::Complete, length, 0))
-        }
-        logos_abi::service::RemoteGateOperation::Seal => {
-            let mut output = [0; logos_remote::MAX_FRAME];
-            let sealed = length.checked_add(16).filter(|sealed| *sealed <= output.len());
-            sealed
-                .filter(|sealed| remote_state.seal(&source[..length], &mut output[..*sealed]))
-                .map(|sealed| {
+    let outcome = remote_runtime
+        .handle_request(|remote_state| match request.operation {
+            logos_abi::service::RemoteGateOperation::Handshake => {
+                let mut output = [0; logos_remote::MAX_FRAME];
+                remote_state.handshake(&source[..length], &mut output).map(|length| {
                     unsafe {
-                        core::ptr::copy_nonoverlapping(output.as_ptr(), address as *mut u8, sealed)
+                        core::ptr::copy_nonoverlapping(output.as_ptr(), address as *mut u8, length)
                     };
-                    (logos_abi::service::RemoteGateStatus::Complete, sealed, 0)
+                    (logos_abi::service::RemoteGateStatus::Complete, length, 0)
                 })
-        }
-        logos_abi::service::RemoteGateOperation::Invoke => remote_invoke(
-            remote_state,
-            &source[..length],
-            address,
-            storage_runtime,
-            block_context,
-            scheduler,
-            persistence_page,
-            persistence_owner,
-            tick,
-            sessions,
-            sessions_handle,
-            remote_session,
-            capabilities,
-            input,
-            lifecycle,
-            service_healthy,
-            channel,
-            responses,
-            service_scheduler,
-            service_capability,
-            service,
-        ),
-        logos_abi::service::RemoteGateOperation::Subscribe
-        | logos_abi::service::RemoteGateOperation::Credit
-        | logos_abi::service::RemoteGateOperation::Acknowledge => {
-            remote_subscription(remote_state, &source[..length], address, request.operation)
-        }
-        logos_abi::service::RemoteGateOperation::Reset => {
-            remote_state.reset_transport();
-            Some((logos_abi::service::RemoteGateStatus::Complete, 0, 0))
-        }
-    };
+            }
+            logos_abi::service::RemoteGateOperation::Open => {
+                let plaintext_length = length.checked_sub(16);
+                plaintext_length
+                    .filter(|length| {
+                        remote_state
+                            .open(&source[..request.length as usize], output_page(address, *length))
+                    })
+                    .map(|length| (logos_abi::service::RemoteGateStatus::Complete, length, 0))
+            }
+            logos_abi::service::RemoteGateOperation::Seal => {
+                let mut output = [0; logos_remote::MAX_FRAME];
+                let sealed = length.checked_add(16).filter(|sealed| *sealed <= output.len());
+                sealed
+                    .filter(|sealed| remote_state.seal(&source[..length], &mut output[..*sealed]))
+                    .map(|sealed| {
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                output.as_ptr(),
+                                address as *mut u8,
+                                sealed,
+                            )
+                        };
+                        (logos_abi::service::RemoteGateStatus::Complete, sealed, 0)
+                    })
+            }
+            logos_abi::service::RemoteGateOperation::Invoke => remote_invoke(
+                remote_state,
+                &source[..length],
+                address,
+                storage_runtime,
+                block_context,
+                scheduler,
+                persistence_page,
+                persistence_owner,
+                tick,
+                sessions,
+                sessions_handle,
+                remote_session,
+                capabilities,
+                input,
+                lifecycle,
+                service_healthy,
+                channel,
+                responses,
+                service_scheduler,
+                service_capability,
+                service,
+            ),
+            logos_abi::service::RemoteGateOperation::Subscribe
+            | logos_abi::service::RemoteGateOperation::Credit
+            | logos_abi::service::RemoteGateOperation::Acknowledge => {
+                remote_subscription(remote_state, &source[..length], address, request.operation)
+            }
+            logos_abi::service::RemoteGateOperation::Reset => {
+                remote_state.reset_transport();
+                Some((logos_abi::service::RemoteGateStatus::Complete, 0, 0))
+            }
+        })
+        .flatten();
     let (status, length, cursor) =
         outcome.unwrap_or((logos_abi::service::RemoteGateStatus::Denied, 0, 0));
     remote.reply(logos_abi::service::RemotePageReply {
@@ -4337,11 +4510,12 @@ fn replace_terminal(
     _storage_owner: u64,
     history: logos_abi::PageHandle,
 ) -> Option<(native_task::Handle, TerminalEndpoints, logos_abi::PageHandle)> {
-    if !network_runtime.invalidate_client(
-        NetworkClientSlot::Terminal,
-        scheduler,
-        logos_abi::NetworkStatus::Cancelled,
-    ) {
+    if !network_runtime
+        .invalidate_client(NetworkClientSlot::Terminal, logos_abi::NetworkStatus::Cancelled)
+    {
+        return None;
+    }
+    if !drain_network_wakes(network_runtime, scheduler) {
         return None;
     }
     if !scheduler.failed(handle) && !scheduler.fail(handle) {
@@ -4450,7 +4624,10 @@ fn replace_network(
     pages: &mut logos_core::shared_pages::SharedPages,
     previous: NetworkResources,
 ) -> Option<(native_task::Handle, native_task::NetworkEndpoint, NetworkResources)> {
-    if !network_runtime.invalidate_active(scheduler, logos_abi::NetworkStatus::Reset) {
+    if !network_runtime.invalidate_active(logos_abi::NetworkStatus::Reset) {
+        return None;
+    }
+    if !drain_network_wakes(network_runtime, scheduler) {
         return None;
     }
     if !scheduler.failed(handle) && !scheduler.fail(handle) {
@@ -4486,11 +4663,12 @@ fn replace_gateway(
     owner: Option<u64>,
     previous: Option<logos_abi::PageHandle>,
 ) -> Option<(native_task::Handle, logos_abi::PageHandle)> {
-    if !network_runtime.invalidate_client(
-        NetworkClientSlot::Gateway,
-        scheduler,
-        logos_abi::NetworkStatus::Cancelled,
-    ) {
+    if !network_runtime
+        .invalidate_client(NetworkClientSlot::Gateway, logos_abi::NetworkStatus::Cancelled)
+    {
+        return None;
+    }
+    if !drain_network_wakes(network_runtime, scheduler) {
         return None;
     }
     let owner = owner?;
@@ -4517,50 +4695,6 @@ fn restart_native_service(
         return None;
     }
     scheduler.replace(handle, memory, |_, _| true)
-}
-
-fn hex_key(key: &[u8; 32], output: &mut [u8; 64]) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for (index, byte) in key.iter().copied().enumerate() {
-        output[index * 2] = HEX[(byte >> 4) as usize];
-        output[index * 2 + 1] = HEX[(byte & 0x0f) as usize];
-    }
-}
-
-fn hex_decode_key(input: &[u8], output: &mut [u8; 32]) -> bool {
-    if input.len() != 64 {
-        return false;
-    }
-    for (index, chunk) in input.chunks_exact(2).enumerate() {
-        let Some(high) = hex_value(chunk[0]) else { return false };
-        let Some(low) = hex_value(chunk[1]) else { return false };
-        output[index] = (high << 4) | low;
-    }
-    !output.iter().all(|byte| *byte == 0)
-}
-
-fn decimal_u64(mut value: u64, output: &mut [u8; 20]) -> usize {
-    let mut position = output.len();
-    loop {
-        position -= 1;
-        output[position] = b'0' + (value % 10) as u8;
-        value /= 10;
-        if value == 0 {
-            break;
-        }
-    }
-    let length = output.len() - position;
-    output.copy_within(position.., 0);
-    length
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn task_a(task: &mut scheduler::Task) -> scheduler::TaskState {

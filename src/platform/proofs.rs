@@ -15,7 +15,7 @@ impl State {
         self.0.set(self.0.get() || passed);
     }
 
-    pub const fn passed(&self) -> bool {
+    pub fn passed(&self) -> bool {
         self.0.get()
     }
 }

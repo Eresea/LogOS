@@ -1,13 +1,17 @@
 # Network
 
-> **Status:** Network v1 typed device/event and client transport implementation complete; QEMU
-> operational closure remains open at the Network/Gateway scheduling boundary. Results are recorded in
+> **Status:** Network bootstrap v1 is complete: typed device transport, safe DMA ownership,
+> Ethernet/ARP/IPv4/DHCP/UDP, and the basic capability model are implemented. The scalable Network
+> architecture is not complete: asynchronous TX, bounded batched scheduling, a scalable socket
+> model, robust/scalable TCP, and multiqueue readiness remain future work. Remaining QEMU datagram
+> client closure is pending.
+> Results are recorded in
 > [testing status](../testing/STATUS.md).
 >
 > **Owner:** Foundation network driver and System Network service
 
-> **Milestone:** Network v1 typed device-facing and client transport ABI implemented; behavioral
-> proof closure pending.
+> **Milestone:** Bootstrap transport is implemented; the current single-transaction client path is
+> a compatibility boundary, not the final Network architecture.
 
 ## Goal
 
@@ -78,12 +82,19 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   maps distinct typed device/event pages only into the Network service, and delivers one validated
   RX frame event at a time.
 - `logos-network-service` handles bounded device transport, DHCP acquisition, ARP resolution,
-  `Status`, `Bind`, `SendTo`, `ReceiveFrom`, `Close`, and `Cancel` state operations. Core validates
-  capability scope and copies client payloads through the fixed Network TX page. Cancellation,
-  close, reset, and ARP single-flight cleanup release pending client state.
+  `Status`, `Bind`, `SendTo`, `ReceiveFrom`, `Listen`, `Accept`, `Read`, `Write`, `Close`, and
+  `Cancel` state operations. Core validates capability scope and copies client payloads through the
+  fixed Network TX page. Cancellation, close, reset, and ARP single-flight cleanup release pending
+  client state.
 - `NetworkClientPage` and `NetworkServerPage` are the only client/server boundary. Core configures
   Terminal and Gateway transfer-page authority, admits one global transaction, returns `Busy` to a
   competing client, and publishes only exact request/generation replies.
+- `NetworkRuntime` owns readiness separately from client pages. Once Network is bound and idle it
+  submits an internal `Status` request through the Network server endpoint, caches the returned
+  `NetworkInfo`, and exposes `configured()`/`info()` to the runtime. Gateway startup does not use
+  Terminal as a readiness probe.
+- The QEMU harness polls `QUERY network/configured` over COM2. The debugcon DHCP line remains a
+  diagnostic artifact only and cannot gate a scenario.
 - Client submission is transactional: validate authority and the configured page, copy TX bytes,
   deliver to Network, mark the client `Processing`, then wake the Network service. Any failed step
   rolls the client and server pages back. Completion copies RX bytes only from the configured
@@ -93,9 +104,14 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   through the Core capability and service relay, `network/unauthorized-operation` proves denied
   Bind/SendTo/ReceiveFrom requests stop in Core, and `network/simultaneous-client-busy` proves
   Terminal/Gateway contention does not overwrite the active transaction.
-- Behavioral closure remains gated on the registered Network-client scenarios. Full serial runs can
-  still exhaust the old four-buffer RX assumption; the current driver posts sixteen buffers while
-  preserving descriptor and generation validation.
+- Client behavior proofs use the independent `test-usernet` profile and a dedicated Network
+  client session. `network/icmp-echo` sends Echo through the typed client page to the deterministic
+  host peer; `network/udp-round-trip` performs Bind, SendTo, and ReceiveFrom against the host UDP
+  peer. Backpressure, packet-loss, timeout, reset/reconnect, device binding, and authorization
+  proofs use the same direct-client boundary and do not gate execution on `QUERY network/configured`
+  or Terminal input orchestration. DHCP and configuration remain the bootstrap-specific proofs.
+- Behavioral closure remains gated on the registered Network-client scenarios. The scheduling
+  boundary repair requires a fresh serial Network and Remote proof run.
 
 ### ABI-v4 device transport milestone
 
@@ -115,18 +131,60 @@ The Network service's `Info` request now returns typed `NetworkInfo` through `Ne
 and DHCP proceeds through the same typed path. Terminal and Gateway use typed client pages; neither
 client receives Network device/event pages.
 
-### ABI-v4 client transport
+### ABI-v4 client transport (bootstrap compatibility path)
 
-`NetworkRuntime` owns one global `active_client` association. The association records the client
-slot, exact client/server endpoints, request, owner, and task handle; it is never queued or inferred
-from a page alone. A second Terminal/Gateway request receives `Busy` without touching the active
-server page.
+`NetworkRuntime` owns one global `active_client` association. The association records the optional
+production client slot, exact client/server endpoints, request, owner, and explicit completion
+target; it is never queued or inferred from a page alone. A second Terminal/Gateway request
+receives `Busy` without touching the active server page.
+
+Every production completion wakes and runs the requesting task, including `Busy`, `Denied`,
+`Invalid`, timeout, cancellation, reset, and I/O replies. Test-only white-box probes use an
+explicit probe target and never stand in for a live Terminal or Gateway caller.
+
+This path still serializes client work through one global active association and performs scheduler
+integration at the Core composition boundary. It is retained to preserve the typed bootstrap ABI;
+it does not provide the intended asynchronous socket architecture. Future Network work must move
+application writes into per-connection TX buffers, drain RX packets with bounded service budgets,
+and notify readable connections without Gateway- or Remote-specific scheduling.
 
 The transfer page is configured when each client mapping is installed and is retained across client
 page reset. Data requests must name that exact handle and stay within the fixed page payload window.
 TX copies occur before server delivery; RX copies occur only after an exact ID/generation reply is
 validated. Old task mappings are invalidated before replacement and the active association is
 completed with `Cancelled` or `Reset` before its pages are released.
+
+### TCP foundation (independent proof)
+
+`logos-net::TcpState` is a bounded one-listener/one-connection foundation. Host tests cover
+SYN/SYN-ACK/ACK establishment, exact sequence and acknowledgement arithmetic, ordered payload
+acknowledgements, server writes, duplicate ACKs, bounded retransmission, FIN/CloseWait, and RST.
+The post-handshake pure ACK does not generate a redundant ACK. The Network service waits for a
+pre-SYN `Accept`, retires TCP writes only after the VirtIO TX completion, and relays the typed
+`Listen`/`Accept`/`Read`/`Write` operations through the normal Core Network boundary.
+
+`network/tcp-stream` is the independent QEMU proof. It uses a deterministic host TCP peer through
+QEMU host forwarding to port 7443, a test-only exact TCP capability scope, the real VirtIO driver,
+the real Network service, and no Gateway, Sessions, Remote, enrollment, persistence, Noise, or
+`logosctl` runtime path. The TCP ESP contains only Terminal, Storage, and Network payloads. The
+exchange asserts `hello`/`world`, a deterministic 512-byte transform, the ACK of the first server
+write before the second server write, and host FIN closure. Structured events are emitted for
+`listener_waiting`, `connection_established`, `connection_readable`, `write_pending`,
+`write_acknowledged`, and `connection_closed`.
+
+This proves the bounded TCP foundation only. Multiple listeners, multiple connections, queued
+per-connection RX/TX, asynchronous readiness, congestion-control completeness, and scalable
+service scheduling remain deferred.
+
+### Direct Network-client proof boundary
+
+The permanent ICMP, UDP, device-bind, authorization, backpressure, packet-loss, timeout, and
+reset/reconnect IDs now run like `network/tcp-stream`: a minimal UEFI image starts Terminal,
+Storage, and Network only; Core grants a dedicated test session the exact Network capability
+scopes; the typed client endpoint submits the request; and a deterministic host peer supplies the
+wire response. The harness sends only `RUN <proof-id>` and waits for the structured result. The
+multi-client Busy proof remains a Gateway-slot contract until Core exposes a second independent
+Network client without the Remote composition path.
 
 ### Transport milestone: DHCP over Core-owned VirtIO
 
@@ -152,7 +210,7 @@ configuration and client paths. Host tests cover fixed-slot exhaustion, ARP expi
 and failure cleanup. The `Bind`/`SendTo`/`ReceiveFrom`/`Echo` relay, capability gate, cancellation,
 timeout, malformed-frame, and reconnect paths are live.
 
-### Milestone close
+### Milestone close — pending verification
 
 The permanent Network suite is `cargo run -p logos-test -- suite network`; the PR suite includes it.
 Each promoted proof requires a structured reply and exact endpoint or payload assertion. Fault-heavy
@@ -461,23 +519,23 @@ and never cast untrusted bytes to Rust enums or packed structs.
 - [x] Make every implemented Network proof fail if its semantic assertion is unavailable; no
       unconditional success marker or skipped scenario satisfies a checklist item.
 - [x] Add completed Network proofs to the PR suite and keep fault-heavy repeats in nightly.
-- [x] Run `cargo run -p logos-test -- suite network`.
-- [x] Run `cargo run -p logos-test -- suite pr`.
+- [ ] Re-run `cargo run -p logos-test -- suite network` after the scheduling repair.
+- [ ] Re-run `cargo run -p logos-test -- suite pr` after the scheduling repair.
 - [x] Commit the Network v1 resilience proof.
 
-### Phase 8: close the milestone
+### Phase 8: close the bootstrap milestone
 
-- [x] Check every v1 scope item and exit criterion against a passing proof ID.
+- [ ] Check every v1 scope item and exit criterion against a passing proof ID after the scheduling repair.
 - [x] Update `docs/ARCHITECTURE.md` if implementation changed the accepted boundary.
 - [x] Update `docs/boot-sequence.md` with Network dependencies, non-blocking offline boot, and
       restart path.
 - [x] Update `docs/security.md` with the implemented exact endpoint capability enforcement.
-- [x] Update `docs/ROADMAP.md` to mark Network v1 complete.
-- [x] Change this document's status to complete.
+- [x] Record the bootstrap transport boundary and its deferred architecture work.
+- [ ] Close the remaining Network client QEMU proofs.
 - [x] Run `cargo fmt --check`.
 - [x] Run the prescribed host clippy checks with `-D warnings`.
 - [x] Run the prescribed host-compatible workspace tests.
-- [x] Run `cargo run -p logos-test -- suite network`.
+- [ ] Run `cargo run -p logos-test -- suite network` after the scheduling repair.
 - [x] Run `scripts/run.ps1 -Headless` and verify local services remain usable while the peer is absent.
 - [x] Run `scripts/check.ps1`.
 - [x] Commit the documentation-only milestone close separately.
@@ -496,6 +554,7 @@ and never cast untrusted bytes to Rust enums or packed structs.
 | `network/packet-loss` | QEMU | Deterministic DHCP loss and malformed/duplicate ICMP traffic produce bounded progress |
 | `network/timeout` | QEMU | Virtual deadline produces one timeout reply and no held resources |
 | `network/reset-reconnect` | QEMU | Reset leaves DHCP-bound Network usable and echo succeeds without reboot |
+| `network/tcp-stream` | QEMU | Independent host TCP peer completes typed Listen/Accept/Read/Write with exact payloads and structured close state |
 
 Host tests remain the primary proof for parsers, checksums, state transitions, bounds, and malformed
 input. QEMU tests prove the real PCI, interrupt, DMA, service-gate, capability, and recovery paths.
@@ -524,7 +583,8 @@ assertions; matching a diagnostic line alone is insufficient.
 
 ## Exit proof
 
-Network v1 is complete only when permanent automated tests prove all of the following in QEMU:
+Network bootstrap v1 is complete for the implemented device and datagram boundary. The remaining
+QEMU client proofs are still required before that boundary is treated as closed:
 
 - LogOS acquires the exact DHCP configuration from the hermetic host peer.
 - Host-to-guest and guest-to-host ICMP echo succeed.
@@ -551,7 +611,9 @@ crates unless a real dependency boundary requires it.
 
 ## Deferred
 
-- TCP, DNS, TLS, trust stores, certificate validation, and secure enrollment.
+- Production TCP, DNS, TLS, trust stores, certificate validation, and secure enrollment. The bounded
+  TCP foundation is proven through the Network service in QEMU; scalable stream architecture is
+  deferred.
 - IPv6, IP fragmentation/reassembly, IPv4 multicast, VLANs, jumbo frames, raw sockets, and packet
   capture APIs.
 - VirtIO modern transport, checksum/segmentation offloads, mergeable RX buffers, control queues,
@@ -572,12 +634,11 @@ See [Architecture](architecture.md#12-networking-model),
 
 ### V2 — Stream connectivity
 
-- Remote Foundation has completed the portable TCP ABI and checksum-validated TCP codec. The
-  bounded one-listener/one-stream TCP state model now also covers SYN/ACK establishment, owner
-  checks, ordered payload buffering, bounded writes, reset, and generation invalidation. The
-  Network-service frame parsing/transmit and Core payload copying now consume TCP operations;
-  owner multiplexing and Gateway remain.
-- Capability-scoped TCP connect, listen, accept, close, and bounded stream I/O.
+- The bounded host-to-guest TCP stream foundation is proven, but the current service path is not a
+  scalable asynchronous socket architecture and must not be represented as one.
+- Add per-connection TX/RX ownership, asynchronous NIC completion, bounded packet/service budgets,
+  isolated connection failure, and readiness notifications before promoting TCP to production.
+- Scalable capability-scoped TCP connect, listen, accept, close, and bounded stream I/O.
 - Remote Foundation constrains TCP capability scopes to the exact local port `7443`.
 - Concurrent operations, ephemeral ports, connected endpoint state, and DNS resolution.
 - Authenticated-transport integration; identity, trust policy, and key ownership stay in their System services.

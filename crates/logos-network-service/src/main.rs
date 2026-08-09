@@ -71,19 +71,7 @@ fn run(context: &mut ServiceContext) -> ! {
     let mut counters = logos_abi::NetworkCounters::default();
 
     #[cfg(feature = "test-usernet")]
-    state.dhcp_start(now, 1);
-    state.dhcp_acknowledge(
-        now,
-        state.dhcp_xid(),
-        NetworkConfig {
-            address: Ipv4([10, 0, 2, 15]),
-            mask: Ipv4([255, 255, 255, 0]),
-            router: Some(Ipv4([10, 0, 2, 2])),
-            lease_until: now.saturating_add(600),
-            renew_at: now.saturating_add(300),
-            rebind_at: now.saturating_add(525),
-        },
-    );
+    configure_test_usernet(&mut state, now, 1);
 
     if !issue_info(context, pending) {
         spin();
@@ -102,19 +90,7 @@ fn run(context: &mut ServiceContext) -> ! {
                     xid = xid.max(1);
                     #[cfg(feature = "test-usernet")]
                     {
-                        state.dhcp_start(now, xid);
-                        state.dhcp_acknowledge(
-                            now,
-                            state.dhcp_xid(),
-                            NetworkConfig {
-                                address: Ipv4([10, 0, 2, 15]),
-                                mask: Ipv4([255, 255, 255, 0]),
-                                router: Some(Ipv4([10, 0, 2, 2])),
-                                lease_until: now.saturating_add(600),
-                                renew_at: now.saturating_add(300),
-                                rebind_at: now.saturating_add(525),
-                            },
-                        );
+                        configure_test_usernet(&mut state, now, xid);
                         pending_info = false;
                         pending = 0;
                         continue;
@@ -382,19 +358,7 @@ fn run(context: &mut ServiceContext) -> ! {
                 #[cfg(feature = "test-usernet")]
                 if state.dhcp_config().is_none() {
                     let xid = state.dhcp_xid().max(1);
-                    state.dhcp_start(1, xid);
-                    let _ = state.dhcp_acknowledge(
-                        1,
-                        xid,
-                        NetworkConfig {
-                            address: Ipv4([10, 0, 2, 15]),
-                            mask: Ipv4([255, 255, 255, 0]),
-                            router: Some(Ipv4([10, 0, 2, 2])),
-                            lease_until: 601,
-                            renew_at: 301,
-                            rebind_at: 526,
-                        },
-                    );
+                    configure_test_usernet(&mut state, 1, xid);
                 }
                 let config = state.dhcp_config();
                 let result = if cfg!(feature = "test-usernet") {
@@ -436,7 +400,10 @@ fn run(context: &mut ServiceContext) -> ! {
                 let result = logos_net::EndpointId::from_wire(request.endpoint.0)
                     .ok_or(logos_net::TcpStateError::Invalid)
                     .and_then(|endpoint| state.tcp_mut().accept(owner, endpoint));
-                if matches!(result, Err(logos_net::TcpStateError::Busy)) {
+                if matches!(
+                    result,
+                    Err(logos_net::TcpStateError::Busy | logos_net::TcpStateError::NoData)
+                ) {
                     waiting_accept = Some((request, owner));
                     if !context.network_wait(request.deadline) {
                         spin();
@@ -536,10 +503,13 @@ fn run(context: &mut ServiceContext) -> ! {
                                     next_id,
                                 )
                             {
-                                NetworkStatus::Complete
-                            } else {
-                                NetworkStatus::Io
+                                waiting_send = Some(request);
+                                waiting_send_arp = false;
+                                pending = next_id;
+                                next_id = next_id.wrapping_add(1).max(1);
+                                continue;
                             }
+                            NetworkStatus::Io
                         } else {
                             NetworkStatus::Busy
                         }
@@ -1607,6 +1577,25 @@ fn option_u32(value: Result<Option<&[u8]>, logos_net::Error>) -> Option<u32> {
     Some(u32::from_be_bytes(value.try_into().ok()?))
 }
 
+#[cfg(feature = "test-usernet")]
+fn configure_test_usernet(state: &mut NetworkState, now: u64, xid: u32) {
+    state.dhcp_start(now, xid);
+    if state.dhcp_offer(now, xid) {
+        let _ = state.dhcp_acknowledge(
+            now,
+            xid,
+            NetworkConfig {
+                address: Ipv4([10, 0, 2, 15]),
+                mask: Ipv4([255, 255, 255, 0]),
+                router: Some(Ipv4([10, 0, 2, 2])),
+                lease_until: now.saturating_add(600),
+                renew_at: now.saturating_add(300),
+                rebind_at: now.saturating_add(525),
+            },
+        );
+    }
+}
+
 fn contiguous_mask(mask: Ipv4) -> bool {
     let value = u32::from_be_bytes(mask.0);
     let inverted = !value;
@@ -1657,19 +1646,7 @@ fn handle_request(
     #[cfg(feature = "test-usernet")]
     if state.dhcp_config().is_none() {
         let xid = state.dhcp_xid().max(1);
-        state.dhcp_start(1, xid);
-        let _ = state.dhcp_acknowledge(
-            1,
-            xid,
-            NetworkConfig {
-                address: Ipv4([10, 0, 2, 15]),
-                mask: Ipv4([255, 255, 255, 0]),
-                router: Some(Ipv4([10, 0, 2, 2])),
-                lease_until: 601,
-                renew_at: 301,
-                rebind_at: 526,
-            },
-        );
+        configure_test_usernet(state, 1, xid);
     }
     let config = state.dhcp_config();
     let status_info = config.map_or(info, |config| NetworkInfo {

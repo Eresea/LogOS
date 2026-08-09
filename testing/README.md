@@ -8,12 +8,17 @@ Host tests prove bounded algorithms and state machines. QEMU scenarios prove ass
 
 ## Protocol
 
-Test builds use bounded ASCII `LOGOS/1` frames over COM2. Requests are `HELLO`, `RUN`, `INJECT`, `INPUT`, `QUERY`, `ADVANCE`, `RESET`, and `SHUTDOWN`; responses are `READY`, `EVENT`, `RESULT`, and `ERROR`. Human debugcon text is not asserted.
+Test builds use bounded ASCII `LOGOS/1` frames over COM2. Requests are `HELLO`, `RUN`, `INJECT`, `INPUT`, `QUERY`, `ADVANCE`, `RESET`, and `SHUTDOWN`; responses are `READY`, `EVENT`, `RESULT`, and `ERROR`. Readiness is semantic: `QUERY network/configured` reports the authoritative NetworkRuntime cache. Human debugcon text is diagnostic only and is never a synchronization primitive.
 
 ## Proof rules
 
 - Use `<module>/<behavior>` IDs and explicit readiness.
 - Use bounded timeouts, deterministic seeds, semantic fault names, and bounded polling waits.
+- Let a successful bounded `logosctl` operation prove Gateway listening; do not wait for Gateway
+  debug text.
+- Remote scenarios have one authority: the host operation, or a structured postcondition query;
+  Core does not run a second label-only copy of the scenario.
+- Test-driven Terminal input uses the same `RemoteRuntime::local_command` path as production input.
 - Register the roadmap criterion and retain completed v1 proofs until its contract is deprecated.
 - Future contracts must skip, never pass or expected-fail.
 

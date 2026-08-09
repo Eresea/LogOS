@@ -30,4 +30,6 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0022](0022-typed-session-effect-pages.md) | Accepted | Mediate Session and privileged Effect transport through separate typed pages. |
 | [0023](0023-typed-store-block-pages.md) | Accepted | Mediate Store and Storage-owned Block transport through independent typed pages and a concrete Storage owner. |
 | [0024](0024-typed-network-device-event-transport.md) | Accepted | Move Network device/event payloads and DMA identities to generation-safe typed pages owned by NetworkRuntime. |
+| [0025](0025-network-readiness-and-completion-targets.md) | Accepted | Make NetworkRuntime own readiness and separate production task completion from test probes. |
+| [0026](0026-network-bootstrap-and-async-service-boundary.md) | Accepted | Keep the Network bootstrap boundary while moving scheduler decisions above NetworkRuntime. |
 
