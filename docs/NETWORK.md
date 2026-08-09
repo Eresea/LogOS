@@ -93,12 +93,11 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   competing client, and publishes only exact request/generation replies.
 - `SubmitWrite` and `PollStream` extend that same Network request contract. `SubmitWrite` accepts
   bytes into connection-owned stream storage; TCP sequence numbers are assigned only when a wire
-  range is armed. `PollStream` consumes the client's auxiliary `StreamPage`, whose records carry
-  coalesced `Readable`/`Writable`/`Closed` state, sequence numbers, and cumulative accepted/
-  acknowledged byte watermarks.
-- Network service state changes are routed by `NetworkRuntime` into the owning client's bounded
-  stream page. Overflow preserves the latest readiness state and requires resynchronization.
-  NetworkRuntime reports readiness/completion; the scheduler owns task execution.
+  range is armed. `PollStream` is authoritative and returns the current
+  `Readable`/`Writable`/`Closed` state plus cumulative accepted/acknowledged byte watermarks.
+- `StreamPage` is a coalesced notification cache, not the source of truth. When it reports overflow,
+  a client polls each owned endpoint through `PollStream`, rebuilds current state, and clears the
+  overflow flag. NetworkRuntime reports notifications; the scheduler owns task execution.
 - `NetworkRuntime` owns readiness separately from client pages. Once Network is bound and idle it
   submits an internal `Status` request through the Network server endpoint, caches the returned
   `NetworkInfo`, and exposes `configured()`/`info()` to the runtime. Gateway startup does not use

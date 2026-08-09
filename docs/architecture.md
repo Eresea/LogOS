@@ -50,8 +50,10 @@ transport, not a second Network ABI. Network service state uses separate bounded
 connection tables, with one listener and eight connections initially. Each connection owns byte
 stream RX/TX storage and cumulative accepted/acknowledged watermarks; TCP sequence numbers are
 assigned only when bytes are transmitted. Readiness is coalesced per connection and completion
-records are bounded with sequence/loss detection. NetworkRuntime reports readiness/completion and
-routes it to client pages; the scheduler owns task execution. See [ADR-0027](adr/0027-network-scalable-stream-slice.md).
+records are bounded with sequence/loss detection. `PollStream` is authoritative for current
+readiness and byte watermarks; `StreamPage` is only a notification cache. On overflow, clients poll
+each owned endpoint and clear the flag. NetworkRuntime routes notifications to client pages; the
+scheduler owns task execution. See [ADR-0027](adr/0027-network-scalable-stream-slice.md).
 
 ## 1. Purpose
 

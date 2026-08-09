@@ -25,9 +25,10 @@ RX/TX storage, retransmission, close/reset state, and progress watermarks. Four 
 storage units only.
 
 NetworkRuntime drains service stream records, publishes them into the owning client's StreamPage,
-and reports readiness/completion. Readiness is level/coalesced and queues are bounded; overflow
-preserves the latest state and requires resynchronization. The scheduler owns task execution and
-NetworkRuntime never runs Gateway, Remote, or client tasks as protocol work.
+and reports notifications. `PollStream` queries the owning connection and returns authoritative
+readiness plus accepted/acknowledged watermarks. Readiness is level/coalesced and queues are bounded;
+on overflow, clients poll each owned endpoint and clear the overflow flag. The scheduler owns task
+execution and NetworkRuntime never runs Gateway, Remote, or client tasks as protocol work.
 
 ## Consequences
 
