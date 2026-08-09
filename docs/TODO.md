@@ -79,6 +79,20 @@ completed-layer passes and current boundary failures.
 - [ ] Resume capability development: complete Remote verification or begin Safe System
       Artifacts / Persistence v2.
 
+### Async-first/state-transition follow-up
+
+- [x] Record the async-first ownership and scheduling boundary in ADR-0028 and audit current
+      production paths.
+- [x] Move Remote transport startup scheduling into top-level platform composition.
+- [ ] Convert `SessionsRuntime` relay into bounded `Deliver -> EffectPending -> ReplyPending`
+      state with a runnable notification; retain capability checks.
+- [ ] Convert Storage relay and protected Remote persistence into bounded request/block/completion
+      phases without changing durable commit semantics or page-loan cleanup.
+- [ ] Define and apply a minimal observable-state sequence/generation convention where two or more
+      existing APIs need client resynchronization.
+- [ ] Replace remaining bootstrap Network service global wait slots only after the real multi-
+      connection proof; do not expand the single-client compatibility path.
+
 ## 3. Documentation debt
 
 - [ ] Reconcile the deferred FLOW.md Phase 0 charter when that milestone is scheduled.

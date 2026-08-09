@@ -17,6 +17,14 @@ This file tracks system capabilities and their required module slices. Module sc
 
 See [Architecture](architecture.md), [security constraints](security.md), and [boot constraints](boot-sequence.md).
 
+## Async-first architecture checkpoint
+
+ADR-0028 is the system-wide rule for long-lived work: owned bounded state advances from commands,
+events, and timers; subsystem code reports readiness/completion; platform composition owns scheduling.
+NetworkRuntime and authoritative `PollStream` are compliant reference paths. Bootstrap Sessions and
+Storage relay choreography, plus the Remote persist/invoke/reply chain, remain explicitly bounded
+conversion milestones and must not grow new nested execution dependencies.
+
 ## Post-ABI-v4 execution sequence
 
 The project spends one bounded cycle per step, then stops restructuring ABI v4:

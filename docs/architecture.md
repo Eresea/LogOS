@@ -86,6 +86,16 @@ bindings, the large Remote request polling loop, protected persistence context, 
 replacement composition. ABI v4 remains unfrozen until the Network and Remote QEMU proofs are green;
 extracting the polling loop is deferred until this consolidation is stable.
 
+### Async-first state and scheduling rule
+
+Long-lived or externally-driven work lives in bounded state owned by the subsystem that can advance
+it. Commands, completions, events, and timers cause explicit state transitions; readiness and
+completion are authoritative state, while notifications are bounded, coalesced hints. Subsystems
+may report a runnable task or changed endpoint, but Core/platform composition owns waking and running
+tasks. Blocking APIs are allowed when they wrap the stateful primitive or preserve a real durability
+or security boundary. Generations, deadlines, and cancellation belong to the operation state so
+replacement and stale completion remain deterministic. See [ADR-0028](adr/0028-async-first-subsystem-state.md).
+
 ## 2. Ring model
 
 ## Ring 0 — Core
