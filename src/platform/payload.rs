@@ -10,7 +10,7 @@ use uefi::{
     },
 };
 
-const MAX_PAYLOAD: usize = 512 * 1024;
+const MAX_PAYLOAD: usize = 768 * 1024;
 struct Buffer(UnsafeCell<[u8; MAX_PAYLOAD]>);
 unsafe impl Sync for Buffer {}
 static TERMINAL_PAYLOAD: Buffer = Buffer(UnsafeCell::new([0; MAX_PAYLOAD]));

@@ -6,7 +6,7 @@ use core::{
 use crate::mm::memory::{Contiguous, Page, PhysicalMemory};
 
 const ENTRIES: usize = 512;
-const MAPPED_PAGES: usize = 128;
+const MAPPED_PAGES: usize = 160;
 const PAGE_SIZE: u64 = 4096;
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
