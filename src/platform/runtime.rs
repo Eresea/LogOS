@@ -1182,11 +1182,14 @@ pub(crate) fn run(
 
     macro_rules! poll_gateway {
         () => {{
-            let started_now = remote_runtime.start(
-                network_runtime.configured(),
-                gateway_handle,
-                &mut native_scheduler,
-            );
+            let started_now = remote_runtime
+                .start(network_runtime.configured(), gateway_handle)
+                .is_some_and(|handle| {
+                    native_scheduler.run(handle) && !native_scheduler.failed(handle) && {
+                        remote_runtime.mark_started();
+                        true
+                    }
+                });
             if started_now {
                 debug::write_line(b"LogOS: Gateway started");
                 native_services.ready(supervisor::NativeService::Gateway);
@@ -2291,11 +2294,16 @@ pub(crate) fn run(
                                     true
                                 };
                                 let started = remote_runtime.started()
-                                    || remote_runtime.start(
-                                        network_runtime.configured(),
-                                        gateway_handle,
-                                        &mut native_scheduler,
-                                    );
+                                    || remote_runtime
+                                        .start(network_runtime.configured(), gateway_handle)
+                                        .is_some_and(|handle| {
+                                            native_scheduler.run(handle)
+                                                && !native_scheduler.failed(handle)
+                                                && {
+                                                    remote_runtime.mark_started();
+                                                    true
+                                                }
+                                        });
                                 debug::write_line(if started {
                                     b"LogOS: test remote gateway start passed"
                                 } else {
@@ -2448,11 +2456,16 @@ pub(crate) fn run(
                             || !native_gateway_store
                                 .zip(gateway_page)
                                 .is_none_or(|(endpoint, page)| endpoint.configure_transfer(page))
-                            || !remote_runtime.start(
-                                network_runtime.configured(),
-                                gateway_handle,
-                                &mut native_scheduler,
-                            )
+                            || !remote_runtime
+                                .start(network_runtime.configured(), gateway_handle)
+                                .is_some_and(|handle| {
+                                    native_scheduler.run(handle)
+                                        && !native_scheduler.failed(handle)
+                                        && {
+                                            remote_runtime.mark_started();
+                                            true
+                                        }
+                                })
                         {
                             return false;
                         }

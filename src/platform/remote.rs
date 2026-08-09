@@ -45,14 +45,15 @@ impl RemoteRuntime {
         &mut self,
         network_configured: bool,
         gateway: Option<crate::sched::native_task::Handle>,
-        scheduler: &mut crate::sched::native_task::Scheduler<'_>,
-    ) -> bool {
+    ) -> Option<crate::sched::native_task::Handle> {
         if !self.gateway_started && network_configured {
-            self.gateway_started =
-                gateway.is_some_and(|handle| scheduler.run(handle) && !scheduler.failed(handle));
-            return self.gateway_started;
+            return gateway;
         }
-        false
+        None
+    }
+
+    pub fn mark_started(&mut self) {
+        self.gateway_started = true;
     }
 
     pub const fn started(&self) -> bool {
@@ -206,4 +207,20 @@ pub fn self_check() -> bool {
     !gateway_allowed(false, true, true, None, false)
         && !gateway_allowed(true, false, true, None, false)
         && !gateway_allowed(true, true, true, None, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RemoteRuntime;
+
+    #[test]
+    fn gateway_start_requires_composition_confirmation() {
+        let mut runtime = RemoteRuntime::new(None);
+        assert!(runtime.start(true, None).is_none());
+        assert!(!runtime.started());
+        runtime.mark_started();
+        assert!(runtime.started());
+        runtime.reset_transport();
+        assert!(!runtime.started());
+    }
 }
