@@ -182,6 +182,7 @@ impl Plan {
             .and_then(|_| manager.grant(kind))
     }
 
+    #[cfg_attr(feature = "test-hooks", allow(dead_code))]
     pub fn grant_scoped64(
         &self,
         name: &[u8],

@@ -3,7 +3,8 @@
 > **Status:** Remote Foundation v1 behavior and ownership extraction remain in progress. Network
 > readiness now belongs to NetworkRuntime and Gateway startup no longer probes through Terminal;
 > the QEMU harness now uses structured Network readiness and host-side Remote authority; fixed-seed
-> Network/Remote proof closure remains pending.
+> Network/Remote proof closure remains pending. Gateway startup under `test-hooks` now reuses the
+> exact scoped TCP capability tokens instead of exhausting the bounded capability table.
 
 ## Goal
 

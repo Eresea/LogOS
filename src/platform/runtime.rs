@@ -581,18 +581,27 @@ pub(crate) fn run(
         logos_abi::REMOTE_TCP_PORT,
     )
     .0;
+    #[cfg(feature = "test-hooks")]
+    let gateway_bind_capability = Some(tcp_test_bind_capability);
+    #[cfg(not(feature = "test-hooks"))]
     let gateway_bind_capability = supervisor.grant_scoped64(
         supervisor::GATEWAY,
         &mut capabilities,
         capabilities::CapabilityKind::NetworkBind,
         tcp_scope,
     );
+    #[cfg(feature = "test-hooks")]
+    let gateway_send_capability = Some(tcp_test_send_capability);
+    #[cfg(not(feature = "test-hooks"))]
     let gateway_send_capability = supervisor.grant_scoped64(
         supervisor::GATEWAY,
         &mut capabilities,
         capabilities::CapabilityKind::NetworkSend,
         tcp_scope,
     );
+    #[cfg(feature = "test-hooks")]
+    let gateway_receive_capability = Some(tcp_test_receive_capability);
+    #[cfg(not(feature = "test-hooks"))]
     let gateway_receive_capability = supervisor.grant_scoped64(
         supervisor::GATEWAY,
         &mut capabilities,

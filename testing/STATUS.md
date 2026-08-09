@@ -1,6 +1,7 @@
 # Test Status
 
-> **Last verification:** 2026-08-09 on merged `main`, SHA `27b3595`.
+> **Last verification:** 2026-08-09 from starting SHA `248dcc4`; fresh proof results below include
+> the capability-table correction.
 
 This file is the current evidence ledger. Historical totals, superseded failures, and earlier
 milestone claims are in [the reviewed status record](reviewed/STATUS-history-2026-08.md).
@@ -12,17 +13,19 @@ milestone claims are in [the reviewed status record](reviewed/STATUS-history-202
 - `scripts/check.ps1 -Stage uefi` and `-Stage uefi -Release` passed; all six images built.
 - Headless boot reached `startup self check passed`, `check network typed endpoints passed`, and
   `native terminal active`.
-- Direct Network-client proofs pass individually through real VirtIO, the Network service, typed
-  client requests, and the deterministic host peer: device binding, ICMP, UDP, authorization,
-  backpressure/cancel, packet loss, transport/configuration, timeout, reset/reconnect, and TCP
-  stream.
+- Fresh direct Network-client runs passed through real VirtIO, the Network service, typed client
+  requests, and the deterministic host peer for transport/configuration, ICMP, UDP, and
+  reset/reconnect. Fresh `network/tcp-stream` stopped at `write_pending`; the result timed out
+  waiting for its structured completion.
 - `logos-net` has 15 TCP foundation tests covering handshake, data/ACK arithmetic, duplicate ACKs,
   bounded retransmission, FIN/CloseWait, and RST.
-- The Network-only suite is **11 passed, 1 failed**. The only failure is
-  `network/simultaneous-client-busy`, which still requires the Gateway second-client slot.
-- Five Remote proofs remain explicitly skipped/unimplemented: enrollment persistence, reconnect
-  replay, pending-after-reset, Gateway restart, and protected-state corruption. Their permanent IDs
-  remain registered.
+- The historical Network-only ledger is stale against this fresh run: in addition to the known
+  `network/simultaneous-client-busy` gap, `network/tcp-stream` currently stops at `write_pending`.
+- Fresh Remote auth and typed-invoke runs reach enrollment and Gateway startup, then fail before a
+  host reply: auth-denied reaches the gate-denial/transport-close path, while typed-invoke produces
+  no Remote gate request after enrollment. Five Remote proofs remain explicitly skipped/unimplemented:
+  enrollment persistence, reconnect replay, pending-after-reset, Gateway restart, and protected-state
+  corruption. Their permanent IDs remain registered.
 - The direct `transport-dhcp` and `configuration` baselines assert typed configuration; raw DHCP
   Discover/Offer/Request/Ack orchestration is not current baseline evidence.
 

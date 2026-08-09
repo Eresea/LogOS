@@ -1,6 +1,6 @@
 # LogOS Roadmap
 
-> **Updated:** 2026-08-08
+> **Updated:** 2026-08-09
 >
 > **Current milestone:** ABI v4 stabilization and migration closeout
 >
@@ -24,19 +24,20 @@ events, and timers; subsystem code reports readiness/completion; platform compos
 NetworkRuntime and authoritative `PollStream` are compliant reference paths. Bootstrap Sessions and
 its runtime compatibility wrapper are now phase-owned. Storage relay choreography and the Remote
 persist/invoke/reply chain remain explicitly bounded conversion milestones and must not grow new
-nested execution dependencies. Network QEMU proof repair remains open until the focused scenarios
-are green.
+nested execution dependencies. A capability-table admission defect that prevented Gateway startup
+under `test-hooks` is corrected; fresh TCP and Remote end-to-end proof failures remain open.
 
 ## Post-ABI-v4 execution sequence
 
 The project spends one bounded cycle per step, then stops restructuring ABI v4:
 
-1. Stabilize and repair the completed typed layers, using the main suite as the gate.
-2. Close the Network bootstrap proofs, then begin the asynchronous Network architecture: queued
-   per-connection work, bounded RX/TX service budgets, and scheduler integration outside Network.
-3. Promote the independent TCP foundation proof, then prove Gateway and `logosctl` through it.
-4. Freeze ABI v4 structure and resume capability development—first Remote verification if the
-   QEMU environment is available, otherwise Safe System Artifacts / Persistence v2.
+1. Applications Foundation: prove one bundled capability-isolated WASM component.
+2. Persistence v2 artifact slice: bounded multi-page/streamed immutable artifacts, integrity and quota.
+3. Applications v1: install/run/persist/stop/remove using artifact storage.
+4. Update v1: signed staged system bundles, health-gated activation and rollback.
+5. Flow: integrate typed automation once real stable application/system operations exist.
+6. Experience/operational expansion: graphical environment, broader Remote administration, hardware
+   scaling when workloads demand it.
 
 No new ABI-wide abstraction or parallel transport is introduced after step 3 without a new ADR
 and an explicit compatibility milestone.

@@ -5,21 +5,23 @@ subsystem documents; completed work and old milestone ledgers are kept in `revie
 
 ## Current milestone: ABI v4 stabilization and migration closeout
 
-- [ ] Repair the remaining Network suite proof `network/simultaneous-client-busy` after the
-      Gateway second-client scheduling boundary is fixed.
+- [ ] Repair the remaining Network suite proofs: `network/simultaneous-client-busy` and the current
+      `network/tcp-stream` stop at `write_pending`.
 - [ ] Add queued per-connection Network work and bounded RX/TX service budgets without making
       Gateway or Remote part of Network scheduling.
 - [ ] Keep the independent `network/tcp-stream` proof green, then prove Gateway and `logosctl`
-      through the real TCP foundation.
+      through the real TCP foundation; current Remote auth stops after the gate denial/close path.
 - [ ] Implement the five skipped Remote proofs with real multi-boot/reconnect/restart orchestration
       and precise persisted-state postconditions.
-- [ ] Freeze ABI v4 structure after the Network and Remote cycles; require a new ADR for exceptions.
+- [ ] Freeze ABI v4 structure only after Network, Remote, and ownership gates pass; require a new ADR
+      for exceptions.
 
 ## Async-first follow-up
 
 - [ ] Convert Sessions relay work into bounded `Deliver -> EffectPending -> ReplyPending` state.
 - [ ] Convert Storage relay and protected Remote persistence into bounded request/block/completion
-      phases without changing durable commit semantics or page-loan cleanup.
+      phases without changing durable commit semantics or page-loan cleanup; current wrappers still
+      synchronously drive dependent services.
 - [ ] Define observable sequence/generation conventions where existing APIs need resynchronization.
 - [ ] Replace bootstrap Network global wait slots only after the multi-connection proof.
 
