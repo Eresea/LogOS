@@ -1,119 +1,35 @@
 # TODO
 
-> Working list derived from ROADMAP.md, FLOW.md, ARCHITECTURE.md, NAMING.md, and
-> study_considerations.md. This is a planning aid, not a replacement for ROADMAP.md's
-> authoritative checklists.
+This is the active implementation list. Current contracts and proof evidence live in the linked
+subsystem documents; completed work and old milestone ledgers are kept in `reviewed/` and ADRs.
 
-## 1. Implemented bootstrap
+## Current milestone: ABI v4 stabilization and migration closeout
 
-- [x] `logos-terminal` owns the bounded terminal model, input normalization, framebuffer rendering,
-      and font rasterization.
-- [x] `logos-terminal-service` runs as a separately loaded Ring-3 payload through a bounded Core
-      gate.
-- [x] Platform bootstrap code provides static typed service specifications, manifests, lifecycle
-      policy, capability grants, identities, time, entropy, secrets, audit, and driver binding.
-- [x] The kernel-owned recovery console remains a direct, independent fallback.
-- [x] ABI v4 typed endpoint pages and the canonical native-service specification are recorded in
-      ADR-0020 and consumed by payload staging, supervisor planning, and service lookup.
-- [x] The QEMU harness uses suite-selected runners rather than root-level scenario-ID branches.
+- [ ] Repair the remaining Network suite proof `network/simultaneous-client-busy` after the
+      Gateway second-client scheduling boundary is fixed.
+- [ ] Add queued per-connection Network work and bounded RX/TX service budgets without making
+      Gateway or Remote part of Network scheduling.
+- [ ] Keep the independent `network/tcp-stream` proof green, then prove Gateway and `logosctl`
+      through the real TCP foundation.
+- [ ] Implement the five skipped Remote proofs with real multi-boot/reconnect/restart orchestration
+      and precise persisted-state postconditions.
+- [ ] Freeze ABI v4 structure after the Network and Remote cycles; require a new ADR for exceptions.
 
-## 2. Current milestone: ABI v4 stabilization and migration closeout
+## Async-first follow-up
 
-Network bootstrap transport is implemented, but the scalable Network architecture, its full QEMU
-closure, and the Remote Foundation proofs remain open. ABI v4 restructuring is not frozen. The
-registered proof IDs remain permanent regression contracts; the fixed-seed QEMU run records
-completed-layer passes and current boundary failures.
-
-1. [x] Define the minimal versioned Input, Display, and Session capability contracts required by
-   `logos-terminal`.
-2. [x] Replace the bounded Core context gate with capability-scoped typed endpoint contracts.
-3. [x] Move normal command/session dispatch out of Core while keeping privileged execution
-   capability-gated.
-4. [x] Prove Terminal and Sessions failure, restart, capability denial, and recovery handoff in
-   the supported QEMU harness when available.
-5. Keep the recovery console kernel-owned while Remote Foundation advances.
-
-### Phase 3 Network typed-page and client transport gap
-
-- [x] Replace the legacy Network-client page boundary with scalar-validated, generation-safe typed
-      Network pages and restore the canonical service mapping.
-- [x] Complete one global Terminal/Gateway client transaction with transactional rollback,
-      configured transfer-page authority, exact completion matching, timeout/cancel/reset handling,
-      and replacement invalidation.
-- [ ] Close the remaining QEMU Network-client scenarios after the service/device scheduling
-      boundary is repaired.
-
-### Phase 5 cleanup
-
-- [x] Move Network readiness ownership into `NetworkRuntime`'s direct server `Status` transaction.
-- [x] Make every production Network reply wake and run its blocked caller for every status.
-- [x] Give white-box QEMU probes an explicit test-only completion target.
-- [x] Replace Network debug-log readiness waits with structured `QUERY network/configured` polling.
-- [x] Make bounded `logosctl` success the Gateway-listening proof.
-- [x] Make Remote host operations authoritative; remove duplicate label-only Core scenario runs.
-- [x] Mark the five unfinished Remote proofs skipped while retaining their permanent IDs.
-- [ ] Implement each skipped Remote proof with real multi-boot/reconnect/restart orchestration and
-      a precise persisted-state postcondition.
-- [x] Consolidate `remote-key`, `enroll`, and `unenroll` through one `RemoteRuntime::local_command`.
-- [x] Remove external `RemoteRuntime::state_mut()` access; defer `poll_gateway` extraction.
-- [x] Move proof state semantics out of the platform composition root.
-- [x] Add deterministic TcpState evidence for sequence/acknowledgement arithmetic, bounded
-      retransmission, duplicate ACKs, FIN/CloseWait, and RST.
-- [x] Split QEMU catalogs and suite runner policy by suite.
-- [x] Use the canonical service endpoint set directly for page mapping.
-- [x] Split the Remote ABI protocol into `service/remote.rs`.
-- [x] Privatize Network and Remote runtime state behind accessors.
-- [x] Enforce inward package-ring imports in `scripts/arch-deps.py`.
-- [x] Reconcile milestone records with the fixed-seed QEMU evidence and deferred migration IDs.
-
-### Next bounded cycles
-
-- [x] Stabilization cycle: validate and repair the completed typed layers against the main suite;
-      fixed-fixture QEMU run records 43 passed, 12 migration-deferred, and 28 skipped.
-- [ ] **Network architecture cycle:** add queued per-connection TX/RX work and bounded service
-      budgets without Gateway- or Remote-specific scheduling.
-- [ ] Prove a genuine Network TCP stream without Remote, then run `remote/typed-invoke` through the
-      real Gateway and `logosctl` path.
-- [ ] Remote cycle: implement the five skipped proofs with their documented orchestration.
-- [ ] Stop restructuring ABI v4 after those cycles; require a new ADR for any exception.
-- [ ] Resume capability development: complete Remote verification or begin Safe System
-      Artifacts / Persistence v2.
-
-### Async-first/state-transition follow-up
-
-- [x] Record the async-first ownership and scheduling boundary in ADR-0028 and audit current
-      production paths.
-- [x] Move Remote transport startup scheduling into top-level platform composition.
-- [ ] Convert `SessionsRuntime` relay into bounded `Deliver -> EffectPending -> ReplyPending`
-      state with a runnable notification; retain capability checks.
+- [ ] Convert Sessions relay work into bounded `Deliver -> EffectPending -> ReplyPending` state.
 - [ ] Convert Storage relay and protected Remote persistence into bounded request/block/completion
       phases without changing durable commit semantics or page-loan cleanup.
-- [ ] Define and apply a minimal observable-state sequence/generation convention where two or more
-      existing APIs need client resynchronization.
-- [ ] Replace remaining bootstrap Network service global wait slots only after the real multi-
-      connection proof; do not expand the single-client compatibility path.
+- [ ] Define observable sequence/generation conventions where existing APIs need resynchronization.
+- [ ] Replace bootstrap Network global wait slots only after the multi-connection proof.
 
-## 3. Documentation debt
+## Documentation debt
 
 - [ ] Reconcile the deferred FLOW.md Phase 0 charter when that milestone is scheduled.
 - [ ] Graduate `system.inference` and `session.remote` from Candidate to Working only when their
       milestones begin.
 
-## 4. Proposed roadmap additions
+## Deferred candidates
 
-Keep the following as candidates until their target milestone begins:
-
-| Idea | Suggested home | Priority |
-| --- | --- | --- |
-| Signed action receipts for multi-agent trust | System.audit extension | Medium |
-| Deterministic causal replay | Continuous Core trace lane | Medium |
-| Semantic diff/plan before privileged apply | Flow simulation and Update | Medium |
-| CHERI-backed capabilities | Long-term Core hardware target | Low near-term |
-| Heterogeneous compute as typed `ComputeRef` | Ring 0/Ring 1 placement pass | Low near-term |
-| Power domains as first-class capability/quota | Driver lifecycle and WASM quotas | Low near-term |
-
-## 5. Naming register follow-up
-
-Per NAMING.md §10, any new roadmap item gets a naming pass before it becomes a public type or
-command. In particular, “Sensitive” and “compensating action” need one-sentence scope checks
-against the Reserved Vocabulary table.
+Long-term ideas remain in [reviewed roadmap candidates](../reviewed/roadmap-candidates.md); they are
+not active implementation work.
