@@ -3,7 +3,7 @@ pub const SERVICE: crate::platform::services::Service = crate::platform::service
 use crate::drivers::network;
 use crate::sched::native_task::{
     Handle, NetworkClientEndpoint, NetworkDeviceEndpoint, NetworkEventEndpoint,
-    NetworkServerEndpoint,
+    NetworkServerEndpoint, NetworkStreamEndpoint,
 };
 use logos_abi::{NetworkOperation, NetworkRequest};
 use logos_core::capabilities::CapabilityKind;
@@ -93,7 +93,10 @@ pub struct NetworkRuntime {
     task: Option<Handle>,
     device_endpoint: NetworkDeviceEndpoint,
     event_endpoint: NetworkEventEndpoint,
+    stream_endpoint: NetworkStreamEndpoint,
     server_endpoint: Option<NetworkServerEndpoint>,
+    clients: [Option<(u64, NetworkClientEndpoint)>; 2],
+    client_wakes: [Option<Handle>; 2],
     active_client: Option<PendingClient>,
     device: Option<network::Device>,
     resources: Option<Resources>,
@@ -106,6 +109,33 @@ pub struct NetworkRuntime {
 }
 
 impl NetworkRuntime {
+    const fn slot_index(slot: NetworkClientSlot) -> usize {
+        match slot {
+            NetworkClientSlot::Terminal => 0,
+            NetworkClientSlot::Gateway => 1,
+        }
+    }
+
+    fn drain_streams(&mut self) {
+        for _ in 0..logos_abi::NETWORK_MAX_STREAM_RECORDS {
+            let Some(record) = self.stream_endpoint.take_next() else { break };
+            let Some((index, client)) = self
+                .clients
+                .iter()
+                .enumerate()
+                .find(|(_, client)| client.is_some_and(|(owner, _)| owner == record.owner))
+            else {
+                continue;
+            };
+            let Some((_, endpoint)) = *client else { continue };
+            if endpoint.publish_stream(record)
+                && let Some(handle) = self.client_wakes[index]
+            {
+                self.wake_client(handle);
+            }
+        }
+    }
+
     pub const fn task(&self) -> Option<Handle> {
         self.task
     }
@@ -169,7 +199,10 @@ impl NetworkRuntime {
             task: None,
             device_endpoint: NetworkDeviceEndpoint::unavailable(),
             event_endpoint: NetworkEventEndpoint::unavailable(),
+            stream_endpoint: NetworkStreamEndpoint::unavailable(),
             server_endpoint: None,
+            clients: [None; 2],
+            client_wakes: [None; 2],
             active_client: None,
             device,
             resources: None,
@@ -188,6 +221,7 @@ impl NetworkRuntime {
         server_endpoint: NetworkServerEndpoint,
         device_endpoint: NetworkDeviceEndpoint,
         event_endpoint: NetworkEventEndpoint,
+        stream_endpoint: NetworkStreamEndpoint,
         resources: Resources,
     ) -> bool {
         if self.active_client.is_some() {
@@ -206,6 +240,7 @@ impl NetworkRuntime {
         self.server_endpoint = Some(server_endpoint);
         self.device_endpoint = device_endpoint;
         self.event_endpoint = event_endpoint;
+        self.stream_endpoint = stream_endpoint;
         self.resources = Some(resources);
         self.degraded = false;
         self.readiness.reset();
@@ -317,6 +352,7 @@ impl NetworkRuntime {
     }
 
     pub fn poll(&mut self, tick: u64) -> bool {
+        self.drain_streams();
         if !self.device_endpoint.pending() && !self.poll_readiness(tick) {
             return false;
         }
@@ -626,6 +662,7 @@ impl NetworkRuntime {
             request.operation,
             NetworkOperation::SendTo
                 | NetworkOperation::Write
+                | NetworkOperation::SubmitWrite
                 | NetworkOperation::ReceiveFrom
                 | NetworkOperation::Read
         ) {
@@ -807,7 +844,33 @@ impl NetworkRuntime {
             Ok(transfer) => transfer,
             Err(status) => return Self::reply_request(client, target, request, status, self),
         };
-        if matches!(request.operation, NetworkOperation::SendTo | NetworkOperation::Write) {
+        if request.operation == NetworkOperation::PollStream {
+            let record = client.poll_stream(request.endpoint);
+            let (status, endpoint) = record.map_or(
+                (logos_abi::NetworkStatus::Busy, logos_abi::NetworkEndpoint(0)),
+                |record| (record.status, record.endpoint),
+            );
+            let reply = logos_abi::NetworkReply {
+                id: request.id,
+                status,
+                endpoint: if status == logos_abi::NetworkStatus::Complete {
+                    endpoint
+                } else {
+                    logos_abi::NetworkEndpoint(0)
+                },
+                generation: request.generation,
+                source_address: 0,
+                source_port: 0,
+                length: 0,
+                info: logos_abi::NetworkInfo::default(),
+                counters: logos_abi::NetworkCounters::default(),
+            };
+            return client.mark_processing() && client.reply(reply) && self.complete_target(target);
+        }
+        if matches!(
+            request.operation,
+            NetworkOperation::SendTo | NetworkOperation::Write | NetworkOperation::SubmitWrite
+        ) {
             let Some((_, source)) = transfer else { return false };
             let Some(resources) = self.resources else {
                 return Self::reply_request(
@@ -847,6 +910,19 @@ impl NetworkRuntime {
                 self,
             );
             return reset && reply;
+        }
+        if let Some(slot) = slot {
+            let index = Self::slot_index(slot);
+            self.clients[index] = Some((owner, client));
+            #[cfg(feature = "test-hooks")]
+            if let CompletionTarget::Task(handle) = target {
+                self.client_wakes[index] = Some(handle);
+            }
+            #[cfg(not(feature = "test-hooks"))]
+            {
+                let CompletionTarget::Task(handle) = target;
+                self.client_wakes[index] = Some(handle);
+            }
         }
         self.active_client =
             Some(PendingClient { slot, request, owner, endpoint: client, server, target });
@@ -967,12 +1043,14 @@ pub fn capability(request: NetworkRequest) -> Option<(CapabilityKind, u64)> {
         NetworkOperation::Bind | NetworkOperation::Listen => {
             Some((CapabilityKind::NetworkBind, request.peer.0))
         }
-        NetworkOperation::SendTo | NetworkOperation::Echo | NetworkOperation::Write => {
-            Some((CapabilityKind::NetworkSend, request.peer.0))
-        }
-        NetworkOperation::ReceiveFrom | NetworkOperation::Accept | NetworkOperation::Read => {
-            Some((CapabilityKind::NetworkReceive, request.peer.0))
-        }
+        NetworkOperation::SendTo
+        | NetworkOperation::Echo
+        | NetworkOperation::Write
+        | NetworkOperation::SubmitWrite => Some((CapabilityKind::NetworkSend, request.peer.0)),
+        NetworkOperation::ReceiveFrom
+        | NetworkOperation::Accept
+        | NetworkOperation::Read
+        | NetworkOperation::PollStream => Some((CapabilityKind::NetworkReceive, request.peer.0)),
         NetworkOperation::Status | NetworkOperation::Cancel | NetworkOperation::Close => None,
     }
 }

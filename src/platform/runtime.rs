@@ -1133,6 +1133,9 @@ pub(crate) fn run(
             else {
                 return false;
             };
+            let Some(stream_endpoint) = native_scheduler.network_stream_endpoint(handle) else {
+                return false;
+            };
             let Some(server_endpoint) = native_scheduler.network_server_endpoint(handle) else {
                 return false;
             };
@@ -1141,6 +1144,7 @@ pub(crate) fn run(
                 server_endpoint,
                 device_endpoint,
                 event_endpoint,
+                stream_endpoint,
                 resources,
             )
         });
@@ -1959,6 +1963,10 @@ pub(crate) fn run(
                     else {
                         return false;
                     };
+                    let Some(stream_endpoint) = native_scheduler.network_stream_endpoint(restarted)
+                    else {
+                        return false;
+                    };
                     let Some(server_endpoint) = native_scheduler.network_server_endpoint(restarted)
                     else {
                         return false;
@@ -1970,6 +1978,7 @@ pub(crate) fn run(
                             server_endpoint,
                             device_endpoint,
                             event_endpoint,
+                            stream_endpoint,
                             resources,
                         )
                         || !native_scheduler.run(restarted)
@@ -3106,15 +3115,20 @@ pub(crate) fn run(
                                 network_runtime.device_generation(),
                             ))
                             .is_some_and(|(device_endpoint, event_endpoint)| {
-                                native_scheduler.network_server_endpoint(restarted).is_some_and(
-                                    |server_endpoint| {
-                                        network_runtime.bind(
-                                            restarted,
-                                            server_endpoint,
-                                            device_endpoint,
-                                            event_endpoint,
-                                            resources,
-                                        )
+                                native_scheduler.network_stream_endpoint(restarted).is_some_and(
+                                    |stream_endpoint| {
+                                        native_scheduler
+                                            .network_server_endpoint(restarted)
+                                            .is_some_and(|server_endpoint| {
+                                                network_runtime.bind(
+                                                    restarted,
+                                                    server_endpoint,
+                                                    device_endpoint,
+                                                    event_endpoint,
+                                                    stream_endpoint,
+                                                    resources,
+                                                )
+                                            })
                                     },
                                 )
                             });
@@ -3809,6 +3823,37 @@ fn run_network_tcp_stream(
     }
     test_hooks::event(ID, "connection_established");
 
+    let accept_second = request(
+        0x9000_0306,
+        logos_abi::NetworkOperation::Accept,
+        listen_reply.endpoint,
+        logos_abi::PageHandle(0),
+        0,
+        0,
+    );
+    let Some(second_reply) = run_network_request(
+        accept_second,
+        client,
+        runtime,
+        scheduler,
+        session,
+        capabilities,
+        shared_pages,
+        owner,
+    ) else {
+        test_hooks::event(ID, "second_accept_failed");
+        return false;
+    };
+    if second_reply.status != logos_abi::NetworkStatus::Complete
+        || !second_reply.endpoint.valid()
+        || second_reply.endpoint == accept_reply.endpoint
+        || second_reply.generation != listen_reply.generation
+    {
+        test_hooks::event(ID, network_status_label(second_reply.status));
+        return false;
+    }
+    test_hooks::event(ID, "second_connection_established");
+
     let address = match shared_pages.address(owner, page) {
         Some(address) => address,
         None => return false,
@@ -3841,15 +3886,15 @@ fn run_network_tcp_stream(
     test_hooks::event(ID, "connection_readable");
 
     unsafe {
-        core::ptr::copy_nonoverlapping(b"world".as_ptr(), address as *mut u8, 5);
+        core::ptr::copy_nonoverlapping(b"wo".as_ptr(), address as *mut u8, 2);
     }
     test_hooks::event(ID, "write_pending");
     let write = request(
         0x9000_0303,
-        logos_abi::NetworkOperation::Write,
+        logos_abi::NetworkOperation::SubmitWrite,
         accept_reply.endpoint,
         page,
-        5,
+        2,
         accept_reply.generation,
     );
     let Some(write_reply) = run_network_request(
@@ -3866,6 +3911,106 @@ fn run_network_tcp_stream(
     };
     if write_reply.status != logos_abi::NetworkStatus::Complete
         || write_reply.endpoint != accept_reply.endpoint
+    {
+        return false;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(b"rld".as_ptr(), address as *mut u8, 3);
+    }
+    let write_tail = request(
+        0x9000_0307,
+        logos_abi::NetworkOperation::SubmitWrite,
+        accept_reply.endpoint,
+        page,
+        3,
+        accept_reply.generation,
+    );
+    let Some(write_tail_reply) = run_network_request(
+        write_tail,
+        client,
+        runtime,
+        scheduler,
+        session,
+        capabilities,
+        shared_pages,
+        owner,
+    ) else {
+        return false;
+    };
+    if write_tail_reply.status != logos_abi::NetworkStatus::Complete {
+        return false;
+    }
+    let poll = request(
+        0x9000_0308,
+        logos_abi::NetworkOperation::PollStream,
+        accept_reply.endpoint,
+        logos_abi::PageHandle(0),
+        0,
+        accept_reply.generation,
+    );
+    let Some(poll_reply) = run_network_request(
+        poll,
+        client,
+        runtime,
+        scheduler,
+        session,
+        capabilities,
+        shared_pages,
+        owner,
+    ) else {
+        return false;
+    };
+    if poll_reply.status != logos_abi::NetworkStatus::Complete {
+        return false;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(b"reply".as_ptr(), address as *mut u8, 5);
+    }
+    let second_write = request(
+        0x9000_0309,
+        logos_abi::NetworkOperation::SubmitWrite,
+        second_reply.endpoint,
+        page,
+        5,
+        second_reply.generation,
+    );
+    let Some(second_write_reply) = run_network_request(
+        second_write,
+        client,
+        runtime,
+        scheduler,
+        session,
+        capabilities,
+        shared_pages,
+        owner,
+    ) else {
+        return false;
+    };
+    if second_write_reply.status != logos_abi::NetworkStatus::Complete {
+        return false;
+    }
+    let second_read = request(
+        0x9000_0310,
+        logos_abi::NetworkOperation::Read,
+        second_reply.endpoint,
+        page,
+        logos_abi::MAX_TCP_PAYLOAD as u16,
+        second_reply.generation,
+    );
+    let Some(second_read_reply) = run_network_request(
+        second_read,
+        client,
+        runtime,
+        scheduler,
+        session,
+        capabilities,
+        shared_pages,
+        owner,
+    ) else {
+        return false;
+    };
+    if second_read_reply.status != logos_abi::NetworkStatus::Complete
+        || second_read_reply.length != 5
     {
         return false;
     }

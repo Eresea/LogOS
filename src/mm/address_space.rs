@@ -6,7 +6,7 @@ use core::{
 use crate::mm::memory::{Contiguous, Page, PhysicalMemory};
 
 const ENTRIES: usize = 512;
-const MAPPED_PAGES: usize = 112;
+const MAPPED_PAGES: usize = 128;
 const PAGE_SIZE: u64 = 4096;
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
@@ -30,6 +30,7 @@ const NETWORK_EVENT_ENDPOINT_PAGE: usize = ENTRIES - 35;
 const NETWORK_CLIENT_PAGE: usize = ENTRIES - 36;
 const NETWORK_SERVER_PAGE: usize = ENTRIES - 37;
 const REMOTE_PAGE: usize = ENTRIES - 38;
+const NETWORK_STREAM_PAGE: usize = ENTRIES - 25;
 const STACK_TOP: usize = REMOTE_PAGE;
 const STACK_PAGES: usize = 24;
 const STACK_BASE: usize = STACK_TOP - STACK_PAGES;
@@ -69,6 +70,7 @@ pub struct ContextMapping {
     pub network_server: Option<(u64, u64)>,
     pub network_device: Option<(u64, u64)>,
     pub network_event: Option<(u64, u64)>,
+    pub network_stream: Option<(u64, u64)>,
 }
 
 impl AddressSpace {
@@ -215,6 +217,7 @@ impl AddressSpace {
         network_server: bool,
         network_device: bool,
         network_event: bool,
+        network_stream: bool,
     ) -> Option<ContextMapping> {
         if self.mapping(CONTEXT_PAGE).is_some()
             || input && self.mapping(INPUT_PAGE).is_some()
@@ -230,6 +233,7 @@ impl AddressSpace {
             || network_server && self.mapping(NETWORK_SERVER_PAGE).is_some()
             || network_device && self.mapping(NETWORK_DEVICE_ENDPOINT_PAGE).is_some()
             || network_event && self.mapping(NETWORK_EVENT_ENDPOINT_PAGE).is_some()
+            || network_stream && self.mapping(NETWORK_STREAM_PAGE).is_some()
         {
             return None;
         }
@@ -520,6 +524,37 @@ impl AddressSpace {
         } else {
             None
         };
+        let network_stream_page = if network_stream {
+            match physical.allocate_owned() {
+                Some(page) => Some(page),
+                None => {
+                    for page in [
+                        input_page,
+                        display_page,
+                        session_client_page,
+                        session_server_page,
+                        effect_page,
+                        store_client_page,
+                        store_server_page,
+                        block_client_page,
+                        remote_page,
+                        network_device_page,
+                        network_client_page,
+                        network_server_page,
+                        network_event_page,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let _ = physical.release_page(page);
+                    }
+                    let _ = physical.release_page(context);
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
         let context_address = context.address();
         let input_address = input_page.as_ref().map(Page::address);
         let display_address = display_page.as_ref().map(Page::address);
@@ -534,6 +569,7 @@ impl AddressSpace {
         let network_server_address = network_server_page.as_ref().map(Page::address);
         let network_device_address = network_device_page.as_ref().map(Page::address);
         let network_event_address = network_event_page.as_ref().map(Page::address);
+        let network_stream_address = network_stream_page.as_ref().map(Page::address);
         let input_virtual = input_page.as_ref().map(|_| self.base + PAGE_SIZE * INPUT_PAGE as u64);
         let display_virtual =
             display_page.as_ref().map(|_| self.base + PAGE_SIZE * DISPLAY_PAGE as u64);
@@ -565,6 +601,9 @@ impl AddressSpace {
         let network_event_virtual = network_event_page
             .as_ref()
             .map(|_| self.base + PAGE_SIZE * NETWORK_EVENT_ENDPOINT_PAGE as u64);
+        let network_stream_virtual = network_stream_page
+            .as_ref()
+            .map(|_| self.base + PAGE_SIZE * NETWORK_STREAM_PAGE as u64);
         unsafe {
             ptr::write_bytes(context_address as *mut u8, 0, PAGE_SIZE as usize);
             (context_address as *mut logos_core::native_service::ControlPage)
@@ -593,6 +632,7 @@ impl AddressSpace {
                 network_server_page,
                 network_device_page,
                 network_event_page,
+                network_stream_page,
             ]
             .into_iter()
             .flatten()
@@ -615,6 +655,7 @@ impl AddressSpace {
             (network_server.then_some(NETWORK_SERVER_PAGE), network_server_page),
             (network_device.then_some(NETWORK_DEVICE_ENDPOINT_PAGE), network_device_page),
             (network_event.then_some(NETWORK_EVENT_ENDPOINT_PAGE), network_event_page),
+            (network_stream.then_some(NETWORK_STREAM_PAGE), network_stream_page),
         ] {
             let (Some(index), Some(page)) = (index, page) else { continue };
             let address = page.address();
@@ -648,6 +689,9 @@ impl AddressSpace {
                 } else if index == NETWORK_EVENT_ENDPOINT_PAGE {
                     (address as *mut logos_core::native_service::NetworkEventPage)
                         .write_volatile(logos_core::native_service::NetworkEventPage::new(1, 1, 1));
+                } else if index == NETWORK_STREAM_PAGE {
+                    (address as *mut logos_core::native_service::StreamPage)
+                        .write_volatile(logos_core::native_service::StreamPage::new(1, 1));
                 } else if index == NETWORK_CLIENT_PAGE {
                     (address as *mut logos_core::native_service::NetworkClientPage)
                         .write_volatile(logos_core::native_service::NetworkClientPage::new(1, 1));
@@ -681,6 +725,7 @@ impl AddressSpace {
                 self.unmap_index(NETWORK_SERVER_PAGE, physical);
                 self.unmap_index(NETWORK_DEVICE_ENDPOINT_PAGE, physical);
                 self.unmap_index(NETWORK_EVENT_ENDPOINT_PAGE, physical);
+                self.unmap_index(NETWORK_STREAM_PAGE, physical);
                 return None;
             }
         }
@@ -702,6 +747,7 @@ impl AddressSpace {
                 network_server_virtual,
                 network_device_virtual,
                 network_event_virtual,
+                network_stream_virtual,
             )
         } {
             self.unmap_index(CONTEXT_PAGE, physical);
@@ -718,6 +764,7 @@ impl AddressSpace {
             self.unmap_index(NETWORK_SERVER_PAGE, physical);
             self.unmap_index(NETWORK_DEVICE_ENDPOINT_PAGE, physical);
             self.unmap_index(NETWORK_EVENT_ENDPOINT_PAGE, physical);
+            self.unmap_index(NETWORK_STREAM_PAGE, physical);
             return None;
         }
         Some(ContextMapping {
@@ -735,6 +782,7 @@ impl AddressSpace {
             network_server: network_server_address.zip(network_server_virtual),
             network_device: network_device_address.zip(network_device_virtual),
             network_event: network_event_address.zip(network_event_virtual),
+            network_stream: network_stream_address.zip(network_stream_virtual),
         })
     }
 
