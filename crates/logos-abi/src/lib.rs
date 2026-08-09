@@ -417,6 +417,8 @@ pub enum NetworkStreamReadiness {
 }
 
 impl NetworkStreamReadiness {
+    pub const ALL_BITS: u16 = Self::Readable.bits() | Self::Writable.bits() | Self::Closed.bits();
+
     pub const fn bits(self) -> u16 {
         self as u16
     }
@@ -729,6 +731,10 @@ pub struct NetworkReply {
     pub source_address: u32,
     pub source_port: u16,
     pub length: u16,
+    pub stream_readiness: u16,
+    pub stream_reserved: u16,
+    pub stream_accepted_bytes: u64,
+    pub stream_acknowledged_bytes: u64,
     pub info: NetworkInfo,
     pub counters: NetworkCounters,
 }
@@ -742,7 +748,11 @@ impl NetworkReply {
             return self.endpoint.0 == 0
                 && self.source_address == 0
                 && self.source_port == 0
-                && self.length == 0;
+                && self.length == 0
+                && self.stream_readiness == 0
+                && self.stream_reserved == 0
+                && self.stream_accepted_bytes == 0
+                && self.stream_acknowledged_bytes == 0;
         }
         if self.generation == 0 {
             return false;
@@ -822,6 +832,9 @@ impl NetworkReply {
                     && self.source_address == 0
                     && self.source_port == 0
                     && self.length == 0
+                    && self.stream_readiness & !NetworkStreamReadiness::ALL_BITS == 0
+                    && self.stream_reserved == 0
+                    && self.stream_acknowledged_bytes <= self.stream_accepted_bytes
                     && self.generation == request.generation
             }
             NetworkOperation::Cancel | NetworkOperation::Close => {
@@ -1567,6 +1580,10 @@ mod tests {
             source_address: 0,
             source_port: 0,
             length: send.length,
+            stream_readiness: 0,
+            stream_reserved: 0,
+            stream_accepted_bytes: 0,
+            stream_acknowledged_bytes: 0,
             info: NetworkInfo { generation: send.generation, ..NetworkInfo::default() },
             counters: NetworkCounters::default(),
         };
@@ -1581,6 +1598,10 @@ mod tests {
             source_address: 0,
             source_port: 0,
             length: write.length,
+            stream_readiness: 0,
+            stream_reserved: 0,
+            stream_accepted_bytes: 0,
+            stream_acknowledged_bytes: 0,
             info: NetworkInfo { generation: write.generation, ..NetworkInfo::default() },
             counters: NetworkCounters::default(),
         };
@@ -1596,6 +1617,20 @@ mod tests {
             }
             .valid_for(poll)
         );
+        let poll_reply = NetworkReply {
+            id: poll.id,
+            endpoint: poll.endpoint,
+            generation: poll.generation,
+            length: 0,
+            stream_readiness: NetworkStreamReadiness::Readable.bits()
+                | NetworkStreamReadiness::Writable.bits(),
+            stream_accepted_bytes: 6,
+            stream_acknowledged_bytes: 3,
+            ..tcp_reply
+        };
+        assert!(poll_reply.valid_for(poll));
+        assert!(!NetworkReply { stream_readiness: 8, ..poll_reply }.valid_for(poll));
+        assert!(!NetworkReply { stream_acknowledged_bytes: 7, ..poll_reply }.valid_for(poll));
         assert!(!NetworkReply { length: send.length - 1, ..reply }.valid_for(send));
         assert!(
             !NetworkReply { status: NetworkStatus::TimedOut, endpoint: send.endpoint, ..reply }

@@ -303,20 +303,6 @@ impl NetworkClientEndpoint {
                 )
             }
     }
-
-    pub fn poll_stream(
-        self,
-        endpoint: logos_abi::NetworkEndpoint,
-    ) -> Option<logos_abi::NetworkStreamRecord> {
-        (self.stream_page_physical != 0).then(|| unsafe {
-            logos_abi::service::StreamPage::take_at(
-                self.stream_page_physical,
-                self.service_generation,
-                self.endpoint_generation,
-                endpoint,
-            )
-        })?
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -329,7 +315,7 @@ pub struct NetworkServerEndpoint {
 
 impl NetworkServerEndpoint {
     pub fn deliver(self, caller: u64, request: logos_abi::NetworkRequest) -> bool {
-        (unsafe {
+        let accepted = unsafe {
             logos_core::native_service::NetworkServerPage::deliver_at(
                 self.page_physical,
                 self.service_generation,
@@ -337,12 +323,29 @@ impl NetworkServerEndpoint {
                 caller,
                 request,
             )
-        }) && unsafe {
+        };
+        if !accepted {
+            let page = unsafe {
+                (self.page_physical as *const logos_abi::service::NetworkServerPage).read_volatile()
+            };
+            if page.service_generation != self.service_generation
+                || page.endpoint_generation != self.endpoint_generation
+            {
+                crate::debug::write_line(b"LogOS: network server identity mismatch");
+            } else {
+                crate::debug::write_line(b"LogOS: network server state not ready");
+            }
+        }
+        let notified = unsafe {
             logos_abi::service::ControlPage::notify_at(
                 self.context_physical,
                 logos_abi::service::NETWORK_REQUEST,
             )
+        };
+        if accepted && !notified {
+            crate::debug::write_line(b"LogOS: network server notify failed");
         }
+        accepted && notified
     }
 
     pub fn response(self, expected_id: u32) -> Option<logos_abi::NetworkReply> {

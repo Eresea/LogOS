@@ -684,6 +684,10 @@ pub struct NetworkClientPage {
     pub reply_source_address: u32,
     pub reply_length: u16,
     pub reserved0: u16,
+    pub reply_stream_readiness: u16,
+    pub reply_stream_reserved: u16,
+    pub reply_stream_accepted_bytes: u64,
+    pub reply_stream_acknowledged_bytes: u64,
     pub reply_info: logos_abi::NetworkInfo,
     pub reply_counters: logos_abi::NetworkCounters,
 }
@@ -713,6 +717,10 @@ pub struct NetworkServerPage {
     pub reply_source_address: u32,
     pub reply_length: u16,
     pub reserved0: u16,
+    pub reply_stream_readiness: u16,
+    pub reply_stream_reserved: u16,
+    pub reply_stream_accepted_bytes: u64,
+    pub reply_stream_acknowledged_bytes: u64,
     pub reply_info: logos_abi::NetworkInfo,
     pub reply_counters: logos_abi::NetworkCounters,
 }
@@ -757,6 +765,10 @@ fn network_reply_from_page(
     source_address: u32,
     source_port: u16,
     length: u16,
+    stream_readiness: u16,
+    stream_reserved: u16,
+    stream_accepted_bytes: u64,
+    stream_acknowledged_bytes: u64,
     info: logos_abi::NetworkInfo,
     counters: logos_abi::NetworkCounters,
 ) -> Option<logos_abi::NetworkReply> {
@@ -768,6 +780,10 @@ fn network_reply_from_page(
         source_address,
         source_port,
         length,
+        stream_readiness,
+        stream_reserved,
+        stream_accepted_bytes,
+        stream_acknowledged_bytes,
         info,
         counters,
     })
@@ -792,6 +808,10 @@ fn set_network_reply(
     reply_source_address: &mut u32,
     reply_source_port: &mut u16,
     reply_length: &mut u16,
+    reply_stream_readiness: &mut u16,
+    reply_stream_reserved: &mut u16,
+    reply_stream_accepted_bytes: &mut u64,
+    reply_stream_acknowledged_bytes: &mut u64,
     reply_info: &mut logos_abi::NetworkInfo,
     reply_counters: &mut logos_abi::NetworkCounters,
     request: logos_abi::NetworkRequest,
@@ -806,6 +826,10 @@ fn set_network_reply(
     *reply_source_address = reply.source_address;
     *reply_source_port = reply.source_port;
     *reply_length = reply.length;
+    *reply_stream_readiness = reply.stream_readiness;
+    *reply_stream_reserved = reply.stream_reserved;
+    *reply_stream_accepted_bytes = reply.stream_accepted_bytes;
+    *reply_stream_acknowledged_bytes = reply.stream_acknowledged_bytes;
     *reply_info = reply.info;
     *reply_counters = reply.counters;
     *state = network_reply_state(reply.status) as u32;
@@ -835,6 +859,10 @@ impl NetworkClientPage {
             reply_source_address: 0,
             reply_length: 0,
             reserved0: 0,
+            reply_stream_readiness: 0,
+            reply_stream_reserved: 0,
+            reply_stream_accepted_bytes: 0,
+            reply_stream_acknowledged_bytes: 0,
             reply_info: logos_abi::NetworkInfo {
                 mac: [0; 6],
                 mtu: 0,
@@ -1036,6 +1064,10 @@ impl NetworkClientPage {
             &mut page.reply_source_address,
             &mut page.reply_source_port,
             &mut page.reply_length,
+            &mut page.reply_stream_readiness,
+            &mut page.reply_stream_reserved,
+            &mut page.reply_stream_accepted_bytes,
+            &mut page.reply_stream_acknowledged_bytes,
             &mut page.reply_info,
             &mut page.reply_counters,
             request,
@@ -1071,6 +1103,10 @@ impl NetworkClientPage {
             &mut page.reply_source_address,
             &mut page.reply_source_port,
             &mut page.reply_length,
+            &mut page.reply_stream_readiness,
+            &mut page.reply_stream_reserved,
+            &mut page.reply_stream_accepted_bytes,
+            &mut page.reply_stream_acknowledged_bytes,
             &mut page.reply_info,
             &mut page.reply_counters,
             request,
@@ -1111,6 +1147,10 @@ impl NetworkClientPage {
             page.reply_source_address,
             page.reply_source_port,
             page.reply_length,
+            page.reply_stream_readiness,
+            page.reply_stream_reserved,
+            page.reply_stream_accepted_bytes,
+            page.reply_stream_acknowledged_bytes,
             page.reply_info,
             page.reply_counters,
         )?;
@@ -1144,6 +1184,10 @@ impl NetworkServerPage {
             reply_source_address: 0,
             reply_length: 0,
             reserved0: 0,
+            reply_stream_readiness: 0,
+            reply_stream_reserved: 0,
+            reply_stream_accepted_bytes: 0,
+            reply_stream_acknowledged_bytes: 0,
             reply_info: logos_abi::NetworkInfo {
                 mac: [0; 6],
                 mtu: 0,
@@ -1309,6 +1353,10 @@ impl NetworkServerPage {
             &mut page.reply_source_address,
             &mut page.reply_source_port,
             &mut page.reply_length,
+            &mut page.reply_stream_readiness,
+            &mut page.reply_stream_reserved,
+            &mut page.reply_stream_accepted_bytes,
+            &mut page.reply_stream_acknowledged_bytes,
             &mut page.reply_info,
             &mut page.reply_counters,
             request,
@@ -1349,6 +1397,10 @@ impl NetworkServerPage {
             page.reply_source_address,
             page.reply_source_port,
             page.reply_length,
+            page.reply_stream_readiness,
+            page.reply_stream_reserved,
+            page.reply_stream_accepted_bytes,
+            page.reply_stream_acknowledged_bytes,
             page.reply_info,
             page.reply_counters,
         )?;
@@ -4698,6 +4750,10 @@ mod tests {
             source_address: 0,
             source_port: 0,
             length: 0,
+            stream_readiness: 0,
+            stream_reserved: 0,
+            stream_accepted_bytes: 0,
+            stream_acknowledged_bytes: 0,
             info: logos_abi::NetworkInfo::default(),
             counters: logos_abi::NetworkCounters::default(),
         }
@@ -4712,6 +4768,10 @@ mod tests {
             source_address: 0,
             source_port: 0,
             length: 0,
+            stream_readiness: 0,
+            stream_reserved: 0,
+            stream_accepted_bytes: 0,
+            stream_acknowledged_bytes: 0,
             info: logos_abi::NetworkInfo::default(),
             counters: logos_abi::NetworkCounters::default(),
         }
@@ -4872,6 +4932,10 @@ mod tests {
             source_address: 0,
             source_port: 0,
             length: 0,
+            stream_readiness: logos_abi::NetworkStreamReadiness::Writable.bits(),
+            stream_reserved: 0,
+            stream_accepted_bytes: 5,
+            stream_acknowledged_bytes: 3,
             info: logos_abi::NetworkInfo::default(),
             counters: logos_abi::NetworkCounters::default(),
         };

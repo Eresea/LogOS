@@ -509,7 +509,7 @@ impl ServiceContext {
             }
     }
 
-    pub fn poll_stream(
+    pub fn take_stream_notification(
         &self,
         endpoint: logos_abi::NetworkEndpoint,
     ) -> Option<logos_abi::NetworkStreamRecord> {

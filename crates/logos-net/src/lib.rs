@@ -9,6 +9,9 @@ pub const IPV4_HEADER: usize = 20;
 pub const UDP_HEADER: usize = 8;
 pub const TCP_HEADER: usize = 20;
 pub const MAX_UDP_PAYLOAD: usize = 1472;
+pub const STREAM_READABLE: u16 = 1;
+pub const STREAM_WRITABLE: u16 = 2;
+pub const STREAM_CLOSED: u16 = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -793,6 +796,27 @@ impl TcpState {
     ) -> Result<(u64, u64), TcpStateError> {
         let connection = self.connection(owner, endpoint)?;
         Ok((connection.accepted_bytes, connection.acknowledged_bytes))
+    }
+
+    pub fn stream_state(
+        &self,
+        owner: u64,
+        endpoint: EndpointId,
+    ) -> Result<(u16, u64, u64), TcpStateError> {
+        let connection = self.connection(owner, endpoint)?;
+        let mut readiness = 0;
+        if connection.read_length != 0 {
+            readiness |= STREAM_READABLE;
+        }
+        if connection.phase == TcpPhase::Established
+            && usize::from(connection.tx_length) < MAX_TCP_TX_BYTES
+        {
+            readiness |= STREAM_WRITABLE;
+        }
+        if connection.phase == TcpPhase::CloseWait {
+            readiness |= STREAM_CLOSED;
+        }
+        Ok((readiness, connection.accepted_bytes, connection.acknowledged_bytes))
     }
 
     pub fn close(&mut self, owner: u64, endpoint: EndpointId) -> Result<(), TcpStateError> {
@@ -2106,6 +2130,7 @@ mod tests {
             .unwrap();
         assert_eq!(state.take_tx(), None);
         let stream = state.accept(7, listener).unwrap();
+        assert_eq!(state.stream_state(7, stream), Ok((STREAM_WRITABLE, 0, 0)));
 
         state
             .ingest(
@@ -2125,16 +2150,19 @@ mod tests {
         assert_eq!(payload_ack.header.sequence, 101);
         assert_eq!(payload_ack.header.acknowledgement, 206);
         assert_eq!(payload_ack.header.flags, TCP_FLAG_ACK);
+        assert_eq!(state.stream_state(7, stream), Ok((STREAM_READABLE | STREAM_WRITABLE, 0, 0)));
 
         let mut output = [0; 5];
         assert_eq!(state.read(7, stream, &mut output), Ok(5));
         assert_eq!(&output, b"hello");
+        assert_eq!(state.stream_state(7, stream), Ok((STREAM_WRITABLE, 0, 0)));
         state.write(7, stream, b"world").unwrap();
         let server_write = state.take_tx().unwrap();
         assert_eq!(server_write.header.sequence, 101);
         assert_eq!(server_write.header.acknowledgement, 206);
         assert_eq!(server_write.header.flags, TCP_FLAG_ACK);
         assert_eq!(&server_write.payload[..usize::from(server_write.length)], b"world");
+        assert_eq!(state.stream_state(7, stream), Ok((STREAM_WRITABLE, 5, 0)));
 
         state
             .ingest(
@@ -2151,6 +2179,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state.take_tx(), None);
+        assert_eq!(state.stream_state(7, stream), Ok((STREAM_WRITABLE, 5, 5)));
 
         state.write(7, stream, b"again").unwrap();
         let second_write = state.take_tx().unwrap();
@@ -2194,6 +2223,7 @@ mod tests {
         assert_eq!(fin_ack.header.sequence, 111);
         assert_eq!(fin_ack.header.acknowledgement, 207);
         assert_eq!(fin_ack.header.flags, TCP_FLAG_ACK);
+        assert_eq!(state.stream_state(7, stream), Ok((STREAM_CLOSED, 10, 10)));
     }
 
     #[test]

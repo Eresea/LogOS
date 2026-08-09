@@ -320,6 +320,7 @@ impl NetworkRuntime {
         }
         if let Some(id) = self.readiness.probe_pending {
             if let Some(reply) = server.response(id) {
+                crate::debug::write_line(b"LogOS: network readiness response");
                 self.readiness.info = Some(reply.info);
                 self.readiness.probe_pending = None;
                 self.readiness.probe_due = tick.saturating_add(64);
@@ -342,6 +343,7 @@ impl NetworkRuntime {
             deadline: u64::MAX / 2,
         };
         if !server.deliver(0, request) {
+            crate::debug::write_line(b"LogOS: network readiness delivery failed");
             self.readiness.probe_due = tick.saturating_add(64);
             let _ = server.reset();
             return true;
@@ -844,29 +846,6 @@ impl NetworkRuntime {
             Ok(transfer) => transfer,
             Err(status) => return Self::reply_request(client, target, request, status, self),
         };
-        if request.operation == NetworkOperation::PollStream {
-            let record = client.poll_stream(request.endpoint);
-            let (status, endpoint) = record.map_or(
-                (logos_abi::NetworkStatus::Busy, logos_abi::NetworkEndpoint(0)),
-                |record| (record.status, record.endpoint),
-            );
-            let reply = logos_abi::NetworkReply {
-                id: request.id,
-                status,
-                endpoint: if status == logos_abi::NetworkStatus::Complete {
-                    endpoint
-                } else {
-                    logos_abi::NetworkEndpoint(0)
-                },
-                generation: request.generation,
-                source_address: 0,
-                source_port: 0,
-                length: 0,
-                info: logos_abi::NetworkInfo::default(),
-                counters: logos_abi::NetworkCounters::default(),
-            };
-            return client.mark_processing() && client.reply(reply) && self.complete_target(target);
-        }
         if matches!(
             request.operation,
             NetworkOperation::SendTo | NetworkOperation::Write | NetworkOperation::SubmitWrite
@@ -890,6 +869,7 @@ impl NetworkRuntime {
             }
         }
         if !server.deliver(owner, request) {
+            crate::debug::write_line(b"LogOS: network server delivery failed");
             let reset = server.reset();
             let reply = Self::reply_unprocessed_request(
                 client,
@@ -901,6 +881,7 @@ impl NetworkRuntime {
             return reset && reply;
         }
         if !client.mark_processing() {
+            crate::debug::write_line(b"LogOS: network client processing failed");
             let reset = server.reset();
             let reply = Self::reply_unprocessed_request(
                 client,
@@ -1023,6 +1004,10 @@ fn error_reply(
         source_address: 0,
         source_port: 0,
         length: 0,
+        stream_readiness: 0,
+        stream_reserved: 0,
+        stream_accepted_bytes: 0,
+        stream_acknowledged_bytes: 0,
         info: logos_abi::NetworkInfo::default(),
         counters,
     }

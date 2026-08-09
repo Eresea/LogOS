@@ -150,6 +150,10 @@ fn run(context: &mut ServiceContext) -> ! {
                                 source_address: 0,
                                 source_port: 0,
                                 length: 0,
+                                stream_readiness: 0,
+                                stream_reserved: 0,
+                                stream_accepted_bytes: 0,
+                                stream_acknowledged_bytes: 0,
                                 info,
                                 counters,
                             }) {
@@ -180,6 +184,10 @@ fn run(context: &mut ServiceContext) -> ! {
                                 0
                             },
                             info,
+                            stream_readiness: 0,
+                            stream_reserved: 0,
+                            stream_accepted_bytes: 0,
+                            stream_acknowledged_bytes: 0,
                             counters,
                         };
                         if !context.network_reply_after_device(request, reply) {
@@ -204,6 +212,10 @@ fn run(context: &mut ServiceContext) -> ! {
                                 source_address: 0,
                                 source_port: 0,
                                 length: 0,
+                                stream_readiness: 0,
+                                stream_reserved: 0,
+                                stream_accepted_bytes: 0,
+                                stream_acknowledged_bytes: 0,
                                 info,
                                 counters,
                             }) {
@@ -224,6 +236,10 @@ fn run(context: &mut ServiceContext) -> ! {
                             source_address: 0,
                             source_port: 0,
                             length: 0,
+                            stream_readiness: 0,
+                            stream_reserved: 0,
+                            stream_accepted_bytes: 0,
+                            stream_acknowledged_bytes: 0,
                             info,
                             counters,
                         }) {
@@ -285,6 +301,10 @@ fn run(context: &mut ServiceContext) -> ! {
                     source_address: 0,
                     source_port: 0,
                     length: 0,
+                    stream_readiness: 0,
+                    stream_reserved: 0,
+                    stream_accepted_bytes: 0,
+                    stream_acknowledged_bytes: 0,
                     info,
                     counters,
                 }) {
@@ -345,6 +365,10 @@ fn run(context: &mut ServiceContext) -> ! {
                             source_address: 0,
                             source_port: 0,
                             length: 0,
+                            stream_readiness: 0,
+                            stream_reserved: 0,
+                            stream_accepted_bytes: 0,
+                            stream_acknowledged_bytes: 0,
                             info,
                             counters,
                         }) {
@@ -376,6 +400,10 @@ fn run(context: &mut ServiceContext) -> ! {
                     source_address: 0,
                     source_port: 0,
                     length: 0,
+                    stream_readiness: 0,
+                    stream_reserved: 0,
+                    stream_accepted_bytes: 0,
+                    stream_acknowledged_bytes: 0,
                     info,
                     counters,
                 })
@@ -422,6 +450,10 @@ fn run(context: &mut ServiceContext) -> ! {
                             source_address: u32::from_be_bytes(source.0),
                             source_port,
                             length: 0,
+                            stream_readiness: 0,
+                            stream_reserved: 0,
+                            stream_accepted_bytes: 0,
+                            stream_acknowledged_bytes: 0,
                             info,
                             counters,
                         }
@@ -460,6 +492,10 @@ fn run(context: &mut ServiceContext) -> ! {
                     source_port: 0,
                     length: received.unwrap_or(0) as u16,
                     info,
+                    stream_readiness: 0,
+                    stream_reserved: 0,
+                    stream_accepted_bytes: 0,
+                    stream_acknowledged_bytes: 0,
                     counters,
                 };
                 if !context.network_reply(reply) {
@@ -507,11 +543,15 @@ fn run(context: &mut ServiceContext) -> ! {
                     Err(error) => (map_tcp_error(error), 0, 0),
                 };
                 if status == NetworkStatus::Complete {
+                    let readiness = state
+                        .tcp()
+                        .stream_state(owner, endpoint)
+                        .map_or(logos_net::STREAM_WRITABLE, |(readiness, _, _)| readiness);
                     let _ = context.publish_stream(logos_abi::NetworkStreamRecord {
                         owner,
                         endpoint: request.endpoint,
                         generation: request.generation,
-                        readiness: logos_abi::NetworkStreamReadiness::Writable.bits(),
+                        readiness,
                         status,
                         reserved: 0,
                         sequence: 0,
@@ -531,6 +571,10 @@ fn run(context: &mut ServiceContext) -> ! {
                     source_address: 0,
                     source_port: 0,
                     length: if status == NetworkStatus::Complete { request.length } else { 0 },
+                    stream_readiness: 0,
+                    stream_reserved: 0,
+                    stream_accepted_bytes: 0,
+                    stream_acknowledged_bytes: 0,
                     info,
                     counters,
                 }) {
@@ -539,16 +583,20 @@ fn run(context: &mut ServiceContext) -> ! {
                 continue;
             }
             if request.operation == NetworkOperation::PollStream {
-                let result = context.poll_stream(request.endpoint);
-                let (status, endpoint) = result
-                    .map_or((NetworkStatus::Busy, NetworkEndpoint(0)), |record| {
-                        (record.status, record.endpoint)
-                    });
+                let result = logos_net::EndpointId::from_wire(request.endpoint.0)
+                    .ok_or(logos_net::TcpStateError::Invalid)
+                    .and_then(|endpoint| state.tcp().stream_state(owner, endpoint));
+                let (status, readiness, accepted_bytes, acknowledged_bytes) = match result {
+                    Ok((readiness, accepted_bytes, acknowledged_bytes)) => {
+                        (NetworkStatus::Complete, readiness, accepted_bytes, acknowledged_bytes)
+                    }
+                    Err(error) => (map_tcp_error(error), 0, 0, 0),
+                };
                 if !context.network_reply(NetworkReply {
                     id: request.id,
                     status,
                     endpoint: if status == NetworkStatus::Complete {
-                        endpoint
+                        request.endpoint
                     } else {
                         NetworkEndpoint(0)
                     },
@@ -556,6 +604,10 @@ fn run(context: &mut ServiceContext) -> ! {
                     source_address: 0,
                     source_port: 0,
                     length: 0,
+                    stream_readiness: readiness,
+                    stream_reserved: 0,
+                    stream_accepted_bytes: accepted_bytes,
+                    stream_acknowledged_bytes: acknowledged_bytes,
                     info,
                     counters,
                 }) {
@@ -624,6 +676,10 @@ fn run(context: &mut ServiceContext) -> ! {
                     source_address: 0,
                     source_port: 0,
                     length: if status == NetworkStatus::Complete { request.length } else { 0 },
+                    stream_readiness: 0,
+                    stream_reserved: 0,
+                    stream_accepted_bytes: 0,
+                    stream_acknowledged_bytes: 0,
                     info,
                     counters,
                 }) {
@@ -762,6 +818,10 @@ fn run(context: &mut ServiceContext) -> ! {
                         source_address: request.peer.address(),
                         source_port: 0,
                         length: 0,
+                        stream_readiness: 0,
+                        stream_reserved: 0,
+                        stream_accepted_bytes: 0,
+                        stream_acknowledged_bytes: 0,
                         info,
                         counters,
                     },
@@ -794,6 +854,10 @@ fn run(context: &mut ServiceContext) -> ! {
                                 source_address: 0,
                                 source_port: 0,
                                 length: length as u16,
+                                stream_readiness: 0,
+                                stream_reserved: 0,
+                                stream_accepted_bytes: 0,
+                                stream_acknowledged_bytes: 0,
                                 info,
                                 counters,
                             },
@@ -841,6 +905,10 @@ fn run(context: &mut ServiceContext) -> ! {
                             source_address: u32::from_be_bytes(receive.0.0),
                             source_port: receive.1,
                             length: receive.2 as u16,
+                            stream_readiness: 0,
+                            stream_reserved: 0,
+                            stream_accepted_bytes: 0,
+                            stream_acknowledged_bytes: 0,
                             info,
                             counters,
                         },
@@ -863,6 +931,10 @@ fn run(context: &mut ServiceContext) -> ! {
                             source_address: 0,
                             source_port: 0,
                             length: 0,
+                            stream_readiness: 0,
+                            stream_reserved: 0,
+                            stream_accepted_bytes: 0,
+                            stream_acknowledged_bytes: 0,
                             info,
                             counters,
                         },
@@ -890,6 +962,10 @@ fn run(context: &mut ServiceContext) -> ! {
                             source_address: u32::from_be_bytes(source.0),
                             source_port,
                             length: 0,
+                            stream_readiness: 0,
+                            stream_reserved: 0,
+                            stream_accepted_bytes: 0,
+                            stream_acknowledged_bytes: 0,
                             info,
                             counters,
                         },
@@ -928,6 +1004,10 @@ fn run(context: &mut ServiceContext) -> ! {
                             source_address: 0,
                             source_port: 0,
                             length: 0,
+                            stream_readiness: 0,
+                            stream_reserved: 0,
+                            stream_accepted_bytes: 0,
+                            stream_acknowledged_bytes: 0,
                             info,
                             counters,
                         },
@@ -1743,6 +1823,10 @@ fn error_reply(
         source_address: 0,
         source_port: 0,
         length: 0,
+        stream_readiness: 0,
+        stream_reserved: 0,
+        stream_accepted_bytes: 0,
+        stream_acknowledged_bytes: 0,
         info,
         counters,
     }
@@ -1831,6 +1915,10 @@ fn handle_request(
         source_address,
         source_port,
         length,
+        stream_readiness: 0,
+        stream_reserved: 0,
+        stream_accepted_bytes: 0,
+        stream_acknowledged_bytes: 0,
         info: status_info,
         counters,
     }
