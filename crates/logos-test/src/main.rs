@@ -1902,13 +1902,31 @@ fn tcp_stream_peer(port: u16) -> Result<(), String> {
             Err(error) => return Err(format!("TCP peer connect: {error}")),
         }
     };
+    let mut second = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => break stream,
+            Err(error) if Instant::now() < deadline => {
+                let _ = error;
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(format!("second TCP peer connect: {error}")),
+        }
+    };
     stream.set_nodelay(true).map_err(io_error)?;
+    second.set_nodelay(true).map_err(io_error)?;
     stream.set_read_timeout(Some(Duration::from_secs(10))).map_err(io_error)?;
+    second.set_read_timeout(Some(Duration::from_secs(10))).map_err(io_error)?;
     stream.write_all(b"hello").map_err(io_error)?;
+    second.write_all(b"other").map_err(io_error)?;
     let mut small = [0; 5];
     stream.read_exact(&mut small).map_err(io_error)?;
     if small != *b"world" {
         return Err(format!("TCP peer received {:?}, expected world", small));
+    }
+    let mut second_output = [0; 5];
+    second.read_exact(&mut second_output).map_err(io_error)?;
+    if second_output != *b"reply" {
+        return Err(format!("second TCP peer received {:?}, expected reply", second_output));
     }
 
     let mut input = [0; 512];
