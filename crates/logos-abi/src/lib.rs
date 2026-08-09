@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod endpoint_v5;
 pub mod service;
 
 pub const MAX_SESSION_TEXT: usize = 256;

@@ -80,6 +80,11 @@ page fields are populated only by the address-space compatibility adapter. Remot
 isolated in the Remote protocol module, and proof state is owned by the test-hook proof module rather
 than the platform composition root.
 
+Deferred endpoint evolution now has isolated bounded primitives: `logos_abi::endpoint_v5` defines a
+generation-bound endpoint table, while `logos_core` provides binary manifest validation, owner-scoped
+resource leases, explicit-loss event queues, and an opt-in cooperative poll runtime. These are not
+implicitly wired into the ABI-v4 boot path; the existing scheduler and typed pages remain active.
+
 The current Remote migration checkpoint is deliberately partial: `RemoteRuntime` owns RemoteState,
 local trust commands through one `local_command` path, transport reset/start state, protected
 control loading, the enrollment gate, and one bounded generation-bound input operation slot.

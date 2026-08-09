@@ -35,3 +35,4 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0027](0027-network-scalable-stream-slice.md) | Accepted - current scalable Network architecture baseline | Evolve the typed Network endpoint with bounded listener/connection tables and async byte-stream state. |
 | [0028](0028-async-first-subsystem-state.md) | Accepted | Represent long-lived work as bounded owned state and keep task scheduling above subsystem protocol execution. |
 | [0029](0029-generic-internal-endpoint-mappings.md) | Accepted | Map static typed endpoint descriptors through bounded generic Core records while preserving ABI-v4 pages. |
+| [0030](0030-bounded-deferred-runtime-primitives.md) | Accepted | Add bounded ABI-v5, manifest, resource, event, and polling primitives behind the ABI-v4 compatibility path. |

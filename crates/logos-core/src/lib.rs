@@ -2,7 +2,9 @@
 
 pub mod capabilities;
 pub mod clock;
+pub mod event;
 pub mod fault;
+pub mod manifest;
 pub mod native_service {
     pub use logos_abi::service::{
         ABI, ACKNOWLEDGED, BlockClientPage, COMPLETE, ControlPage, DisplayPage, EffectPage,
@@ -16,5 +18,7 @@ pub mod native_service {
         StoreServerPage, StreamPage, self_check,
     };
 }
+pub mod poll_runtime;
+pub mod resource;
 pub mod shared_pages;
 pub mod test_protocol;
