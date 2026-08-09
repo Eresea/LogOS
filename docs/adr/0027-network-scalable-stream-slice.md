@@ -1,6 +1,6 @@
 # ADR-0027: Network scalable stream slice
 
-- Status: Accepted
+- Status: Accepted - current scalable Network architecture baseline
 - Date: 2026-08-09
 
 ## Context

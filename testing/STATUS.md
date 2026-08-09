@@ -1,6 +1,8 @@
 # Test Status
 
-Last verification: 2026-08-09. Current direct-client baseline on `codex/repair-network-invariants`.
+Last verification: 2026-08-09. Current direct-client baseline on merged `main` SHA `27b3595`.
+Merged-main host/debug/release checks passed; the Network suite and three independent TCP attempts were run
+with seed `1` and one QEMU job, but each hit `network_resources_unavailable` in this environment.
 Historical checkpoint material is retained below only where explicitly labeled.
 The opening architecture notes are retained context; **Current evidence** is the authoritative
 run ledger.

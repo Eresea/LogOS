@@ -32,5 +32,4 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0024](0024-typed-network-device-event-transport.md) | Accepted | Move Network device/event payloads and DMA identities to generation-safe typed pages owned by NetworkRuntime. |
 | [0025](0025-network-readiness-and-completion-targets.md) | Accepted | Make NetworkRuntime own readiness and separate production task completion from test probes. |
 | [0026](0026-network-bootstrap-and-async-service-boundary.md) | Accepted | Keep the Network bootstrap boundary while moving scheduler decisions above NetworkRuntime. |
-| [0027](0027-network-scalable-stream-slice.md) | Accepted | Evolve the typed Network endpoint with bounded listener/connection tables and async byte-stream state. |
-
+| [0027](0027-network-scalable-stream-slice.md) | Accepted - current scalable Network architecture baseline | Evolve the typed Network endpoint with bounded listener/connection tables and async byte-stream state. |
