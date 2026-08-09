@@ -4,6 +4,7 @@ use core::{
 };
 
 use crate::mm::memory::{Contiguous, Page, PhysicalMemory};
+use crate::platform::services::{EndpointDescriptor, EndpointKind};
 
 const ENTRIES: usize = 512;
 const MAPPED_PAGES: usize = 160;
@@ -60,6 +61,7 @@ struct Mapping {
 
 pub struct ContextMapping {
     pub context: (u64, u64),
+    pub entries: [Option<ContextMappingEntry>; 14],
     pub input: Option<(u64, u64)>,
     pub display: Option<(u64, u64)>,
     pub session_client: Option<(u64, u64)>,
@@ -74,6 +76,41 @@ pub struct ContextMapping {
     pub network_device: Option<(u64, u64)>,
     pub network_event: Option<(u64, u64)>,
     pub network_stream: Option<(u64, u64)>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ContextMappingEntry {
+    pub kind: EndpointKind,
+    pub physical: u64,
+    pub virtual_address: u64,
+}
+
+fn endpoint_index(kind: EndpointKind) -> Option<usize> {
+    Some(match kind {
+        EndpointKind::Input => 0,
+        EndpointKind::Display => 1,
+        EndpointKind::SessionClient => 2,
+        EndpointKind::SessionServer => 3,
+        EndpointKind::Effect => 4,
+        EndpointKind::StoreClient => 5,
+        EndpointKind::StoreServer => 6,
+        EndpointKind::BlockClient => 7,
+        EndpointKind::Remote => 8,
+        EndpointKind::NetworkClient => 9,
+        EndpointKind::NetworkServer => 10,
+        EndpointKind::NetworkDevice => 11,
+        EndpointKind::NetworkEvent => 12,
+        EndpointKind::NetworkStream => 13,
+    })
+}
+
+fn mapping_insert(
+    entries: &mut [Option<ContextMappingEntry>; 14],
+    entry: ContextMappingEntry,
+) -> Option<()> {
+    let slot = entries.iter_mut().find(|slot| slot.is_none())?;
+    *slot = Some(entry);
+    Some(())
 }
 
 impl AddressSpace {
@@ -203,8 +240,54 @@ impl AddressSpace {
         Some(self.base)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn map_context(
+        &mut self,
+        physical: &mut PhysicalMemory,
+        endpoints: &[EndpointDescriptor],
+    ) -> Option<ContextMapping> {
+        if endpoints.len() > 14 {
+            return None;
+        }
+        let mut seen = [false; 14];
+        for descriptor in endpoints {
+            let index = endpoint_index(descriptor.kind)?;
+            if seen[index] {
+                return None;
+            }
+            seen[index] = true;
+        }
+        let mut context_mapping = self.map_context_legacy(
+            physical, seen[0], seen[1], seen[2], seen[3], seen[4], seen[5], seen[6], seen[7],
+            seen[8], seen[9], seen[10], seen[11], seen[12], seen[13],
+        )?;
+        let mappings = [
+            (EndpointKind::Input, context_mapping.input),
+            (EndpointKind::Display, context_mapping.display),
+            (EndpointKind::SessionClient, context_mapping.session_client),
+            (EndpointKind::SessionServer, context_mapping.session_server),
+            (EndpointKind::Effect, context_mapping.effect),
+            (EndpointKind::StoreClient, context_mapping.store_client),
+            (EndpointKind::StoreServer, context_mapping.store_server),
+            (EndpointKind::BlockClient, context_mapping.block_client),
+            (EndpointKind::Remote, context_mapping.remote),
+            (EndpointKind::NetworkClient, context_mapping.network_client),
+            (EndpointKind::NetworkServer, context_mapping.network_server),
+            (EndpointKind::NetworkDevice, context_mapping.network_device),
+            (EndpointKind::NetworkEvent, context_mapping.network_event),
+            (EndpointKind::NetworkStream, context_mapping.network_stream),
+        ];
+        for (kind, endpoint_mapping) in mappings {
+            if let Some((physical, virtual_address)) = endpoint_mapping {
+                mapping_insert(
+                    &mut context_mapping.entries,
+                    ContextMappingEntry { kind, physical, virtual_address },
+                )?;
+            }
+        }
+        Some(context_mapping)
+    }
+
+    fn map_context_legacy(
         &mut self,
         physical: &mut PhysicalMemory,
         input: bool,
@@ -772,6 +855,7 @@ impl AddressSpace {
         }
         Some(ContextMapping {
             context: (context_address, context_virtual),
+            entries: [None; 14],
             input: input_address.zip(input_virtual),
             display: display_address.zip(display_virtual),
             session_client: session_client_address.zip(session_client_virtual),

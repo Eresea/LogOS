@@ -4,9 +4,7 @@ use logos_core::capabilities::{Capability, CapabilityKind, CapabilityManager};
 
 const MAX_MANIFESTS: usize = 8;
 
-pub use services::{
-    EndpointSet, Profile, Profiles, Protocol, RecoveryClass, RestartPolicy, ServiceSpec,
-};
+pub use services::{Profile, Profiles, Protocol, RecoveryClass, RestartPolicy, ServiceSpec};
 pub type Manifest = ServiceSpec;
 
 pub const SUPERVISOR: &[u8] = services::SUPERVISOR;
@@ -418,7 +416,7 @@ pub fn self_check() -> bool {
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
             recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
-            endpoints: EndpointSet::NONE,
+            endpoints: &[],
         },
         Manifest {
             service: services::Service::Supervisor,
@@ -429,7 +427,7 @@ pub fn self_check() -> bool {
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
             recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
-            endpoints: EndpointSet::NONE,
+            endpoints: &[],
         },
     ];
     const MISSING: &[Manifest] = &[Manifest {
@@ -441,7 +439,7 @@ pub fn self_check() -> bool {
         restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         recovery: RecoveryClass::Restartable,
         profiles: Profiles::ALL,
-        endpoints: EndpointSet::NONE,
+        endpoints: &[],
     }];
     const CYCLE: &[Manifest] = &[
         Manifest {
@@ -453,7 +451,7 @@ pub fn self_check() -> bool {
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
             recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
-            endpoints: EndpointSet::NONE,
+            endpoints: &[],
         },
         Manifest {
             service: services::Service::Supervisor,
@@ -464,7 +462,7 @@ pub fn self_check() -> bool {
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
             recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
-            endpoints: EndpointSet::NONE,
+            endpoints: &[],
         },
     ];
     Plan::build(OK, Profile::Normal).is_ok_and(|plan| plan.starts(A) && plan.starts(B))
@@ -494,7 +492,7 @@ pub fn dependency_loss_self_check() -> bool {
         restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         recovery: RecoveryClass::Restartable,
         profiles: Profiles::ALL,
-        endpoints: EndpointSet::NONE,
+        endpoints: &[],
     }];
     matches!(Plan::build(MISSING, Profile::Normal), Err(Error::MissingDependency))
 }

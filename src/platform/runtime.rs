@@ -854,17 +854,26 @@ pub(crate) fn run(
     let gateway_spec = services::Service::Gateway.spec();
     check!(
         b"typed endpoint map",
-        terminal_spec.endpoints.contains(services::EndpointSet::INPUT)
-            && terminal_spec.endpoints.contains(services::EndpointSet::DISPLAY)
-            && terminal_spec.endpoints.contains(services::EndpointSet::STORE_CLIENT)
-            && terminal_spec.endpoints.contains(services::EndpointSet::NETWORK_CLIENT)
-            && storage_spec.endpoints.contains(services::EndpointSet::STORE_SERVER)
-            && storage_spec.endpoints.contains(services::EndpointSet::BLOCK_CLIENT)
-            && network_spec.endpoints.contains(services::EndpointSet::NETWORK_DEVICE)
-            && network_spec.endpoints.contains(services::EndpointSet::NETWORK_EVENT)
-            && gateway_spec.endpoints.contains(services::EndpointSet::NETWORK_CLIENT)
-            && gateway_spec.endpoints.contains(services::EndpointSet::REMOTE)
-            && gateway_spec.endpoints.contains(services::EndpointSet::STORE_CLIENT),
+        services::has_endpoint(terminal_spec.endpoints, services::EndpointKind::Input)
+            && services::has_endpoint(terminal_spec.endpoints, services::EndpointKind::Display)
+            && services::has_endpoint(terminal_spec.endpoints, services::EndpointKind::StoreClient)
+            && services::has_endpoint(
+                terminal_spec.endpoints,
+                services::EndpointKind::NetworkClient
+            )
+            && services::has_endpoint(storage_spec.endpoints, services::EndpointKind::StoreServer)
+            && services::has_endpoint(storage_spec.endpoints, services::EndpointKind::BlockClient)
+            && services::has_endpoint(
+                network_spec.endpoints,
+                services::EndpointKind::NetworkDevice
+            )
+            && services::has_endpoint(network_spec.endpoints, services::EndpointKind::NetworkEvent)
+            && services::has_endpoint(
+                gateway_spec.endpoints,
+                services::EndpointKind::NetworkClient
+            )
+            && services::has_endpoint(gateway_spec.endpoints, services::EndpointKind::Remote)
+            && services::has_endpoint(gateway_spec.endpoints, services::EndpointKind::StoreClient),
     );
     if let Some(storage) = native_storage.as_mut() {
         check!(b"storage heap", storage.map_heap(&mut memory).is_some());

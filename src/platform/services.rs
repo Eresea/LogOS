@@ -60,49 +60,62 @@ pub struct RestartPolicy {
     pub backoff_ticks: u64,
 }
 
-/// Endpoint pages granted to a native service by the bootstrap mapper.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct EndpointSet(u16);
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EndpointKind {
+    Input,
+    Display,
+    SessionClient,
+    SessionServer,
+    Effect,
+    StoreClient,
+    StoreServer,
+    BlockClient,
+    Remote,
+    NetworkClient,
+    NetworkServer,
+    NetworkDevice,
+    NetworkEvent,
+    NetworkStream,
+}
 
-impl EndpointSet {
-    const INPUT_BIT: u16 = 1 << 0;
-    const DISPLAY_BIT: u16 = 1 << 1;
-    const SESSION_CLIENT_BIT: u16 = 1 << 2;
-    const SESSION_SERVER_BIT: u16 = 1 << 3;
-    const EFFECT_BIT: u16 = 1 << 4;
-    const STORE_CLIENT_BIT: u16 = 1 << 5;
-    const STORE_SERVER_BIT: u16 = 1 << 6;
-    const BLOCK_CLIENT_BIT: u16 = 1 << 7;
-    const REMOTE_BIT: u16 = 1 << 8;
-    const NETWORK_DEVICE_BIT: u16 = 1 << 9;
-    const NETWORK_EVENT_BIT: u16 = 1 << 10;
-    const NETWORK_CLIENT_BIT: u16 = 1 << 11;
-    const NETWORK_SERVER_BIT: u16 = 1 << 12;
-    const NETWORK_STREAM_BIT: u16 = 1 << 13;
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EndpointRole {
+    Client,
+    Server,
+    Device,
+    Event,
+    Shared,
+}
 
-    pub const NONE: Self = Self(0);
-    pub const INPUT: Self = Self(Self::INPUT_BIT);
-    pub const DISPLAY: Self = Self(Self::DISPLAY_BIT);
-    pub const SESSION_CLIENT: Self = Self(Self::SESSION_CLIENT_BIT);
-    pub const SESSION_SERVER: Self = Self(Self::SESSION_SERVER_BIT);
-    pub const EFFECT: Self = Self(Self::EFFECT_BIT);
-    pub const STORE_CLIENT: Self = Self(Self::STORE_CLIENT_BIT);
-    pub const STORE_SERVER: Self = Self(Self::STORE_SERVER_BIT);
-    pub const BLOCK_CLIENT: Self = Self(Self::BLOCK_CLIENT_BIT);
-    pub const REMOTE: Self = Self(Self::REMOTE_BIT);
-    pub const NETWORK_DEVICE: Self = Self(Self::NETWORK_DEVICE_BIT);
-    pub const NETWORK_EVENT: Self = Self(Self::NETWORK_EVENT_BIT);
-    pub const NETWORK_CLIENT: Self = Self(Self::NETWORK_CLIENT_BIT);
-    pub const NETWORK_SERVER: Self = Self(Self::NETWORK_SERVER_BIT);
-    pub const NETWORK_STREAM: Self = Self(Self::NETWORK_STREAM_BIT);
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EndpointPermissions(u8);
 
-    pub const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
+impl EndpointPermissions {
+    pub const READ_WRITE: Self = Self(0b11);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EndpointDescriptor {
+    pub kind: EndpointKind,
+    pub role: EndpointRole,
+    pub permissions: EndpointPermissions,
+}
+
+impl EndpointDescriptor {
+    pub const fn new(kind: EndpointKind, role: EndpointRole) -> Self {
+        Self { kind, role, permissions: EndpointPermissions::READ_WRITE }
     }
+}
 
-    pub const fn contains(self, endpoint: Self) -> bool {
-        self.0 & endpoint.0 == endpoint.0
+pub fn has_endpoint(endpoints: &[EndpointDescriptor], kind: EndpointKind) -> bool {
+    let mut index = 0;
+    while index < endpoints.len() {
+        if endpoints[index].kind == kind {
+            return true;
+        }
+        index += 1;
     }
+    false
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -127,8 +140,37 @@ pub struct ServiceSpec {
     pub restart: RestartPolicy,
     pub recovery: RecoveryClass,
     pub profiles: Profiles,
-    pub endpoints: EndpointSet,
+    pub endpoints: &'static [EndpointDescriptor],
 }
+
+const STORAGE_ENDPOINTS: &[EndpointDescriptor] = &[
+    EndpointDescriptor::new(EndpointKind::StoreServer, EndpointRole::Server),
+    EndpointDescriptor::new(EndpointKind::BlockClient, EndpointRole::Client),
+];
+const TERMINAL_ENDPOINTS: &[EndpointDescriptor] = &[
+    EndpointDescriptor::new(EndpointKind::Input, EndpointRole::Client),
+    EndpointDescriptor::new(EndpointKind::Display, EndpointRole::Client),
+    EndpointDescriptor::new(EndpointKind::SessionClient, EndpointRole::Client),
+    EndpointDescriptor::new(EndpointKind::StoreClient, EndpointRole::Client),
+    EndpointDescriptor::new(EndpointKind::NetworkClient, EndpointRole::Client),
+    EndpointDescriptor::new(EndpointKind::NetworkStream, EndpointRole::Shared),
+];
+const SESSIONS_ENDPOINTS: &[EndpointDescriptor] = &[
+    EndpointDescriptor::new(EndpointKind::SessionServer, EndpointRole::Server),
+    EndpointDescriptor::new(EndpointKind::Effect, EndpointRole::Server),
+];
+const NETWORK_ENDPOINTS: &[EndpointDescriptor] = &[
+    EndpointDescriptor::new(EndpointKind::NetworkServer, EndpointRole::Server),
+    EndpointDescriptor::new(EndpointKind::NetworkDevice, EndpointRole::Device),
+    EndpointDescriptor::new(EndpointKind::NetworkEvent, EndpointRole::Event),
+    EndpointDescriptor::new(EndpointKind::NetworkStream, EndpointRole::Shared),
+];
+const GATEWAY_ENDPOINTS: &[EndpointDescriptor] = &[
+    EndpointDescriptor::new(EndpointKind::NetworkClient, EndpointRole::Client),
+    EndpointDescriptor::new(EndpointKind::NetworkStream, EndpointRole::Shared),
+    EndpointDescriptor::new(EndpointKind::Remote, EndpointRole::Client),
+    EndpointDescriptor::new(EndpointKind::StoreClient, EndpointRole::Client),
+];
 
 const SUPERVISOR_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Supervisor,
@@ -139,7 +181,7 @@ const SUPERVISOR_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 0, backoff_ticks: 0 },
     recovery: RecoveryClass::Fatal,
     profiles: Profiles::ALL,
-    endpoints: EndpointSet::NONE,
+    endpoints: &[],
 };
 const VIRTIO_BALLOON_SPEC: ServiceSpec = ServiceSpec {
     service: Service::VirtioBalloon,
@@ -150,7 +192,7 @@ const VIRTIO_BALLOON_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Resettable,
     profiles: Profiles::NORMAL_RECOVERY,
-    endpoints: EndpointSet::NONE,
+    endpoints: &[],
 };
 const VIRTIO_BLOCK_SPEC: ServiceSpec = ServiceSpec {
     service: Service::VirtioBlock,
@@ -161,7 +203,7 @@ const VIRTIO_BLOCK_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Resettable,
     profiles: Profiles::NORMAL_RECOVERY,
-    endpoints: EndpointSet::NONE,
+    endpoints: &[],
 };
 const STORAGE_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Storage,
@@ -177,7 +219,7 @@ const STORAGE_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_RECOVERY,
-    endpoints: EndpointSet::STORE_SERVER.union(EndpointSet::BLOCK_CLIENT),
+    endpoints: STORAGE_ENDPOINTS,
 };
 const TERMINAL_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Terminal,
@@ -188,12 +230,7 @@ const TERMINAL_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 1, backoff_ticks: 0 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
-    endpoints: EndpointSet::INPUT
-        .union(EndpointSet::DISPLAY)
-        .union(EndpointSet::SESSION_CLIENT)
-        .union(EndpointSet::STORE_CLIENT)
-        .union(EndpointSet::NETWORK_CLIENT)
-        .union(EndpointSet::NETWORK_STREAM),
+    endpoints: TERMINAL_ENDPOINTS,
 };
 const SESSIONS_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Sessions,
@@ -204,7 +241,7 @@ const SESSIONS_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
-    endpoints: EndpointSet::SESSION_SERVER.union(EndpointSet::EFFECT),
+    endpoints: SESSIONS_ENDPOINTS,
 };
 const NETWORK_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Network,
@@ -220,10 +257,7 @@ const NETWORK_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
-    endpoints: EndpointSet::NETWORK_SERVER
-        .union(EndpointSet::NETWORK_DEVICE)
-        .union(EndpointSet::NETWORK_EVENT)
-        .union(EndpointSet::NETWORK_STREAM),
+    endpoints: NETWORK_ENDPOINTS,
 };
 const GATEWAY_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Gateway,
@@ -239,10 +273,7 @@ const GATEWAY_SPEC: ServiceSpec = ServiceSpec {
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
-    endpoints: EndpointSet::NETWORK_CLIENT
-        .union(EndpointSet::NETWORK_STREAM)
-        .union(EndpointSet::REMOTE)
-        .union(EndpointSet::STORE_CLIENT),
+    endpoints: GATEWAY_ENDPOINTS,
 };
 
 /// The single typed service specification consumed by boot planning, payload
@@ -281,24 +312,24 @@ pub fn self_check() -> bool {
     SERVICE_SPECS.iter().all(|spec| spec.service.spec().name == spec.name)
         && SERVICE_SPECS.len() == SERVICES
         && Service::Terminal.spec().protocol == Protocol { abi: 1, version: 0 }
-        && Service::Storage.spec().endpoints.contains(EndpointSet::STORE_SERVER)
-        && Service::Terminal.spec().endpoints.contains(EndpointSet::SESSION_CLIENT)
-        && Service::Sessions.spec().endpoints.contains(EndpointSet::SESSION_SERVER)
-        && Service::Sessions.spec().endpoints.contains(EndpointSet::EFFECT)
-        && Service::Network.spec().endpoints.contains(EndpointSet::NETWORK_DEVICE)
-        && Service::Network.spec().endpoints.contains(EndpointSet::NETWORK_EVENT)
-        && Service::Network.spec().endpoints.contains(EndpointSet::NETWORK_STREAM)
-        && Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_CLIENT)
-        && Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_STREAM)
-        && Service::Network.spec().endpoints.contains(EndpointSet::NETWORK_SERVER)
-        && !Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_DEVICE)
-        && !Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_EVENT)
-        && !Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_SERVER)
-        && !Service::Gateway.spec().endpoints.contains(EndpointSet::NETWORK_DEVICE)
-        && !Service::Gateway.spec().endpoints.contains(EndpointSet::NETWORK_EVENT)
-        && !Service::Gateway.spec().endpoints.contains(EndpointSet::NETWORK_SERVER)
-        && Service::Storage.spec().endpoints.contains(EndpointSet::BLOCK_CLIENT)
-        && Service::Gateway.spec().endpoints.contains(EndpointSet::REMOTE)
+        && has_endpoint(Service::Storage.spec().endpoints, EndpointKind::StoreServer)
+        && has_endpoint(Service::Terminal.spec().endpoints, EndpointKind::SessionClient)
+        && has_endpoint(Service::Sessions.spec().endpoints, EndpointKind::SessionServer)
+        && has_endpoint(Service::Sessions.spec().endpoints, EndpointKind::Effect)
+        && has_endpoint(Service::Network.spec().endpoints, EndpointKind::NetworkDevice)
+        && has_endpoint(Service::Network.spec().endpoints, EndpointKind::NetworkEvent)
+        && has_endpoint(Service::Network.spec().endpoints, EndpointKind::NetworkStream)
+        && has_endpoint(Service::Terminal.spec().endpoints, EndpointKind::NetworkClient)
+        && has_endpoint(Service::Terminal.spec().endpoints, EndpointKind::NetworkStream)
+        && has_endpoint(Service::Network.spec().endpoints, EndpointKind::NetworkServer)
+        && !has_endpoint(Service::Terminal.spec().endpoints, EndpointKind::NetworkDevice)
+        && !has_endpoint(Service::Terminal.spec().endpoints, EndpointKind::NetworkEvent)
+        && !has_endpoint(Service::Terminal.spec().endpoints, EndpointKind::NetworkServer)
+        && !has_endpoint(Service::Gateway.spec().endpoints, EndpointKind::NetworkDevice)
+        && !has_endpoint(Service::Gateway.spec().endpoints, EndpointKind::NetworkEvent)
+        && !has_endpoint(Service::Gateway.spec().endpoints, EndpointKind::NetworkServer)
+        && has_endpoint(Service::Storage.spec().endpoints, EndpointKind::BlockClient)
+        && has_endpoint(Service::Gateway.spec().endpoints, EndpointKind::Remote)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

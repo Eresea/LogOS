@@ -1,4 +1,4 @@
-use crate::platform::services::EndpointSet;
+use crate::platform::services::{EndpointDescriptor, EndpointKind};
 use crate::{
     arch::cpu::{EntryState, Privilege},
     mm::{address_space::AddressSpace, memory::PhysicalMemory},
@@ -8,7 +8,52 @@ use crate::{
 
 const TASKS: usize = 5;
 
-pub type EndpointPages = EndpointSet;
+pub type EndpointPages = &'static [EndpointDescriptor];
+const MAX_ENDPOINTS: usize = 14;
+
+#[derive(Clone, Copy)]
+struct EndpointMapping {
+    kind: EndpointKind,
+    physical: u64,
+    virtual_address: u64,
+    generation: u32,
+}
+
+#[derive(Clone, Copy)]
+struct EndpointMappings {
+    entries: [Option<EndpointMapping>; MAX_ENDPOINTS],
+}
+
+impl EndpointMappings {
+    const fn from_context(
+        entries: [Option<crate::mm::address_space::ContextMappingEntry>; 14],
+    ) -> Self {
+        let mut mappings = [None; MAX_ENDPOINTS];
+        let mut index = 0;
+        while index < entries.len() {
+            if let Some(entry) = entries[index] {
+                mappings[index] = Some(EndpointMapping {
+                    kind: entry.kind,
+                    physical: entry.physical,
+                    virtual_address: entry.virtual_address,
+                    generation: 1,
+                });
+            }
+            index += 1;
+        }
+        Self { entries: mappings }
+    }
+
+    fn get(&self, kind: EndpointKind) -> Option<EndpointMapping> {
+        self.entries.iter().flatten().find(|entry| entry.kind == kind).copied()
+    }
+
+    fn set_generation(&mut self, generation: u32) {
+        for entry in self.entries.iter_mut().flatten() {
+            entry.generation = generation;
+        }
+    }
+}
 
 pub struct Task<'a> {
     privilege: &'a Privilege,
@@ -17,20 +62,7 @@ pub struct Task<'a> {
     entry: u64,
     context_physical: u64,
     context: u64,
-    input_page_physical: Option<u64>,
-    display_page_physical: Option<u64>,
-    session_client_page_physical: Option<u64>,
-    session_server_page_physical: Option<u64>,
-    effect_page_physical: Option<u64>,
-    store_client_page_physical: Option<u64>,
-    store_server_page_physical: Option<u64>,
-    block_client_page_physical: Option<u64>,
-    remote_page_physical: Option<u64>,
-    network_device_page_physical: Option<u64>,
-    network_event_page_physical: Option<u64>,
-    network_stream_page_physical: Option<u64>,
-    network_client_page_physical: Option<u64>,
-    network_server_page_physical: Option<u64>,
+    endpoint_mappings: EndpointMappings,
     endpoint_pages: EndpointPages,
     generation: u32,
     started: bool,
@@ -1173,6 +1205,13 @@ impl SessionEndpoint {
 }
 
 impl<'a> Task<'a> {
+    fn endpoint_mapping(&self, kind: EndpointKind) -> Option<u64> {
+        self.endpoint_mappings
+            .get(kind)
+            .filter(|mapping| mapping.generation == self.generation && mapping.virtual_address != 0)
+            .map(|mapping| mapping.physical)
+    }
+
     pub fn load(
         memory: &mut PhysicalMemory,
         payload: Payload,
@@ -1184,23 +1223,7 @@ impl<'a> Task<'a> {
             let _ = space.release(memory);
             return None;
         };
-        let Some(mapping) = space.map_context(
-            memory,
-            endpoint_pages.contains(EndpointSet::INPUT),
-            endpoint_pages.contains(EndpointSet::DISPLAY),
-            endpoint_pages.contains(EndpointSet::SESSION_CLIENT),
-            endpoint_pages.contains(EndpointSet::SESSION_SERVER),
-            endpoint_pages.contains(EndpointSet::EFFECT),
-            endpoint_pages.contains(EndpointSet::STORE_CLIENT),
-            endpoint_pages.contains(EndpointSet::STORE_SERVER),
-            endpoint_pages.contains(EndpointSet::BLOCK_CLIENT),
-            endpoint_pages.contains(EndpointSet::REMOTE),
-            endpoint_pages.contains(EndpointSet::NETWORK_CLIENT),
-            endpoint_pages.contains(EndpointSet::NETWORK_SERVER),
-            endpoint_pages.contains(EndpointSet::NETWORK_DEVICE),
-            endpoint_pages.contains(EndpointSet::NETWORK_EVENT),
-            endpoint_pages.contains(EndpointSet::NETWORK_STREAM),
-        ) else {
+        let Some(mapping) = space.map_context(memory, endpoint_pages) else {
             let _ = space.release(memory);
             return None;
         };
@@ -1212,20 +1235,7 @@ impl<'a> Task<'a> {
             entry,
             context_physical,
             context,
-            input_page_physical: mapping.input.map(|(physical, _)| physical),
-            display_page_physical: mapping.display.map(|(physical, _)| physical),
-            session_client_page_physical: mapping.session_client.map(|(physical, _)| physical),
-            session_server_page_physical: mapping.session_server.map(|(physical, _)| physical),
-            effect_page_physical: mapping.effect.map(|(physical, _)| physical),
-            store_client_page_physical: mapping.store_client.map(|(physical, _)| physical),
-            store_server_page_physical: mapping.store_server.map(|(physical, _)| physical),
-            block_client_page_physical: mapping.block_client.map(|(physical, _)| physical),
-            remote_page_physical: mapping.remote.map(|(physical, _)| physical),
-            network_client_page_physical: mapping.network_client.map(|(physical, _)| physical),
-            network_server_page_physical: mapping.network_server.map(|(physical, _)| physical),
-            network_device_page_physical: mapping.network_device.map(|(physical, _)| physical),
-            network_event_page_physical: mapping.network_event.map(|(physical, _)| physical),
-            network_stream_page_physical: mapping.network_stream.map(|(physical, _)| physical),
+            endpoint_mappings: EndpointMappings::from_context(mapping.entries),
             endpoint_pages,
             generation: 1,
             started: false,
@@ -1243,7 +1253,7 @@ impl<'a> Task<'a> {
     }
 
     pub fn input_endpoint(&self) -> Option<InputEndpoint> {
-        self.input_page_physical.map(|page_physical| InputEndpoint {
+        self.endpoint_mapping(EndpointKind::Input).map(|page_physical| InputEndpoint {
             page_physical: Some(page_physical),
             generation: self.generation,
         })
@@ -1254,7 +1264,7 @@ impl<'a> Task<'a> {
     }
 
     pub fn display_endpoint(&self) -> Option<DisplayEndpoint> {
-        self.display_page_physical.map(|page_physical| DisplayEndpoint {
+        self.endpoint_mapping(EndpointKind::Display).map(|page_physical| DisplayEndpoint {
             context_physical: self.context_physical,
             page_physical: Some(page_physical),
             generation: self.generation,
@@ -1262,23 +1272,27 @@ impl<'a> Task<'a> {
     }
 
     pub fn session_client_endpoint(&self) -> Option<SessionClientEndpoint> {
-        self.session_client_page_physical.map(|page_physical| SessionClientEndpoint {
-            page_physical,
-            service_generation: self.generation,
-            endpoint_generation: self.generation,
+        self.endpoint_mapping(EndpointKind::SessionClient).map(|page_physical| {
+            SessionClientEndpoint {
+                page_physical,
+                service_generation: self.generation,
+                endpoint_generation: self.generation,
+            }
         })
     }
 
     pub fn session_server_endpoint(&self) -> Option<SessionServerEndpoint> {
-        self.session_server_page_physical.map(|page_physical| SessionServerEndpoint {
-            page_physical,
-            service_generation: self.generation,
-            endpoint_generation: self.generation,
+        self.endpoint_mapping(EndpointKind::SessionServer).map(|page_physical| {
+            SessionServerEndpoint {
+                page_physical,
+                service_generation: self.generation,
+                endpoint_generation: self.generation,
+            }
         })
     }
 
     pub fn effect_endpoint(&self) -> Option<EffectEndpoint> {
-        self.effect_page_physical.map(|page_physical| EffectEndpoint {
+        self.endpoint_mapping(EndpointKind::Effect).map(|page_physical| EffectEndpoint {
             page_physical,
             service_generation: self.generation,
             endpoint_generation: self.generation,
@@ -1295,17 +1309,17 @@ impl<'a> Task<'a> {
         } {
             return false;
         }
-        if let Some(page) = self.input_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::Input) {
             if !unsafe { logos_core::native_service::InputPage::reset_at(page, generation) } {
                 return false;
             }
         }
-        if let Some(page) = self.display_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::Display) {
             if !unsafe { logos_core::native_service::DisplayPage::reset_at(page, generation) } {
                 return false;
             }
         }
-        if let Some(page) = self.session_client_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::SessionClient) {
             if !unsafe {
                 logos_core::native_service::SessionClientPage::reset_at(
                     page, generation, generation,
@@ -1314,7 +1328,7 @@ impl<'a> Task<'a> {
                 return false;
             }
         }
-        if let Some(page) = self.session_server_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::SessionServer) {
             if !unsafe {
                 logos_core::native_service::SessionServerPage::reset_at(
                     page, generation, generation,
@@ -1323,42 +1337,42 @@ impl<'a> Task<'a> {
                 return false;
             }
         }
-        if let Some(page) = self.effect_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::Effect) {
             if !unsafe {
                 logos_core::native_service::EffectPage::reset_at(page, generation, generation)
             } {
                 return false;
             }
         }
-        if let Some(page) = self.store_client_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::StoreClient) {
             if !unsafe {
                 logos_core::native_service::StoreClientPage::reset_at(page, generation, generation)
             } {
                 return false;
             }
         }
-        if let Some(page) = self.store_server_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::StoreServer) {
             if !unsafe {
                 logos_core::native_service::StoreServerPage::reset_at(page, generation, generation)
             } {
                 return false;
             }
         }
-        if let Some(page) = self.block_client_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::BlockClient) {
             if !unsafe {
                 logos_core::native_service::BlockClientPage::reset_at(page, generation, generation)
             } {
                 return false;
             }
         }
-        if let Some(page) = self.remote_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::Remote) {
             if !unsafe {
                 logos_core::native_service::RemotePage::reset_at(page, generation, generation)
             } {
                 return false;
             }
         }
-        if let Some(page) = self.network_device_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::NetworkDevice) {
             if !unsafe {
                 logos_core::native_service::NetworkDevicePage::reset_generation_at(
                     page, generation, generation,
@@ -1367,7 +1381,7 @@ impl<'a> Task<'a> {
                 return false;
             }
         }
-        if let Some(page) = self.network_client_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::NetworkClient) {
             if !unsafe {
                 logos_core::native_service::NetworkClientPage::reset_at(
                     page, generation, generation,
@@ -1376,7 +1390,7 @@ impl<'a> Task<'a> {
                 return false;
             }
         }
-        if let Some(page) = self.network_server_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::NetworkServer) {
             if !unsafe {
                 logos_core::native_service::NetworkServerPage::reset_at(
                     page, generation, generation,
@@ -1385,7 +1399,7 @@ impl<'a> Task<'a> {
                 return false;
             }
         }
-        if let Some(page) = self.network_event_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::NetworkEvent) {
             if !unsafe {
                 logos_core::native_service::NetworkEventPage::reset_generation_at(
                     page, generation, generation,
@@ -1394,13 +1408,14 @@ impl<'a> Task<'a> {
                 return false;
             }
         }
-        if let Some(page) = self.network_stream_page_physical {
+        if let Some(page) = self.endpoint_mapping(EndpointKind::NetworkStream) {
             if !unsafe {
                 logos_core::native_service::StreamPage::reset_at(page, generation, generation)
             } {
                 return false;
             }
         }
+        self.endpoint_mappings.set_generation(generation);
         self.generation = generation;
         true
     }
@@ -1414,7 +1429,7 @@ impl<'a> Task<'a> {
     }
 
     pub fn store_client_endpoint(&self) -> Option<StoreClientEndpoint> {
-        self.store_client_page_physical.map(|page_physical| StoreClientEndpoint {
+        self.endpoint_mapping(EndpointKind::StoreClient).map(|page_physical| StoreClientEndpoint {
             context_physical: self.context_physical,
             page_physical,
             service_generation: self.generation,
@@ -1423,7 +1438,7 @@ impl<'a> Task<'a> {
     }
 
     pub fn store_server_endpoint(&self) -> Option<StoreServerEndpoint> {
-        self.store_server_page_physical.map(|page_physical| StoreServerEndpoint {
+        self.endpoint_mapping(EndpointKind::StoreServer).map(|page_physical| StoreServerEndpoint {
             context_physical: self.context_physical,
             page_physical,
             service_generation: self.generation,
@@ -1432,7 +1447,7 @@ impl<'a> Task<'a> {
     }
 
     pub fn block_client_endpoint(&self) -> Option<BlockClientEndpoint> {
-        self.block_client_page_physical.map(|page_physical| BlockClientEndpoint {
+        self.endpoint_mapping(EndpointKind::BlockClient).map(|page_physical| BlockClientEndpoint {
             context_physical: self.context_physical,
             page_physical,
             service_generation: self.generation,
@@ -1446,51 +1461,63 @@ impl<'a> Task<'a> {
     }
 
     pub fn network_client_endpoint(&self) -> Option<NetworkClientEndpoint> {
-        self.network_client_page_physical.map(|page_physical| NetworkClientEndpoint {
-            page_physical,
-            stream_page_physical: self.network_stream_page_physical.unwrap_or(0),
-            service_generation: self.generation,
-            endpoint_generation: self.generation,
+        self.endpoint_mapping(EndpointKind::NetworkClient).map(|page_physical| {
+            NetworkClientEndpoint {
+                page_physical,
+                stream_page_physical: self
+                    .endpoint_mapping(EndpointKind::NetworkStream)
+                    .unwrap_or(0),
+                service_generation: self.generation,
+                endpoint_generation: self.generation,
+            }
         })
     }
 
     pub fn network_server_endpoint(&self) -> Option<NetworkServerEndpoint> {
-        self.network_server_page_physical.map(|page_physical| NetworkServerEndpoint {
-            context_physical: self.context_physical,
-            page_physical,
-            service_generation: self.generation,
-            endpoint_generation: self.generation,
+        self.endpoint_mapping(EndpointKind::NetworkServer).map(|page_physical| {
+            NetworkServerEndpoint {
+                context_physical: self.context_physical,
+                page_physical,
+                service_generation: self.generation,
+                endpoint_generation: self.generation,
+            }
         })
     }
 
     pub fn network_device_endpoint(&self, device_generation: u32) -> Option<NetworkDeviceEndpoint> {
-        self.network_device_page_physical.map(|page_physical| NetworkDeviceEndpoint {
-            page_physical,
-            service_generation: self.generation,
-            endpoint_generation: self.generation,
-            device_generation,
+        self.endpoint_mapping(EndpointKind::NetworkDevice).map(|page_physical| {
+            NetworkDeviceEndpoint {
+                page_physical,
+                service_generation: self.generation,
+                endpoint_generation: self.generation,
+                device_generation,
+            }
         })
     }
 
     pub fn network_event_endpoint(&self, device_generation: u32) -> Option<NetworkEventEndpoint> {
-        self.network_event_page_physical.map(|page_physical| NetworkEventEndpoint {
-            page_physical,
-            service_generation: self.generation,
-            endpoint_generation: self.generation,
-            device_generation,
+        self.endpoint_mapping(EndpointKind::NetworkEvent).map(|page_physical| {
+            NetworkEventEndpoint {
+                page_physical,
+                service_generation: self.generation,
+                endpoint_generation: self.generation,
+                device_generation,
+            }
         })
     }
 
     pub fn network_stream_endpoint(&self) -> Option<NetworkStreamEndpoint> {
-        self.network_stream_page_physical.map(|page_physical| NetworkStreamEndpoint {
-            page_physical,
-            service_generation: self.generation,
-            endpoint_generation: self.generation,
+        self.endpoint_mapping(EndpointKind::NetworkStream).map(|page_physical| {
+            NetworkStreamEndpoint {
+                page_physical,
+                service_generation: self.generation,
+                endpoint_generation: self.generation,
+            }
         })
     }
 
     pub fn remote_endpoint(&self) -> Option<RemoteEndpoint> {
-        self.remote_page_physical.map(|page_physical| RemoteEndpoint {
+        self.endpoint_mapping(EndpointKind::Remote).map(|page_physical| RemoteEndpoint {
             page_physical,
             service_generation: self.generation,
             endpoint_generation: self.generation,

@@ -74,9 +74,11 @@ Cargo package edges are checked against this inward ring direction by
 `scripts/arch-deps.py --check`; boot and test assembly exceptions are listed in
 that checker rather than becoming implicit imports.
 
-ABI v4 keeps endpoint ownership in the canonical service `EndpointSet`; task mapping consumes
-that set directly. Remote transport pages are isolated in the Remote protocol module, and proof
-state is owned by the test-hook proof module rather than the platform composition root.
+ABI v4 keeps endpoint ownership in the canonical service `ServiceSpec::endpoints` descriptor list;
+Core maps that bounded list through generic endpoint identity and lifetime records. The ABI-v4 named
+page fields are populated only by the address-space compatibility adapter. Remote transport pages are
+isolated in the Remote protocol module, and proof state is owned by the test-hook proof module rather
+than the platform composition root.
 
 The current Remote migration checkpoint is deliberately partial: `RemoteRuntime` owns RemoteState,
 local trust commands through one `local_command` path, transport reset/start state, protected
