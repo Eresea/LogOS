@@ -14,6 +14,35 @@ pub const TEXT_NAMESPACE: logos_abi::NamespaceId = logos_abi::NamespaceId(2);
 pub const AUDIT_NAMESPACE: logos_abi::NamespaceId = logos_abi::NamespaceId(3);
 pub const SECRETS_NAMESPACE: logos_abi::NamespaceId = logos_abi::NamespaceId(4);
 
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoragePhase {
+    Idle,
+    RequestAccepted,
+    StoragePending,
+    BlockPending,
+    DurableReplyReady,
+    Complete,
+    Failed,
+    TimedOut,
+    Cancelled,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub struct StorageOperation {
+    pub request: logos_abi::StoreRequest,
+    pub terminal_owner: u64,
+    pub storage_owner: u64,
+    pub page: logos_abi::PageHandle,
+    pub loaned: bool,
+    pub deadline: u64,
+    pub response: Option<logos_abi::StoreReply>,
+    pub block_phase: StoragePhase,
+    pub generation: u32,
+    pub phase: StoragePhase,
+}
+
 pub struct StorageRuntime {
     store_client: crate::sched::native_task::StoreClientEndpoint,
     store_server: crate::sched::native_task::StoreServerEndpoint,
@@ -21,6 +50,8 @@ pub struct StorageRuntime {
     handle: crate::sched::native_task::Handle,
     block_dispatch: crate::platform::block::Dispatch,
     relay: RelayState,
+    wake: Option<crate::sched::native_task::Handle>,
+    operation: Option<StorageOperation>,
 }
 
 impl StorageRuntime {
@@ -37,6 +68,8 @@ impl StorageRuntime {
             handle,
             block_dispatch: crate::platform::block::Dispatch::new(),
             relay: RelayState::new(),
+            wake: None,
+            operation: None,
         }
     }
 
@@ -50,28 +83,44 @@ impl StorageRuntime {
         self.block_client = block_client;
         self.handle = handle;
         self.relay.clear();
+        self.wake = None;
+        self.operation = None;
     }
 
     pub fn rebind_client(&mut self, store_client: crate::sched::native_task::StoreClientEndpoint) {
         self.store_client = store_client;
         self.relay.clear();
+        self.wake = None;
+        self.operation = None;
     }
 
     fn bind_block_context(&self, context: &mut block::DispatchContext<'_>) {
         context.endpoint = self.block_client;
     }
 
-    pub fn poll_block(
-        &mut self,
-        context: &mut block::DispatchContext<'_>,
-        scheduler: &mut native_task::Scheduler<'_>,
-        tick: u64,
-    ) -> bool {
+    pub fn poll_block(&mut self, context: &mut block::DispatchContext<'_>, tick: u64) -> bool {
         if !self.block_client.available() || !self.handle.available() {
             return true;
         }
         let Some(reply) = self.block_reply(context, tick) else { return true };
-        self.block_client.reply(reply) && scheduler.wake(self.handle) && scheduler.run(self.handle)
+        if !self.block_client.reply(reply) {
+            return false;
+        }
+        if let Some(operation) = self.operation.as_mut() {
+            operation.block_phase = StoragePhase::DurableReplyReady;
+            operation.phase = StoragePhase::DurableReplyReady;
+        }
+        self.wake = Some(self.handle);
+        true
+    }
+
+    pub fn take_wake(&mut self) -> Option<native_task::Handle> {
+        self.wake.take()
+    }
+
+    #[allow(dead_code)]
+    pub fn operation(&self) -> Option<StorageOperation> {
+        self.operation
     }
 
     pub fn block_reply(
@@ -140,7 +189,31 @@ impl StorageRuntime {
         tick: u64,
     ) -> session::Relay {
         self.bind_block_context(context);
-        relay_store_request(
+        let request = terminal.request();
+        if let Some(operation) = self.operation {
+            if request.is_some_and(|request| request.id != operation.request.id) {
+                return session::Relay::Handled(terminal.reply(logos_abi::StoreReply {
+                    id: request.map_or(0, |request| request.id),
+                    status: logos_abi::PersistenceStatus::Unavailable,
+                    version: 0,
+                    length: 0,
+                }));
+            }
+        } else if let Some(request) = request {
+            self.operation = Some(StorageOperation {
+                request,
+                terminal_owner,
+                storage_owner,
+                page: request.page,
+                loaned: false,
+                deadline: request.deadline,
+                response: None,
+                block_phase: StoragePhase::Idle,
+                generation: u32::from(self.handle.generation()),
+                phase: StoragePhase::RequestAccepted,
+            });
+        }
+        let relay = relay_store_request(
             terminal,
             self.store_server,
             &mut self.block_dispatch,
@@ -154,7 +227,18 @@ impl StorageRuntime {
             capabilities,
             &mut self.relay,
             tick,
-        )
+        );
+        if let Some(operation) = self.operation.as_mut() {
+            operation.phase = match relay {
+                session::Relay::Handled(true) | session::Relay::Recovery => StoragePhase::Complete,
+                session::Relay::Handled(false) => StoragePhase::Failed,
+                session::Relay::Runnable(_) => StoragePhase::StoragePending,
+            };
+        }
+        if !matches!(relay, session::Relay::Runnable(_)) {
+            self.operation = None;
+        }
+        relay
     }
 
     #[allow(clippy::too_many_arguments)]

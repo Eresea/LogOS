@@ -169,6 +169,7 @@ impl Context {
 pub enum Relay {
     Handled(bool),
     Recovery,
+    Runnable(crate::sched::native_task::Handle),
 }
 
 impl Relay {
@@ -177,7 +178,93 @@ impl Relay {
         match self {
             Self::Handled(ok) => ok,
             Self::Recovery => true,
+            Self::Runnable(_) => true,
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OperationPhase {
+    Idle,
+    EffectPending,
+    ReplyPending(logos_abi::EffectResult),
+}
+
+#[derive(Clone, Copy)]
+pub struct SessionCompletion {
+    pub reply: logos_abi::service::SessionServerReply,
+    pub effect: logos_abi::EffectResult,
+}
+
+pub enum OperationProgress {
+    Runnable,
+    Complete(SessionCompletion),
+    Failed,
+}
+
+pub struct SessionOperation {
+    id: Option<u32>,
+    phase: OperationPhase,
+}
+
+impl SessionOperation {
+    pub const fn new() -> Self {
+        Self { id: None, phase: OperationPhase::Idle }
+    }
+
+    pub const fn idle(&self) -> bool {
+        matches!(self.phase, OperationPhase::Idle)
+    }
+
+    pub fn submit(
+        &mut self,
+        sessions: crate::sched::native_task::SessionEndpoint,
+        id: u32,
+        caller: u64,
+        request: logos_abi::SessionRequest,
+    ) -> bool {
+        if !self.idle() || !sessions.deliver_id(id, caller, request) {
+            return false;
+        }
+        self.id = Some(id);
+        self.phase = OperationPhase::EffectPending;
+        true
+    }
+
+    pub fn advance(
+        &mut self,
+        sessions: crate::sched::native_task::SessionEndpoint,
+        context: crate::ipc::effects::Context<'_, '_>,
+    ) -> OperationProgress {
+        let Some(id) = self.id else { return OperationProgress::Failed };
+        match self.phase {
+            OperationPhase::Idle => OperationProgress::Failed,
+            OperationPhase::EffectPending => {
+                let Some(effect) = sessions.effect_id(id) else {
+                    return OperationProgress::Runnable;
+                };
+                let result = crate::ipc::effects::execute(effect, context);
+                if !sessions.reply_effect(result) {
+                    self.clear();
+                    OperationProgress::Failed
+                } else {
+                    self.phase = OperationPhase::ReplyPending(result);
+                    OperationProgress::Runnable
+                }
+            }
+            OperationPhase::ReplyPending(effect) => {
+                let Some(reply) = sessions.reply_id(id) else {
+                    return OperationProgress::Runnable;
+                };
+                self.clear();
+                OperationProgress::Complete(SessionCompletion { reply, effect })
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.id = None;
+        self.phase = OperationPhase::Idle;
     }
 }
 
@@ -185,18 +272,24 @@ pub struct SessionsRuntime {
     terminal: crate::sched::native_task::SyscallEndpoint,
     sessions: Option<crate::sched::native_task::SessionEndpoint>,
     handle: Option<crate::sched::native_task::Handle>,
-    pending: Option<u32>,
+    operation: SessionOperation,
     failed: u32,
 }
 
 impl SessionsRuntime {
     pub const fn new(terminal: crate::sched::native_task::SyscallEndpoint) -> Self {
-        Self { terminal, sessions: None, handle: None, pending: None, failed: 0 }
+        Self {
+            terminal,
+            sessions: None,
+            handle: None,
+            operation: SessionOperation::new(),
+            failed: 0,
+        }
     }
 
     pub fn bind_terminal(&mut self, terminal: crate::sched::native_task::SyscallEndpoint) {
         self.terminal = terminal;
-        self.pending = None;
+        self.operation.clear();
     }
 
     pub fn bind_sessions(
@@ -206,7 +299,7 @@ impl SessionsRuntime {
     ) {
         self.sessions = sessions;
         self.handle = handle;
-        self.pending = None;
+        self.operation.clear();
     }
 
     #[allow(dead_code)]
@@ -219,84 +312,56 @@ impl SessionsRuntime {
         self.failed
     }
 
-    pub fn relay(
-        &mut self,
-        scheduler: &mut crate::sched::native_task::Scheduler<'_>,
-        context: crate::ipc::effects::Context<'_, '_>,
-    ) -> Relay {
-        let Some(message) = self.terminal.message() else { return Relay::Handled(true) };
-        if !context.session.allows(context.capabilities, CapabilityKind::Session) {
-            return Relay::Handled(self.terminal.reply_id(
-                message.id,
-                logos_abi::service::SessionStatus::Denied,
-                b"permission denied",
-            ));
-        }
+    pub fn relay(&mut self, context: crate::ipc::effects::Context<'_, '_>) -> Relay {
         let (Some(sessions), Some(handle)) = (self.sessions, self.handle) else {
+            let Some(message) = self.terminal.message() else { return Relay::Handled(true) };
             return Relay::Handled(self.terminal.reply_id(
                 message.id,
                 logos_abi::service::SessionStatus::Failed,
                 b"session unavailable",
             ));
         };
-        self.pending = Some(message.id);
-        let ok = sessions.deliver_id(
-            message.id,
-            context.session.principal().page_owner(),
-            message.request,
-        ) && scheduler.wake(handle)
-            && scheduler.run(handle);
-        let Some(effect) = ok.then(|| sessions.effect_id(message.id)).flatten() else {
-            self.failed = self.failed.saturating_add(1);
-            return Relay::Handled(false);
-        };
-        let result = crate::ipc::effects::execute(effect, context);
-        if !sessions.reply_effect(result) || !scheduler.wake(handle) || !scheduler.run(handle) {
-            self.failed = self.failed.saturating_add(1);
-            return Relay::Handled(false);
+        if self.operation.idle() {
+            let Some(message) = self.terminal.message() else { return Relay::Handled(true) };
+            if !context.session.allows(context.capabilities, CapabilityKind::Session) {
+                return Relay::Handled(self.terminal.reply_id(
+                    message.id,
+                    logos_abi::service::SessionStatus::Denied,
+                    b"permission denied",
+                ));
+            }
+            if !self.operation.submit(
+                sessions,
+                message.id,
+                context.session.principal().page_owner(),
+                message.request,
+            ) {
+                self.failed = self.failed.saturating_add(1);
+                return Relay::Handled(false);
+            }
+            return Relay::Runnable(handle);
         }
-        let Some(reply) = sessions.reply_id(message.id) else {
-            self.failed = self.failed.saturating_add(1);
-            return Relay::Handled(false);
-        };
-        let ok = self.terminal.reply_id(
-            message.id,
-            reply.status,
-            &reply.reply.text[..reply.reply.length],
-        ) && scheduler.wake(handle)
-            && scheduler.run(handle);
-        self.pending = None;
-        if !ok {
-            self.failed = self.failed.saturating_add(1);
+        match self.operation.advance(sessions, context) {
+            OperationProgress::Runnable => Relay::Runnable(handle),
+            OperationProgress::Failed => {
+                self.failed = self.failed.saturating_add(1);
+                Relay::Handled(false)
+            }
+            OperationProgress::Complete(completion) => {
+                let ok = self.terminal.reply_id(
+                    completion.reply.id,
+                    completion.reply.status,
+                    &completion.reply.reply.text[..completion.reply.reply.length],
+                );
+                if !ok {
+                    self.failed = self.failed.saturating_add(1);
+                }
+                if completion.effect == logos_abi::EffectResult::Recovery {
+                    Relay::Recovery
+                } else {
+                    Relay::Handled(ok)
+                }
+            }
         }
-        if result == logos_abi::EffectResult::Recovery {
-            Relay::Recovery
-        } else {
-            Relay::Handled(ok)
-        }
     }
-}
-
-pub fn invoke_native(
-    request: logos_abi::SessionRequest,
-    sessions: Option<crate::sched::native_task::SessionEndpoint>,
-    scheduler: &mut crate::sched::native_task::Scheduler<'_>,
-    sessions_handle: Option<crate::sched::native_task::Handle>,
-    context: crate::ipc::effects::Context<'_, '_>,
-) -> Option<logos_abi::SessionReply> {
-    if !context.session.allows(context.capabilities, CapabilityKind::Session) {
-        return logos_abi::SessionReply::from_bytes(b"permission denied");
-    }
-    let (Some(sessions), Some(handle)) = (sessions, sessions_handle) else {
-        return logos_abi::SessionReply::from_bytes(b"session unavailable");
-    };
-    if !sessions.deliver(request) || !scheduler.wake(handle) || !scheduler.run(handle) {
-        return None;
-    }
-    let result = crate::ipc::effects::execute(sessions.effect()?, context);
-    if !sessions.reply_effect(result) || !scheduler.wake(handle) || !scheduler.run(handle) {
-        return None;
-    }
-    let reply = sessions.reply()?;
-    (scheduler.wake(handle) && scheduler.run(handle)).then_some(reply)
 }

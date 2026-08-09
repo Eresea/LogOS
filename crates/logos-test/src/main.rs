@@ -550,7 +550,26 @@ impl Harness {
     fn reset(&mut self, scenario: &str) -> Result<(), String> {
         self.renew_deadline();
         self.send(&format!("LOGOS/1 RESET {scenario}\n"))?;
-        self.wait("LOGOS/1 RESULT reset=accepted")?;
+        let mut booted = false;
+        while Instant::now() < self.deadline {
+            self.drain_serial()?;
+            if has_line_prefix(&self.serial, "LOGOS/1 RESULT reset=accepted") {
+                break;
+            }
+            if has_line_prefix(&self.serial, "LOGOS/1 BOOT ") {
+                booted = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !booted && !has_line_prefix(&self.serial, "LOGOS/1 RESULT reset=accepted") {
+            return Err("timeout waiting for reset acceptance or reboot".into());
+        }
+        if booted {
+            self.wait("LOGOS/1 READY")?;
+            self.send("LOGOS/1 HELLO\n")?;
+            self.wait("LOGOS/1 RESULT hello=ok")?;
+        }
         Ok(())
     }
 

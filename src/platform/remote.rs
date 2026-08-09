@@ -6,9 +6,38 @@ pub struct LocalCommandReply {
     pub enrolled: bool,
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemotePhase {
+    Received,
+    Authenticating,
+    PersistingPending,
+    InvokingSession,
+    PersistingCompletion,
+    ReadyToReply,
+    Complete,
+    Failed,
+    TimedOut,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub struct RemoteOperation {
+    pub owner: u64,
+    pub page: logos_abi::PageHandle,
+    pub generation: u32,
+    pub request_id: u32,
+    pub sequence: u64,
+    pub phase: RemotePhase,
+    pub deadline: u64,
+    pub input: [u8; logos_remote::MAX_FRAME],
+    pub input_length: usize,
+}
+
 pub struct RemoteRuntime {
     state: Option<RemoteState>,
     gateway_started: bool,
+    operation: Option<RemoteOperation>,
 }
 
 impl RemoteRuntime {
@@ -18,6 +47,7 @@ impl RemoteRuntime {
 
     pub fn replace_state(&mut self, state: RemoteState) {
         self.state = Some(state);
+        self.operation = None;
     }
 
     pub fn load_control(
@@ -38,7 +68,11 @@ impl RemoteRuntime {
     }
 
     pub fn new(bootstrap: Option<logos_remote::Bootstrap>) -> Self {
-        Self { state: bootstrap.and_then(RemoteState::new), gateway_started: false }
+        Self {
+            state: bootstrap.and_then(RemoteState::new),
+            gateway_started: false,
+            operation: None,
+        }
     }
 
     pub fn start(
@@ -62,9 +96,56 @@ impl RemoteRuntime {
 
     pub fn reset_transport(&mut self) {
         self.gateway_started = false;
+        self.operation = None;
         if let Some(state) = self.state.as_mut() {
             state.reset_transport();
         }
+    }
+
+    pub fn begin_operation(
+        &mut self,
+        owner: u64,
+        page: logos_abi::PageHandle,
+        generation: u32,
+        request_id: u32,
+        deadline: u64,
+        input: &[u8],
+    ) -> bool {
+        if input.len() > logos_remote::MAX_FRAME || self.operation.is_some() {
+            return false;
+        }
+        let mut owned = [0; logos_remote::MAX_FRAME];
+        owned[..input.len()].copy_from_slice(input);
+        self.operation = Some(RemoteOperation {
+            owner,
+            page,
+            generation,
+            request_id,
+            sequence: 0,
+            phase: RemotePhase::Received,
+            deadline,
+            input: owned,
+            input_length: input.len(),
+        });
+        true
+    }
+
+    pub fn set_operation_phase(&mut self, phase: RemotePhase) {
+        if let Some(operation) = self.operation.as_mut() {
+            operation.phase = phase;
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn operation(&self) -> Option<RemoteOperation> {
+        self.operation
+    }
+
+    pub fn finish_operation(&mut self) {
+        if let Some(operation) = self.operation.as_mut() {
+            operation.phase = RemotePhase::Complete;
+        }
+        self.operation = None;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -222,5 +303,19 @@ mod tests {
         assert!(runtime.started());
         runtime.reset_transport();
         assert!(!runtime.started());
+    }
+
+    #[test]
+    fn operation_slot_owns_one_bounded_request() {
+        let mut runtime = RemoteRuntime::new(None);
+        assert!(runtime.begin_operation(7, logos_abi::PageHandle(3), 2, 9, 100, b"payload",));
+        assert!(!runtime.begin_operation(7, logos_abi::PageHandle(3), 2, 10, 100, b"other"));
+        let operation = runtime.operation().unwrap();
+        assert_eq!(operation.phase, RemotePhase::Received);
+        assert_eq!(&operation.input[..operation.input_length], b"payload");
+        runtime.set_operation_phase(RemotePhase::PersistingPending);
+        assert_eq!(runtime.operation().unwrap().phase, RemotePhase::PersistingPending);
+        runtime.finish_operation();
+        assert!(runtime.operation().is_none());
     }
 }

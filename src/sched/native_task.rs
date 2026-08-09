@@ -344,8 +344,65 @@ impl NetworkServerEndpoint {
         };
         if accepted && !notified {
             crate::debug::write_line(b"LogOS: network server notify failed");
+            let context = unsafe {
+                (self.context_physical as *const logos_abi::service::ControlPage).read_volatile()
+            };
+            crate::debug::write_line(if context.abi != logos_abi::service::ABI {
+                b"LogOS: network notify context abi mismatch"
+            } else if context.status != logos_abi::service::ACKNOWLEDGED
+                && context.operation == logos_abi::service::NETWORK_WAIT
+            {
+                b"LogOS: network notify context waiting"
+            } else if context.status != logos_abi::service::ACKNOWLEDGED
+                && context.operation == logos_abi::service::NETWORK_DEVICE_REQUEST
+            {
+                b"LogOS: network notify context device"
+            } else if context.status != logos_abi::service::ACKNOWLEDGED
+                && context.operation == logos_abi::service::NETWORK_REQUEST
+            {
+                b"LogOS: network notify context request"
+            } else if context.status != logos_abi::service::ACKNOWLEDGED
+                && context.operation == logos_abi::service::NETWORK_REPLY
+            {
+                b"LogOS: network notify context reply"
+            } else if context.status != logos_abi::service::ACKNOWLEDGED
+                && context.operation == logos_abi::service::COMPLETE
+            {
+                b"LogOS: network notify context complete"
+            } else if context.status != logos_abi::service::ACKNOWLEDGED
+                && context.operation == logos_abi::service::READY
+            {
+                b"LogOS: network notify context ready"
+            } else if context.status != logos_abi::service::ACKNOWLEDGED
+                && context.operation == logos_abi::service::NETWORK_EVENT
+            {
+                b"LogOS: network notify context event"
+            } else if context.status != logos_abi::service::ACKNOWLEDGED
+                && context.operation == logos_abi::service::NETWORK_DEVICE_REPLY
+            {
+                b"LogOS: network notify context device reply"
+            } else if context.status != logos_abi::service::ACKNOWLEDGED && context.operation == 0 {
+                b"LogOS: network notify context empty"
+            } else if context.status != logos_abi::service::ACKNOWLEDGED {
+                b"LogOS: network notify context unacknowledged"
+            } else {
+                b"LogOS: network notify context invalid"
+            });
         }
         accepted && notified
+    }
+
+    pub fn idle(self) -> bool {
+        if self.page_physical == 0 {
+            return false;
+        }
+        let page = unsafe {
+            (self.page_physical as *const logos_abi::service::NetworkServerPage).read_volatile()
+        };
+        page.service_generation == self.service_generation
+            && page.endpoint_generation == self.endpoint_generation
+            && logos_abi::service::NetworkPageState::from_wire(page.state)
+                == Some(logos_abi::service::NetworkPageState::Ready)
     }
 
     pub fn response(self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
@@ -378,6 +435,10 @@ pub struct RemoteEndpoint {
 }
 
 impl RemoteEndpoint {
+    pub const fn generation(self) -> u32 {
+        self.service_generation
+    }
+
     pub fn request(self) -> Option<logos_core::native_service::RemotePageRequest> {
         unsafe {
             logos_core::native_service::RemotePage::take_at(
@@ -1074,6 +1135,7 @@ impl SessionEndpoint {
         self.context_physical
     }
 
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub fn deliver(self, request: logos_abi::SessionRequest) -> bool {
         self.server.deliver(1, 0, request)
     }
@@ -1082,6 +1144,7 @@ impl SessionEndpoint {
         self.server.deliver(id, caller, request)
     }
 
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub fn reply(self) -> Option<logos_abi::SessionReply> {
         self.server.reply(1).map(|response| response.reply)
     }
@@ -1090,6 +1153,7 @@ impl SessionEndpoint {
         self.server.reply(id)
     }
 
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub fn effect(self) -> Option<logos_abi::EffectRequest> {
         self.effect.request().map(|message| message.request)
     }

@@ -4251,8 +4251,11 @@ impl ControlPage {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
-        if context.abi != ABI || context.reserved != 0 || context.status != ACKNOWLEDGED {
+        if context.abi != ABI || context.reserved != 0 {
             return false;
+        }
+        if context.status != ACKNOWLEDGED {
+            return context.operation == operation;
         }
         context.operation = operation;
         unsafe { (address as *mut Self).write_volatile(context) };
@@ -4868,6 +4871,10 @@ mod tests {
         let context_address = (&mut context as *mut ControlPage) as u64;
         assert!(unsafe { ControlPage::notify_at(context_address, BLOCK_REQUEST) });
         assert_eq!(context.operation, BLOCK_REQUEST);
+        context.status = 0;
+        unsafe { (context_address as *mut ControlPage).write_volatile(context) };
+        assert!(unsafe { ControlPage::notify_at(context_address, BLOCK_REQUEST) });
+        assert!(!unsafe { ControlPage::notify_at(context_address, NETWORK_REQUEST) });
     }
 
     #[test]

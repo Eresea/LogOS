@@ -22,6 +22,44 @@ use logos_core::capabilities;
 use logos_terminal::{command, display, input, terminal, text};
 use uefi::mem::memory_map::MemoryMap;
 
+#[allow(clippy::too_many_arguments)]
+fn drive_sessions_relay<'task>(
+    runtime: &mut session::SessionsRuntime,
+    scheduler: &mut native_task::Scheduler<'_>,
+    request_session: &session::Context,
+    capabilities: &capabilities::CapabilityManager,
+    tick: u64,
+    input: &mut input::Service,
+    lifecycle: &mut supervisor::Lifecycle,
+    service_healthy: bool,
+    channel: &ipc::Channel,
+    responses: &ipc::Channel,
+    service_scheduler: &mut scheduler::Scheduler<'task>,
+    service_capability: capabilities::Capability,
+    service: services::ServiceHandle,
+) -> session::Relay {
+    for _ in 0..4 {
+        let relay = runtime.relay(effects::Context {
+            session: request_session,
+            capabilities,
+            tick,
+            input,
+            lifecycle,
+            service_healthy,
+            channel,
+            responses,
+            service_scheduler,
+            service_capability,
+            service,
+        });
+        let session::Relay::Runnable(handle) = relay else { return relay };
+        if !scheduler.wake(handle) || !scheduler.run(handle) {
+            return session::Relay::Handled(false);
+        }
+    }
+    session::Relay::Handled(false)
+}
+
 #[cfg_attr(feature = "test-hooks", allow(unreachable_code, unused_mut, unused_variables))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
@@ -1149,12 +1187,18 @@ pub(crate) fn run(
             )
         });
         let ran = bound && native_scheduler.run(handle) && !native_scheduler.failed(handle);
+        if !bound {
+            debug::write_line(b"LogOS: Network service bind failed");
+        } else if !ran {
+            debug::write_line(b"LogOS: Network service initial run failed");
+        }
         ran.then_some(handle)
     } else {
         None
     };
     if network_handle.is_some() {
         native_services.ready(supervisor::NativeService::Network);
+        debug::write_line(b"LogOS: Network service bound");
     } else {
         let _ = native_services.missing(supervisor::NativeService::Network);
     }
@@ -2328,23 +2372,20 @@ pub(crate) fn run(
                             } else if request.is_none() {
                                 true
                             } else {
-                                let reply = sessions_runtime.relay(
+                                let reply = drive_sessions_relay(
+                                    &mut sessions_runtime,
                                     &mut native_scheduler,
-                                    effects::Context {
-                                        session: request_session,
-
-                                        capabilities: &capabilities,
-                                        tick: interrupts::ticks(),
-                                        input: &mut input,
-                                        lifecycle: &mut service_lifecycle,
-                                        service_healthy: service_health
-                                            .healthy(balloon::NAME, interrupts::ticks()),
-                                        channel: &channel,
-                                        responses: &responses,
-                                        service_scheduler: &mut service_scheduler,
-                                        service_capability,
-                                        service: virtio_handle,
-                                    },
+                                    request_session,
+                                    &capabilities,
+                                    interrupts::ticks(),
+                                    &mut input,
+                                    &mut service_lifecycle,
+                                    service_health.healthy(balloon::NAME, interrupts::ticks()),
+                                    &channel,
+                                    &responses,
+                                    &mut service_scheduler,
+                                    service_capability,
+                                    virtio_handle,
                                 );
                                 reply.ok()
                                     && expected.is_none_or(|expected| {
@@ -3165,9 +3206,9 @@ pub(crate) fn run(
                         device: &mut block_device,
                         memory: &mut memory,
                     },
-                    &mut native_scheduler,
                     tick,
-                ) {
+                ) || !drain_storage_wakes(&mut storage_runtime, &mut native_scheduler)
+                {
                     debug::write_line(b"LogOS: storage block reply failed");
                 }
                 if !poll_network(
@@ -3392,21 +3433,20 @@ pub(crate) fn run(
                                 break;
                             }
                         } else if native_command.request().is_some() {
-                            let mut relay = sessions_runtime.relay(
+                            let mut relay = drive_sessions_relay(
+                                &mut sessions_runtime,
                                 &mut native_scheduler,
-                                effects::Context {
-                                    session: &session,
-                                    capabilities: &capabilities,
-                                    tick,
-                                    input: &mut input,
-                                    lifecycle: &mut service_lifecycle,
-                                    service_healthy: service_health.healthy(balloon::NAME, tick),
-                                    channel: &channel,
-                                    responses: &responses,
-                                    service_scheduler: &mut service_scheduler,
-                                    service_capability,
-                                    service: virtio_handle,
-                                },
+                                &session,
+                                &capabilities,
+                                tick,
+                                &mut input,
+                                &mut service_lifecycle,
+                                service_health.healthy(balloon::NAME, tick),
+                                &channel,
+                                &responses,
+                                &mut service_scheduler,
+                                service_capability,
+                                virtio_handle,
                             );
 
                             if matches!(relay, session::Relay::Handled(false)) {
@@ -3426,6 +3466,9 @@ pub(crate) fn run(
                                 }
                                 session::Relay::Handled(false) => {
                                     debug::write_line(b"LogOS: Sessions relay failed");
+                                }
+                                session::Relay::Runnable(_) => {
+                                    debug::write_line(b"LogOS: Sessions relay still pending");
                                 }
                                 session::Relay::Handled(true) => {
                                     if !native_scheduler.wake(native_handle)
@@ -3544,9 +3587,9 @@ pub(crate) fn run(
                         device: &mut block_device,
                         memory: &mut memory,
                     },
-                    &mut native_scheduler,
                     tick,
                 );
+                let _ = drain_storage_wakes(&mut storage_runtime, &mut native_scheduler);
                 let _ = poll_network(
                     &mut network_runtime,
                     &mut native_scheduler,
@@ -3571,6 +3614,69 @@ pub(crate) fn run(
     loop {
         unsafe { core::arch::asm!("cli", "hlt") };
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn invoke_native(
+    request: logos_abi::SessionRequest,
+    sessions: Option<native_task::SessionEndpoint>,
+    scheduler: &mut native_task::Scheduler<'_>,
+    sessions_handle: Option<native_task::Handle>,
+    context: effects::Context<'_, '_>,
+) -> Option<logos_abi::SessionReply> {
+    if !context.session.allows(context.capabilities, capabilities::CapabilityKind::Session) {
+        return logos_abi::SessionReply::from_bytes(b"permission denied");
+    }
+    let (Some(sessions), Some(handle)) = (sessions, sessions_handle) else {
+        return logos_abi::SessionReply::from_bytes(b"session unavailable");
+    };
+    let caller = context.session.principal().page_owner();
+    let effects::Context {
+        session,
+        capabilities,
+        tick,
+        input,
+        lifecycle,
+        service_healthy,
+        channel,
+        responses,
+        service_scheduler,
+        service_capability,
+        service,
+    } = context;
+    let mut operation = session::SessionOperation::new();
+    if !operation.submit(sessions, 1, caller, request) {
+        return None;
+    }
+    for _ in 0..4 {
+        match operation.advance(
+            sessions,
+            effects::Context {
+                session,
+                capabilities,
+                tick,
+                input: &mut *input,
+                lifecycle: &mut *lifecycle,
+                service_healthy,
+                channel,
+                responses,
+                service_scheduler: &mut *service_scheduler,
+                service_capability,
+                service,
+            },
+        ) {
+            session::OperationProgress::Runnable => {
+                if !scheduler.wake(handle) || !scheduler.run(handle) {
+                    return None;
+                }
+            }
+            session::OperationProgress::Complete(completion) => {
+                return Some(completion.reply.reply);
+            }
+            session::OperationProgress::Failed => return None,
+        }
+    }
+    None
 }
 
 #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
@@ -3608,6 +3714,21 @@ fn run_network_device_request(
 #[allow(clippy::too_many_arguments)]
 fn drain_network_wakes(
     runtime: &mut network::NetworkRuntime,
+    scheduler: &mut native_task::Scheduler<'_>,
+) -> bool {
+    while let Some(handle) = runtime.take_wake() {
+        if scheduler.failed(handle) {
+            return false;
+        }
+        if !scheduler.wake(handle) || !scheduler.run(handle) {
+            return false;
+        }
+    }
+    true
+}
+
+fn drain_storage_wakes(
+    runtime: &mut storage::StorageRuntime,
     scheduler: &mut native_task::Scheduler<'_>,
 ) -> bool {
     while let Some(handle) = runtime.take_wake() {
@@ -4194,6 +4315,26 @@ fn poll_gateway(
         return false;
     }
     source[..length].copy_from_slice(bytes);
+    if !remote_runtime.begin_operation(
+        owner,
+        page,
+        remote.generation(),
+        request.id,
+        request.deadline,
+        &source[..length],
+    ) {
+        return remote.reply(logos_abi::service::RemotePageReply {
+            id: request.id,
+            status: logos_abi::service::RemoteGateStatus::Busy,
+            length: 0,
+            cursor: 0,
+        }) && scheduler.wake(handle)
+            && scheduler.run(handle);
+    }
+    remote_runtime.set_operation_phase(match request.operation {
+        logos_abi::service::RemoteGateOperation::Invoke => remote::RemotePhase::Authenticating,
+        _ => remote::RemotePhase::InvokingSession,
+    });
     let outcome = remote_runtime
         .handle_request(|remote_state| match request.operation {
             logos_abi::service::RemoteGateOperation::Handshake => {
@@ -4266,13 +4407,15 @@ fn poll_gateway(
         .flatten();
     let (status, length, cursor) =
         outcome.unwrap_or((logos_abi::service::RemoteGateStatus::Denied, 0, 0));
-    remote.reply(logos_abi::service::RemotePageReply {
+    remote_runtime.set_operation_phase(remote::RemotePhase::ReadyToReply);
+    let replied = remote.reply(logos_abi::service::RemotePageReply {
         id: request.id,
         status,
         length: length as u16,
         cursor,
-    }) && scheduler.wake(handle)
-        && scheduler.run(handle)
+    });
+    remote_runtime.finish_operation();
+    replied && scheduler.wake(handle) && scheduler.run(handle)
 }
 
 fn remote_subscription(
@@ -4506,7 +4649,7 @@ fn remote_invoke(
     let mut argument = [0; logos_abi::MAX_SESSION_TEXT];
     let argument_length = usize::from(invocation.argument_length);
     argument[..argument_length].copy_from_slice(&invocation.argument[..argument_length]);
-    let reply = session::invoke_native(
+    let reply = invoke_native(
         logos_abi::SessionRequest::new(syscall, argument, argument_length),
         sessions,
         scheduler,

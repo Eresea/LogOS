@@ -330,6 +330,9 @@ impl NetworkRuntime {
         if self.configured() || self.active_client.is_some() || tick < self.readiness.probe_due {
             return true;
         }
+        if !server.idle() {
+            return true;
+        }
         let id = self.readiness.next_probe_id;
         self.readiness.next_probe_id = id.wrapping_add(1).max(1);
         let request = logos_abi::NetworkRequest {
