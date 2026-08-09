@@ -1,5 +1,7 @@
 #![no_std]
 
+use core::ops::{Deref, DerefMut};
+
 pub const ETHERNET_MIN_FRAME: usize = 60;
 pub const ETHERNET_HEADER: usize = 14;
 pub const ETHERNET_MAX_FRAME: usize = 1514;
@@ -322,6 +324,11 @@ pub const TCP_FLAG_SYN: u8 = 0x02;
 pub const TCP_FLAG_RST: u8 = 0x04;
 pub const TCP_FLAG_ACK: u8 = 0x10;
 pub const MAX_TCP_STREAM: usize = 1024;
+pub const MAX_TCP_LISTENERS: usize = 1;
+pub const MAX_TCP_CONNECTIONS: usize = 8;
+pub const MAX_TCP_ENDPOINTS: usize = MAX_TCP_LISTENERS + MAX_TCP_CONNECTIONS;
+pub const MAX_TCP_TX_BYTES: usize = 4 * MAX_TCP_STREAM;
+pub const MAX_TCP_RX_BYTES: usize = 4 * MAX_TCP_STREAM;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TcpStateError {
@@ -353,7 +360,8 @@ pub struct TcpTx {
 }
 
 #[derive(Clone, Copy)]
-struct TcpConnection {
+pub struct TcpConnection {
+    active: bool,
     owner: u64,
     endpoint: EndpointId,
     local_port: u16,
@@ -364,23 +372,128 @@ struct TcpConnection {
     remote_seq: u32,
     accepted: bool,
     read_length: u16,
-    read_buffer: [u8; MAX_TCP_STREAM],
-    write_pending: bool,
-    write_sequence: u32,
-    write_length: u16,
-    write_buffer: [u8; MAX_TCP_STREAM],
-}
-
-pub struct TcpState {
-    generation: u16,
-    owner: u64,
-    port: u16,
-    listener: Option<EndpointId>,
-    connection: Option<TcpConnection>,
+    read_buffer: [u8; MAX_TCP_RX_BYTES],
+    tx_length: u16,
+    tx_buffer: [u8; MAX_TCP_TX_BYTES],
+    accepted_bytes: u64,
+    acknowledged_bytes: u64,
+    in_flight: bool,
+    in_flight_sequence: u32,
+    in_flight_length: u16,
     outgoing: Option<TcpTx>,
     last: Option<TcpTx>,
     deadline: u64,
     retries: u8,
+}
+
+impl TcpConnection {
+    const EMPTY: Self = Self {
+        active: false,
+        owner: 0,
+        endpoint: EndpointId(0),
+        local_port: 0,
+        peer: Ipv4([0; 4]),
+        peer_port: 0,
+        phase: TcpPhase::SynReceived,
+        local_seq: 0,
+        remote_seq: 0,
+        accepted: false,
+        read_length: 0,
+        read_buffer: [0; MAX_TCP_RX_BYTES],
+        tx_length: 0,
+        tx_buffer: [0; MAX_TCP_TX_BYTES],
+        accepted_bytes: 0,
+        acknowledged_bytes: 0,
+        in_flight: false,
+        in_flight_sequence: 0,
+        in_flight_length: 0,
+        outgoing: None,
+        last: None,
+        deadline: 0,
+        retries: 0,
+    };
+}
+
+#[derive(Clone, Copy)]
+pub struct TcpListener {
+    owner: u64,
+    endpoint: EndpointId,
+    local_port: u16,
+    sequence: u32,
+    active: bool,
+}
+
+impl TcpListener {
+    const EMPTY: Self =
+        Self { owner: 0, endpoint: EndpointId(0), local_port: 0, sequence: 0, active: false };
+}
+
+pub struct ListenerTable<const N: usize> {
+    slots: [TcpListener; N],
+}
+
+impl<const N: usize> ListenerTable<N> {
+    pub const fn new() -> Self {
+        Self { slots: [TcpListener::EMPTY; N] }
+    }
+}
+
+impl<const N: usize> Default for ListenerTable<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> Deref for ListenerTable<N> {
+    type Target = [TcpListener; N];
+
+    fn deref(&self) -> &Self::Target {
+        &self.slots
+    }
+}
+
+impl<const N: usize> DerefMut for ListenerTable<N> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.slots
+    }
+}
+
+pub struct ConnectionTable<const N: usize> {
+    slots: [TcpConnection; N],
+}
+
+impl<const N: usize> ConnectionTable<N> {
+    pub const fn new() -> Self {
+        Self { slots: [TcpConnection::EMPTY; N] }
+    }
+}
+
+impl<const N: usize> Default for ConnectionTable<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> Deref for ConnectionTable<N> {
+    type Target = [TcpConnection; N];
+
+    fn deref(&self) -> &Self::Target {
+        &self.slots
+    }
+}
+
+impl<const N: usize> DerefMut for ConnectionTable<N> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.slots
+    }
+}
+
+pub struct TcpState {
+    generation: u16,
+    listeners: ListenerTable<MAX_TCP_LISTENERS>,
+    connections: ConnectionTable<MAX_TCP_CONNECTIONS>,
+    next_schedule: usize,
+    now: u64,
 }
 
 impl Default for TcpState {
@@ -393,14 +506,10 @@ impl TcpState {
     pub const fn new() -> Self {
         Self {
             generation: 1,
-            owner: 0,
-            port: 0,
-            listener: None,
-            connection: None,
-            outgoing: None,
-            last: None,
-            deadline: 0,
-            retries: 0,
+            listeners: ListenerTable::new(),
+            connections: ConnectionTable::new(),
+            next_schedule: 0,
+            now: 1,
         }
     }
 
@@ -417,19 +526,22 @@ impl TcpState {
         if port == 0 {
             return Err(TcpStateError::Invalid);
         }
-        if let Some(endpoint) = self.listener {
-            return (self.owner == owner && self.port == port)
-                .then_some(endpoint)
+        if let Some(listener) =
+            self.listeners.iter().find(|listener| listener.active && listener.local_port == port)
+        {
+            return (listener.owner == owner)
+                .then_some(listener.endpoint)
                 .ok_or(TcpStateError::AddressInUse);
         }
-        let endpoint = EndpointId((u32::from(self.generation) << 16) | 1);
-        self.owner = owner;
-        self.port = port;
-        self.listener = Some(endpoint);
-        self.connection = None;
-        self.outgoing = None;
-        self.last = None;
-        self.deadline = sequence as u64;
+        let index = self
+            .listeners
+            .iter()
+            .position(|listener| !listener.active)
+            .ok_or(TcpStateError::Full)?;
+        let endpoint = self.endpoint_for_listener(index);
+        self.now = u64::from(sequence).max(1);
+        self.listeners[index] =
+            TcpListener { owner, endpoint, local_port: port, sequence, active: true };
         Ok(endpoint)
     }
 
@@ -438,190 +550,184 @@ impl TcpState {
         owner: u64,
         listener: EndpointId,
     ) -> Result<EndpointId, TcpStateError> {
-        if self.owner != owner || self.listener != Some(listener) {
-            return Err(TcpStateError::Owner);
-        }
-        let connection = self.connection.as_mut().ok_or(TcpStateError::NoData)?;
-        if connection.phase != TcpPhase::Established {
-            return Err(TcpStateError::Busy);
-        }
-        if connection.accepted {
-            return Err(TcpStateError::Busy);
-        }
-        connection.accepted = true;
-        Ok(connection.endpoint)
+        let index = self.listener_index(owner, listener)?;
+        let port = self.listeners[index].local_port;
+        self.connections
+            .iter_mut()
+            .find(|connection| {
+                connection.active
+                    && connection.owner == owner
+                    && connection.local_port == port
+                    && connection.phase == TcpPhase::Established
+                    && !connection.accepted
+            })
+            .map(|connection| {
+                connection.accepted = true;
+                connection.endpoint
+            })
+            .ok_or(TcpStateError::NoData)
     }
 
     pub fn peer(&self, owner: u64, endpoint: EndpointId) -> Result<(Ipv4, u16), TcpStateError> {
-        let connection = self.connection.ok_or(TcpStateError::NotFound)?;
-        if connection.owner != owner || connection.endpoint != endpoint {
-            return Err(TcpStateError::Owner);
-        }
+        let connection = self.connection(owner, endpoint)?;
         Ok((connection.peer, connection.peer_port))
     }
 
     pub fn ingest(&mut self, source: Ipv4, packet: Tcp<'_>) -> Result<(), TcpStateError> {
-        if let Some(connection) = self.connection {
-            if source != connection.peer
-                || packet.source_port != connection.peer_port
-                || packet.destination_port != connection.local_port
-            {
-                return Ok(());
-            }
+        self.now = self.now.max(1);
+        if let Some(index) =
+            self.connection_index(source, packet.source_port, packet.destination_port)
+        {
             if packet.flags & TCP_FLAG_RST != 0 {
-                self.connection = None;
-                self.outgoing = None;
-                self.last = None;
+                self.connections[index] = TcpConnection::EMPTY;
                 return Err(TcpStateError::Reset);
             }
-            if connection.phase == TcpPhase::SynReceived {
+            if self.connections[index].phase == TcpPhase::SynReceived {
                 if packet.flags & TCP_FLAG_ACK != 0
-                    && packet.acknowledgement == connection.local_seq + 1
+                    && packet.acknowledgement == self.connections[index].local_seq + 1
                 {
-                    let mut established = connection;
-                    established.phase = TcpPhase::Established;
-                    established.local_seq = established.local_seq.wrapping_add(1);
-                    self.connection = Some(established);
-                    self.last = None;
-                    return Ok(());
+                    self.connections[index].phase = TcpPhase::Established;
+                    self.connections[index].local_seq =
+                        self.connections[index].local_seq.wrapping_add(1);
+                    self.connections[index].last = None;
                 }
                 return Ok(());
             }
-            let mut connection = connection;
-            if connection.write_pending
+            if self.connections[index].in_flight
                 && packet.flags & TCP_FLAG_ACK != 0
-                && packet.acknowledgement.wrapping_sub(connection.write_sequence)
-                    >= u32::from(connection.write_length)
+                && packet.acknowledgement.wrapping_sub(self.connections[index].in_flight_sequence)
+                    >= u32::from(self.connections[index].in_flight_length)
             {
-                connection.write_pending = false;
-                self.last = None;
+                let length = self.connections[index].in_flight_length;
+                self.connections[index].in_flight = false;
+                self.connections[index].last = None;
+                self.connections[index].acknowledged_bytes =
+                    self.connections[index].acknowledged_bytes.saturating_add(u64::from(length));
+                self.connections[index].in_flight_length = 0;
+                self.arm_next_tx(index);
             }
             let mut acknowledge = false;
-            if packet.sequence == connection.remote_seq {
-                if packet.payload.len() > MAX_TCP_STREAM - usize::from(connection.read_length) {
+            if packet.sequence == self.connections[index].remote_seq {
+                if packet.payload.len()
+                    > MAX_TCP_RX_BYTES - usize::from(self.connections[index].read_length)
+                {
                     self.arm_ack(
+                        index,
                         source,
                         packet.source_port,
-                        connection.local_seq,
-                        connection.remote_seq,
+                        self.connections[index].local_seq,
+                        self.connections[index].remote_seq,
                     );
                     return Err(TcpStateError::MessageTooLarge);
                 }
-                let start = usize::from(connection.read_length);
-                connection.read_buffer[start..start + packet.payload.len()]
+                let start = usize::from(self.connections[index].read_length);
+                self.connections[index].read_buffer[start..start + packet.payload.len()]
                     .copy_from_slice(packet.payload);
-                connection.read_length = (start + packet.payload.len()) as u16;
-                connection.remote_seq =
-                    connection.remote_seq.wrapping_add(packet.payload.len() as u32);
+                self.connections[index].read_length = (start + packet.payload.len()) as u16;
+                self.connections[index].remote_seq =
+                    self.connections[index].remote_seq.wrapping_add(packet.payload.len() as u32);
                 acknowledge = !packet.payload.is_empty();
             }
-            if packet.flags & TCP_FLAG_FIN != 0 && packet.sequence == connection.remote_seq {
-                connection.remote_seq = connection.remote_seq.wrapping_add(1);
-                connection.phase = TcpPhase::CloseWait;
+            if packet.flags & TCP_FLAG_FIN != 0
+                && packet.sequence == self.connections[index].remote_seq
+            {
+                self.connections[index].remote_seq =
+                    self.connections[index].remote_seq.wrapping_add(1);
+                self.connections[index].phase = TcpPhase::CloseWait;
                 acknowledge = true;
             }
-            self.connection = Some(connection);
             if acknowledge {
                 self.arm_ack(
+                    index,
                     source,
                     packet.source_port,
-                    connection.local_seq,
-                    connection.remote_seq,
+                    self.connections[index].local_seq,
+                    self.connections[index].remote_seq,
                 );
             }
             return Ok(());
         }
-        if self.listener.is_some()
-            && packet.destination_port == self.port
+        if let Some(listener_index) = self.listener_for_port(packet.destination_port)
             && packet.flags & TCP_FLAG_SYN != 0
         {
-            let endpoint = EndpointId((u32::from(self.generation) << 16) | 2);
+            let index = self
+                .connections
+                .iter()
+                .position(|connection| !connection.active)
+                .ok_or(TcpStateError::Full)?;
+            let listener = self.listeners[listener_index];
+            let endpoint = self.endpoint_for_connection(index);
             let connection = TcpConnection {
-                owner: self.owner,
+                active: true,
+                owner: listener.owner,
                 endpoint,
                 local_port: packet.destination_port,
                 peer: source,
                 peer_port: packet.source_port,
                 phase: TcpPhase::SynReceived,
-                local_seq: self.deadline as u32,
+                local_seq: listener.sequence,
                 remote_seq: packet.sequence.wrapping_add(1),
-                accepted: false,
-                read_length: 0,
-                read_buffer: [0; MAX_TCP_STREAM],
-                write_pending: false,
-                write_sequence: 0,
-                write_length: 0,
-                write_buffer: [0; MAX_TCP_STREAM],
+                ..TcpConnection::EMPTY
             };
-            self.connection = Some(connection);
-            self.arm_tx(TcpTx {
-                source: Ipv4([0; 4]),
-                destination: source,
-                header: TcpHeader {
-                    source_port: packet.destination_port,
-                    destination_port: packet.source_port,
-                    sequence: connection.local_seq,
-                    acknowledgement: connection.remote_seq,
-                    flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
-                    window: MAX_TCP_STREAM as u16,
+            self.connections[index] = connection;
+            self.listeners[listener_index].sequence = listener.sequence.wrapping_add(1);
+            self.arm_control(
+                index,
+                TcpTx {
+                    source: Ipv4([0; 4]),
+                    destination: source,
+                    header: TcpHeader {
+                        source_port: packet.destination_port,
+                        destination_port: packet.source_port,
+                        sequence: connection.local_seq,
+                        acknowledgement: connection.remote_seq,
+                        flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
+                        window: MAX_TCP_RX_BYTES as u16,
+                    },
+                    length: 0,
+                    payload: [0; MAX_TCP_STREAM],
                 },
-                length: 0,
-                payload: [0; MAX_TCP_STREAM],
-            });
+            );
         }
         Ok(())
     }
 
-    fn arm_ack(
-        &mut self,
-        destination: Ipv4,
-        destination_port: u16,
-        sequence: u32,
-        acknowledgement: u32,
-    ) {
-        let source = Ipv4([0; 4]);
-        self.outgoing = Some(TcpTx {
-            source,
-            destination,
-            header: TcpHeader {
-                source_port: self.port,
-                destination_port,
-                sequence,
-                acknowledgement,
-                flags: TCP_FLAG_ACK,
-                window: (MAX_TCP_STREAM as u16)
-                    .saturating_sub(self.connection.map_or(0, |c| c.read_length)),
-            },
-            length: 0,
-            payload: [0; MAX_TCP_STREAM],
-        });
-    }
-
-    fn arm_tx(&mut self, tx: TcpTx) {
-        self.outgoing = Some(tx);
-        self.last = Some(tx);
-        self.retries = 0;
-        self.deadline = self.deadline.saturating_add(1).max(1);
-    }
-
     pub fn take_tx(&mut self) -> Option<TcpTx> {
-        self.outgoing.take()
+        for offset in 0..MAX_TCP_CONNECTIONS {
+            let index = (self.next_schedule + offset) % MAX_TCP_CONNECTIONS;
+            if let Some(tx) = self.connections[index].outgoing.take() {
+                self.next_schedule = (index + 1) % MAX_TCP_CONNECTIONS;
+                return Some(tx);
+            }
+        }
+        None
     }
 
     /// Retransmit reliable control/data frames a bounded number of times.
     pub fn tick(&mut self, now: u64) -> bool {
-        if self.outgoing.is_some() || self.last.is_none() || now < self.deadline {
-            return false;
+        self.now = now.max(1);
+        let mut changed = false;
+        for index in 0..MAX_TCP_CONNECTIONS {
+            if !self.connections[index].active {
+                continue;
+            }
+            if self.connections[index].outgoing.is_none()
+                && self.connections[index].last.is_some()
+                && now >= self.connections[index].deadline
+            {
+                if self.connections[index].retries >= 3 {
+                    self.connections[index] = TcpConnection::EMPTY;
+                    continue;
+                }
+                self.connections[index].retries += 1;
+                self.connections[index].deadline =
+                    now.saturating_add(1u64 << self.connections[index].retries);
+                self.connections[index].outgoing = self.connections[index].last;
+                changed = true;
+            }
+            self.arm_next_tx(index);
         }
-        if self.retries >= 3 {
-            self.connection = None;
-            self.last = None;
-            return false;
-        }
-        self.retries += 1;
-        self.deadline = now.saturating_add(1u64 << self.retries);
-        self.outgoing = self.last;
-        true
+        changed
     }
 
     pub fn read(
@@ -630,17 +736,15 @@ impl TcpState {
         endpoint: EndpointId,
         output: &mut [u8],
     ) -> Result<usize, TcpStateError> {
-        let connection = self.connection.as_mut().ok_or(TcpStateError::NotFound)?;
-        if connection.owner != owner || connection.endpoint != endpoint {
-            return Err(TcpStateError::Owner);
-        }
-        if connection.read_length == 0 {
+        let index = self.connection_index_by_owner(owner, endpoint)?;
+        if self.connections[index].read_length == 0 {
             return Err(TcpStateError::NoData);
         }
-        let length = usize::from(connection.read_length).min(output.len());
-        output[..length].copy_from_slice(&connection.read_buffer[..length]);
-        connection.read_buffer.copy_within(length..usize::from(connection.read_length), 0);
-        connection.read_length -= length as u16;
+        let length = usize::from(self.connections[index].read_length).min(output.len());
+        output[..length].copy_from_slice(&self.connections[index].read_buffer[..length]);
+        let read_length = usize::from(self.connections[index].read_length);
+        self.connections[index].read_buffer.copy_within(length..read_length, 0);
+        self.connections[index].read_length -= length as u16;
         Ok(length)
     }
 
@@ -650,65 +754,210 @@ impl TcpState {
         endpoint: EndpointId,
         payload: &[u8],
     ) -> Result<(), TcpStateError> {
+        let index = self.connection_index_by_owner(owner, endpoint)?;
+        if self.connections[index].tx_length != 0 || self.connections[index].in_flight {
+            return Err(TcpStateError::Busy);
+        }
+        self.submit_write(owner, endpoint, payload).map(|_| ())
+    }
+
+    pub fn submit_write(
+        &mut self,
+        owner: u64,
+        endpoint: EndpointId,
+        payload: &[u8],
+    ) -> Result<u64, TcpStateError> {
         if payload.is_empty() || payload.len() > MAX_TCP_STREAM {
             return Err(TcpStateError::MessageTooLarge);
         }
-        let tx = {
-            let connection = self.connection.as_mut().ok_or(TcpStateError::NotFound)?;
-            if connection.owner != owner || connection.endpoint != endpoint {
-                return Err(TcpStateError::Owner);
-            }
-            if connection.phase != TcpPhase::Established || connection.write_pending {
-                return Err(TcpStateError::Busy);
-            }
-            connection.write_pending = true;
-            connection.write_sequence = connection.local_seq;
-            connection.write_length = payload.len() as u16;
-            connection.write_buffer[..payload.len()].copy_from_slice(payload);
-            connection.local_seq = connection.local_seq.wrapping_add(payload.len() as u32);
-            let mut bytes = [0; MAX_TCP_STREAM];
-            bytes[..payload.len()].copy_from_slice(payload);
-            TcpTx {
-                source: Ipv4([0; 4]),
-                destination: connection.peer,
-                header: TcpHeader {
-                    source_port: connection.local_port,
-                    destination_port: connection.peer_port,
-                    sequence: connection.write_sequence,
-                    acknowledgement: connection.remote_seq,
-                    flags: TCP_FLAG_ACK,
-                    window: MAX_TCP_STREAM as u16,
-                },
-                length: payload.len() as u16,
-                payload: bytes,
-            }
-        };
-        self.arm_tx(tx);
-        Ok(())
+        let index = self.connection_index_by_owner(owner, endpoint)?;
+        if self.connections[index].phase != TcpPhase::Established {
+            return Err(TcpStateError::Busy);
+        }
+        if payload.len() > MAX_TCP_TX_BYTES - usize::from(self.connections[index].tx_length) {
+            return Err(TcpStateError::Busy);
+        }
+        let start = usize::from(self.connections[index].tx_length);
+        self.connections[index].tx_buffer[start..start + payload.len()].copy_from_slice(payload);
+        self.connections[index].tx_length += payload.len() as u16;
+        self.connections[index].accepted_bytes =
+            self.connections[index].accepted_bytes.saturating_add(payload.len() as u64);
+        self.arm_next_tx(index);
+        Ok(self.connections[index].accepted_bytes)
+    }
+
+    pub fn stream_watermarks(
+        &self,
+        owner: u64,
+        endpoint: EndpointId,
+    ) -> Result<(u64, u64), TcpStateError> {
+        let connection = self.connection(owner, endpoint)?;
+        Ok((connection.accepted_bytes, connection.acknowledged_bytes))
     }
 
     pub fn close(&mut self, owner: u64, endpoint: EndpointId) -> Result<(), TcpStateError> {
-        if self.owner == owner && self.listener == Some(endpoint) && self.connection.is_none() {
-            self.listener = None;
-            self.port = 0;
+        if let Some(index) = self.listeners.iter().position(|listener| {
+            listener.active && listener.owner == owner && listener.endpoint == endpoint
+        }) {
+            if self.connections.iter().any(|connection| {
+                connection.active && connection.local_port == self.listeners[index].local_port
+            }) {
+                return Err(TcpStateError::Busy);
+            }
+            self.listeners[index] = TcpListener::EMPTY;
             return Ok(());
         }
-        let connection = self.connection.ok_or(TcpStateError::NotFound)?;
-        if connection.owner != owner || connection.endpoint != endpoint {
-            return Err(TcpStateError::Owner);
-        }
-        self.connection = None;
-        self.outgoing = None;
-        self.last = None;
+        let index = self.connection_index_by_owner(owner, endpoint)?;
+        self.connections[index] = TcpConnection::EMPTY;
         Ok(())
     }
 
     pub fn reset(&mut self) {
         self.generation = self.generation.wrapping_add(1).max(1);
-        self.listener = None;
-        self.connection = None;
-        self.outgoing = None;
-        self.last = None;
+        self.listeners = ListenerTable::new();
+        self.connections = ConnectionTable::new();
+        self.next_schedule = 0;
+        self.now = 1;
+    }
+
+    pub fn listener_count(&self) -> usize {
+        self.listeners.iter().filter(|listener| listener.active).count()
+    }
+
+    pub fn connection_count(&self) -> usize {
+        self.connections.iter().filter(|connection| connection.active).count()
+    }
+
+    fn endpoint_for_listener(&self, index: usize) -> EndpointId {
+        EndpointId((u32::from(self.generation) << 16) | (index as u32 + 1))
+    }
+
+    fn endpoint_for_connection(&self, index: usize) -> EndpointId {
+        EndpointId(
+            (u32::from(self.generation) << 16) | (index as u32 + MAX_TCP_LISTENERS as u32 + 1),
+        )
+    }
+
+    fn listener_index(&self, owner: u64, endpoint: EndpointId) -> Result<usize, TcpStateError> {
+        self.listeners
+            .iter()
+            .position(|listener| {
+                listener.active && listener.owner == owner && listener.endpoint == endpoint
+            })
+            .ok_or(TcpStateError::Owner)
+    }
+
+    fn listener_for_port(&self, port: u16) -> Option<usize> {
+        self.listeners.iter().position(|listener| listener.active && listener.local_port == port)
+    }
+
+    fn connection_index(
+        &self,
+        source: Ipv4,
+        source_port: u16,
+        destination_port: u16,
+    ) -> Option<usize> {
+        self.connections.iter().position(|connection| {
+            connection.active
+                && connection.peer == source
+                && connection.peer_port == source_port
+                && connection.local_port == destination_port
+        })
+    }
+
+    fn connection_index_by_owner(
+        &self,
+        owner: u64,
+        endpoint: EndpointId,
+    ) -> Result<usize, TcpStateError> {
+        self.connections
+            .iter()
+            .position(|connection| {
+                connection.active && connection.owner == owner && connection.endpoint == endpoint
+            })
+            .ok_or_else(|| {
+                if endpoint.generation() != self.generation {
+                    TcpStateError::NotFound
+                } else {
+                    TcpStateError::Owner
+                }
+            })
+    }
+
+    fn connection(&self, owner: u64, endpoint: EndpointId) -> Result<TcpConnection, TcpStateError> {
+        Ok(self.connections[self.connection_index_by_owner(owner, endpoint)?])
+    }
+
+    fn arm_ack(
+        &mut self,
+        index: usize,
+        destination: Ipv4,
+        destination_port: u16,
+        sequence: u32,
+        acknowledgement: u32,
+    ) {
+        self.connections[index].outgoing = Some(TcpTx {
+            source: Ipv4([0; 4]),
+            destination,
+            header: TcpHeader {
+                source_port: self.connections[index].local_port,
+                destination_port,
+                sequence,
+                acknowledgement,
+                flags: TCP_FLAG_ACK,
+                window: (MAX_TCP_RX_BYTES as u16)
+                    .saturating_sub(self.connections[index].read_length),
+            },
+            length: 0,
+            payload: [0; MAX_TCP_STREAM],
+        });
+    }
+
+    fn arm_control(&mut self, index: usize, tx: TcpTx) {
+        self.connections[index].outgoing = Some(tx);
+        self.connections[index].last = Some(tx);
+        self.connections[index].retries = 0;
+        self.connections[index].deadline = self.now.saturating_add(1).max(1);
+    }
+
+    fn arm_next_tx(&mut self, index: usize) {
+        let connection = &mut self.connections[index];
+        if !connection.active
+            || connection.outgoing.is_some()
+            || connection.in_flight
+            || connection.tx_length == 0
+            || connection.phase != TcpPhase::Established
+        {
+            return;
+        }
+        let length = usize::from(connection.tx_length).min(MAX_TCP_STREAM);
+        let mut payload = [0; MAX_TCP_STREAM];
+        payload[..length].copy_from_slice(&connection.tx_buffer[..length]);
+        connection.tx_buffer.copy_within(length..usize::from(connection.tx_length), 0);
+        connection.tx_length -= length as u16;
+        let sequence = connection.local_seq;
+        connection.local_seq = connection.local_seq.wrapping_add(length as u32);
+        connection.in_flight = true;
+        connection.in_flight_sequence = sequence;
+        connection.in_flight_length = length as u16;
+        let tx = TcpTx {
+            source: Ipv4([0; 4]),
+            destination: connection.peer,
+            header: TcpHeader {
+                source_port: connection.local_port,
+                destination_port: connection.peer_port,
+                sequence,
+                acknowledgement: connection.remote_seq,
+                flags: TCP_FLAG_ACK,
+                window: MAX_TCP_RX_BYTES as u16,
+            },
+            length: length as u16,
+            payload,
+        };
+        connection.outgoing = Some(tx);
+        connection.last = Some(tx);
+        connection.retries = 0;
+        connection.deadline = self.now.saturating_add(1).max(1);
     }
 }
 
@@ -1036,7 +1285,11 @@ pub struct EndpointId(u32);
 impl EndpointId {
     pub const fn from_wire(value: u32) -> Option<Self> {
         let endpoint = Self(value);
-        if endpoint.generation() != 0 && endpoint.slot() < 8 { Some(endpoint) } else { None }
+        if endpoint.generation() != 0 && endpoint.slot() < MAX_TCP_ENDPOINTS {
+            Some(endpoint)
+        } else {
+            None
+        }
     }
 
     pub const fn wire(self) -> u32 {
@@ -2005,6 +2258,147 @@ mod tests {
             Err(TcpStateError::Reset)
         );
         assert_eq!(state.accept(7, listener), Err(TcpStateError::NoData));
+    }
+
+    #[test]
+    fn tcp_stream_writes_are_byte_queued_and_connection_local() {
+        let mut state = TcpState::new();
+        let listener = state.listen(7, 7443, 100).unwrap();
+        for (port, sequence) in [(50000, 200), (50001, 300)] {
+            state
+                .ingest(
+                    PEER_IP,
+                    Tcp {
+                        source_port: port,
+                        destination_port: 7443,
+                        sequence,
+                        acknowledgement: 0,
+                        flags: TCP_FLAG_SYN,
+                        window: 1024,
+                        payload: &[],
+                    },
+                )
+                .unwrap();
+            let _ = state.take_tx();
+            state
+                .ingest(
+                    PEER_IP,
+                    Tcp {
+                        source_port: port,
+                        destination_port: 7443,
+                        sequence: sequence + 1,
+                        acknowledgement: if port == 50000 { 101 } else { 102 },
+                        flags: TCP_FLAG_ACK,
+                        window: 1024,
+                        payload: &[],
+                    },
+                )
+                .unwrap();
+        }
+        let first = state.accept(7, listener).unwrap();
+        let second = state.accept(7, listener).unwrap();
+        assert_ne!(first, second);
+
+        assert_eq!(state.submit_write(7, first, b"abc"), Ok(3));
+        assert_eq!(state.submit_write(7, first, b"def"), Ok(6));
+        let first_tx = state.take_tx().unwrap();
+        assert_eq!(&first_tx.payload[..usize::from(first_tx.length)], b"abc");
+        assert_eq!(state.stream_watermarks(7, first), Ok((6, 0)));
+        assert_eq!(state.submit_write(7, second, b"peer"), Ok(4));
+        assert_eq!(state.submit_write(8, first, b"x"), Err(TcpStateError::Owner));
+
+        state
+            .ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 50000,
+                    destination_port: 7443,
+                    sequence: 201,
+                    acknowledgement: first_tx.header.sequence + u32::from(first_tx.length),
+                    flags: TCP_FLAG_ACK,
+                    window: 1024,
+                    payload: &[],
+                },
+            )
+            .unwrap();
+        let mut second_tx = state.take_tx().unwrap();
+        if &second_tx.payload[..usize::from(second_tx.length)] == b"peer" {
+            state
+                .ingest(
+                    PEER_IP,
+                    Tcp {
+                        source_port: 50001,
+                        destination_port: 7443,
+                        sequence: 301,
+                        acknowledgement: second_tx.header.sequence + u32::from(second_tx.length),
+                        flags: TCP_FLAG_ACK,
+                        window: 1024,
+                        payload: &[],
+                    },
+                )
+                .unwrap();
+            second_tx = state.take_tx().unwrap();
+        }
+        assert_eq!(&second_tx.payload[..usize::from(second_tx.length)], b"def");
+        state
+            .ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 50000,
+                    destination_port: 7443,
+                    sequence: 201,
+                    acknowledgement: second_tx.header.sequence + u32::from(second_tx.length),
+                    flags: TCP_FLAG_ACK,
+                    window: 1024,
+                    payload: &[],
+                },
+            )
+            .unwrap();
+        assert_eq!(state.stream_watermarks(7, first), Ok((6, 6)));
+        assert_eq!(state.stream_watermarks(7, second), Ok((4, 4)));
+    }
+
+    #[test]
+    fn listener_and_connection_tables_have_independent_bounds() {
+        let mut state = TcpState::new();
+        let listener = state.listen(7, 7443, 100).unwrap();
+        assert_eq!(state.listen(7, 7444, 100), Err(TcpStateError::Full));
+        for port in 50000..50000 + MAX_TCP_CONNECTIONS as u16 {
+            assert_eq!(
+                state.ingest(
+                    PEER_IP,
+                    Tcp {
+                        source_port: port,
+                        destination_port: 7443,
+                        sequence: 200,
+                        acknowledgement: 0,
+                        flags: TCP_FLAG_SYN,
+                        window: 1024,
+                        payload: &[],
+                    },
+                ),
+                Ok(())
+            );
+            let _ = state.take_tx();
+        }
+        assert_eq!(state.listener_count(), 1);
+        assert_eq!(state.connection_count(), MAX_TCP_CONNECTIONS);
+        assert_eq!(
+            state.ingest(
+                PEER_IP,
+                Tcp {
+                    source_port: 51000,
+                    destination_port: 7443,
+                    sequence: 200,
+                    acknowledgement: 0,
+                    flags: TCP_FLAG_SYN,
+                    window: 1024,
+                    payload: &[],
+                },
+            ),
+            Err(TcpStateError::Full)
+        );
+        assert_eq!(listener.slot(), 0);
     }
 
     #[test]

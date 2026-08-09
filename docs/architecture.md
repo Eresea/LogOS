@@ -25,7 +25,7 @@ states, generation checks, and bounded validation. Core owns endpoint mappings, 
 page loans, and reclamation; a service receives only the endpoint set declared by its canonical
 `platform::services::ServiceSpec`.
 The control page is implicit; `ServiceSpec::endpoints` is the single map for additional Input,
-Display, Session, Store, Block, Network device/event, and Remote pages. `ControlPage` carries only
+Display, Session, Store, Block, Network device/event/stream, and Remote pages. `ControlPage` carries only
 lifecycle and notification state for Network and Remote; device payloads, event payloads, deadlines,
 DMA handles, and remote request/reply scalars live in typed endpoint pages.
 
@@ -41,6 +41,17 @@ health gating, privileged setup, and the run loop implemented in `platform::runt
 coordination remains below `src/platform`, while hardware, memory, scheduling, IPC, and capability
 enforcement remain Core responsibilities. The migration is atomic: ABI-v3 payloads are
 rejected and no compatibility adapter or dynamic endpoint registry exists. See [ADR-0020](adr/0020-typed-native-endpoint-pages.md).
+
+### Network scalable stream slice
+
+The typed Network endpoint remains the single capability, ownership, generation, and replacement
+boundary. `SubmitWrite` and `PollStream` are additional operations; `StreamPage` is auxiliary state
+transport, not a second Network ABI. Network service state uses separate bounded listener and
+connection tables, with one listener and eight connections initially. Each connection owns byte
+stream RX/TX storage and cumulative accepted/acknowledged watermarks; TCP sequence numbers are
+assigned only when bytes are transmitted. Readiness is coalesced per connection and completion
+records are bounded with sequence/loss detection. NetworkRuntime reports readiness/completion and
+routes it to client pages; the scheduler owns task execution. See [ADR-0027](adr/0027-network-scalable-stream-slice.md).
 
 ## 1. Purpose
 

@@ -467,6 +467,102 @@ fn run(context: &mut ServiceContext) -> ! {
                 }
                 continue;
             }
+            if request.operation == NetworkOperation::SubmitWrite {
+                let Some(pages) = context.network_pages() else {
+                    if !context.network_reply(error_reply(
+                        request,
+                        NetworkStatus::Offline,
+                        info,
+                        counters,
+                    )) {
+                        spin();
+                    }
+                    continue;
+                };
+                let payload = unsafe {
+                    core::slice::from_raw_parts(
+                        (pages.tx_address + CLIENT_PAYLOAD_OFFSET as u64) as *const u8,
+                        usize::from(request.length),
+                    )
+                };
+                let Some(endpoint) = logos_net::EndpointId::from_wire(request.endpoint.0) else {
+                    if !context.network_reply(error_reply(
+                        request,
+                        NetworkStatus::Invalid,
+                        info,
+                        counters,
+                    )) {
+                        spin();
+                    }
+                    continue;
+                };
+                let result = state.tcp_mut().submit_write(owner, endpoint, payload);
+                let (status, accepted_bytes, acknowledged_bytes) = match result {
+                    Ok(accepted) => state
+                        .tcp()
+                        .stream_watermarks(owner, endpoint)
+                        .map_or((NetworkStatus::Complete, accepted, 0), |(_, acknowledged)| {
+                            (NetworkStatus::Complete, accepted, acknowledged)
+                        }),
+                    Err(error) => (map_tcp_error(error), 0, 0),
+                };
+                if status == NetworkStatus::Complete {
+                    let _ = context.publish_stream(logos_abi::NetworkStreamRecord {
+                        owner,
+                        endpoint: request.endpoint,
+                        generation: request.generation,
+                        readiness: logos_abi::NetworkStreamReadiness::Writable.bits(),
+                        status,
+                        reserved: 0,
+                        sequence: 0,
+                        accepted_bytes,
+                        acknowledged_bytes,
+                    });
+                }
+                if !context.network_reply(NetworkReply {
+                    id: request.id,
+                    status,
+                    endpoint: if status == NetworkStatus::Complete {
+                        request.endpoint
+                    } else {
+                        NetworkEndpoint(0)
+                    },
+                    generation: info.generation,
+                    source_address: 0,
+                    source_port: 0,
+                    length: if status == NetworkStatus::Complete { request.length } else { 0 },
+                    info,
+                    counters,
+                }) {
+                    spin();
+                }
+                continue;
+            }
+            if request.operation == NetworkOperation::PollStream {
+                let result = context.poll_stream(request.endpoint);
+                let (status, endpoint) = result
+                    .map_or((NetworkStatus::Busy, NetworkEndpoint(0)), |record| {
+                        (record.status, record.endpoint)
+                    });
+                if !context.network_reply(NetworkReply {
+                    id: request.id,
+                    status,
+                    endpoint: if status == NetworkStatus::Complete {
+                        endpoint
+                    } else {
+                        NetworkEndpoint(0)
+                    },
+                    generation: info.generation,
+                    source_address: 0,
+                    source_port: 0,
+                    length: 0,
+                    info,
+                    counters,
+                }) {
+                    spin();
+                }
+                continue;
+            }
             if request.operation == NetworkOperation::Write {
                 let Some(pages) = context.network_pages() else {
                     if !context.network_reply(error_reply(
@@ -1617,6 +1713,22 @@ fn map_state_error(error: StateError) -> NetworkStatus {
     }
 }
 
+fn map_tcp_error(error: logos_net::TcpStateError) -> NetworkStatus {
+    match error {
+        logos_net::TcpStateError::Busy => NetworkStatus::Busy,
+        logos_net::TcpStateError::NoData => NetworkStatus::Busy,
+        logos_net::TcpStateError::Owner => NetworkStatus::Denied,
+        logos_net::TcpStateError::Invalid | logos_net::TcpStateError::NotFound => {
+            NetworkStatus::Invalid
+        }
+        logos_net::TcpStateError::MessageTooLarge => NetworkStatus::MessageTooLarge,
+        logos_net::TcpStateError::Full | logos_net::TcpStateError::AddressInUse => {
+            NetworkStatus::Full
+        }
+        logos_net::TcpStateError::Reset => NetworkStatus::Reset,
+    }
+}
+
 fn error_reply(
     request: NetworkRequest,
     status: NetworkStatus,
@@ -1707,7 +1819,9 @@ fn handle_request(
         | NetworkOperation::Listen
         | NetworkOperation::Accept
         | NetworkOperation::Read
-        | NetworkOperation::Write => (NetworkStatus::Offline, NetworkEndpoint(0)),
+        | NetworkOperation::Write
+        | NetworkOperation::SubmitWrite
+        | NetworkOperation::PollStream => (NetworkStatus::Offline, NetworkEndpoint(0)),
     };
     NetworkReply {
         id: request.id,

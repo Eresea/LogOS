@@ -1,10 +1,9 @@
 # Network
 
-> **Status:** Network bootstrap v1 is complete: typed device transport, safe DMA ownership,
-> Ethernet/ARP/IPv4/DHCP/UDP, and the basic capability model are implemented. The scalable Network
-> architecture is not complete: asynchronous TX, bounded batched scheduling, a scalable socket
-> model, robust/scalable TCP, and multiqueue readiness remain future work. Remaining QEMU datagram
-> client closure is pending.
+> **Status:** Network bootstrap v1 remains the compatibility path. The first scalable slice now
+> provides separate bounded listener/connection tables, per-connection byte-stream TX storage,
+> accepted/acknowledged watermarks, and a generation-bound auxiliary `StreamPage` with coalesced
+> readiness and bounded loss detection.
 > Results are recorded in
 > [testing status](../testing/STATUS.md).
 >
@@ -61,6 +60,9 @@ items in dependency order.
 - Return `Busy` instead of allocating or growing a queue when a fixed in-flight limit is reached.
 - The Network service remains allocation-free after startup; all tables and packet buffers are
   fixed-size and independent of traffic volume.
+- Listener capacity and TCP connection capacity are separate: one listener and eight connections
+  initially. Four 1 KiB TX chunks are byte storage, never application-message or TCP-segment
+  boundaries.
 - Network failure never blocks local boot. The service reports `Offline` or `Degraded`, retries
   configuration on bounded timers, and leaves Terminal, Store, and recovery usable.
 - Device reset or Network service restart invalidates endpoints, cancels pending operations,
@@ -89,6 +91,14 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
 - `NetworkClientPage` and `NetworkServerPage` are the only client/server boundary. Core configures
   Terminal and Gateway transfer-page authority, admits one global transaction, returns `Busy` to a
   competing client, and publishes only exact request/generation replies.
+- `SubmitWrite` and `PollStream` extend that same Network request contract. `SubmitWrite` accepts
+  bytes into connection-owned stream storage; TCP sequence numbers are assigned only when a wire
+  range is armed. `PollStream` consumes the client's auxiliary `StreamPage`, whose records carry
+  coalesced `Readable`/`Writable`/`Closed` state, sequence numbers, and cumulative accepted/
+  acknowledged byte watermarks.
+- Network service state changes are routed by `NetworkRuntime` into the owning client's bounded
+  stream page. Overflow preserves the latest readiness state and requires resynchronization.
+  NetworkRuntime reports readiness/completion; the scheduler owns task execution.
 - `NetworkRuntime` owns readiness separately from client pages. Once Network is bound and idle it
   submits an internal `Status` request through the Network server endpoint, caches the returned
   `NetworkInfo`, and exposes `configured()`/`info()` to the runtime. Gateway startup does not use
@@ -172,25 +182,28 @@ completed with `Cancelled` or `Reset` before its pages are released.
 
 ### TCP foundation (independent proof)
 
-`logos-net::TcpState` is a bounded one-listener/one-connection foundation. Host tests cover
+`logos-net::TcpState` is a bounded separate listener/connection table implementation. Host tests cover
 SYN/SYN-ACK/ACK establishment, exact sequence and acknowledgement arithmetic, ordered payload
 acknowledgements, server writes, duplicate ACKs, bounded retransmission, FIN/CloseWait, and RST.
 The post-handshake pure ACK does not generate a redundant ACK. The Network service waits for a
 pre-SYN `Accept`, retires TCP writes only after the VirtIO TX completion, and relays the typed
 `Listen`/`Accept`/`Read`/`Write` operations through the normal Core Network boundary.
 
-`network/tcp-stream` is the independent QEMU proof. It uses a deterministic host TCP peer through
+`network/tcp-stream` is the independent QEMU proof. It uses two simultaneous deterministic host TCP
+connections through
 QEMU host forwarding to port 7443, a test-only exact TCP capability scope, the real VirtIO driver,
 the real Network service, and no Gateway, Sessions, Remote, enrollment, persistence, Noise, or
 `logosctl` runtime path. The TCP ESP contains only Terminal, Storage, and Network payloads. The
-exchange asserts `hello`/`world`, a deterministic 512-byte transform, the ACK of the first server
-write before the second server write, and host FIN closure. Structured events are emitted for
+exchange asserts `hello`/`world`, a second connection's `other`/`reply` exchange, two accepted
+stream writes submitted before peer application reads, a coalesced stream poll, a deterministic
+512-byte transform, and host FIN closure. Structured events are emitted for
 `listener_waiting`, `connection_established`, `connection_readable`, `write_pending`,
 `write_acknowledged`, and `connection_closed`.
 
-This proves the bounded TCP foundation only. Multiple listeners, multiple connections, queued
-per-connection RX/TX, asynchronous readiness, congestion-control completeness, and scalable
-service scheduling remain deferred.
+The bootstrap `Listen`/`Accept`/`Read`/`Write` operations remain supported while clients migrate to
+`SubmitWrite`/`PollStream`. Multiple connections, queued per-connection RX/TX, coalesced readiness,
+and scheduler ownership are now part of the first scalable slice; congestion-control completeness
+and multiple-listener policy remain deferred.
 
 ### Direct Network-client proof boundary
 

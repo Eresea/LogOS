@@ -16,6 +16,7 @@ pub use logos_abi::service::{
     NetworkClientPage, NetworkDevicePage, NetworkDmaResources, NetworkEventPage, NetworkServerPage,
     NetworkServerRequest, ProtocolVersion, RemotePage, RemotePageReply, RemotePageRequest,
     SessionClientPage, SessionServerPage, SessionStatus, StoreClientPage, StoreServerPage,
+    StreamPage,
 };
 
 pub type EntryControlPage = *mut ControlPage;
@@ -493,6 +494,49 @@ impl ServiceContext {
             )
         }
         .then_some(event)
+    }
+
+    pub fn publish_stream(&self, record: logos_abi::NetworkStreamRecord) -> bool {
+        let raw = self.raw();
+        raw.network_stream_page != 0
+            && unsafe {
+                StreamPage::publish_at(
+                    raw.network_stream_page,
+                    raw.generation,
+                    raw.generation,
+                    record,
+                )
+            }
+    }
+
+    pub fn poll_stream(
+        &self,
+        endpoint: logos_abi::NetworkEndpoint,
+    ) -> Option<logos_abi::NetworkStreamRecord> {
+        let raw = self.raw();
+        (raw.network_stream_page != 0).then(|| unsafe {
+            StreamPage::take_at(raw.network_stream_page, raw.generation, raw.generation, endpoint)
+        })?
+    }
+
+    pub fn stream_overflowed(&self) -> bool {
+        let raw = self.raw();
+        raw.network_stream_page != 0
+            && unsafe {
+                StreamPage::overflow_at(raw.network_stream_page, raw.generation, raw.generation)
+            }
+    }
+
+    pub fn clear_stream_overflow(&self) -> bool {
+        let raw = self.raw();
+        raw.network_stream_page != 0
+            && unsafe {
+                StreamPage::clear_overflow_at(
+                    raw.network_stream_page,
+                    raw.generation,
+                    raw.generation,
+                )
+            }
     }
 
     pub fn remote_gate_request(&self) -> Option<RemotePageRequest> {

@@ -28,6 +28,7 @@ pub struct Task<'a> {
     remote_page_physical: Option<u64>,
     network_device_page_physical: Option<u64>,
     network_event_page_physical: Option<u64>,
+    network_stream_page_physical: Option<u64>,
     network_client_page_physical: Option<u64>,
     network_server_page_physical: Option<u64>,
     endpoint_pages: EndpointPages,
@@ -198,6 +199,7 @@ pub struct NetworkEndpoint {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct NetworkClientEndpoint {
     page_physical: u64,
+    stream_page_physical: u64,
     service_generation: u32,
     endpoint_generation: u32,
 }
@@ -288,6 +290,32 @@ impl NetworkClientEndpoint {
                 expected_id,
             )
         }
+    }
+
+    pub fn publish_stream(self, record: logos_abi::NetworkStreamRecord) -> bool {
+        self.stream_page_physical != 0
+            && unsafe {
+                logos_abi::service::StreamPage::publish_at(
+                    self.stream_page_physical,
+                    self.service_generation,
+                    self.endpoint_generation,
+                    record,
+                )
+            }
+    }
+
+    pub fn poll_stream(
+        self,
+        endpoint: logos_abi::NetworkEndpoint,
+    ) -> Option<logos_abi::NetworkStreamRecord> {
+        (self.stream_page_physical != 0).then(|| unsafe {
+            logos_abi::service::StreamPage::take_at(
+                self.stream_page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+                endpoint,
+            )
+        })?
     }
 }
 
@@ -1010,6 +1038,33 @@ impl NetworkEventEndpoint {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct NetworkStreamEndpoint {
+    page_physical: u64,
+    service_generation: u32,
+    endpoint_generation: u32,
+}
+
+impl NetworkStreamEndpoint {
+    pub const fn unavailable() -> Self {
+        Self { page_physical: 0, service_generation: 0, endpoint_generation: 0 }
+    }
+
+    pub const fn available(self) -> bool {
+        self.page_physical != 0
+    }
+
+    pub fn take_next(self) -> Option<logos_abi::NetworkStreamRecord> {
+        self.available().then(|| unsafe {
+            logos_abi::service::StreamPage::take_next_at(
+                self.page_physical,
+                self.service_generation,
+                self.endpoint_generation,
+            )
+        })?
+    }
+}
+
 impl SessionEndpoint {
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub const fn context(self) -> u64 {
@@ -1077,6 +1132,7 @@ impl<'a> Task<'a> {
             endpoint_pages.contains(EndpointSet::NETWORK_SERVER),
             endpoint_pages.contains(EndpointSet::NETWORK_DEVICE),
             endpoint_pages.contains(EndpointSet::NETWORK_EVENT),
+            endpoint_pages.contains(EndpointSet::NETWORK_STREAM),
         ) else {
             let _ = space.release(memory);
             return None;
@@ -1102,6 +1158,7 @@ impl<'a> Task<'a> {
             network_server_page_physical: mapping.network_server.map(|(physical, _)| physical),
             network_device_page_physical: mapping.network_device.map(|(physical, _)| physical),
             network_event_page_physical: mapping.network_event.map(|(physical, _)| physical),
+            network_stream_page_physical: mapping.network_stream.map(|(physical, _)| physical),
             endpoint_pages,
             generation: 1,
             started: false,
@@ -1270,6 +1327,13 @@ impl<'a> Task<'a> {
                 return false;
             }
         }
+        if let Some(page) = self.network_stream_page_physical {
+            if !unsafe {
+                logos_core::native_service::StreamPage::reset_at(page, generation, generation)
+            } {
+                return false;
+            }
+        }
         self.generation = generation;
         true
     }
@@ -1317,6 +1381,7 @@ impl<'a> Task<'a> {
     pub fn network_client_endpoint(&self) -> Option<NetworkClientEndpoint> {
         self.network_client_page_physical.map(|page_physical| NetworkClientEndpoint {
             page_physical,
+            stream_page_physical: self.network_stream_page_physical.unwrap_or(0),
             service_generation: self.generation,
             endpoint_generation: self.generation,
         })
@@ -1346,6 +1411,14 @@ impl<'a> Task<'a> {
             service_generation: self.generation,
             endpoint_generation: self.generation,
             device_generation,
+        })
+    }
+
+    pub fn network_stream_endpoint(&self) -> Option<NetworkStreamEndpoint> {
+        self.network_stream_page_physical.map(|page_physical| NetworkStreamEndpoint {
+            page_physical,
+            service_generation: self.generation,
+            endpoint_generation: self.generation,
         })
     }
 
@@ -1555,6 +1628,10 @@ impl<'a> Scheduler<'a> {
         device_generation: u32,
     ) -> Option<NetworkEventEndpoint> {
         self.entry(handle)?.task.network_event_endpoint(device_generation)
+    }
+
+    pub fn network_stream_endpoint(&self, handle: Handle) -> Option<NetworkStreamEndpoint> {
+        self.entry(handle)?.task.network_stream_endpoint()
     }
 
     pub fn task_mut(&mut self, handle: Handle) -> Option<&mut Task<'a>> {

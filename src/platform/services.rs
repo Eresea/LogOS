@@ -78,6 +78,7 @@ impl EndpointSet {
     const NETWORK_EVENT_BIT: u16 = 1 << 10;
     const NETWORK_CLIENT_BIT: u16 = 1 << 11;
     const NETWORK_SERVER_BIT: u16 = 1 << 12;
+    const NETWORK_STREAM_BIT: u16 = 1 << 13;
 
     pub const NONE: Self = Self(0);
     pub const INPUT: Self = Self(Self::INPUT_BIT);
@@ -93,6 +94,7 @@ impl EndpointSet {
     pub const NETWORK_EVENT: Self = Self(Self::NETWORK_EVENT_BIT);
     pub const NETWORK_CLIENT: Self = Self(Self::NETWORK_CLIENT_BIT);
     pub const NETWORK_SERVER: Self = Self(Self::NETWORK_SERVER_BIT);
+    pub const NETWORK_STREAM: Self = Self(Self::NETWORK_STREAM_BIT);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -190,7 +192,8 @@ const TERMINAL_SPEC: ServiceSpec = ServiceSpec {
         .union(EndpointSet::DISPLAY)
         .union(EndpointSet::SESSION_CLIENT)
         .union(EndpointSet::STORE_CLIENT)
-        .union(EndpointSet::NETWORK_CLIENT),
+        .union(EndpointSet::NETWORK_CLIENT)
+        .union(EndpointSet::NETWORK_STREAM),
 };
 const SESSIONS_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Sessions,
@@ -219,7 +222,8 @@ const NETWORK_SPEC: ServiceSpec = ServiceSpec {
     profiles: Profiles::NORMAL_ONLY,
     endpoints: EndpointSet::NETWORK_SERVER
         .union(EndpointSet::NETWORK_DEVICE)
-        .union(EndpointSet::NETWORK_EVENT),
+        .union(EndpointSet::NETWORK_EVENT)
+        .union(EndpointSet::NETWORK_STREAM),
 };
 const GATEWAY_SPEC: ServiceSpec = ServiceSpec {
     service: Service::Gateway,
@@ -236,6 +240,7 @@ const GATEWAY_SPEC: ServiceSpec = ServiceSpec {
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
     endpoints: EndpointSet::NETWORK_CLIENT
+        .union(EndpointSet::NETWORK_STREAM)
         .union(EndpointSet::REMOTE)
         .union(EndpointSet::STORE_CLIENT),
 };
@@ -282,7 +287,9 @@ pub fn self_check() -> bool {
         && Service::Sessions.spec().endpoints.contains(EndpointSet::EFFECT)
         && Service::Network.spec().endpoints.contains(EndpointSet::NETWORK_DEVICE)
         && Service::Network.spec().endpoints.contains(EndpointSet::NETWORK_EVENT)
+        && Service::Network.spec().endpoints.contains(EndpointSet::NETWORK_STREAM)
         && Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_CLIENT)
+        && Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_STREAM)
         && Service::Network.spec().endpoints.contains(EndpointSet::NETWORK_SERVER)
         && !Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_DEVICE)
         && !Service::Terminal.spec().endpoints.contains(EndpointSet::NETWORK_EVENT)
