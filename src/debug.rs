@@ -52,6 +52,16 @@ pub fn write_line(message: &[u8]) {
     }
 }
 
+pub fn write_hex_u64_line(prefix: &[u8], value: u64) {
+    let mut line = [0; LOG_BYTES];
+    let prefix_length = prefix.len().min(LOG_BYTES.saturating_sub(16));
+    line[..prefix_length].copy_from_slice(&prefix[..prefix_length]);
+    for (index, shift) in (0..16).zip((0..64).step_by(4).rev()) {
+        line[prefix_length + index] = b"0123456789abcdef"[((value >> shift) & 0xf) as usize];
+    }
+    write_line(&line[..prefix_length + 16]);
+}
+
 #[allow(dead_code)]
 pub fn snapshot() -> Snapshot {
     let flags: u64;

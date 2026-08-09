@@ -1191,6 +1191,7 @@ pub(crate) fn run(
             debug::write_line(b"LogOS: Network service bind failed");
         } else if !ran {
             debug::write_line(b"LogOS: Network service initial run failed");
+            network_runtime.unbind();
         }
         ran.then_some(handle)
     } else {

@@ -247,6 +247,20 @@ impl NetworkRuntime {
         true
     }
 
+    pub fn unbind(&mut self) {
+        self.task = None;
+        self.device_endpoint = NetworkDeviceEndpoint::unavailable();
+        self.event_endpoint = NetworkEventEndpoint::unavailable();
+        self.stream_endpoint = NetworkStreamEndpoint::unavailable();
+        self.server_endpoint = None;
+        self.clients = [None; 2];
+        self.client_wakes = [None; 2];
+        self.active_client = None;
+        self.pending = None;
+        self.readiness.reset();
+        self.wakes = WakeSet::default();
+    }
+
     pub fn reset(&mut self) -> bool {
         let (Some(device), Some(resources)) = (self.device.as_mut(), self.resources) else {
             return false;

@@ -1569,9 +1569,22 @@ impl<'a> Task<'a> {
                 };
                 self.complete
             }
-            Some(EntryState::Panic) => false,
-            Some(EntryState::Fault(_)) => false,
-            None => false,
+            Some(EntryState::Panic) => {
+                crate::debug::write_line(b"LogOS: native task panic");
+                false
+            }
+            Some(EntryState::Fault(fault)) => {
+                crate::debug::write_line(b"LogOS: native task fault");
+                crate::debug::write_hex_u64_line(b"LogOS: fault vector=", u64::from(fault.vector));
+                crate::debug::write_hex_u64_line(b"LogOS: fault error=", fault.error);
+                crate::debug::write_hex_u64_line(b"LogOS: fault rip=", fault.rip);
+                crate::debug::write_hex_u64_line(b"LogOS: fault cr2=", fault.cr2);
+                false
+            }
+            None => {
+                crate::debug::write_line(b"LogOS: native task returned no state");
+                false
+            }
         }
     }
 }

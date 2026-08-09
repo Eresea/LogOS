@@ -32,7 +32,10 @@ const NETWORK_SERVER_PAGE: usize = ENTRIES - 37;
 const REMOTE_PAGE: usize = ENTRIES - 38;
 const NETWORK_STREAM_PAGE: usize = ENTRIES - 25;
 const STACK_TOP: usize = REMOTE_PAGE;
-const STACK_PAGES: usize = 24;
+// NetworkState owns bounded TCP RX/TX storage in the service task frame.
+// Keep enough fixed stack for that state plus packet parsing without adding
+// an allocator or moving ownership out of the replaceable service.
+const STACK_PAGES: usize = 96;
 const STACK_BASE: usize = STACK_TOP - STACK_PAGES;
 const CONTEXT_PAGE: usize = ENTRIES - 4;
 const HEAP_PAGE: usize = ENTRIES - 9;
