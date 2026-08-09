@@ -77,6 +77,7 @@ pub struct ControlPage {
     pub slot1: u32,
     pub network_device_page: u64,
     pub network_event_page: u64,
+    pub network_stream_page: u64,
 }
 
 /// Explicit state values shared by typed endpoint pages.
@@ -502,6 +503,161 @@ impl NetworkPageState {
             8 => Self::TimedOut,
             _ => return None,
         })
+    }
+}
+
+/// Auxiliary, generation-bound stream readiness/completion page.
+///
+/// The page is owned by Core and shared with the Network service. Records are
+/// coalesced per endpoint; the page is not a second request/reply transport.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct StreamPage {
+    pub service_generation: u32,
+    pub endpoint_generation: u32,
+    pub state: u32,
+    pub overflow: u32,
+    pub sequence: u64,
+    pub records: [logos_abi::NetworkStreamRecord; logos_abi::NETWORK_MAX_STREAM_RECORDS],
+    pub reserved: [u8; logos_abi::PAGE_SIZE - 408],
+}
+
+#[allow(clippy::missing_safety_doc)]
+impl StreamPage {
+    pub const fn new(service_generation: u32, endpoint_generation: u32) -> Self {
+        Self {
+            service_generation,
+            endpoint_generation,
+            state: NetworkPageState::Ready as u32,
+            overflow: 0,
+            sequence: 0,
+            records: [logos_abi::NetworkStreamRecord::EMPTY; logos_abi::NETWORK_MAX_STREAM_RECORDS],
+            reserved: [0; logos_abi::PAGE_SIZE - 408],
+        }
+    }
+
+    pub unsafe fn reset_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        if address == 0 || !address.is_multiple_of(core::mem::align_of::<Self>() as u64) {
+            return false;
+        }
+        let current = unsafe { (address as *const Self).read_volatile() };
+        if current.service_generation != service_generation
+            || current.endpoint_generation != endpoint_generation
+            || service_generation == 0
+            || endpoint_generation == 0
+        {
+            return false;
+        }
+        unsafe {
+            (address as *mut Self)
+                .write_volatile(Self::new(service_generation, endpoint_generation))
+        };
+        true
+    }
+
+    pub unsafe fn publish_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        mut record: logos_abi::NetworkStreamRecord,
+    ) -> bool {
+        if !record.endpoint.valid() || record.generation == 0 {
+            return false;
+        }
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if page.service_generation != service_generation
+            || page.endpoint_generation != endpoint_generation
+            || service_generation == 0
+            || endpoint_generation == 0
+        {
+            return false;
+        }
+        page.sequence = page.sequence.wrapping_add(1).max(1);
+        record.sequence = page.sequence;
+        if let Some(existing) = page.records.iter_mut().find(|item| {
+            item.owner == record.owner
+                && item.endpoint == record.endpoint
+                && item.generation == record.generation
+        }) {
+            *existing = record;
+        } else if let Some(empty) = page.records.iter_mut().find(|item| item.endpoint.0 == 0) {
+            *empty = record;
+        } else {
+            page.overflow = 1;
+            unsafe { (address as *mut Self).write_volatile(page) };
+            return false;
+        }
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
+    }
+
+    pub unsafe fn take_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+        endpoint: logos_abi::NetworkEndpoint,
+    ) -> Option<logos_abi::NetworkStreamRecord> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if page.service_generation != service_generation
+            || page.endpoint_generation != endpoint_generation
+            || !endpoint.valid()
+        {
+            return None;
+        }
+        let record = page.records.iter_mut().find(|item| item.endpoint == endpoint)?;
+        let value = *record;
+        *record = logos_abi::NetworkStreamRecord::EMPTY;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(value)
+    }
+
+    pub unsafe fn take_next_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> Option<logos_abi::NetworkStreamRecord> {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if page.service_generation != service_generation
+            || page.endpoint_generation != endpoint_generation
+        {
+            return None;
+        }
+        let record = page.records.iter_mut().find(|item| item.endpoint.valid())?;
+        let value = *record;
+        *record = logos_abi::NetworkStreamRecord::EMPTY;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        Some(value)
+    }
+
+    pub unsafe fn overflow_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let page = unsafe { (address as *const Self).read_volatile() };
+        page.service_generation == service_generation
+            && page.endpoint_generation == endpoint_generation
+            && page.overflow != 0
+    }
+
+    pub unsafe fn clear_overflow_at(
+        address: u64,
+        service_generation: u32,
+        endpoint_generation: u32,
+    ) -> bool {
+        let mut page = unsafe { (address as *mut Self).read_volatile() };
+        if page.service_generation != service_generation
+            || page.endpoint_generation != endpoint_generation
+        {
+            return false;
+        }
+        page.overflow = 0;
+        unsafe { (address as *mut Self).write_volatile(page) };
+        true
     }
 }
 
@@ -3886,6 +4042,7 @@ const _: () = assert!(size_of::<StoreServerPage>() <= logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<BlockClientPage>() <= logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<NetworkDevicePage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<NetworkEventPage>() == logos_abi::PAGE_SIZE);
+const _: () = assert!(size_of::<StreamPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<RemotePage>() == logos_abi::PAGE_SIZE);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3925,6 +4082,7 @@ impl ControlPage {
             slot1: 0,
             network_device_page: 0,
             network_event_page: 0,
+            network_stream_page: 0,
         }
     }
 
@@ -3960,6 +4118,7 @@ impl ControlPage {
         reset.network_server_page = current.network_server_page;
         reset.network_device_page = current.network_device_page;
         reset.network_event_page = current.network_event_page;
+        reset.network_stream_page = current.network_stream_page;
         unsafe { (address as *mut Self).write_volatile(reset) };
         true
     }
@@ -3982,6 +4141,7 @@ impl ControlPage {
         network_server_page: Option<u64>,
         network_device_page: Option<u64>,
         network_event_page: Option<u64>,
+        network_stream_page: Option<u64>,
     ) -> bool {
         if generation == 0 {
             return false;
@@ -4005,6 +4165,7 @@ impl ControlPage {
         context.network_server_page = network_server_page.unwrap_or(0);
         context.network_device_page = network_device_page.unwrap_or(0);
         context.network_event_page = network_event_page.unwrap_or(0);
+        context.network_stream_page = network_stream_page.unwrap_or(0);
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -4176,6 +4337,12 @@ impl ControlPage {
         let context = unsafe { (address as *const Self).read_volatile() };
         (context.abi == ABI && context.reserved == 0 && context.network_server_page != 0)
             .then_some(context.network_server_page)
+    }
+
+    pub unsafe fn network_stream_page_at(address: u64) -> Option<u64> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.network_stream_page != 0)
+            .then_some(context.network_stream_page)
     }
 
     pub unsafe fn remote_pending_at(address: u64) -> bool {
@@ -4727,6 +4894,48 @@ mod tests {
             Some(PageHandle(3))
         );
         assert_eq!(unsafe { NetworkClientPage::transfer_page_at(address, 1, 3) }, None);
+    }
+
+    #[test]
+    fn stream_page_coalesces_and_reports_bounded_loss() {
+        let mut page = StreamPage::new(3, 7);
+        let address = (&mut page as *mut StreamPage) as u64;
+        let endpoint = logos_abi::NetworkEndpoint::new(1, 7).unwrap();
+        let record = |owner, endpoint, accepted| logos_abi::NetworkStreamRecord {
+            owner,
+            endpoint,
+            generation: 7,
+            readiness: logos_abi::NetworkStreamReadiness::Writable.bits(),
+            status: logos_abi::NetworkStatus::Complete,
+            reserved: 0,
+            sequence: 0,
+            accepted_bytes: accepted,
+            acknowledged_bytes: accepted / 2,
+        };
+        assert!(unsafe { StreamPage::publish_at(address, 3, 7, record(11, endpoint, 3)) });
+        assert!(unsafe { StreamPage::publish_at(address, 3, 7, record(11, endpoint, 6)) });
+        assert_eq!(unsafe { StreamPage::take_next_at(address, 3, 7) }.unwrap().accepted_bytes, 6);
+        for slot in 1..=logos_abi::NETWORK_MAX_STREAM_RECORDS as u16 {
+            assert!(unsafe {
+                StreamPage::publish_at(
+                    address,
+                    3,
+                    7,
+                    record(u64::from(slot), logos_abi::NetworkEndpoint::new(slot, 7).unwrap(), 1),
+                )
+            });
+        }
+        assert!(!unsafe {
+            StreamPage::publish_at(
+                address,
+                3,
+                7,
+                record(99, logos_abi::NetworkEndpoint::new(99, 7).unwrap(), 1),
+            )
+        });
+        assert!(unsafe { StreamPage::overflow_at(address, 3, 7) });
+        assert!(unsafe { StreamPage::clear_overflow_at(address, 3, 7) });
+        assert!(!unsafe { StreamPage::overflow_at(address, 3, 7) });
     }
 
     #[test]

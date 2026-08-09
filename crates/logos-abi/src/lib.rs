@@ -9,6 +9,10 @@ pub const MAX_PERSISTENCE_OPERATIONS: usize = 8;
 pub const MAX_NETWORK_PAYLOAD: usize = 1472;
 pub const MAX_TCP_PAYLOAD: usize = 1024;
 pub const NETWORK_MAX_ENDPOINTS: usize = 8;
+pub const NETWORK_MAX_TCP_LISTENERS: usize = 1;
+pub const NETWORK_MAX_TCP_CONNECTIONS: usize = 8;
+pub const NETWORK_MAX_STREAM_TX_BYTES: usize = 4 * MAX_TCP_PAYLOAD;
+pub const NETWORK_MAX_STREAM_RECORDS: usize = 8;
 pub const NETWORK_MAX_ARP_ENTRIES: usize = 8;
 pub const NETWORK_MAX_DATAGRAMS: usize = 4;
 pub const NETWORK_MIN_FRAME: usize = 60;
@@ -379,6 +383,8 @@ pub enum NetworkOperation {
     Accept,
     Read,
     Write,
+    SubmitWrite,
+    PollStream,
 }
 
 impl NetworkOperation {
@@ -395,9 +401,53 @@ impl NetworkOperation {
             9 => Some(Self::Accept),
             10 => Some(Self::Read),
             11 => Some(Self::Write),
+            12 => Some(Self::SubmitWrite),
+            13 => Some(Self::PollStream),
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub enum NetworkStreamReadiness {
+    Readable = 1,
+    Writable = 2,
+    Closed = 4,
+}
+
+impl NetworkStreamReadiness {
+    pub const fn bits(self) -> u16 {
+        self as u16
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetworkStreamRecord {
+    pub owner: u64,
+    pub endpoint: NetworkEndpoint,
+    pub generation: u16,
+    pub readiness: u16,
+    pub status: NetworkStatus,
+    pub reserved: u8,
+    pub sequence: u64,
+    pub accepted_bytes: u64,
+    pub acknowledged_bytes: u64,
+}
+
+impl NetworkStreamRecord {
+    pub const EMPTY: Self = Self {
+        owner: 0,
+        endpoint: NetworkEndpoint(0),
+        generation: 0,
+        readiness: 0,
+        status: NetworkStatus::Invalid,
+        reserved: 0,
+        sequence: 0,
+        accepted_bytes: 0,
+        acknowledged_bytes: 0,
+    };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -640,6 +690,24 @@ impl NetworkRequest {
                     && (1..=MAX_TCP_PAYLOAD).contains(&(self.length as usize))
                     && self.generation != 0
             }
+            NetworkOperation::SubmitWrite => {
+                self.endpoint.valid()
+                    && self.peer.protocol() == Some(NetworkProtocol::Tcp)
+                    && self.peer.valid()
+                    && self.peer.address() == 0
+                    && self.page.0 != 0
+                    && (1..=MAX_TCP_PAYLOAD).contains(&(self.length as usize))
+                    && self.generation != 0
+            }
+            NetworkOperation::PollStream => {
+                self.endpoint.valid()
+                    && self.peer.protocol() == Some(NetworkProtocol::Tcp)
+                    && self.peer.valid()
+                    && self.peer.address() == 0
+                    && self.page.0 == 0
+                    && self.length == 0
+                    && self.generation != 0
+            }
             NetworkOperation::Cancel | NetworkOperation::Close => {
                 self.endpoint.valid()
                     && self.peer.0 == 0
@@ -740,6 +808,20 @@ impl NetworkReply {
                     && self.source_address == 0
                     && self.source_port == 0
                     && self.length == request.length
+                    && self.generation == request.generation
+            }
+            NetworkOperation::SubmitWrite => {
+                self.endpoint == request.endpoint
+                    && self.source_address == 0
+                    && self.source_port == 0
+                    && self.length == request.length
+                    && self.generation == request.generation
+            }
+            NetworkOperation::PollStream => {
+                self.endpoint == request.endpoint
+                    && self.source_address == 0
+                    && self.source_port == 0
+                    && self.length == 0
                     && self.generation == request.generation
             }
             NetworkOperation::Cancel | NetworkOperation::Close => {
@@ -1462,6 +1544,20 @@ mod tests {
         };
         assert!(write.valid_shape());
         assert!(!NetworkRequest { length: MAX_TCP_PAYLOAD as u16 + 1, ..write }.valid_shape());
+        let submit = NetworkRequest { operation: NetworkOperation::SubmitWrite, ..write };
+        assert!(submit.valid_shape());
+        let poll = NetworkRequest {
+            id: 7,
+            operation: NetworkOperation::PollStream,
+            endpoint: write.endpoint,
+            peer: write.peer,
+            page: PageHandle(0),
+            length: 0,
+            generation: write.generation,
+            deadline: 1,
+        };
+        assert!(poll.valid_shape());
+        assert!(!NetworkRequest { page: write.page, ..poll }.valid_shape());
 
         let reply = NetworkReply {
             id: send.id,
@@ -1489,6 +1585,17 @@ mod tests {
             counters: NetworkCounters::default(),
         };
         assert!(tcp_reply.valid_for(write));
+        assert!(tcp_reply.valid_for(submit));
+        assert!(
+            NetworkReply {
+                id: poll.id,
+                endpoint: poll.endpoint,
+                generation: poll.generation,
+                length: 0,
+                ..tcp_reply
+            }
+            .valid_for(poll)
+        );
         assert!(!NetworkReply { length: send.length - 1, ..reply }.valid_for(send));
         assert!(
             !NetworkReply { status: NetworkStatus::TimedOut, endpoint: send.endpoint, ..reply }
