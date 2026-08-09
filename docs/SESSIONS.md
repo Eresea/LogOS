@@ -11,6 +11,10 @@ Expose typed, capability-scoped operations independently of local, remote, graph
 
 The implemented command, result, cancellation, timeout, backpressure, pipeline, and capability contracts are recorded in [Console](CONSOLE.md).
 
+The platform relay owns one bounded request through `EffectPending -> ReplyPending`. It reports
+`Runnable(handle)` between phases; only `platform::runtime` performs scheduler wake/run. The
+composition-level native invocation helper uses the same phase object as a compatibility wrapper.
+
 ## V2 — Attach and resume
 
 - Persistent jobs and typed streaming results.

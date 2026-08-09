@@ -80,11 +80,11 @@ state is owned by the test-hook proof module rather than the platform compositio
 
 The current Remote migration checkpoint is deliberately partial: `RemoteRuntime` owns RemoteState,
 local trust commands through one `local_command` path, transport reset/start state, protected
-control loading, and the enrollment gate. Production and test-driven Terminal input share that path;
-mutable RemoteState is not exposed to callers. The composition root still owns Gateway endpoint
-bindings, the large Remote request polling loop, protected persistence context, deadlines, and
-replacement composition. ABI v4 remains unfrozen until the Network and Remote QEMU proofs are green;
-extracting the polling loop is deferred until this consolidation is stable.
+control loading, the enrollment gate, and one bounded generation-bound input operation slot.
+Production and test-driven Terminal input share that path; mutable RemoteState is not exposed to
+callers. The composition root still owns Gateway endpoint bindings, the large Remote request
+polling loop, protected persistence context, deadlines, and replacement composition. ABI v4 remains
+unfrozen until the Network and Remote QEMU proofs are green.
 
 ### Async-first state and scheduling rule
 
@@ -714,7 +714,9 @@ ownership until Ring-1 driver isolation can enforce those resources directly. Sh
 quota-bound, non-executable, owner-checked, temporarily lendable, and reclaimed on service exit.
 
 The restartable Ring-2 Storage service owns the on-disk policy and is coordinated by the concrete
-`platform::storage::StorageRuntime`, which owns Store rebinding, relay state, and Block dispatch.
+`platform::storage::StorageRuntime`, which owns Store rebinding, relay state, one bounded operation
+record, Block dispatch, and a single-slot Block wake handoff. The old synchronous persistence
+wrappers remain a composition compatibility boundary until loan/durability transition proofs close.
 Store client and server pages are never shared; Core copies validated requests and replies between
 them. Transfer handles name Core-owned loan records, and loans are returned on success, denial,
 timeout, cancellation, fault, and replacement. Two alternating checksummed

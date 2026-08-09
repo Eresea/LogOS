@@ -22,8 +22,10 @@ See [Architecture](architecture.md), [security constraints](security.md), and [b
 ADR-0028 is the system-wide rule for long-lived work: owned bounded state advances from commands,
 events, and timers; subsystem code reports readiness/completion; platform composition owns scheduling.
 NetworkRuntime and authoritative `PollStream` are compliant reference paths. Bootstrap Sessions and
-Storage relay choreography, plus the Remote persist/invoke/reply chain, remain explicitly bounded
-conversion milestones and must not grow new nested execution dependencies.
+its runtime compatibility wrapper are now phase-owned. Storage relay choreography and the Remote
+persist/invoke/reply chain remain explicitly bounded conversion milestones and must not grow new
+nested execution dependencies. Network QEMU proof repair remains open until the focused scenarios
+are green.
 
 ## Post-ABI-v4 execution sequence
 

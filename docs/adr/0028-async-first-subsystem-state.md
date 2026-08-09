@@ -76,6 +76,18 @@ This is guidance, not a new universal Signals API.
 - Tests should assert state transitions, stale-generation rejection, timeout, cancellation, and
   resynchronization rather than rely on arbitrary delays.
 
+## Implementation checkpoint
+
+- Sessions relay phase ownership is implemented; scheduling remains in
+  `platform::runtime` through the bounded `Runnable(Handle)` notification.
+- Storage has a bounded operation record and single-slot Block wake handoff; its synchronous
+  persistence wrappers remain a compatibility boundary until loan and durability transition
+  proofs are complete.
+- Remote copies Gateway input into one generation-bound operation slot; Invoke still awaits the
+  Storage/Sessions compatibility path and is not marked multi-poll complete.
+- Network readiness now checks the server page for an idle state before probing and emits
+  structured control-state diagnostics. QEMU readiness/reset evidence is still a required gate.
+
 ## Alternatives considered
 
 - Rust `async`/`await` and a kernel executor - rejected because LogOS needs explicit ownership,
