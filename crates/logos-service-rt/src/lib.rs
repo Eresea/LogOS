@@ -19,7 +19,6 @@ pub use logos_abi::service::{
     SessionClientPage, SessionServerPage, SessionStatus, StoreClientPage, StoreServerPage,
     StreamPage,
 };
-
 pub type EntryControlPage = *mut ControlPage;
 static ACTIVE_CONTEXT: AtomicUsize = AtomicUsize::new(0);
 

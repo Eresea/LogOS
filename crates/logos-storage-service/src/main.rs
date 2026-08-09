@@ -4,12 +4,16 @@
 use core::mem::MaybeUninit;
 use core::mem::size_of;
 
+use logos_core::resource::ResourceHandle;
 use logos_service_rt::{BlockClient, BlockError, Header, ProtocolVersion, ServiceContext};
 use logos_store::{Error, Recovery, SECTOR_SIZE, SectorBackend, Store};
 
-use logos_storage_service::protocol::{ReadSelection, ReplaceTransaction};
+use logos_storage_service::protocol::{
+    ReadSelection, ReplaceTransaction, StorageTransactionPool, storage_lease_owner,
+};
 
 const MINIMUM_SECTORS: usize = 10;
+const MAX_STORAGE_LEASES: usize = 2;
 
 type DiskStore = Store<BlockBackend>;
 const STORE_MEMORY: usize = 4 * logos_abi::PAGE_SIZE;
@@ -17,9 +21,29 @@ const STORE_MEMORY: usize = 4 * logos_abi::PAGE_SIZE;
 struct RuntimeState {
     replace: MaybeUninit<ReplaceTransaction>,
     replace_active: bool,
+    replace_lease: Option<(ResourceHandle, u64)>,
     read: MaybeUninit<ReadSelection>,
     read_active: bool,
+    read_lease: Option<(ResourceHandle, u64)>,
+    leases: StorageTransactionPool<MAX_STORAGE_LEASES>,
     store: MaybeUninit<DiskStore>,
+}
+
+fn owns(
+    lease: Option<(ResourceHandle, u64)>,
+    leases: &StorageTransactionPool<MAX_STORAGE_LEASES>,
+    owner: u64,
+) -> bool {
+    lease.is_some_and(|(handle, lease_owner)| lease_owner == owner && leases.owns(owner, handle))
+}
+
+fn release(
+    lease: &mut Option<(ResourceHandle, u64)>,
+    leases: &mut StorageTransactionPool<MAX_STORAGE_LEASES>,
+) {
+    if let Some((handle, owner)) = lease.take() {
+        let _ = leases.release(owner, handle);
+    }
 }
 
 #[used]
@@ -94,7 +118,11 @@ fn start(context: &mut ServiceContext) -> Result<(&'static mut RuntimeState, boo
     let slot = context.heap_slot::<RuntimeState>().ok_or(Error::Invalid)?;
     let state = unsafe { &mut *slot.as_mut_ptr() };
     state.replace_active = false;
+    state.replace_lease = None;
     state.read_active = false;
+    state.read_lease = None;
+    state.leases = StorageTransactionPool::new();
+    state.store = MaybeUninit::uninit();
     if blank {
         Store::format_with_backend_at(&mut state.store, backend)?
     } else {
@@ -136,8 +164,10 @@ fn reply(
 fn process(
     context: &ServiceContext,
     state: &mut RuntimeState,
-    request: logos_abi::StoreRequest,
+    message: logos_abi::service::StoreServerRequest,
 ) -> logos_abi::StoreReply {
+    let request = message.request;
+    let owner = storage_lease_owner(message.caller);
     let Some(page) = context.shared_page() else {
         return reply(request, logos_abi::PersistenceStatus::Invalid);
     };
@@ -149,13 +179,13 @@ fn process(
         return reply(request, logos_abi::PersistenceStatus::Denied);
     }
     match request.operation {
-        logos_abi::StoreOperation::OpenRead => process_open_read(state, request),
-        logos_abi::StoreOperation::ReadChunk => process_read_chunk(state, request, page),
-        logos_abi::StoreOperation::BeginReplace => process_begin_replace(state, request),
-        logos_abi::StoreOperation::WriteChunk => process_write_chunk(state, request, page),
-        logos_abi::StoreOperation::Commit => process_commit(state, request),
+        logos_abi::StoreOperation::OpenRead => process_open_read(state, owner, request),
+        logos_abi::StoreOperation::ReadChunk => process_read_chunk(state, owner, request, page),
+        logos_abi::StoreOperation::BeginReplace => process_begin_replace(state, owner, request),
+        logos_abi::StoreOperation::WriteChunk => process_write_chunk(state, owner, request, page),
+        logos_abi::StoreOperation::Commit => process_commit(state, owner, request),
         logos_abi::StoreOperation::Abort | logos_abi::StoreOperation::Cancel => {
-            process_abort(state, request)
+            process_abort(state, owner, request)
         }
     }
 }
@@ -163,6 +193,7 @@ fn process(
 #[inline(never)]
 fn process_open_read(
     state: &mut RuntimeState,
+    owner: u64,
     request: logos_abi::StoreRequest,
 ) -> logos_abi::StoreReply {
     let store = unsafe { state.store.assume_init_mut() };
@@ -172,8 +203,19 @@ fn process_open_read(
         request.version,
     ) {
         Ok((version, length)) => {
-            state.read.write(ReadSelection::new(request, length));
+            if state.read_active {
+                if !owns(state.read_lease, &state.leases, owner) {
+                    return reply(request, logos_abi::PersistenceStatus::Full);
+                }
+                state.read_active = false;
+                release(&mut state.read_lease, &mut state.leases);
+            }
+            let Some(lease) = state.leases.acquire(owner) else {
+                return reply(request, logos_abi::PersistenceStatus::Full);
+            };
+            state.read.write(ReadSelection::new(request, length, owner));
             state.read_active = true;
+            state.read_lease = Some((lease, owner));
             logos_abi::StoreReply {
                 id: request.id,
                 status: logos_abi::PersistenceStatus::Complete,
@@ -188,13 +230,17 @@ fn process_open_read(
 #[inline(never)]
 fn process_read_chunk(
     state: &mut RuntimeState,
+    owner: u64,
     request: logos_abi::StoreRequest,
     page: logos_service_rt::SharedPage,
 ) -> logos_abi::StoreReply {
-    if !state.read_active {
-        return reply(request, logos_abi::PersistenceStatus::Invalid);
+    if !state.read_active || !owns(state.read_lease, &state.leases, owner) {
+        return reply(request, logos_abi::PersistenceStatus::Denied);
     }
     let selection = unsafe { state.read.assume_init_ref() };
+    if !selection.valid_for(request, owner) {
+        return reply(request, logos_abi::PersistenceStatus::Denied);
+    }
     let store = unsafe { state.store.assume_init_mut() };
     let output =
         unsafe { core::slice::from_raw_parts_mut(page.address as *mut u8, logos_abi::PAGE_SIZE) };
@@ -219,14 +265,19 @@ fn process_read_chunk(
 #[inline(never)]
 fn process_begin_replace(
     state: &mut RuntimeState,
+    owner: u64,
     request: logos_abi::StoreRequest,
 ) -> logos_abi::StoreReply {
     if state.replace_active {
-        return reply(request, logos_abi::PersistenceStatus::Invalid);
+        return reply(request, logos_abi::PersistenceStatus::Full);
     }
-    if let Some(replace) = ReplaceTransaction::begin(request) {
+    if let Some(replace) = ReplaceTransaction::begin(request, owner) {
+        let Some(lease) = state.leases.acquire(owner) else {
+            return reply(request, logos_abi::PersistenceStatus::Full);
+        };
         state.replace.write(replace);
         state.replace_active = true;
+        state.replace_lease = Some((lease, owner));
         reply(request, logos_abi::PersistenceStatus::Complete)
     } else {
         reply(request, logos_abi::PersistenceStatus::Invalid)
@@ -236,16 +287,17 @@ fn process_begin_replace(
 #[inline(never)]
 fn process_write_chunk(
     state: &mut RuntimeState,
+    owner: u64,
     request: logos_abi::StoreRequest,
     page: logos_service_rt::SharedPage,
 ) -> logos_abi::StoreReply {
-    if !state.replace_active {
-        return reply(request, logos_abi::PersistenceStatus::Invalid);
+    if !state.replace_active || !owns(state.replace_lease, &state.leases, owner) {
+        return reply(request, logos_abi::PersistenceStatus::Denied);
     }
     let replace = unsafe { state.replace.assume_init_mut() };
     let page =
         unsafe { core::slice::from_raw_parts(page.address as *const u8, logos_abi::PAGE_SIZE) };
-    if replace.write(request, page) {
+    if replace.write(request, owner, page) {
         reply(request, logos_abi::PersistenceStatus::Complete)
     } else {
         reply(request, logos_abi::PersistenceStatus::Invalid)
@@ -255,10 +307,11 @@ fn process_write_chunk(
 #[inline(never)]
 fn process_commit(
     state: &mut RuntimeState,
+    owner: u64,
     request: logos_abi::StoreRequest,
 ) -> logos_abi::StoreReply {
-    if !state.replace_active {
-        return reply(request, logos_abi::PersistenceStatus::Invalid);
+    if !state.replace_active || !owns(state.replace_lease, &state.leases, owner) {
+        return reply(request, logos_abi::PersistenceStatus::Denied);
     }
     let replace = state.replace.as_ptr();
     if !unsafe { ReplaceTransaction::complete_at(replace) } {
@@ -266,6 +319,7 @@ fn process_commit(
     }
     let result = commit_store(state, replace);
     state.replace_active = false;
+    release(&mut state.replace_lease, &mut state.leases);
     match result {
         Ok(version) => logos_abi::StoreReply {
             id: request.id,
@@ -292,12 +346,27 @@ fn commit_store(
 #[inline(never)]
 fn process_abort(
     state: &mut RuntimeState,
+    owner: u64,
     request: logos_abi::StoreRequest,
 ) -> logos_abi::StoreReply {
-    state.replace_active = false;
-    if request.operation == logos_abi::StoreOperation::Cancel {
-        state.read_active = false;
+    if request.operation == logos_abi::StoreOperation::Abort {
+        if !state.replace_active || !owns(state.replace_lease, &state.leases, owner) {
+            return reply(request, logos_abi::PersistenceStatus::Denied);
+        }
+        state.replace_active = false;
+        release(&mut state.replace_lease, &mut state.leases);
+        return reply(request, logos_abi::PersistenceStatus::Complete);
     }
+
+    if owns(state.replace_lease, &state.leases, owner) {
+        state.replace_active = false;
+        state.replace_lease = None;
+    }
+    if owns(state.read_lease, &state.leases, owner) {
+        state.read_active = false;
+        state.read_lease = None;
+    }
+    let _ = state.leases.reclaim(owner);
     reply(request, logos_abi::PersistenceStatus::Complete)
 }
 
@@ -329,7 +398,7 @@ fn run(context: &mut ServiceContext) -> ! {
         if let Some(request) = context.store_request() {
             #[cfg(feature = "test-hooks")]
             inject_failure(request.request);
-            let response = process(context, state, request.request);
+            let response = process(context, state, request);
             if !context.store_reply(response) {
                 spin();
             }

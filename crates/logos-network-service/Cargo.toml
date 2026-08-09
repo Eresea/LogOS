@@ -8,6 +8,7 @@ workspace = true
 
 [dependencies]
 logos-abi = { path = "../logos-abi" }
+logos-core = { path = "../logos-core" }
 logos-net = { path = "../logos-net" }
 logos-service-rt = { path = "../logos-service-rt" }
 

@@ -2,9 +2,10 @@
 #![cfg_attr(not(test), no_std)]
 
 use logos_abi::{
-    NetworkDeviceOperation, NetworkDeviceRequest, NetworkEndpoint, NetworkInfo, NetworkOperation,
-    NetworkReply, NetworkRequest, NetworkStatus,
+    NetworkDeviceOperation, NetworkDeviceReply, NetworkDeviceRequest, NetworkEndpoint,
+    NetworkEvent, NetworkInfo, NetworkOperation, NetworkReply, NetworkRequest, NetworkStatus,
 };
+use logos_core::event::EventQueue;
 use logos_net::{
     Arp, DHCP_ACK, DHCP_NAK, DHCP_OFFER, DHCP_OPTION_LEASE_TIME, DHCP_OPTION_MESSAGE_TYPE,
     DHCP_OPTION_ROUTER, DHCP_OPTION_SERVER_ID, DHCP_OPTION_SUBNET_MASK, DHCP_OPTION_T1,
@@ -13,7 +14,7 @@ use logos_net::{
     encode_tcp, encode_udp, parse_arp, parse_dhcp, parse_ethernet, parse_icmp_echo, parse_ipv4,
     parse_tcp, parse_udp,
 };
-use logos_service_rt::{Header, ProtocolVersion, ServiceContext};
+use logos_service_rt::{Header, NetworkServerRequest, ProtocolVersion, ServiceContext};
 
 fn trace(_: &[u8]) {}
 
@@ -72,6 +73,33 @@ impl PendingOperations {
     }
 }
 
+#[derive(Clone, Copy)]
+enum NetworkStepEvent {
+    DeviceReply(NetworkDeviceReply),
+    ClientRequest(NetworkServerRequest),
+    NetworkEvent(NetworkEvent),
+}
+
+struct NetworkReactor {
+    events: EventQueue<NetworkStepEvent, 16>,
+    /// Pending outbound operations shared between event-source and dispatch.
+    operations: PendingOperations,
+}
+
+impl NetworkReactor {
+    fn new() -> Self {
+        Self { events: EventQueue::new(), operations: PendingOperations::default() }
+    }
+
+    fn push_event(&mut self, event: NetworkStepEvent) -> bool {
+        self.events.push(event).is_ok()
+    }
+
+    fn pop_event(&mut self) -> Option<NetworkStepEvent> {
+        self.events.pop()
+    }
+}
+
 #[used]
 #[unsafe(link_section = ".logos")]
 static HEADER: Header =
@@ -97,7 +125,7 @@ fn run(context: &mut ServiceContext) -> ! {
     let mut next_id = 2u32;
     let mut now = 1u64;
     let mut xid = 0x4c4f_474fu32;
-    let mut operations = PendingOperations::default();
+    let mut reactor = NetworkReactor::new();
     let mut next_echo = 1u16;
     let mut icmp_reply: Option<IcmpReply> = None;
     let mut tcp_reply: Option<TcpTx> = None;
@@ -112,6 +140,11 @@ fn run(context: &mut ServiceContext) -> ! {
     while context.acknowledged() {
         if pending != 0 {
             if let Some(device_reply) = context.network_device_reply(pending) {
+                if !reactor.push_event(NetworkStepEvent::DeviceReply(device_reply)) {
+                    spin();
+                }
+            }
+            if let Some(NetworkStepEvent::DeviceReply(device_reply)) = reactor.pop_event() {
                 if pending_info {
                     if device_reply.status != NetworkStatus::Complete
                         || device_reply.info.mac == [0; 6]
@@ -160,13 +193,13 @@ fn run(context: &mut ServiceContext) -> ! {
                     info = device_reply.info;
                     state.reset();
                     state.dhcp_start(now, xid);
-                    operations.reset();
+                    reactor.operations.reset();
                 }
-                if let Some(operation) = operations.send {
+                if let Some(operation) = reactor.operations.send {
                     let request = operation.request;
                     if operation.awaiting_arp {
                         if device_reply.status != NetworkStatus::Complete {
-                            operations.send = None;
+                            reactor.operations.send = None;
                             if !context.request_network(request) {
                                 spin();
                             }
@@ -189,7 +222,7 @@ fn run(context: &mut ServiceContext) -> ! {
                             }
                         }
                     } else {
-                        operations.send = None;
+                        reactor.operations.send = None;
                         let _ = state.finish_pending(request.id);
                         let reply = NetworkReply {
                             id: request.id,
@@ -223,11 +256,11 @@ fn run(context: &mut ServiceContext) -> ! {
                         }
                     }
                 }
-                if let Some(operation) = operations.echo {
+                if let Some(operation) = reactor.operations.echo {
                     let request = operation.request;
                     if operation.awaiting_arp {
                         if device_reply.status != NetworkStatus::Complete {
-                            operations.echo = None;
+                            reactor.operations.echo = None;
                             let _ = state.expire_echo(u64::MAX);
                             if !context.request_network(request) {
                                 spin();
@@ -251,7 +284,7 @@ fn run(context: &mut ServiceContext) -> ! {
                             }
                         }
                     } else if device_reply.status != NetworkStatus::Complete {
-                        operations.echo = None;
+                        reactor.operations.echo = None;
                         let _ = state.expire_echo(u64::MAX);
                         if !context.request_network(request) {
                             spin();
@@ -279,6 +312,11 @@ fn run(context: &mut ServiceContext) -> ! {
         }
 
         if let Some(message) = context.network_server_request() {
+            if !reactor.push_event(NetworkStepEvent::ClientRequest(message)) {
+                spin();
+            }
+        }
+        if let Some(NetworkStepEvent::ClientRequest(message)) = reactor.pop_event() {
             let request = message.request;
             let owner = message.caller;
             #[cfg(feature = "test-hooks")]
@@ -286,23 +324,23 @@ fn run(context: &mut ServiceContext) -> ! {
             if matches!(request.operation, NetworkOperation::Cancel | NetworkOperation::Close) {
                 counters.cancellations = counters.cancellations.saturating_add(1);
                 let endpoint = logos_net::EndpointId::from_wire(request.endpoint.0);
-                let cancels_receive = operations.receive.is_some_and(|pending| {
+                let cancels_receive = reactor.operations.receive.is_some_and(|pending| {
                     owner == pending.owner
                         && endpoint == logos_net::EndpointId::from_wire(pending.request.endpoint.0)
                 });
-                let cancels_send = operations.send.is_some_and(|pending| {
+                let cancels_send = reactor.operations.send.is_some_and(|pending| {
                     endpoint == logos_net::EndpointId::from_wire(pending.request.endpoint.0)
                 });
-                let cancels_echo = operations.echo.is_some();
+                let cancels_echo = reactor.operations.echo.is_some();
                 if cancels_receive || cancels_send || cancels_echo {
-                    if let Some(pending) = operations.receive.take() {
+                    if let Some(pending) = reactor.operations.receive.take() {
                         let _ = state.cancel_pending(pending.request.id);
                     }
-                    if let Some(pending) = operations.send.take() {
+                    if let Some(pending) = reactor.operations.send.take() {
                         let _ = state.cancel_pending(pending.request.id);
                     }
                     if cancels_echo {
-                        operations.echo = None;
+                        reactor.operations.echo = None;
                         let _ = state.expire_echo(u64::MAX);
                     }
                 }
@@ -368,13 +406,15 @@ fn run(context: &mut ServiceContext) -> ! {
                 }
                 match submit_datagram(context, &mut state, info, request, now, next_id) {
                     Ok(SubmitDatagram::Sent) => {
-                        operations.send = Some(SendOperation { request, awaiting_arp: false });
+                        reactor.operations.send =
+                            Some(SendOperation { request, awaiting_arp: false });
                         pending = next_id;
                         next_id = next_id.wrapping_add(1).max(1);
                         continue;
                     }
                     Ok(SubmitDatagram::Arp) => {
-                        operations.send = Some(SendOperation { request, awaiting_arp: true });
+                        reactor.operations.send =
+                            Some(SendOperation { request, awaiting_arp: true });
                         pending = next_id;
                         next_id = next_id.wrapping_add(1).max(1);
                         continue;
@@ -456,7 +496,7 @@ fn run(context: &mut ServiceContext) -> ! {
                     result,
                     Err(logos_net::TcpStateError::Busy | logos_net::TcpStateError::NoData)
                 ) {
-                    operations.accept = Some(AcceptOperation { request, owner });
+                    reactor.operations.accept = Some(AcceptOperation { request, owner });
                     if !context.network_wait(request.deadline) {
                         spin();
                     }
@@ -501,7 +541,7 @@ fn run(context: &mut ServiceContext) -> ! {
                     state.tcp_mut().read(owner, endpoint, output).ok()
                 });
                 if received.is_none() {
-                    operations.receive = Some(ReceiveOperation { request, owner });
+                    reactor.operations.receive = Some(ReceiveOperation { request, owner });
                     if !context.network_wait(request.deadline) {
                         spin();
                     }
@@ -657,37 +697,37 @@ fn run(context: &mut ServiceContext) -> ! {
                         usize::from(request.length),
                     )
                 };
-                let status = if let Some(endpoint) =
-                    logos_net::EndpointId::from_wire(request.endpoint.0)
-                {
-                    if state.tcp_mut().write(owner, endpoint, payload).is_ok() {
-                        tcp_reply = state.tcp_mut().take_tx();
-                        if tcp_reply.is_some()
-                            && submit_action(
-                                context,
-                                &state,
-                                &info,
-                                DhcpAction::TcpReply,
-                                offer,
-                                server,
-                                arp_reply,
-                                icmp_reply,
-                                tcp_reply,
-                                next_id,
-                            )
-                        {
-                            operations.send = Some(SendOperation { request, awaiting_arp: false });
-                            pending = next_id;
-                            next_id = next_id.wrapping_add(1).max(1);
-                            continue;
+                let status =
+                    if let Some(endpoint) = logos_net::EndpointId::from_wire(request.endpoint.0) {
+                        if state.tcp_mut().write(owner, endpoint, payload).is_ok() {
+                            tcp_reply = state.tcp_mut().take_tx();
+                            if tcp_reply.is_some()
+                                && submit_action(
+                                    context,
+                                    &state,
+                                    &info,
+                                    DhcpAction::TcpReply,
+                                    offer,
+                                    server,
+                                    arp_reply,
+                                    icmp_reply,
+                                    tcp_reply,
+                                    next_id,
+                                )
+                            {
+                                reactor.operations.send =
+                                    Some(SendOperation { request, awaiting_arp: false });
+                                pending = next_id;
+                                next_id = next_id.wrapping_add(1).max(1);
+                                continue;
+                            }
+                            NetworkStatus::Io
+                        } else {
+                            NetworkStatus::Busy
                         }
-                        NetworkStatus::Io
                     } else {
-                        NetworkStatus::Busy
-                    }
-                } else {
-                    NetworkStatus::Invalid
-                };
+                        NetworkStatus::Invalid
+                    };
                 if !context.network_reply(NetworkReply {
                     id: request.id,
                     status,
@@ -741,13 +781,15 @@ fn run(context: &mut ServiceContext) -> ! {
                 }
                 match submit_echo(context, &mut state, info, request, echo, now, next_id) {
                     Ok(SubmitDatagram::Sent) => {
-                        operations.echo = Some(EchoOperation { request, awaiting_arp: false });
+                        reactor.operations.echo =
+                            Some(EchoOperation { request, awaiting_arp: false });
                         pending = next_id;
                         next_id = next_id.wrapping_add(1).max(1);
                         continue;
                     }
                     Ok(SubmitDatagram::Arp) => {
-                        operations.echo = Some(EchoOperation { request, awaiting_arp: true });
+                        reactor.operations.echo =
+                            Some(EchoOperation { request, awaiting_arp: true });
                         pending = next_id;
                         next_id = next_id.wrapping_add(1).max(1);
                         continue;
@@ -773,7 +815,7 @@ fn run(context: &mut ServiceContext) -> ! {
                         kind: logos_net::PendingKind::Receive,
                         deadline: request.deadline,
                     });
-                    operations.receive = Some(ReceiveOperation { request, owner });
+                    reactor.operations.receive = Some(ReceiveOperation { request, owner });
                     if !context.network_wait(request.deadline) {
                         spin();
                     }
@@ -787,6 +829,11 @@ fn run(context: &mut ServiceContext) -> ! {
         }
 
         if let Some(event) = context.network_event() {
+            if !reactor.push_event(NetworkStepEvent::NetworkEvent(event)) {
+                spin();
+            }
+        }
+        if let Some(NetworkStepEvent::NetworkEvent(event)) = reactor.pop_event() {
             now = event.now.max(now);
             if event.generation != info.generation {
                 continue;
@@ -825,12 +872,12 @@ fn run(context: &mut ServiceContext) -> ! {
                 }
                 logos_abi::NetworkEventKind::Cancel => DhcpAction::None,
             };
-            if let Some(operation) = operations.echo
+            if let Some(operation) = reactor.operations.echo
                 && !operation.awaiting_arp
                 && state.echo().is_none()
             {
                 let request = operation.request;
-                operations.echo = None;
+                reactor.operations.echo = None;
                 if !context.network_reply_after_event(
                     request,
                     NetworkReply {
@@ -853,7 +900,7 @@ fn run(context: &mut ServiceContext) -> ! {
                 }
                 continue;
             }
-            if let Some(operation) = operations.receive {
+            if let Some(operation) = reactor.operations.receive {
                 let request = operation.request;
                 let owner = operation.owner;
                 if request.operation == NetworkOperation::Read {
@@ -868,7 +915,7 @@ fn run(context: &mut ServiceContext) -> ! {
                         state.tcp_mut().read(owner, endpoint, output).ok()
                     });
                     if let Some(length) = length {
-                        operations.receive = None;
+                        reactor.operations.receive = None;
                         if !context.network_reply_after_event(
                             request,
                             NetworkReply {
@@ -892,7 +939,7 @@ fn run(context: &mut ServiceContext) -> ! {
                         continue;
                     }
                     if now >= request.deadline {
-                        operations.receive = None;
+                        reactor.operations.receive = None;
                         if !context.network_reply_after_event(
                             request,
                             error_reply(request, NetworkStatus::TimedOut, info, counters),
@@ -919,7 +966,7 @@ fn run(context: &mut ServiceContext) -> ! {
                 if let Some(receive) = received {
                     trace(b"LogOS: network receive complete\r\n");
                     let _ = state.finish_pending(request.id);
-                    operations.receive = None;
+                    reactor.operations.receive = None;
                     if !context.network_reply_after_event(
                         request,
                         NetworkReply {
@@ -945,7 +992,7 @@ fn run(context: &mut ServiceContext) -> ! {
                 if now >= request.deadline {
                     counters.timeouts = counters.timeouts.saturating_add(1);
                     let _ = state.cancel_pending(request.id);
-                    operations.receive = None;
+                    reactor.operations.receive = None;
                     if !context.network_reply_after_event(
                         request,
                         NetworkReply {
@@ -969,14 +1016,14 @@ fn run(context: &mut ServiceContext) -> ! {
                     continue;
                 }
             }
-            if let Some(operation) = operations.accept {
+            if let Some(operation) = reactor.operations.accept {
                 let request = operation.request;
                 let owner = operation.owner;
                 let result = logos_net::EndpointId::from_wire(request.endpoint.0)
                     .ok_or(logos_net::TcpStateError::Invalid)
                     .and_then(|endpoint| state.tcp_mut().accept(owner, endpoint));
                 if let Ok(endpoint) = result {
-                    operations.accept = None;
+                    reactor.operations.accept = None;
                     let (source, source_port) =
                         state.tcp().peer(owner, endpoint).unwrap_or((Ipv4([0; 4]), 0));
                     if !context.network_reply_after_event(
@@ -1002,7 +1049,7 @@ fn run(context: &mut ServiceContext) -> ! {
                     continue;
                 }
                 if now >= request.deadline {
-                    operations.accept = None;
+                    reactor.operations.accept = None;
                     if !context.network_reply_after_event(
                         request,
                         error_reply(request, NetworkStatus::TimedOut, info, counters),
@@ -1012,14 +1059,14 @@ fn run(context: &mut ServiceContext) -> ! {
                     continue;
                 }
             }
-            if let Some(operation) = operations.send
+            if let Some(operation) = reactor.operations.send
                 && operation.awaiting_arp
                 && state.arp_target().is_none()
             {
                 let request = operation.request;
                 if now >= request.deadline {
                     counters.timeouts = counters.timeouts.saturating_add(1);
-                    operations.send = None;
+                    reactor.operations.send = None;
                     let _ = state.cancel_pending(request.id);
                     if !context.network_reply_after_event(
                         request,
@@ -1046,20 +1093,20 @@ fn run(context: &mut ServiceContext) -> ! {
                 if let Ok(SubmitDatagram::Sent) =
                     submit_datagram(context, &mut state, info, request, now, next_id)
                 {
-                    operations.send = Some(SendOperation { request, awaiting_arp: false });
+                    reactor.operations.send = Some(SendOperation { request, awaiting_arp: false });
                     pending = next_id;
                     next_id = next_id.wrapping_add(1).max(1);
                     continue;
                 }
             }
-            if let Some(operation) = operations.echo
+            if let Some(operation) = reactor.operations.echo
                 && operation.awaiting_arp
                 && state.arp_target().is_none()
             {
                 let request = operation.request;
                 if now >= request.deadline {
                     counters.timeouts = counters.timeouts.saturating_add(1);
-                    operations.echo = None;
+                    reactor.operations.echo = None;
                     let _ = state.expire_echo(now);
                     if !context.network_reply_after_event(
                         request,
@@ -1073,7 +1120,7 @@ fn run(context: &mut ServiceContext) -> ! {
                     && let Ok(SubmitDatagram::Sent) =
                         submit_echo(context, &mut state, info, request, echo, now, next_id)
                 {
-                    operations.echo = Some(EchoOperation { request, awaiting_arp: false });
+                    reactor.operations.echo = Some(EchoOperation { request, awaiting_arp: false });
                     pending = next_id;
                     next_id = next_id.wrapping_add(1).max(1);
                     continue;
@@ -1977,33 +2024,54 @@ mod tests {
 
     #[test]
     fn pending_operations_reset_as_one_owned_state() {
-        let mut operations = PendingOperations {
+        let mut reactor = NetworkReactor::new();
+        reactor.operations = PendingOperations {
             receive: Some(ReceiveOperation { request: request(1), owner: 7 }),
             accept: Some(AcceptOperation { request: request(2), owner: 8 }),
             send: Some(SendOperation { request: request(3), awaiting_arp: true }),
             echo: Some(EchoOperation { request: request(4), awaiting_arp: false }),
         };
 
-        operations.reset();
+        reactor.operations.reset();
 
-        assert!(operations.receive.is_none());
-        assert!(operations.accept.is_none());
-        assert!(operations.send.is_none());
-        assert!(operations.echo.is_none());
+        assert!(reactor.operations.receive.is_none());
+        assert!(reactor.operations.accept.is_none());
+        assert!(reactor.operations.send.is_none());
+        assert!(reactor.operations.echo.is_none());
     }
 
     #[test]
     fn pending_send_transition_keeps_request_identity() {
         let request = request(9);
-        let mut operations = PendingOperations {
+        let mut reactor = NetworkReactor::new();
+        reactor.operations = PendingOperations {
             send: Some(SendOperation { request, awaiting_arp: true }),
             ..PendingOperations::default()
         };
 
-        let operation = operations.send.take().expect("pending send");
-        operations.send = Some(SendOperation { awaiting_arp: false, ..operation });
+        let operation = reactor.operations.send.take().expect("pending send");
+        reactor.operations.send = Some(SendOperation { awaiting_arp: false, ..operation });
 
-        assert_eq!(operations.send.map(|operation| operation.request.id), Some(9));
-        assert!(!operations.send.is_some_and(|operation| operation.awaiting_arp));
+        assert_eq!(reactor.operations.send.map(|operation| operation.request.id), Some(9));
+        assert!(!reactor.operations.send.is_some_and(|operation| operation.awaiting_arp));
+    }
+
+    #[test]
+    fn reactor_queues_events_fifo() {
+        let mut reactor = NetworkReactor::new();
+        let event = NetworkEvent {
+            id: 1,
+            kind: logos_abi::NetworkEventKind::Timer,
+            generation: 1,
+            device_generation: 1,
+            page: PageHandle(0),
+            length: 0,
+            now: 1,
+            metadata: [0; 16],
+        };
+
+        assert!(reactor.push_event(NetworkStepEvent::NetworkEvent(event)));
+        assert!(matches!(reactor.pop_event(), Some(NetworkStepEvent::NetworkEvent(_))));
+        assert!(reactor.pop_event().is_none());
     }
 }
