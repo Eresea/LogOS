@@ -2392,6 +2392,35 @@ pub(crate) fn run(
                         shared_history,
                     );
                 }
+                if matches!(id, "network/transport-dhcp" | "network/configuration") {
+                    let request = logos_abi::NetworkRequest {
+                        id: 0x9000_0002,
+                        operation: logos_abi::NetworkOperation::Status,
+                        endpoint: logos_abi::NetworkEndpoint(0),
+                        peer: logos_abi::NetworkScope(0),
+                        page: logos_abi::PageHandle(0),
+                        length: 0,
+                        generation: 0,
+                        deadline: u64::MAX / 2,
+                    };
+                    let Some(reply) = run_network_request(
+                        request,
+                        native_terminal_network,
+                        &mut network_runtime,
+                        &mut native_scheduler,
+                        &network_test_session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) else {
+                        return false;
+                    };
+                    return reply.status == logos_abi::NetworkStatus::Complete
+                        && reply.info.configuration == 1
+                        && reply.info.ipv4 == 0x0a00_020f
+                        && reply.info.subnet_mask == 0xffffff00
+                        && reply.info.router == 0x0a00_0202;
+                }
                 if id == "network/simultaneous-client-busy" {
                     if gateway_handle.is_none() {
                         let Some(task) = native_gateway.take() else {

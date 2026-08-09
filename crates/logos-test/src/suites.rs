@@ -1,5 +1,4 @@
 pub(crate) mod catalog;
-pub(crate) mod network;
 pub(crate) mod persistence;
 pub(crate) mod remote;
 
@@ -31,7 +30,6 @@ pub(crate) use catalog::SCENARIOS;
 #[derive(Clone, Copy)]
 pub(crate) enum Runner {
     Default,
-    NetworkConfiguration,
     NetworkClient,
     NetworkTcpStream,
     PersistenceWriteInterruption,

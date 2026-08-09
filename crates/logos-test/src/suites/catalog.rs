@@ -196,7 +196,13 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
     persistence_scenario("persistence/write-interruption", Runner::PersistenceWriteInterruption),
     persistence_scenario("persistence/recovery", Runner::PersistenceRecovery),
     persistence_scenario("persistence/corruption-detected", Runner::PersistenceCorruption),
-    configured("network/transport-dhcp", "network", &[], Fixture::Fresh),
+    configured_with_runner(
+        "network/transport-dhcp",
+        "network",
+        &[],
+        Fixture::Fresh,
+        Runner::NetworkClient,
+    ),
     configured_with_runner(
         "network/device-bind",
         "network",
@@ -209,7 +215,7 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
         "network",
         &[],
         Fixture::Fresh,
-        Runner::NetworkConfiguration,
+        Runner::NetworkClient,
     ),
     configured_with_runner(
         "network/unauthorized-operation",

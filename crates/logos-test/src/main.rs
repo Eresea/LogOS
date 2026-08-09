@@ -969,15 +969,6 @@ fn run_one(id: &str) -> i32 {
     } else {
         &profiles.standard
     };
-    if suites::network::is_configuration(scenario.runner) {
-        progress.start(scenario.id);
-        let result = run_network_configuration(&run_dir, profile, scenario, seed);
-        progress.record(&result);
-        progress.finish();
-        let _ = write_reports(&run_dir, std::slice::from_ref(&result));
-        cleanup_bulk_artifacts(&run_dir);
-        return report(&result);
-    }
     if matches!(scenario.runner, Runner::NetworkTcpStream) {
         progress.start(scenario.id);
         let result = run_tcp_stream_fixture(&run_dir, profile, scenario, seed);
@@ -1014,39 +1005,6 @@ fn run_one(id: &str) -> i32 {
     let _ = write_reports(&run_dir, &results);
     cleanup_bulk_artifacts(&run_dir);
     results.first().map_or(1, report)
-}
-
-fn run_network_configuration(
-    run_dir: &Path,
-    profile: &ImageProfile,
-    scenario: Scenario,
-    seed: u64,
-) -> ResultRecord {
-    let started = Instant::now();
-    let fixture_dir = run_dir.join("fixtures").join("network-configuration");
-    let result = (|| -> Result<(), String> {
-        fs::create_dir_all(&fixture_dir).map_err(io_error)?;
-        let (qemu, ovmf) = qemu_paths()?;
-        let mut harness = Harness::boot_with_peer(
-            &qemu,
-            &ovmf,
-            profile,
-            &fixture_dir,
-            scenario.timeout,
-            "LogOS: storage formatted",
-        )?;
-        harness.run_id(scenario.id)?;
-        harness.shutdown()
-    })();
-    cleanup_fixture_artifacts(&fixture_dir, result.is_err());
-    ResultRecord {
-        id: scenario.id.into(),
-        status: if result.is_ok() { Status::Passed } else { Status::Failed },
-        duration_ms: started.elapsed().as_millis(),
-        seed,
-        failure: result.err(),
-        artifacts: run_dir.to_path_buf(),
-    }
 }
 
 fn run_tcp_stream_fixture(
