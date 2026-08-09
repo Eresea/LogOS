@@ -78,6 +78,53 @@ pub enum EndpointKind {
     NetworkStream,
 }
 
+impl EndpointKind {
+    #[allow(dead_code)]
+    pub const fn to_v5_kind(self) -> u16 {
+        match self {
+            Self::Input => logos_abi::endpoint_v5::KIND_INPUT,
+            Self::Display => logos_abi::endpoint_v5::KIND_DISPLAY,
+            Self::SessionClient => logos_abi::endpoint_v5::KIND_SESSION_CLIENT,
+            Self::SessionServer => logos_abi::endpoint_v5::KIND_SESSION_SERVER,
+            Self::Effect => logos_abi::endpoint_v5::KIND_EFFECT,
+            Self::StoreClient => logos_abi::endpoint_v5::KIND_STORE_CLIENT,
+            Self::StoreServer => logos_abi::endpoint_v5::KIND_STORE_SERVER,
+            Self::BlockClient => logos_abi::endpoint_v5::KIND_BLOCK_CLIENT,
+            Self::Remote => logos_abi::endpoint_v5::KIND_REMOTE,
+            Self::NetworkDevice => logos_abi::endpoint_v5::KIND_NETWORK_DEVICE,
+            Self::NetworkEvent => logos_abi::endpoint_v5::KIND_NETWORK_EVENT,
+            Self::NetworkClient => logos_abi::endpoint_v5::KIND_NETWORK_CLIENT,
+            Self::NetworkServer => logos_abi::endpoint_v5::KIND_NETWORK_SERVER,
+            Self::NetworkStream => logos_abi::endpoint_v5::KIND_NETWORK_STREAM,
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn build_endpoint_table_v5(
+    manifest_entry: &logos_core::manifest::ManifestEntry,
+    endpoints: &[EndpointDescriptor],
+    generation: u32,
+    get_page_addr: impl Fn(EndpointKind) -> u64,
+) -> logos_abi::endpoint_v5::EndpointTable {
+    let mut table = logos_abi::endpoint_v5::EndpointTable::new(generation);
+    for descriptor in endpoints {
+        let kind = descriptor.kind.to_v5_kind();
+        let page = get_page_addr(descriptor.kind);
+        if page != 0 {
+            let slot = logos_abi::endpoint_v5::EndpointSlot::new(
+                kind,
+                manifest_entry.version,
+                0,
+                page,
+                generation,
+            );
+            table.insert(slot);
+        }
+    }
+    table
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EndpointRole {
     Client,

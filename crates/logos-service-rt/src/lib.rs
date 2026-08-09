@@ -10,6 +10,7 @@ use core::{
 #[cfg(target_os = "uefi")]
 use core::panic::PanicInfo;
 
+pub use logos_abi::endpoint_v5::{self, EndpointSlot, EndpointTable};
 use logos_abi::service as native_service;
 pub use logos_abi::service::{
     BlockClientPage, ControlPage, DisplayPage, EffectPage, Header, InputPage, MAX_TEXT,
@@ -84,7 +85,42 @@ impl ServiceContext {
         self.raw.as_ptr() as u64
     }
 
+    pub fn v5_endpoint(&self, kind: u16) -> Option<(u64, u32)> {
+        let raw = self.raw();
+        if (raw.slot0 == 0 && raw.slot1 == 0) || raw.generation == 0 {
+            return None;
+        }
+        let table_addr = (raw.slot0 as u64) | ((raw.slot1 as u64) << 32);
+        if !table_addr.is_multiple_of(core::mem::align_of::<EndpointTable>() as u64) {
+            return None;
+        }
+        let table_ptr = table_addr as *const EndpointTable;
+        let table = unsafe { &*table_ptr };
+        if table.generation != raw.generation {
+            return None;
+        }
+        let slot = table.find(kind)?;
+        if slot.valid() && slot.generation == raw.generation {
+            Some((slot.page, slot.generation))
+        } else {
+            None
+        }
+    }
+
     fn endpoint_page(&self, operation: u32) -> Option<(u64, u32)> {
+        let kind = match operation {
+            native_service::READ_INPUT => endpoint_v5::KIND_INPUT,
+            native_service::PRESENT_PIXEL
+            | native_service::PRESENT_TEXT
+            | native_service::CLEAR_DISPLAY => endpoint_v5::KIND_DISPLAY,
+            _ => 0,
+        };
+        if kind != 0 {
+            let endpoint = self.v5_endpoint(kind);
+            if endpoint.is_some() {
+                return endpoint;
+            }
+        }
         let raw = self.raw();
         let page = match operation {
             native_service::READ_INPUT => raw.input_page,
@@ -97,18 +133,27 @@ impl ServiceContext {
     }
 
     fn session_client_page(&self) -> Option<(u64, u32)> {
+        if let Some(endpoint) = self.v5_endpoint(endpoint_v5::KIND_SESSION_CLIENT) {
+            return Some(endpoint);
+        }
         let raw = self.raw();
         (raw.session_client_page != 0 && raw.generation != 0)
             .then_some((raw.session_client_page, raw.generation))
     }
 
     fn session_server_page(&self) -> Option<(u64, u32)> {
+        if let Some(endpoint) = self.v5_endpoint(endpoint_v5::KIND_SESSION_SERVER) {
+            return Some(endpoint);
+        }
         let raw = self.raw();
         (raw.session_server_page != 0 && raw.generation != 0)
             .then_some((raw.session_server_page, raw.generation))
     }
 
     fn effect_page(&self) -> Option<(u64, u32)> {
+        if let Some(endpoint) = self.v5_endpoint(endpoint_v5::KIND_EFFECT) {
+            return Some(endpoint);
+        }
         let raw = self.raw();
         (raw.effect_page != 0 && raw.generation != 0).then_some((raw.effect_page, raw.generation))
     }
@@ -790,4 +835,61 @@ pub extern "win64" fn efi_main(
     _system_table: *const core::ffi::c_void,
 ) -> usize {
     0
+}
+
+#[cfg(test)]
+mod rt_tests {
+    use super::*;
+
+    #[test]
+    fn service_context_v5_endpoint_resolution_and_fallback() {
+        let mut raw_control = ControlPage {
+            abi: 4,
+            reserved: 0,
+            operation: 0,
+            status: 0,
+            generation: 3,
+            lifecycle: 1,
+            input_page: 0x1000,
+            display_page: 0,
+            session_client_page: 0x2000,
+            session_server_page: 0,
+            effect_page: 0,
+            store_client_page: 0,
+            store_server_page: 0,
+            block_client_page: 0,
+            remote_page: 0,
+            network_client_page: 0,
+            network_server_page: 0,
+            slot0: 0,
+            slot1: 0,
+            network_device_page: 0,
+            network_event_page: 0,
+            network_stream_page: 0,
+        };
+        let raw_ptr = &mut raw_control as *mut ControlPage;
+        let ctx = ServiceContext { raw: NonNull::new(raw_ptr).unwrap(), next_session_id: 1 };
+
+        // Fallback to legacy v4 page pointers when slot0/slot1 is 0
+        assert_eq!(ctx.endpoint_page(native_service::READ_INPUT), Some((0x1000, 3)));
+        assert_eq!(ctx.session_client_page(), Some((0x2000, 3)));
+        assert_eq!(ctx.v5_endpoint(endpoint_v5::KIND_SESSION_CLIENT), None);
+
+        // Setup opt-in v5 EndpointTable
+        let mut table = EndpointTable::new(3);
+        assert!(table.insert(EndpointSlot::new(endpoint_v5::KIND_SESSION_CLIENT, 1, 0, 0x9000, 3)));
+
+        let table_ptr = &table as *const EndpointTable as u64;
+        unsafe {
+            (*raw_ptr).slot0 = table_ptr as u32;
+            (*raw_ptr).slot1 = (table_ptr >> 32) as u32;
+        }
+
+        // Opt-in v5 endpoint slot is preferred over v4 legacy pointer
+        assert_eq!(ctx.v5_endpoint(endpoint_v5::KIND_SESSION_CLIENT), Some((0x9000, 3)));
+        assert_eq!(ctx.session_client_page(), Some((0x9000, 3)));
+
+        // Unregistered kinds fall back to v4
+        assert_eq!(ctx.endpoint_page(native_service::READ_INPUT), Some((0x1000, 3)));
+    }
 }

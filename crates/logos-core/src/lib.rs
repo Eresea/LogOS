@@ -5,6 +5,7 @@ pub mod clock;
 pub mod event;
 pub mod fault;
 pub mod manifest;
+pub use manifest::{MAX_MANIFEST_ENTRIES, ManifestEntry, ManifestError, ServiceManifest};
 pub mod native_service {
     pub use logos_abi::service::{
         ABI, ACKNOWLEDGED, BlockClientPage, COMPLETE, ControlPage, DisplayPage, EffectPage,

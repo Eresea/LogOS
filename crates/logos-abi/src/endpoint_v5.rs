@@ -2,6 +2,21 @@
 
 pub const MAX_ENDPOINT_SLOTS: usize = 16;
 
+pub const KIND_INPUT: u16 = 1;
+pub const KIND_DISPLAY: u16 = 2;
+pub const KIND_SESSION_CLIENT: u16 = 3;
+pub const KIND_SESSION_SERVER: u16 = 4;
+pub const KIND_EFFECT: u16 = 5;
+pub const KIND_STORE_CLIENT: u16 = 6;
+pub const KIND_STORE_SERVER: u16 = 7;
+pub const KIND_BLOCK_CLIENT: u16 = 8;
+pub const KIND_REMOTE: u16 = 9;
+pub const KIND_NETWORK_DEVICE: u16 = 10;
+pub const KIND_NETWORK_EVENT: u16 = 11;
+pub const KIND_NETWORK_CLIENT: u16 = 12;
+pub const KIND_NETWORK_SERVER: u16 = 13;
+pub const KIND_NETWORK_STREAM: u16 = 14;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct EndpointSlot {
