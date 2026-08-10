@@ -203,13 +203,13 @@ pub enum OperationProgress {
 }
 
 pub struct SessionOperation {
-    id: Option<u32>,
+    identity: Option<logos_core::operation::OperationIdentity>,
     phase: OperationPhase,
 }
 
 impl SessionOperation {
     pub const fn new() -> Self {
-        Self { id: None, phase: OperationPhase::Idle }
+        Self { identity: None, phase: OperationPhase::Idle }
     }
 
     pub const fn idle(&self) -> bool {
@@ -221,12 +221,17 @@ impl SessionOperation {
         sessions: crate::sched::native_task::SessionEndpoint,
         id: u32,
         caller: u64,
+        generation: u32,
         request: logos_abi::SessionRequest,
     ) -> bool {
+        let Some(identity) = logos_core::operation::OperationIdentity::new(caller, generation, id)
+        else {
+            return false;
+        };
         if !self.idle() || !sessions.deliver_id(id, caller, request) {
             return false;
         }
-        self.id = Some(id);
+        self.identity = Some(identity);
         self.phase = OperationPhase::EffectPending;
         true
     }
@@ -234,9 +239,15 @@ impl SessionOperation {
     pub fn advance(
         &mut self,
         sessions: crate::sched::native_task::SessionEndpoint,
+        generation: u32,
         context: crate::ipc::effects::Context<'_, '_>,
     ) -> OperationProgress {
-        let Some(id) = self.id else { return OperationProgress::Failed };
+        let Some(identity) = self.identity else { return OperationProgress::Failed };
+        let id = identity.request_id();
+        if !identity.matches(identity.owner(), generation, id) {
+            self.clear();
+            return OperationProgress::Failed;
+        }
         match self.phase {
             OperationPhase::Idle => OperationProgress::Failed,
             OperationPhase::EffectPending => {
@@ -263,7 +274,7 @@ impl SessionOperation {
     }
 
     pub fn clear(&mut self) {
-        self.id = None;
+        self.identity = None;
         self.phase = OperationPhase::Idle;
     }
 }
@@ -334,6 +345,7 @@ impl SessionsRuntime {
                 sessions,
                 message.id,
                 context.session.principal().page_owner(),
+                u32::from(handle.generation()),
                 message.request,
             ) {
                 self.failed = self.failed.saturating_add(1);
@@ -341,7 +353,7 @@ impl SessionsRuntime {
             }
             return Relay::Runnable(handle);
         }
-        match self.operation.advance(sessions, context) {
+        match self.operation.advance(sessions, u32::from(handle.generation()), context) {
             OperationProgress::Runnable => Relay::Runnable(handle),
             OperationProgress::Failed => {
                 self.failed = self.failed.saturating_add(1);

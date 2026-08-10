@@ -32,7 +32,7 @@ pub enum StoragePhase {
 #[derive(Clone, Copy)]
 pub struct StorageOperation {
     pub request: logos_abi::StoreRequest,
-    pub terminal_owner: u64,
+    pub identity: logos_core::operation::OperationIdentity,
     pub storage_owner: u64,
     pub page: logos_abi::PageHandle,
     pub loaned: bool,
@@ -191,7 +191,13 @@ impl StorageRuntime {
         self.bind_block_context(context);
         let request = terminal.request();
         if let Some(operation) = self.operation {
-            if request.is_some_and(|request| request.id != operation.request.id) {
+            if request.is_some_and(|request| {
+                !operation.identity.matches(
+                    terminal_owner,
+                    u32::from(self.handle.generation()),
+                    request.id,
+                )
+            }) {
                 return session::Relay::Handled(terminal.reply(logos_abi::StoreReply {
                     id: request.map_or(0, |request| request.id),
                     status: logos_abi::PersistenceStatus::Unavailable,
@@ -200,9 +206,29 @@ impl StorageRuntime {
                 }));
             }
         } else if let Some(request) = request {
+            let Some(identity) = logos_core::operation::OperationIdentity::new(
+                terminal_owner,
+                u32::from(self.handle.generation()),
+                request.id,
+            ) else {
+                return session::Relay::Handled(terminal.reply(logos_abi::StoreReply {
+                    id: request.id,
+                    status: logos_abi::PersistenceStatus::Invalid,
+                    version: 0,
+                    length: 0,
+                }));
+            };
+            if identity.expired(request.deadline, tick) {
+                return session::Relay::Handled(terminal.reply(logos_abi::StoreReply {
+                    id: request.id,
+                    status: logos_abi::PersistenceStatus::TimedOut,
+                    version: 0,
+                    length: 0,
+                }));
+            }
             self.operation = Some(StorageOperation {
                 request,
-                terminal_owner,
+                identity,
                 storage_owner,
                 page: request.page,
                 loaned: false,

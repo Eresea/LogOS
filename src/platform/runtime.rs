@@ -3674,12 +3674,13 @@ fn invoke_native(
         service,
     } = context;
     let mut operation = session::SessionOperation::new();
-    if !operation.submit(sessions, 1, caller, request) {
+    if !operation.submit(sessions, 1, caller, u32::from(handle.generation()), request) {
         return None;
     }
     for _ in 0..4 {
         match operation.advance(
             sessions,
+            u32::from(handle.generation()),
             effects::Context {
                 session,
                 capabilities,

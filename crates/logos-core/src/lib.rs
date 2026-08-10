@@ -19,6 +19,7 @@ pub mod native_service {
         StoreServerPage, StreamPage, self_check,
     };
 }
+pub mod operation;
 pub mod poll_runtime;
 pub mod resource;
 pub mod shared_pages;
