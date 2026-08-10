@@ -1773,6 +1773,18 @@ pub(crate) fn run(
                     if !failed || !startup.start() {
                         return false;
                     }
+                    if !storage_runtime.cancel_terminal_store_operation(
+                        &mut block::DispatchContext {
+                            endpoint: native_storage_block,
+                            pages: &mut shared_pages,
+                            store_owner: storage_owner,
+                            store_page: storage_block_page,
+                            device: &mut block_device,
+                            memory: &mut memory,
+                        },
+                    ) {
+                        return false;
+                    }
                     let Some((restarted, endpoints, history)) = replace_terminal(
                         &mut native_scheduler,
                         &mut network_runtime,
