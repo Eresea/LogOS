@@ -85,6 +85,7 @@ struct StreamWaitOperation {
 #[derive(Clone, Copy)]
 struct SendOperation {
     request: NetworkRequest,
+    owner: u64,
     awaiting_arp: bool,
     submitted: bool,
 }
@@ -92,7 +93,29 @@ struct SendOperation {
 #[derive(Clone, Copy)]
 struct EchoOperation {
     request: NetworkRequest,
+    owner: u64,
     awaiting_arp: bool,
+}
+
+#[derive(Clone, Copy)]
+struct OperationSlot {
+    id: u32,
+    owner: u64,
+    generation: u16,
+    deadline: u64,
+}
+
+impl OperationSlot {
+    const fn new(request: NetworkRequest, owner: u64) -> Self {
+        Self { id: request.id, owner, generation: request.generation, deadline: request.deadline }
+    }
+
+    const fn matches(self, request: NetworkRequest, owner: u64) -> bool {
+        self.id == request.id
+            && self.owner == owner
+            && self.generation == request.generation
+            && self.deadline == request.deadline
+    }
 }
 
 #[derive(Default)]
@@ -102,11 +125,41 @@ struct PendingOperations {
     stream_wait: Option<StreamWaitOperation>,
     send: Option<SendOperation>,
     echo: Option<EchoOperation>,
+    slots: [Option<OperationSlot>; logos_abi::MAX_PERSISTENCE_OPERATIONS],
 }
 
 impl PendingOperations {
     fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    fn sync_slots(&mut self) {
+        self.slots = [None; logos_abi::MAX_PERSISTENCE_OPERATIONS];
+        let mut index = 0;
+        for slot in [
+            self.receive.map(|operation| OperationSlot::new(operation.request, operation.owner)),
+            self.accept.map(|operation| OperationSlot::new(operation.request, operation.owner)),
+            self.stream_wait
+                .map(|operation| OperationSlot::new(operation.request, operation.owner)),
+            self.send.map(|operation| OperationSlot::new(operation.request, operation.owner)),
+            self.echo.map(|operation| OperationSlot::new(operation.request, operation.owner)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if index < self.slots.len() {
+                self.slots[index] = Some(slot);
+                index += 1;
+            }
+        }
+    }
+
+    fn has_capacity(&self) -> bool {
+        self.slots.iter().any(Option::is_none)
+    }
+
+    fn owns(&self, request: NetworkRequest, owner: u64) -> bool {
+        self.slots.iter().flatten().any(|slot| slot.matches(request, owner))
     }
 }
 
@@ -413,6 +466,7 @@ fn run(context: &mut ServiceContext) -> ! {
             next_id = next_id.wrapping_add(1).max(1);
         }
 
+        reactor.operations.sync_slots();
         if let Some(message) = context.network_server_request() {
             if !reactor.push_event(NetworkStepEvent::ClientRequest(message)) {
                 spin();
@@ -421,19 +475,34 @@ fn run(context: &mut ServiceContext) -> ! {
         if let Some(message) = reactor.pop_client_request() {
             let request = message.request;
             let owner = message.caller;
+            if !reactor.operations.has_capacity()
+                && !matches!(request.operation, NetworkOperation::Cancel | NetworkOperation::Close)
+            {
+                if !context.network_reply(error_reply(request, NetworkStatus::Busy, info, counters))
+                {
+                    spin();
+                }
+                continue;
+            }
             #[cfg(feature = "test-hooks")]
             inject_failure(request.id);
             if matches!(request.operation, NetworkOperation::Cancel | NetworkOperation::Close) {
                 counters.cancellations = counters.cancellations.saturating_add(1);
                 let endpoint = logos_net::EndpointId::from_wire(request.endpoint.0);
                 let cancels_receive = reactor.operations.receive.is_some_and(|pending| {
-                    owner == pending.owner
+                    reactor.operations.owns(pending.request, pending.owner)
+                        && owner == pending.owner
                         && endpoint == logos_net::EndpointId::from_wire(pending.request.endpoint.0)
                 });
                 let cancels_send = reactor.operations.send.is_some_and(|pending| {
-                    endpoint == logos_net::EndpointId::from_wire(pending.request.endpoint.0)
+                    reactor.operations.owns(pending.request, pending.owner)
+                        && owner == pending.owner
+                        && endpoint == logos_net::EndpointId::from_wire(pending.request.endpoint.0)
                 });
-                let cancels_echo = reactor.operations.echo.is_some();
+                let cancels_echo = reactor.operations.echo.is_some_and(|pending| {
+                    reactor.operations.owns(pending.request, pending.owner)
+                        && owner == pending.owner
+                });
                 if cancels_receive || cancels_send || cancels_echo {
                     if let Some(pending) = reactor.operations.receive.take() {
                         let _ = state.cancel_pending(pending.request.id);
@@ -508,15 +577,23 @@ fn run(context: &mut ServiceContext) -> ! {
                 }
                 match submit_datagram(context, &mut state, info, request, now, next_id) {
                     Ok(SubmitDatagram::Sent) => {
-                        reactor.operations.send =
-                            Some(SendOperation { request, awaiting_arp: false, submitted: true });
+                        reactor.operations.send = Some(SendOperation {
+                            request,
+                            owner,
+                            awaiting_arp: false,
+                            submitted: true,
+                        });
                         pending = next_id;
                         next_id = next_id.wrapping_add(1).max(1);
                         continue;
                     }
                     Ok(SubmitDatagram::Arp) => {
-                        reactor.operations.send =
-                            Some(SendOperation { request, awaiting_arp: true, submitted: false });
+                        reactor.operations.send = Some(SendOperation {
+                            request,
+                            owner,
+                            awaiting_arp: true,
+                            submitted: false,
+                        });
                         pending = next_id;
                         next_id = next_id.wrapping_add(1).max(1);
                         continue;
@@ -860,6 +937,7 @@ fn run(context: &mut ServiceContext) -> ! {
                                 if pending != 0 {
                                     reactor.operations.send = Some(SendOperation {
                                         request,
+                                        owner,
                                         awaiting_arp: false,
                                         submitted: false,
                                     });
@@ -878,6 +956,7 @@ fn run(context: &mut ServiceContext) -> ! {
                                 ) {
                                     reactor.operations.send = Some(SendOperation {
                                         request,
+                                        owner,
                                         awaiting_arp: false,
                                         submitted: true,
                                     });
@@ -947,14 +1026,14 @@ fn run(context: &mut ServiceContext) -> ! {
                 match submit_echo(context, &mut state, info, request, echo, now, next_id) {
                     Ok(SubmitDatagram::Sent) => {
                         reactor.operations.echo =
-                            Some(EchoOperation { request, awaiting_arp: false });
+                            Some(EchoOperation { request, owner, awaiting_arp: false });
                         pending = next_id;
                         next_id = next_id.wrapping_add(1).max(1);
                         continue;
                     }
                     Ok(SubmitDatagram::Arp) => {
                         reactor.operations.echo =
-                            Some(EchoOperation { request, awaiting_arp: true });
+                            Some(EchoOperation { request, owner, awaiting_arp: true });
                         pending = next_id;
                         next_id = next_id.wrapping_add(1).max(1);
                         continue;
@@ -1321,8 +1400,12 @@ fn run(context: &mut ServiceContext) -> ! {
                 if let Ok(SubmitDatagram::Sent) =
                     submit_datagram(context, &mut state, info, request, now, next_id)
                 {
-                    reactor.operations.send =
-                        Some(SendOperation { request, awaiting_arp: false, submitted: true });
+                    reactor.operations.send = Some(SendOperation {
+                        request,
+                        owner: operation.owner,
+                        awaiting_arp: false,
+                        submitted: true,
+                    });
                     pending = next_id;
                     next_id = next_id.wrapping_add(1).max(1);
                     continue;
@@ -1349,7 +1432,11 @@ fn run(context: &mut ServiceContext) -> ! {
                     && let Ok(SubmitDatagram::Sent) =
                         submit_echo(context, &mut state, info, request, echo, now, next_id)
                 {
-                    reactor.operations.echo = Some(EchoOperation { request, awaiting_arp: false });
+                    reactor.operations.echo = Some(EchoOperation {
+                        request,
+                        owner: operation.owner,
+                        awaiting_arp: false,
+                    });
                     pending = next_id;
                     next_id = next_id.wrapping_add(1).max(1);
                     continue;
@@ -2367,8 +2454,14 @@ mod tests {
             receive: Some(ReceiveOperation { request: request(1), owner: 7 }),
             accept: Some(AcceptOperation { request: request(2), owner: 8 }),
             stream_wait: Some(StreamWaitOperation { request: request(3), owner: 9 }),
-            send: Some(SendOperation { request: request(3), awaiting_arp: true, submitted: false }),
-            echo: Some(EchoOperation { request: request(4), awaiting_arp: false }),
+            send: Some(SendOperation {
+                request: request(3),
+                owner: 10,
+                awaiting_arp: true,
+                submitted: false,
+            }),
+            echo: Some(EchoOperation { request: request(4), owner: 11, awaiting_arp: false }),
+            ..PendingOperations::default()
         };
 
         reactor.operations.reset();
@@ -2381,11 +2474,36 @@ mod tests {
     }
 
     #[test]
+    fn operation_slots_validate_identity_and_bound_capacity() {
+        let mut pending = PendingOperations {
+            receive: Some(ReceiveOperation { request: request(1), owner: 7 }),
+            send: Some(SendOperation {
+                request: request(2),
+                owner: 8,
+                awaiting_arp: true,
+                submitted: false,
+            }),
+            ..PendingOperations::default()
+        };
+        pending.sync_slots();
+        assert!(pending.has_capacity());
+        assert!(pending.owns(request(1), 7));
+        assert!(!pending.owns(request(1), 9));
+        let mut full = pending;
+        full.accept = Some(AcceptOperation { request: request(3), owner: 9 });
+        full.stream_wait = Some(StreamWaitOperation { request: request(4), owner: 10 });
+        full.echo = Some(EchoOperation { request: request(5), owner: 11, awaiting_arp: false });
+        full.sync_slots();
+        assert!(full.has_capacity());
+        assert_eq!(full.slots.iter().flatten().count(), 5);
+    }
+
+    #[test]
     fn pending_send_transition_keeps_request_identity() {
         let request = request(9);
         let mut reactor = NetworkReactor::new();
         reactor.operations = PendingOperations {
-            send: Some(SendOperation { request, awaiting_arp: true, submitted: false }),
+            send: Some(SendOperation { request, owner: 7, awaiting_arp: true, submitted: false }),
             ..PendingOperations::default()
         };
 
