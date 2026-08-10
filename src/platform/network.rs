@@ -338,6 +338,7 @@ impl NetworkRuntime {
                 self.readiness.info = Some(reply.info);
                 self.readiness.probe_pending = None;
                 self.readiness.probe_due = tick.saturating_add(64);
+                self.wake_service();
             }
             return true;
         }
@@ -736,7 +737,12 @@ impl NetworkRuntime {
         let Some(current) = self.active_client.take() else { return false };
         let published = current.endpoint.reply(reply);
         let reset = current.server.reset();
-        published && reset && self.complete_target(current.target)
+        if published && reset {
+            self.wake_service();
+            self.complete_target(current.target)
+        } else {
+            false
+        }
     }
 
     pub fn invalidate_client(

@@ -797,6 +797,8 @@ next architecture is queue-based: application writes enqueue to connection-owned
 bounded Network work produces segments, NIC completion reclaims buffers, and RX processing fills
 bounded per-connection buffers and publishes readiness. Network must not wake or run Gateway or
 Remote as part of protocol processing; scheduler composition belongs above the Network service.
+Consuming a Network server reply also wakes the blocked Network service, so its next bounded
+transition is never coupled to the next client request.
 
 Bind, send, and receive authority are separate. Each grant carries an exact protocol/local-port or
 protocol/remote-IPv4-and-port scope; wildcard and CIDR policy remain future firewall work. Network

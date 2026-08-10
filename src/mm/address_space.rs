@@ -287,6 +287,7 @@ impl AddressSpace {
         Some(context_mapping)
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the fixed legacy endpoint-map contract.
     fn map_context_legacy(
         &mut self,
         physical: &mut PhysicalMemory,

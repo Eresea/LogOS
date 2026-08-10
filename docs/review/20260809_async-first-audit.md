@@ -34,8 +34,7 @@ runtime, future type, executor, universal event bus, or ABI v5 is warranted.
 
 ## Latest local validation
 
-The 2026-08-10 boundary-refactor tree passed the host and UEFI build gates. Its fresh
-`network/tcp-stream` QEMU runs stalled after Storage startup before the structured boot report
-(latest seed `1786391407555509400`); the retained artifact is
-`target/logos-test/run-1786391407555257500`. It is a failure to investigate, not evidence that the
-Network bootstrap migration is complete.
+The 2026-08-10 boundary-refactor tree passed the host and UEFI build gates. `network/tcp-stream`
+QEMU passed in 3.5 seconds (seed `1786393021352042600`). The targeted `remote/typed-invoke` and
+`remote/auth-denied` proofs still time out in Gateway/Remote composition; they are not Network
+transport evidence.

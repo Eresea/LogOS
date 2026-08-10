@@ -196,6 +196,7 @@ pub struct SessionCompletion {
     pub effect: logos_abi::EffectResult,
 }
 
+#[allow(clippy::large_enum_variant)] // Completion stays inline: native services have no allocator.
 pub enum OperationProgress {
     Runnable,
     Complete(SessionCompletion),
