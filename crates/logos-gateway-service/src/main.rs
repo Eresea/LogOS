@@ -14,6 +14,63 @@ use logos_service_rt::{Header, ProtocolVersion, ServiceContext};
 const DEADLINE: u64 = u64::MAX / 2;
 const STREAM_CLOSED: u16 = NetworkStreamReadiness::Closed.bits();
 const STREAM_WRITABLE: u16 = NetworkStreamReadiness::Writable.bits();
+const MAX_CONNECTIONS: usize = 4;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConnectionPhase {
+    Read,
+    Decode,
+    Remote,
+    Write,
+    Close,
+}
+
+#[derive(Clone, Copy)]
+struct ConnectionEntry {
+    stream: logos_abi::NetworkReply,
+    phase: ConnectionPhase,
+    authenticated: bool,
+}
+
+struct ConnectionTable {
+    entries: [Option<ConnectionEntry>; MAX_CONNECTIONS],
+}
+
+impl ConnectionTable {
+    const fn new() -> Self {
+        Self { entries: [None; MAX_CONNECTIONS] }
+    }
+
+    fn insert(&mut self, stream: logos_abi::NetworkReply) -> Option<usize> {
+        let index = self.entries.iter().position(Option::is_none)?;
+        self.entries[index] =
+            Some(ConnectionEntry { stream, phase: ConnectionPhase::Read, authenticated: false });
+        Some(index)
+    }
+
+    fn phase(&mut self, index: usize, phase: ConnectionPhase) -> bool {
+        let Some(entry) = self.entries.get_mut(index).and_then(Option::as_mut) else {
+            return false;
+        };
+        if entry.stream.endpoint.0 == 0 {
+            return false;
+        }
+        entry.phase = phase;
+        true
+    }
+
+    fn authenticate(&mut self, index: usize) -> bool {
+        let Some(entry) = self.entries.get_mut(index).and_then(Option::as_mut) else {
+            return false;
+        };
+        entry.authenticated = true;
+        true
+    }
+
+    fn remove(&mut self, index: usize) -> Option<ConnectionEntry> {
+        self.entries.get_mut(index)?.take()
+    }
+}
 
 #[derive(Clone, Copy)]
 struct StreamTxState {
@@ -70,6 +127,7 @@ fn run(context: &mut ServiceContext) -> ! {
     }
     let Some(page) = context.shared_page() else { spin() };
     let mut id = 1;
+    let mut connections = ConnectionTable::new();
     while context.acknowledged() {
         let Some(listener) = network(
             context,
@@ -94,12 +152,36 @@ fn run(context: &mut ServiceContext) -> ! {
             ) else {
                 break;
             };
-            serve(context, page.handle, page.address, listener.endpoint, stream, &mut id);
+            let Some(connection) = connections.insert(stream) else {
+                let _ = network(
+                    context,
+                    &mut id,
+                    NetworkOperation::Close,
+                    stream.endpoint,
+                    stream.generation,
+                    logos_abi::PageHandle(0),
+                    0,
+                );
+                continue;
+            };
+            serve(
+                context,
+                page.handle,
+                page.address,
+                listener.endpoint,
+                stream,
+                &mut id,
+                &mut connections,
+                connection,
+            );
+            let _ = connections.phase(connection, ConnectionPhase::Close);
+            let _ = connections.remove(connection);
         }
     }
     spin()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve(
     context: &mut ServiceContext,
     page: logos_abi::PageHandle,
@@ -107,10 +189,13 @@ fn serve(
     _listener: NetworkEndpoint,
     stream: logos_abi::NetworkReply,
     id: &mut u32,
+    connections: &mut ConnectionTable,
+    connection: usize,
 ) {
     let mut decoder = FrameDecoder::new();
     let mut authenticated = false;
     'connection: loop {
+        let _ = connections.phase(connection, ConnectionPhase::Read);
         let Some(reply) = network(
             context,
             id,
@@ -132,6 +217,7 @@ fn serve(
                 break 'connection;
             }
             let Some(frame) = decoder.ready().ok().flatten() else { continue };
+            let _ = connections.phase(connection, ConnectionPhase::Decode);
             let mut request = [0; MAX_FRAME];
             request[..frame.len()].copy_from_slice(frame);
             let operation = if authenticated {
@@ -139,6 +225,7 @@ fn serve(
             } else {
                 RemoteGateOperation::Handshake
             };
+            let _ = connections.phase(connection, ConnectionPhase::Remote);
             let Some(opened) = gate(context, id, page, address, operation, &request[..frame.len()])
             else {
                 break 'connection;
@@ -180,6 +267,7 @@ fn serve(
                 sealed
             } else {
                 authenticated = true;
+                let _ = connections.authenticate(connection);
                 opened
             };
             let response =
@@ -188,6 +276,7 @@ fn serve(
             let Ok(framed_length) = frame_encode(&mut framed, response) else {
                 break 'connection;
             };
+            let _ = connections.phase(connection, ConnectionPhase::Write);
             if !write_all(context, id, page, address, stream, &framed[..framed_length]) {
                 break 'connection;
             }
@@ -490,5 +579,21 @@ mod tests {
             0,
             0,
         )));
+    }
+
+    #[test]
+    fn connection_table_is_bounded_and_phase_owned() {
+        let stream = reply(NetworkStatus::Complete, NetworkEndpoint(7), 3, STREAM_WRITABLE, 0, 0);
+        let mut table = ConnectionTable::new();
+        let first = table.insert(stream).expect("first connection");
+        assert!(table.phase(first, ConnectionPhase::Decode));
+        assert!(table.phase(first, ConnectionPhase::Remote));
+        assert!(table.authenticate(first));
+        assert!(table.remove(first).is_some());
+        assert!(table.insert(stream).is_some());
+        assert!(table.insert(stream).is_some());
+        assert!(table.insert(stream).is_some());
+        assert!(table.insert(stream).is_some());
+        assert!(table.insert(stream).is_none());
     }
 }
