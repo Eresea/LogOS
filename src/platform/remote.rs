@@ -24,6 +24,7 @@ pub enum RemotePhase {
 #[derive(Clone, Copy)]
 pub struct RemoteOperation {
     pub token: logos_abi::service::OperationToken,
+    pub child: Option<logos_abi::service::OperationToken>,
     pub identity: logos_core::operation::OperationIdentity,
     pub page: logos_abi::PageHandle,
     pub sequence: u64,
@@ -127,6 +128,7 @@ impl RemoteRuntime {
         owned[..input.len()].copy_from_slice(input);
         self.operation = Some(RemoteOperation {
             token,
+            child: None,
             identity,
             page,
             sequence: 1,
@@ -142,6 +144,36 @@ impl RemoteRuntime {
         if let Some(operation) = self.operation.as_mut() {
             operation.phase = phase;
         }
+    }
+
+    pub fn begin_child_operation(&mut self) -> bool {
+        let Some(operation) = self.operation.as_mut() else { return false };
+        if operation.child.is_some() {
+            return false;
+        }
+        let Some(child) = logos_abi::service::OperationToken::new(
+            operation.token.owner,
+            operation.token.generation,
+            operation.token.request_id,
+            operation.token.deadline,
+            operation.token.sequence.saturating_add(1),
+        ) else {
+            return false;
+        };
+        operation.child = Some(child);
+        true
+    }
+
+    pub fn finish_child_operation(&mut self, success: bool) -> bool {
+        let Some(operation) = self.operation.as_mut() else { return false };
+        let Some(child) = operation.child.take() else { return false };
+        success
+            && child.matches(
+                operation.token.owner,
+                operation.token.generation,
+                operation.token.request_id,
+            )
+            && child.sequence > operation.token.sequence
     }
 
     #[allow(dead_code)]

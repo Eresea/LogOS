@@ -4407,76 +4407,93 @@ fn poll_gateway(
         logos_abi::service::RemoteGateOperation::Invoke => remote::RemotePhase::Authenticating,
         _ => remote::RemotePhase::InvokingSession,
     });
-    let outcome = remote_runtime
-        .handle_request(|remote_state| match request.operation {
-            logos_abi::service::RemoteGateOperation::Handshake => {
-                let mut output = [0; logos_remote::MAX_FRAME];
-                remote_state.handshake(&source[..length], &mut output).map(|length| {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(output.as_ptr(), address as *mut u8, length)
-                    };
-                    (logos_abi::service::RemoteGateStatus::Complete, length, 0)
-                })
-            }
-            logos_abi::service::RemoteGateOperation::Open => {
-                let plaintext_length = length.checked_sub(16);
-                plaintext_length
-                    .filter(|length| {
-                        remote_state
-                            .open(&source[..request.length as usize], output_page(address, *length))
-                    })
-                    .map(|length| (logos_abi::service::RemoteGateStatus::Complete, length, 0))
-            }
-            logos_abi::service::RemoteGateOperation::Seal => {
-                let mut output = [0; logos_remote::MAX_FRAME];
-                let sealed = length.checked_add(16).filter(|sealed| *sealed <= output.len());
-                sealed
-                    .filter(|sealed| remote_state.seal(&source[..length], &mut output[..*sealed]))
-                    .map(|sealed| {
+    let child_started = request.operation != logos_abi::service::RemoteGateOperation::Invoke
+        || remote_runtime.begin_child_operation();
+    let outcome = if child_started {
+        remote_runtime
+            .handle_request(|remote_state| match request.operation {
+                logos_abi::service::RemoteGateOperation::Handshake => {
+                    let mut output = [0; logos_remote::MAX_FRAME];
+                    remote_state.handshake(&source[..length], &mut output).map(|length| {
                         unsafe {
                             core::ptr::copy_nonoverlapping(
                                 output.as_ptr(),
                                 address as *mut u8,
-                                sealed,
+                                length,
                             )
                         };
-                        (logos_abi::service::RemoteGateStatus::Complete, sealed, 0)
+                        (logos_abi::service::RemoteGateStatus::Complete, length, 0)
                     })
-            }
-            logos_abi::service::RemoteGateOperation::Invoke => remote_invoke(
-                remote_state,
-                &source[..length],
-                address,
-                storage_runtime,
-                block_context,
-                scheduler,
-                persistence_page,
-                persistence_owner,
-                tick,
-                sessions,
-                sessions_handle,
-                remote_session,
-                capabilities,
-                input,
-                lifecycle,
-                service_healthy,
-                channel,
-                responses,
-                service_scheduler,
-                service_capability,
-                service,
-            ),
-            logos_abi::service::RemoteGateOperation::Subscribe
-            | logos_abi::service::RemoteGateOperation::Credit
-            | logos_abi::service::RemoteGateOperation::Acknowledge => {
-                remote_subscription(remote_state, &source[..length], address, request.operation)
-            }
-            logos_abi::service::RemoteGateOperation::Reset => {
-                remote_state.reset_transport();
-                Some((logos_abi::service::RemoteGateStatus::Complete, 0, 0))
-            }
-        })
-        .flatten();
+                }
+                logos_abi::service::RemoteGateOperation::Open => {
+                    let plaintext_length = length.checked_sub(16);
+                    plaintext_length
+                        .filter(|length| {
+                            remote_state.open(
+                                &source[..request.length as usize],
+                                output_page(address, *length),
+                            )
+                        })
+                        .map(|length| (logos_abi::service::RemoteGateStatus::Complete, length, 0))
+                }
+                logos_abi::service::RemoteGateOperation::Seal => {
+                    let mut output = [0; logos_remote::MAX_FRAME];
+                    let sealed = length.checked_add(16).filter(|sealed| *sealed <= output.len());
+                    sealed
+                        .filter(|sealed| {
+                            remote_state.seal(&source[..length], &mut output[..*sealed])
+                        })
+                        .map(|sealed| {
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    output.as_ptr(),
+                                    address as *mut u8,
+                                    sealed,
+                                )
+                            };
+                            (logos_abi::service::RemoteGateStatus::Complete, sealed, 0)
+                        })
+                }
+                logos_abi::service::RemoteGateOperation::Invoke => remote_invoke(
+                    remote_state,
+                    &source[..length],
+                    address,
+                    storage_runtime,
+                    block_context,
+                    scheduler,
+                    persistence_page,
+                    persistence_owner,
+                    tick,
+                    sessions,
+                    sessions_handle,
+                    remote_session,
+                    capabilities,
+                    input,
+                    lifecycle,
+                    service_healthy,
+                    channel,
+                    responses,
+                    service_scheduler,
+                    service_capability,
+                    service,
+                ),
+                logos_abi::service::RemoteGateOperation::Subscribe
+                | logos_abi::service::RemoteGateOperation::Credit
+                | logos_abi::service::RemoteGateOperation::Acknowledge => {
+                    remote_subscription(remote_state, &source[..length], address, request.operation)
+                }
+                logos_abi::service::RemoteGateOperation::Reset => {
+                    remote_state.reset_transport();
+                    Some((logos_abi::service::RemoteGateStatus::Complete, 0, 0))
+                }
+            })
+            .flatten()
+    } else {
+        None
+    };
+    let child_valid = request.operation != logos_abi::service::RemoteGateOperation::Invoke
+        || remote_runtime.finish_child_operation(outcome.is_some());
+    let outcome = outcome.filter(|_| child_valid);
     let (status, length, cursor) =
         outcome.unwrap_or((logos_abi::service::RemoteGateStatus::Denied, 0, 0));
     remote_runtime.set_operation_phase(remote::RemotePhase::ReadyToReply);
