@@ -107,6 +107,11 @@ may report a runnable task or changed endpoint, but Core/platform composition ow
 tasks. Blocking APIs are allowed when they wrap the stateful primitive or preserve a real durability
 or security boundary. Generations, deadlines, and cancellation belong to the operation state so
 replacement and stale completion remain deterministic. See [ADR-0028](adr/0028-async-first-subsystem-state.md).
+`logos_core::operation::OperationIdentity` is the small common identity check for owner,
+generation, and request ID; typed subsystem state retains its own phases and resources. Capability
+is checked before a slot is accepted, and timeout, cancellation, failure, and replacement each end
+the slot and reclaim its resources. The required task fields and host/QEMU proof selection rules are
+in the [bounded task contract template](task-contract-template.md) and [ADR-0032](adr/0032-bounded-task-contracts-and-proof-tiers.md).
 
 ## 2. Ring model
 

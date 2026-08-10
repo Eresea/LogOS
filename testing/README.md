@@ -4,7 +4,13 @@
 
 ## Levels
 
-Host tests prove bounded algorithms and state machines. QEMU scenarios prove assembled Core, Console, and Platform contracts. Nightly and weekly suites repeat scenarios and fault matrices; unavailable Persistence and Network proofs are explicit skips.
+Host tests prove bounded algorithms and state machines: validation, capability/generation rejection,
+ownership/reclamation, timeout/cancellation, and fixed-capacity exhaustion. QEMU scenarios prove
+assembled Core, Console, and Platform contracts: boot, target behavior, devices, shared pages,
+scheduler composition, replacement/recovery, and fault containment. A changed isolation seam needs
+both its focused host acceptance test and the applicable named QEMU proof; then run the broader
+affected suite. Nightly and weekly suites repeat scenarios and fault matrices; unavailable
+Persistence and Network proofs are explicit skips.
 
 ## Protocol
 

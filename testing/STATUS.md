@@ -8,6 +8,11 @@ milestone claims are in [the reviewed status record](reviewed/STATUS-history-202
 
 ## Current evidence
 
+- Current local boundary-refactor validation passed `scripts/check.ps1 -Stage host` and
+  `scripts/check.ps1 -Stage uefi`. A fresh `network/tcp-stream` run did not produce a structured
+  boot report: two fresh runs stalled after Storage startup and timed out (latest seed
+  `1786391407555509400`; retained artifact `target/logos-test/run-1786391407555257500`). It is not
+  passing evidence for this dirty tree.
 - `scripts/check.ps1 -Stage host` passed: formatting, clippy, host tests, architecture, documentation
   links, ADR index checks, and focused host tests. The changed crates also pass `logos-core` (12),
   `logos-net` (17), and `logos-network-service` (5) tests, including

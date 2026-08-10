@@ -14,7 +14,7 @@ operation and the service can return to its entry point; it is not evidence of a
 | Network client | `crates/logos-service-rt/src/lib.rs` wait/finish helpers | Blocking-looking helpers wrap typed page state and authoritative completion/readiness. | A | Low | No change. |
 | Scheduler | `src/platform/runtime.rs::drain_network_wakes` | Top-level composition drains bounded notifications, validates generation through scheduler handles, then runs tasks. | A | Low | Keep scheduler ownership here. |
 | Remote startup | `src/platform/remote.rs::RemoteRuntime::start` | Remote state previously called `scheduler.run(gateway)` while starting transport. | C | High | Fixed in this change: Remote reports the gateway handle; runtime starts it. |
-| Sessions | `src/platform/session.rs::SessionsRuntime::relay` and runtime compatibility wrapper | Owned `EffectPending -> ReplyPending` state reports `Runnable(handle)`; only `platform::runtime` wakes/runs. | A/B | Medium | Transition conversion landed; add focused stale-generation and replacement proofs. |
+| Sessions | `src/platform/session.rs::SessionsRuntime::relay` and runtime compatibility wrapper | Owned `EffectPending -> ReplyPending` state reports `Runnable(handle)`; owner/generation/request identity is retained while suspended, and only `platform::runtime` wakes/runs. | A/B | Medium | Transition conversion landed; retain focused stale-generation and replacement proofs. |
 | Storage relay | `src/platform/storage.rs::relay_store_request` | Bounded operation metadata and Block wake reporting now exist, but the protected/synchronous relay path still completes in a composition wrapper. | C/D | High | Finish the owned multi-poll relay before marking complete; preserve durability and loans. |
 | Storage startup | `src/platform/storage.rs::run_startup` | Bootstrap waits for service status while advancing bounded Block state. | B/D | Medium | Keep until service startup is independently state-driven. |
 | Storage service | `crates/logos-storage-service/src/main.rs::BlockBackend` | Block client convenience calls are synchronous at the sector/durability boundary; Store replies only after commit/flush semantics. | D | Medium | Keep semantic boundary; later split internal block operations if concurrency requires it. |
@@ -31,3 +31,11 @@ uses the same bounded runnable-notification boundary. Storage and Remote have op
 bounded wake plumbing, but their synchronous compatibility paths remain explicitly unfinished.
 The Network QEMU readiness path still needs a green proof before it can be marked complete. No async
 runtime, future type, executor, universal event bus, or ABI v5 is warranted.
+
+## Latest local validation
+
+The 2026-08-10 boundary-refactor tree passed the host and UEFI build gates. Its fresh
+`network/tcp-stream` QEMU runs stalled after Storage startup before the structured boot report
+(latest seed `1786391407555509400`); the retained artifact is
+`target/logos-test/run-1786391407555257500`. It is a failure to investigate, not evidence that the
+Network bootstrap migration is complete.

@@ -18,12 +18,17 @@ subsystem documents; completed work and old milestone ledgers are kept in `revie
 
 ## Async-first follow-up
 
-- [ ] Convert Sessions relay work into bounded `Deliver -> EffectPending -> ReplyPending` state.
+- [x] Sessions owns bounded `Deliver -> EffectPending -> ReplyPending` state with a typed
+      owner/generation/request identity; scheduler composition consumes only its runnable hint.
 - [ ] Convert Storage relay and protected Remote persistence into bounded request/block/completion
       phases without changing durable commit semantics or page-loan cleanup; current wrappers still
       synchronously drive dependent services.
 - [ ] Define observable sequence/generation conventions where existing APIs need resynchronization.
 - [ ] Replace bootstrap Network global wait slots only after the multi-connection proof.
+
+All boundary work uses the [bounded task contract template](task-contract-template.md). Host
+acceptance tests cover local state and ownership; QEMU/fault proofs are selected by the modified
+isolation seam rather than crate ownership.
 
 ## Documentation debt
 
