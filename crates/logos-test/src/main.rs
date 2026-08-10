@@ -578,6 +578,9 @@ impl Harness {
         if let Some(peer) = &self.network_peer {
             peer.set_scenario(scenario.id);
         }
+        if scenario.id == "network/simultaneous-client-busy" {
+            self.wait_network_configured()?;
+        }
         for command in scenario.setup {
             self.send(&format!("LOGOS/1 INPUT {command}\n"))?;
             self.wait("LOGOS/1 RESULT input=accepted")?;
@@ -1667,9 +1670,7 @@ fn build_profiles(root: &Path, run_dir: &Path, persistence: bool) -> Result<Prof
     let profiles_dir = run_dir.join("profiles");
     fs::create_dir_all(&profiles_dir).map_err(io_error)?;
     let standard = build_profile(root, &profiles_dir.join("standard"), false, false)?;
-    let mut tcp = build_profile(root, &profiles_dir.join("tcp"), false, true)?;
-    tcp.sessions = None;
-    tcp.gateway = None;
+    let tcp = build_profile(root, &profiles_dir.join("tcp"), false, true)?;
     let persistence_profile = if persistence {
         build_profile(root, &profiles_dir.join("persistence"), true, false)?
     } else {

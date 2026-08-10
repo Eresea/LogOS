@@ -1,7 +1,7 @@
 # Test Status
 
-> **Last verification:** 2026-08-09 from starting SHA `248dcc4`; fresh proof results below include
-> the capability-table correction.
+> **Last verification:** 2026-08-10 from starting SHA `0a5a02c`; working-tree changes are listed
+> below.
 
 This file is the current evidence ledger. Historical totals, superseded failures, and earlier
 milestone claims are in [the reviewed status record](reviewed/STATUS-history-2026-08.md).
@@ -9,18 +9,16 @@ milestone claims are in [the reviewed status record](reviewed/STATUS-history-202
 ## Current evidence
 
 - `scripts/check.ps1 -Stage host` passed: formatting, clippy, host tests, architecture, documentation
-  links, ADR index checks, and focused `logos-abi` transport tests (30 passed).
+  links, ADR index checks, and focused host tests. The changed crates also pass `logos-core` (12),
+  `logos-net` (17), and `logos-network-service` (4) tests.
 - `scripts/check.ps1 -Stage uefi` and `-Stage uefi -Release` passed; all six images built.
 - Headless boot reached `startup self check passed`, `check network typed endpoints passed`, and
   `native terminal active`.
-- Fresh direct Network-client runs passed through real VirtIO, the Network service, typed client
-  requests, and the deterministic host peer for transport/configuration, ICMP, UDP, and
-  reset/reconnect. Fresh `network/tcp-stream` stopped at `write_pending`; the result timed out
-  waiting for its structured completion.
-- `logos-net` has 15 TCP foundation tests covering handshake, data/ACK arithmetic, duplicate ACKs,
-  bounded retransmission, FIN/CloseWait, and RST.
-- The historical Network-only ledger is stale against this fresh run: in addition to the known
-  `network/simultaneous-client-busy` gap, `network/tcp-stream` currently stops at `write_pending`.
+- Fresh `cargo run -p logos-test -- suite network` passed all 12 Network scenarios, including
+  `network/simultaneous-client-busy` and `network/tcp-stream`; the latter verified accepted and
+  acknowledged stream watermarks and exact peer bytes.
+- The TCP foundation now has 17 `logos-net` tests covering handshake, data/ACK arithmetic, duplicate
+  ACKs, bounded retransmission, FIN/CloseWait, RST, and bounded stream TX occupancy.
 - Fresh Remote auth and typed-invoke runs reach enrollment and Gateway startup, then fail before a
   host reply: auth-denied reaches the gate-denial/transport-close path, while typed-invoke produces
   no Remote gate request after enrollment. Five Remote proofs remain explicitly skipped/unimplemented:

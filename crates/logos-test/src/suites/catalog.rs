@@ -224,7 +224,13 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
         Fixture::Fresh,
         Runner::NetworkClient,
     ),
-    configured("network/simultaneous-client-busy", "network", &[], Fixture::Fresh),
+    configured_with_runner(
+        "network/simultaneous-client-busy",
+        "network",
+        &["enroll 31d4ab6aceec961137917037936e60716fac573afe94d9da84a8020448dfc112"],
+        Fixture::Fresh,
+        Runner::NetworkClient,
+    ),
     configured_with_runner(
         "network/icmp-echo",
         "network",

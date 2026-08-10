@@ -36,6 +36,10 @@ impl<T: Copy, const N: usize> EventQueue<T, N> {
         event
     }
 
+    pub fn peek(&self) -> Option<&T> {
+        (self.len != 0).then(|| self.entries[self.head].as_ref()).flatten()
+    }
+
     pub const fn len(&self) -> usize {
         self.len
     }
@@ -68,5 +72,14 @@ mod tests {
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.dropped(), 1);
+    }
+
+    #[test]
+    fn peek_preserves_fifo_head() {
+        let mut queue = EventQueue::<u8, 2>::new();
+        assert!(queue.push(1).is_ok());
+        assert_eq!(queue.peek(), Some(&1));
+        assert_eq!(queue.peek(), Some(&1));
+        assert_eq!(queue.pop(), Some(1));
     }
 }

@@ -1,9 +1,8 @@
 # Network
 
-> **Status:** Network bootstrap v1 is the compatibility path. The first scalable slice provides
-> bounded listener/connection tables, per-connection byte-stream storage, watermarks, and a
-> generation-bound `StreamPage`; scalable asynchronous service work and one Network suite proof
-> remain open.
+> **Status:** Network bootstrap v1 is the compatibility path. The current TCP slice provides bounded
+> listener/connection tables, per-connection byte-stream storage, accepted/acknowledged watermarks,
+> fair bounded TX scheduling, and a generation-bound `StreamPage`; the full Network suite is green.
 >
 > **Owner:** Core's Foundation network driver and the replaceable System Network service.
 
@@ -55,8 +54,12 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
   active association records exact endpoints, request, owner, and completion target; a competing
   client gets `Busy` without touching the active page.
 - `SubmitWrite` accepts bytes into connection-owned storage. Sequence numbers are assigned only when
-  a wire range is armed. `PollStream` is authoritative for `Readable`, `Writable`, `Closed`, and
-  accepted/acknowledged byte watermarks.
+  a wire range is armed. One TCP frame is scheduled per service activation using bounded round-robin
+  selection; queued plus in-flight bytes consume the fixed TX budget. `PollStream` is authoritative
+  for `Readable`, `Writable`, `Closed`, and accepted/acknowledged byte watermarks. Legacy `Write`
+  requests defer while the device slot is occupied instead of being rejected spuriously.
+- The reactor processes device replies directly and preserves FIFO event heads when the next event is
+  for another source; typed client/network events cannot strand a pending device completion.
 - `StreamPage` is a coalesced notification cache, not a second transport or source of truth. On
   overflow, clients poll owned endpoints and clear the flag.
 - `NetworkRuntime` owns readiness through an internal server `Status` request and exposes
@@ -97,11 +100,9 @@ services and recovery usable.
 
 ## Current work
 
-- Repair `network/simultaneous-client-busy` after the Gateway second-client scheduling boundary is
-  fixed.
-- Add queued per-connection TX/RX work and bounded service budgets without moving scheduler ownership
-  into Network or adding a generic async framework.
-- Keep the standalone `network/tcp-stream` proof green, then prove Gateway and `logosctl` through it.
+- Prove Gateway and `logosctl` through the real TCP foundation.
+- Extend bounded asynchronous work to RX and concurrent stream operations without moving scheduler
+  ownership into Network or adding a generic async framework.
 - Implement the five skipped Remote proofs only after their documented multi-boot and persistence
   postconditions are available.
 
@@ -115,6 +116,7 @@ services and recovery usable.
 | `network/icmp-echo` | Valid echo in both directions with matching ID/sequence/checksum |
 | `network/udp-round-trip` | Exact payload and source/destination endpoints both ways |
 | `network/unauthorized-operation` | Denial before service wake-up or NIC/page effects |
+| `network/simultaneous-client-busy` | One client receives `Busy`; cancellation restores another client |
 | `network/backpressure-cancel` | Second request is `Busy`; cancellation releases resources |
 | `network/packet-loss` | Deterministic loss and malformed/duplicate traffic make bounded progress |
 | `network/timeout` | One timeout reply and no held resources |

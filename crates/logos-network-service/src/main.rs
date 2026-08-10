@@ -2,8 +2,8 @@
 #![cfg_attr(not(test), no_std)]
 
 use logos_abi::{
-    NetworkDeviceOperation, NetworkDeviceReply, NetworkDeviceRequest, NetworkEndpoint,
-    NetworkEvent, NetworkInfo, NetworkOperation, NetworkReply, NetworkRequest, NetworkStatus,
+    NetworkDeviceOperation, NetworkDeviceRequest, NetworkEndpoint, NetworkEvent, NetworkInfo,
+    NetworkOperation, NetworkReply, NetworkRequest, NetworkStatus,
 };
 use logos_core::event::EventQueue;
 use logos_net::{
@@ -24,6 +24,7 @@ const DEVICE_DEADLINE: u64 = u64::MAX / 2;
 const BROADCAST: Ipv4 = Ipv4([255; 4]);
 const CLIENT_PAYLOAD_OFFSET: usize = 2048;
 const ICMP_PAYLOAD: usize = logos_abi::MAX_NETWORK_PAYLOAD;
+const TCP_SERVICE_BUDGET: usize = 1;
 
 #[derive(Clone, Copy)]
 struct IcmpReply {
@@ -51,6 +52,7 @@ struct AcceptOperation {
 struct SendOperation {
     request: NetworkRequest,
     awaiting_arp: bool,
+    submitted: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -75,7 +77,6 @@ impl PendingOperations {
 
 #[derive(Clone, Copy)]
 enum NetworkStepEvent {
-    DeviceReply(NetworkDeviceReply),
     ClientRequest(NetworkServerRequest),
     NetworkEvent(NetworkEvent),
 }
@@ -95,8 +96,26 @@ impl NetworkReactor {
         self.events.push(event).is_ok()
     }
 
-    fn pop_event(&mut self) -> Option<NetworkStepEvent> {
-        self.events.pop()
+    fn pop_client_request(&mut self) -> Option<NetworkServerRequest> {
+        if matches!(self.events.peek(), Some(NetworkStepEvent::ClientRequest(_))) {
+            match self.events.pop() {
+                Some(NetworkStepEvent::ClientRequest(request)) => Some(request),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    fn pop_network_event(&mut self) -> Option<NetworkEvent> {
+        if matches!(self.events.peek(), Some(NetworkStepEvent::NetworkEvent(_))) {
+            match self.events.pop() {
+                Some(NetworkStepEvent::NetworkEvent(event)) => Some(event),
+                _ => None,
+            }
+        } else {
+            None
+        }
     }
 }
 
@@ -140,11 +159,6 @@ fn run(context: &mut ServiceContext) -> ! {
     while context.acknowledged() {
         if pending != 0 {
             if let Some(device_reply) = context.network_device_reply(pending) {
-                if !reactor.push_event(NetworkStepEvent::DeviceReply(device_reply)) {
-                    spin();
-                }
-            }
-            if let Some(NetworkStepEvent::DeviceReply(device_reply)) = reactor.pop_event() {
                 if pending_info {
                     if device_reply.status != NetworkStatus::Complete
                         || device_reply.info.mac == [0; 6]
@@ -221,7 +235,7 @@ fn run(context: &mut ServiceContext) -> ! {
                                 spin();
                             }
                         }
-                    } else {
+                    } else if operation.submitted {
                         reactor.operations.send = None;
                         let _ = state.finish_pending(request.id);
                         let reply = NetworkReply {
@@ -311,12 +325,52 @@ fn run(context: &mut ServiceContext) -> ! {
             }
         }
 
+        for _ in 0..TCP_SERVICE_BUDGET {
+            if pending != 0 {
+                break;
+            }
+            let (reply, from_event) = match tcp_reply {
+                Some(reply) => (reply, true),
+                None => {
+                    let Some(reply) = state.tcp().peek_tx() else { break };
+                    (reply, false)
+                }
+            };
+            if !submit_action(
+                context,
+                &state,
+                &info,
+                DhcpAction::TcpReply,
+                offer,
+                server,
+                arp_reply,
+                icmp_reply,
+                Some(reply),
+                next_id,
+            ) {
+                break;
+            }
+            if from_event {
+                tcp_reply = None;
+                if let Some(operation) = reactor.operations.send
+                    && !operation.awaiting_arp
+                    && !operation.submitted
+                {
+                    reactor.operations.send = Some(SendOperation { submitted: true, ..operation });
+                }
+            } else {
+                let _ = state.tcp_mut().take_tx();
+            }
+            pending = next_id;
+            next_id = next_id.wrapping_add(1).max(1);
+        }
+
         if let Some(message) = context.network_server_request() {
             if !reactor.push_event(NetworkStepEvent::ClientRequest(message)) {
                 spin();
             }
         }
-        if let Some(NetworkStepEvent::ClientRequest(message)) = reactor.pop_event() {
+        if let Some(message) = reactor.pop_client_request() {
             let request = message.request;
             let owner = message.caller;
             #[cfg(feature = "test-hooks")]
@@ -407,14 +461,14 @@ fn run(context: &mut ServiceContext) -> ! {
                 match submit_datagram(context, &mut state, info, request, now, next_id) {
                     Ok(SubmitDatagram::Sent) => {
                         reactor.operations.send =
-                            Some(SendOperation { request, awaiting_arp: false });
+                            Some(SendOperation { request, awaiting_arp: false, submitted: true });
                         pending = next_id;
                         next_id = next_id.wrapping_add(1).max(1);
                         continue;
                     }
                     Ok(SubmitDatagram::Arp) => {
                         reactor.operations.send =
-                            Some(SendOperation { request, awaiting_arp: true });
+                            Some(SendOperation { request, awaiting_arp: true, submitted: false });
                         pending = next_id;
                         next_id = next_id.wrapping_add(1).max(1);
                         continue;
@@ -551,7 +605,7 @@ fn run(context: &mut ServiceContext) -> ! {
                     id: request.id,
                     status: NetworkStatus::Complete,
                     endpoint: request.endpoint,
-                    generation: info.generation,
+                    generation: request.generation,
                     source_address: 0,
                     source_port: 0,
                     length: received.unwrap_or(0) as u16,
@@ -597,20 +651,20 @@ fn run(context: &mut ServiceContext) -> ! {
                     continue;
                 };
                 let result = state.tcp_mut().submit_write(owner, endpoint, payload);
-                let (status, accepted_bytes, acknowledged_bytes) = match result {
-                    Ok(accepted) => state
-                        .tcp()
-                        .stream_watermarks(owner, endpoint)
-                        .map_or((NetworkStatus::Complete, accepted, 0), |(_, acknowledged)| {
-                            (NetworkStatus::Complete, accepted, acknowledged)
-                        }),
-                    Err(error) => (map_tcp_error(error), 0, 0),
+                let (status, readiness, accepted_bytes, acknowledged_bytes) = match result {
+                    Ok(accepted) => state.tcp().stream_watermarks(owner, endpoint).map_or(
+                        (NetworkStatus::Complete, 0, accepted, 0),
+                        |(_, acknowledged)| {
+                            let readiness = state
+                                .tcp()
+                                .stream_state(owner, endpoint)
+                                .map_or(0, |(readiness, _, _)| readiness);
+                            (NetworkStatus::Complete, readiness, accepted, acknowledged)
+                        },
+                    ),
+                    Err(error) => (map_tcp_error(error), 0, 0, 0),
                 };
                 if status == NetworkStatus::Complete {
-                    let readiness = state
-                        .tcp()
-                        .stream_state(owner, endpoint)
-                        .map_or(logos_net::STREAM_WRITABLE, |(readiness, _, _)| readiness);
                     let _ = context.publish_stream(logos_abi::NetworkStreamRecord {
                         owner,
                         endpoint: request.endpoint,
@@ -631,14 +685,22 @@ fn run(context: &mut ServiceContext) -> ! {
                     } else {
                         NetworkEndpoint(0)
                     },
-                    generation: info.generation,
+                    generation: request.generation,
                     source_address: 0,
                     source_port: 0,
                     length: if status == NetworkStatus::Complete { request.length } else { 0 },
-                    stream_readiness: 0,
+                    stream_readiness: if status == NetworkStatus::Complete { readiness } else { 0 },
                     stream_reserved: 0,
-                    stream_accepted_bytes: 0,
-                    stream_acknowledged_bytes: 0,
+                    stream_accepted_bytes: if status == NetworkStatus::Complete {
+                        accepted_bytes
+                    } else {
+                        0
+                    },
+                    stream_acknowledged_bytes: if status == NetworkStatus::Complete {
+                        acknowledged_bytes
+                    } else {
+                        0
+                    },
                     info,
                     counters,
                 }) {
@@ -664,7 +726,7 @@ fn run(context: &mut ServiceContext) -> ! {
                     } else {
                         NetworkEndpoint(0)
                     },
-                    generation: info.generation,
+                    generation: request.generation,
                     source_address: 0,
                     source_port: 0,
                     length: 0,
@@ -701,8 +763,16 @@ fn run(context: &mut ServiceContext) -> ! {
                     if let Some(endpoint) = logos_net::EndpointId::from_wire(request.endpoint.0) {
                         if state.tcp_mut().write(owner, endpoint, payload).is_ok() {
                             tcp_reply = state.tcp_mut().take_tx();
-                            if tcp_reply.is_some()
-                                && submit_action(
+                            if let Some(reply) = tcp_reply {
+                                if pending != 0 {
+                                    reactor.operations.send = Some(SendOperation {
+                                        request,
+                                        awaiting_arp: false,
+                                        submitted: false,
+                                    });
+                                    continue;
+                                }
+                                if submit_action(
                                     context,
                                     &state,
                                     &info,
@@ -711,15 +781,18 @@ fn run(context: &mut ServiceContext) -> ! {
                                     server,
                                     arp_reply,
                                     icmp_reply,
-                                    tcp_reply,
+                                    Some(reply),
                                     next_id,
-                                )
-                            {
-                                reactor.operations.send =
-                                    Some(SendOperation { request, awaiting_arp: false });
-                                pending = next_id;
-                                next_id = next_id.wrapping_add(1).max(1);
-                                continue;
+                                ) {
+                                    reactor.operations.send = Some(SendOperation {
+                                        request,
+                                        awaiting_arp: false,
+                                        submitted: true,
+                                    });
+                                    pending = next_id;
+                                    next_id = next_id.wrapping_add(1).max(1);
+                                    continue;
+                                }
                             }
                             NetworkStatus::Io
                         } else {
@@ -736,7 +809,7 @@ fn run(context: &mut ServiceContext) -> ! {
                     } else {
                         NetworkEndpoint(0)
                     },
-                    generation: info.generation,
+                    generation: request.generation,
                     source_address: 0,
                     source_port: 0,
                     length: if status == NetworkStatus::Complete { request.length } else { 0 },
@@ -833,7 +906,7 @@ fn run(context: &mut ServiceContext) -> ! {
                 spin();
             }
         }
-        if let Some(NetworkStepEvent::NetworkEvent(event)) = reactor.pop_event() {
+        if let Some(event) = reactor.pop_network_event() {
             now = event.now.max(now);
             if event.generation != info.generation {
                 continue;
@@ -1093,7 +1166,8 @@ fn run(context: &mut ServiceContext) -> ! {
                 if let Ok(SubmitDatagram::Sent) =
                     submit_datagram(context, &mut state, info, request, now, next_id)
                 {
-                    reactor.operations.send = Some(SendOperation { request, awaiting_arp: false });
+                    reactor.operations.send =
+                        Some(SendOperation { request, awaiting_arp: false, submitted: true });
                     pending = next_id;
                     next_id = next_id.wrapping_add(1).max(1);
                     continue;
@@ -1126,6 +1200,9 @@ fn run(context: &mut ServiceContext) -> ! {
                     continue;
                 }
             }
+            if action == DhcpAction::TcpReply && pending != 0 {
+                continue;
+            }
             if action != DhcpAction::None && action != DhcpAction::Expired {
                 if !submit_action(
                     context, &state, &info, action, offer, server, arp_reply, icmp_reply,
@@ -1139,7 +1216,11 @@ fn run(context: &mut ServiceContext) -> ! {
             }
         }
 
-        let deadline = state.dhcp_deadline().max(now.saturating_add(1));
+        let deadline = if state.tcp().peek_tx().is_some() {
+            now.saturating_add(1)
+        } else {
+            state.dhcp_deadline().max(now.saturating_add(1))
+        };
         if !context.network_wait(deadline) {
             spin();
         }
@@ -2028,7 +2109,7 @@ mod tests {
         reactor.operations = PendingOperations {
             receive: Some(ReceiveOperation { request: request(1), owner: 7 }),
             accept: Some(AcceptOperation { request: request(2), owner: 8 }),
-            send: Some(SendOperation { request: request(3), awaiting_arp: true }),
+            send: Some(SendOperation { request: request(3), awaiting_arp: true, submitted: false }),
             echo: Some(EchoOperation { request: request(4), awaiting_arp: false }),
         };
 
@@ -2045,7 +2126,7 @@ mod tests {
         let request = request(9);
         let mut reactor = NetworkReactor::new();
         reactor.operations = PendingOperations {
-            send: Some(SendOperation { request, awaiting_arp: true }),
+            send: Some(SendOperation { request, awaiting_arp: true, submitted: false }),
             ..PendingOperations::default()
         };
 
@@ -2071,7 +2152,27 @@ mod tests {
         };
 
         assert!(reactor.push_event(NetworkStepEvent::NetworkEvent(event)));
-        assert!(matches!(reactor.pop_event(), Some(NetworkStepEvent::NetworkEvent(_))));
-        assert!(reactor.pop_event().is_none());
+        assert!(reactor.pop_network_event().is_some());
+        assert!(reactor.pop_network_event().is_none());
+    }
+
+    #[test]
+    fn reactor_keeps_unexpected_event_at_fifo_head() {
+        let mut reactor = NetworkReactor::new();
+        let event = NetworkEvent {
+            id: 1,
+            kind: logos_abi::NetworkEventKind::Timer,
+            generation: 1,
+            device_generation: 1,
+            page: PageHandle(0),
+            length: 0,
+            now: 1,
+            metadata: [0; 16],
+        };
+
+        assert!(reactor.push_event(NetworkStepEvent::NetworkEvent(event)));
+        assert!(reactor.pop_client_request().is_none());
+        assert_eq!(reactor.events.len(), 1);
+        assert!(reactor.pop_network_event().is_some());
     }
 }

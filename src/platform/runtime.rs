@@ -2554,6 +2554,9 @@ pub(crate) fn run(
                         generation: 0,
                         deadline: u64::MAX / 2,
                     };
+                    if !drain_network_wakes(&mut network_runtime, &mut native_scheduler) {
+                        return false;
+                    }
                     if !network_runtime.relay_client(
                         NetworkClientSlot::Gateway,
                         gateway_client,
@@ -2586,45 +2589,26 @@ pub(crate) fn run(
                     {
                         return false;
                     }
+                    test_hooks::event("network/simultaneous-client-busy", "terminal_busy");
                     if !drain_network_wakes(&mut network_runtime, &mut native_scheduler) {
                         return false;
                     }
-                    let gateway_request = logos_abi::NetworkRequest {
-                        id: 0x9000_0201,
-                        operation: logos_abi::NetworkOperation::Listen,
-                        peer: logos_abi::NetworkScope::new(
-                            logos_abi::NetworkProtocol::Tcp,
-                            0,
-                            logos_abi::REMOTE_TCP_PORT,
-                        ),
-                        ..terminal_request
+                    test_hooks::event("network/simultaneous-client-busy", "gateway_cancelled");
+                    let next_terminal_request =
+                        logos_abi::NetworkRequest { id: 0x9000_0202, ..terminal_request };
+                    let Some(next) = run_network_request(
+                        next_terminal_request,
+                        native_terminal_network,
+                        &mut network_runtime,
+                        &mut native_scheduler,
+                        &session,
+                        &capabilities,
+                        &shared_pages,
+                        terminal_owner,
+                    ) else {
+                        return false;
                     };
-                    if !gateway_client.issue(gateway_request)
-                        || !network_runtime.relay_client(
-                            NetworkClientSlot::Gateway,
-                            gateway_client,
-                            gateway_task,
-                            gateway_session,
-                            &capabilities,
-                            &shared_pages,
-                            gateway_owner,
-                            interrupts::ticks(),
-                        )
-                    {
-                        return false;
-                    }
-                    if !drain_network_wakes(&mut network_runtime, &mut native_scheduler) {
-                        return false;
-                    }
-                    let passed = gateway_client
-                        .response(gateway_request.id)
-                        .is_some_and(|reply| reply.status == logos_abi::NetworkStatus::Busy)
-                        && network_runtime.invalidate_client(
-                            NetworkClientSlot::Terminal,
-                            logos_abi::NetworkStatus::Cancelled,
-                        )
-                        && drain_network_wakes(&mut network_runtime, &mut native_scheduler);
-                    return passed;
+                    return next.status == logos_abi::NetworkStatus::Complete;
                 }
                 if id == "network/unauthorized-operation" {
                     let endpoint = logos_abi::NetworkEndpoint(0x0001_0001);
@@ -4064,9 +4048,12 @@ fn run_network_tcp_stream(
     };
     if write_reply.status != logos_abi::NetworkStatus::Complete
         || write_reply.endpoint != accept_reply.endpoint
+        || write_reply.stream_accepted_bytes != 2
+        || write_reply.stream_acknowledged_bytes > write_reply.stream_accepted_bytes
     {
         return false;
     }
+    test_hooks::event(ID, "write_accepted");
     unsafe {
         core::ptr::copy_nonoverlapping(b"rld".as_ptr(), address as *mut u8, 3);
     }
@@ -4090,9 +4077,14 @@ fn run_network_tcp_stream(
     ) else {
         return false;
     };
-    if write_tail_reply.status != logos_abi::NetworkStatus::Complete {
+    if write_tail_reply.status != logos_abi::NetworkStatus::Complete
+        || write_tail_reply.stream_accepted_bytes != 5
+        || write_tail_reply.stream_acknowledged_bytes < write_reply.stream_acknowledged_bytes
+        || write_tail_reply.stream_acknowledged_bytes > write_tail_reply.stream_accepted_bytes
+    {
         return false;
     }
+    test_hooks::event(ID, "write_tail_accepted");
     let poll = request(
         0x9000_0308,
         logos_abi::NetworkOperation::PollStream,
@@ -4113,9 +4105,14 @@ fn run_network_tcp_stream(
     ) else {
         return false;
     };
-    if poll_reply.status != logos_abi::NetworkStatus::Complete {
+    if poll_reply.status != logos_abi::NetworkStatus::Complete
+        || poll_reply.stream_accepted_bytes != 5
+        || poll_reply.stream_acknowledged_bytes < write_tail_reply.stream_acknowledged_bytes
+        || poll_reply.stream_acknowledged_bytes > poll_reply.stream_accepted_bytes
+    {
         return false;
     }
+    test_hooks::event(ID, "stream_polled");
     unsafe {
         core::ptr::copy_nonoverlapping(b"reply".as_ptr(), address as *mut u8, 5);
     }

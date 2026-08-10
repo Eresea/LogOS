@@ -696,14 +696,14 @@ impl TcpState {
     }
 
     pub fn take_tx(&mut self) -> Option<TcpTx> {
-        for offset in 0..MAX_TCP_CONNECTIONS {
-            let index = (self.next_schedule + offset) % MAX_TCP_CONNECTIONS;
-            if let Some(tx) = self.connections[index].outgoing.take() {
-                self.next_schedule = (index + 1) % MAX_TCP_CONNECTIONS;
-                return Some(tx);
-            }
-        }
-        None
+        let index = self.next_tx_index()?;
+        let tx = self.connections[index].outgoing.take();
+        self.next_schedule = (index + 1) % MAX_TCP_CONNECTIONS;
+        tx
+    }
+
+    pub fn peek_tx(&self) -> Option<TcpTx> {
+        self.next_tx_index().and_then(|index| self.connections[index].outgoing)
     }
 
     /// Retransmit reliable control/data frames a bounded number of times.
@@ -777,7 +777,7 @@ impl TcpState {
         if self.connections[index].phase != TcpPhase::Established {
             return Err(TcpStateError::Busy);
         }
-        if payload.len() > MAX_TCP_TX_BYTES - usize::from(self.connections[index].tx_length) {
+        if payload.len() > MAX_TCP_TX_BYTES - self.tx_occupied(index) {
             return Err(TcpStateError::Busy);
         }
         let start = usize::from(self.connections[index].tx_length);
@@ -809,7 +809,7 @@ impl TcpState {
             readiness |= STREAM_READABLE;
         }
         if connection.phase == TcpPhase::Established
-            && usize::from(connection.tx_length) < MAX_TCP_TX_BYTES
+            && self.tx_occupied_connection(&connection) < MAX_TCP_TX_BYTES
         {
             readiness |= STREAM_WRITABLE;
         }
@@ -910,6 +910,21 @@ impl TcpState {
 
     fn connection(&self, owner: u64, endpoint: EndpointId) -> Result<TcpConnection, TcpStateError> {
         Ok(self.connections[self.connection_index_by_owner(owner, endpoint)?])
+    }
+
+    fn tx_occupied(&self, index: usize) -> usize {
+        self.tx_occupied_connection(&self.connections[index])
+    }
+
+    fn tx_occupied_connection(&self, connection: &TcpConnection) -> usize {
+        usize::from(connection.tx_length)
+            + usize::from(if connection.in_flight { connection.in_flight_length } else { 0 })
+    }
+
+    fn next_tx_index(&self) -> Option<usize> {
+        (0..MAX_TCP_CONNECTIONS)
+            .map(|offset| (self.next_schedule + offset) % MAX_TCP_CONNECTIONS)
+            .find(|&index| self.connections[index].outgoing.is_some())
     }
 
     fn arm_ack(
@@ -2386,6 +2401,15 @@ mod tests {
             .unwrap();
         assert_eq!(state.stream_watermarks(7, first), Ok((6, 6)));
         assert_eq!(state.stream_watermarks(7, second), Ok((4, 4)));
+
+        let chunk = [0; MAX_TCP_STREAM];
+        for _ in 0..4 {
+            assert!(state.submit_write(7, first, &chunk).is_ok());
+        }
+        assert_eq!(state.submit_write(7, first, b"x"), Err(TcpStateError::Busy));
+        assert_eq!(state.stream_state(7, first).unwrap().0 & STREAM_WRITABLE, 0);
+        state.reset();
+        assert_eq!(state.stream_watermarks(7, first), Err(TcpStateError::NotFound));
     }
 
     #[test]
