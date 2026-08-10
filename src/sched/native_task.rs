@@ -1808,7 +1808,7 @@ impl<'a> Scheduler<'a> {
                 Some(self.run(handle))
             }
             Some(_) => None,
-            None => Some(self.run(handle)),
+            None => None,
         }
     }
 

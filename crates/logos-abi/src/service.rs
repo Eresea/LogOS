@@ -640,10 +640,19 @@ impl ControlPage {
             return false;
         }
         context.input_page == 0
-            || unsafe {
-                InputPage::waiting_at(context.input_page, context.generation)
-                    || InputPage::reply_pending_at(context.input_page, context.generation)
-            }
+            || unsafe { InputPage::waiting_at(context.input_page, context.generation) }
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned ControlPage mapping.
+    pub unsafe fn input_reply_pending_at(address: u64) -> bool {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        context.abi == ABI
+            && context.reserved == 0
+            && context.operation == READ_INPUT
+            && context.status == ACKNOWLEDGED
+            && context.input_page != 0
+            && unsafe { InputPage::reply_pending_at(context.input_page, context.generation) }
     }
 
     pub unsafe fn store_client_page_at(address: u64) -> Option<u64> {
