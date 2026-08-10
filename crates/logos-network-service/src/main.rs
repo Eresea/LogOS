@@ -36,6 +36,34 @@ struct IcmpReply {
     payload: [u8; ICMP_PAYLOAD],
 }
 
+#[derive(Clone, Copy, Default)]
+struct TcpTxStage(Option<TcpTx>);
+
+impl TcpTxStage {
+    fn peek(&self) -> Option<TcpTx> {
+        self.0
+    }
+
+    fn stage_from_state(&mut self, state: &mut NetworkState) {
+        if self.0.is_none() {
+            self.0 = state.tcp_mut().take_tx();
+        }
+    }
+
+    fn submit<F>(&mut self, submit: F) -> bool
+    where
+        F: FnOnce(TcpTx) -> bool,
+    {
+        let Some(tx) = self.0 else { return false };
+        if submit(tx) {
+            self.0 = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ReceiveOperation {
     request: NetworkRequest,
@@ -147,7 +175,7 @@ fn run(context: &mut ServiceContext) -> ! {
     let mut reactor = NetworkReactor::new();
     let mut next_echo = 1u16;
     let mut icmp_reply: Option<IcmpReply> = None;
-    let mut tcp_reply: Option<TcpTx> = None;
+    let mut tcp_stage = TcpTxStage::default();
     let mut counters = logos_abi::NetworkCounters::default();
 
     #[cfg(feature = "test-usernet")]
@@ -188,7 +216,7 @@ fn run(context: &mut ServiceContext) -> ! {
                             server,
                             arp_reply,
                             icmp_reply,
-                            tcp_reply,
+                            tcp_stage.peek(),
                             next_id,
                         ) {
                             spin();
@@ -329,29 +357,28 @@ fn run(context: &mut ServiceContext) -> ! {
             if pending != 0 {
                 break;
             }
-            let (reply, from_event) = match tcp_reply {
-                Some(reply) => (reply, true),
+            let from_stage = tcp_stage.peek().is_some();
+            let reply = match tcp_stage.peek() {
+                Some(reply) => reply,
                 None => {
                     let Some(reply) = state.tcp().peek_tx() else { break };
-                    (reply, false)
+                    reply
                 }
             };
-            if !submit_action(
-                context,
-                &state,
-                &info,
-                DhcpAction::TcpReply,
-                offer,
-                server,
-                arp_reply,
-                icmp_reply,
-                Some(reply),
-                next_id,
-            ) {
-                break;
-            }
-            if from_event {
-                tcp_reply = None;
+            if from_stage {
+                if !submit_staged_tcp(
+                    context,
+                    &state,
+                    &info,
+                    offer,
+                    server,
+                    arp_reply,
+                    icmp_reply,
+                    &mut tcp_stage,
+                    next_id,
+                ) {
+                    break;
+                }
                 if let Some(operation) = reactor.operations.send
                     && !operation.awaiting_arp
                     && !operation.submitted
@@ -359,6 +386,20 @@ fn run(context: &mut ServiceContext) -> ! {
                     reactor.operations.send = Some(SendOperation { submitted: true, ..operation });
                 }
             } else {
+                if !submit_action(
+                    context,
+                    &state,
+                    &info,
+                    DhcpAction::TcpReply,
+                    offer,
+                    server,
+                    arp_reply,
+                    icmp_reply,
+                    Some(reply),
+                    next_id,
+                ) {
+                    break;
+                }
                 let _ = state.tcp_mut().take_tx();
             }
             pending = next_id;
@@ -762,8 +803,8 @@ fn run(context: &mut ServiceContext) -> ! {
                 let status =
                     if let Some(endpoint) = logos_net::EndpointId::from_wire(request.endpoint.0) {
                         if state.tcp_mut().write(owner, endpoint, payload).is_ok() {
-                            tcp_reply = state.tcp_mut().take_tx();
-                            if let Some(reply) = tcp_reply {
+                            tcp_stage.stage_from_state(&mut state);
+                            if tcp_stage.peek().is_some() {
                                 if pending != 0 {
                                     reactor.operations.send = Some(SendOperation {
                                         request,
@@ -772,16 +813,15 @@ fn run(context: &mut ServiceContext) -> ! {
                                     });
                                     continue;
                                 }
-                                if submit_action(
+                                if submit_staged_tcp(
                                     context,
                                     &state,
                                     &info,
-                                    DhcpAction::TcpReply,
                                     offer,
                                     server,
                                     arp_reply,
                                     icmp_reply,
-                                    Some(reply),
+                                    &mut tcp_stage,
                                     next_id,
                                 ) {
                                     reactor.operations.send = Some(SendOperation {
@@ -925,13 +965,13 @@ fn run(context: &mut ServiceContext) -> ! {
                         &mut server,
                         &mut arp_reply,
                         &mut icmp_reply,
-                        &mut tcp_reply,
+                        &mut tcp_stage,
                         &mut counters,
                     )
                 }
                 logos_abi::NetworkEventKind::Timer => {
                     if state.tcp_mut().tick(now) {
-                        tcp_reply = state.tcp_mut().take_tx();
+                        tcp_stage.stage_from_state(&mut state);
                         DhcpAction::TcpReply
                     } else {
                         state.dhcp_tick(now)
@@ -1200,13 +1240,39 @@ fn run(context: &mut ServiceContext) -> ! {
                     continue;
                 }
             }
-            if action == DhcpAction::TcpReply && pending != 0 {
+            if action == DhcpAction::TcpReply {
+                if pending != 0 {
+                    continue;
+                }
+                if !submit_staged_tcp(
+                    context,
+                    &state,
+                    &info,
+                    offer,
+                    server,
+                    arp_reply,
+                    icmp_reply,
+                    &mut tcp_stage,
+                    next_id,
+                ) {
+                    spin();
+                }
+                pending = next_id;
+                next_id = next_id.wrapping_add(1).max(1);
                 continue;
             }
             if action != DhcpAction::None && action != DhcpAction::Expired {
                 if !submit_action(
-                    context, &state, &info, action, offer, server, arp_reply, icmp_reply,
-                    tcp_reply, next_id,
+                    context,
+                    &state,
+                    &info,
+                    action,
+                    offer,
+                    server,
+                    arp_reply,
+                    icmp_reply,
+                    tcp_stage.peek(),
+                    next_id,
                 ) {
                     spin();
                 }
@@ -1621,6 +1687,34 @@ fn submit_action(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn submit_staged_tcp(
+    context: &mut ServiceContext,
+    state: &NetworkState,
+    info: &NetworkInfo,
+    offer: Ipv4,
+    server: Ipv4,
+    arp_reply: Option<Arp>,
+    icmp_reply: Option<IcmpReply>,
+    tcp_stage: &mut TcpTxStage,
+    id: u32,
+) -> bool {
+    tcp_stage.submit(|reply| {
+        submit_action(
+            context,
+            state,
+            info,
+            DhcpAction::TcpReply,
+            offer,
+            server,
+            arp_reply,
+            icmp_reply,
+            Some(reply),
+            id,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn accept_dhcp(
     context: &ServiceContext,
     length: u16,
@@ -1631,7 +1725,7 @@ fn accept_dhcp(
     server: &mut Ipv4,
     arp_reply: &mut Option<Arp>,
     icmp_reply: &mut Option<IcmpReply>,
-    tcp_reply: &mut Option<TcpTx>,
+    tcp_stage: &mut TcpTxStage,
     counters: &mut logos_abi::NetworkCounters,
 ) -> DhcpAction {
     let Some(pages) = context.network_pages() else {
@@ -1754,8 +1848,8 @@ fn accept_dhcp(
             }
         };
         let _ = state.tcp_mut().ingest(ip.source, tcp);
-        *tcp_reply = state.tcp_mut().take_tx();
-        return tcp_reply.as_ref().map_or(DhcpAction::None, |_| DhcpAction::TcpReply);
+        tcp_stage.stage_from_state(state);
+        return tcp_stage.peek().map_or(DhcpAction::None, |_| DhcpAction::TcpReply);
     }
     if ip.protocol != 17 {
         counters.unsupported = counters.unsupported.saturating_add(1);
@@ -2101,6 +2195,53 @@ mod tests {
             generation: 1,
             deadline: 10,
         }
+    }
+
+    fn tcp_tx() -> TcpTx {
+        TcpTx {
+            source: Ipv4([10, 0, 2, 15]),
+            destination: Ipv4([10, 0, 2, 2]),
+            header: logos_net::TcpHeader {
+                source_port: 40000,
+                destination_port: 7443,
+                sequence: 1,
+                acknowledgement: 1,
+                flags: 0x10,
+                window: 1024,
+            },
+            length: 0,
+            payload: [0; logos_net::MAX_TCP_STREAM],
+        }
+    }
+
+    #[test]
+    fn staged_tcp_tx_transfers_ownership_once() {
+        let mut stage = TcpTxStage(Some(tcp_tx()));
+        let mut attempts = 0;
+        let mut accepted = 0;
+
+        assert!(!stage.submit(|_| {
+            attempts += 1;
+            false
+        }));
+        assert!(stage.peek().is_some());
+        assert!(stage.submit(|_| {
+            attempts += 1;
+            accepted += 1;
+            true
+        }));
+        assert!(!stage.submit(|_| {
+            attempts += 1;
+            accepted += 1;
+            true
+        }));
+        assert_eq!(attempts, 2);
+        assert_eq!(accepted, 1);
+        assert!(stage.peek().is_none());
+
+        let mut state = NetworkState::new();
+        stage.stage_from_state(&mut state);
+        assert!(stage.peek().is_none());
     }
 
     #[test]
