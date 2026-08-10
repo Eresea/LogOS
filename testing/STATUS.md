@@ -1,7 +1,7 @@
 # Test Status
 
-> **Last verification:** 2026-08-10 at `HEAD` `9143712f16824f4ae843667d448f4762ef3e7084`, with
-> implementation diff fingerprint (excluding this ledger) `0416ecd583afe9c3c7ed02e8e75e74bb32871d26`.
+> **Last verification:** 2026-08-10 at repository `HEAD` `ee0df0693d64d359ea9d1e5f454a5ab02425d6ed`,
+> with the uncommitted Gateway TX staging changes present in the resulting tree.
 
 This file is the current evidence ledger. Historical totals, superseded failures, and earlier
 milestone claims are in [the reviewed status record](reviewed/STATUS-history-2026-08.md).
@@ -25,13 +25,23 @@ milestone claims are in [the reviewed status record](reviewed/STATUS-history-202
   paths do not replace an already staged frame. The regression is
   `staged_tcp_tx_transfers_ownership_once`; it does not rely on peer byte-stream duplicate
   suppression.
+- `remote/crypto-kat` passed in QEMU UEFI (seed `1786388210976619800`). It runs RFC 7748
+  X25519 public-key/DH vectors, RFC 8439 ChaCha20-Poly1305 encrypt/decrypt vectors, SHA-256,
+  and the fixed `Noise_IK_25519_ChaChaPoly_SHA256` transcript through `RemoteResponder`, including
+  second-message and transport authentication. The same `logos-remote` KAT passes on the host.
+  The target-scoped Fiat Curve25519 and software ChaCha20/Poly1305 cfgs are recognized by the
+  locked dependency versions and do not produce a cryptographic divergence.
 - The TCP foundation now has 17 `logos-net` tests covering handshake, data/ACK arithmetic, duplicate
   ACKs, bounded retransmission, FIN/CloseWait, RST, and bounded stream TX occupancy.
-- Fresh Remote auth and typed-invoke runs reach enrollment and Gateway startup, then fail before a
-  host reply: auth-denied reaches the gate-denial/transport-close path, while typed-invoke produces
-  no Remote gate request after enrollment. Five Remote proofs remain explicitly skipped/unimplemented:
-  enrollment persistence, reconnect replay, pending-after-reset, Gateway restart, and protected-state
-  corruption. Their permanent IDs remain registered.
+- Fresh `cargo run -p logos-test -- run remote/auth-denied` failed after the semantic authentication
+  rejection with `timeout waiting for QEMU exit` (seed `1786388432816371600`). Fresh
+  `cargo run -p logos-test -- run remote/typed-invoke` still fails before the post-enrollment
+  `ADVANCE` reply (seed `1786389989859588400`); the Gateway writable-wait path is not reached.
+  The isolated guest proof rules out the UEFI cryptographic implementation and target crypto cfgs
+  as that failure's cause; these Remote proofs are not passing evidence for this tree. Five Remote
+  proofs remain explicitly skipped/unimplemented: enrollment persistence, reconnect replay,
+  pending-after-reset, Gateway restart, and protected-state corruption. Their permanent IDs remain
+  registered.
 - The direct `transport-dhcp` and `configuration` baselines assert typed configuration; raw DHCP
   Discover/Offer/Request/Ack orchestration is not current baseline evidence.
 

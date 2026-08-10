@@ -56,8 +56,10 @@ cross-ring boundary requires superseding [ADR-0015](adr/0015-network-v1-boundary
 - `SubmitWrite` accepts bytes into connection-owned storage. Sequence numbers are assigned only when
   a wire range is armed. One TCP frame is scheduled per service activation using bounded round-robin
   selection; queued plus in-flight bytes consume the fixed TX budget. `PollStream` is authoritative
-  for `Readable`, `Writable`, `Closed`, and accepted/acknowledged byte watermarks. Legacy `Write`
-  requests defer while the device slot is occupied instead of being rejected spuriously.
+  for `Readable`, `Writable`, `Closed`, and accepted/acknowledged byte watermarks. `AwaitWritable`
+  defers one client request inside Network until that state changes, so clients without an event page
+  do not poll or wait on device events. Legacy `Write` requests defer while the device slot is
+  occupied instead of being rejected spuriously.
 - The reactor processes device replies directly and preserves FIFO event heads when the next event is
   for another source; typed client/network events cannot strand a pending device completion.
 - `StreamPage` is a coalesced notification cache, not a second transport or source of truth. On

@@ -585,6 +585,9 @@ impl Harness {
             self.send(&format!("LOGOS/1 INPUT {command}\n"))?;
             self.wait("LOGOS/1 RESULT input=accepted")?;
         }
+        if matches!(scenario.runner, Runner::RemoteCryptoKat) {
+            return self.run_id(scenario.id);
+        }
         if scenario.suite == "remote" {
             return self.run_remote(scenario);
         }
@@ -646,19 +649,28 @@ impl Harness {
             .ok_or("logosctl stdin")?
             .write_all(input.as_bytes())
             .map_err(io_error)?;
+        let mut timed_out = false;
         while child.try_wait().map_err(io_error)?.is_none() {
             if Instant::now() >= self.deadline {
+                timed_out = true;
                 let _ = child.kill();
                 break;
             }
             self.send("LOGOS/1 ADVANCE 64\n")?;
             let _ = self.wait("LOGOS/1 RESULT advance=accepted");
-            std::thread::sleep(Duration::from_millis(10));
         }
         let output = child.wait_with_output().map_err(io_error)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
+        if timed_out {
+            return Err(format!(
+                "logosctl timed out: stdout={} stderr={}",
+                stdout,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
         let passed = if suites::remote::auth_denied(scenario.runner) {
             !output.status.success()
+                && String::from_utf8_lossy(&output.stderr).contains("authentication rejected")
         } else {
             output.status.success() && stdout.contains("pong")
         };
@@ -1643,8 +1655,12 @@ fn run_fixture(
     }
     if let Err(error) = harness.shutdown() {
         if let Some(index) = last_result {
-            results[index].status = Status::Failed;
-            results[index].failure = Some(error);
+            if results[index].status == Status::Passed {
+                results[index].status = Status::Failed;
+                results[index].failure = Some(error);
+            } else if let Some(failure) = &mut results[index].failure {
+                failure.push_str(&format!("; shutdown: {error}"));
+            }
         }
         capture_failure(&fixture_dir, harness.qmp_port, &harness.qmp_log);
     }
@@ -2123,6 +2139,7 @@ mod tests {
                         | "network/timeout"
                         | "network/reset-reconnect"
                         | "network/tcp-stream"
+                        | "remote/crypto-kat"
                         | "remote/enrollment-persistence"
                         | "remote/auth-denied"
                         | "remote/typed-invoke"

@@ -39,6 +39,7 @@ pub(crate) enum Runner {
     PersistenceTimeoutReset,
     PersistenceTerminalHistory,
     PersistenceCapabilityDenied,
+    RemoteCryptoKat,
     RemoteAuthDenied,
     RemoteTypedInvoke,
 }

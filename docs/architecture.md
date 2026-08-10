@@ -781,6 +781,10 @@ readiness cache, and completion target. Once the Network service is bound and id
 submits `Status` directly to the Network server endpoint; Terminal is not a readiness dependency.
 `platform::runtime` retains only top-level polling and composition.
 
+Gateway waits for TCP send capacity through the typed `AwaitWritable` request. Network owns the
+deferred request and completes it from its device/event loop; Gateway never waits on a Network
+event endpoint it does not own.
+
 Every production Network completion wakes and runs its blocked caller task for both successful and
 error statuses. QEMU white-box requests use an explicit test-only probe target, so test completion
 cannot encode Terminal as a fake caller or weaken the production scheduler invariant. The intended

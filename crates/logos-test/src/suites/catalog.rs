@@ -282,6 +282,13 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
     ),
     scenario("remote/enrollment-persistence", "remote", Fixture::Persistence),
     configured_with_runner(
+        "remote/crypto-kat",
+        "remote",
+        &[],
+        Fixture::Fresh,
+        Runner::RemoteCryptoKat,
+    ),
+    configured_with_runner(
         "remote/auth-denied",
         "remote",
         &[],

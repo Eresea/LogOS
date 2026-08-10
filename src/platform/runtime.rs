@@ -2457,6 +2457,32 @@ pub(crate) fn run(
                 true
             }
             test_hooks::Action::Run(id) => {
+                if id == "remote/crypto-kat" {
+                    let result = logos_remote::crypto_kat();
+                    test_hooks::event(
+                        id,
+                        match result {
+                            Ok(()) => "passed",
+                            Err(logos_remote::CryptoKatPhase::Sha256) => "sha256",
+                            Err(logos_remote::CryptoKatPhase::X25519Public) => "x25519-public",
+                            Err(logos_remote::CryptoKatPhase::X25519Dh) => "x25519-dh",
+                            Err(logos_remote::CryptoKatPhase::ChaCha20Poly1305Encrypt) => {
+                                "chacha20poly1305-encrypt"
+                            }
+                            Err(logos_remote::CryptoKatPhase::ChaCha20Poly1305Decrypt) => {
+                                "chacha20poly1305-decrypt"
+                            }
+                            Err(logos_remote::CryptoKatPhase::NoiseFirstMessage) => {
+                                "noise-first-message"
+                            }
+                            Err(logos_remote::CryptoKatPhase::NoiseSecondMessage) => {
+                                "noise-second-message"
+                            }
+                            Err(logos_remote::CryptoKatPhase::Transport) => "transport",
+                        },
+                    );
+                    return result.is_ok();
+                }
                 if id == "network/tcp-stream" {
                     return run_network_tcp_stream(
                         native_terminal_network,

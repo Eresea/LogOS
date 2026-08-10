@@ -1,9 +1,9 @@
-#![no_main]
-#![no_std]
+#![cfg_attr(not(test), no_main)]
+#![cfg_attr(not(test), no_std)]
 
 use logos_abi::{
     MAX_TCP_PAYLOAD, NetworkEndpoint, NetworkOperation, NetworkProtocol, NetworkRequest,
-    NetworkScope, NetworkStatus, REMOTE_TCP_PORT,
+    NetworkScope, NetworkStatus, NetworkStreamReadiness, REMOTE_TCP_PORT,
     service::{RemoteGateOperation, RemoteGateStatus, RemotePageRequest},
 };
 use logos_remote::{
@@ -12,6 +12,47 @@ use logos_remote::{
 use logos_service_rt::{Header, ProtocolVersion, ServiceContext};
 
 const DEADLINE: u64 = u64::MAX / 2;
+const STREAM_CLOSED: u16 = NetworkStreamReadiness::Closed.bits();
+const STREAM_WRITABLE: u16 = NetworkStreamReadiness::Writable.bits();
+
+#[derive(Clone, Copy)]
+struct StreamTxState {
+    endpoint: NetworkEndpoint,
+    generation: u16,
+    accepted: u64,
+}
+
+impl StreamTxState {
+    fn new(stream: logos_abi::NetworkReply) -> Self {
+        Self {
+            endpoint: stream.endpoint,
+            generation: stream.generation,
+            accepted: stream.stream_accepted_bytes,
+        }
+    }
+
+    fn observe_poll(&mut self, reply: logos_abi::NetworkReply) -> bool {
+        if reply.status != NetworkStatus::Complete
+            || reply.endpoint != self.endpoint
+            || reply.generation != self.generation
+            || reply.stream_readiness & STREAM_CLOSED != 0
+            || reply.stream_acknowledged_bytes > reply.stream_accepted_bytes
+            || reply.stream_accepted_bytes < self.accepted
+        {
+            return false;
+        }
+        self.accepted = reply.stream_accepted_bytes;
+        true
+    }
+
+    fn accept_write(&mut self, reply: logos_abi::NetworkReply, length: usize) -> bool {
+        let expected = self.accepted.saturating_add(length as u64);
+        if !self.observe_poll(reply) || self.accepted != expected {
+            return false;
+        }
+        true
+    }
+}
 
 #[used]
 #[unsafe(link_section = ".logos")]
@@ -238,26 +279,80 @@ fn write_all(
     stream: logos_abi::NetworkReply,
     bytes: &[u8],
 ) -> bool {
-    for chunk in bytes.chunks(MAX_TCP_PAYLOAD) {
-        unsafe { core::ptr::copy_nonoverlapping(chunk.as_ptr(), address as *mut u8, chunk.len()) };
-        if network(
+    let mut state = StreamTxState::new(stream);
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let Some(poll) = network_reply(
             context,
             id,
-            NetworkOperation::Write,
+            NetworkOperation::PollStream,
+            stream.endpoint,
+            stream.generation,
+            logos_abi::PageHandle(0),
+            0,
+        ) else {
+            return false;
+        };
+        if !state.observe_poll(poll) {
+            return false;
+        }
+        if poll.stream_readiness & STREAM_WRITABLE == 0 {
+            if !await_writable(context, id, stream, &mut state) {
+                return false;
+            }
+            continue;
+        }
+        let length = core::cmp::min(MAX_TCP_PAYLOAD, bytes.len() - offset);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes[offset..offset + length].as_ptr(),
+                address as *mut u8,
+                length,
+            )
+        };
+        let Some(reply) = network_reply(
+            context,
+            id,
+            NetworkOperation::SubmitWrite,
             stream.endpoint,
             stream.generation,
             page,
-            chunk.len() as u16,
-        )
-        .is_none()
-        {
+            length as u16,
+        ) else {
             return false;
+        };
+        match reply.status {
+            NetworkStatus::Complete if state.accept_write(reply, length) => offset += length,
+            NetworkStatus::Busy => {
+                if !await_writable(context, id, stream, &mut state) {
+                    return false;
+                }
+            }
+            _ => return false,
         }
     }
     true
 }
 
-fn network(
+fn await_writable(
+    context: &mut ServiceContext,
+    id: &mut u32,
+    stream: logos_abi::NetworkReply,
+    state: &mut StreamTxState,
+) -> bool {
+    network_reply(
+        context,
+        id,
+        NetworkOperation::AwaitWritable,
+        stream.endpoint,
+        stream.generation,
+        logos_abi::PageHandle(0),
+        0,
+    )
+    .is_some_and(|reply| state.observe_poll(reply) && reply.stream_readiness & STREAM_WRITABLE != 0)
+}
+
+fn network_reply(
     context: &mut ServiceContext,
     id: &mut u32,
     operation: NetworkOperation,
@@ -285,11 +380,115 @@ fn network(
     if !context.request_network(request) {
         return None;
     }
-    context.network_response(request_id).filter(|reply| reply.status == NetworkStatus::Complete)
+    context.network_response(request_id)
+}
+
+fn network(
+    context: &mut ServiceContext,
+    id: &mut u32,
+    operation: NetworkOperation,
+    endpoint: NetworkEndpoint,
+    generation: u16,
+    page: logos_abi::PageHandle,
+    length: u16,
+) -> Option<logos_abi::NetworkReply> {
+    network_reply(context, id, operation, endpoint, generation, page, length)
+        .filter(|reply| reply.status == NetworkStatus::Complete)
 }
 
 fn spin() -> ! {
     loop {
         core::hint::spin_loop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reply(
+        status: NetworkStatus,
+        endpoint: NetworkEndpoint,
+        generation: u16,
+        readiness: u16,
+        accepted: u64,
+        acknowledged: u64,
+    ) -> logos_abi::NetworkReply {
+        logos_abi::NetworkReply {
+            id: 1,
+            status,
+            endpoint,
+            generation,
+            source_address: 0,
+            source_port: 0,
+            length: 0,
+            stream_readiness: readiness,
+            stream_reserved: 0,
+            stream_accepted_bytes: accepted,
+            stream_acknowledged_bytes: acknowledged,
+            info: logos_abi::NetworkInfo::default(),
+            counters: logos_abi::NetworkCounters::default(),
+        }
+    }
+
+    #[test]
+    fn stream_writer_tracks_cumulative_acceptance_without_duplicate_chunks() {
+        let endpoint = NetworkEndpoint(7);
+        let mut state =
+            StreamTxState::new(reply(NetworkStatus::Complete, endpoint, 3, STREAM_WRITABLE, 0, 0));
+
+        assert!(state.observe_poll(reply(
+            NetworkStatus::Complete,
+            endpoint,
+            3,
+            STREAM_WRITABLE,
+            0,
+            0,
+        )));
+        assert!(!state.accept_write(reply(NetworkStatus::Busy, endpoint, 3, 0, 0, 0), 4,));
+        assert_eq!(state.accepted, 0);
+        assert!(
+            state.accept_write(
+                reply(NetworkStatus::Complete, endpoint, 3, STREAM_WRITABLE, 4, 0),
+                4,
+            )
+        );
+        assert!(
+            !state.accept_write(
+                reply(NetworkStatus::Complete, endpoint, 3, STREAM_WRITABLE, 4, 4),
+                4,
+            )
+        );
+        assert!(
+            state.accept_write(
+                reply(NetworkStatus::Complete, endpoint, 3, STREAM_WRITABLE, 7, 4),
+                3,
+            )
+        );
+        assert_eq!(state.accepted, 7);
+    }
+
+    #[test]
+    fn stream_writer_rejects_reset_stale_and_closed_progress() {
+        let endpoint = NetworkEndpoint(7);
+        let mut state =
+            StreamTxState::new(reply(NetworkStatus::Complete, endpoint, 3, STREAM_WRITABLE, 0, 0));
+        assert!(!state.observe_poll(reply(NetworkStatus::Reset, endpoint, 3, 0, 0, 0,)));
+        assert!(!state.observe_poll(reply(
+            NetworkStatus::Complete,
+            endpoint,
+            4,
+            STREAM_WRITABLE,
+            0,
+            0,
+        )));
+        assert!(!state.observe_poll(reply(
+            NetworkStatus::Complete,
+            endpoint,
+            3,
+            STREAM_CLOSED,
+            0,
+            0,
+        )));
     }
 }

@@ -1052,7 +1052,8 @@ pub fn capability(request: NetworkRequest) -> Option<(CapabilityKind, u64)> {
         NetworkOperation::ReceiveFrom
         | NetworkOperation::Accept
         | NetworkOperation::Read
-        | NetworkOperation::PollStream => Some((CapabilityKind::NetworkReceive, request.peer.0)),
+        | NetworkOperation::PollStream
+        | NetworkOperation::AwaitWritable => Some((CapabilityKind::NetworkReceive, request.peer.0)),
         NetworkOperation::Status | NetworkOperation::Cancel | NetworkOperation::Close => None,
     }
 }

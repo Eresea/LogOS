@@ -249,8 +249,11 @@ impl Transport {
             builder.build_handshake_state::<logos_remote::NoiseChaCha, logos_remote::NoiseSha256>();
         let first = handshake.write_message_vec(&[]).map_err(|_| io::Error::other("noise"))?;
         write_frame(&mut stream, &first)?;
-        let second = read_frame(&mut stream)?;
-        handshake.read_message(&second, &mut []).map_err(|_| io::Error::other("noise"))?;
+        let second =
+            read_frame(&mut stream).map_err(|_| io::Error::other("authentication rejected"))?;
+        handshake
+            .read_message(&second, &mut [])
+            .map_err(|_| io::Error::other("authentication rejected"))?;
         if !handshake.completed() {
             return Err(io::Error::other("noise incomplete"));
         }

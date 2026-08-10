@@ -386,6 +386,7 @@ pub enum NetworkOperation {
     Write,
     SubmitWrite,
     PollStream,
+    AwaitWritable,
 }
 
 impl NetworkOperation {
@@ -404,6 +405,7 @@ impl NetworkOperation {
             11 => Some(Self::Write),
             12 => Some(Self::SubmitWrite),
             13 => Some(Self::PollStream),
+            14 => Some(Self::AwaitWritable),
             _ => None,
         }
     }
@@ -702,7 +704,7 @@ impl NetworkRequest {
                     && (1..=MAX_TCP_PAYLOAD).contains(&(self.length as usize))
                     && self.generation != 0
             }
-            NetworkOperation::PollStream => {
+            NetworkOperation::PollStream | NetworkOperation::AwaitWritable => {
                 self.endpoint.valid()
                     && self.peer.protocol() == Some(NetworkProtocol::Tcp)
                     && self.peer.valid()
@@ -828,7 +830,7 @@ impl NetworkReply {
                     && self.length == request.length
                     && self.generation == request.generation
             }
-            NetworkOperation::PollStream => {
+            NetworkOperation::PollStream | NetworkOperation::AwaitWritable => {
                 self.endpoint == request.endpoint
                     && self.source_address == 0
                     && self.source_port == 0
@@ -1572,6 +1574,8 @@ mod tests {
         };
         assert!(poll.valid_shape());
         assert!(!NetworkRequest { page: write.page, ..poll }.valid_shape());
+        let await_writable = NetworkRequest { operation: NetworkOperation::AwaitWritable, ..poll };
+        assert!(await_writable.valid_shape());
 
         let reply = NetworkReply {
             id: send.id,
@@ -1630,6 +1634,7 @@ mod tests {
             ..tcp_reply
         };
         assert!(poll_reply.valid_for(poll));
+        assert!(poll_reply.valid_for(await_writable));
         assert!(!NetworkReply { stream_readiness: 8, ..poll_reply }.valid_for(poll));
         assert!(!NetworkReply { stream_acknowledged_bytes: 7, ..poll_reply }.valid_for(poll));
         assert!(!NetworkReply { length: send.length - 1, ..reply }.valid_for(send));

@@ -77,6 +77,12 @@ struct AcceptOperation {
 }
 
 #[derive(Clone, Copy)]
+struct StreamWaitOperation {
+    request: NetworkRequest,
+    owner: u64,
+}
+
+#[derive(Clone, Copy)]
 struct SendOperation {
     request: NetworkRequest,
     awaiting_arp: bool,
@@ -93,6 +99,7 @@ struct EchoOperation {
 struct PendingOperations {
     receive: Option<ReceiveOperation>,
     accept: Option<AcceptOperation>,
+    stream_wait: Option<StreamWaitOperation>,
     send: Option<SendOperation>,
     echo: Option<EchoOperation>,
 }
@@ -782,6 +789,51 @@ fn run(context: &mut ServiceContext) -> ! {
                 }
                 continue;
             }
+            if request.operation == NetworkOperation::AwaitWritable {
+                let result = logos_net::EndpointId::from_wire(request.endpoint.0)
+                    .ok_or(logos_net::TcpStateError::Invalid)
+                    .and_then(|endpoint| state.tcp().stream_state(owner, endpoint));
+                let (status, readiness, accepted_bytes, acknowledged_bytes) = match result {
+                    Ok((readiness, accepted_bytes, acknowledged_bytes))
+                        if readiness & logos_abi::NetworkStreamReadiness::Writable.bits() == 0
+                            && readiness & logos_abi::NetworkStreamReadiness::Closed.bits()
+                                == 0 =>
+                    {
+                        reactor.operations.stream_wait =
+                            Some(StreamWaitOperation { request, owner });
+                        if !context.network_wait(request.deadline) {
+                            spin();
+                        }
+                        continue;
+                    }
+                    Ok((readiness, accepted_bytes, acknowledged_bytes)) => {
+                        (NetworkStatus::Complete, readiness, accepted_bytes, acknowledged_bytes)
+                    }
+                    Err(error) => (map_tcp_error(error), 0, 0, 0),
+                };
+                if !context.network_reply(NetworkReply {
+                    id: request.id,
+                    status,
+                    endpoint: if status == NetworkStatus::Complete {
+                        request.endpoint
+                    } else {
+                        NetworkEndpoint(0)
+                    },
+                    generation: request.generation,
+                    source_address: 0,
+                    source_port: 0,
+                    length: 0,
+                    stream_readiness: readiness,
+                    stream_reserved: 0,
+                    stream_accepted_bytes: accepted_bytes,
+                    stream_acknowledged_bytes: acknowledged_bytes,
+                    info,
+                    counters,
+                }) {
+                    spin();
+                }
+                continue;
+            }
             if request.operation == NetworkOperation::Write {
                 let Some(pages) = context.network_pages() else {
                     if !context.network_reply(error_reply(
@@ -1171,6 +1223,69 @@ fn run(context: &mut ServiceContext) -> ! {
                     }
                     continue;
                 }
+            }
+            if let Some(operation) = reactor.operations.stream_wait {
+                let request = operation.request;
+                let result = logos_net::EndpointId::from_wire(request.endpoint.0)
+                    .ok_or(logos_net::TcpStateError::Invalid)
+                    .and_then(|endpoint| state.tcp().stream_state(operation.owner, endpoint));
+                let (status, readiness, accepted_bytes, acknowledged_bytes) = match result {
+                    Ok((readiness, accepted_bytes, acknowledged_bytes))
+                        if readiness & logos_abi::NetworkStreamReadiness::Writable.bits() == 0
+                            && readiness & logos_abi::NetworkStreamReadiness::Closed.bits()
+                                == 0
+                            && now < request.deadline =>
+                    {
+                        continue;
+                    }
+                    Ok((readiness, accepted_bytes, acknowledged_bytes)) => {
+                        (NetworkStatus::Complete, readiness, accepted_bytes, acknowledged_bytes)
+                    }
+                    Err(error) => (map_tcp_error(error), 0, 0, 0),
+                };
+                reactor.operations.stream_wait = None;
+                let status = if now >= request.deadline && status == NetworkStatus::Complete {
+                    NetworkStatus::TimedOut
+                } else {
+                    status
+                };
+                if !context.network_reply_after_event(
+                    request,
+                    NetworkReply {
+                        id: request.id,
+                        status,
+                        endpoint: if status == NetworkStatus::Complete {
+                            request.endpoint
+                        } else {
+                            NetworkEndpoint(0)
+                        },
+                        generation: request.generation,
+                        source_address: 0,
+                        source_port: 0,
+                        length: 0,
+                        stream_readiness: if status == NetworkStatus::Complete {
+                            readiness
+                        } else {
+                            0
+                        },
+                        stream_reserved: 0,
+                        stream_accepted_bytes: if status == NetworkStatus::Complete {
+                            accepted_bytes
+                        } else {
+                            0
+                        },
+                        stream_acknowledged_bytes: if status == NetworkStatus::Complete {
+                            acknowledged_bytes
+                        } else {
+                            0
+                        },
+                        info,
+                        counters,
+                    },
+                ) {
+                    spin();
+                }
+                continue;
             }
             if let Some(operation) = reactor.operations.send
                 && operation.awaiting_arp
@@ -2154,7 +2269,8 @@ fn handle_request(
         | NetworkOperation::Read
         | NetworkOperation::Write
         | NetworkOperation::SubmitWrite
-        | NetworkOperation::PollStream => (NetworkStatus::Offline, NetworkEndpoint(0)),
+        | NetworkOperation::PollStream
+        | NetworkOperation::AwaitWritable => (NetworkStatus::Offline, NetworkEndpoint(0)),
     };
     NetworkReply {
         id: request.id,
@@ -2250,6 +2366,7 @@ mod tests {
         reactor.operations = PendingOperations {
             receive: Some(ReceiveOperation { request: request(1), owner: 7 }),
             accept: Some(AcceptOperation { request: request(2), owner: 8 }),
+            stream_wait: Some(StreamWaitOperation { request: request(3), owner: 9 }),
             send: Some(SendOperation { request: request(3), awaiting_arp: true, submitted: false }),
             echo: Some(EchoOperation { request: request(4), awaiting_arp: false }),
         };
@@ -2258,6 +2375,7 @@ mod tests {
 
         assert!(reactor.operations.receive.is_none());
         assert!(reactor.operations.accept.is_none());
+        assert!(reactor.operations.stream_wait.is_none());
         assert!(reactor.operations.send.is_none());
         assert!(reactor.operations.echo.is_none());
     }
