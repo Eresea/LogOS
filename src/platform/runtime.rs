@@ -1304,7 +1304,7 @@ pub(crate) fn run(
     if !native_input.deliver(logos_abi::InputEvent::STARTUP) {
         fail!(b"terminal history startup");
     }
-    if !native_scheduler.wake(native_handle) {
+    if !native_scheduler.wake_or_ready(native_handle) {
         fail!(b"terminal history startup");
     }
     if !native_scheduler.run(native_handle) {
@@ -1509,7 +1509,7 @@ pub(crate) fn run(
                         return false;
                     }
                     if !native_input.deliver(logos_abi::InputEvent::STARTUP)
-                        || !native_scheduler.wake(native_handle)
+                        || !native_scheduler.wake_or_ready(native_handle)
                         || !native_scheduler.run(native_handle)
                     {
                         return false;
@@ -1654,7 +1654,7 @@ pub(crate) fn run(
                         if !native_input.deliver(event) {
                             return false;
                         }
-                        if !native_scheduler.wake(native_handle)
+                        if !native_scheduler.wake_or_ready(native_handle)
                             || !native_scheduler.run(native_handle)
                         {
                             return false;
@@ -1759,12 +1759,12 @@ pub(crate) fn run(
                     let previous_context = native_display.context();
                     let failed = if value == "assert-terminal-service-panic" {
                         native_input.deliver_raw(0xfa)
-                            && native_scheduler.wake(previous)
+                            && native_scheduler.wake_or_ready(previous)
                             && native_scheduler.run(previous)
                             && native_scheduler.failed(previous)
                     } else if value == "assert-terminal-service-fault" {
                         native_input.deliver_raw(0xfb)
-                            && native_scheduler.wake(previous)
+                            && native_scheduler.wake_or_ready(previous)
                             && native_scheduler.run(previous)
                             && native_scheduler.failed(previous)
                     } else {
@@ -1824,7 +1824,7 @@ pub(crate) fn run(
                             native_handle,
                         )
                         || !native_input.deliver(logos_abi::InputEvent::STARTUP)
-                        || !native_scheduler.wake(native_handle)
+                        || !native_scheduler.wake_or_ready(native_handle)
                         || !native_scheduler.run(native_handle)
                     {
                         return false;
@@ -2251,7 +2251,7 @@ pub(crate) fn run(
                 if deny_display {
                     let passed = logos_abi::InputEvent::from_byte(b'x').is_some_and(|event| {
                         native_input.deliver(event)
-                            && native_scheduler.wake(native_handle)
+                            && native_scheduler.wake_or_ready(native_handle)
                             && native_scheduler.run(native_handle)
                             && !resume_display(
                                 native_display,
@@ -2268,7 +2268,7 @@ pub(crate) fn run(
                 let passed = value.bytes().chain(core::iter::once(b'\n')).all(|byte| {
                     logos_abi::InputEvent::from_byte(byte)
                         .is_some_and(|event| native_input.deliver(event))
-                        && native_scheduler.wake(native_handle)
+                        && native_scheduler.wake_or_ready(native_handle)
                         && native_scheduler.run(native_handle)
                         && storage_runtime.relay_terminal_store_requests(
                             native_store,
@@ -3334,7 +3334,7 @@ pub(crate) fn run(
                 if let Some(event) = input.next(tick, keyboard::poll_scancode) {
                     if let Some(native_event) = native_input_event(event) {
                         if !native_input.deliver(native_event)
-                            || !native_scheduler.wake(native_handle)
+                            || !native_scheduler.wake_or_ready(native_handle)
                             || !native_scheduler.run(native_handle)
                             || !resume_display(
                                 native_display,

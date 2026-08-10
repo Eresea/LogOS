@@ -1783,6 +1783,20 @@ impl<'a> Scheduler<'a> {
         true
     }
 
+    /// Wake a task for a bounded notification that may arrive while it is
+    /// already runnable. A failed task remains non-wakeable.
+    pub fn wake_or_ready(&mut self, handle: Handle) -> bool {
+        let Some(entry) = self.entry_mut(handle) else { return false };
+        if entry.waiting == Some(Event::FAILURE) {
+            return false;
+        }
+        if entry.waiting.is_some() {
+            entry.waiting = None;
+            crate::platform::trace::record(crate::platform::trace::Event::TaskWoken);
+        }
+        true
+    }
+
     pub fn fail(&mut self, handle: Handle) -> bool {
         let Some(entry) = self.entry_mut(handle) else { return false };
         if entry.waiting == Some(Event::FAILURE) {

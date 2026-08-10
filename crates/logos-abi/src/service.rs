@@ -168,7 +168,7 @@ pub struct ControlPage {
 ///
 /// | page | service transition | Core transition | reset/replacement |
 /// | --- | --- | --- | --- |
-/// | Input | `Ready -> Waiting -> Ready` (`wait_at`, `take_at`) | `Waiting -> Reply` (`deliver_at`) | reset to `Ready`; generation mismatch rejects |
+/// | Input | `Ready -> Waiting -> Ready` (`wait_at`, `take_at`) | `Ready/Waiting -> Reply` (`deliver_at`) | reset to `Ready`; generation mismatch rejects |
 /// | Display | `Ready -> Request -> Ready` (`request_*`, `finish_at`) | `Request -> Complete` (`complete_at`) | reset to `Ready`; generation mismatch rejects |
 ///
 /// Unknown scalar states and malformed payloads are rejected without a write.
@@ -640,7 +640,10 @@ impl ControlPage {
             return false;
         }
         context.input_page == 0
-            || unsafe { InputPage::waiting_at(context.input_page, context.generation) }
+            || unsafe {
+                InputPage::waiting_at(context.input_page, context.generation)
+                    || InputPage::reply_pending_at(context.input_page, context.generation)
+            }
     }
 
     pub unsafe fn store_client_page_at(address: u64) -> Option<u64> {
@@ -1558,9 +1561,12 @@ mod tests {
         assert!(unsafe { InputPage::waiting_at(address, 7) });
         assert!(!unsafe { InputPage::deliver_at(address, 8, b'x') });
         assert!(unsafe { InputPage::deliver_at(address, 7, b'x') });
+        assert!(unsafe { InputPage::reply_pending_at(address, 7) });
         assert_eq!(unsafe { InputPage::take_at(address, 7) }, Some(b'x'));
+        assert!(!unsafe { InputPage::reply_pending_at(address, 7) });
         assert!(unsafe { InputPage::take_at(address, 7) }.is_none());
-        assert!(!unsafe { InputPage::deliver_at(address, 7, b'y') });
+        assert!(unsafe { InputPage::deliver_at(address, 7, b'y') });
+        assert_eq!(unsafe { InputPage::take_at(address, 7) }, Some(b'y'));
         assert!(unsafe { InputPage::reset_at(address, 8) });
         assert!(!unsafe { InputPage::wait_at(address, 7) });
         assert!(unsafe { InputPage::wait_at(address, 8) });

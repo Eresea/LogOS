@@ -406,6 +406,10 @@ fn run(context: &mut ServiceContext) -> ! {
         }
         let byte = if let Some(byte) = deferred_input.take() {
             Some(byte)
+        } else if let Some(byte) = context.input_byte() {
+            // A store completion can wake us while the input endpoint already
+            // contains a reply. Consume that reply before arming another wait.
+            Some(byte)
         } else {
             if !context.wait_for_input() {
                 spin();
