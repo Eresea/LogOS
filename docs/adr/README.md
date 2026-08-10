@@ -38,3 +38,4 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0030](0030-bounded-deferred-runtime-primitives.md) | Accepted | Add bounded ABI-v5, manifest, resource, event, and polling primitives behind the ABI-v4 compatibility path. |
 | [0031](0031-network-stream-writable-wait.md) | Accepted | Keep deferred TCP writable waits inside Network's event owner. |
 | [0032](0032-bounded-task-contracts-and-proof-tiers.md) | Accepted | Scope work with bounded ownership contracts and select proofs by isolation boundary. |
+| [0033](0033-abi-v5-bounded-operations.md) | Accepted | Cut over native pages to ABI v5 operation tokens and bounded completion phases. |

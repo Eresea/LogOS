@@ -2,7 +2,7 @@
 
 > **Updated:** 2026-08-09
 >
-> **Current milestone:** ABI v4 stabilization and migration closeout
+> **Current milestone:** ABI v5 bounded async migration
 >
 > **Target:** A remotely operable, capability-based Rust OS with replaceable native services and sandboxed WASM applications.
 
@@ -27,9 +27,9 @@ persist/invoke/reply chain remain explicitly bounded conversion milestones and m
 nested execution dependencies. A capability-table admission defect that prevented Gateway startup
 under `test-hooks` is corrected; fresh TCP and Remote end-to-end proof failures remain open.
 
-## Post-ABI-v4 execution sequence
+## Post-ABI-v5 execution sequence
 
-The project spends one bounded cycle per step, then stops restructuring ABI v4:
+The project spends one bounded cycle per step, then stops restructuring ABI v5:
 
 1. Applications Foundation: prove one bundled capability-isolated WASM component.
 2. Persistence v2 artifact slice: bounded multi-page/streamed immutable artifacts, integrity and quota.

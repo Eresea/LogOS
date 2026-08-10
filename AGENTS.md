@@ -1,6 +1,6 @@
 # LogOS Agent Guide
 
-LogOS is an experimental `no_std` Rust UEFI kernel. The current milestone is ABI v4
+LogOS is an experimental `no_std` Rust UEFI kernel. The current milestone is ABI v5
 stabilization and migration closeout: Network bootstrap transport and the independent TCP
 foundation are implemented, while scalable Network work, one Network suite proof, and five
 explicitly skipped Remote proofs remain open.

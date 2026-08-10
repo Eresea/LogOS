@@ -2,6 +2,7 @@
 
 pub mod endpoint_v5;
 pub mod service;
+pub use service::{CompletionEnvelope, OperationPhase, OperationToken};
 
 pub const MAX_SESSION_TEXT: usize = 256;
 pub const PAGE_SIZE: usize = 4096;

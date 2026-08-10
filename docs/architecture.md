@@ -10,7 +10,7 @@ transport. Read [the documentation map](README.md) before opening optional annex
 
 LogOS is a `no_std` Rust UEFI kernel with a small privileged Core and replaceable services. Console,
 Platform, Persistence, and Network bootstrap slices are implemented. Scalable Network work and the
-remaining Remote proofs are still open; ABI v4 is not frozen until those ownership and proof gates pass.
+remaining Remote proofs are still open; ABI v5 is not frozen until those ownership and proof gates pass.
 
 ## Rings
 
@@ -40,7 +40,7 @@ mandatory process boundaries. Outer code depends inward through typed, capabilit
 - Production builds expose no test control surface. Host tests prove portable state and codecs; QEMU
   proves boot, devices, isolation, recovery, and public contracts.
 
-## ABI v4 native services
+## ABI v5 native services
 
 Each service receives one mapped `logos_abi::service::ControlPage` plus the typed endpoint pages named
 by its canonical `platform::services::ServiceSpec::endpoints`. Core maps, validates, loans, revokes,
@@ -48,8 +48,10 @@ and reclaims pages; services never receive physical addresses.
 
 Active typed pages include Input, Display, Session client/server, Effect, Store client/server, Storage
 Block, Network device/event/client/server/stream, and Remote pages. Page state is scalar-validated and
-generation-checked. ABI-v3 payloads are rejected; there is no compatibility adapter or dynamic endpoint
-registry in the active path.
+generation-checked. ABI-v4 payloads and descriptors are rejected at startup; there is no compatibility
+adapter or dynamic endpoint registry in the active path. Long-lived work carries a bounded
+`OperationToken` and `CompletionEnvelope`; only the owning scheduler may advance a token, and a
+terminal phase releases any page loan exactly once.
 
 Service replacement advances the generation before releasing the old address space. Stale handles,
 pages, replies, and completions are rejected and owned resources are reclaimed exactly once.

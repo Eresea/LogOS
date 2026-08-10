@@ -21,7 +21,7 @@ implementation work follows [the roadmap](roadmap.md), [TODO](TODO.md), and the 
 ## Explicit non-goals for the current milestone
 
 No Flow parser, compiler, bytecode VM, package registry, language server, general async runtime, or
-AI-specific authority is required for ABI v4 stabilization. The Phase 0 charter remains deferred until
+AI-specific authority is required for ABI v5 stabilization. The Phase 0 charter remains deferred until
 real stable system/application operations exist.
 
 ## Future gates

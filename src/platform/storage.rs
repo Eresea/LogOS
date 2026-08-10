@@ -18,8 +18,8 @@ pub const SECRETS_NAMESPACE: logos_abi::NamespaceId = logos_abi::NamespaceId(4);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoragePhase {
     Idle,
-    RequestAccepted,
-    StoragePending,
+    Accepted,
+    StorePending,
     BlockPending,
     DurableReplyReady,
     Complete,
@@ -32,12 +32,14 @@ pub enum StoragePhase {
 #[derive(Clone, Copy)]
 pub struct StorageOperation {
     pub request: logos_abi::StoreRequest,
+    pub token: logos_abi::service::OperationToken,
     pub identity: logos_core::operation::OperationIdentity,
     pub storage_owner: u64,
     pub page: logos_abi::PageHandle,
     pub loaned: bool,
     pub deadline: u64,
     pub response: Option<logos_abi::StoreReply>,
+    pub completion: Option<logos_abi::service::CompletionEnvelope>,
     pub block_phase: StoragePhase,
     pub generation: u32,
     pub phase: StoragePhase,
@@ -52,6 +54,7 @@ pub struct StorageRuntime {
     relay: RelayState,
     wake: Option<crate::sched::native_task::Handle>,
     operation: Option<StorageOperation>,
+    next_sequence: u64,
 }
 
 impl StorageRuntime {
@@ -70,6 +73,7 @@ impl StorageRuntime {
             relay: RelayState::new(),
             wake: None,
             operation: None,
+            next_sequence: 1,
         }
     }
 
@@ -85,6 +89,7 @@ impl StorageRuntime {
         self.relay.clear();
         self.wake = None;
         self.operation = None;
+        self.next_sequence = 1;
     }
 
     pub fn rebind_client(&mut self, store_client: crate::sched::native_task::StoreClientEndpoint) {
@@ -92,6 +97,7 @@ impl StorageRuntime {
         self.relay.clear();
         self.wake = None;
         self.operation = None;
+        self.next_sequence = 1;
     }
 
     fn bind_block_context(&self, context: &mut block::DispatchContext<'_>) {
@@ -101,6 +107,10 @@ impl StorageRuntime {
     pub fn poll_block(&mut self, context: &mut block::DispatchContext<'_>, tick: u64) -> bool {
         if !self.block_client.available() || !self.handle.available() {
             return true;
+        }
+        if let Some(operation) = self.operation.as_mut() {
+            operation.block_phase = StoragePhase::BlockPending;
+            operation.phase = StoragePhase::BlockPending;
         }
         let Some(reply) = self.block_reply(context, tick) else { return true };
         if !self.block_client.reply(reply) {
@@ -189,36 +199,26 @@ impl StorageRuntime {
         tick: u64,
     ) -> session::Relay {
         self.bind_block_context(context);
-        let request = terminal.request();
+        let Some(request) = terminal.request() else {
+            return session::Relay::Handled(true);
+        };
+        let generation = u32::from(self.handle.generation());
         if let Some(operation) = self.operation {
-            if request.is_some_and(|request| {
-                !operation.identity.matches(
-                    terminal_owner,
-                    u32::from(self.handle.generation()),
-                    request.id,
-                )
-            }) {
-                return session::Relay::Handled(terminal.reply(logos_abi::StoreReply {
-                    id: request.map_or(0, |request| request.id),
-                    status: logos_abi::PersistenceStatus::Unavailable,
-                    version: 0,
-                    length: 0,
-                }));
+            if !operation.token.matches(terminal_owner, generation, request.id)
+                || !operation.identity.matches(terminal_owner, generation, request.id)
+            {
+                return session::Relay::Handled(false);
             }
-        } else if let Some(request) = request {
-            let Some(identity) = logos_core::operation::OperationIdentity::new(
-                terminal_owner,
-                u32::from(self.handle.generation()),
-                request.id,
-            ) else {
-                return session::Relay::Handled(terminal.reply(logos_abi::StoreReply {
-                    id: request.id,
-                    status: logos_abi::PersistenceStatus::Invalid,
-                    version: 0,
-                    length: 0,
-                }));
-            };
-            if identity.expired(request.deadline, tick) {
+            if operation.identity.expired(operation.deadline, tick) {
+                if operation.loaned {
+                    let _ = context.pages.return_loan(storage_owner, operation.page);
+                }
+                let _completion = logos_abi::service::CompletionEnvelope {
+                    token: operation.token,
+                    phase: logos_abi::service::OperationPhase::TimedOut,
+                    status: logos_abi::PersistenceStatus::TimedOut as u32,
+                };
+                self.operation = None;
                 return session::Relay::Handled(terminal.reply(logos_abi::StoreReply {
                     id: request.id,
                     status: logos_abi::PersistenceStatus::TimedOut,
@@ -226,45 +226,166 @@ impl StorageRuntime {
                     length: 0,
                 }));
             }
-            self.operation = Some(StorageOperation {
-                request,
-                identity,
-                storage_owner,
-                page: request.page,
-                loaned: false,
-                deadline: request.deadline,
-                response: None,
-                block_phase: StoragePhase::Idle,
-                generation: u32::from(self.handle.generation()),
-                phase: StoragePhase::RequestAccepted,
-            });
+            if let Some(reply) = self.store_server.response(request.id) {
+                if operation.loaned {
+                    let _ = context.pages.return_loan(storage_owner, operation.page);
+                }
+                update_store_state(&mut self.relay, request, reply.status);
+                if let Some(operation) = self.operation.as_mut() {
+                    operation.response = Some(reply);
+                    operation.completion = Some(logos_abi::service::CompletionEnvelope {
+                        token: operation.token,
+                        phase: if reply.status == logos_abi::PersistenceStatus::Complete {
+                            logos_abi::service::OperationPhase::Complete
+                        } else {
+                            logos_abi::service::OperationPhase::Failed
+                        },
+                        status: reply.status as u32,
+                    });
+                }
+                self.operation = None;
+                let resumed = !self.handle.available()
+                    || (scheduler.wake(self.handle) && scheduler.run(self.handle));
+                return session::Relay::Handled(resumed && terminal.reply(reply));
+            }
+            if scheduler.failed(self.handle) {
+                if operation.loaned {
+                    let _ = context.pages.return_loan(storage_owner, operation.page);
+                }
+                self.operation = None;
+                return session::Relay::Handled(false);
+            }
+            if let Some(reply) = self.block_dispatch.poll(context, tick) {
+                if let Some(operation) = self.operation.as_mut() {
+                    operation.phase = StoragePhase::BlockPending;
+                    operation.block_phase = StoragePhase::BlockPending;
+                }
+                if !context.endpoint.reply(reply)
+                    || !scheduler.wake(self.handle)
+                    || !scheduler.run(self.handle)
+                {
+                    if operation.loaned {
+                        let _ = context.pages.return_loan(storage_owner, operation.page);
+                    }
+                    self.operation = None;
+                    return session::Relay::Handled(false);
+                }
+                if let Some(operation) = self.operation.as_mut() {
+                    operation.phase = StoragePhase::DurableReplyReady;
+                    operation.block_phase = StoragePhase::DurableReplyReady;
+                }
+            }
+            if let Some(operation) = self.operation.as_mut() {
+                operation.phase = StoragePhase::StorePending;
+                operation.completion = Some(logos_abi::service::CompletionEnvelope {
+                    token: operation.token,
+                    phase: logos_abi::service::OperationPhase::Pending,
+                    status: 0,
+                });
+            }
+            let _ = scheduler.wake(self.handle) && scheduler.run(self.handle);
+            return session::Relay::Runnable(self.handle);
         }
-        let relay = relay_store_request(
-            terminal,
-            self.store_server,
-            &mut self.block_dispatch,
-            context,
-            terminal_owner,
-            storage_owner,
-            history_page,
-            scheduler,
-            self.handle,
-            session,
-            capabilities,
-            &mut self.relay,
-            tick,
+
+        let Some(identity) =
+            logos_core::operation::OperationIdentity::new(terminal_owner, generation, request.id)
+        else {
+            return session::Relay::Handled(false);
+        };
+        let Some(namespace) = store_namespace(request, &self.relay) else {
+            return session::Relay::Handled(terminal.reply(logos_abi::StoreReply {
+                id: request.id,
+                status: logos_abi::PersistenceStatus::Denied,
+                version: 0,
+                length: 0,
+            }));
+        };
+        if !session.allows_scoped(capabilities, store_capability(request.operation), namespace.0) {
+            return session::Relay::Handled(terminal.reply(logos_abi::StoreReply {
+                id: request.id,
+                status: logos_abi::PersistenceStatus::Denied,
+                version: 0,
+                length: 0,
+            }));
+        }
+        if !self.store_server.available() || !self.handle.available() {
+            return session::Relay::Handled(terminal.reply(logos_abi::StoreReply {
+                id: request.id,
+                status: logos_abi::PersistenceStatus::Unavailable,
+                version: 0,
+                length: 0,
+            }));
+        }
+        let needs_page = matches!(
+            request.operation,
+            logos_abi::StoreOperation::ReadChunk | logos_abi::StoreOperation::WriteChunk
         );
-        if let Some(operation) = self.operation.as_mut() {
-            operation.phase = match relay {
-                session::Relay::Handled(true) | session::Relay::Recovery => StoragePhase::Complete,
-                session::Relay::Handled(false) => StoragePhase::Failed,
-                session::Relay::Runnable(_) => StoragePhase::StoragePending,
+        let loaned = if needs_page {
+            let Some(page) = terminal.transfer_page() else {
+                return session::Relay::Handled(false);
             };
+            if page != history_page
+                || context.pages.address(storage_owner, page).is_some()
+                || context.pages.address(terminal_owner, page).is_none()
+                || !context.pages.lend(terminal_owner, page, storage_owner)
+            {
+                return session::Relay::Handled(false);
+            }
+            true
+        } else {
+            false
+        };
+        if !self.store_server.waiting()
+            && (!scheduler.wake(self.handle) || !scheduler.run(self.handle))
+        {
+            return session::Relay::Handled(false);
         }
-        if !matches!(relay, session::Relay::Runnable(_)) {
-            self.operation = None;
+        if !self.store_server.deliver(request, terminal_owner) {
+            if loaned {
+                let _ = context.pages.return_loan(storage_owner, request.page);
+            }
+            return session::Relay::Handled(false);
         }
-        relay
+        if !scheduler.wake(self.handle) || !scheduler.run(self.handle) {
+            if loaned {
+                let _ = context.pages.return_loan(storage_owner, request.page);
+            }
+            return session::Relay::Handled(false);
+        }
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1).max(1);
+        let deadline = request.deadline.max(tick.saturating_add(100));
+        let Some(token) = logos_abi::service::OperationToken::new(
+            terminal_owner,
+            generation,
+            request.id,
+            deadline,
+            sequence,
+        ) else {
+            if loaned {
+                let _ = context.pages.return_loan(storage_owner, request.page);
+            }
+            return session::Relay::Handled(false);
+        };
+        self.operation = Some(StorageOperation {
+            request,
+            token,
+            identity,
+            storage_owner,
+            page: request.page,
+            loaned,
+            deadline,
+            response: None,
+            completion: Some(logos_abi::service::CompletionEnvelope {
+                token,
+                phase: logos_abi::service::OperationPhase::Accepted,
+                status: logos_abi::service::READY,
+            }),
+            block_phase: StoragePhase::Idle,
+            generation,
+            phase: StoragePhase::Accepted,
+        });
+        session::Relay::Runnable(self.handle)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -282,22 +403,25 @@ impl StorageRuntime {
         tick: u64,
     ) -> bool {
         self.bind_block_context(context);
-        relay_terminal_store_requests(
+        let had_request = terminal.request().is_some();
+        let relay = self.relay_store_request(
             terminal,
-            self.store_server,
-            &mut self.block_dispatch,
             context,
             terminal_owner,
             storage_owner,
             history_page,
             scheduler,
-            terminal_handle,
-            self.handle,
             session,
             capabilities,
-            &mut self.relay,
             tick,
-        )
+        );
+        match relay {
+            session::Relay::Handled(ok) => {
+                ok && (!had_request
+                    || (scheduler.wake(terminal_handle) && scheduler.run(terminal_handle)))
+            }
+            session::Relay::Recovery | session::Relay::Runnable(_) => true,
+        }
     }
 
     pub fn cancel_store_transaction(&self, scheduler: &mut native_task::Scheduler<'_>) -> bool {
@@ -463,143 +587,6 @@ fn update_store_state(
             }
         }
         logos_abi::StoreOperation::ReadChunk | logos_abi::StoreOperation::WriteChunk => {}
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn relay_store_request(
-    terminal: native_task::StoreClientEndpoint,
-    storage: native_task::StoreServerEndpoint,
-    dispatch: &mut block::Dispatch,
-    block_context: &mut block::DispatchContext<'_>,
-    terminal_owner: u64,
-    storage_owner: u64,
-    history_page: logos_abi::PageHandle,
-    scheduler: &mut native_task::Scheduler<'_>,
-    storage_handle: native_task::Handle,
-    session: &session::Context,
-    capabilities: &capabilities::CapabilityManager,
-    state: &mut RelayState,
-    tick: u64,
-) -> session::Relay {
-    let Some(request) = terminal.request() else {
-        return session::Relay::Handled(true);
-    };
-    if !storage.available() || !storage_handle.available() {
-        return session::Relay::Handled(terminal.reply(logos_abi::StoreReply {
-            id: request.id,
-            status: logos_abi::PersistenceStatus::Unavailable,
-            version: 0,
-            length: 0,
-        }));
-    }
-    let Some(namespace) = store_namespace(request, state) else {
-        let _ = terminal.reply(logos_abi::StoreReply {
-            id: request.id,
-            status: logos_abi::PersistenceStatus::Denied,
-            version: 0,
-            length: 0,
-        });
-        return session::Relay::Handled(true);
-    };
-    if !session.allows_scoped(capabilities, store_capability(request.operation), namespace.0) {
-        let replied = terminal.reply(logos_abi::StoreReply {
-            id: request.id,
-            status: logos_abi::PersistenceStatus::Denied,
-            version: 0,
-            length: 0,
-        });
-        return session::Relay::Handled(replied);
-    }
-    if !storage.waiting() {
-        if scheduler.wake(storage_handle) {
-            if !scheduler.run(storage_handle) {
-                return session::Relay::Handled(false);
-            }
-        } else if !scheduler.run(storage_handle) {
-            return session::Relay::Handled(false);
-        }
-        if !storage.waiting() {
-            return session::Relay::Handled(false);
-        }
-    }
-    let needs_page = matches!(
-        request.operation,
-        logos_abi::StoreOperation::ReadChunk | logos_abi::StoreOperation::WriteChunk
-    );
-    let mut loaned = false;
-    if needs_page {
-        let Some(page) = terminal.transfer_page() else {
-            let _ = terminal.reply(logos_abi::StoreReply {
-                id: request.id,
-                status: logos_abi::PersistenceStatus::Denied,
-                version: 0,
-                length: 0,
-            });
-            return session::Relay::Handled(true);
-        };
-        if page != history_page
-            || block_context.pages.address(storage_owner, page).is_some()
-            || block_context.pages.address(terminal_owner, page).is_none()
-            || !block_context.pages.lend(terminal_owner, page, storage_owner)
-        {
-            let _ = terminal.reply(logos_abi::StoreReply {
-                id: request.id,
-                status: logos_abi::PersistenceStatus::Denied,
-                version: 0,
-                length: 0,
-            });
-            return session::Relay::Handled(true);
-        }
-        loaned = true;
-    }
-    if !storage.deliver(request, terminal_owner) {
-        if loaned {
-            let _ = block_context.pages.return_loan(storage_owner, request.page);
-        }
-        return session::Relay::Handled(false);
-    }
-    let storage_ready = scheduler.wake(storage_handle) && scheduler.run(storage_handle);
-    if !storage_ready {
-        if loaned {
-            let _ = block_context.pages.return_loan(storage_owner, request.page);
-        }
-        return session::Relay::Handled(false);
-    }
-    let mut current_tick = tick;
-    loop {
-        if let Some(reply) = storage.response(request.id) {
-            if loaned {
-                let _ = block_context.pages.return_loan(storage_owner, request.page);
-            }
-            update_store_state(state, request, reply.status);
-            let terminal_replied = scheduler.wake(storage_handle)
-                && scheduler.run(storage_handle)
-                && terminal.reply(reply);
-            return session::Relay::Handled(terminal_replied);
-        }
-        if scheduler.failed(storage_handle) {
-            if loaned {
-                let _ = block_context.pages.return_loan(storage_owner, request.page);
-            }
-            return session::Relay::Handled(false);
-        }
-        if let Some(reply) = dispatch.poll(block_context, current_tick) {
-            if !block_context.endpoint.reply(reply)
-                || !scheduler.wake(storage_handle)
-                || !scheduler.run(storage_handle)
-            {
-                if loaned {
-                    let _ = block_context.pages.return_loan(storage_owner, request.page);
-                }
-                return session::Relay::Handled(false);
-            }
-        } else if dispatch.accepts_new_request() {
-            interrupts::wait_for_tick();
-        } else {
-            interrupts::wait_for_virtio();
-        }
-        current_tick = interrupts::ticks();
     }
 }
 
@@ -906,59 +893,6 @@ pub fn persist_remote_enrollment(
         *state = secrets::RemoteState::unavailable(bootstrap);
         false
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn relay_terminal_store_requests(
-    terminal: native_task::StoreClientEndpoint,
-    storage: native_task::StoreServerEndpoint,
-    dispatch: &mut block::Dispatch,
-    block_context: &mut block::DispatchContext<'_>,
-    terminal_owner: u64,
-    storage_owner: u64,
-    history_page: logos_abi::PageHandle,
-    scheduler: &mut native_task::Scheduler<'_>,
-    terminal_handle: native_task::Handle,
-    storage_handle: native_task::Handle,
-    session: &session::Context,
-    capabilities: &capabilities::CapabilityManager,
-    state: &mut RelayState,
-    tick: u64,
-) -> bool {
-    while terminal.request().is_some() {
-        let relayed = relay_store_request(
-            terminal,
-            storage,
-            dispatch,
-            block_context,
-            terminal_owner,
-            storage_owner,
-            history_page,
-            scheduler,
-            storage_handle,
-            session,
-            capabilities,
-            state,
-            tick,
-        )
-        .ok();
-        if !relayed {
-            let Some(request) = terminal.request() else { return false };
-            if !terminal.reply(logos_abi::StoreReply {
-                id: request.id,
-                status: logos_abi::PersistenceStatus::Unavailable,
-                version: 0,
-                length: 0,
-            }) {
-                return false;
-            }
-        }
-        let terminal_ready = scheduler.wake(terminal_handle) && scheduler.run(terminal_handle);
-        if !terminal_ready {
-            return false;
-        }
-    }
-    true
 }
 
 pub fn cancel_store_transaction(

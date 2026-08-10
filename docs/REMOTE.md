@@ -70,7 +70,7 @@ are implemented.
   reset, restart, or protected-corruption orchestration.
 
 The remote proof IDs are registered in `logos-test`. They remain explicit verification work rather
-than environment-gated work. ABI v4 is not frozen until the full Network suite, all Remote proofs,
+than environment-gated work. ABI v5 is not frozen until the full Network suite, all Remote proofs,
 and the remaining ownership extraction pass together.
 
 ## Current ownership checkpoint

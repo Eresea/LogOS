@@ -20,7 +20,7 @@ pub use session::*;
 pub use storage::*;
 
 pub const MAGIC: [u8; 4] = *b"LGSV";
-pub const ABI: u16 = 4;
+pub const ABI: u16 = 5;
 pub const MAX_TEXT: usize = 256;
 pub const READY: u32 = 1;
 pub const READ_INPUT: u32 = 2;
@@ -53,9 +53,87 @@ pub const STORAGE_CORRUPT: u32 = 4;
 pub const STORAGE_IO_FAILED: u32 = 5;
 pub const STORAGE_UNAVAILABLE: u32 = 6;
 
+/// ABI-v5 operation phases shared by every bounded cross-boundary task.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub enum OperationPhase {
+    Accepted = 1,
+    Pending = 2,
+    Blocked = 3,
+    Completing = 4,
+    Complete = 5,
+    Failed = 6,
+    TimedOut = 7,
+    Cancelled = 8,
+}
+
+impl OperationPhase {
+    pub const fn from_wire(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::Accepted,
+            2 => Self::Pending,
+            3 => Self::Blocked,
+            4 => Self::Completing,
+            5 => Self::Complete,
+            6 => Self::Failed,
+            7 => Self::TimedOut,
+            8 => Self::Cancelled,
+            _ => return None,
+        })
+    }
+
+    pub const fn terminal(self) -> bool {
+        matches!(self, Self::Complete | Self::Failed | Self::TimedOut | Self::Cancelled)
+    }
+}
+
+/// Owner/generation/request identity carried by ABI-v5 operation pages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct OperationToken {
+    pub owner: u64,
+    pub generation: u32,
+    pub request_id: u32,
+    pub deadline: u64,
+    pub sequence: u64,
+}
+
+impl OperationToken {
+    pub const fn new(
+        owner: u64,
+        generation: u32,
+        request_id: u32,
+        deadline: u64,
+        sequence: u64,
+    ) -> Option<Self> {
+        if owner == 0 || generation == 0 || request_id == 0 || deadline == 0 || sequence == 0 {
+            None
+        } else {
+            Some(Self { owner, generation, request_id, deadline, sequence })
+        }
+    }
+
+    pub const fn matches(self, owner: u64, generation: u32, request_id: u32) -> bool {
+        self.owner == owner && self.generation == generation && self.request_id == request_id
+    }
+
+    pub const fn expired(self, tick: u64) -> bool {
+        tick >= self.deadline
+    }
+}
+
+/// Fixed-size completion envelope; notifications never replace this state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct CompletionEnvelope {
+    pub token: OperationToken,
+    pub phase: OperationPhase,
+    pub status: u32,
+}
+
 /// Core-owned control page shared by one native service.
 ///
-/// ABI v4 keeps the control header compact and puts service-specific request
+/// ABI v5 keeps the control header compact and puts service-specific request
 /// payloads behind typed endpoint pages. The header is stored in a dedicated
 /// page mapping; endpoint mappings are granted explicitly by the service
 /// specification.
@@ -850,6 +928,7 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
     pub const V1: Self = Self { major: 1, minor: 0 };
+    pub const V2: Self = Self { major: 2, minor: 0 };
 
     pub const fn supports(self, required: Self) -> bool {
         self.major == required.major && self.minor >= required.minor
@@ -898,9 +977,11 @@ pub fn self_check() -> bool {
     let reset = unsafe { ControlPage::reset_at((&mut control as *mut ControlPage) as u64) }
         && control.abi == ABI
         && control.operation == 0;
-    Header::new(*b"terminal\0\0\0\0\0\0\0\0", ProtocolVersion::V1, self_check_entry)
-        .valid_for(b"terminal", ProtocolVersion::V1)
+    Header::new(*b"terminal\0\0\0\0\0\0\0\0", ProtocolVersion::V2, self_check_entry)
+        .valid_for(b"terminal", ProtocolVersion::V2)
         && !Header::new(*b"terminal\0\0\0\0\0\0\0\0", ProtocolVersion::V1, self_check_entry)
+            .valid_for(b"terminal", ProtocolVersion::V2)
+        && !Header::new(*b"terminal\0\0\0\0\0\0\0\0", ProtocolVersion::V2, self_check_entry)
             .valid_for(b"other", ProtocolVersion::V1)
         && reset
 }
@@ -915,6 +996,20 @@ extern "C" fn self_check_entry(_: *mut ControlPage) -> ! {
 mod tests {
     use super::*;
     use logos_abi::{NetworkEndpoint, NetworkProtocol, NetworkScope, PageHandle};
+
+    #[test]
+    fn v5_operation_tokens_are_bounded_and_terminal() {
+        assert!(OperationToken::new(0, 1, 1, 1, 1).is_none());
+        let token = OperationToken::new(7, 3, 9, 10, 2).unwrap();
+        assert!(token.matches(7, 3, 9));
+        assert!(!token.matches(7, 4, 9));
+        assert!(!token.expired(9));
+        assert!(token.expired(10));
+        assert!(OperationPhase::Complete.terminal());
+        assert!(!OperationPhase::Pending.terminal());
+        assert_eq!(OperationPhase::from_wire(8), Some(OperationPhase::Cancelled));
+        assert_eq!(OperationPhase::from_wire(0), None);
+    }
 
     fn bind_request(id: u32) -> logos_abi::NetworkRequest {
         logos_abi::NetworkRequest {

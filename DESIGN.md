@@ -5,7 +5,7 @@
 
 The former design document was a large proposal for allocator growth, service manifests, a HAL,
 structured errors, async IPC, testing, CI, and other future work. It is not an active requirements
-list; several proposals are implemented, deferred, or superseded by the current ABI-v4 architecture.
+list; several proposals are implemented, deferred, or superseded by the current ABI-v5 architecture.
 
 Use these documents instead:
 

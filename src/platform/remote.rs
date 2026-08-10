@@ -23,6 +23,7 @@ pub enum RemotePhase {
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub struct RemoteOperation {
+    pub token: logos_abi::service::OperationToken,
     pub identity: logos_core::operation::OperationIdentity,
     pub page: logos_abi::PageHandle,
     pub sequence: u64,
@@ -117,12 +118,18 @@ impl RemoteRuntime {
         if input.len() > logos_remote::MAX_FRAME || self.operation.is_some() {
             return false;
         }
+        let Some(token) =
+            logos_abi::service::OperationToken::new(owner, generation, request_id, deadline, 1)
+        else {
+            return false;
+        };
         let mut owned = [0; logos_remote::MAX_FRAME];
         owned[..input.len()].copy_from_slice(input);
         self.operation = Some(RemoteOperation {
+            token,
             identity,
             page,
-            sequence: 0,
+            sequence: 1,
             phase: RemotePhase::Received,
             deadline,
             input: owned,

@@ -412,7 +412,7 @@ pub fn self_check() -> bool {
             name: B,
             dependencies: &[A],
             capabilities: &[],
-            protocol: Protocol { abi: 1, version: 0 },
+            protocol: Protocol { abi: 2, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
             recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
@@ -423,7 +423,7 @@ pub fn self_check() -> bool {
             name: A,
             dependencies: &[],
             capabilities: &[],
-            protocol: Protocol { abi: 1, version: 0 },
+            protocol: Protocol { abi: 2, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
             recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
@@ -435,7 +435,7 @@ pub fn self_check() -> bool {
         name: A,
         dependencies: &[B],
         capabilities: &[],
-        protocol: Protocol { abi: 1, version: 0 },
+        protocol: Protocol { abi: 2, version: 0 },
         restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         recovery: RecoveryClass::Restartable,
         profiles: Profiles::ALL,
@@ -447,7 +447,7 @@ pub fn self_check() -> bool {
             name: A,
             dependencies: &[B],
             capabilities: &[],
-            protocol: Protocol { abi: 1, version: 0 },
+            protocol: Protocol { abi: 2, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
             recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
@@ -458,7 +458,7 @@ pub fn self_check() -> bool {
             name: B,
             dependencies: &[A],
             capabilities: &[],
-            protocol: Protocol { abi: 1, version: 0 },
+            protocol: Protocol { abi: 2, version: 0 },
             restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
             recovery: RecoveryClass::Restartable,
             profiles: Profiles::ALL,
@@ -474,9 +474,9 @@ pub fn protocol_self_check() -> bool {
     let Ok(plan) = boot_plan(Profile::Normal) else {
         return false;
     };
-    plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 1, version: 2 })
-        == Some(Protocol { abi: 1, version: 0 })
-        && plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 2, version: 0 }).is_none()
+    plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 2, version: 2 })
+        == Some(Protocol { abi: 2, version: 0 })
+        && plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 1, version: 0 }).is_none()
         && plan.recovery(SUPERVISOR) == Some(RecoveryClass::Fatal)
         && plan.recovery(VIRTIO_BLOCK) == Some(RecoveryClass::Resettable)
         && plan.recovery(TERMINAL) == Some(RecoveryClass::Restartable)
@@ -488,7 +488,7 @@ pub fn dependency_loss_self_check() -> bool {
         name: b"a",
         dependencies: &[b"missing"],
         capabilities: &[],
-        protocol: Protocol { abi: 1, version: 0 },
+        protocol: Protocol { abi: 2, version: 0 },
         restart: RestartPolicy { retries: 1, backoff_ticks: 1 },
         recovery: RecoveryClass::Restartable,
         profiles: Profiles::ALL,
@@ -499,7 +499,7 @@ pub fn dependency_loss_self_check() -> bool {
 
 pub fn startup_failure_self_check() -> bool {
     boot_plan(Profile::Normal)
-        .is_ok_and(|plan| plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 2, version: 0 }).is_none())
+        .is_ok_and(|plan| plan.negotiate(VIRTIO_BALLOON, Protocol { abi: 1, version: 0 }).is_none())
 }
 
 pub fn diagnostics_self_check() -> bool {

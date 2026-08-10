@@ -7,7 +7,7 @@ use logos_service_rt::{Header, ProtocolVersion, ServiceContext};
 #[used]
 #[unsafe(link_section = ".logos")]
 static HEADER: Header =
-    Header::new(*b"sessions\0\0\0\0\0\0\0\0", ProtocolVersion::V1, logos_service_entry);
+    Header::new(*b"sessions\0\0\0\0\0\0\0\0", ProtocolVersion::V2, logos_service_entry);
 
 #[unsafe(no_mangle)]
 extern "C" fn logos_service_entry(context: logos_service_rt::EntryControlPage) -> ! {

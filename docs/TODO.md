@@ -3,7 +3,7 @@
 This is the active implementation list. Current contracts and proof evidence live in the linked
 subsystem documents; completed work and old milestone ledgers are kept in `reviewed/` and ADRs.
 
-## Current milestone: ABI v4 stabilization and migration closeout
+## Current milestone: ABI v5 bounded async migration
 
 - [x] Repair the Network suite proofs: `network/simultaneous-client-busy` and
       `network/tcp-stream` pass with structured contention, exact-byte, and watermark assertions.
@@ -13,8 +13,7 @@ subsystem documents; completed work and old milestone ledgers are kept in `revie
       the gate denial/close path.
 - [ ] Implement the five skipped Remote proofs with real multi-boot/reconnect/restart orchestration
       and precise persisted-state postconditions.
-- [ ] Freeze ABI v4 structure only after Network, Remote, and ownership gates pass; require a new ADR
-      for exceptions.
+- [ ] Freeze ABI v5 structure only after Network, Remote, Storage, Gateway, and ownership gates pass.
 
 ## Async-first follow-up
 
@@ -23,8 +22,9 @@ subsystem documents; completed work and old milestone ledgers are kept in `revie
 - [ ] Convert Storage relay and protected Remote persistence into bounded request/block/completion
       phases without changing durable commit semantics or page-loan cleanup; current wrappers still
       synchronously drive dependent services.
-- [ ] Define observable sequence/generation conventions where existing APIs need resynchronization.
+- [x] Define observable sequence/generation conventions in the ABI v5 operation token and completion envelope.
 - [ ] Replace bootstrap Network global wait slots only after the multi-connection proof.
+- [ ] Move Gateway from the single connection loop to a fixed connection table with per-phase backpressure.
 
 All boundary work uses the [bounded task contract template](task-contract-template.md). Host
 acceptance tests cover local state and ownership; QEMU/fault proofs are selected by the modified

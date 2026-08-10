@@ -49,7 +49,7 @@ fn release(
 #[used]
 #[unsafe(link_section = ".logos")]
 static HEADER: Header =
-    Header::new(*b"storage\0\0\0\0\0\0\0\0\0", ProtocolVersion::V1, logos_service_entry);
+    Header::new(*b"storage\0\0\0\0\0\0\0\0\0", ProtocolVersion::V2, logos_service_entry);
 
 struct BlockBackend {
     client: BlockClient,

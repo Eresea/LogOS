@@ -111,7 +111,7 @@ mod tests {
     fn rejects_duplicate_and_oversized_manifest_entries() {
         let mut manifest = ServiceManifest::new();
         let entry =
-            ManifestEntry { service_id: 1, abi: 1, version: 1, capabilities: 0, endpoint_count: 1 };
+            ManifestEntry { service_id: 1, abi: 2, version: 1, capabilities: 0, endpoint_count: 1 };
         assert_eq!(manifest.add(entry), Ok(()));
         assert_eq!(manifest.add(entry), Err(ManifestError::Invalid));
         assert_eq!(

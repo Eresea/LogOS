@@ -224,7 +224,7 @@ const SUPERVISOR_SPEC: ServiceSpec = ServiceSpec {
     name: SUPERVISOR,
     dependencies: &[],
     capabilities: &[],
-    protocol: Protocol { abi: 1, version: 0 },
+    protocol: Protocol { abi: 2, version: 0 },
     restart: RestartPolicy { retries: 0, backoff_ticks: 0 },
     recovery: RecoveryClass::Fatal,
     profiles: Profiles::ALL,
@@ -235,7 +235,7 @@ const VIRTIO_BALLOON_SPEC: ServiceSpec = ServiceSpec {
     name: VIRTIO_BALLOON,
     dependencies: &[SUPERVISOR],
     capabilities: &[CapabilityKind::Service],
-    protocol: Protocol { abi: 1, version: 0 },
+    protocol: Protocol { abi: 2, version: 0 },
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Resettable,
     profiles: Profiles::NORMAL_RECOVERY,
@@ -246,7 +246,7 @@ const VIRTIO_BLOCK_SPEC: ServiceSpec = ServiceSpec {
     name: VIRTIO_BLOCK,
     dependencies: &[SUPERVISOR],
     capabilities: &[CapabilityKind::Service, CapabilityKind::Block, CapabilityKind::Memory],
-    protocol: Protocol { abi: 1, version: 0 },
+    protocol: Protocol { abi: 2, version: 0 },
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Resettable,
     profiles: Profiles::NORMAL_RECOVERY,
@@ -262,7 +262,7 @@ const STORAGE_SPEC: ServiceSpec = ServiceSpec {
         CapabilityKind::StoreRead,
         CapabilityKind::StoreWrite,
     ],
-    protocol: Protocol { abi: 1, version: 0 },
+    protocol: Protocol { abi: 2, version: 0 },
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_RECOVERY,
@@ -273,7 +273,7 @@ const TERMINAL_SPEC: ServiceSpec = ServiceSpec {
     name: TERMINAL,
     dependencies: &[SUPERVISOR],
     capabilities: &[CapabilityKind::Service, CapabilityKind::Input, CapabilityKind::Display],
-    protocol: Protocol { abi: 1, version: 0 },
+    protocol: Protocol { abi: 2, version: 0 },
     restart: RestartPolicy { retries: 1, backoff_ticks: 0 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
@@ -284,7 +284,7 @@ const SESSIONS_SPEC: ServiceSpec = ServiceSpec {
     name: SESSIONS,
     dependencies: &[SUPERVISOR],
     capabilities: &[CapabilityKind::Service, CapabilityKind::Session],
-    protocol: Protocol { abi: 1, version: 0 },
+    protocol: Protocol { abi: 2, version: 0 },
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
@@ -300,7 +300,7 @@ const NETWORK_SPEC: ServiceSpec = ServiceSpec {
         CapabilityKind::NetworkSend,
         CapabilityKind::NetworkReceive,
     ],
-    protocol: Protocol { abi: 1, version: 0 },
+    protocol: Protocol { abi: 2, version: 0 },
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
@@ -316,7 +316,7 @@ const GATEWAY_SPEC: ServiceSpec = ServiceSpec {
         CapabilityKind::NetworkSend,
         CapabilityKind::NetworkReceive,
     ],
-    protocol: Protocol { abi: 1, version: 0 },
+    protocol: Protocol { abi: 2, version: 0 },
     restart: RestartPolicy { retries: 3, backoff_ticks: 2 },
     recovery: RecoveryClass::Restartable,
     profiles: Profiles::NORMAL_ONLY,
@@ -358,7 +358,7 @@ impl Service {
 pub fn self_check() -> bool {
     SERVICE_SPECS.iter().all(|spec| spec.service.spec().name == spec.name)
         && SERVICE_SPECS.len() == SERVICES
-        && Service::Terminal.spec().protocol == Protocol { abi: 1, version: 0 }
+        && Service::Terminal.spec().protocol == Protocol { abi: 2, version: 0 }
         && has_endpoint(Service::Storage.spec().endpoints, EndpointKind::StoreServer)
         && has_endpoint(Service::Terminal.spec().endpoints, EndpointKind::SessionClient)
         && has_endpoint(Service::Sessions.spec().endpoints, EndpointKind::SessionServer)
