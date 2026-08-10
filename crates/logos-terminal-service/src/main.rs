@@ -46,6 +46,228 @@ fn page_bytes(page: SharedPage) -> &'static mut [u8; logos_abi::PAGE_SIZE] {
     unsafe { &mut *(page.address as *mut [u8; logos_abi::PAGE_SIZE]) }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HistoryPhase {
+    Idle,
+    LoadOpen,
+    LoadRead,
+    SaveBegin,
+    SaveWrite,
+    SaveCommit,
+    SaveAbort,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HistoryPoll {
+    Idle,
+    Pending,
+    Complete,
+    Failed,
+}
+
+struct HistoryTask {
+    phase: HistoryPhase,
+    request_id: u32,
+    page: Option<SharedPage>,
+}
+
+impl HistoryTask {
+    const fn new() -> Self {
+        Self { phase: HistoryPhase::Idle, request_id: 0, page: None }
+    }
+
+    const fn pending(&self) -> bool {
+        !matches!(self.phase, HistoryPhase::Idle)
+    }
+
+    fn issue(
+        &mut self,
+        context: &mut ServiceContext,
+        request: StoreRequest,
+        phase: HistoryPhase,
+    ) -> bool {
+        if !context.request_store(request) {
+            return false;
+        }
+        self.request_id = request.id;
+        self.phase = phase;
+        true
+    }
+
+    fn start_load(&mut self, context: &mut ServiceContext, next: &mut u32) -> bool {
+        if self.pending() {
+            return false;
+        }
+        let Some(page) = context.shared_page() else { return false };
+        self.page = Some(page);
+        let open = request(
+            next_id(next),
+            StoreOperation::OpenRead,
+            VersionSelector::Current,
+            0,
+            0,
+            PageHandle(0),
+        );
+        self.issue(context, open, HistoryPhase::LoadOpen)
+    }
+
+    fn start_save(
+        &mut self,
+        terminal: &Model,
+        context: &mut ServiceContext,
+        next: &mut u32,
+    ) -> bool {
+        if self.pending() {
+            return false;
+        }
+        let Some(page) = context.shared_page() else { return false };
+        page_bytes(page)[..HISTORY_BYTES].copy_from_slice(&terminal.export_history());
+        self.page = Some(page);
+        let begin = request(
+            next_id(next),
+            StoreOperation::BeginReplace,
+            VersionSelector::None,
+            0,
+            HISTORY_BYTES as u32,
+            PageHandle(0),
+        );
+        self.issue(context, begin, HistoryPhase::SaveBegin)
+    }
+
+    fn poll(
+        &mut self,
+        terminal: &mut Model,
+        context: &mut ServiceContext,
+        next: &mut u32,
+    ) -> HistoryPoll {
+        let phase = self.phase;
+        if phase == HistoryPhase::Idle {
+            return HistoryPoll::Idle;
+        }
+        let Some(reply) = context.store_response(self.request_id) else {
+            return HistoryPoll::Pending;
+        };
+        let Some(page) = self.page else {
+            self.phase = HistoryPhase::Idle;
+            return HistoryPoll::Failed;
+        };
+        match phase {
+            HistoryPhase::LoadOpen => match reply.status {
+                logos_abi::PersistenceStatus::NotFound => {
+                    self.phase = HistoryPhase::Idle;
+                    HistoryPoll::Complete
+                }
+                logos_abi::PersistenceStatus::Complete
+                    if reply.length as usize == HISTORY_BYTES =>
+                {
+                    let read = request(
+                        next_id(next),
+                        StoreOperation::ReadChunk,
+                        VersionSelector::None,
+                        0,
+                        HISTORY_BYTES as u32,
+                        page.handle,
+                    );
+                    if self.issue(context, read, HistoryPhase::LoadRead) {
+                        HistoryPoll::Pending
+                    } else {
+                        self.phase = HistoryPhase::Idle;
+                        HistoryPoll::Failed
+                    }
+                }
+                logos_abi::PersistenceStatus::Complete | logos_abi::PersistenceStatus::Corrupt => {
+                    self.phase = HistoryPhase::Idle;
+                    let _ = terminal.write_output(b"history corrupt");
+                    HistoryPoll::Complete
+                }
+                _ => {
+                    self.phase = HistoryPhase::Idle;
+                    let _ = terminal.write_output(b"history persistence failed");
+                    HistoryPoll::Failed
+                }
+            },
+            HistoryPhase::LoadRead => {
+                self.phase = HistoryPhase::Idle;
+                if reply.status != logos_abi::PersistenceStatus::Complete
+                    || reply.length as usize != HISTORY_BYTES
+                {
+                    let _ = terminal.write_output(b"history corrupt");
+                    return HistoryPoll::Complete;
+                }
+                if !terminal.restore_history_bytes(&page_bytes(page)[..HISTORY_BYTES]) {
+                    let _ = terminal.write_output(b"history corrupt");
+                }
+                HistoryPoll::Complete
+            }
+            HistoryPhase::SaveBegin => {
+                if reply.status != logos_abi::PersistenceStatus::Complete {
+                    self.phase = HistoryPhase::Idle;
+                    return HistoryPoll::Failed;
+                }
+                let write = request(
+                    next_id(next),
+                    StoreOperation::WriteChunk,
+                    VersionSelector::None,
+                    0,
+                    HISTORY_BYTES as u32,
+                    page.handle,
+                );
+                if self.issue(context, write, HistoryPhase::SaveWrite) {
+                    HistoryPoll::Pending
+                } else {
+                    self.phase = HistoryPhase::Idle;
+                    HistoryPoll::Failed
+                }
+            }
+            HistoryPhase::SaveWrite => {
+                if reply.status != logos_abi::PersistenceStatus::Complete {
+                    let abort = request(
+                        next_id(next),
+                        StoreOperation::Abort,
+                        VersionSelector::None,
+                        0,
+                        0,
+                        PageHandle(0),
+                    );
+                    if self.issue(context, abort, HistoryPhase::SaveAbort) {
+                        return HistoryPoll::Pending;
+                    }
+                    self.phase = HistoryPhase::Idle;
+                    return HistoryPoll::Failed;
+                }
+                let commit = request(
+                    next_id(next),
+                    StoreOperation::Commit,
+                    VersionSelector::None,
+                    0,
+                    0,
+                    PageHandle(0),
+                );
+                if self.issue(context, commit, HistoryPhase::SaveCommit) {
+                    HistoryPoll::Pending
+                } else {
+                    self.phase = HistoryPhase::Idle;
+                    HistoryPoll::Failed
+                }
+            }
+            HistoryPhase::SaveCommit => {
+                self.phase = HistoryPhase::Idle;
+                if reply.status == logos_abi::PersistenceStatus::Complete {
+                    HistoryPoll::Complete
+                } else {
+                    HistoryPoll::Failed
+                }
+            }
+            HistoryPhase::SaveAbort => {
+                self.phase = HistoryPhase::Idle;
+                HistoryPoll::Failed
+            }
+            HistoryPhase::Idle => HistoryPoll::Idle,
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn load_history_with(
     terminal: &mut Model,
     page: SharedPage,
@@ -98,14 +320,7 @@ fn load_history_with(
     }
 }
 
-fn load_history(terminal: &mut Model, context: &mut ServiceContext, next: &mut u32) {
-    let Some(page) = context.shared_page() else {
-        let _ = terminal.write_output(b"history persistence failed");
-        return;
-    };
-    load_history_with(terminal, page, next, |request| context.store(request));
-}
-
+#[cfg_attr(not(test), allow(dead_code))]
 fn abort_replace(
     next: &mut u32,
     store: &mut impl FnMut(StoreRequest) -> Option<logos_abi::StoreReply>,
@@ -120,6 +335,7 @@ fn abort_replace(
     ));
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn save_history_with(
     terminal: &Model,
     page: SharedPage,
@@ -160,11 +376,6 @@ fn save_history_with(
     true
 }
 
-fn save_history(terminal: &Model, context: &mut ServiceContext, next: &mut u32) -> bool {
-    let Some(page) = context.shared_page() else { return false };
-    save_history_with(terminal, page, next, |request| context.store(request))
-}
-
 #[used]
 #[unsafe(link_section = ".logos")]
 static HEADER: Header =
@@ -183,12 +394,25 @@ fn run(context: &mut ServiceContext) -> ! {
     let _ = terminal.write_output(b"LOGOS RING3 TERMINAL");
     let mut next_store_id = 1;
     let mut history_started = false;
+    let mut history = HistoryTask::new();
+    let mut deferred_input = None;
     while context.acknowledged() {
         render(&mut terminal, context);
-        if !context.wait_for_input() {
-            spin();
+        match history.poll(&mut terminal, context, &mut next_store_id) {
+            HistoryPoll::Failed => {
+                let _ = terminal.write_output(b"history persistence failed");
+            }
+            HistoryPoll::Idle | HistoryPoll::Pending | HistoryPoll::Complete => {}
         }
-        let Some(byte) = context.input_byte() else {
+        let byte = if let Some(byte) = deferred_input.take() {
+            Some(byte)
+        } else {
+            if !context.wait_for_input() {
+                spin();
+            }
+            context.input_byte()
+        };
+        let Some(byte) = byte else {
             continue;
         };
         #[cfg(feature = "test-hooks")]
@@ -200,16 +424,26 @@ fn run(context: &mut ServiceContext) -> ! {
         if !history_started {
             history_started = true;
             if byte == logos_abi::InputEvent::STARTUP.byte() {
-                load_history(&mut terminal, context, &mut next_store_id);
+                if !history.start_load(context, &mut next_store_id) {
+                    let _ = terminal.write_output(b"history persistence failed");
+                }
                 continue;
             }
-            load_history(&mut terminal, context, &mut next_store_id);
+            if !history.start_load(context, &mut next_store_id) {
+                let _ = terminal.write_output(b"history persistence failed");
+            }
+            deferred_input = Some(byte);
+            continue;
+        }
+        if history.pending() {
+            deferred_input = Some(byte);
+            continue;
         }
         let Some(input) = logos_abi::InputEvent::from_byte(byte) else {
             continue;
         };
         match input.byte() {
-            b'\n' => submit_line(&mut terminal, context, &mut next_store_id),
+            b'\n' => submit_line(&mut terminal, context, &mut next_store_id, &mut history),
             0x08 => {
                 let _ = terminal.backspace();
             }
@@ -249,10 +483,15 @@ fn inject_failure(control: u32) {
     }
 }
 
-fn submit_line(terminal: &mut Model, context: &mut ServiceContext, next: &mut u32) {
+fn submit_line(
+    terminal: &mut Model,
+    context: &mut ServiceContext,
+    next: &mut u32,
+    history: &mut HistoryTask,
+) {
     let submission = terminal.submit();
     let _ = terminal.write_output(submission.as_bytes());
-    if !submission.as_bytes().is_empty() && !save_history(terminal, context, next) {
+    if !submission.as_bytes().is_empty() && !history.start_save(terminal, context, next) {
         let _ = terminal.write_output(b"history persistence failed");
     }
     match command::pipeline(submission) {

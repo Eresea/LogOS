@@ -333,13 +333,21 @@ impl ServiceContext {
     }
 
     pub fn store(&mut self, request: logos_abi::StoreRequest) -> Option<logos_abi::StoreReply> {
-        let (page, generation) = self.store_client_page()?;
-        if unsafe { !StoreClientPage::request_at(page, generation, generation, request) }
-            || !self.invoke(native_service::STORE_REQUEST)
-        {
+        if !self.request_store(request) {
             return None;
         }
-        unsafe { StoreClientPage::finish_at(page, generation, generation, request.id) }
+        self.store_response(request.id)
+    }
+
+    pub fn request_store(&mut self, request: logos_abi::StoreRequest) -> bool {
+        let Some((page, generation)) = self.store_client_page() else { return false };
+        (unsafe { StoreClientPage::request_at(page, generation, generation, request) })
+            && self.invoke(native_service::STORE_REQUEST)
+    }
+
+    pub fn store_response(&self, id: u32) -> Option<logos_abi::StoreReply> {
+        let (page, generation) = self.store_client_page()?;
+        unsafe { StoreClientPage::finish_at(page, generation, generation, id) }
     }
 
     pub fn store_request(&self) -> Option<native_service::StoreServerRequest> {

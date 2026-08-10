@@ -1310,48 +1310,33 @@ pub(crate) fn run(
     if !native_scheduler.run(native_handle) {
         fail!(b"terminal history startup");
     }
-    for _ in 0..512 {
-        if native_store.request().is_none() {
-            break;
-        }
-        let _ = storage_runtime.relay_terminal_store_requests(
-            native_store,
-            &mut block::DispatchContext {
-                endpoint: native_storage_block,
-                pages: &mut shared_pages,
-                store_owner: storage_owner,
-                store_page: storage_block_page,
-                device: &mut block_device,
-                memory: &mut memory,
-            },
-            terminal_owner,
-            storage_owner,
-            shared_history,
-            &mut native_scheduler,
-            native_handle,
-            &session,
-            &capabilities,
-            interrupts::ticks(),
-        );
-        let _ = native_scheduler.run_next();
-        interrupts::wait_for_tick();
-    }
-    let terminal_history_startup = native_store.request().is_none();
-    debug::write_line(if terminal_history_startup {
-        b"LogOS: terminal history startup relay passed"
-    } else {
-        b"LogOS: terminal history startup relay failed"
-    });
-    if !terminal_history_startup
-        || !resume_display(
-            native_display,
-            &session,
-            &capabilities,
-            session_display_capability,
-            &mut native_scheduler,
-            native_handle,
-        )
-    {
+    let _ = storage_runtime.relay_terminal_store_requests(
+        native_store,
+        &mut block::DispatchContext {
+            endpoint: native_storage_block,
+            pages: &mut shared_pages,
+            store_owner: storage_owner,
+            store_page: storage_block_page,
+            device: &mut block_device,
+            memory: &mut memory,
+        },
+        terminal_owner,
+        storage_owner,
+        shared_history,
+        &mut native_scheduler,
+        native_handle,
+        &session,
+        &capabilities,
+        interrupts::ticks(),
+    );
+    if !resume_display(
+        native_display,
+        &session,
+        &capabilities,
+        session_display_capability,
+        &mut native_scheduler,
+        native_handle,
+    ) {
         fail!(b"terminal history startup");
     }
     native_services.ready(supervisor::NativeService::Terminal);
