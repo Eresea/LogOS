@@ -3333,17 +3333,21 @@ pub(crate) fn run(
                 }
                 if let Some(event) = input.next(tick, keyboard::poll_scancode) {
                     if let Some(native_event) = native_input_event(event) {
-                        if !native_input.deliver(native_event)
-                            || !native_scheduler.wake_or_ready(native_handle)
-                            || !native_scheduler.run(native_handle)
-                            || !resume_display(
-                                native_display,
-                                &session,
-                                &capabilities,
-                                session_display_capability,
-                                &mut native_scheduler,
-                                native_handle,
-                            )
+                        let notified = native_input
+                            .deliver(native_event)
+                            .then(|| native_scheduler.notify_input(native_handle));
+                        if notified.is_none()
+                            || notified.flatten() == Some(false)
+                            || notified.flatten().is_some_and(|_| {
+                                !resume_display(
+                                    native_display,
+                                    &session,
+                                    &capabilities,
+                                    session_display_capability,
+                                    &mut native_scheduler,
+                                    native_handle,
+                                )
+                            })
                         {
                             if native_services.failed(supervisor::NativeService::Terminal, tick)
                                 == supervisor::FailureAction::Retry

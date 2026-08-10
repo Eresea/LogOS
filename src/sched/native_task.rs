@@ -1797,6 +1797,21 @@ impl<'a> Scheduler<'a> {
         true
     }
 
+    /// Deliver input without interrupting a task blocked on another phase.
+    pub fn notify_input(&mut self, handle: Handle) -> Option<bool> {
+        let entry = self.entry_mut(handle)?;
+        match entry.waiting {
+            Some(Event::FAILURE) => Some(false),
+            Some(Event::INPUT) => {
+                entry.waiting = None;
+                crate::platform::trace::record(crate::platform::trace::Event::TaskWoken);
+                Some(self.run(handle))
+            }
+            Some(_) => None,
+            None => Some(self.run(handle)),
+        }
+    }
+
     pub fn fail(&mut self, handle: Handle) -> bool {
         let Some(entry) = self.entry_mut(handle) else { return false };
         if entry.waiting == Some(Event::FAILURE) {
