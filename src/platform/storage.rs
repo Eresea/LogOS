@@ -424,8 +424,28 @@ impl StorageRuntime {
         }
     }
 
-    pub fn cancel_store_transaction(&self, scheduler: &mut native_task::Scheduler<'_>) -> bool {
-        cancel_store_transaction(self.store_server, scheduler, self.handle)
+    pub fn cancel_terminal_store_operation(
+        &mut self,
+        context: &mut block::DispatchContext<'_>,
+    ) -> bool {
+        let Some(operation) = self.operation.take() else {
+            return true;
+        };
+        self.bind_block_context(context);
+        self.block_dispatch.cancel_on_exit(context);
+        if operation.loaned && !context.pages.return_loan(operation.storage_owner, operation.page) {
+            return false;
+        }
+        let reply = logos_abi::StoreReply {
+            id: operation.request.id,
+            status: logos_abi::PersistenceStatus::Cancelled,
+            version: 0,
+            length: 0,
+        };
+        let server_replied = self.store_server.reply(reply);
+        let _ = self.store_server.response(operation.request.id);
+        self.wake = None;
+        server_replied
     }
 
     pub fn persist_remote_control(

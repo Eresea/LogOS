@@ -1368,6 +1368,18 @@ pub(crate) fn run(
                     if !native_scheduler.fail(previous_terminal) || !startup.start() {
                         return false;
                     }
+                    if !storage_runtime.cancel_terminal_store_operation(
+                        &mut block::DispatchContext {
+                            endpoint: native_storage_block,
+                            pages: &mut shared_pages,
+                            store_owner: storage_owner,
+                            store_page: storage_block_page,
+                            device: &mut block_device,
+                            memory: &mut memory,
+                        },
+                    ) {
+                        return false;
+                    }
                     let Some((restarted_terminal, endpoints, history)) = replace_terminal(
                         &mut native_scheduler,
                         &mut network_runtime,
@@ -1502,7 +1514,7 @@ pub(crate) fn run(
                     {
                         return false;
                     }
-                    if !storage_runtime.relay_terminal_store_requests(
+                    let _ = storage_runtime.relay_terminal_store_requests(
                         native_store,
                         &mut block::DispatchContext {
                             endpoint: native_storage_block,
@@ -1520,7 +1532,8 @@ pub(crate) fn run(
                         &session,
                         &capabilities,
                         interrupts::ticks(),
-                    ) || !resume_display(
+                    );
+                    if !resume_display(
                         native_display,
                         &session,
                         &capabilities,
@@ -1801,34 +1814,36 @@ pub(crate) fn run(
                         || !native_input.deliver(logos_abi::InputEvent::STARTUP)
                         || !native_scheduler.wake(native_handle)
                         || !native_scheduler.run(native_handle)
-                        || !storage_runtime.relay_terminal_store_requests(
-                            native_store,
-                            &mut block::DispatchContext {
-                                endpoint: native_storage_block,
-                                pages: &mut shared_pages,
-                                store_owner: storage_owner,
-                                store_page: storage_block_page,
-                                device: &mut block_device,
-                                memory: &mut memory,
-                            },
-                            terminal_owner,
-                            storage_owner,
-                            shared_history,
-                            &mut native_scheduler,
-                            native_handle,
-                            &session,
-                            &capabilities,
-                            interrupts::ticks(),
-                        )
-                        || !resume_display(
-                            native_display,
-                            &session,
-                            &capabilities,
-                            session_display_capability,
-                            &mut native_scheduler,
-                            native_handle,
-                        )
                     {
+                        return false;
+                    }
+                    let _ = storage_runtime.relay_terminal_store_requests(
+                        native_store,
+                        &mut block::DispatchContext {
+                            endpoint: native_storage_block,
+                            pages: &mut shared_pages,
+                            store_owner: storage_owner,
+                            store_page: storage_block_page,
+                            device: &mut block_device,
+                            memory: &mut memory,
+                        },
+                        terminal_owner,
+                        storage_owner,
+                        shared_history,
+                        &mut native_scheduler,
+                        native_handle,
+                        &session,
+                        &capabilities,
+                        interrupts::ticks(),
+                    );
+                    if !resume_display(
+                        native_display,
+                        &session,
+                        &capabilities,
+                        session_display_capability,
+                        &mut native_scheduler,
+                        native_handle,
+                    ) {
                         return false;
                     }
                 }
@@ -3322,8 +3337,16 @@ pub(crate) fn run(
                                 == supervisor::FailureAction::Retry
                                 && native_services.due(supervisor::NativeService::Terminal, tick)
                             {
-                                if !storage_runtime.cancel_store_transaction(&mut native_scheduler)
-                                {
+                                if !storage_runtime.cancel_terminal_store_operation(
+                                    &mut block::DispatchContext {
+                                        endpoint: native_storage_block,
+                                        pages: &mut shared_pages,
+                                        store_owner: storage_owner,
+                                        store_page: storage_block_page,
+                                        device: &mut block_device,
+                                        memory: &mut memory,
+                                    },
+                                ) {
                                     console_mode = mode::ConsoleMode::Recovery;
                                     break;
                                 }
@@ -3573,19 +3596,26 @@ pub(crate) fn run(
                 }
                 if matches!(action, console::Action::RestartTerminal) {
                     native_services.manual_restart(supervisor::NativeService::Terminal);
-                    if storage_runtime.cancel_store_transaction(&mut native_scheduler)
-                        && let Some((restarted, endpoints, history)) = replace_terminal(
-                            &mut native_scheduler,
-                            &mut network_runtime,
-                            native_handle,
-                            storage_handle,
-                            &mut memory,
-                            &mut shared_pages,
-                            terminal_owner,
-                            storage_owner,
-                            shared_history,
-                        )
-                    {
+                    if storage_runtime.cancel_terminal_store_operation(
+                        &mut block::DispatchContext {
+                            endpoint: native_storage_block,
+                            pages: &mut shared_pages,
+                            store_owner: storage_owner,
+                            store_page: storage_block_page,
+                            device: &mut block_device,
+                            memory: &mut memory,
+                        },
+                    ) && let Some((restarted, endpoints, history)) = replace_terminal(
+                        &mut native_scheduler,
+                        &mut network_runtime,
+                        native_handle,
+                        storage_handle,
+                        &mut memory,
+                        &mut shared_pages,
+                        terminal_owner,
+                        storage_owner,
+                        shared_history,
+                    ) {
                         native_handle = restarted;
                         (
                             native_input,

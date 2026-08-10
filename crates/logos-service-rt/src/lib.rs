@@ -215,7 +215,9 @@ impl ServiceContext {
         let Some((page, generation)) = self.endpoint_page(native_service::READ_INPUT) else {
             return false;
         };
-        (unsafe { InputPage::wait_at(page, generation) }) && self.invoke(native_service::READ_INPUT)
+        (unsafe { InputPage::wait_at(page, generation) }
+            || unsafe { InputPage::waiting_at(page, generation) })
+            && self.invoke(native_service::READ_INPUT)
     }
 
     pub fn wait_for_request(&mut self) -> bool {

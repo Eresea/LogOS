@@ -742,6 +742,18 @@ impl StoreServerEndpoint {
         }
     }
 
+    pub fn reply(self, reply: logos_abi::StoreReply) -> bool {
+        self.available()
+            && unsafe {
+                logos_abi::service::StoreServerPage::reply_at(
+                    self.page_physical,
+                    self.service_generation,
+                    self.endpoint_generation,
+                    reply,
+                )
+            }
+    }
+
     pub fn configure_transfer(self, page: logos_abi::PageHandle) -> bool {
         if !self.available() {
             return false;
