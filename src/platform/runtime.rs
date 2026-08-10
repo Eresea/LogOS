@@ -1654,9 +1654,7 @@ pub(crate) fn run(
                         if !native_input.deliver(event) {
                             return false;
                         }
-                        if !native_scheduler.wake_or_ready(native_handle)
-                            || !native_scheduler.run(native_handle)
-                        {
+                        if native_scheduler.notify_input(native_handle) == Some(false) {
                             return false;
                         }
                         if !storage_runtime.relay_terminal_store_requests(
@@ -2251,8 +2249,7 @@ pub(crate) fn run(
                 if deny_display {
                     let passed = logos_abi::InputEvent::from_byte(b'x').is_some_and(|event| {
                         native_input.deliver(event)
-                            && native_scheduler.wake_or_ready(native_handle)
-                            && native_scheduler.run(native_handle)
+                            && native_scheduler.notify_input(native_handle) != Some(false)
                             && !resume_display(
                                 native_display,
                                 &denied_session,
@@ -2268,8 +2265,7 @@ pub(crate) fn run(
                 let passed = value.bytes().chain(core::iter::once(b'\n')).all(|byte| {
                     logos_abi::InputEvent::from_byte(byte)
                         .is_some_and(|event| native_input.deliver(event))
-                        && native_scheduler.wake_or_ready(native_handle)
-                        && native_scheduler.run(native_handle)
+                        && native_scheduler.notify_input(native_handle) != Some(false)
                         && storage_runtime.relay_terminal_store_requests(
                             native_store,
                             &mut block::DispatchContext {
