@@ -24,7 +24,9 @@ subsystem documents; completed work and old milestone ledgers are kept in `revie
       synchronously drive dependent services.
 - [x] Define observable sequence/generation conventions in the ABI v5 operation token and completion envelope.
 - [ ] Replace bootstrap Network global wait slots only after the multi-connection proof.
-- [ ] Move Gateway from the single connection loop to a fixed connection table with per-phase backpressure.
+- [ ] Finish Gateway migration from the single connection loop to independently stepped table entries.
+- [x] Add bounded Network operation identity slots and owner/generation cancellation checks.
+- [x] Add the fixed Gateway connection table and explicit read/decode/remote/write/close phases.
 
 All boundary work uses the [bounded task contract template](task-contract-template.md). Host
 acceptance tests cover local state and ownership; QEMU/fault proofs are selected by the modified
