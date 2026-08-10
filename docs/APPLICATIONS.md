@@ -33,4 +33,4 @@ Run portable applications as capability-isolated WASM components without making 
 
 A WASM application can be installed, run, communicate, persist, stop, and be removed using only granted interfaces. Failure remains isolated and resource limits remain enforceable.
 
-See [Architecture](architecture.md#ring-4--runtime), [AI addressability](architecture.md#14-ai-addressability), and [Security](security.md).
+See [Architecture](architecture.md#rings) and [Security](security.md).

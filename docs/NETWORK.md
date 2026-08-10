@@ -145,7 +145,7 @@ requires it.
 
 ## References
 
-- [Architecture networking model](architecture.md#12-networking-model)
+- [Architecture subsystem boundaries](architecture.md#current-subsystem-boundaries)
 - [Security constraints](security.md)
 - [Boot constraints](boot-sequence.md)
 - [Network boundary ADR](adr/0015-network-v1-boundary.md)

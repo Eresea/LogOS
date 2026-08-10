@@ -32,4 +32,4 @@ Replace a signed system bundle without making failed updates fatal.
 
 Application updates are not part of V1.
 
-See the update state machine in [Architecture](architecture.md#13-update-model).
+See the update scope in [Roadmap](roadmap.md) and the ownership boundary in [Architecture](architecture.md).

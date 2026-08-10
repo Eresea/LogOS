@@ -15,6 +15,8 @@ explicitly skipped Remote proofs remain open.
   or hardware-facing changes.
 - Document new subsystem boundaries in `docs/architecture.md`; treat `docs/boot-sequence.md` and
   `docs/security.md` as constraints.
+- Use `docs/README.md` to select the smallest relevant documentation set; optional annexes are not
+  default project context.
 - Create and index an ADR for irreversible or cross-ring decisions. Routine reversible changes need
   no ADR.
 - Keep historical evidence in reviewed documents or ADRs, not in active checklists.

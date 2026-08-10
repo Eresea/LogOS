@@ -113,4 +113,4 @@ Without local display or keyboard, an authenticated user can inspect the machine
 
 Update execution and general large-file transfer are not part of V1.
 
-See session placement in [Architecture](architecture.md#3-dependency-rules) and constraints in [Security](security.md).
+See session placement in [Architecture](architecture.md#rings) and constraints in [Security](security.md).

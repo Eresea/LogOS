@@ -28,4 +28,4 @@ Multiple isolated applications render without arbitrary input or surface access.
 - Multiple displays, high-refresh scheduling, touch, richer text input, and remote visual streaming.
 - GPU acceleration only when measurements justify it.
 
-See Experience placement in [Architecture](architecture.md#ring-5--experience).
+See Experience placement in [Architecture](architecture.md#rings).
