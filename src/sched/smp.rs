@@ -231,7 +231,17 @@ impl<'a> SmpScheduler<'a> {
     where
         F: Future<Output = ()> + Send + Unpin,
     {
-        let future: Pin<&'a mut F> = unsafe { Pin::new_unchecked(future) };
+        let future: Pin<&'a mut F> = Pin::new(future);
+        self.spawn_pinned_future(future)
+    }
+
+    pub fn spawn_pinned_future<F>(
+        &mut self,
+        future: Pin<&'a mut F>,
+    ) -> Result<TaskHandle, SpawnError>
+    where
+        F: Future<Output = ()> + Send,
+    {
         let future: Pin<&'a mut (dyn Future<Output = ()> + Send)> = future;
         self.spawn_entry(Entry::Future(future), Some(()))
     }
@@ -312,6 +322,12 @@ impl<'a> SmpScheduler<'a> {
 
     #[allow(dead_code)]
     pub fn run(&self, cpu: usize, handle: TaskHandle) -> bool {
+        let Some(cpu_state) = self.cpus.get(cpu) else {
+            return false;
+        };
+        if !cpu_state.active.load(Ordering::Acquire) {
+            return false;
+        }
         let Some(slot) = self.tasks.get(handle.slot()) else {
             return false;
         };
@@ -331,14 +347,10 @@ impl<'a> SmpScheduler<'a> {
         {
             return false;
         }
-        if let Some(cpu_state) = self.cpus.get(cpu) {
-            slot.last_cpu.store(cpu as u8, Ordering::Release);
-            cpu_state.idle.store(false, Ordering::Release);
-        }
+        slot.last_cpu.store(cpu as u8, Ordering::Release);
+        cpu_state.idle.store(false, Ordering::Release);
         let ran = self.run_claimed(handle.slot());
-        if let Some(cpu_state) = self.cpus.get(cpu) {
-            cpu_state.idle.store(true, Ordering::Release);
-        }
+        cpu_state.idle.store(true, Ordering::Release);
         ran
     }
 
