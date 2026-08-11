@@ -1,6 +1,9 @@
 #![no_main]
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 mod arch;
 mod boot;
 mod console;

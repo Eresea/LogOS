@@ -759,6 +759,7 @@ pub fn self_check(topology: &crate::arch::acpi::CpuTopology) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     struct BlockOnce {
         runs: u8,
@@ -787,12 +788,13 @@ mod tests {
 
     #[test]
     fn stale_waker_cannot_wake_reused_slot() {
-        let mut first = YieldFuture { polls: 0, waker: None };
+        let first_signal = Arc::new(Mutex::new(None));
+        let mut first = YieldFuture::new(first_signal.clone());
         let mut second = BlockFuture;
         let mut scheduler = SmpScheduler::new().with_notifier(|_| true);
         let first_handle = scheduler.spawn_future(&mut first).unwrap();
         assert!(scheduler.run_next(0));
-        let old_waker = first.waker.take().unwrap();
+        let old_waker = first_signal.lock().unwrap().take().unwrap();
         let stale_waker = old_waker.clone();
         old_waker.wake();
         assert!(scheduler.run_next(0));
@@ -805,7 +807,13 @@ mod tests {
 
     struct YieldFuture {
         polls: u8,
-        waker: Option<Waker>,
+        signal: Arc<Mutex<Option<Waker>>>,
+    }
+
+    impl YieldFuture {
+        fn new(signal: Arc<Mutex<Option<Waker>>>) -> Self {
+            Self { polls: 0, signal }
+        }
     }
 
     impl Future for YieldFuture {
@@ -814,7 +822,7 @@ mod tests {
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             self.polls += 1;
             if self.polls == 1 {
-                self.waker = Some(cx.waker().clone());
+                *self.signal.lock().unwrap() = Some(cx.waker().clone());
                 Poll::Pending
             } else {
                 Poll::Ready(())
@@ -834,11 +842,12 @@ mod tests {
 
     #[test]
     fn future_waker_resumes_pending_future_once() {
-        let mut future = YieldFuture { polls: 0, waker: None };
+        let signal = Arc::new(Mutex::new(None));
+        let mut future = YieldFuture::new(signal.clone());
         let mut scheduler = SmpScheduler::new().with_notifier(|_| true);
         let handle = scheduler.spawn_future(&mut future).unwrap();
         assert!(scheduler.run_next(0));
-        future.waker.take().unwrap().wake();
+        signal.lock().unwrap().take().unwrap().wake();
         assert_eq!(scheduler.state(handle), Some(SchedulingState::Runnable));
         assert!(scheduler.run_next(0));
         assert!(scheduler.state(handle).is_none());
@@ -856,7 +865,7 @@ mod tests {
 
     #[test]
     fn bounded_task_capacity_is_explicit() {
-        let mut tasks = [BlockFuture; MAX_SMP_TASKS];
+        let mut tasks = [const { BlockFuture }; MAX_SMP_TASKS];
         let mut scheduler = SmpScheduler::new().with_notifier(|_| true);
         for task in &mut tasks {
             assert!(scheduler.spawn_future(task).is_ok());
@@ -867,14 +876,16 @@ mod tests {
     #[test]
     fn waker_capacity_rejects_excess_retained_wakers() {
         let mut scheduler = SmpScheduler::new().with_notifier(|_| true);
+        let signals: [Arc<Mutex<Option<Waker>>>; MAX_WAKER_TOKENS] =
+            core::array::from_fn(|_| Arc::new(Mutex::new(None)));
         let mut futures: [YieldFuture; MAX_WAKER_TOKENS] =
-            core::array::from_fn(|_| YieldFuture { polls: 0, waker: None });
+            core::array::from_fn(|index| YieldFuture::new(signals[index].clone()));
         let mut stale_wakers: [Option<Waker>; MAX_WAKER_TOKENS] = core::array::from_fn(|_| None);
 
         for (index, future) in futures.iter_mut().enumerate() {
             let handle = scheduler.spawn_future(future).unwrap();
             assert!(scheduler.run_next(0));
-            let waker = future.waker.take().unwrap();
+            let waker = signals[index].lock().unwrap().take().unwrap();
             let stale_waker = waker.clone();
             waker.wake();
             assert!(scheduler.run_next(0));
@@ -882,7 +893,7 @@ mod tests {
             stale_wakers[index] = Some(stale_waker);
         }
 
-        let mut candidate = YieldFuture { polls: 0, waker: None };
+        let mut candidate = YieldFuture::new(Arc::new(Mutex::new(None)));
         assert_eq!(scheduler.spawn_future(&mut candidate), Err(SpawnError::WakerCapacity));
     }
 }
