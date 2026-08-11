@@ -1,5 +1,4 @@
-# Documentation map
+# Active documentation
 
-The active vNext contract is [the architecture note](architecture.md).
-Older milestone documents and ADRs are retained as historical reference only;
-they do not constrain vNext until explicitly re-adopted.
+- [Architecture](architecture.md): current ownership and deferred boundaries.
+- [Development](development.md): the smallest build and boot proof.

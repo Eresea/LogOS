@@ -1,13 +1,12 @@
 # vNext architecture
 
-The vNext kernel is one UEFI package with one privileged entry point.
+The project is one `no_std` UEFI binary.
 
-| Boundary | Current owner | Contract |
+| Boundary | Owner | Current proof |
 | --- | --- | --- |
-| UEFI entry | `src/main.rs` | enter, print one debug line, remain alive |
-| Debug output | `debug_line` | bytes to port `0xe9`, followed by CRLF |
-| Everything else | deferred | added only with a passing acceptance proof |
+| UEFI entry | `src/main.rs` | enter and remain alive |
+| Debug output | `debug_line` | write one line to port `0xe9` |
+| All other subsystems | deferred | add only with an acceptance test |
 
-The kernel remains `no_std`, fixed-resource, and observable through the QEMU
-debug console. There are no service crates, allocators, runtimes, or public ABI
-modules in this milestone.
+The v1 design, contracts, and decisions are archived in `v1_docs/` and are
+not active requirements.

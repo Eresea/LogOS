@@ -26,7 +26,7 @@ def exact_path(path: Path) -> bool:
 def main() -> int:
     failures = []
     for document in sorted(ROOT.rglob("*.md")):
-        if any(part in {"review", "reviewed"} for part in document.relative_to(ROOT).parts):
+        if any(part in {"review", "reviewed", "v1_docs"} for part in document.relative_to(ROOT).parts):
             continue
         for match in LINK.finditer(document.read_text(encoding="utf-8")):
             target = match.group(1)
