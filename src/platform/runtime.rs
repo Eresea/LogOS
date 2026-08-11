@@ -1703,6 +1703,11 @@ pub(crate) fn run(
                     ) {
                         return false;
                     }
+                    remote_load_phase = if remote_bootstrap.is_some() {
+                        RemoteLoadPhase::EnrollmentPending
+                    } else {
+                        RemoteLoadPhase::Disabled
+                    };
                     if !native_input.deliver(logos_abi::InputEvent::STARTUP)
                         || !native_scheduler.wake(native_handle)
                         || !native_scheduler.run(native_handle)
