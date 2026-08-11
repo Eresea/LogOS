@@ -1,33 +1,18 @@
-[workspace]
-members = ["crates/logos-abi", "crates/logos-core", "crates/logos-net", "crates/logos-network-service", "crates/logos-remote", "crates/logos-service-rt", "crates/logos-store", "crates/logos-storage-service", "crates/logos-terminal", "crates/logos-terminal-service", "crates/logos-sessions-service", "crates/logos-gateway-service", "crates/logos-test", "crates/logosctl"]
-default-members = ["crates/logos-abi", "crates/logos-core", "crates/logos-service-rt", "crates/logos-store", "crates/logos-terminal", "crates/logos-test"]
-resolver = "3"
-
-[workspace.package]
+[package]
+name = "logos-vnext"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 
-[workspace.lints.rust]
+[lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
 
-[package]
-name = "logos-uefi"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.85"
-
-[lints]
-workspace = true
-
 [dependencies]
-logos-core = { path = "crates/logos-core" }
-logos-abi = { path = "crates/logos-abi" }
-logos-terminal = { path = "crates/logos-terminal" }
-logos-remote = { path = "crates/logos-remote" }
 uefi = { version = "0.35", features = ["panic_handler"] }
 
-[features]
-test-hooks = []
-block-probe = []
+[[bin]]
+name = "logos-vnext"
+path = "src/main.rs"
+test = false
+bench = false

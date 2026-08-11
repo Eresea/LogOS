@@ -1,36 +1,17 @@
-name: Crate Tests
+name: vNext Checks
 
 on:
   workflow_dispatch:
 
 env:
-  RUSTFLAGS: "-D warnings"
   CARGO_TERM_COLOR: always
 
 jobs:
-  terminal-crate:
-    name: Terminal Crate Tests
+  check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Install Rust components
-        run: |
-          rustup component add rustfmt clippy
-          rustup target add x86_64-unknown-uefi
-
-      - name: Format check (logos-terminal)
-        run: cargo fmt --check -p logos-terminal
-
-      - name: Clippy (logos-terminal)
-        run: cargo clippy -p logos-terminal --all-targets --all-features -- -D warnings
-
-      - name: Test logos-terminal
-        run: cargo test -p logos-terminal --lib --all-features
-
-      - name: Doc tests (logos-terminal)
-        run: cargo test -p logos-terminal --doc
-
-      - name: Build docs (logos-terminal)
-        run: cargo doc -p logos-terminal --no-deps --all-features
+      - run: rustup target add x86_64-unknown-uefi
+      - run: cargo fmt --check
+      - run: cargo clippy --target x86_64-unknown-uefi -- -D warnings
+      - run: cargo build --target x86_64-unknown-uefi

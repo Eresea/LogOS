@@ -1,20 +1,18 @@
 # LogOS Agent Guide
 
-LogOS is an experimental `no_std` Rust UEFI kernel. The current milestone is ABI v5
-stabilization and migration closeout: Network bootstrap transport and the independent TCP
-foundation are implemented, while scalable Network work, one Network suite proof, and five
-explicitly skipped Remote proofs remain open.
+LogOS vNext is a clean-slate `no_std` Rust UEFI kernel. The current milestone is the smallest
+bootable slice: enter UEFI, emit one debug-console line, and remain alive.
 
 ## Rules
 
-- Preserve `no_std`, fixed-size resource bounds, QEMU debug-console output, and public contracts.
+- Preserve `no_std`, fixed-size resource bounds, and QEMU debug-console output.
 - Keep changes small and independently bootable; do not add runtime, allocator, or OS dependencies
   without a documented milestone.
 - Run `cargo fmt --check` and `cargo clippy -- -D warnings` after Rust changes.
 - Run the smallest relevant host test; use `scripts/run.ps1` or `scripts/check.ps1` for boot, UEFI,
   or hardware-facing changes.
-- Document new subsystem boundaries in `docs/architecture.md`; treat `docs/boot-sequence.md` and
-  `docs/security.md` as constraints.
+- Document new subsystem boundaries in `docs/architecture.md`; add them only when a proof requires
+  them.
 - Use `docs/README.md` to select the smallest relevant documentation set; optional annexes are not
   default project context.
 - Create and index an ADR for irreversible or cross-ring decisions. Routine reversible changes need
@@ -23,8 +21,7 @@ explicitly skipped Remote proofs remain open.
 
 ## Ownership
 
-Core owns hardware, memory, scheduling, IPC, and capabilities. Replaceable services own higher-level
-policy and durable state; applications are future WASM modules. Onion rings describe dependency
-direction, not mandatory runtime boundaries.
+The single UEFI binary owns the current boot proof. Scheduling, memory, IPC, services, and
+applications are deferred until a concrete acceptance test requires each one.
 
 Plan before coding, verify the result, and report remaining issues. Do not bundle unrelated changes.

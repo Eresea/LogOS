@@ -1,9 +1,6 @@
-param([ValidateSet('main', 'pr', 'nightly', 'weekly')][string]$Suite = 'main')
+param([switch]$Release)
 
-Push-Location (Split-Path $PSScriptRoot -Parent)
-try {
-    cargo run -p logos-test -- suite $Suite
-    exit $LASTEXITCODE
-} finally {
-    Pop-Location
-}
+$ErrorActionPreference = 'Stop'
+$args = @('-Stage', 'uefi')
+if ($Release) { $args += '-Release' }
+& (Join-Path $PSScriptRoot 'check.ps1') @args
