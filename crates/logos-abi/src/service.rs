@@ -146,22 +146,7 @@ pub struct ControlPage {
     pub status: u32,
     pub generation: u32,
     pub lifecycle: u32,
-    pub input_page: u64,
-    pub display_page: u64,
-    pub session_client_page: u64,
-    pub session_server_page: u64,
-    pub effect_page: u64,
-    pub store_client_page: u64,
-    pub store_server_page: u64,
-    pub block_client_page: u64,
-    pub remote_page: u64,
-    pub network_client_page: u64,
-    pub network_server_page: u64,
-    pub slot0: u32,
-    pub slot1: u32,
-    pub network_device_page: u64,
-    pub network_event_page: u64,
-    pub network_stream_page: u64,
+    pub endpoint_table: u64,
 }
 
 /// Explicit state values shared by typed endpoint pages.
@@ -371,6 +356,7 @@ fn decode_effect_request(
 }
 
 const _: () = assert!(size_of::<ControlPage>() <= logos_abi::PAGE_SIZE);
+const _: () = assert!(size_of::<crate::endpoint_v5::EndpointTable>() <= logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<InputPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<DisplayPage>() == logos_abi::PAGE_SIZE);
 const _: () = assert!(size_of::<SessionClientPage>() <= logos_abi::PAGE_SIZE);
@@ -398,22 +384,7 @@ impl ControlPage {
             status: 0,
             generation,
             lifecycle: LIFECYCLE_STARTING,
-            input_page: 0,
-            display_page: 0,
-            session_client_page: 0,
-            session_server_page: 0,
-            effect_page: 0,
-            store_client_page: 0,
-            store_server_page: 0,
-            block_client_page: 0,
-            remote_page: 0,
-            network_client_page: 0,
-            network_server_page: 0,
-            slot0: 0,
-            slot1: 0,
-            network_device_page: 0,
-            network_event_page: 0,
-            network_stream_page: 0,
+            endpoint_table: 0,
         }
     }
 
@@ -436,45 +407,23 @@ impl ControlPage {
         }
         unsafe { (address as *mut Self).write_volatile(Self::with_generation(current.generation)) };
         let mut reset = unsafe { (address as *mut Self).read_volatile() };
-        reset.input_page = current.input_page;
-        reset.display_page = current.display_page;
-        reset.session_client_page = current.session_client_page;
-        reset.session_server_page = current.session_server_page;
-        reset.effect_page = current.effect_page;
-        reset.store_client_page = current.store_client_page;
-        reset.store_server_page = current.store_server_page;
-        reset.block_client_page = current.block_client_page;
-        reset.remote_page = current.remote_page;
-        reset.network_client_page = current.network_client_page;
-        reset.network_server_page = current.network_server_page;
-        reset.network_device_page = current.network_device_page;
-        reset.network_event_page = current.network_event_page;
-        reset.network_stream_page = current.network_stream_page;
+        reset.endpoint_table = current.endpoint_table;
         unsafe { (address as *mut Self).write_volatile(reset) };
         true
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping owned by Core.
-    pub unsafe fn configure_endpoint_pages_at(
+    pub unsafe fn configure_endpoint_table_at(
         address: u64,
         generation: u32,
-        input_page: Option<u64>,
-        display_page: Option<u64>,
-        session_client_page: Option<u64>,
-        session_server_page: Option<u64>,
-        effect_page: Option<u64>,
-        store_client_page: Option<u64>,
-        store_server_page: Option<u64>,
-        block_client_page: Option<u64>,
-        remote_page: Option<u64>,
-        network_client_page: Option<u64>,
-        network_server_page: Option<u64>,
-        network_device_page: Option<u64>,
-        network_event_page: Option<u64>,
-        network_stream_page: Option<u64>,
+        endpoint_table: u64,
     ) -> bool {
-        if generation == 0 {
+        if generation == 0
+            || endpoint_table == 0
+            || !endpoint_table
+                .is_multiple_of(align_of::<crate::endpoint_v5::EndpointTable>() as u64)
+        {
             return false;
         }
         let mut context = unsafe { (address as *mut Self).read_volatile() };
@@ -483,20 +432,7 @@ impl ControlPage {
         }
         context.generation = generation;
         context.lifecycle = LIFECYCLE_STARTING;
-        context.input_page = input_page.unwrap_or(0);
-        context.display_page = display_page.unwrap_or(0);
-        context.session_client_page = session_client_page.unwrap_or(0);
-        context.session_server_page = session_server_page.unwrap_or(0);
-        context.effect_page = effect_page.unwrap_or(0);
-        context.store_client_page = store_client_page.unwrap_or(0);
-        context.store_server_page = store_server_page.unwrap_or(0);
-        context.block_client_page = block_client_page.unwrap_or(0);
-        context.remote_page = remote_page.unwrap_or(0);
-        context.network_client_page = network_client_page.unwrap_or(0);
-        context.network_server_page = network_server_page.unwrap_or(0);
-        context.network_device_page = network_device_page.unwrap_or(0);
-        context.network_event_page = network_event_page.unwrap_or(0);
-        context.network_stream_page = network_stream_page.unwrap_or(0);
+        context.endpoint_table = endpoint_table;
         unsafe { (address as *mut Self).write_volatile(context) };
         true
     }
@@ -559,42 +495,62 @@ impl ControlPage {
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
-    pub unsafe fn input_page_at(address: u64) -> Option<u64> {
+    pub unsafe fn endpoint_at(address: u64, kind: u16) -> Option<(u64, u32)> {
         let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI && context.reserved == 0 && context.input_page != 0)
-            .then_some(context.input_page)
+        if context.abi != ABI
+            || context.reserved != 0
+            || context.generation == 0
+            || context.endpoint_table == 0
+            || !context
+                .endpoint_table
+                .is_multiple_of(align_of::<crate::endpoint_v5::EndpointTable>() as u64)
+        {
+            return None;
+        }
+        let table = unsafe {
+            (context.endpoint_table as *const crate::endpoint_v5::EndpointTable).read_volatile()
+        };
+        if table.reserved != 0 || table.generation != context.generation {
+            return None;
+        }
+        let slot = table.find(kind)?;
+        (slot.valid() && slot.generation == context.generation)
+            .then_some((slot.page, slot.generation))
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `ControlPage` mapping.
+    pub unsafe fn input_page_at(address: u64) -> Option<u64> {
+        unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_INPUT) }
+            .map(|endpoint| endpoint.0)
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn display_page_at(address: u64) -> Option<u64> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI && context.reserved == 0 && context.display_page != 0)
-            .then_some(context.display_page)
+        unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_DISPLAY) }
+            .map(|endpoint| endpoint.0)
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn session_client_page_at(address: u64) -> Option<u64> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI && context.reserved == 0 && context.session_client_page != 0)
-            .then_some(context.session_client_page)
+        unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_SESSION_CLIENT) }
+            .map(|endpoint| endpoint.0)
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn session_server_page_at(address: u64) -> Option<u64> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI && context.reserved == 0 && context.session_server_page != 0)
-            .then_some(context.session_server_page)
+        unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_SESSION_SERVER) }
+            .map(|endpoint| endpoint.0)
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn effect_page_at(address: u64) -> Option<u64> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI && context.reserved == 0 && context.effect_page != 0)
-            .then_some(context.effect_page)
+        unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_EFFECT) }
+            .map(|endpoint| endpoint.0)
     }
 
     /// # Safety
@@ -647,251 +603,236 @@ impl ControlPage {
         {
             return false;
         }
-        context.input_page == 0
-            || unsafe { InputPage::waiting_at(context.input_page, context.generation) }
+        unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_INPUT) }
+            .is_some_and(|(page, generation)| unsafe { InputPage::waiting_at(page, generation) })
     }
 
     pub unsafe fn store_client_page_at(address: u64) -> Option<u64> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI && context.reserved == 0 && context.store_client_page != 0)
-            .then_some(context.store_client_page)
+        unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_STORE_CLIENT) }
+            .map(|endpoint| endpoint.0)
     }
 
     pub unsafe fn store_server_page_at(address: u64) -> Option<u64> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI && context.reserved == 0 && context.store_server_page != 0)
-            .then_some(context.store_server_page)
+        unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_STORE_SERVER) }
+            .map(|endpoint| endpoint.0)
     }
 
     pub unsafe fn block_client_page_at(address: u64) -> Option<u64> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI && context.reserved == 0 && context.block_client_page != 0)
-            .then_some(context.block_client_page)
+        unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_BLOCK_CLIENT) }
+            .map(|endpoint| endpoint.0)
     }
 
     pub unsafe fn network_client_page_at(address: u64) -> Option<u64> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI && context.reserved == 0 && context.network_client_page != 0)
-            .then_some(context.network_client_page)
+        unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_NETWORK_CLIENT) }
+            .map(|endpoint| endpoint.0)
     }
 
     pub unsafe fn network_server_page_at(address: u64) -> Option<u64> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI && context.reserved == 0 && context.network_server_page != 0)
-            .then_some(context.network_server_page)
+        unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_NETWORK_SERVER) }
+            .map(|endpoint| endpoint.0)
     }
 
     pub unsafe fn network_stream_page_at(address: u64) -> Option<u64> {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        (context.abi == ABI && context.reserved == 0 && context.network_stream_page != 0)
-            .then_some(context.network_stream_page)
+        unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_NETWORK_STREAM) }
+            .map(|endpoint| endpoint.0)
     }
 
     pub unsafe fn remote_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let Some((page, generation)) =
+            (unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_REMOTE) })
+        else {
+            return false;
+        };
         context.abi == ABI
             && context.reserved == 0
-            && context.remote_page != 0
             && context.generation != 0
-            && unsafe {
-                RemotePage::pending_at(context.remote_page, context.generation, context.generation)
-            }
+            && unsafe { RemotePage::pending_at(page, generation, generation) }
     }
 
     pub unsafe fn network_client_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let Some((page, generation)) =
+            (unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_NETWORK_CLIENT) })
+        else {
+            return false;
+        };
         context.abi == ABI
             && context.reserved == 0
             && context.operation == NETWORK_REQUEST
             && context.status == ACKNOWLEDGED
-            && context.network_client_page != 0
-            && unsafe {
-                NetworkClientPage::pending_at(
-                    context.network_client_page,
-                    context.generation,
-                    context.generation,
-                )
-            }
+            && unsafe { NetworkClientPage::pending_at(page, generation, generation) }
     }
 
     pub unsafe fn network_server_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let Some((page, generation)) =
+            (unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_NETWORK_SERVER) })
+        else {
+            return false;
+        };
         context.abi == ABI
             && context.reserved == 0
             && context.operation == NETWORK_REQUEST
             && context.status == ACKNOWLEDGED
-            && context.network_server_page != 0
-            && unsafe {
-                NetworkServerPage::pending_at(
-                    context.network_server_page,
-                    context.generation,
-                    context.generation,
-                )
-            }
+            && unsafe { NetworkServerPage::pending_at(page, generation, generation) }
     }
 
     pub unsafe fn store_client_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let Some((page, generation)) =
+            (unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_STORE_CLIENT) })
+        else {
+            return false;
+        };
         context.abi == ABI
             && context.reserved == 0
             && context.operation == STORE_REQUEST
             && context.status == ACKNOWLEDGED
-            && context.store_client_page != 0
-            && unsafe {
-                StoreClientPage::pending_at(
-                    context.store_client_page,
-                    context.generation,
-                    context.generation,
-                )
-            }
+            && unsafe { StoreClientPage::pending_at(page, generation, generation) }
     }
 
     pub unsafe fn block_client_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let Some((page, generation)) =
+            (unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_BLOCK_CLIENT) })
+        else {
+            return false;
+        };
         context.abi == ABI
             && context.reserved == 0
             && context.operation == BLOCK_REQUEST
             && context.status == ACKNOWLEDGED
-            && context.block_client_page != 0
-            && unsafe {
-                BlockClientPage::pending_at(
-                    context.block_client_page,
-                    context.generation,
-                    context.generation,
-                )
-            }
+            && unsafe { BlockClientPage::pending_at(page, generation, generation) }
     }
 
     pub unsafe fn network_server_reply_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let Some((page, generation)) =
+            (unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_NETWORK_SERVER) })
+        else {
+            return false;
+        };
         context.abi == ABI
             && context.reserved == 0
             && context.operation == NETWORK_REPLY
             && context.status == ACKNOWLEDGED
-            && context.network_server_page != 0
-            && unsafe {
-                NetworkServerPage::reply_pending_at(
-                    context.network_server_page,
-                    context.generation,
-                    context.generation,
-                )
-            }
+            && unsafe { NetworkServerPage::reply_pending_at(page, generation, generation) }
     }
 
     pub unsafe fn store_client_reply_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let Some((page, generation)) =
+            (unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_STORE_CLIENT) })
+        else {
+            return false;
+        };
         context.abi == ABI
             && context.reserved == 0
             && context.operation == STORE_REPLY
             && context.status == ACKNOWLEDGED
-            && context.store_client_page != 0
-            && unsafe {
-                StoreClientPage::reply_pending_at(
-                    context.store_client_page,
-                    context.generation,
-                    context.generation,
-                )
-            }
+            && unsafe { StoreClientPage::reply_pending_at(page, generation, generation) }
     }
 
     pub unsafe fn store_server_reply_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let Some((page, generation)) =
+            (unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_STORE_SERVER) })
+        else {
+            return false;
+        };
         context.abi == ABI
             && context.reserved == 0
             && context.operation == STORE_REPLY
             && context.status == ACKNOWLEDGED
-            && context.store_server_page != 0
-            && unsafe {
-                StoreServerPage::reply_pending_at(
-                    context.store_server_page,
-                    context.generation,
-                    context.generation,
-                )
-            }
+            && unsafe { StoreServerPage::reply_pending_at(page, generation, generation) }
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn session_client_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let Some((page, generation)) =
+            (unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_SESSION_CLIENT) })
+        else {
+            return false;
+        };
         context.abi == ABI
             && context.reserved == 0
             && context.operation == SYSCALL
             && context.status == ACKNOWLEDGED
-            && context.session_client_page != 0
-            && unsafe {
-                SessionClientPage::pending_at(
-                    context.session_client_page,
-                    context.generation,
-                    context.generation,
-                )
-            }
+            && unsafe { SessionClientPage::pending_at(page, generation, generation) }
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn session_server_waiting_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let Some((page, generation)) =
+            (unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_SESSION_SERVER) })
+        else {
+            return false;
+        };
         context.abi == ABI
             && context.reserved == 0
             && context.operation == READ_INPUT
             && context.status == ACKNOWLEDGED
-            && context.session_server_page != 0
-            && unsafe {
-                SessionServerPage::waiting_at(
-                    context.session_server_page,
-                    context.generation,
-                    context.generation,
-                )
-            }
+            && unsafe { SessionServerPage::waiting_at(page, generation, generation) }
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn session_server_reply_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let Some((page, generation)) =
+            (unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_SESSION_SERVER) })
+        else {
+            return false;
+        };
         context.abi == ABI
             && context.reserved == 0
             && context.operation == SESSION_REPLY
             && context.status == ACKNOWLEDGED
-            && context.session_server_page != 0
-            && unsafe {
-                SessionServerPage::reply_pending_at(
-                    context.session_server_page,
-                    context.generation,
-                    context.generation,
-                )
-            }
+            && unsafe { SessionServerPage::reply_pending_at(page, generation, generation) }
     }
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn effect_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let Some((page, generation)) =
+            (unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_EFFECT) })
+        else {
+            return false;
+        };
         context.abi == ABI
             && context.reserved == 0
             && context.operation == SESSION_EFFECT
             && context.status == ACKNOWLEDGED
-            && context.effect_page != 0
-            && unsafe {
-                EffectPage::pending_at(context.effect_page, context.generation, context.generation)
-            }
+            && unsafe { EffectPage::pending_at(page, generation, generation) }
     }
 
     pub unsafe fn network_device_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let has_endpoint = unsafe {
+            Self::endpoint_at(address, crate::endpoint_v5::KIND_NETWORK_DEVICE).is_some()
+        };
         context.abi == ABI
             && context.reserved == 0
             && context.operation == NETWORK_DEVICE_REQUEST
             && context.status == ACKNOWLEDGED
+            && has_endpoint
     }
 
     pub unsafe fn network_event_pending_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
+        let has_endpoint =
+            unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_NETWORK_EVENT).is_some() };
         context.abi == ABI
             && context.reserved == 0
             && context.status == ACKNOWLEDGED
             && context.operation == NETWORK_WAIT
+            && has_endpoint
     }
 
     /// # Safety
@@ -899,14 +840,15 @@ impl ControlPage {
     /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn display_waiting_at(address: u64) -> bool {
         let context = unsafe { (address as *const Self).read_volatile() };
-        if context.abi != ABI
-            || context.reserved != 0
-            || context.status != ACKNOWLEDGED
-            || context.display_page == 0
-        {
+        let Some((page, generation)) =
+            (unsafe { Self::endpoint_at(address, crate::endpoint_v5::KIND_DISPLAY) })
+        else {
+            return false;
+        };
+        if context.abi != ABI || context.reserved != 0 || context.status != ACKNOWLEDGED {
             return false;
         }
-        unsafe { DisplayPage::pending_at(context.display_page, context.generation) }
+        unsafe { DisplayPage::pending_at(page, generation) }
     }
 }
 
@@ -1179,6 +1121,32 @@ mod tests {
         unsafe { (context_address as *mut ControlPage).write_volatile(context) };
         assert!(unsafe { ControlPage::notify_at(context_address, BLOCK_REQUEST) });
         assert!(!unsafe { ControlPage::notify_at(context_address, NETWORK_REQUEST) });
+    }
+
+    #[test]
+    fn control_page_resolves_only_generation_bound_v5_endpoints() {
+        let mut table = crate::endpoint_v5::EndpointTable::new(7);
+        assert!(table.insert(crate::endpoint_v5::EndpointSlot::new(
+            crate::endpoint_v5::KIND_INPUT,
+            crate::endpoint_v5::ENDPOINT_VERSION,
+            0,
+            0x1000,
+            7,
+        )));
+        let table_address = (&mut table as *mut crate::endpoint_v5::EndpointTable) as u64;
+        let mut context = ControlPage::new();
+        let context_address = (&mut context as *mut ControlPage) as u64;
+        assert!(unsafe {
+            ControlPage::configure_endpoint_table_at(context_address, 7, table_address)
+        });
+        assert_eq!(unsafe { ControlPage::input_page_at(context_address) }, Some(0x1000));
+        assert_eq!(
+            unsafe { ControlPage::endpoint_at(context_address, crate::endpoint_v5::KIND_DISPLAY) },
+            None
+        );
+
+        table.reset(8);
+        assert_eq!(unsafe { ControlPage::input_page_at(context_address) }, None);
     }
 
     #[test]

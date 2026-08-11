@@ -79,7 +79,6 @@ pub enum EndpointKind {
 }
 
 impl EndpointKind {
-    #[allow(dead_code)]
     pub const fn to_v5_kind(self) -> u16 {
         match self {
             Self::Input => logos_abi::endpoint_v5::KIND_INPUT,
@@ -98,31 +97,6 @@ impl EndpointKind {
             Self::NetworkStream => logos_abi::endpoint_v5::KIND_NETWORK_STREAM,
         }
     }
-}
-
-#[allow(dead_code)]
-pub fn build_endpoint_table_v5(
-    manifest_entry: &logos_core::manifest::ManifestEntry,
-    endpoints: &[EndpointDescriptor],
-    generation: u32,
-    get_page_addr: impl Fn(EndpointKind) -> u64,
-) -> logos_abi::endpoint_v5::EndpointTable {
-    let mut table = logos_abi::endpoint_v5::EndpointTable::new(generation);
-    for descriptor in endpoints {
-        let kind = descriptor.kind.to_v5_kind();
-        let page = get_page_addr(descriptor.kind);
-        if page != 0 {
-            let slot = logos_abi::endpoint_v5::EndpointSlot::new(
-                kind,
-                manifest_entry.version,
-                0,
-                page,
-                generation,
-            );
-            table.insert(slot);
-        }
-    }
-    table
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

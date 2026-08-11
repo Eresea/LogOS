@@ -1,18 +1,20 @@
 use super::writable::Writable;
 use core::{
     arch::{asm, global_asm},
-    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 const TIMER_VECTOR: usize = 32;
 const KEYBOARD_VECTOR: usize = 33;
 const VIRTIO_VECTOR: usize = 48;
+const SCHEDULER_VECTOR: usize = 49;
 const SERVICE_GATE_VECTOR: usize = 0x80;
 const EXCEPTIONS: usize = 32;
 const PIT_HZ: u16 = 100;
 const PIT_DIVISOR: u16 = (1_193_182u32 / PIT_HZ as u32) as u16;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
+static SCHEDULER_RESCHEDULE: AtomicBool = AtomicBool::new(false);
 static LOCAL_APIC: AtomicUsize = AtomicUsize::new(0);
 static IO_APIC: AtomicUsize = AtomicUsize::new(0);
 static IO_APIC_GSI_BASE: AtomicUsize = AtomicUsize::new(0);
@@ -23,6 +25,7 @@ unsafe extern "C" {
     fn timer_interrupt();
     fn keyboard_irq();
     fn virtio_irq();
+    fn scheduler_irq();
     fn user_gate();
     static exception_stub_table: [usize; EXCEPTIONS];
 }
@@ -37,8 +40,13 @@ extern "C" fn virtio_interrupt() {
     crate::drivers::virtio::interrupt();
     crate::drivers::block::interrupt();
     crate::drivers::network::interrupt();
-    let local_apic = LOCAL_APIC.load(Ordering::Acquire);
-    unsafe { core::ptr::write_volatile((local_apic + 0xb0) as *mut u32, 0) };
+    end_of_interrupt();
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn scheduler_interrupt() {
+    SCHEDULER_RESCHEDULE.store(true, Ordering::Release);
+    end_of_interrupt();
 }
 
 #[unsafe(no_mangle)]
@@ -65,6 +73,7 @@ pub fn install(madt: crate::arch::acpi::Madt) -> bool {
         (*idt)[TIMER_VECTOR] = IdtEntry::new(timer_interrupt as *const () as usize, selector);
         (*idt)[KEYBOARD_VECTOR] = IdtEntry::new(keyboard_irq as *const () as usize, selector);
         (*idt)[VIRTIO_VECTOR] = IdtEntry::new(virtio_irq as *const () as usize, selector);
+        (*idt)[SCHEDULER_VECTOR] = IdtEntry::new(scheduler_irq as *const () as usize, selector);
         (*idt)[SERVICE_GATE_VECTOR] =
             IdtEntry::new(user_gate as *const () as usize, selector).user_callable();
         load_idt(idt);
@@ -107,6 +116,32 @@ pub fn wait_for_tick() {
 
 pub fn wait_for_virtio() {
     wait_for_tick();
+}
+
+pub fn notify_cpu(apic_id: u32) -> bool {
+    let Some(apic_id) = u8::try_from(apic_id).ok() else {
+        return false;
+    };
+    let local_apic = LOCAL_APIC.load(Ordering::Acquire);
+    if local_apic == 0 {
+        return false;
+    }
+    unsafe {
+        core::ptr::write_volatile((local_apic + 0x310) as *mut u32, u32::from(apic_id) << 24);
+        core::ptr::write_volatile((local_apic + 0x300) as *mut u32, SCHEDULER_VECTOR as u32);
+    }
+    true
+}
+
+pub fn take_scheduler_notification() -> bool {
+    SCHEDULER_RESCHEDULE.swap(false, Ordering::AcqRel)
+}
+
+fn end_of_interrupt() {
+    let local_apic = LOCAL_APIC.load(Ordering::Acquire);
+    if local_apic != 0 {
+        unsafe { core::ptr::write_volatile((local_apic + 0xb0) as *mut u32, 0) };
+    }
 }
 
 #[repr(C, packed)]
@@ -361,6 +396,26 @@ global_asm!(
     "push r11",
     "sub rsp, 40",
     "call virtio_interrupt",
+    "add rsp, 40",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdx",
+    "pop rcx",
+    "pop rax",
+    "iretq",
+    ".global scheduler_irq",
+    "scheduler_irq:",
+    "push rax",
+    "push rcx",
+    "push rdx",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "sub rsp, 40",
+    "call scheduler_interrupt",
     "add rsp, 40",
     "pop r11",
     "pop r10",

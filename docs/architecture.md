@@ -37,21 +37,26 @@ mandatory process boundaries. Outer code depends inward through typed, capabilit
   affecting a new service instance.
 - Fixed capacities are public behavior: return a bounded error such as `Busy` or `Full`; do not grow
   resources implicitly or add an allocator/runtime dependency.
+- Core's bounded SMP scheduler uses atomic generation/state claims, per-CPU scan cursors, and
+  scheduler-only local-APIC notification; task bodies never run under a global scheduler lock.
+- Async tasks are opt-in fixed slots with scheduler-owned generation-safe wakers. Native services
+  remain on the cooperative scheduler until their subsystem boundaries are migrated independently.
 - Production builds expose no test control surface. Host tests prove portable state and codecs; QEMU
   proves boot, devices, isolation, recovery, and public contracts.
 
 ## ABI v5 native services
 
-Each service receives one mapped `logos_abi::service::ControlPage` plus the typed endpoint pages named
-by its canonical `platform::services::ServiceSpec::endpoints`. Core maps, validates, loans, revokes,
-and reclaims pages; services never receive physical addresses.
+Each service receives one mapped `logos_abi::service::ControlPage` plus one bounded, generation-bound
+`logos_abi::endpoint_v5::EndpointTable`. The table names the typed endpoint pages selected by its
+canonical `platform::services::ServiceSpec::endpoints`; Core maps, validates, loans, revokes, and
+reclaims pages, while services never receive physical addresses.
 
 Active typed pages include Input, Display, Session client/server, Effect, Store client/server, Storage
 Block, Network device/event/client/server/stream, and Remote pages. Page state is scalar-validated and
-generation-checked. ABI-v4 payloads and descriptors are rejected at startup; there is no compatibility
-adapter or dynamic endpoint registry in the active path. Long-lived work carries a bounded
-`OperationToken` and `CompletionEnvelope`; only the owning scheduler may advance a token, and a
-terminal phase releases any page loan exactly once.
+generation-checked. The old ABI-v4 per-page ControlPage pointers are not part of the active ABI; there
+is no compatibility adapter, fallback reader, or dynamic endpoint registry. Long-lived work carries a
+bounded `OperationToken` and `CompletionEnvelope`; only the owning scheduler may advance a token, and
+a terminal phase releases any page loan exactly once.
 
 Service replacement advances the generation before releasing the old address space. Stale handles,
 pages, replies, and completions are rejected and owned resources are reclaimed exactly once.
@@ -75,6 +80,9 @@ isolation constraints live in [Security](security.md).
 - [Remote](REMOTE.md) owns trust/enrollment and the structured attachment above Network and Sessions.
 - [Console](CONSOLE.md) and [Sessions](SESSIONS.md) own local interaction, not privileged mechanisms.
 
+The SMP/async foundation is currently BSP-only. AP startup, per-CPU descriptor/TSS/IDT state, task
+migration, and a multi-vCPU QEMU proof remain prerequisites before Core can release secondary CPUs.
+
 ## Placement test
 
 Before adding a component, record its invariant, owned resources, required capabilities, failure radius,
@@ -83,8 +91,11 @@ unclear, the boundary is not ready. Cross-ring or irreversible decisions require
 
 ## References
 
+The active endpoint discovery contract is [ADR-0036](adr/0036-abi-v5-endpoint-table.md).
+
 - [Roadmap](roadmap.md) — current sequence and exit targets.
 - [Milestone policy](MILESTONE-POLICY.md) — completion and documentation rules.
 - [Onion rings](ONION_RINGS.md) — optional placement rationale.
 - [ADR-0020](adr/0020-typed-native-endpoint-pages.md), [ADR-0028](adr/0028-async-first-subsystem-state.md),
   [ADR-0032](adr/0032-bounded-task-contracts-and-proof-tiers.md) — active transport and work-state decisions.
+- [ADR-0035](adr/0035-bounded-smp-async-foundation.md) — bounded SMP and async execution boundary.

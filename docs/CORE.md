@@ -13,6 +13,8 @@ Core v1 is a dependable, event-driven kernel foundation. It is not a desktop OS,
 - [x] Framebuffer recovery console with PS/2 IRQ keyboard input.
 - [x] IDT, exception halt path, PIT bootstrap clock, and ACPI-derived IOAPIC VirtIO completion IRQ.
 - [x] Cooperative ready/blocked task scheduler, generation-tagged task handles, and event-driven idle.
+- [x] Bounded CPU topology records, atomic SMP task claims, scheduler wakers, and async future slots
+      are available as a BSP-only foundation; AP startup and multi-vCPU proof remain deferred.
 - [x] Physical-page allocation across conventional-memory ranges, owned-page recycling, and reversible bootstrap virtual mappings.
 - [x] Generation-tagged capability grants and revocation, service registry, queued IPC requests/replies, PCI discovery, and legacy VirtIO balloon service.
 - [x] ACPI RSDP/XSDT/MADT validation and APIC topology discovery.
@@ -45,4 +47,6 @@ Only Runtime or Experience requirements may pull forward enforceable CPU/resourc
 
 ## V3 — Hardware scale
 
-Only committed hardware targets may pull forward SMP, IOMMU, MSI-X, hotplug, or broader power management. Core versions do not advance merely to match outer modules.
+Only committed hardware targets may pull forward AP startup, per-CPU descriptor state, IOMMU, MSI-X,
+hotplug, or broader power management. The current bounded SMP scheduler is preparatory and does not
+release APs or change the single-CPU boot path.

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub const MAX_ENDPOINT_SLOTS: usize = 16;
+pub const ENDPOINT_VERSION: u16 = 1;
 
 pub const KIND_INPUT: u16 = 1;
 pub const KIND_DISPLAY: u16 = 2;
@@ -16,6 +17,10 @@ pub const KIND_NETWORK_EVENT: u16 = 11;
 pub const KIND_NETWORK_CLIENT: u16 = 12;
 pub const KIND_NETWORK_SERVER: u16 = 13;
 pub const KIND_NETWORK_STREAM: u16 = 14;
+
+pub const fn known_kind(kind: u16) -> bool {
+    matches!(kind, KIND_INPUT..=KIND_NETWORK_STREAM)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -35,7 +40,11 @@ impl EndpointSlot {
     }
 
     pub const fn valid(self) -> bool {
-        self.kind != 0 && self.version != 0 && self.page != 0 && self.generation != 0
+        known_kind(self.kind)
+            && self.version != 0
+            && self.page != 0
+            && self.page.is_multiple_of(4096)
+            && self.generation != 0
     }
 }
 
@@ -50,7 +59,12 @@ pub struct EndpointTable {
 
 impl EndpointTable {
     pub const fn new(generation: u32) -> Self {
-        Self { generation, count: 0, reserved: 0, slots: [EndpointSlot::EMPTY; MAX_ENDPOINT_SLOTS] }
+        Self {
+            generation: if generation == 0 { 1 } else { generation },
+            count: 0,
+            reserved: 0,
+            slots: [EndpointSlot::EMPTY; MAX_ENDPOINT_SLOTS],
+        }
     }
 
     pub fn insert(&mut self, slot: EndpointSlot) -> bool {
@@ -58,6 +72,7 @@ impl EndpointTable {
         if !slot.valid()
             || slot.generation != self.generation
             || count >= MAX_ENDPOINT_SLOTS
+            || self.reserved != 0
             || self.slots[..count].iter().any(|current| current.kind == slot.kind)
         {
             return false;
@@ -95,5 +110,13 @@ mod tests {
         table.reset(5);
         assert_eq!(table.count, 0);
         assert_eq!(table.generation, 5);
+    }
+
+    #[test]
+    fn slots_reject_unknown_kinds_and_unaligned_pages() {
+        let mut table = EndpointTable::new(1);
+        assert!(!table.insert(EndpointSlot::new(99, ENDPOINT_VERSION, 0, 0x1000, 1)));
+        assert!(!table.insert(EndpointSlot::new(KIND_INPUT, ENDPOINT_VERSION, 0, 0x1001, 1,)));
+        assert!(table.insert(EndpointSlot::new(KIND_INPUT, ENDPOINT_VERSION, 0, 0x1000, 1,)));
     }
 }

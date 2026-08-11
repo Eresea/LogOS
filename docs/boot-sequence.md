@@ -47,6 +47,11 @@ must support the manifest requirement. Ring-3 exception stubs normalize CPU fram
 metadata to Core. Service panics use the same typed failure gate. Cleanup and replacement begin only
 after Core has restored its own address space and stack.
 
+The current SMP/async scheduler foundation is initialized and self-checked on the BSP only. AP
+release is deliberately not part of this boot sequence: a future AP stage must publish global Core
+state first, install per-CPU descriptor/interrupt stacks, and enter a controlled scheduler loop
+through an explicit barrier before any secondary CPU can run task work.
+
 ## Persistence ordering and recovery
 
 After device discovery and Block-driver binding, Core starts the Ring-2 Store and completes its

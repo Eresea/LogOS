@@ -1,5 +1,8 @@
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 pub mod capabilities;
 pub mod clock;
 pub mod event;
@@ -23,4 +26,6 @@ pub mod operation;
 pub mod poll_runtime;
 pub mod resource;
 pub mod shared_pages;
+#[cfg(test)]
+mod smp_model;
 pub mod test_protocol;

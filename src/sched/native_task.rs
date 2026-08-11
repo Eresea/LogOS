@@ -62,6 +62,7 @@ pub struct Task<'a> {
     entry: u64,
     context_physical: u64,
     context: u64,
+    endpoint_table_physical: u64,
     endpoint_mappings: EndpointMappings,
     endpoint_pages: EndpointPages,
     generation: u32,
@@ -1244,6 +1245,7 @@ impl<'a> Task<'a> {
             return None;
         };
         let (context_physical, context) = mapping.context;
+        let (endpoint_table_physical, _) = mapping.endpoint_table;
         Some(Self {
             privilege,
             payload,
@@ -1251,6 +1253,7 @@ impl<'a> Task<'a> {
             entry,
             context_physical,
             context,
+            endpoint_table_physical,
             endpoint_mappings: EndpointMappings::from_context(mapping.entries),
             endpoint_pages,
             generation: 1,
@@ -1431,8 +1434,40 @@ impl<'a> Task<'a> {
                 return false;
             }
         }
+        if !self.reset_endpoint_table(generation) {
+            return false;
+        }
         self.endpoint_mappings.set_generation(generation);
         self.generation = generation;
+        true
+    }
+
+    fn reset_endpoint_table(&self, generation: u32) -> bool {
+        let table = unsafe {
+            (self.endpoint_table_physical as *const logos_abi::endpoint_v5::EndpointTable)
+                .read_volatile()
+        };
+        if table.reserved != 0 {
+            return false;
+        }
+        let mut table = logos_abi::endpoint_v5::EndpointTable::new(generation);
+        for mapping in self.endpoint_mappings.entries.iter().flatten() {
+            if mapping.virtual_address == 0
+                || !table.insert(logos_abi::endpoint_v5::EndpointSlot::new(
+                    mapping.kind.to_v5_kind(),
+                    logos_abi::endpoint_v5::ENDPOINT_VERSION,
+                    0,
+                    mapping.virtual_address,
+                    generation,
+                ))
+            {
+                return false;
+            }
+        }
+        unsafe {
+            (self.endpoint_table_physical as *mut logos_abi::endpoint_v5::EndpointTable)
+                .write_volatile(table);
+        }
         true
     }
 
