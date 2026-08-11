@@ -16,6 +16,10 @@ low-memory trampoline, and starts APs sequentially with INIT/SIPI/SIPI using the
 CPU installs private GDT/IDT state, baseline x87/SSE configuration, GS-addressed local state, and a
 periodic local-APIC timer.
 
+After initialization, Core registers exactly one root `TaskEntry` for the future Runtime and enters the
+existing scheduler. This is a task handoff, not Runtime orchestration: the root task uses the same fixed
+stack, context publication, and reclamation rules as every other task.
+
 ## Consequences
 
 The scheduler is SMP-native from its first implementation and can later expose task contexts to

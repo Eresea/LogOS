@@ -9,8 +9,8 @@ Status: active preemptive SMP Core milestone.
 - `cargo fmt --check` and host clippy with warnings denied pass.
 - UEFI debug build and `qemu-proof` build pass for `x86_64-unknown-uefi`.
 - QEMU proof reaches `LogOS vNext: QEMU proof PASS` with `-smp 1`, `-smp 2`, and `-smp 8`.
-  The proof exercises two non-yielding CPU-bound tasks, GPR/flags/XMM preservation, per-CPU timer
-  ticks, repeated preemption, and blocked/wake (cross-CPU for SMP runs).
+  The proof exercises the root-task handoff, two non-yielding CPU-bound tasks, GPR/flags/XMM
+  preservation, per-CPU timer ticks, repeated preemption, and blocked/wake (cross-CPU for SMP runs).
 - The local-APIC period is measured against the calibrated TSC on the BSP and each AP before its
   timer is enabled.
 - Non-proof UEFI boot reaches `LogOS vNext: core ready` and remains in the scheduler for 1, 2, and
