@@ -32,6 +32,7 @@ const NETWORK_CLIENT_PAGE: usize = ENTRIES - 36;
 const NETWORK_SERVER_PAGE: usize = ENTRIES - 37;
 const REMOTE_PAGE: usize = ENTRIES - 38;
 const NETWORK_STREAM_PAGE: usize = ENTRIES - 25;
+const ENDPOINT_TABLE_PAGE: usize = ENTRIES - 3;
 const STACK_TOP: usize = REMOTE_PAGE;
 // NetworkState owns bounded TCP RX/TX storage in the service task frame.
 // Keep enough fixed stack for that state plus packet parsing without adding
@@ -61,6 +62,7 @@ struct Mapping {
 
 pub struct ContextMapping {
     pub context: (u64, u64),
+    pub endpoint_table: (u64, u64),
     pub entries: [Option<ContextMappingEntry>; 14],
     pub input: Option<(u64, u64)>,
     pub display: Option<(u64, u64)>,
@@ -256,7 +258,7 @@ impl AddressSpace {
             }
             seen[index] = true;
         }
-        let mut context_mapping = self.map_context_legacy(
+        let mut context_mapping = self.map_context_pages(
             physical, seen[0], seen[1], seen[2], seen[3], seen[4], seen[5], seen[6], seen[7],
             seen[8], seen[9], seen[10], seen[11], seen[12], seen[13],
         )?;
@@ -287,8 +289,8 @@ impl AddressSpace {
         Some(context_mapping)
     }
 
-    #[allow(clippy::too_many_arguments)] // Mirrors the fixed legacy endpoint-map contract.
-    fn map_context_legacy(
+    #[allow(clippy::too_many_arguments)] // Keeps the fixed endpoint map explicit and bounded.
+    fn map_context_pages(
         &mut self,
         physical: &mut PhysicalMemory,
         input: bool,
@@ -307,6 +309,7 @@ impl AddressSpace {
         network_stream: bool,
     ) -> Option<ContextMapping> {
         if self.mapping(CONTEXT_PAGE).is_some()
+            || self.mapping(ENDPOINT_TABLE_PAGE).is_some()
             || input && self.mapping(INPUT_PAGE).is_some()
             || display && self.mapping(DISPLAY_PAGE).is_some()
             || session_client && self.mapping(SESSION_CLIENT_PAGE).is_some()
@@ -642,7 +645,36 @@ impl AddressSpace {
         } else {
             None
         };
+        let endpoint_table_page = match physical.allocate_owned() {
+            Some(page) => page,
+            None => {
+                for page in [
+                    input_page,
+                    display_page,
+                    session_client_page,
+                    session_server_page,
+                    effect_page,
+                    store_client_page,
+                    store_server_page,
+                    block_client_page,
+                    remote_page,
+                    network_device_page,
+                    network_client_page,
+                    network_server_page,
+                    network_event_page,
+                    network_stream_page,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let _ = physical.release_page(page);
+                }
+                let _ = physical.release_page(context);
+                return None;
+            }
+        };
         let context_address = context.address();
+        let endpoint_table_address = endpoint_table_page.address();
         let input_address = input_page.as_ref().map(Page::address);
         let display_address = display_page.as_ref().map(Page::address);
         let session_client_address = session_client_page.as_ref().map(Page::address);
@@ -657,6 +689,7 @@ impl AddressSpace {
         let network_device_address = network_device_page.as_ref().map(Page::address);
         let network_event_address = network_event_page.as_ref().map(Page::address);
         let network_stream_address = network_stream_page.as_ref().map(Page::address);
+        let endpoint_table_virtual = self.base + PAGE_SIZE * ENDPOINT_TABLE_PAGE as u64;
         let input_virtual = input_page.as_ref().map(|_| self.base + PAGE_SIZE * INPUT_PAGE as u64);
         let display_virtual =
             display_page.as_ref().map(|_| self.base + PAGE_SIZE * DISPLAY_PAGE as u64);
@@ -695,12 +728,42 @@ impl AddressSpace {
             ptr::write_bytes(context_address as *mut u8, 0, PAGE_SIZE as usize);
             (context_address as *mut logos_core::native_service::ControlPage)
                 .write_volatile(logos_core::native_service::ControlPage::new());
+            let mut table = logos_abi::endpoint_v5::EndpointTable::new(1);
+            for (kind, page) in [
+                (EndpointKind::Input, input_virtual),
+                (EndpointKind::Display, display_virtual),
+                (EndpointKind::SessionClient, session_client_virtual),
+                (EndpointKind::SessionServer, session_server_virtual),
+                (EndpointKind::Effect, effect_virtual),
+                (EndpointKind::StoreClient, store_client_virtual),
+                (EndpointKind::StoreServer, store_server_virtual),
+                (EndpointKind::BlockClient, block_client_virtual),
+                (EndpointKind::Remote, remote_virtual),
+                (EndpointKind::NetworkClient, network_client_virtual),
+                (EndpointKind::NetworkServer, network_server_virtual),
+                (EndpointKind::NetworkDevice, network_device_virtual),
+                (EndpointKind::NetworkEvent, network_event_virtual),
+                (EndpointKind::NetworkStream, network_stream_virtual),
+            ] {
+                if let Some(page) = page {
+                    let _ = table.insert(logos_abi::endpoint_v5::EndpointSlot::new(
+                        kind.to_v5_kind(),
+                        logos_abi::endpoint_v5::ENDPOINT_VERSION,
+                        0,
+                        page,
+                        1,
+                    ));
+                }
+            }
+            (endpoint_table_address as *mut logos_abi::endpoint_v5::EndpointTable)
+                .write_volatile(table);
             (self.pt.address() as *mut u64)
                 .add(CONTEXT_PAGE)
                 .write_volatile(context_address | PRESENT | WRITABLE | USER | NO_EXECUTE);
         }
         if let Err(page) = self.insert_mapping(CONTEXT_PAGE, context) {
             let _ = physical.release_page(page);
+            let _ = physical.release_page(endpoint_table_page);
             if let Some(page) = input_page {
                 let _ = physical.release_page(page);
             }
@@ -718,6 +781,37 @@ impl AddressSpace {
                 network_client_page,
                 network_server_page,
                 network_device_page,
+                network_event_page,
+                network_stream_page,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let _ = physical.release_page(page);
+            }
+            return None;
+        }
+        unsafe {
+            (self.pt.address() as *mut u64)
+                .add(ENDPOINT_TABLE_PAGE)
+                .write_volatile(endpoint_table_address | PRESENT | WRITABLE | USER | NO_EXECUTE);
+        }
+        if let Err(page) = self.insert_mapping(ENDPOINT_TABLE_PAGE, endpoint_table_page) {
+            let _ = physical.release_page(page);
+            self.unmap_index(CONTEXT_PAGE, physical);
+            for page in [
+                input_page,
+                display_page,
+                session_client_page,
+                session_server_page,
+                effect_page,
+                store_client_page,
+                store_server_page,
+                block_client_page,
+                remote_page,
+                network_device_page,
+                network_client_page,
+                network_server_page,
                 network_event_page,
                 network_stream_page,
             ]
@@ -799,6 +893,7 @@ impl AddressSpace {
             if let Err(page) = self.insert_mapping(index, page) {
                 let _ = physical.release_page(page);
                 self.unmap_index(CONTEXT_PAGE, physical);
+                self.unmap_index(ENDPOINT_TABLE_PAGE, physical);
                 self.unmap_index(INPUT_PAGE, physical);
                 self.unmap_index(DISPLAY_PAGE, physical);
                 self.unmap_index(SESSION_CLIENT_PAGE, physical);
@@ -818,26 +913,14 @@ impl AddressSpace {
         }
         let context_virtual = self.base + PAGE_SIZE * CONTEXT_PAGE as u64;
         if !unsafe {
-            logos_core::native_service::ControlPage::configure_endpoint_pages_at(
+            logos_core::native_service::ControlPage::configure_endpoint_table_at(
                 context_address,
                 1,
-                input_virtual,
-                display_virtual,
-                session_client_virtual,
-                session_server_virtual,
-                effect_virtual,
-                store_client_virtual,
-                store_server_virtual,
-                block_client_virtual,
-                remote_virtual,
-                network_client_virtual,
-                network_server_virtual,
-                network_device_virtual,
-                network_event_virtual,
-                network_stream_virtual,
+                endpoint_table_virtual,
             )
         } {
             self.unmap_index(CONTEXT_PAGE, physical);
+            self.unmap_index(ENDPOINT_TABLE_PAGE, physical);
             self.unmap_index(INPUT_PAGE, physical);
             self.unmap_index(DISPLAY_PAGE, physical);
             self.unmap_index(SESSION_CLIENT_PAGE, physical);
@@ -856,6 +939,7 @@ impl AddressSpace {
         }
         Some(ContextMapping {
             context: (context_address, context_virtual),
+            endpoint_table: (endpoint_table_address, endpoint_table_virtual),
             entries: [None; 14],
             input: input_address.zip(input_virtual),
             display: display_address.zip(display_virtual),
