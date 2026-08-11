@@ -78,6 +78,8 @@ isolation constraints live in [Security](security.md).
 - [Platform](PLATFORM.md) supervises manifests, capabilities, health, and restart.
 - [Persistence](PERSISTENCE.md) owns bounded named objects and atomic recovery on the raw block device.
 - [Network](NETWORK.md) owns protocol state and bounded TCP/UDP endpoints; Core owns NIC/DMA.
+- `platform::runtime_network` owns bounded network polling, wake draining, and terminal relays;
+  `runtime.rs` retains cross-subsystem orchestration and gateway/remote policy.
 - [Remote](REMOTE.md) owns trust/enrollment and the structured attachment above Network and Sessions.
 - [Console](CONSOLE.md) and [Sessions](SESSIONS.md) own local interaction, not privileged mechanisms.
 
