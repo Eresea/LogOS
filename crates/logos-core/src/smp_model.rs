@@ -200,15 +200,17 @@ mod tests {
     }
 
     #[test]
-    fn wake_before_and_after_pending_are_not_lost() {
+    fn wake_during_and_after_pending_transition_is_preserved() {
         let registry = Registry::<1>::new();
         let handle = registry.spawn().unwrap();
         let running = registry.claim(0).unwrap();
+        assert_eq!(registry.state(running), Some(State::Running));
         assert!(registry.wake(running));
         assert!(registry.finish_pending(running));
         assert_eq!(registry.state(handle), Some(State::Runnable));
         let running = registry.claim(1).unwrap();
         assert!(!registry.finish_pending(running));
+        assert_eq!(registry.state(handle), Some(State::Blocked));
         assert!(registry.wake(handle));
         assert_eq!(registry.state(handle), Some(State::Runnable));
     }
