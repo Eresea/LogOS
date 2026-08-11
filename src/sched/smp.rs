@@ -833,16 +833,25 @@ mod tests {
     }
 
     #[test]
-    fn future_wake_race_resumes_once() {
+    fn future_waker_resumes_pending_future_once() {
         let mut future = YieldFuture { polls: 0, waker: None };
         let mut scheduler = SmpScheduler::new().with_notifier(|_| true);
         let handle = scheduler.spawn_future(&mut future).unwrap();
         assert!(scheduler.run_next(0));
         future.waker.take().unwrap().wake();
         assert_eq!(scheduler.state(handle), Some(SchedulingState::Runnable));
-        assert!(scheduler.run_next(1) == false);
         assert!(scheduler.run_next(0));
         assert!(scheduler.state(handle).is_none());
+        assert!(!scheduler.run_next(0));
+    }
+
+    #[test]
+    fn inactive_or_invalid_cpu_cannot_run_task() {
+        let mut future = BlockFuture;
+        let mut scheduler = SmpScheduler::new().with_notifier(|_| true);
+        assert!(scheduler.spawn_future(&mut future).is_ok());
+        assert!(!scheduler.run_next(1));
+        assert!(!scheduler.run_next(MAX_CPUS));
     }
 
     #[test]
