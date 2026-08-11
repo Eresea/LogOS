@@ -185,6 +185,7 @@ fn next_generation(generation: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::boxed::Box;
 
     #[test]
     fn exclusive_claim_with_two_workers() {

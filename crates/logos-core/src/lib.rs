@@ -1,5 +1,8 @@
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 pub mod capabilities;
 pub mod clock;
 pub mod event;
