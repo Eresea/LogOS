@@ -85,25 +85,7 @@ impl ServiceContext {
     }
 
     pub fn v5_endpoint(&self, kind: u16) -> Option<(u64, u32)> {
-        let raw = self.raw();
-        if (raw.slot0 == 0 && raw.slot1 == 0) || raw.generation == 0 {
-            return None;
-        }
-        let table_addr = (raw.slot0 as u64) | ((raw.slot1 as u64) << 32);
-        if !table_addr.is_multiple_of(core::mem::align_of::<EndpointTable>() as u64) {
-            return None;
-        }
-        let table_ptr = table_addr as *const EndpointTable;
-        let table = unsafe { &*table_ptr };
-        if table.generation != raw.generation {
-            return None;
-        }
-        let slot = table.find(kind)?;
-        if slot.valid() && slot.generation == raw.generation {
-            Some((slot.page, slot.generation))
-        } else {
-            None
-        }
+        unsafe { ControlPage::endpoint_at(self.raw_address(), kind) }
     }
 
     fn endpoint_page(&self, operation: u32) -> Option<(u64, u32)> {
@@ -120,66 +102,38 @@ impl ServiceContext {
                 return endpoint;
             }
         }
-        let raw = self.raw();
-        let page = match operation {
-            native_service::READ_INPUT => raw.input_page,
-            native_service::PRESENT_PIXEL
-            | native_service::PRESENT_TEXT
-            | native_service::CLEAR_DISPLAY => raw.display_page,
-            _ => 0,
-        };
-        (page != 0 && raw.generation != 0).then_some((page, raw.generation))
+        None
     }
 
     fn session_client_page(&self) -> Option<(u64, u32)> {
-        if let Some(endpoint) = self.v5_endpoint(endpoint_v5::KIND_SESSION_CLIENT) {
-            return Some(endpoint);
-        }
-        let raw = self.raw();
-        (raw.session_client_page != 0 && raw.generation != 0)
-            .then_some((raw.session_client_page, raw.generation))
+        self.v5_endpoint(endpoint_v5::KIND_SESSION_CLIENT)
     }
 
     fn session_server_page(&self) -> Option<(u64, u32)> {
-        if let Some(endpoint) = self.v5_endpoint(endpoint_v5::KIND_SESSION_SERVER) {
-            return Some(endpoint);
-        }
-        let raw = self.raw();
-        (raw.session_server_page != 0 && raw.generation != 0)
-            .then_some((raw.session_server_page, raw.generation))
+        self.v5_endpoint(endpoint_v5::KIND_SESSION_SERVER)
     }
 
     fn effect_page(&self) -> Option<(u64, u32)> {
-        if let Some(endpoint) = self.v5_endpoint(endpoint_v5::KIND_EFFECT) {
-            return Some(endpoint);
-        }
-        let raw = self.raw();
-        (raw.effect_page != 0 && raw.generation != 0).then_some((raw.effect_page, raw.generation))
+        self.v5_endpoint(endpoint_v5::KIND_EFFECT)
     }
 
     fn network_device_generation(&self) -> Option<u32> {
-        let raw = self.raw();
-        if raw.network_device_page == 0 || raw.generation == 0 {
-            return None;
-        }
-        let page = unsafe { (raw.network_device_page as *const NetworkDevicePage).read_volatile() };
+        let (page_address, generation) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_DEVICE)?;
+        let page = unsafe { (page_address as *const NetworkDevicePage).read_volatile() };
         let service_generation = page.service_generation;
         let endpoint_generation = page.endpoint_generation;
         let device_generation = page.device_generation;
-        (service_generation == raw.generation
-            && endpoint_generation == raw.generation
+        (service_generation == generation
+            && endpoint_generation == generation
             && device_generation != 0)
             .then_some(device_generation)
     }
 
     fn network_event_generation(&self) -> Option<u32> {
-        let raw = self.raw();
-        if raw.network_event_page == 0 || raw.generation == 0 {
-            return None;
-        }
-        let page = unsafe { (raw.network_event_page as *const NetworkEventPage).read_volatile() };
-        (page.service_generation == raw.generation
-            && page.endpoint_generation == raw.generation
+        let (page_address, generation) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_EVENT)?;
+        let page = unsafe { (page_address as *const NetworkEventPage).read_volatile() };
+        (page.service_generation == generation
+            && page.endpoint_generation == generation
             && page.device_generation != 0)
             .then_some(page.device_generation)
     }
@@ -221,11 +175,9 @@ impl ServiceContext {
     }
 
     pub fn wait_for_request(&mut self) -> bool {
-        let raw = self.raw();
-        if raw.store_server_page != 0 && raw.generation != 0 {
-            (unsafe {
-                StoreServerPage::wait_at(raw.store_server_page, raw.generation, raw.generation)
-            }) && self.invoke(native_service::READ_INPUT)
+        if let Some((page, generation)) = self.store_server_page() {
+            (unsafe { StoreServerPage::wait_at(page, generation, generation) })
+                && self.invoke(native_service::READ_INPUT)
         } else {
             self.invoke(native_service::READ_INPUT)
         }
@@ -366,7 +318,7 @@ impl ServiceContext {
     pub fn shared_page(&self) -> Option<SharedPage> {
         let (page, generation) = self.store_client_page().or_else(|| self.store_server_page())?;
         let handle = unsafe {
-            if self.raw().store_client_page == page {
+            if self.store_client_page().is_some_and(|(client_page, _)| client_page == page) {
                 StoreClientPage::transfer_page_at(page, generation, generation)
             } else {
                 StoreServerPage::transfer_page_at(page, generation, generation)
@@ -392,36 +344,23 @@ impl ServiceContext {
 
     pub fn network_wait(&mut self, deadline: u64) -> bool {
         let Some(device_generation) = self.network_event_generation() else { return false };
+        let Some((page, generation)) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_EVENT) else {
+            return false;
+        };
         (unsafe {
-            NetworkEventPage::wait_at(
-                self.raw().network_event_page,
-                self.raw().generation,
-                self.raw().generation,
-                device_generation,
-                deadline,
-            )
+            NetworkEventPage::wait_at(page, generation, generation, device_generation, deadline)
         } || unsafe {
-            NetworkEventPage::waiting_at(
-                self.raw().network_event_page,
-                self.raw().generation,
-                self.raw().generation,
-                device_generation,
-            )
+            NetworkEventPage::waiting_at(page, generation, generation, device_generation)
         }) && self.invoke(native_service::NETWORK_WAIT)
     }
 
     pub fn network_pages(&self) -> Option<NetworkDmaResources> {
         let raw = self.raw();
         let generation = raw.generation;
+        let (page, _) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_DEVICE)?;
         let device_generation = self.network_device_generation()?;
-        let (rx_handle, tx_handle) = unsafe {
-            NetworkDevicePage::dma_at(
-                raw.network_device_page,
-                generation,
-                generation,
-                device_generation,
-            )?
-        };
+        let (rx_handle, tx_handle) =
+            unsafe { NetworkDevicePage::dma_at(page, generation, generation, device_generation)? };
         Some(NetworkDmaResources {
             rx_handle,
             rx_address: self.raw_address().checked_sub(19 * logos_abi::PAGE_SIZE as u64)?,
@@ -431,10 +370,8 @@ impl ServiceContext {
     }
 
     pub fn network_server_request(&self) -> Option<NetworkServerRequest> {
-        let raw = self.raw();
-        (raw.network_server_page != 0).then(|| unsafe {
-            NetworkServerPage::take_at(raw.network_server_page, raw.generation, raw.generation)
-        })?
+        let (page, generation) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_SERVER)?;
+        unsafe { NetworkServerPage::take_at(page, generation, generation) }
     }
 
     pub fn network_request(&self) -> Option<logos_abi::NetworkRequest> {
@@ -442,42 +379,23 @@ impl ServiceContext {
     }
 
     pub fn network_response(&self, expected_id: u32) -> Option<logos_abi::NetworkReply> {
-        let raw = self.raw();
-        (raw.network_client_page != 0).then(|| unsafe {
-            NetworkClientPage::finish_at(
-                raw.network_client_page,
-                raw.generation,
-                raw.generation,
-                expected_id,
-            )
-        })?
+        let (page, generation) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_CLIENT)?;
+        unsafe { NetworkClientPage::finish_at(page, generation, generation, expected_id) }
     }
 
     pub fn request_network(&mut self, request: logos_abi::NetworkRequest) -> bool {
-        let raw = self.raw();
-        (raw.network_client_page != 0
-            && unsafe {
-                NetworkClientPage::request_at(
-                    raw.network_client_page,
-                    raw.generation,
-                    raw.generation,
-                    request,
-                )
-            })
+        let Some((page, generation)) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_CLIENT) else {
+            return false;
+        };
+        (unsafe { NetworkClientPage::request_at(page, generation, generation, request) })
             && self.invoke(native_service::NETWORK_REQUEST)
     }
 
     pub fn network_reply(&mut self, reply: logos_abi::NetworkReply) -> bool {
-        let raw = self.raw();
-        (raw.network_server_page != 0
-            && unsafe {
-                NetworkServerPage::reply_at(
-                    raw.network_server_page,
-                    raw.generation,
-                    raw.generation,
-                    reply,
-                )
-            })
+        let Some((page, generation)) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_SERVER) else {
+            return false;
+        };
+        (unsafe { NetworkServerPage::reply_at(page, generation, generation, reply) })
             && self.invoke(native_service::NETWORK_REPLY)
     }
 
@@ -501,24 +419,20 @@ impl ServiceContext {
 
     pub fn network_device_request(&mut self, request: logos_abi::NetworkDeviceRequest) -> bool {
         let Some(device_generation) = self.network_device_generation() else { return false };
+        let Some((page, generation)) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_DEVICE) else {
+            return false;
+        };
         (unsafe {
-            NetworkDevicePage::request_at(
-                self.raw().network_device_page,
-                self.raw().generation,
-                self.raw().generation,
-                device_generation,
-                request,
-            )
+            NetworkDevicePage::request_at(page, generation, generation, device_generation, request)
         }) && self.invoke(native_service::NETWORK_DEVICE_REQUEST)
     }
 
     pub fn network_device_reply(&self, expected_id: u32) -> Option<logos_abi::NetworkDeviceReply> {
-        let raw = self.raw();
-        let generation = raw.generation;
+        let (page, generation) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_DEVICE)?;
         let device_generation = self.network_device_generation()?;
         unsafe {
             NetworkDevicePage::take_reply_at(
-                raw.network_device_page,
+                page,
                 generation,
                 generation,
                 device_generation,
@@ -528,100 +442,66 @@ impl ServiceContext {
     }
 
     pub fn network_event(&self) -> Option<logos_abi::NetworkEvent> {
-        let raw = self.raw();
-        let generation = raw.generation;
+        let (page, generation) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_EVENT)?;
         let device_generation = self.network_event_generation()?;
-        let event = unsafe {
-            NetworkEventPage::take_at(
-                raw.network_event_page,
-                generation,
-                generation,
-                device_generation,
-            )
-        }?;
-        unsafe {
-            NetworkEventPage::acknowledge_at(
-                raw.network_event_page,
-                generation,
-                generation,
-                device_generation,
-            )
-        }
-        .then_some(event)
+        let event =
+            unsafe { NetworkEventPage::take_at(page, generation, generation, device_generation) }?;
+        unsafe { NetworkEventPage::acknowledge_at(page, generation, generation, device_generation) }
+            .then_some(event)
     }
 
     pub fn publish_stream(&self, record: logos_abi::NetworkStreamRecord) -> bool {
-        let raw = self.raw();
-        raw.network_stream_page != 0
-            && unsafe {
-                StreamPage::publish_at(
-                    raw.network_stream_page,
-                    raw.generation,
-                    raw.generation,
-                    record,
-                )
-            }
+        let Some((page, generation)) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_STREAM) else {
+            return false;
+        };
+        unsafe { StreamPage::publish_at(page, generation, generation, record) }
     }
 
     pub fn take_stream_notification(
         &self,
         endpoint: logos_abi::NetworkEndpoint,
     ) -> Option<logos_abi::NetworkStreamRecord> {
-        let raw = self.raw();
-        (raw.network_stream_page != 0).then(|| unsafe {
-            StreamPage::take_at(raw.network_stream_page, raw.generation, raw.generation, endpoint)
-        })?
+        let (page, generation) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_STREAM)?;
+        unsafe { StreamPage::take_at(page, generation, generation, endpoint) }
     }
 
     pub fn stream_overflowed(&self) -> bool {
-        let raw = self.raw();
-        raw.network_stream_page != 0
-            && unsafe {
-                StreamPage::overflow_at(raw.network_stream_page, raw.generation, raw.generation)
-            }
+        let Some((page, generation)) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_STREAM) else {
+            return false;
+        };
+        unsafe { StreamPage::overflow_at(page, generation, generation) }
     }
 
     pub fn clear_stream_overflow(&self) -> bool {
-        let raw = self.raw();
-        raw.network_stream_page != 0
-            && unsafe {
-                StreamPage::clear_overflow_at(
-                    raw.network_stream_page,
-                    raw.generation,
-                    raw.generation,
-                )
-            }
+        let Some((page, generation)) = self.v5_endpoint(endpoint_v5::KIND_NETWORK_STREAM) else {
+            return false;
+        };
+        unsafe { StreamPage::clear_overflow_at(page, generation, generation) }
     }
 
     pub fn remote_gate_request(&self) -> Option<RemotePageRequest> {
-        let raw = self.raw();
-        (raw.remote_page != 0).then(|| unsafe {
-            RemotePage::take_at(raw.remote_page, raw.generation, raw.generation)
-        })?
+        let (page, generation) = self.v5_endpoint(endpoint_v5::KIND_REMOTE)?;
+        unsafe { RemotePage::take_at(page, generation, generation) }
     }
 
     pub fn remote_gate_reply(&self, expected_id: u32) -> Option<RemotePageReply> {
-        let raw = self.raw();
-        (raw.remote_page != 0).then(|| unsafe {
-            RemotePage::finish_at(raw.remote_page, raw.generation, raw.generation, expected_id)
-        })?
+        let (page, generation) = self.v5_endpoint(endpoint_v5::KIND_REMOTE)?;
+        unsafe { RemotePage::finish_at(page, generation, generation, expected_id) }
     }
 
     pub fn request_remote_gate(&mut self, request: RemotePageRequest) -> bool {
-        let raw = self.raw();
-        (raw.remote_page != 0
-            && unsafe {
-                RemotePage::request_at(raw.remote_page, raw.generation, raw.generation, request)
-            })
+        let Some((page, generation)) = self.v5_endpoint(endpoint_v5::KIND_REMOTE) else {
+            return false;
+        };
+        (unsafe { RemotePage::request_at(page, generation, generation, request) })
             && self.invoke(native_service::REMOTE_GATE)
     }
 
     pub fn reply_remote_gate(&mut self, reply: RemotePageReply) -> bool {
-        let raw = self.raw();
-        (raw.remote_page != 0
-            && unsafe {
-                RemotePage::reply_at(raw.remote_page, raw.generation, raw.generation, reply)
-            })
+        let Some((page, generation)) = self.v5_endpoint(endpoint_v5::KIND_REMOTE) else {
+            return false;
+        };
+        (unsafe { RemotePage::reply_at(page, generation, generation, reply) })
             && self.invoke(native_service::REMOTE_GATE)
     }
 
@@ -637,21 +517,15 @@ impl ServiceContext {
     }
 
     fn store_client_page(&self) -> Option<(u64, u32)> {
-        let raw = self.raw();
-        (raw.store_client_page != 0 && raw.generation != 0)
-            .then_some((raw.store_client_page, raw.generation))
+        self.v5_endpoint(endpoint_v5::KIND_STORE_CLIENT)
     }
 
     fn store_server_page(&self) -> Option<(u64, u32)> {
-        let raw = self.raw();
-        (raw.store_server_page != 0 && raw.generation != 0)
-            .then_some((raw.store_server_page, raw.generation))
+        self.v5_endpoint(endpoint_v5::KIND_STORE_SERVER)
     }
 
     fn block_client_page(&self) -> Option<(u64, u32)> {
-        let raw = self.raw();
-        (raw.block_client_page != 0 && raw.generation != 0)
-            .then_some((raw.block_client_page, raw.generation))
+        self.v5_endpoint(endpoint_v5::KIND_BLOCK_CLIENT)
     }
 
     pub fn heap_slot<T>(&self) -> Option<&'static mut MaybeUninit<T>> {
@@ -851,54 +725,40 @@ mod rt_tests {
     use super::*;
 
     #[test]
-    fn service_context_v5_endpoint_resolution_and_fallback() {
+    fn service_context_v5_endpoint_resolution_is_table_only() {
+        let mut table = EndpointTable::new(3);
+        assert!(table.insert(EndpointSlot::new(
+            endpoint_v5::KIND_INPUT,
+            endpoint_v5::ENDPOINT_VERSION,
+            0,
+            0x1000,
+            3,
+        )));
+        assert!(table.insert(EndpointSlot::new(
+            endpoint_v5::KIND_SESSION_CLIENT,
+            endpoint_v5::ENDPOINT_VERSION,
+            0,
+            0x9000,
+            3,
+        )));
+        let table_ptr = &table as *const EndpointTable as u64;
         let mut raw_control = ControlPage {
-            abi: 4,
+            abi: native_service::ABI,
             reserved: 0,
             operation: 0,
             status: 0,
             generation: 3,
             lifecycle: 1,
-            input_page: 0x1000,
-            display_page: 0,
-            session_client_page: 0x2000,
-            session_server_page: 0,
-            effect_page: 0,
-            store_client_page: 0,
-            store_server_page: 0,
-            block_client_page: 0,
-            remote_page: 0,
-            network_client_page: 0,
-            network_server_page: 0,
-            slot0: 0,
-            slot1: 0,
-            network_device_page: 0,
-            network_event_page: 0,
-            network_stream_page: 0,
+            endpoint_table: table_ptr,
         };
         let raw_ptr = &mut raw_control as *mut ControlPage;
         let ctx = ServiceContext { raw: NonNull::new(raw_ptr).unwrap(), next_session_id: 1 };
 
-        // Fallback to legacy v4 page pointers when slot0/slot1 is 0
         assert_eq!(ctx.endpoint_page(native_service::READ_INPUT), Some((0x1000, 3)));
-        assert_eq!(ctx.session_client_page(), Some((0x2000, 3)));
-        assert_eq!(ctx.v5_endpoint(endpoint_v5::KIND_SESSION_CLIENT), None);
-
-        // Setup opt-in v5 EndpointTable
-        let mut table = EndpointTable::new(3);
-        assert!(table.insert(EndpointSlot::new(endpoint_v5::KIND_SESSION_CLIENT, 1, 0, 0x9000, 3)));
-
-        let table_ptr = &table as *const EndpointTable as u64;
-        unsafe {
-            (*raw_ptr).slot0 = table_ptr as u32;
-            (*raw_ptr).slot1 = (table_ptr >> 32) as u32;
-        }
-
-        // Opt-in v5 endpoint slot is preferred over v4 legacy pointer
-        assert_eq!(ctx.v5_endpoint(endpoint_v5::KIND_SESSION_CLIENT), Some((0x9000, 3)));
         assert_eq!(ctx.session_client_page(), Some((0x9000, 3)));
+        assert_eq!(ctx.v5_endpoint(endpoint_v5::KIND_DISPLAY), None);
 
-        // Unregistered kinds fall back to v4
-        assert_eq!(ctx.endpoint_page(native_service::READ_INPUT), Some((0x1000, 3)));
+        unsafe { (*raw_ptr).generation = 4 };
+        assert_eq!(ctx.v5_endpoint(endpoint_v5::KIND_INPUT), None);
     }
 }
