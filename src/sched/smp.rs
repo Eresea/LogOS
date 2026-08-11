@@ -739,6 +739,9 @@ pub fn self_check(topology: &crate::arch::acpi::CpuTopology) -> bool {
 
     let mut future = YieldOnce(0);
     let mut scheduler = SmpScheduler::new();
+    if topology.truncated() && topology.count() != crate::arch::acpi::MAX_CPUS {
+        return false;
+    }
     if scheduler.configure_topology(topology) == 0
         || !scheduler.cpu(0).is_some_and(|cpu| cpu.active)
     {

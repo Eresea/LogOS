@@ -41,10 +41,7 @@ unsafe impl<const N: usize> Sync for Registry<N> {}
 
 impl<const N: usize> Registry<N> {
     pub const fn new() -> Self {
-        Self {
-            slots: [const { Slot::new() }; N],
-            cursors: [const { AtomicUsize::new(0) }; 2],
-        }
+        Self { slots: [const { Slot::new() }; N], cursors: [const { AtomicUsize::new(0) }; 2] }
     }
 
     pub fn spawn(&self) -> Option<Handle> {
