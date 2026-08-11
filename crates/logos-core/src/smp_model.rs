@@ -231,18 +231,24 @@ mod tests {
     }
 
     #[test]
-    fn generation_completion_and_bounds_are_safe() {
+    fn completion_reuses_capacity_and_rejects_stale_generation() {
         let registry = Registry::<1>::new();
         let old = registry.spawn().unwrap();
         assert!(registry.spawn().is_none());
-        assert!(registry.complete(registry.claim(0).unwrap()));
+        let old_running = registry.claim(0).unwrap();
+        assert_eq!(old_running, old);
+        assert_eq!(registry.state(old), Some(State::Running));
+        assert!(registry.complete(old_running));
         assert!(registry.state(old).is_none());
         let new = registry.spawn().unwrap();
+        assert_eq!(new.slot, old.slot);
         assert_ne!(old.generation, new.generation);
         assert!(!registry.wake(old));
         let running = registry.claim(0).unwrap();
+        assert_eq!(running, new);
         assert!(registry.complete(running));
         assert!(!registry.complete(running));
+        assert!(registry.state(new).is_none());
     }
 
     #[test]
