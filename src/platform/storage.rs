@@ -14,6 +14,13 @@ pub const TEXT_NAMESPACE: logos_abi::NamespaceId = logos_abi::NamespaceId(2);
 pub const AUDIT_NAMESPACE: logos_abi::NamespaceId = logos_abi::NamespaceId(3);
 pub const SECRETS_NAMESPACE: logos_abi::NamespaceId = logos_abi::NamespaceId(4);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartupPoll {
+    Pending,
+    Ready,
+    Failed,
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoragePhase {
@@ -152,8 +159,27 @@ impl StorageRuntime {
         context: &mut block::DispatchContext<'_>,
         scheduler: &mut native_task::Scheduler<'_>,
     ) -> bool {
+        interrupts::enable();
+        for _ in 0..256 {
+            match self.startup_poll(context, scheduler) {
+                StartupPoll::Ready => return true,
+                StartupPoll::Failed => return false,
+                StartupPoll::Pending => {
+                    let _ = scheduler.run_next();
+                    core::hint::spin_loop();
+                }
+            }
+        }
+        false
+    }
+
+    pub fn startup_poll(
+        &mut self,
+        context: &mut block::DispatchContext<'_>,
+        scheduler: &mut native_task::Scheduler<'_>,
+    ) -> StartupPoll {
         self.bind_block_context(context);
-        run_startup(self.store_server, &mut self.block_dispatch, context, scheduler, self.handle)
+        poll_startup(self.store_server, &mut self.block_dispatch, context, scheduler, self.handle)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -403,7 +429,8 @@ impl StorageRuntime {
         tick: u64,
     ) -> bool {
         self.bind_block_context(context);
-        let had_request = terminal.request().is_some();
+        let request = terminal.request();
+        let had_request = request.is_some();
         let relay = self.relay_store_request(
             terminal,
             context,
@@ -417,10 +444,53 @@ impl StorageRuntime {
         );
         match relay {
             session::Relay::Handled(ok) => {
-                ok && (!had_request
-                    || (scheduler.wake(terminal_handle) && scheduler.run(terminal_handle)))
+                if !ok {
+                    let Some(request) = request else { return false };
+                    if !terminal.reply(logos_abi::StoreReply {
+                        id: request.id,
+                        status: logos_abi::PersistenceStatus::Unavailable,
+                        version: 0,
+                        length: 0,
+                    }) {
+                        return false;
+                    }
+                }
+                let resumable = scheduler
+                    .waiting_for_operation(terminal_handle, logos_abi::service::READ_INPUT)
+                    || scheduler
+                        .waiting_for_operation(terminal_handle, logos_abi::service::STORE_REQUEST);
+                if had_request
+                    && resumable
+                    && (!scheduler.wake(terminal_handle) || !scheduler.run(terminal_handle))
+                {
+                    return false;
+                }
+                if !terminal.pending() {
+                    return true;
+                }
+                let next = self.relay_store_request(
+                    terminal,
+                    context,
+                    terminal_owner,
+                    storage_owner,
+                    history_page,
+                    scheduler,
+                    session,
+                    capabilities,
+                    tick,
+                );
+                matches!(next, session::Relay::Handled(true) | session::Relay::Runnable(_))
+                    && (!scheduler
+                        .waiting_for_operation(terminal_handle, logos_abi::service::STORE_REQUEST)
+                        || (scheduler.wake(terminal_handle) && scheduler.run(terminal_handle)))
             }
-            session::Relay::Recovery | session::Relay::Runnable(_) => true,
+            session::Relay::Runnable(_) => {
+                !had_request
+                    || !scheduler
+                        .waiting_for_operation(terminal_handle, logos_abi::service::STORE_REQUEST)
+                    || (scheduler.wake(terminal_handle) && scheduler.run(terminal_handle))
+            }
+            session::Relay::Recovery => true,
         }
     }
 
@@ -637,7 +707,7 @@ fn protected_store_request(
         debug::write_line(b"LogOS: remote persistence run failed");
         return None;
     }
-    loop {
+    for _ in 0..256 {
         if let Some(reply) = storage.response(request.id) {
             let ready = scheduler.wake(storage_handle) && scheduler.run(storage_handle);
             return ready.then_some(reply);
@@ -657,13 +727,13 @@ fn protected_store_request(
                 debug::write_line(b"LogOS: remote persistence block relay failed");
                 return None;
             }
-        } else if dispatch.accepts_new_request() {
-            interrupts::wait_for_tick();
         } else {
-            interrupts::wait_for_virtio();
+            let _ = scheduler.run_next();
+            core::hint::spin_loop();
         }
         current_tick = interrupts::ticks();
     }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -943,57 +1013,37 @@ pub fn cancel_store_transaction(
             .is_some_and(|reply| reply.status == logos_abi::PersistenceStatus::Complete)
 }
 
-pub fn run_startup(
+pub fn poll_startup(
     storage: native_task::StoreServerEndpoint,
     dispatch: &mut block::Dispatch,
     context: &mut block::DispatchContext<'_>,
     scheduler: &mut native_task::Scheduler<'_>,
     handle: native_task::Handle,
-) -> bool {
-    interrupts::enable();
-    loop {
-        if scheduler.failed(handle) {
-            return false;
-        }
-        let waiting = storage.waiting();
-        if waiting {
-            debug::write_line(b"LogOS: startup waiting");
-            let marker: &[u8] = match storage.status() {
-                Some(logos_core::native_service::STORAGE_FORMATTED) => b"LogOS: storage formatted",
-                Some(logos_core::native_service::STORAGE_RECOVERED) => b"LogOS: storage recovered",
-                Some(logos_core::native_service::STORAGE_RECOVERED_INCOMPLETE) => {
-                    b"LogOS: storage recovered-incomplete"
-                }
-                Some(logos_core::native_service::STORAGE_CORRUPT) => b"LogOS: storage corrupt",
-                Some(logos_core::native_service::STORAGE_IO_FAILED) => b"LogOS: storage io-failed",
-                _ => {
-                    return false;
-                }
-            };
-            debug::write_line(marker);
-            return true;
-        }
-        let Some(reply) = dispatch.poll(context, interrupts::ticks()) else {
-            debug::write_line(if dispatch.accepts_new_request() {
-                b"LogOS: storage startup no request"
-            } else {
-                b"LogOS: storage startup block pending"
-            });
-            if dispatch.accepts_new_request() {
-                interrupts::wait_for_tick();
-            } else {
-                interrupts::wait_for_virtio();
+) -> StartupPoll {
+    if scheduler.failed(handle) {
+        return StartupPoll::Failed;
+    }
+    if storage.waiting() {
+        let marker: &[u8] = match storage.status() {
+            Some(logos_core::native_service::STORAGE_FORMATTED) => b"LogOS: storage formatted",
+            Some(logos_core::native_service::STORAGE_RECOVERED) => b"LogOS: storage recovered",
+            Some(logos_core::native_service::STORAGE_RECOVERED_INCOMPLETE) => {
+                b"LogOS: storage recovered-incomplete"
             }
-            continue;
+            Some(logos_core::native_service::STORAGE_CORRUPT) => b"LogOS: storage corrupt",
+            Some(logos_core::native_service::STORAGE_IO_FAILED) => b"LogOS: storage io-failed",
+            _ => return StartupPoll::Failed,
         };
-        if !context.endpoint.reply(reply) {
-            return false;
-        }
-        if !scheduler.wake(handle) {
-            return false;
-        }
-        if !scheduler.run(handle) {
-            return false;
-        }
+        debug::write_line(b"LogOS: startup waiting");
+        debug::write_line(marker);
+        return StartupPoll::Ready;
+    }
+    let Some(reply) = dispatch.poll(context, interrupts::ticks()) else {
+        return StartupPoll::Pending;
+    };
+    if !context.endpoint.reply(reply) || !scheduler.wake(handle) || !scheduler.run(handle) {
+        StartupPoll::Failed
+    } else {
+        StartupPoll::Pending
     }
 }

@@ -1304,13 +1304,13 @@ pub(crate) fn run(
     if !native_input.deliver(logos_abi::InputEvent::STARTUP) {
         fail!(b"terminal history startup");
     }
-    if !native_scheduler.wake_or_ready(native_handle) {
+    if !native_scheduler.wake(native_handle) {
         fail!(b"terminal history startup");
     }
     if !native_scheduler.run(native_handle) {
         fail!(b"terminal history startup");
     }
-    let _ = storage_runtime.relay_terminal_store_requests(
+    if !storage_runtime.relay_terminal_store_requests(
         native_store,
         &mut block::DispatchContext {
             endpoint: native_storage_block,
@@ -1328,7 +1328,9 @@ pub(crate) fn run(
         &session,
         &capabilities,
         interrupts::ticks(),
-    );
+    ) {
+        fail!(b"terminal history startup");
+    }
     if !resume_display(
         native_display,
         &session,
@@ -1509,7 +1511,7 @@ pub(crate) fn run(
                         return false;
                     }
                     if !native_input.deliver(logos_abi::InputEvent::STARTUP)
-                        || !native_scheduler.wake_or_ready(native_handle)
+                        || !native_scheduler.wake(native_handle)
                         || !native_scheduler.run(native_handle)
                     {
                         return false;
@@ -1654,28 +1656,40 @@ pub(crate) fn run(
                         if !native_input.deliver(event) {
                             return false;
                         }
-                        if native_scheduler.notify_input(native_handle) == Some(false) {
+                        if !native_scheduler.wake(native_handle)
+                            || !native_scheduler.run(native_handle)
+                            || !resume_display(
+                                native_display,
+                                &session,
+                                &capabilities,
+                                session_display_capability,
+                                &mut native_scheduler,
+                                native_handle,
+                            )
+                        {
                             return false;
                         }
-                        if !storage_runtime.relay_terminal_store_requests(
-                            native_store,
-                            &mut block::DispatchContext {
-                                endpoint: native_storage_block,
-                                pages: &mut shared_pages,
-                                store_owner: storage_owner,
-                                store_page: storage_block_page,
-                                device: &mut block_device,
-                                memory: &mut memory,
-                            },
-                            terminal_owner,
-                            storage_owner,
-                            shared_history,
-                            &mut native_scheduler,
-                            native_handle,
-                            &session,
-                            &capabilities,
-                            interrupts::ticks(),
-                        ) {
+                        if native_command.request().is_none()
+                            && !storage_runtime.relay_terminal_store_requests(
+                                native_store,
+                                &mut block::DispatchContext {
+                                    endpoint: native_storage_block,
+                                    pages: &mut shared_pages,
+                                    store_owner: storage_owner,
+                                    store_page: storage_block_page,
+                                    device: &mut block_device,
+                                    memory: &mut memory,
+                                },
+                                terminal_owner,
+                                storage_owner,
+                                shared_history,
+                                &mut native_scheduler,
+                                native_handle,
+                                &session,
+                                &capabilities,
+                                interrupts::ticks(),
+                            )
+                        {
                             return false;
                         }
                         if !resume_display(
@@ -1757,12 +1771,12 @@ pub(crate) fn run(
                     let previous_context = native_display.context();
                     let failed = if value == "assert-terminal-service-panic" {
                         native_input.deliver_raw(0xfa)
-                            && native_scheduler.wake_or_ready(previous)
+                            && native_scheduler.wake(previous)
                             && native_scheduler.run(previous)
                             && native_scheduler.failed(previous)
                     } else if value == "assert-terminal-service-fault" {
                         native_input.deliver_raw(0xfb)
-                            && native_scheduler.wake_or_ready(previous)
+                            && native_scheduler.wake(previous)
                             && native_scheduler.run(previous)
                             && native_scheduler.failed(previous)
                     } else {
@@ -1822,7 +1836,7 @@ pub(crate) fn run(
                             native_handle,
                         )
                         || !native_input.deliver(logos_abi::InputEvent::STARTUP)
-                        || !native_scheduler.wake_or_ready(native_handle)
+                        || !native_scheduler.wake(native_handle)
                         || !native_scheduler.run(native_handle)
                     {
                         return false;
@@ -2249,7 +2263,8 @@ pub(crate) fn run(
                 if deny_display {
                     let passed = logos_abi::InputEvent::from_byte(b'x').is_some_and(|event| {
                         native_input.deliver(event)
-                            && native_scheduler.notify_input(native_handle) != Some(false)
+                            && native_scheduler.wake(native_handle)
+                            && native_scheduler.run(native_handle)
                             && !resume_display(
                                 native_display,
                                 &denied_session,
@@ -2265,26 +2280,36 @@ pub(crate) fn run(
                 let passed = value.bytes().chain(core::iter::once(b'\n')).all(|byte| {
                     logos_abi::InputEvent::from_byte(byte)
                         .is_some_and(|event| native_input.deliver(event))
-                        && native_scheduler.notify_input(native_handle) != Some(false)
-                        && storage_runtime.relay_terminal_store_requests(
-                            native_store,
-                            &mut block::DispatchContext {
-                                endpoint: native_storage_block,
-                                pages: &mut shared_pages,
-                                store_owner: storage_owner,
-                                store_page: storage_block_page,
-                                device: &mut block_device,
-                                memory: &mut memory,
-                            },
-                            terminal_owner,
-                            storage_owner,
-                            shared_history,
-                            &mut native_scheduler,
-                            native_handle,
+                        && native_scheduler.wake(native_handle)
+                        && native_scheduler.run(native_handle)
+                        && resume_display(
+                            native_display,
                             &session,
                             &capabilities,
-                            interrupts::ticks(),
+                            session_display_capability,
+                            &mut native_scheduler,
+                            native_handle,
                         )
+                        && (native_command.request().is_some()
+                            || storage_runtime.relay_terminal_store_requests(
+                                native_store,
+                                &mut block::DispatchContext {
+                                    endpoint: native_storage_block,
+                                    pages: &mut shared_pages,
+                                    store_owner: storage_owner,
+                                    store_page: storage_block_page,
+                                    device: &mut block_device,
+                                    memory: &mut memory,
+                                },
+                                terminal_owner,
+                                storage_owner,
+                                shared_history,
+                                &mut native_scheduler,
+                                native_handle,
+                                &session,
+                                &capabilities,
+                                interrupts::ticks(),
+                            ))
                         && resume_display(
                             native_display,
                             &session,
@@ -2440,6 +2465,34 @@ pub(crate) fn run(
                                     )
                             }
                         })
+                        && (native_store.request().is_none()
+                            || storage_runtime.relay_terminal_store_requests(
+                                native_store,
+                                &mut block::DispatchContext {
+                                    endpoint: native_storage_block,
+                                    pages: &mut shared_pages,
+                                    store_owner: storage_owner,
+                                    store_page: storage_block_page,
+                                    device: &mut block_device,
+                                    memory: &mut memory,
+                                },
+                                terminal_owner,
+                                storage_owner,
+                                shared_history,
+                                &mut native_scheduler,
+                                native_handle,
+                                &session,
+                                &capabilities,
+                                interrupts::ticks(),
+                            ))
+                        && resume_display(
+                            native_display,
+                            &session,
+                            &capabilities,
+                            session_display_capability,
+                            &mut native_scheduler,
+                            native_handle,
+                        )
                 });
                 if proof_input {
                     proof.record(passed);
@@ -3256,8 +3309,8 @@ pub(crate) fn run(
                 {
                     debug::write_line(b"LogOS: storage block reply failed");
                 }
-                if native_store.request().is_some() {
-                    let _ = storage_runtime.relay_terminal_store_requests(
+                if native_store.request().is_some()
+                    && (!storage_runtime.relay_terminal_store_requests(
                         native_store,
                         &mut block::DispatchContext {
                             endpoint: native_storage_block,
@@ -3275,7 +3328,17 @@ pub(crate) fn run(
                         &session,
                         &capabilities,
                         tick,
-                    );
+                    ) || !resume_display(
+                        native_display,
+                        &session,
+                        &capabilities,
+                        session_display_capability,
+                        &mut native_scheduler,
+                        native_handle,
+                    ))
+                {
+                    console_mode = mode::ConsoleMode::Recovery;
+                    break;
                 }
                 if !poll_network(
                     &mut network_runtime,
@@ -3327,23 +3390,22 @@ pub(crate) fn run(
                         let _ = native_services.failed(supervisor::NativeService::Gateway, tick);
                     }
                 }
-                if let Some(event) = input.next(tick, keyboard::poll_scancode) {
+                if native_scheduler
+                    .waiting_for_operation(native_handle, logos_abi::service::READ_INPUT)
+                    && let Some(event) = input.next(tick, keyboard::poll_scancode)
+                {
                     if let Some(native_event) = native_input_event(event) {
-                        let notified = native_input
-                            .deliver(native_event)
-                            .then(|| native_scheduler.notify_input(native_handle));
-                        if notified.is_none()
-                            || notified.flatten() == Some(false)
-                            || notified.flatten().is_some_and(|_| {
-                                !resume_display(
-                                    native_display,
-                                    &session,
-                                    &capabilities,
-                                    session_display_capability,
-                                    &mut native_scheduler,
-                                    native_handle,
-                                )
-                            })
+                        if !native_input.deliver(native_event)
+                            || !native_scheduler.wake(native_handle)
+                            || !native_scheduler.run(native_handle)
+                            || !resume_display(
+                                native_display,
+                                &session,
+                                &capabilities,
+                                session_display_capability,
+                                &mut native_scheduler,
+                                native_handle,
+                            )
                         {
                             if native_services.failed(supervisor::NativeService::Terminal, tick)
                                 == supervisor::FailureAction::Retry
@@ -3411,7 +3473,8 @@ pub(crate) fn run(
                             console_mode = mode::ConsoleMode::Recovery;
                             break;
                         }
-                        if native_store.request().is_some()
+                        if native_command.request().is_none()
+                            && native_store.request().is_some()
                             && (!storage_runtime.relay_terminal_store_requests(
                                 native_store,
                                 &mut block::DispatchContext {
