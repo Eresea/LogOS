@@ -25,6 +25,11 @@ use uefi::mem::memory_map::MemoryMap;
 #[path = "runtime_remote.rs"]
 mod runtime_remote;
 use runtime_remote::{RemoteLoadPhase, drive_sessions_relay, poll_remote_load};
+#[path = "runtime_network.rs"]
+mod runtime_network;
+#[cfg(feature = "test-hooks")]
+use runtime_network::{assert_qemu_network_configuration, run_network_device_request};
+use runtime_network::{drain_network_wakes, poll_network};
 
 #[cfg_attr(feature = "test-hooks", allow(unreachable_code, unused_mut, unused_variables))]
 #[allow(clippy::too_many_arguments)]
@@ -3885,54 +3890,6 @@ fn invoke_native(
     None
 }
 
-#[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
-fn run_network_device_request(
-    runtime: &mut network::NetworkRuntime,
-    scheduler: &mut native_task::Scheduler<'_>,
-    request: logos_abi::NetworkDeviceRequest,
-    tick: u64,
-) -> Option<logos_abi::NetworkDeviceReply> {
-    for step in 0..16 {
-        if runtime.device_endpoint().pending() && !runtime.poll(tick.saturating_add(step)) {
-            return None;
-        }
-        if !drain_network_wakes(runtime, scheduler) {
-            return None;
-        }
-        if !runtime.device_endpoint().pending() {
-            break;
-        }
-    }
-    if !runtime.device_endpoint().issue(request) {
-        return None;
-    }
-    for step in 0..256 {
-        if !runtime.poll_device_proof(tick.saturating_add(step)) {
-            return None;
-        }
-        if let Some(reply) = runtime.device_endpoint().response(request.id) {
-            return Some(reply);
-        }
-    }
-    None
-}
-
-#[allow(clippy::too_many_arguments)]
-fn drain_network_wakes(
-    runtime: &mut network::NetworkRuntime,
-    scheduler: &mut native_task::Scheduler<'_>,
-) -> bool {
-    while let Some(handle) = runtime.take_wake() {
-        if scheduler.failed(handle) {
-            return false;
-        }
-        if !scheduler.wake(handle) || !scheduler.run(handle) {
-            return false;
-        }
-    }
-    true
-}
-
 fn drain_storage_wakes(
     runtime: &mut storage::StorageRuntime,
     scheduler: &mut native_task::Scheduler<'_>,
@@ -3943,78 +3900,6 @@ fn drain_storage_wakes(
         }
     }
     true
-}
-
-#[allow(clippy::too_many_arguments)]
-fn poll_network(
-    runtime: &mut network::NetworkRuntime,
-    scheduler: &mut native_task::Scheduler<'_>,
-    tick: u64,
-    terminal: native_task::NetworkClientEndpoint,
-    terminal_handle: native_task::Handle,
-    session: &session::Context,
-    capabilities: &capabilities::CapabilityManager,
-    shared_pages: &logos_core::shared_pages::SharedPages,
-    terminal_owner: u64,
-) -> bool {
-    if runtime.task().is_none() {
-        return true;
-    }
-    if !runtime.poll(tick) || !drain_network_wakes(runtime, scheduler) {
-        return false;
-    }
-    if !runtime.relay_client(
-        NetworkClientSlot::Terminal,
-        terminal,
-        terminal_handle,
-        session,
-        capabilities,
-        shared_pages,
-        terminal_owner,
-        tick,
-    ) {
-        return false;
-    }
-    if !drain_network_wakes(runtime, scheduler) || !runtime.poll(tick) {
-        return false;
-    }
-    if !drain_network_wakes(runtime, scheduler) {
-        return false;
-    }
-    if !runtime.relay_client(
-        NetworkClientSlot::Terminal,
-        terminal,
-        terminal_handle,
-        session,
-        capabilities,
-        shared_pages,
-        terminal_owner,
-        tick,
-    ) {
-        return false;
-    }
-    if !drain_network_wakes(runtime, scheduler) {
-        return false;
-    }
-    true
-}
-
-#[cfg(feature = "test-hooks")]
-fn assert_qemu_network_configuration(runtime: &network::NetworkRuntime, asserted: &mut bool) {
-    if *asserted {
-        return;
-    }
-    let Some(info) = runtime.info() else { return };
-    if info.configuration == 1
-        && info.ipv4 == u32::from_be_bytes([10, 0, 2, 15])
-        && info.subnet_mask == u32::from_be_bytes([255, 255, 255, 0])
-        && info.router == u32::from_be_bytes([10, 0, 2, 2])
-    {
-        debug::write_line(
-            b"LOGOS/1 NETWORK transport-dhcp status=bound ipv4=10.0.2.15 mask=255.255.255.0 router=10.0.2.2",
-        );
-        *asserted = true;
-    }
 }
 
 #[cfg(feature = "test-hooks")]
