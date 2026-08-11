@@ -796,6 +796,7 @@ mod tests {
         let stale_waker = old_waker.clone();
         old_waker.wake();
         assert!(scheduler.run_next(0));
+        assert!(scheduler.state(first_handle).is_none());
         let second_handle = scheduler.spawn_future(&mut second).unwrap();
         stale_waker.wake();
         assert_ne!(first_handle.generation(), second_handle.generation());
