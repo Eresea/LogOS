@@ -1743,6 +1743,9 @@ pub(crate) fn run(
                     ) {
                         return false;
                     }
+                    if !poll_terminal_once!() {
+                        return false;
+                    }
                     #[cfg(feature = "test-hooks")]
                     {
                         network_qemu_asserted = false;
