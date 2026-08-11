@@ -11,6 +11,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Publication | `Scheduler::save_context` + `finish` | outgoing task is claimable only after context-save publication |
 | Scheduler | `Scheduler` | eight generation-safe slots, atomic lifecycle/wake word, CAS `Runnable → Running`, no task-body lock |
 | Task primitives | `spawn`, `wake`, `yield_current`, `block_current`, `reclaim_completed` | explicit runnable/blocked/completed states and cheap wake-pending race handling |
+| Timed wait | `sleep_current_for`, `wake_due` | one fixed deadline per slot; explicit wake cancels the deadline and BSP timer scans remain bounded |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
 | Runtime handoff | `handoff_to_runtime` | registers one root `TaskEntry`; the scheduler starts it through the normal context path |
 | Proof workload | `qemu-proof` feature | assembly CPU-bound canaries, timer/switch counters, cross-CPU block/wake, structured PASS |

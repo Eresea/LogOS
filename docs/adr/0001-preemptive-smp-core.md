@@ -6,9 +6,10 @@
 ## Decision
 
 Core uses eight fixed 16 KiB task stacks, fixed per-CPU scheduler stacks, and a bounded atomic
-slot state word containing generation, lifecycle, and wake-pending state. Timer and voluntary
-switch entry share one canonical saved frame. Assembly saves the complete outgoing frame on the
-task stack, switches to the per-CPU scheduler stack, and only then publishes the task state for
+slot state word containing generation, lifecycle, and wake-pending state. Each slot also has one
+bounded wake deadline. Timer and voluntary switch entry share one canonical saved frame. Assembly
+saves the complete outgoing frame on the task stack, switches to the per-CPU scheduler stack, and
+only then publishes the task state for
 another CPU to claim. Task bodies execute without a global scheduler lock.
 
 UEFI discovers healthy processors, rejects unsupported x2APIC IDs and malformed capacity, stages a
@@ -19,6 +20,9 @@ periodic local-APIC timer.
 After initialization, Core registers exactly one root `TaskEntry` for the future Runtime and enters the
 existing scheduler. This is a task handoff, not Runtime orchestration: the root task uses the same fixed
 stack, context publication, and reclamation rules as every other task.
+
+Timed waits use a fixed deadline scan on the BSP timer. An explicit generation-safe wake cancels the
+deadline; no timer heap or general event queue is introduced.
 
 ## Consequences
 

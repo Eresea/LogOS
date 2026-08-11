@@ -20,9 +20,9 @@ Run independent bounded proofs for `-smp 1`, `-smp 2`, and `-smp 8`:
 ```
 
 Each proof requires UEFI entry, the Core-ready marker, a root-task handoff through the normal
-scheduler path, and two non-yielding assembly tasks with
-preserved GPR/flags/XMM canaries and sustained progress, timer ticks on every online CPU, repeated
-preemptive switches, and a blocked task woken by another CPU for SMP (same CPU for `-smp 1`). The
-runner captures debugcon output and fails on timeout or fatal output.
+scheduler path, repeated cancellable timer waits by the root task, and two non-yielding assembly
+tasks with preserved GPR/flags/XMM canaries and sustained progress, timer ticks on every online
+CPU, repeated preemptive switches, and a blocked task woken by another CPU for SMP (same CPU for
+`-smp 1`). The runner captures debugcon output and fails on timeout or fatal output.
 
 `v1_docs/` and old v1 evidence are historical; they are not active proof criteria.
