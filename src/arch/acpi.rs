@@ -601,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn truncates_excess_processors_without_growing() {
+    fn truncates_excess_processors_at_fixed_capacity() {
         let mut entries = [0u8; (MAX_CPUS + 1) * 8];
         for (index, entry) in entries.chunks_exact_mut(8).enumerate() {
             entry[0] = 0;
@@ -612,5 +612,8 @@ mod tests {
         let topology = CpuTopology::parse(&entries, None).unwrap();
         assert_eq!(topology.count(), MAX_CPUS);
         assert!(topology.truncated());
+        assert_eq!(topology.get(0).unwrap().apic_id, 0);
+        assert_eq!(topology.get(MAX_CPUS - 1).unwrap().apic_id, (MAX_CPUS - 1) as u32);
+        assert!(topology.get(MAX_CPUS).is_none());
     }
 }
