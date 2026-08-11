@@ -23,4 +23,6 @@ pub mod operation;
 pub mod poll_runtime;
 pub mod resource;
 pub mod shared_pages;
+#[cfg(test)]
+mod smp_model;
 pub mod test_protocol;

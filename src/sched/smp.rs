@@ -738,7 +738,7 @@ pub fn self_check(topology: &crate::arch::acpi::CpuTopology) -> bool {
     scheduler.run_next(0)
         && scheduler.state(handle) == Some(SchedulingState::Runnable)
         && scheduler.run_next(0)
-        && scheduler.state(handle) == Some(SchedulingState::Vacant)
+        && scheduler.state(handle).is_none()
 }
 
 #[cfg(test)]
@@ -826,7 +826,7 @@ mod tests {
         assert_eq!(scheduler.state(handle), Some(SchedulingState::Runnable));
         assert!(scheduler.run_next(1) == false);
         assert!(scheduler.run_next(0));
-        assert_eq!(scheduler.state(handle), Some(SchedulingState::Vacant));
+        assert!(scheduler.state(handle).is_none());
     }
 
     #[test]
