@@ -40,3 +40,4 @@ Create one for an irreversible or cross-ring decision. Do not create one for rou
 | [0032](0032-bounded-task-contracts-and-proof-tiers.md) | Accepted | Scope work with bounded ownership contracts and select proofs by isolation boundary. |
 | [0033](0033-abi-v5-bounded-operations.md) | Accepted | Cut over native pages to ABI v5 operation tokens and bounded completion phases. |
 | [0035](0035-bounded-smp-async-foundation.md) | Accepted | Keep SMP scheduling and async execution bounded. |
+| [0036](0036-abi-v5-endpoint-table.md) | Accepted | Make the bounded generation-bound endpoint table the only native-service endpoint directory. |

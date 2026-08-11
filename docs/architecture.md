@@ -46,16 +46,17 @@ mandatory process boundaries. Outer code depends inward through typed, capabilit
 
 ## ABI v5 native services
 
-Each service receives one mapped `logos_abi::service::ControlPage` plus the typed endpoint pages named
-by its canonical `platform::services::ServiceSpec::endpoints`. Core maps, validates, loans, revokes,
-and reclaims pages; services never receive physical addresses.
+Each service receives one mapped `logos_abi::service::ControlPage` plus one bounded, generation-bound
+`logos_abi::endpoint_v5::EndpointTable`. The table names the typed endpoint pages selected by its
+canonical `platform::services::ServiceSpec::endpoints`; Core maps, validates, loans, revokes, and
+reclaims pages, while services never receive physical addresses.
 
 Active typed pages include Input, Display, Session client/server, Effect, Store client/server, Storage
 Block, Network device/event/client/server/stream, and Remote pages. Page state is scalar-validated and
-generation-checked. ABI-v4 payloads and descriptors are rejected at startup; there is no compatibility
-adapter or dynamic endpoint registry in the active path. Long-lived work carries a bounded
-`OperationToken` and `CompletionEnvelope`; only the owning scheduler may advance a token, and a
-terminal phase releases any page loan exactly once.
+generation-checked. The old ABI-v4 per-page ControlPage pointers are not part of the active ABI; there
+is no compatibility adapter, fallback reader, or dynamic endpoint registry. Long-lived work carries a
+bounded `OperationToken` and `CompletionEnvelope`; only the owning scheduler may advance a token, and
+a terminal phase releases any page loan exactly once.
 
 Service replacement advances the generation before releasing the old address space. Stale handles,
 pages, replies, and completions are rejected and owned resources are reclaimed exactly once.
@@ -89,6 +90,8 @@ restart behavior, recovery requirement, outward contract, and host/QEMU proof. I
 unclear, the boundary is not ready. Cross-ring or irreversible decisions require an [ADR](adr/README.md).
 
 ## References
+
+The active endpoint discovery contract is [ADR-0036](adr/0036-abi-v5-endpoint-table.md).
 
 - [Roadmap](roadmap.md) — current sequence and exit targets.
 - [Milestone policy](MILESTONE-POLICY.md) — completion and documentation rules.
