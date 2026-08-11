@@ -39,6 +39,8 @@ mandatory process boundaries. Outer code depends inward through typed, capabilit
   resources implicitly or add an allocator/runtime dependency.
 - Core's bounded SMP scheduler uses atomic generation/state claims, per-CPU scan cursors, and
   scheduler-only local-APIC notification; task bodies never run under a global scheduler lock.
+- `sched::task` owns the shared `Runnable`, `TaskState`, and `Event` contract; cooperative, native,
+  and SMP schedulers own their separate execution policies until migration proofs close.
 - Async tasks are opt-in fixed slots with scheduler-owned generation-safe wakers. Native services
   remain on the cooperative scheduler until their subsystem boundaries are migrated independently.
 - Production builds expose no test control surface. Host tests prove portable state and codecs; QEMU
