@@ -26,6 +26,7 @@ const GENERATION_SHIFT: u32 = 8;
 const GENERATION_MASK: u64 = (1 << (64 - GENERATION_SHIFT)) - 1;
 const INITIAL_GENERATION: u64 = 1;
 const NO_CPU_TASK: u8 = u8::MAX;
+const NO_DEADLINE: u64 = u64::MAX;
 
 pub type TaskEntry = fn();
 
@@ -70,6 +71,7 @@ impl TaskHandle {
 pub enum FinishState {
     Runnable,
     Blocked,
+    TimedBlocked,
     Completed,
 }
 
@@ -81,6 +83,7 @@ struct TaskSlot {
     #[allow(dead_code)]
     stack: UnsafeCell<TaskStack>,
     state: AtomicU64,
+    wake_deadline: AtomicU64,
     saved_rsp: AtomicUsize,
     context_saved: AtomicBool,
 }
@@ -91,6 +94,7 @@ impl TaskSlot {
             entry: AtomicUsize::new(0),
             stack: UnsafeCell::new(TaskStack([0; TASK_STACK_SIZE])),
             state: AtomicU64::new(pack(INITIAL_GENERATION, VACANT)),
+            wake_deadline: AtomicU64::new(NO_DEADLINE),
             saved_rsp: AtomicUsize::new(0),
             context_saved: AtomicBool::new(false),
         }
@@ -165,12 +169,63 @@ impl Scheduler {
                 continue;
             }
             slot.entry.store(entry as usize, Ordering::Release);
+            slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
             slot.saved_rsp.store(0, Ordering::Release);
             slot.context_saved.store(false, Ordering::Release);
             slot.state.store(pack(generation, RUNNABLE), Ordering::Release);
             return Ok(TaskHandle { slot: index as u8, generation });
         }
         Err(SpawnError::Capacity)
+    }
+
+    #[cfg_attr(not(target_os = "uefi"), allow(dead_code))]
+    /// Arm one bounded timer deadline for a currently running task.
+    pub(crate) fn arm_deadline(&self, handle: TaskHandle, deadline: u64) -> bool {
+        let Some(slot) = self.tasks.get(handle.slot as usize) else {
+            return false;
+        };
+        let word = slot.state.load(Ordering::Acquire);
+        if generation(word) != handle.generation || state(word) != RUNNING {
+            return false;
+        }
+        slot.wake_deadline.store(deadline, Ordering::Release);
+        true
+    }
+
+    #[cfg_attr(not(target_os = "uefi"), allow(dead_code))]
+    /// Wake blocked tasks whose deadlines have elapsed. Returns the wake count.
+    pub(crate) fn wake_due(&self, now: u64) -> usize {
+        let mut woken = 0;
+        for slot in &self.tasks {
+            let word = slot.state.load(Ordering::Acquire);
+            if state(word) != BLOCKED {
+                continue;
+            }
+            let deadline = slot.wake_deadline.load(Ordering::Acquire);
+            if deadline == NO_DEADLINE || deadline > now {
+                continue;
+            }
+            if slot
+                .wake_deadline
+                .compare_exchange(deadline, NO_DEADLINE, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                continue;
+            }
+            if slot
+                .state
+                .compare_exchange(
+                    word,
+                    pack(generation(word), RUNNABLE),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                woken += 1;
+            }
+        }
+        woken
     }
 
     pub fn state(&self, handle: TaskHandle) -> Option<TaskState> {
@@ -198,7 +253,10 @@ impl Scheduler {
                 return false;
             }
             let next = match state(old) {
-                BLOCKED => pack(handle.generation, RUNNABLE),
+                BLOCKED => {
+                    slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
+                    pack(handle.generation, RUNNABLE)
+                }
                 RUNNING => old | WAKE_PENDING,
                 RUNNABLE => old,
                 _ => return false,
@@ -274,8 +332,13 @@ impl Scheduler {
                 FinishState::Runnable => RUNNABLE,
                 FinishState::Blocked if old & WAKE_PENDING == 0 => BLOCKED,
                 FinishState::Blocked => RUNNABLE,
+                FinishState::TimedBlocked if old & WAKE_PENDING == 0 => BLOCKED,
+                FinishState::TimedBlocked => RUNNABLE,
                 FinishState::Completed => COMPLETED,
             };
+            if next_state != BLOCKED || matches!(outcome, FinishState::Blocked) {
+                slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
+            }
             if slot
                 .state
                 .compare_exchange(
@@ -309,6 +372,7 @@ impl Scheduler {
             return false;
         }
         slot.entry.store(0, Ordering::Release);
+        slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
         slot.saved_rsp.store(0, Ordering::Release);
         slot.context_saved.store(false, Ordering::Release);
         slot.state.store(pack(next_generation(handle.generation), VACANT), Ordering::Release);
@@ -422,7 +486,9 @@ pub(crate) fn runtime_entry() {
     #[cfg(feature = "qemu-proof")]
     proof::handoff_started();
     loop {
-        yield_current();
+        sleep_current_for(3);
+        #[cfg(feature = "qemu-proof")]
+        proof::runtime_wait_resumed();
     }
 }
 
@@ -445,6 +511,12 @@ pub fn yield_current() {
 #[cfg(target_os = "uefi")]
 pub fn block_current() {
     arch::block_current()
+}
+
+#[cfg(target_os = "uefi")]
+/// Block until the deadline or until another CPU calls `wake` for this task.
+pub fn sleep_current_for(ticks: u64) {
+    arch::sleep_current_for(ticks)
 }
 
 #[cfg(target_os = "uefi")]
@@ -525,6 +597,62 @@ mod tests {
         assert_eq!(scheduler.state(handle), Some(TaskState::Blocked));
         assert!(scheduler.wake(handle));
         assert!(scheduler.wake(handle));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+    }
+
+    #[test]
+    fn timed_wait_wakes_at_or_after_its_deadline() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert!(scheduler.arm_deadline(handle, 10));
+        assert!(scheduler.save_context(handle, 0x2200));
+        assert!(scheduler.finish(handle, FinishState::TimedBlocked));
+        assert_eq!(scheduler.wake_due(9), 0);
+        assert_eq!(scheduler.state(handle), Some(TaskState::Blocked));
+        assert_eq!(scheduler.wake_due(10), 1);
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+    }
+
+    #[test]
+    fn explicit_wake_cancels_a_timed_wait() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert!(scheduler.arm_deadline(handle, 20));
+        assert!(scheduler.save_context(handle, 0x2300));
+        assert!(scheduler.finish(handle, FinishState::TimedBlocked));
+        assert!(scheduler.wake(handle));
+        assert_eq!(scheduler.wake_due(20), 0);
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+    }
+
+    #[test]
+    fn wake_racing_with_timed_block_keeps_task_runnable() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert!(scheduler.arm_deadline(handle, 30));
+        assert!(scheduler.wake(handle));
+        assert!(scheduler.save_context(handle, 0x2500));
+        assert!(scheduler.finish(handle, FinishState::TimedBlocked));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+        assert_eq!(scheduler.wake_due(30), 0);
+    }
+
+    #[test]
+    fn concurrent_timer_scans_wake_a_waiter_once() {
+        let scheduler = Arc::new(Scheduler::new());
+        let handle = scheduler.spawn(empty).unwrap();
+        scheduler.online_cpu(0);
+        assert!(scheduler.claim_next(0).is_some());
+        assert!(scheduler.arm_deadline(handle, 40));
+        assert!(scheduler.save_context(handle, 0x2600));
+        assert!(scheduler.finish(handle, FinishState::TimedBlocked));
+        let mut workers = Vec::new();
+        for _ in 0..MAX_CPUS {
+            let scheduler = Arc::clone(&scheduler);
+            workers.push(thread::spawn(move || scheduler.wake_due(40)));
+        }
+        let wakes: usize = workers.into_iter().map(|worker| worker.join().unwrap()).sum();
+        assert_eq!(wakes, 1);
         assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
     }
 

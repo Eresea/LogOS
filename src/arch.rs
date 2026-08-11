@@ -23,6 +23,7 @@ const SWITCH_VECTOR: u8 = 49;
 const ACTION_YIELD: u64 = 1;
 const ACTION_BLOCK: u64 = 2;
 const ACTION_COMPLETE: u64 = 3;
+const ACTION_TIMED_BLOCK: u64 = 4;
 const FX_STATE_SIZE: usize = 512;
 const FX_CONTEXT_POINTER: usize = FX_STATE_SIZE;
 const GPR_WORDS: usize = 15;
@@ -547,7 +548,10 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         fatal(b"LogOS vNext: halted");
     }
     if vector == usize::from(TIMER_VECTOR) {
-        TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+        if cpu == 0 {
+            let now = TIMER_TICKS.fetch_add(1, Ordering::AcqRel) + 1;
+            SCHEDULER.wake_due(now);
+        }
         SCHEDULER.record_tick(cpu);
         local_tick(cpu);
         #[cfg(feature = "qemu-proof")]
@@ -565,6 +569,7 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
             match local.pending_action.swap(0, Ordering::AcqRel) {
                 ACTION_BLOCK => crate::FinishState::Blocked,
                 ACTION_COMPLETE => crate::FinishState::Completed,
+                ACTION_TIMED_BLOCK => crate::FinishState::TimedBlocked,
                 _ => crate::FinishState::Runnable,
             }
         };
@@ -649,6 +654,24 @@ pub fn yield_current() {
 
 pub fn block_current() {
     request_switch(ACTION_BLOCK)
+}
+
+pub fn sleep_current_for(ticks: u64) {
+    let cpu = current_cpu();
+    let Some(handle) = SCHEDULER.current_task(cpu) else {
+        fatal(b"LogOS vNext: sleep without task");
+    };
+    let now = TIMER_TICKS.load(Ordering::Acquire);
+    let deadline = now.saturating_add(ticks.max(1)).min(u64::MAX - 1);
+    unsafe {
+        let local = &*(read_gs() as *const CpuLocal);
+        asm!("cli");
+        if !SCHEDULER.arm_deadline(handle, deadline) {
+            fatal(b"LogOS vNext: sleep deadline");
+        }
+        local.pending_action.store(ACTION_TIMED_BLOCK, Ordering::Release);
+        asm!("sti; int 49");
+    }
 }
 
 fn request_switch(action: u64) {
