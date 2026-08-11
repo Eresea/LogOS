@@ -12,7 +12,7 @@ use crate::platform::{
     audit, balloon, block, entropy, health, identity, inference, mode, network, payload, pe,
     remote, root_key, secrets, services, session, storage, time, trace,
 };
-use crate::sched::{native_task, scheduler};
+use crate::sched::{native_task, scheduler, smp};
 #[cfg(feature = "test-hooks")]
 use crate::test_hooks;
 use crate::{boot, debug};
@@ -285,6 +285,7 @@ pub(crate) fn run(
     let Some(madt) = acpi.and_then(|tables| tables.madt) else {
         fail!(b"acpi");
     };
+    check!(b"smp scheduler", smp::self_check(&madt.topology));
     let memory_regions = memory_map.len();
     let Some(mut memory) = memory::PhysicalMemory::from_memory_map(&memory_map) else {
         fail!(b"memory");

@@ -18,6 +18,10 @@ impl Event {
     pub const DISPLAY: Self = Self(8);
     pub(crate) const FAILURE: Self = Self(16);
     const SELF_CHECK: Self = Self(3);
+
+    pub(crate) const fn bits(self) -> u8 {
+        self.0
+    }
 }
 
 pub trait Runnable {
