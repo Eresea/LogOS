@@ -619,6 +619,9 @@ impl StorageRuntime {
         tick: u64,
     ) -> bool {
         self.bind_block_context(context);
+        if self.protected_read.is_some() {
+            return true;
+        }
         let request = terminal.request();
         let had_request = request.is_some();
         let relay = self.relay_store_request(

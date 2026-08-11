@@ -25,6 +25,7 @@ use uefi::mem::memory_map::MemoryMap;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RemoteLoadPhase {
     Disabled,
+    EnrollmentPending,
     Enrollment,
     Control,
     Ready,
@@ -78,6 +79,7 @@ fn poll_remote_load(
     enrollment_blob: &mut [u8; logos_remote::ENROLLMENT_BLOB_BYTES],
     control_blob: &mut [u8; logos_remote::REMOTE_CONTROL_BLOB_BYTES],
     native_storage_block: native_task::BlockClientEndpoint,
+    terminal_handle: native_task::Handle,
     terminal_owner: u64,
     storage_owner: u64,
     shared_history: logos_abi::PageHandle,
@@ -88,6 +90,30 @@ fn poll_remote_load(
     scheduler: &mut native_task::Scheduler<'_>,
     tick: u64,
 ) -> bool {
+    if *phase == RemoteLoadPhase::EnrollmentPending {
+        if storage_runtime.operation().is_some()
+            || !scheduler.waiting_for_operation(terminal_handle, logos_abi::service::READ_INPUT)
+        {
+            return true;
+        }
+        let Some(page_address) = shared_pages.address(terminal_owner, shared_history) else {
+            *phase = RemoteLoadPhase::Failed;
+            return true;
+        };
+        if storage_runtime.begin_protected_read(
+            shared_history,
+            page_address,
+            logos_abi::TRUST_NAMESPACE,
+            logos_abi::TRUST_ENROLLMENT_NAME,
+            scheduler,
+            tick,
+        ) {
+            *phase = RemoteLoadPhase::Enrollment;
+        } else {
+            *phase = RemoteLoadPhase::Failed;
+        }
+        return true;
+    }
     if !matches!(*phase, RemoteLoadPhase::Enrollment | RemoteLoadPhase::Control) {
         return true;
     }
@@ -1235,7 +1261,7 @@ pub(crate) fn run(
     let mut remote_control_blob = [0; logos_remote::REMOTE_CONTROL_BLOB_BYTES];
     let mut remote_load_phase = match (remote_bootstrap, storage_handle.available()) {
         (Some(_), true) if shared_pages.address(terminal_owner, shared_history).is_some() => {
-            RemoteLoadPhase::Enrollment
+            RemoteLoadPhase::EnrollmentPending
         }
         (Some(bootstrap), _) => {
             remote_runtime.replace_state(secrets::RemoteState::unavailable(bootstrap));
@@ -1243,22 +1269,6 @@ pub(crate) fn run(
         }
         (None, _) => RemoteLoadPhase::Disabled,
     };
-    if remote_load_phase == RemoteLoadPhase::Enrollment {
-        let page_address = shared_pages.address(terminal_owner, shared_history).unwrap();
-        if !storage_runtime.begin_protected_read(
-            shared_history,
-            page_address,
-            logos_abi::TRUST_NAMESPACE,
-            logos_abi::TRUST_ENROLLMENT_NAME,
-            &mut native_scheduler,
-            interrupts::ticks(),
-        ) {
-            if let Some(bootstrap) = remote_bootstrap {
-                remote_runtime.replace_state(secrets::RemoteState::unavailable(bootstrap));
-            }
-            remote_load_phase = RemoteLoadPhase::Failed;
-        }
-    }
     let mut network_handle = if let Some(network_task) = native_network.take()
         && let Some(handle) = native_scheduler.spawn(network_task)
     {
@@ -1322,6 +1332,7 @@ pub(crate) fn run(
                 &mut remote_enrollment_blob,
                 &mut remote_control_blob,
                 native_storage_block,
+                native_handle,
                 terminal_owner,
                 storage_owner,
                 shared_history,
@@ -1358,6 +1369,65 @@ pub(crate) fn run(
                 gateway_resolution_reported = true;
             }
         };
+    }
+    macro_rules! poll_terminal_once {
+        () => {{
+            let mut ready = false;
+            for _ in 0..256 {
+                if native_scheduler
+                    .waiting_for_operation(native_handle, logos_abi::service::READ_INPUT)
+                {
+                    ready = true;
+                    break;
+                }
+                let tick = interrupts::ticks();
+                if !storage_runtime.poll_block(
+                    &mut block::DispatchContext {
+                        endpoint: native_storage_block,
+                        pages: &mut shared_pages,
+                        store_owner: storage_owner,
+                        store_page: storage_block_page,
+                        device: &mut block_device,
+                        memory: &mut memory,
+                    },
+                    tick,
+                ) || !drain_storage_wakes(&mut storage_runtime, &mut native_scheduler)
+                    || (native_store.request().is_some()
+                        && !storage_runtime.relay_terminal_store_requests(
+                            native_store,
+                            &mut block::DispatchContext {
+                                endpoint: native_storage_block,
+                                pages: &mut shared_pages,
+                                store_owner: storage_owner,
+                                store_page: storage_block_page,
+                                device: &mut block_device,
+                                memory: &mut memory,
+                            },
+                            terminal_owner,
+                            storage_owner,
+                            shared_history,
+                            &mut native_scheduler,
+                            native_handle,
+                            &session,
+                            &capabilities,
+                            tick,
+                        ))
+                {
+                    break;
+                }
+                if matches!(
+                    remote_load_phase,
+                    RemoteLoadPhase::Enrollment | RemoteLoadPhase::Control
+                ) && !poll_remote_load_once!()
+                {
+                    break;
+                }
+                let _ = native_scheduler.run_next();
+            }
+            ready
+                || native_scheduler
+                    .waiting_for_operation(native_handle, logos_abi::service::READ_INPUT)
+        }};
     }
     #[cfg(feature = "test-hooks")]
     let mut network_qemu_asserted = false;
@@ -1472,7 +1542,7 @@ pub(crate) fn run(
         },
         |action| match action {
             test_hooks::Action::Input(value) => {
-                if !poll_remote_load_once!() {
+                if !poll_terminal_once!() || !poll_remote_load_once!() {
                     return false;
                 }
                 resolve_gateway_once!();
@@ -2623,14 +2693,14 @@ pub(crate) fn run(
                 passed
             }
             test_hooks::Action::Poll => {
-                if !poll_remote_load_once!() {
+                if !poll_terminal_once!() || !poll_remote_load_once!() {
                     return false;
                 }
                 resolve_gateway_once!();
                 true
             }
             test_hooks::Action::Query(query) => {
-                if !poll_remote_load_once!() {
+                if !poll_terminal_once!() || !poll_remote_load_once!() {
                     return false;
                 }
                 resolve_gateway_once!();
@@ -2638,7 +2708,7 @@ pub(crate) fn run(
             }
             test_hooks::Action::Advance(ticks) => {
                 for step in 0..ticks.min(4096) {
-                    if !poll_remote_load_once!() {
+                    if !poll_terminal_once!() || !poll_remote_load_once!() {
                         return false;
                     }
                     resolve_gateway_once!();
@@ -2663,7 +2733,7 @@ pub(crate) fn run(
                 true
             }
             test_hooks::Action::Run(id) => {
-                if !poll_remote_load_once!() {
+                if !poll_terminal_once!() || !poll_remote_load_once!() {
                     return false;
                 }
                 resolve_gateway_once!();
