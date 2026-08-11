@@ -3,7 +3,7 @@ use crate::{
     arch::cpu::{EntryState, Privilege},
     mm::{address_space::AddressSpace, memory::PhysicalMemory},
     platform::payload::Payload,
-    sched::scheduler::{Event, Runnable, TaskState},
+    sched::task::{Event, Runnable, TaskState},
 };
 
 const TASKS: usize = 5;

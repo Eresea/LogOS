@@ -6,7 +6,7 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-use super::scheduler::{Event, Runnable, TaskState};
+use super::task::{Event, Runnable, TaskState};
 
 #[path = "smp_waker.rs"]
 mod waker;
