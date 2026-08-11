@@ -156,8 +156,15 @@ pub fn boot() -> Status {
     install_cpu(0);
     let _memory_map = unsafe { boot::exit_boot_services(None) };
     initialize_post_uefi(cpu_count);
+    handoff_to_runtime();
     debug_line(b"LogOS vNext: core ready");
     enter_scheduler(0)
+}
+
+fn handoff_to_runtime() {
+    if SCHEDULER.spawn(crate::runtime_entry).is_err() {
+        fatal(b"LogOS vNext: runtime handoff");
+    }
 }
 
 fn discover_cpus() -> usize {

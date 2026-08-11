@@ -10,6 +10,7 @@ static WAKE_CPU: AtomicUsize = AtomicUsize::new(MAX_CPUS);
 static BLOCK_STARTED: AtomicBool = AtomicBool::new(false);
 static BLOCK_RESUMED: AtomicBool = AtomicBool::new(false);
 static WAKE_DONE: AtomicBool = AtomicBool::new(false);
+static HANDOFF_STARTED: AtomicBool = AtomicBool::new(false);
 static PASSED: AtomicBool = AtomicBool::new(false);
 static REPORTED: AtomicBool = AtomicBool::new(false);
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
@@ -30,6 +31,10 @@ pub fn initialize(cpu_count: usize) {
     SCHEDULER.spawn(wake_task).expect("proof task capacity");
 }
 
+pub fn handoff_started() {
+    HANDOFF_STARTED.store(true, Ordering::Release);
+}
+
 pub fn observe(cpu: usize) {
     if PASSED.load(Ordering::Acquire) {
         if cpu == 0 && !REPORTED.swap(true, Ordering::AcqRel) {
@@ -46,6 +51,7 @@ pub fn observe(cpu: usize) {
     if timers
         && progress
         && switches > 20
+        && HANDOFF_STARTED.load(Ordering::Acquire)
         && BLOCK_RESUMED.load(Ordering::Acquire)
         && WAKE_DONE.load(Ordering::Acquire)
         && wake_cpus_differ

@@ -415,6 +415,17 @@ pub static SCHEDULER: Scheduler = Scheduler::new();
 #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
 mod proof;
 
+/// The single production handoff seam. Future Runtime code replaces this
+/// entry without changing UEFI or scheduler ownership.
+#[cfg(target_os = "uefi")]
+pub(crate) fn runtime_entry() {
+    #[cfg(feature = "qemu-proof")]
+    proof::handoff_started();
+    loop {
+        yield_current();
+    }
+}
+
 pub fn boot() -> uefi::prelude::Status {
     #[cfg(target_os = "uefi")]
     {
