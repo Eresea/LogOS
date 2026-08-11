@@ -185,11 +185,10 @@ fn next_generation(generation: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::boxed::Box;
 
     #[test]
     fn exclusive_claim_with_two_workers() {
-        let registry: &'static Registry<1> = Box::leak(Box::new(Registry::new()));
+        let registry = Registry::<1>::new();
         let handle = registry.spawn().unwrap();
         let (left, right) = std::thread::scope(|scope| {
             let left = scope.spawn(|| registry.claim(0));
@@ -197,7 +196,7 @@ mod tests {
             (left.join().unwrap(), right.join().unwrap())
         });
         assert_eq!(left.is_some() as usize + right.is_some() as usize, 1);
-        assert_eq!(left.or(right).unwrap().generation, handle.generation);
+        assert_eq!(left.or(right), Some(handle));
     }
 
     #[test]
