@@ -11,7 +11,10 @@ if ($Stage -in @('all', 'host')) {
     cargo fmt --check
 
     Write-Host '== clippy =='
-    cargo clippy --target x86_64-unknown-uefi -- -D warnings
+    cargo clippy --lib -- -D warnings
+
+    Write-Host '== host tests =='
+    cargo test --lib
 }
 
 if ($Stage -in @('all', 'uefi')) {
@@ -19,4 +22,10 @@ if ($Stage -in @('all', 'uefi')) {
     $args = @('build', '--target', 'x86_64-unknown-uefi')
     if ($Release) { $args += '--release' }
     cargo @args
+
+    Write-Host '== UEFI clippy =='
+    cargo clippy --target x86_64-unknown-uefi -- -D warnings
+
+    Write-Host '== UEFI proof build =='
+    cargo build --features qemu-proof --target x86_64-unknown-uefi
 }
