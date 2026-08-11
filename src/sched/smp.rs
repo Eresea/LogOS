@@ -855,12 +855,38 @@ mod tests {
     }
 
     #[test]
-    fn bounded_task_and_waker_capacity_is_explicit() {
+    fn bounded_task_capacity_is_explicit() {
         let mut tasks = [BlockFuture; MAX_SMP_TASKS];
         let mut scheduler = SmpScheduler::new().with_notifier(|_| true);
         for task in &mut tasks {
             assert!(scheduler.spawn_future(task).is_ok());
         }
         assert_eq!(scheduler.spawn_future(&mut BlockFuture), Err(SpawnError::Full));
+    }
+
+    #[test]
+    fn waker_capacity_rejects_excess_retained_wakers() {
+        let mut scheduler = SmpScheduler::new().with_notifier(|_| true);
+        let mut futures: [YieldFuture; MAX_WAKER_TOKENS] =
+            core::array::from_fn(|_| YieldFuture { polls: 0, waker: None });
+        let mut stale_wakers: [Option<Waker>; MAX_WAKER_TOKENS] =
+            core::array::from_fn(|_| None);
+
+        for (index, future) in futures.iter_mut().enumerate() {
+            let handle = scheduler.spawn_future(future).unwrap();
+            assert!(scheduler.run_next(0));
+            let waker = future.waker.take().unwrap();
+            let stale_waker = waker.clone();
+            waker.wake();
+            assert!(scheduler.run_next(0));
+            assert!(scheduler.state(handle).is_none());
+            stale_wakers[index] = Some(stale_waker);
+        }
+
+        let mut candidate = YieldFuture { polls: 0, waker: None };
+        assert_eq!(
+            scheduler.spawn_future(&mut candidate),
+            Err(SpawnError::WakerCapacity)
+        );
     }
 }
