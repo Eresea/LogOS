@@ -58,35 +58,121 @@ pub(super) fn run_network_tcp_stream(
     owner: u64,
     page: logos_abi::PageHandle,
 ) -> bool {
-    const ID: &str = "network/tcp-stream";
-    const DEADLINE: u64 = u64::MAX / 2;
-    const PORT: u16 = logos_abi::REMOTE_TCP_PORT;
-    let scope = logos_abi::NetworkScope::new(logos_abi::NetworkProtocol::Tcp, 0, PORT);
-    let request = |id, operation, endpoint, page, length, generation| logos_abi::NetworkRequest {
-        id,
-        operation,
-        endpoint,
-        peer: logos_abi::NetworkScope::new(logos_abi::NetworkProtocol::Tcp, 0, PORT),
-        page,
-        length,
-        generation,
-        deadline: DEADLINE,
+    let scope = logos_abi::NetworkScope::new(logos_abi::NetworkProtocol::Tcp, 0, TCP_STREAM_PORT);
+    test_hooks::event(TCP_STREAM_ID, "starting");
+    if !network_ready(runtime) {
+        return false;
+    }
+    let mut proof =
+        TcpProof { client, runtime, scheduler, session, capabilities, shared_pages, owner, page };
+    let Some(connections) = establish_connections(&mut proof) else {
+        return false;
     };
-    test_hooks::event(ID, "starting");
+    let Some(address) = proof.page_address() else {
+        return false;
+    };
+    if !read_hello(&mut proof, &connections, address)
+        || !write_primary_stream(&mut proof, &connections, address)
+        || !verify_secondary_connection(&mut proof, &connections, address)
+        || !verify_bulk_stream(&mut proof, &connections, address)
+    {
+        return false;
+    }
+    test_hooks::event(TCP_STREAM_ID, "connection_closed");
+    scope.valid()
+}
+
+const TCP_STREAM_ID: &str = "network/tcp-stream";
+const TCP_STREAM_DEADLINE: u64 = u64::MAX / 2;
+const TCP_STREAM_PORT: u16 = logos_abi::REMOTE_TCP_PORT;
+
+struct TcpProof<'a, 'task> {
+    client: native_task::NetworkClientEndpoint,
+    runtime: &'a mut network::NetworkRuntime,
+    scheduler: &'a mut native_task::Scheduler<'task>,
+    session: &'a session::Context,
+    capabilities: &'a capabilities::CapabilityManager,
+    shared_pages: &'a logos_core::shared_pages::SharedPages,
+    owner: u64,
+    page: logos_abi::PageHandle,
+}
+
+struct TcpConnections {
+    primary: logos_abi::NetworkEndpoint,
+    secondary: logos_abi::NetworkEndpoint,
+    generation: u16,
+}
+
+impl<'a, 'task> TcpProof<'a, 'task> {
+    fn request(
+        &self,
+        id: u32,
+        operation: logos_abi::NetworkOperation,
+        endpoint: logos_abi::NetworkEndpoint,
+        page: logos_abi::PageHandle,
+        length: u16,
+        generation: u16,
+    ) -> logos_abi::NetworkRequest {
+        logos_abi::NetworkRequest {
+            id,
+            operation,
+            endpoint,
+            peer: logos_abi::NetworkScope::new(logos_abi::NetworkProtocol::Tcp, 0, TCP_STREAM_PORT),
+            page,
+            length,
+            generation,
+            deadline: TCP_STREAM_DEADLINE,
+        }
+    }
+
+    fn issue(&mut self, request: logos_abi::NetworkRequest) -> Option<logos_abi::NetworkReply> {
+        run_network_request(
+            request,
+            self.client,
+            self.runtime,
+            self.scheduler,
+            self.session,
+            self.capabilities,
+            self.shared_pages,
+            self.owner,
+        )
+    }
+
+    fn page_address(&self) -> Option<u64> {
+        self.shared_pages.address(self.owner, self.page)
+    }
+
+    fn write_page(&self, address: u64, bytes: &[u8]) {
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len()) };
+    }
+
+    fn xor_page(&self, address: u64, length: usize) {
+        unsafe {
+            for byte in core::slice::from_raw_parts_mut(address as *mut u8, length) {
+                *byte ^= 0xa5;
+            }
+        }
+    }
+}
+
+fn network_ready(runtime: &network::NetworkRuntime) -> bool {
     if !runtime.has_device() {
-        test_hooks::event(ID, "network_device_unavailable");
+        test_hooks::event(TCP_STREAM_ID, "network_device_unavailable");
         return false;
     }
     if runtime.resources().is_none() {
-        test_hooks::event(ID, "network_resources_unavailable");
+        test_hooks::event(TCP_STREAM_ID, "network_resources_unavailable");
         return false;
     }
     if runtime.task().is_none() {
-        test_hooks::event(ID, "network_unavailable");
+        test_hooks::event(TCP_STREAM_ID, "network_unavailable");
         return false;
     }
+    true
+}
 
-    let listen = request(
+fn establish_connections(proof: &mut TcpProof<'_, '_>) -> Option<TcpConnections> {
+    let listen = proof.request(
         0x9000_0300,
         logos_abi::NetworkOperation::Listen,
         logos_abi::NetworkEndpoint(0),
@@ -94,30 +180,21 @@ pub(super) fn run_network_tcp_stream(
         0,
         0,
     );
-    let Some(listen_reply) = run_network_request(
-        listen,
-        client,
-        runtime,
-        scheduler,
-        session,
-        capabilities,
-        shared_pages,
-        owner,
-    ) else {
-        test_hooks::event(ID, "listener_failed");
-        return false;
+    let Some(listen_reply) = proof.issue(listen) else {
+        test_hooks::event(TCP_STREAM_ID, "listener_failed");
+        return None;
     };
     if listen_reply.status != logos_abi::NetworkStatus::Complete {
-        test_hooks::event(ID, network_status_label(listen_reply.status));
-        return false;
+        test_hooks::event(TCP_STREAM_ID, network_status_label(listen_reply.status));
+        return None;
     }
     if !listen_reply.endpoint.valid() || listen_reply.generation == 0 {
-        test_hooks::event(ID, "listener_shape_invalid");
-        return false;
+        test_hooks::event(TCP_STREAM_ID, "listener_shape_invalid");
+        return None;
     }
-    test_hooks::event(ID, "listener_waiting");
+    test_hooks::event(TCP_STREAM_ID, "listener_waiting");
 
-    let accept = request(
+    let accept = proof.request(
         0x9000_0301,
         logos_abi::NetworkOperation::Accept,
         listen_reply.endpoint,
@@ -125,18 +202,9 @@ pub(super) fn run_network_tcp_stream(
         0,
         0,
     );
-    let Some(accept_reply) = run_network_request(
-        accept,
-        client,
-        runtime,
-        scheduler,
-        session,
-        capabilities,
-        shared_pages,
-        owner,
-    ) else {
-        test_hooks::event(ID, "accept_failed");
-        return false;
+    let Some(accept_reply) = proof.issue(accept) else {
+        test_hooks::event(TCP_STREAM_ID, "accept_failed");
+        return None;
     };
     if accept_reply.status != logos_abi::NetworkStatus::Complete
         || !accept_reply.endpoint.valid()
@@ -144,12 +212,12 @@ pub(super) fn run_network_tcp_stream(
         || accept_reply.source_address == 0
         || accept_reply.source_port == 0
     {
-        test_hooks::event(ID, network_status_label(accept_reply.status));
-        return false;
+        test_hooks::event(TCP_STREAM_ID, network_status_label(accept_reply.status));
+        return None;
     }
-    test_hooks::event(ID, "connection_established");
+    test_hooks::event(TCP_STREAM_ID, "connection_established");
 
-    let accept_second = request(
+    let accept_second = proof.request(
         0x9000_0306,
         logos_abi::NetworkOperation::Accept,
         listen_reply.endpoint,
@@ -157,51 +225,36 @@ pub(super) fn run_network_tcp_stream(
         0,
         0,
     );
-    let Some(second_reply) = run_network_request(
-        accept_second,
-        client,
-        runtime,
-        scheduler,
-        session,
-        capabilities,
-        shared_pages,
-        owner,
-    ) else {
-        test_hooks::event(ID, "second_accept_failed");
-        return false;
+    let Some(second_reply) = proof.issue(accept_second) else {
+        test_hooks::event(TCP_STREAM_ID, "second_accept_failed");
+        return None;
     };
     if second_reply.status != logos_abi::NetworkStatus::Complete
         || !second_reply.endpoint.valid()
         || second_reply.endpoint == accept_reply.endpoint
         || second_reply.generation != listen_reply.generation
     {
-        test_hooks::event(ID, network_status_label(second_reply.status));
-        return false;
+        test_hooks::event(TCP_STREAM_ID, network_status_label(second_reply.status));
+        return None;
     }
-    test_hooks::event(ID, "second_connection_established");
+    test_hooks::event(TCP_STREAM_ID, "second_connection_established");
+    Some(TcpConnections {
+        primary: accept_reply.endpoint,
+        secondary: second_reply.endpoint,
+        generation: listen_reply.generation,
+    })
+}
 
-    let address = match shared_pages.address(owner, page) {
-        Some(address) => address,
-        None => return false,
-    };
-    let read = request(
+fn read_hello(proof: &mut TcpProof<'_, '_>, connections: &TcpConnections, address: u64) -> bool {
+    let read = proof.request(
         0x9000_0302,
         logos_abi::NetworkOperation::Read,
-        accept_reply.endpoint,
-        page,
+        connections.primary,
+        proof.page,
         logos_abi::MAX_TCP_PAYLOAD as u16,
-        accept_reply.generation,
+        connections.generation,
     );
-    let Some(read_reply) = run_network_request(
-        read,
-        client,
-        runtime,
-        scheduler,
-        session,
-        capabilities,
-        shared_pages,
-        owner,
-    ) else {
+    let Some(read_reply) = proof.issue(read) else {
         return false;
     };
     let hello =
@@ -209,61 +262,47 @@ pub(super) fn run_network_tcp_stream(
     if read_reply.status != logos_abi::NetworkStatus::Complete || hello != b"hello" {
         return false;
     }
-    test_hooks::event(ID, "connection_readable");
+    test_hooks::event(TCP_STREAM_ID, "connection_readable");
+    true
+}
 
-    unsafe {
-        core::ptr::copy_nonoverlapping(b"wo".as_ptr(), address as *mut u8, 2);
-    }
-    test_hooks::event(ID, "write_pending");
-    let write = request(
+fn write_primary_stream(
+    proof: &mut TcpProof<'_, '_>,
+    connections: &TcpConnections,
+    address: u64,
+) -> bool {
+    proof.write_page(address, b"wo");
+    test_hooks::event(TCP_STREAM_ID, "write_pending");
+    let write = proof.request(
         0x9000_0303,
         logos_abi::NetworkOperation::SubmitWrite,
-        accept_reply.endpoint,
-        page,
+        connections.primary,
+        proof.page,
         2,
-        accept_reply.generation,
+        connections.generation,
     );
-    let Some(write_reply) = run_network_request(
-        write,
-        client,
-        runtime,
-        scheduler,
-        session,
-        capabilities,
-        shared_pages,
-        owner,
-    ) else {
+    let Some(write_reply) = proof.issue(write) else {
         return false;
     };
     if write_reply.status != logos_abi::NetworkStatus::Complete
-        || write_reply.endpoint != accept_reply.endpoint
+        || write_reply.endpoint != connections.primary
         || write_reply.stream_accepted_bytes != 2
         || write_reply.stream_acknowledged_bytes > write_reply.stream_accepted_bytes
     {
         return false;
     }
-    test_hooks::event(ID, "write_accepted");
-    unsafe {
-        core::ptr::copy_nonoverlapping(b"rld".as_ptr(), address as *mut u8, 3);
-    }
-    let write_tail = request(
+    test_hooks::event(TCP_STREAM_ID, "write_accepted");
+
+    proof.write_page(address, b"rld");
+    let write_tail = proof.request(
         0x9000_0307,
         logos_abi::NetworkOperation::SubmitWrite,
-        accept_reply.endpoint,
-        page,
+        connections.primary,
+        proof.page,
         3,
-        accept_reply.generation,
+        connections.generation,
     );
-    let Some(write_tail_reply) = run_network_request(
-        write_tail,
-        client,
-        runtime,
-        scheduler,
-        session,
-        capabilities,
-        shared_pages,
-        owner,
-    ) else {
+    let Some(write_tail_reply) = proof.issue(write_tail) else {
         return false;
     };
     if write_tail_reply.status != logos_abi::NetworkStatus::Complete
@@ -273,25 +312,17 @@ pub(super) fn run_network_tcp_stream(
     {
         return false;
     }
-    test_hooks::event(ID, "write_tail_accepted");
-    let poll = request(
+    test_hooks::event(TCP_STREAM_ID, "write_tail_accepted");
+
+    let poll = proof.request(
         0x9000_0308,
         logos_abi::NetworkOperation::PollStream,
-        accept_reply.endpoint,
+        connections.primary,
         logos_abi::PageHandle(0),
         0,
-        accept_reply.generation,
+        connections.generation,
     );
-    let Some(poll_reply) = run_network_request(
-        poll,
-        client,
-        runtime,
-        scheduler,
-        session,
-        capabilities,
-        shared_pages,
-        owner,
-    ) else {
+    let Some(poll_reply) = proof.issue(poll) else {
         return false;
     };
     if poll_reply.status != logos_abi::NetworkStatus::Complete
@@ -301,81 +332,62 @@ pub(super) fn run_network_tcp_stream(
     {
         return false;
     }
-    test_hooks::event(ID, "stream_polled");
-    unsafe {
-        core::ptr::copy_nonoverlapping(b"reply".as_ptr(), address as *mut u8, 5);
-    }
-    let second_write = request(
+    test_hooks::event(TCP_STREAM_ID, "stream_polled");
+    true
+}
+
+fn verify_secondary_connection(
+    proof: &mut TcpProof<'_, '_>,
+    connections: &TcpConnections,
+    address: u64,
+) -> bool {
+    proof.write_page(address, b"reply");
+    let second_write = proof.request(
         0x9000_0309,
         logos_abi::NetworkOperation::SubmitWrite,
-        second_reply.endpoint,
-        page,
+        connections.secondary,
+        proof.page,
         5,
-        second_reply.generation,
+        connections.generation,
     );
-    let Some(second_write_reply) = run_network_request(
-        second_write,
-        client,
-        runtime,
-        scheduler,
-        session,
-        capabilities,
-        shared_pages,
-        owner,
-    ) else {
+    let Some(second_write_reply) = proof.issue(second_write) else {
         return false;
     };
     if second_write_reply.status != logos_abi::NetworkStatus::Complete {
         return false;
     }
-    let second_read = request(
+    let second_read = proof.request(
         0x9000_0310,
         logos_abi::NetworkOperation::Read,
-        second_reply.endpoint,
-        page,
+        connections.secondary,
+        proof.page,
         logos_abi::MAX_TCP_PAYLOAD as u16,
-        second_reply.generation,
+        connections.generation,
     );
-    let Some(second_read_reply) = run_network_request(
-        second_read,
-        client,
-        runtime,
-        scheduler,
-        session,
-        capabilities,
-        shared_pages,
-        owner,
-    ) else {
+    let Some(second_read_reply) = proof.issue(second_read) else {
         return false;
     };
-    if second_read_reply.status != logos_abi::NetworkStatus::Complete
-        || second_read_reply.length != 5
-    {
-        return false;
-    }
+    second_read_reply.status == logos_abi::NetworkStatus::Complete && second_read_reply.length == 5
+}
 
+fn verify_bulk_stream(
+    proof: &mut TcpProof<'_, '_>,
+    connections: &TcpConnections,
+    address: u64,
+) -> bool {
     let mut expected = [0; logos_abi::MAX_TCP_PAYLOAD];
     for (index, byte) in expected.iter_mut().take(512).enumerate() {
         *byte = (index as u8).wrapping_mul(37).wrapping_add(11);
     }
-    let large_read = request(
+    let large_read = proof.request(
         0x9000_0304,
         logos_abi::NetworkOperation::Read,
-        accept_reply.endpoint,
-        page,
+        connections.primary,
+        proof.page,
         logos_abi::MAX_TCP_PAYLOAD as u16,
-        accept_reply.generation,
+        connections.generation,
     );
-    let Some(large_read_reply) = run_network_request(
-        large_read,
-        client,
-        runtime,
-        scheduler,
-        session,
-        capabilities,
-        shared_pages,
-        owner,
-    ) else {
+    let Some(large_read_reply) = proof.issue(large_read) else {
         return false;
     };
     let received = unsafe {
@@ -385,41 +397,26 @@ pub(super) fn run_network_tcp_stream(
     {
         return false;
     }
-    test_hooks::event(ID, "write_acknowledged");
+    test_hooks::event(TCP_STREAM_ID, "write_acknowledged");
 
-    unsafe {
-        for byte in core::slice::from_raw_parts_mut(address as *mut u8, 512) {
-            *byte ^= 0xa5;
-        }
-    }
-    let write_large = request(
+    proof.xor_page(address, 512);
+    let write_large = proof.request(
         0x9000_0305,
         logos_abi::NetworkOperation::Write,
-        accept_reply.endpoint,
-        page,
+        connections.primary,
+        proof.page,
         512,
-        accept_reply.generation,
+        connections.generation,
     );
-    let Some(write_large_reply) = run_network_request(
-        write_large,
-        client,
-        runtime,
-        scheduler,
-        session,
-        capabilities,
-        shared_pages,
-        owner,
-    ) else {
-        test_hooks::event(ID, "large_write_failed");
+    let Some(write_large_reply) = proof.issue(write_large) else {
+        test_hooks::event(TCP_STREAM_ID, "large_write_failed");
         return false;
     };
     if write_large_reply.status != logos_abi::NetworkStatus::Complete {
-        test_hooks::event(ID, network_status_label(write_large_reply.status));
+        test_hooks::event(TCP_STREAM_ID, network_status_label(write_large_reply.status));
         return false;
     }
-
-    test_hooks::event(ID, "connection_closed");
-    scope.valid()
+    true
 }
 
 pub(super) const fn network_status_label(status: logos_abi::NetworkStatus) -> &'static str {
