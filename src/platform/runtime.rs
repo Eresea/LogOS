@@ -272,7 +272,12 @@ pub(crate) fn run(
         acpi.is_some_and(|tables| {
             tables.xsdt != 0
                 && tables.madt.is_some_and(|madt| {
-                    madt.local_apic != 0 && madt.io_apic != 0 && madt.io_apic_gsi_base == 0
+                    madt.local_apic != 0
+                        && madt.io_apic != 0
+                        && madt.io_apic_gsi_base == 0
+                        && madt.topology.count() > 0
+                        && madt.topology.usable().next().is_some()
+                        && madt.topology.bsp().is_some()
                 })
                 && tables.has_power()
         }),

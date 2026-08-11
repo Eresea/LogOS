@@ -41,6 +41,111 @@ pub struct Madt {
     pub local_apic: usize,
     pub io_apic: usize,
     pub io_apic_gsi_base: u32,
+    pub topology: CpuTopology,
+}
+
+pub const MAX_CPUS: usize = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Cpu {
+    pub apic_id: u32,
+    pub enabled: bool,
+    pub bsp: bool,
+}
+
+impl Cpu {
+    pub const fn usable(self) -> bool {
+        self.enabled
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct CpuTopology {
+    cpus: [Option<Cpu>; MAX_CPUS],
+    count: usize,
+    truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TopologyError {
+    Malformed,
+}
+
+impl CpuTopology {
+    pub const fn empty() -> Self {
+        Self { cpus: [None; MAX_CPUS], count: 0, truncated: false }
+    }
+
+    pub fn parse(entries: &[u8], bsp_apic_id: Option<u32>) -> Result<Self, TopologyError> {
+        let mut topology = Self::empty();
+        let mut offset = 0;
+        while offset < entries.len() {
+            let Some(&kind) = entries.get(offset) else {
+                return Err(TopologyError::Malformed);
+            };
+            let Some(&length) = entries.get(offset + 1) else {
+                return Err(TopologyError::Malformed);
+            };
+            let length = length as usize;
+            if length < 2 || length > entries.len() - offset {
+                return Err(TopologyError::Malformed);
+            }
+            let entry = &entries[offset..offset + length];
+            let processor = match kind {
+                0 if length >= 8 => {
+                    let apic_id = u32::from(entry[3]);
+                    let flags = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
+                    Some((apic_id, flags))
+                }
+                9 if length >= 16 => {
+                    let apic_id = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
+                    let flags = u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]);
+                    Some((apic_id, flags))
+                }
+                0 | 9 => return Err(TopologyError::Malformed),
+                _ => None,
+            };
+            if let Some((apic_id, flags)) = processor {
+                if topology.cpus[..topology.count]
+                    .iter()
+                    .flatten()
+                    .any(|cpu| cpu.apic_id == apic_id)
+                {
+                    return Err(TopologyError::Malformed);
+                }
+                let cpu =
+                    Cpu { apic_id, enabled: flags & 0x3 != 0, bsp: bsp_apic_id == Some(apic_id) };
+                if topology.count == MAX_CPUS {
+                    topology.truncated = true;
+                } else {
+                    topology.cpus[topology.count] = Some(cpu);
+                    topology.count += 1;
+                }
+            }
+            offset += length;
+        }
+        Ok(topology)
+    }
+
+    pub const fn count(&self) -> usize {
+        self.count
+    }
+
+    pub const fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    pub fn get(&self, index: usize) -> Option<Cpu> {
+        self.cpus.get(index).copied().flatten()
+    }
+
+    pub fn bsp(&self) -> Option<Cpu> {
+        self.cpus[..self.count].iter().flatten().find(|cpu| cpu.bsp).copied()
+    }
+
+    pub fn usable(&self) -> impl Iterator<Item = Cpu> + '_ {
+        self.cpus[..self.count].iter().flatten().copied().filter(|cpu| cpu.usable())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -396,28 +501,50 @@ fn table_header(table: *const Header, signature: [u8; 4]) -> Option<Header> {
 
 fn parse_madt(table: *const Header) -> Option<Madt> {
     let header = table_header(table, *b"APIC")?;
+    let minimum = core::mem::size_of::<Header>() + 8;
+    (header.length as usize >= minimum).then_some(())?;
     let bytes = table.cast::<u8>();
     let local_apic =
         unsafe { bytes.add(core::mem::size_of::<Header>()).cast::<u32>().read_unaligned() };
-    let mut offset = core::mem::size_of::<Header>() + 8;
-    while offset + 2 <= header.length as usize {
-        let kind = unsafe { bytes.add(offset).read() };
-        let length = unsafe { bytes.add(offset + 1).read() } as usize;
-        if length < 2 || offset + length > header.length as usize {
+    let entries = unsafe {
+        core::slice::from_raw_parts(bytes.add(minimum), header.length as usize - minimum)
+    };
+    let topology = CpuTopology::parse(entries, current_apic_id()).ok()?;
+    let mut io_apic = 0;
+    let mut io_apic_gsi_base = 0;
+    let mut offset = 0;
+    while offset + 2 <= entries.len() {
+        let entry_offset = minimum + offset;
+        let kind = unsafe { bytes.add(entry_offset).read() };
+        let length = unsafe { bytes.add(entry_offset + 1).read() } as usize;
+        if length < 2 || offset + length > entries.len() {
             return None;
         }
-        if kind == 1 && length >= 12 {
-            let io_apic = unsafe { bytes.add(offset + 4).cast::<u32>().read_unaligned() };
-            let io_apic_gsi_base = unsafe { bytes.add(offset + 8).cast::<u32>().read_unaligned() };
-            return Some(Madt {
-                local_apic: local_apic as usize,
-                io_apic: io_apic as usize,
-                io_apic_gsi_base,
-            });
+        if kind == 1 && length >= 12 && io_apic == 0 {
+            io_apic =
+                unsafe { bytes.add(entry_offset + 4).cast::<u32>().read_unaligned() as usize };
+            io_apic_gsi_base =
+                unsafe { bytes.add(entry_offset + 8).cast::<u32>().read_unaligned() };
         }
         offset += length;
     }
-    None
+    (io_apic != 0).then_some(Madt {
+        local_apic: local_apic as usize,
+        io_apic,
+        io_apic_gsi_base,
+        topology,
+    })
+}
+
+fn current_apic_id() -> Option<u32> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        Some(unsafe { core::arch::x86_64::__cpuid(1).ebx >> 24 })
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        None
+    }
 }
 
 fn checksum(bytes: *const u8, length: usize) -> bool {
@@ -426,4 +553,43 @@ fn checksum(bytes: *const u8, length: usize) -> bool {
         sum = sum.wrapping_add(unsafe { bytes.add(index).read() });
     }
     sum == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CpuTopology, MAX_CPUS, TopologyError};
+
+    #[test]
+    fn parses_enabled_and_disabled_processors() {
+        let entries = [
+            0, 8, 0, 2, 1, 0, 0, 0, // Local APIC 2, enabled.
+            0, 8, 0, 3, 0, 0, 0, 0, // Local APIC 3, disabled.
+            9, 16, 0, 0, 4, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let topology = CpuTopology::parse(&entries, Some(2)).unwrap();
+        assert_eq!(topology.count(), 3);
+        assert_eq!(topology.bsp().unwrap().apic_id, 2);
+        assert_eq!(topology.usable().count(), 2);
+        assert_eq!(topology.get(2).unwrap().apic_id, 4);
+    }
+
+    #[test]
+    fn rejects_malformed_processor_entries() {
+        assert_eq!(CpuTopology::parse(&[0, 7, 0, 2, 1, 0, 0], None), Err(TopologyError::Malformed));
+        assert_eq!(CpuTopology::parse(&[9, 15, 0, 0], None), Err(TopologyError::Malformed));
+    }
+
+    #[test]
+    fn truncates_excess_processors_without_growing() {
+        let mut entries = [0u8; (MAX_CPUS + 1) * 8];
+        for (index, entry) in entries.chunks_exact_mut(8).enumerate() {
+            entry[0] = 0;
+            entry[1] = 8;
+            entry[3] = index as u8;
+            entry[4] = 1;
+        }
+        let topology = CpuTopology::parse(&entries, None).unwrap();
+        assert_eq!(topology.count(), MAX_CPUS);
+        assert!(topology.truncated());
+    }
 }
