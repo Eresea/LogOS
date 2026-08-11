@@ -37,6 +37,10 @@ mandatory process boundaries. Outer code depends inward through typed, capabilit
   affecting a new service instance.
 - Fixed capacities are public behavior: return a bounded error such as `Busy` or `Full`; do not grow
   resources implicitly or add an allocator/runtime dependency.
+- Core's bounded SMP scheduler uses atomic generation/state claims, per-CPU scan cursors, and
+  scheduler-only local-APIC notification; task bodies never run under a global scheduler lock.
+- Async tasks are opt-in fixed slots with scheduler-owned generation-safe wakers. Native services
+  remain on the cooperative scheduler until their subsystem boundaries are migrated independently.
 - Production builds expose no test control surface. Host tests prove portable state and codecs; QEMU
   proves boot, devices, isolation, recovery, and public contracts.
 
@@ -75,6 +79,9 @@ isolation constraints live in [Security](security.md).
 - [Remote](REMOTE.md) owns trust/enrollment and the structured attachment above Network and Sessions.
 - [Console](CONSOLE.md) and [Sessions](SESSIONS.md) own local interaction, not privileged mechanisms.
 
+The SMP/async foundation is currently BSP-only. AP startup, per-CPU descriptor/TSS/IDT state, task
+migration, and a multi-vCPU QEMU proof remain prerequisites before Core can release secondary CPUs.
+
 ## Placement test
 
 Before adding a component, record its invariant, owned resources, required capabilities, failure radius,
@@ -88,3 +95,4 @@ unclear, the boundary is not ready. Cross-ring or irreversible decisions require
 - [Onion rings](ONION_RINGS.md) — optional placement rationale.
 - [ADR-0020](adr/0020-typed-native-endpoint-pages.md), [ADR-0028](adr/0028-async-first-subsystem-state.md),
   [ADR-0032](adr/0032-bounded-task-contracts-and-proof-tiers.md) — active transport and work-state decisions.
+- [ADR-0035](adr/0035-bounded-smp-async-foundation.md) — bounded SMP and async execution boundary.
