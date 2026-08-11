@@ -62,6 +62,7 @@ enum HistoryPoll {
     Idle,
     Pending,
     Complete,
+    Changed,
     Failed,
 }
 
@@ -178,11 +179,10 @@ impl HistoryTask {
                 logos_abi::PersistenceStatus::Complete | logos_abi::PersistenceStatus::Corrupt => {
                     self.phase = HistoryPhase::Idle;
                     let _ = terminal.write_output(b"history corrupt");
-                    HistoryPoll::Complete
+                    HistoryPoll::Changed
                 }
                 _ => {
                     self.phase = HistoryPhase::Idle;
-                    let _ = terminal.write_output(b"history persistence failed");
                     HistoryPoll::Failed
                 }
             },
@@ -192,10 +192,11 @@ impl HistoryTask {
                     || reply.length as usize != HISTORY_BYTES
                 {
                     let _ = terminal.write_output(b"history corrupt");
-                    return HistoryPoll::Complete;
+                    return HistoryPoll::Changed;
                 }
                 if !terminal.restore_history_bytes(&page_bytes(page)[..HISTORY_BYTES]) {
                     let _ = terminal.write_output(b"history corrupt");
+                    return HistoryPoll::Changed;
                 }
                 HistoryPoll::Complete
             }
@@ -395,27 +396,26 @@ fn run(context: &mut ServiceContext) -> ! {
     let mut next_store_id = 1;
     let mut history_started = false;
     let mut history = HistoryTask::new();
-    let mut deferred_input = None;
+    let mut render_pending = true;
     while context.acknowledged() {
-        render(&mut terminal, context);
         match history.poll(&mut terminal, context, &mut next_store_id) {
             HistoryPoll::Failed => {
                 let _ = terminal.write_output(b"history persistence failed");
+                render_pending = true;
             }
+            HistoryPoll::Changed => render_pending = true,
             HistoryPoll::Idle | HistoryPoll::Pending | HistoryPoll::Complete => {}
         }
-        let byte = if let Some(byte) = deferred_input.take() {
-            Some(byte)
-        } else if let Some(byte) = context.input_byte() {
-            // A store completion can wake us while the input endpoint already
-            // contains a reply. Consume that reply before arming another wait.
-            Some(byte)
-        } else {
+        if render_pending {
+            render(&mut terminal, context);
+            render_pending = false;
+        }
+        let byte = context.input_byte().or_else(|| {
             if !context.wait_for_input() {
                 spin();
             }
             context.input_byte()
-        };
+        });
         let Some(byte) = byte else {
             continue;
         };
@@ -430,18 +430,14 @@ fn run(context: &mut ServiceContext) -> ! {
             if byte == logos_abi::InputEvent::STARTUP.byte() {
                 if !history.start_load(context, &mut next_store_id) {
                     let _ = terminal.write_output(b"history persistence failed");
+                    render_pending = true;
                 }
                 continue;
             }
             if !history.start_load(context, &mut next_store_id) {
                 let _ = terminal.write_output(b"history persistence failed");
+                render_pending = true;
             }
-            deferred_input = Some(byte);
-            continue;
-        }
-        if history.pending() {
-            deferred_input = Some(byte);
-            continue;
         }
         let Some(input) = logos_abi::InputEvent::from_byte(byte) else {
             continue;
@@ -472,6 +468,7 @@ fn run(context: &mut ServiceContext) -> ! {
                 let _ = terminal.insert_utf8(&[byte]);
             }
         }
+        render_pending = true;
     }
     spin()
 }
@@ -495,9 +492,7 @@ fn submit_line(
 ) {
     let submission = terminal.submit();
     let _ = terminal.write_output(submission.as_bytes());
-    if !submission.as_bytes().is_empty() && !history.start_save(terminal, context, next) {
-        let _ = terminal.write_output(b"history persistence failed");
-    }
+    let persist = !submission.as_bytes().is_empty();
     match command::pipeline(submission) {
         Resolution::Local(Local::Text(value)) => {
             let _ = terminal.write_output(value.as_bytes());
@@ -532,6 +527,9 @@ fn submit_line(
         Resolution::Error(_) => {
             let _ = terminal.write_output(b"unknown command");
         }
+    }
+    if persist && !history.start_save(terminal, context, next) {
+        let _ = terminal.write_output(b"history persistence failed");
     }
 }
 
