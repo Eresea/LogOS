@@ -9,7 +9,17 @@ license = "MIT"
 unsafe_op_in_unsafe_fn = "warn"
 
 [dependencies]
-uefi = { version = "0.35", features = ["panic_handler"] }
+uefi = { version = "0.35" }
+
+[features]
+default = []
+qemu-proof = []
+
+[lib]
+name = "logos_vnext"
+path = "src/lib.rs"
+test = true
+bench = false
 
 [[bin]]
 name = "logos-vnext"
