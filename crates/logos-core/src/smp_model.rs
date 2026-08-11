@@ -224,7 +224,10 @@ mod tests {
         assert!(registry.wake(handle));
         assert!(registry.wake(handle));
         assert_eq!(registry.state(handle), Some(State::Runnable));
-        assert_eq!(registry.claim(1).unwrap().slot, handle.slot);
+        let claimed = registry.claim(1).unwrap();
+        assert_eq!(claimed, handle);
+        assert_eq!(registry.state(handle), Some(State::Running));
+        assert!(registry.claim(0).is_none());
     }
 
     #[test]
