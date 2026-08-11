@@ -347,33 +347,6 @@ impl StorageRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn protected_store_read(
-        &mut self,
-        context: &mut block::DispatchContext<'_>,
-        scheduler: &mut native_task::Scheduler<'_>,
-        page: logos_abi::PageHandle,
-        page_address: u64,
-        namespace: logos_abi::NamespaceId,
-        name: &[u8],
-        output: &mut [u8],
-        tick: u64,
-    ) -> logos_abi::PersistenceStatus {
-        self.bind_block_context(context);
-        if !self.begin_protected_read(page, page_address, namespace, name, scheduler, tick) {
-            return logos_abi::PersistenceStatus::Unavailable;
-        }
-        for _ in 0..256 {
-            match self.poll_protected_read(context, scheduler, output, tick) {
-                ProtectedReadPoll::Pending => continue,
-                ProtectedReadPoll::Ready(status, _) => return status,
-                ProtectedReadPoll::Failed => return logos_abi::PersistenceStatus::Unavailable,
-            }
-        }
-        self.protected_read = None;
-        logos_abi::PersistenceStatus::TimedOut
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub fn begin_protected_read(
         &mut self,
         page: logos_abi::PageHandle,
