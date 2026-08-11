@@ -869,8 +869,7 @@ mod tests {
         let mut scheduler = SmpScheduler::new().with_notifier(|_| true);
         let mut futures: [YieldFuture; MAX_WAKER_TOKENS] =
             core::array::from_fn(|_| YieldFuture { polls: 0, waker: None });
-        let mut stale_wakers: [Option<Waker>; MAX_WAKER_TOKENS] =
-            core::array::from_fn(|_| None);
+        let mut stale_wakers: [Option<Waker>; MAX_WAKER_TOKENS] = core::array::from_fn(|_| None);
 
         for (index, future) in futures.iter_mut().enumerate() {
             let handle = scheduler.spawn_future(future).unwrap();
@@ -884,9 +883,6 @@ mod tests {
         }
 
         let mut candidate = YieldFuture { polls: 0, waker: None };
-        assert_eq!(
-            scheduler.spawn_future(&mut candidate),
-            Err(SpawnError::WakerCapacity)
-        );
+        assert_eq!(scheduler.spawn_future(&mut candidate), Err(SpawnError::WakerCapacity));
     }
 }
