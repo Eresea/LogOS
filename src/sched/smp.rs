@@ -281,6 +281,9 @@ impl<'a> SmpScheduler<'a> {
         if !cpu_state.active.load(Ordering::Acquire) {
             return false;
         }
+        if crate::arch::interrupts::take_scheduler_notification() {
+            cpu_state.reschedule.store(true, Ordering::Release);
+        }
         cpu_state.reschedule.swap(false, Ordering::Acquire);
         let start = cpu_state.cursor.fetch_add(1, Ordering::Relaxed) % MAX_SMP_TASKS;
         for offset in 0..MAX_SMP_TASKS {
@@ -667,8 +670,7 @@ fn default_notify(apic_id: u32) -> bool {
     }
     #[cfg(not(test))]
     {
-        let _ = apic_id;
-        true
+        crate::arch::interrupts::notify_cpu(apic_id)
     }
 }
 
