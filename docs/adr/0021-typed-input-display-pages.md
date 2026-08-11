@@ -39,10 +39,3 @@ page even when physical page allocation reuses the same address.
   generation-safe typed-page pattern; ABI v4 has no remaining legacy Remote transport.
 - Later endpoint migrations should copy this concrete pattern: a fixed page, scalar validation,
   generation check, deterministic reset, and ownership through `AddressSpace::release`.
-
-## ABI v5 amendment
-
-The bounded async cutover permits Core to deliver one input event while the page is `Ready`:
-`Ready/Waiting -> Reply -> Ready`. This is a single-slot pre-arm for keys arriving during another
-operation; a second `Reply` is rejected, and `ControlPage::input_waiting_at` treats the reply as a
-valid runnable wake. Generation validation and reset behavior are unchanged.

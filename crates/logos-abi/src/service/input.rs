@@ -58,19 +58,6 @@ impl InputPage {
     }
 
     /// # Safety
-    /// `address` must point to a live, aligned InputPage mapping.
-    pub unsafe fn reply_pending_at(address: u64, generation: u32) -> bool {
-        if address == 0 {
-            return false;
-        }
-        let page = address as *const Self;
-        let page_generation = unsafe { core::ptr::addr_of!((*page).generation).read_volatile() };
-        let state = unsafe { core::ptr::addr_of!((*page).state).read_volatile() };
-        page_generation == generation
-            && EndpointState::from_wire(state) == Some(EndpointState::Reply)
-    }
-
-    /// # Safety
     /// `address` must point to a live, aligned InputPage mapping owned by Core.
     pub unsafe fn deliver_at(address: u64, generation: u32, event: u8) -> bool {
         let mut page = unsafe { (address as *mut Self).read_volatile() };

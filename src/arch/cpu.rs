@@ -254,11 +254,6 @@ extern "C" fn user_gate_resume(frame: *const u64) -> u8 {
         return 1;
     }
     if context != 0
-        && unsafe { logos_core::native_service::ControlPage::input_reply_pending_at(context) }
-    {
-        return 1;
-    }
-    if context != 0
         && unsafe { logos_core::native_service::ControlPage::display_waiting_at(context) }
         && save_user_frame(frame, false, true)
     {

@@ -601,6 +601,17 @@ impl StoreClientEndpoint {
         }
     }
 
+    pub fn pending(self) -> bool {
+        self.available()
+            && unsafe {
+                logos_abi::service::StoreClientPage::pending_at(
+                    self.page_physical,
+                    self.service_generation,
+                    self.endpoint_generation,
+                )
+            }
+    }
+
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub fn deliver(self, request: logos_abi::StoreRequest) -> bool {
         if !self.available() {
@@ -642,21 +653,14 @@ impl StoreClientEndpoint {
         if !self.available() {
             return false;
         }
-        let accepted = unsafe {
+        unsafe {
             logos_abi::service::StoreClientPage::reply_at(
                 self.page_physical,
                 self.service_generation,
                 self.endpoint_generation,
                 reply,
             )
-        };
-        accepted
-            && unsafe {
-                logos_abi::service::ControlPage::notify_at(
-                    self.context_physical,
-                    logos_abi::service::STORE_REPLY,
-                )
-            }
+        }
     }
 
     pub fn configure_transfer(self, page: logos_abi::PageHandle) -> bool {
@@ -1572,6 +1576,10 @@ impl<'a> Task<'a> {
         self.complete
     }
 
+    fn operation(&self) -> Option<u32> {
+        unsafe { logos_core::native_service::ControlPage::operation_at(self.context_physical) }
+    }
+
     pub fn release(self, memory: &mut PhysicalMemory) -> bool {
         self.space.release(memory)
     }
@@ -1773,6 +1781,15 @@ impl<'a> Scheduler<'a> {
         self.entry(handle).is_some() && self.run_index(handle.index())
     }
 
+    pub fn waiting_for_operation(&self, handle: Handle, operation: u32) -> bool {
+        self.waiting_operation(handle) == Some(operation)
+    }
+
+    pub fn waiting_operation(&self, handle: Handle) -> Option<u32> {
+        let entry = self.entry(handle)?;
+        entry.waiting.is_some().then(|| entry.task.operation()).flatten()
+    }
+
     pub fn wake(&mut self, handle: Handle) -> bool {
         let Some(entry) = self.entry_mut(handle) else { return false };
         if entry.waiting.is_none() {
@@ -1781,35 +1798,6 @@ impl<'a> Scheduler<'a> {
         entry.waiting = None;
         crate::platform::trace::record(crate::platform::trace::Event::TaskWoken);
         true
-    }
-
-    /// Wake a task for a bounded notification that may arrive while it is
-    /// already runnable. A failed task remains non-wakeable.
-    pub fn wake_or_ready(&mut self, handle: Handle) -> bool {
-        let Some(entry) = self.entry_mut(handle) else { return false };
-        if entry.waiting == Some(Event::FAILURE) {
-            return false;
-        }
-        if entry.waiting.is_some() {
-            entry.waiting = None;
-            crate::platform::trace::record(crate::platform::trace::Event::TaskWoken);
-        }
-        true
-    }
-
-    /// Deliver input without interrupting a task blocked on another phase.
-    pub fn notify_input(&mut self, handle: Handle) -> Option<bool> {
-        let entry = self.entry_mut(handle)?;
-        match entry.waiting {
-            Some(Event::FAILURE) => Some(false),
-            Some(Event::INPUT) => {
-                entry.waiting = None;
-                crate::platform::trace::record(crate::platform::trace::Event::TaskWoken);
-                Some(self.run(handle))
-            }
-            Some(_) => None,
-            None => None,
-        }
     }
 
     pub fn fail(&mut self, handle: Handle) -> bool {

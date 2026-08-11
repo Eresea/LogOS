@@ -551,6 +551,14 @@ impl ControlPage {
 
     /// # Safety
     /// `address` must point to a live, aligned `ControlPage` mapping.
+    pub unsafe fn operation_at(address: u64) -> Option<u32> {
+        let context = unsafe { (address as *const Self).read_volatile() };
+        (context.abi == ABI && context.reserved == 0 && context.generation != 0)
+            .then_some(context.operation)
+    }
+
+    /// # Safety
+    /// `address` must point to a live, aligned `ControlPage` mapping.
     pub unsafe fn input_page_at(address: u64) -> Option<u64> {
         let context = unsafe { (address as *const Self).read_volatile() };
         (context.abi == ABI && context.reserved == 0 && context.input_page != 0)
@@ -641,18 +649,6 @@ impl ControlPage {
         }
         context.input_page == 0
             || unsafe { InputPage::waiting_at(context.input_page, context.generation) }
-    }
-
-    /// # Safety
-    /// `address` must point to a live, aligned ControlPage mapping.
-    pub unsafe fn input_reply_pending_at(address: u64) -> bool {
-        let context = unsafe { (address as *const Self).read_volatile() };
-        context.abi == ABI
-            && context.reserved == 0
-            && context.operation == READ_INPUT
-            && context.status == ACKNOWLEDGED
-            && context.input_page != 0
-            && unsafe { InputPage::reply_pending_at(context.input_page, context.generation) }
     }
 
     pub unsafe fn store_client_page_at(address: u64) -> Option<u64> {
@@ -1570,9 +1566,7 @@ mod tests {
         assert!(unsafe { InputPage::waiting_at(address, 7) });
         assert!(!unsafe { InputPage::deliver_at(address, 8, b'x') });
         assert!(unsafe { InputPage::deliver_at(address, 7, b'x') });
-        assert!(unsafe { InputPage::reply_pending_at(address, 7) });
         assert_eq!(unsafe { InputPage::take_at(address, 7) }, Some(b'x'));
-        assert!(!unsafe { InputPage::reply_pending_at(address, 7) });
         assert!(unsafe { InputPage::take_at(address, 7) }.is_none());
         assert!(unsafe { InputPage::deliver_at(address, 7, b'y') });
         assert_eq!(unsafe { InputPage::take_at(address, 7) }, Some(b'y'));
