@@ -37,6 +37,17 @@ native-service scheduler remain unchanged and continue to own current services.
 - The single-core path remains the only production execution path until AP startup is complete.
 - Host tests cover the portable atomic state protocol; UEFI target checks cover integration.
 
+## Verification boundary
+
+The reviewed tests keep the portable atomic model separate from the production scheduler. The
+model proves claim, wake-pending, duplicate-wake, generation, and capacity transitions, while the
+production tests cover bounded task slots, `RawWaker` generation invalidation, retained-waker
+capacity, and CPU guards. The model is not a proof of production `UnsafeCell` access or a true
+cross-thread `Pending`/wake race.
+
+Before AP release, add a host-runnable production-scheduler harness or a QEMU proof that exercises
+the real `SmpScheduler` across CPUs; do not treat the model tests as a substitute for that proof.
+
 ## Deliberate deferrals
 
 AP startup still requires a low-memory trampoline, release barrier, per-CPU stacks, and per-CPU
