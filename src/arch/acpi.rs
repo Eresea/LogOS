@@ -560,7 +560,7 @@ mod tests {
     use super::{CpuTopology, MAX_CPUS, TopologyError};
 
     #[test]
-    fn parses_enabled_and_disabled_processors() {
+    fn parses_mixed_processor_records_and_marks_bsp() {
         let entries = [
             0, 8, 0, 2, 1, 0, 0, 0, // Local APIC 2, enabled.
             0, 8, 0, 3, 0, 0, 0, 0, // Local APIC 3, disabled.
@@ -568,9 +568,20 @@ mod tests {
         ];
         let topology = CpuTopology::parse(&entries, Some(2)).unwrap();
         assert_eq!(topology.count(), 3);
-        assert_eq!(topology.bsp().unwrap().apic_id, 2);
+        let first = topology.get(0).unwrap();
+        assert_eq!(first.apic_id, 2);
+        assert!(first.enabled);
+        assert!(first.bsp);
+        let second = topology.get(1).unwrap();
+        assert_eq!(second.apic_id, 3);
+        assert!(!second.enabled);
+        assert!(!second.bsp);
+        let third = topology.get(2).unwrap();
+        assert_eq!(third.apic_id, 4);
+        assert!(third.enabled);
+        assert!(!third.bsp);
+        assert_eq!(topology.bsp().unwrap().apic_id, first.apic_id);
         assert_eq!(topology.usable().count(), 2);
-        assert_eq!(topology.get(2).unwrap().apic_id, 4);
     }
 
     #[test]
