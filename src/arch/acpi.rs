@@ -585,9 +585,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_processor_entries() {
+    fn rejects_malformed_and_duplicate_processor_entries() {
         assert_eq!(CpuTopology::parse(&[0, 7, 0, 2, 1, 0, 0], None), Err(TopologyError::Malformed));
         assert_eq!(CpuTopology::parse(&[9, 15, 0, 0], None), Err(TopologyError::Malformed));
+        assert_eq!(
+            CpuTopology::parse(
+                &[
+                    0, 8, 0, 2, 1, 0, 0, 0,
+                    0, 8, 0, 2, 1, 0, 0, 0,
+                ],
+                None,
+            ),
+            Err(TopologyError::Malformed)
+        );
     }
 
     #[test]
