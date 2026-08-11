@@ -21,6 +21,166 @@ pub enum StartupPoll {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProtectedReadPoll {
+    Pending,
+    Ready(logos_abi::PersistenceStatus, usize),
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProtectedReadPhase {
+    OpenPending,
+    ReadPending { length: usize },
+}
+
+#[derive(Clone, Copy)]
+pub struct ProtectedRead {
+    phase: ProtectedReadPhase,
+    page: logos_abi::PageHandle,
+    page_address: u64,
+    open_id: u32,
+    read_id: u32,
+}
+
+impl ProtectedRead {
+    #[allow(clippy::too_many_arguments)]
+    pub fn start(
+        storage: native_task::StoreServerEndpoint,
+        scheduler: &mut native_task::Scheduler<'_>,
+        storage_handle: native_task::Handle,
+        page: logos_abi::PageHandle,
+        page_address: u64,
+        namespace: logos_abi::NamespaceId,
+        name: &[u8],
+        tick: u64,
+    ) -> Option<Self> {
+        if !storage.available()
+            || !storage_handle.available()
+            || name.is_empty()
+            || name.len() > logos_abi::MAX_OBJECT_NAME
+            || core::str::from_utf8(name).is_err()
+        {
+            return None;
+        }
+        let mut identity = [0; logos_abi::MAX_OBJECT_NAME];
+        identity[..name.len()].copy_from_slice(name);
+        let open_id = u32::MAX - 6;
+        let request = logos_abi::StoreRequest {
+            id: open_id,
+            operation: logos_abi::StoreOperation::OpenRead,
+            namespace,
+            name: identity,
+            name_length: name.len() as u8,
+            version: logos_abi::VersionSelector::Current,
+            offset: 0,
+            length: 0,
+            page: logos_abi::PageHandle(0),
+            deadline: tick.max(1).saturating_add(100),
+        };
+        if !storage.deliver(request, 0)
+            || !scheduler.wake(storage_handle)
+            || !scheduler.run(storage_handle)
+        {
+            return None;
+        }
+        Some(Self {
+            phase: ProtectedReadPhase::OpenPending,
+            page,
+            page_address,
+            open_id,
+            read_id: u32::MAX - 5,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn poll(
+        &mut self,
+        storage: native_task::StoreServerEndpoint,
+        dispatch: &mut block::Dispatch,
+        context: &mut block::DispatchContext<'_>,
+        scheduler: &mut native_task::Scheduler<'_>,
+        storage_handle: native_task::Handle,
+        tick: u64,
+        output: &mut [u8],
+    ) -> ProtectedReadPoll {
+        if scheduler.failed(storage_handle) {
+            return ProtectedReadPoll::Failed;
+        }
+        match self.phase {
+            ProtectedReadPhase::OpenPending => {
+                let Some(reply) = storage.response(self.open_id) else {
+                    return poll_protected_io(dispatch, context, scheduler, storage_handle, tick);
+                };
+                if reply.status != logos_abi::PersistenceStatus::Complete {
+                    return ProtectedReadPoll::Ready(reply.status, 0);
+                }
+                let length = reply.length as usize;
+                if length == 0 || length > output.len() {
+                    return ProtectedReadPoll::Ready(logos_abi::PersistenceStatus::Invalid, 0);
+                }
+                let request = logos_abi::StoreRequest {
+                    id: self.read_id,
+                    operation: logos_abi::StoreOperation::ReadChunk,
+                    namespace: logos_abi::NamespaceId(0),
+                    name: [0; logos_abi::MAX_OBJECT_NAME],
+                    name_length: 0,
+                    version: logos_abi::VersionSelector::None,
+                    offset: 0,
+                    length: length as u32,
+                    page: self.page,
+                    deadline: tick.max(1).saturating_add(100),
+                };
+                if !storage.deliver(request, 0)
+                    || !scheduler.wake(storage_handle)
+                    || !scheduler.run(storage_handle)
+                {
+                    return ProtectedReadPoll::Failed;
+                }
+                self.phase = ProtectedReadPhase::ReadPending { length };
+                ProtectedReadPoll::Pending
+            }
+            ProtectedReadPhase::ReadPending { length } => {
+                let Some(reply) = storage.response(self.read_id) else {
+                    return poll_protected_io(dispatch, context, scheduler, storage_handle, tick);
+                };
+                if reply.status == logos_abi::PersistenceStatus::Complete {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            self.page_address as *const u8,
+                            output.as_mut_ptr(),
+                            length,
+                        );
+                    }
+                }
+                ProtectedReadPoll::Ready(reply.status, length)
+            }
+        }
+    }
+}
+
+fn poll_protected_io(
+    dispatch: &mut block::Dispatch,
+    context: &mut block::DispatchContext<'_>,
+    scheduler: &mut native_task::Scheduler<'_>,
+    storage_handle: native_task::Handle,
+    tick: u64,
+) -> ProtectedReadPoll {
+    if let Some(reply) = dispatch.poll(context, tick) {
+        if context.endpoint.reply(reply)
+            && scheduler.wake(storage_handle)
+            && scheduler.run(storage_handle)
+        {
+            ProtectedReadPoll::Pending
+        } else {
+            ProtectedReadPoll::Failed
+        }
+    } else {
+        let _ = scheduler.run_next();
+        ProtectedReadPoll::Pending
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoragePhase {
@@ -61,6 +221,7 @@ pub struct StorageRuntime {
     relay: RelayState,
     wake: Option<crate::sched::native_task::Handle>,
     operation: Option<StorageOperation>,
+    protected_read: Option<ProtectedRead>,
     next_sequence: u64,
 }
 
@@ -80,6 +241,7 @@ impl StorageRuntime {
             relay: RelayState::new(),
             wake: None,
             operation: None,
+            protected_read: None,
             next_sequence: 1,
         }
     }
@@ -96,6 +258,7 @@ impl StorageRuntime {
         self.relay.clear();
         self.wake = None;
         self.operation = None;
+        self.protected_read = None;
         self.next_sequence = 1;
     }
 
@@ -104,6 +267,7 @@ impl StorageRuntime {
         self.relay.clear();
         self.wake = None;
         self.operation = None;
+        self.protected_read = None;
         self.next_sequence = 1;
     }
 
@@ -195,19 +359,72 @@ impl StorageRuntime {
         tick: u64,
     ) -> logos_abi::PersistenceStatus {
         self.bind_block_context(context);
-        protected_store_read(
+        if !self.begin_protected_read(page, page_address, namespace, name, scheduler, tick) {
+            return logos_abi::PersistenceStatus::Unavailable;
+        }
+        for _ in 0..256 {
+            match self.poll_protected_read(context, scheduler, output, tick) {
+                ProtectedReadPoll::Pending => continue,
+                ProtectedReadPoll::Ready(status, _) => return status,
+                ProtectedReadPoll::Failed => return logos_abi::PersistenceStatus::Unavailable,
+            }
+        }
+        self.protected_read = None;
+        logos_abi::PersistenceStatus::TimedOut
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_protected_read(
+        &mut self,
+        page: logos_abi::PageHandle,
+        page_address: u64,
+        namespace: logos_abi::NamespaceId,
+        name: &[u8],
+        scheduler: &mut native_task::Scheduler<'_>,
+        tick: u64,
+    ) -> bool {
+        if self.protected_read.is_some() {
+            return false;
+        }
+        self.protected_read = ProtectedRead::start(
             self.store_server,
-            &mut self.block_dispatch,
-            context,
             scheduler,
             self.handle,
             page,
             page_address,
             namespace,
             name,
-            output,
             tick,
-        )
+        );
+        self.protected_read.is_some()
+    }
+
+    pub fn poll_protected_read(
+        &mut self,
+        context: &mut block::DispatchContext<'_>,
+        scheduler: &mut native_task::Scheduler<'_>,
+        output: &mut [u8],
+        tick: u64,
+    ) -> ProtectedReadPoll {
+        self.bind_block_context(context);
+        let Some(mut load) = self.protected_read else {
+            return ProtectedReadPoll::Failed;
+        };
+        let poll = load.poll(
+            self.store_server,
+            &mut self.block_dispatch,
+            context,
+            scheduler,
+            self.handle,
+            tick,
+            output,
+        );
+        if !matches!(poll, ProtectedReadPoll::Pending) {
+            self.protected_read = None;
+        } else {
+            self.protected_read = Some(load);
+        }
+        poll
     }
 
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
@@ -836,91 +1053,6 @@ pub fn protected_store_replace(
         tick,
     )
     .map_or(logos_abi::PersistenceStatus::Unavailable, |reply| reply.status)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn protected_store_read(
-    storage: native_task::StoreServerEndpoint,
-    dispatch: &mut block::Dispatch,
-    block_context: &mut block::DispatchContext<'_>,
-    scheduler: &mut native_task::Scheduler<'_>,
-    storage_handle: native_task::Handle,
-    page: logos_abi::PageHandle,
-    page_address: u64,
-    namespace: logos_abi::NamespaceId,
-    name: &[u8],
-    output: &mut [u8],
-    tick: u64,
-) -> logos_abi::PersistenceStatus {
-    if name.is_empty()
-        || name.len() > logos_abi::MAX_OBJECT_NAME
-        || output.is_empty()
-        || output.len() > logos_abi::PAGE_SIZE
-        || core::str::from_utf8(name).is_err()
-    {
-        return logos_abi::PersistenceStatus::Invalid;
-    }
-    let mut identity = [0; logos_abi::MAX_OBJECT_NAME];
-    identity[..name.len()].copy_from_slice(name);
-    let open = logos_abi::StoreRequest {
-        id: u32::MAX - 6,
-        operation: logos_abi::StoreOperation::OpenRead,
-        namespace,
-        name: identity,
-        name_length: name.len() as u8,
-        version: logos_abi::VersionSelector::Current,
-        offset: 0,
-        length: 0,
-        page: logos_abi::PageHandle(0),
-        deadline: tick.max(1).saturating_add(100),
-    };
-    let Some(reply) = protected_store_request(
-        storage,
-        dispatch,
-        block_context,
-        scheduler,
-        storage_handle,
-        open,
-        tick,
-    ) else {
-        return logos_abi::PersistenceStatus::Unavailable;
-    };
-    if reply.status != logos_abi::PersistenceStatus::Complete {
-        return reply.status;
-    }
-    let length = reply.length as usize;
-    if length == 0 || length > output.len() {
-        return logos_abi::PersistenceStatus::Invalid;
-    }
-    let read = logos_abi::StoreRequest {
-        id: u32::MAX - 5,
-        operation: logos_abi::StoreOperation::ReadChunk,
-        namespace: logos_abi::NamespaceId(0),
-        name: [0; logos_abi::MAX_OBJECT_NAME],
-        name_length: 0,
-        version: logos_abi::VersionSelector::None,
-        offset: 0,
-        length: length as u32,
-        page,
-        deadline: tick.max(1).saturating_add(100),
-    };
-    let Some(reply) = protected_store_request(
-        storage,
-        dispatch,
-        block_context,
-        scheduler,
-        storage_handle,
-        read,
-        tick,
-    ) else {
-        return logos_abi::PersistenceStatus::Unavailable;
-    };
-    if reply.status == logos_abi::PersistenceStatus::Complete {
-        unsafe {
-            core::ptr::copy_nonoverlapping(page_address as *const u8, output.as_mut_ptr(), length);
-        }
-    }
-    reply.status
 }
 
 #[allow(clippy::too_many_arguments)]
