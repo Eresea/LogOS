@@ -185,11 +185,10 @@ fn next_generation(generation: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::boxed::Box;
 
     #[test]
     fn exclusive_claim_with_two_workers() {
-        let registry: &'static Registry<1> = Box::leak(Box::new(Registry::new()));
+        let registry = Registry::<1>::new();
         let handle = registry.spawn().unwrap();
         let (left, right) = std::thread::scope(|scope| {
             let left = scope.spawn(|| registry.claim(0));
@@ -197,19 +196,21 @@ mod tests {
             (left.join().unwrap(), right.join().unwrap())
         });
         assert_eq!(left.is_some() as usize + right.is_some() as usize, 1);
-        assert_eq!(left.or(right).unwrap().generation, handle.generation);
+        assert_eq!(left.or(right), Some(handle));
     }
 
     #[test]
-    fn wake_before_and_after_pending_are_not_lost() {
+    fn wake_during_and_after_pending_transition_is_preserved() {
         let registry = Registry::<1>::new();
         let handle = registry.spawn().unwrap();
         let running = registry.claim(0).unwrap();
+        assert_eq!(registry.state(running), Some(State::Running));
         assert!(registry.wake(running));
         assert!(registry.finish_pending(running));
         assert_eq!(registry.state(handle), Some(State::Runnable));
         let running = registry.claim(1).unwrap();
         assert!(!registry.finish_pending(running));
+        assert_eq!(registry.state(handle), Some(State::Blocked));
         assert!(registry.wake(handle));
         assert_eq!(registry.state(handle), Some(State::Runnable));
     }
@@ -223,22 +224,31 @@ mod tests {
         assert!(registry.wake(handle));
         assert!(registry.wake(handle));
         assert_eq!(registry.state(handle), Some(State::Runnable));
-        assert_eq!(registry.claim(1).unwrap().slot, handle.slot);
+        let claimed = registry.claim(1).unwrap();
+        assert_eq!(claimed, handle);
+        assert_eq!(registry.state(handle), Some(State::Running));
+        assert!(registry.claim(0).is_none());
     }
 
     #[test]
-    fn generation_completion_and_bounds_are_safe() {
+    fn completion_reuses_capacity_and_rejects_stale_generation() {
         let registry = Registry::<1>::new();
         let old = registry.spawn().unwrap();
         assert!(registry.spawn().is_none());
-        assert!(registry.complete(registry.claim(0).unwrap()));
+        let old_running = registry.claim(0).unwrap();
+        assert_eq!(old_running, old);
+        assert_eq!(registry.state(old), Some(State::Running));
+        assert!(registry.complete(old_running));
         assert!(registry.state(old).is_none());
         let new = registry.spawn().unwrap();
+        assert_eq!(new.slot, old.slot);
         assert_ne!(old.generation, new.generation);
         assert!(!registry.wake(old));
         let running = registry.claim(0).unwrap();
+        assert_eq!(running, new);
         assert!(registry.complete(running));
         assert!(!registry.complete(running));
+        assert!(registry.state(new).is_none());
     }
 
     #[test]

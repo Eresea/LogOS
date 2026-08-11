@@ -560,7 +560,7 @@ mod tests {
     use super::{CpuTopology, MAX_CPUS, TopologyError};
 
     #[test]
-    fn parses_enabled_and_disabled_processors() {
+    fn parses_mixed_processor_records_and_marks_bsp() {
         let entries = [
             0, 8, 0, 2, 1, 0, 0, 0, // Local APIC 2, enabled.
             0, 8, 0, 3, 0, 0, 0, 0, // Local APIC 3, disabled.
@@ -568,19 +568,34 @@ mod tests {
         ];
         let topology = CpuTopology::parse(&entries, Some(2)).unwrap();
         assert_eq!(topology.count(), 3);
-        assert_eq!(topology.bsp().unwrap().apic_id, 2);
+        let first = topology.get(0).unwrap();
+        assert_eq!(first.apic_id, 2);
+        assert!(first.enabled);
+        assert!(first.bsp);
+        let second = topology.get(1).unwrap();
+        assert_eq!(second.apic_id, 3);
+        assert!(!second.enabled);
+        assert!(!second.bsp);
+        let third = topology.get(2).unwrap();
+        assert_eq!(third.apic_id, 4);
+        assert!(third.enabled);
+        assert!(!third.bsp);
+        assert_eq!(topology.bsp().unwrap().apic_id, first.apic_id);
         assert_eq!(topology.usable().count(), 2);
-        assert_eq!(topology.get(2).unwrap().apic_id, 4);
     }
 
     #[test]
-    fn rejects_malformed_processor_entries() {
+    fn rejects_malformed_and_duplicate_processor_entries() {
         assert_eq!(CpuTopology::parse(&[0, 7, 0, 2, 1, 0, 0], None), Err(TopologyError::Malformed));
         assert_eq!(CpuTopology::parse(&[9, 15, 0, 0], None), Err(TopologyError::Malformed));
+        assert_eq!(
+            CpuTopology::parse(&[0, 8, 0, 2, 1, 0, 0, 0, 0, 8, 0, 2, 1, 0, 0, 0,], None,),
+            Err(TopologyError::Malformed)
+        );
     }
 
     #[test]
-    fn truncates_excess_processors_without_growing() {
+    fn truncates_excess_processors_at_fixed_capacity() {
         let mut entries = [0u8; (MAX_CPUS + 1) * 8];
         for (index, entry) in entries.chunks_exact_mut(8).enumerate() {
             entry[0] = 0;
@@ -591,5 +606,8 @@ mod tests {
         let topology = CpuTopology::parse(&entries, None).unwrap();
         assert_eq!(topology.count(), MAX_CPUS);
         assert!(topology.truncated());
+        assert_eq!(topology.get(0).unwrap().apic_id, 0);
+        assert_eq!(topology.get(MAX_CPUS - 1).unwrap().apic_id, (MAX_CPUS - 1) as u32);
+        assert!(topology.get(MAX_CPUS).is_none());
     }
 }

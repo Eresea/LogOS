@@ -8,7 +8,7 @@ use crate::{
     ipc::{Envelope, Message},
     mm::memory::{Page, PhysicalMemory},
     platform::{services::ServiceHandle, session::Principal},
-    sched::scheduler::{Runnable, TaskState},
+    sched::task::{Event, Runnable, TaskState},
 };
 use logos_core::capabilities::{Capability, CapabilityManager};
 
@@ -120,7 +120,7 @@ impl Runnable for ServiceTask<'_> {
     fn run(&mut self) -> TaskState {
         if let Some((destination, request)) = self.pending {
             if !take_completion() {
-                return TaskState::Blocked(crate::sched::scheduler::Event::VIRTIO);
+                return TaskState::Blocked(Event::VIRTIO);
             }
             self.pending = None;
             let failed = self.service.failed();
@@ -147,7 +147,7 @@ impl Runnable for ServiceTask<'_> {
                     // SAFETY: Core runs scheduler tasks serially and owns this pointer for the task lifetime.
                     if self.service.submit_inflate_one_page(unsafe { &mut *self.memory }) {
                         self.pending = Some((envelope.destination, envelope.request));
-                        return TaskState::Blocked(crate::sched::scheduler::Event::VIRTIO);
+                        return TaskState::Blocked(Event::VIRTIO);
                     }
                     None
                 }
