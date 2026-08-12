@@ -21,7 +21,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Terminal emulator | `terminal::Terminal` | bounded 160×100 cell state, 2,048-line scroll count, parser parameters, alternate screen, SGR, cursor/edit/erase controls, and dirty-cell output |
 | Display state | `display::Display` | validates cell diffs, dimensions, positions, and endpoint generations; pixel/font ownership remains outside this model |
 | Session shell | `session::Session` | bounded line editing, history, environment, four-stage pipelines, eight child slots, and volatile redirection files |
-| Process admission | `process::ProcessTable` | fixed 16-slot process model, ELF64 admission checks, capability sets, generations, exit/fault/reclaim outcomes |
+| Process admission | `process::ProcessTable` | fixed 16-slot process model, ELF64 admission checks, one generation-safe address-space identity per process, capability sets, and exit/fault/reclaim outcomes |
 | Service supervisor | `supervisor::ServiceSupervisor` | five-service lifecycle model, heartbeat timeouts, endpoint epochs, restart limits, and recovery transition |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed user root, code/stack pages, DPL-3 vector 49, and contained #UD/#GP/#PF for the registered task |
 | Terminal proof graph | `terminal_stack::TerminalStack` | deterministic Input → Terminal → Session → Terminal → Display path with generation-safe terminal restart |
@@ -37,8 +37,9 @@ The handoff registers one root task. That task owns the first fixed Runtime oper
 not inspect, schedule, or orchestrate Runtime state. Runtime operations use the scheduler's sleep and
 wake primitives but retain their own deadlines, terminal states, and slot generations. The terminal
 contracts and service graph remain host-tested bounded models. The QEMU proof now adds one static
-ring-3 domain, a vector-49 entry, and a contained user exception; general address-space ownership,
-capabilities, syscall payloads, and ELF image loading remain follow-on Core work. The terminal/display
+ring-3 domain, a vector-49 entry, and a contained user exception. Process admission now owns a
+generation-safe address-space identity, while root binding, mapping, capabilities, syscall payloads,
+and ELF image loading remain follow-on Core work. The terminal/display
 integration still runs before AP startup, so the large terminal state is not placed on a 16 KiB task
 stack.
 

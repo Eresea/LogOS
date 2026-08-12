@@ -4,6 +4,7 @@ pub const MAX_USER_PROCESSES: usize = 16;
 pub const MAX_SERVICE_PROCESSES: usize = 5;
 pub const MAX_COMMAND_PROCESSES: usize = 8;
 pub const MAX_RESERVED_PROCESSES: usize = 2;
+pub const MAX_ADDRESS_SPACES: usize = MAX_USER_PROCESSES;
 pub const USER_STACK_PAGES: usize = 8;
 pub const MAX_IMAGE_BYTES: usize = 512 * 1024;
 pub const MAX_PROGRAM_HEADERS: usize = 16;
@@ -35,6 +36,7 @@ pub enum ProcessError {
     InvalidImage,
     InvalidHandle,
     NotRunning,
+    AddressSpace,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +51,126 @@ impl ProcessHandle {
     }
     pub const fn generation(self) -> u64 {
         self.generation
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AddressSpaceHandle {
+    slot: u8,
+    generation: u64,
+}
+
+impl AddressSpaceHandle {
+    pub const fn slot(self) -> usize {
+        self.slot as usize
+    }
+
+    pub const fn generation(self) -> u64 {
+        self.generation
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AddressSpaceRoot(usize);
+
+impl AddressSpaceRoot {
+    pub const fn new(raw: usize) -> Option<Self> {
+        if raw != 0 && raw & 0xfff == 0 { Some(Self(raw)) } else { None }
+    }
+
+    pub const fn raw(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AddressSpaceState {
+    Vacant,
+    Reserved,
+}
+
+#[derive(Clone, Copy)]
+struct AddressSpaceSlot {
+    generation: u64,
+    state: AddressSpaceState,
+    root: Option<AddressSpaceRoot>,
+}
+
+impl AddressSpaceSlot {
+    const EMPTY: Self = Self { generation: 1, state: AddressSpaceState::Vacant, root: None };
+}
+
+pub struct AddressSpaceTable {
+    slots: [AddressSpaceSlot; MAX_ADDRESS_SPACES],
+}
+
+impl AddressSpaceTable {
+    pub const fn new() -> Self {
+        Self { slots: [AddressSpaceSlot::EMPTY; MAX_ADDRESS_SPACES] }
+    }
+
+    pub fn reserve(&mut self) -> Result<AddressSpaceHandle, ProcessError> {
+        let Some((slot, address_space)) = self
+            .slots
+            .iter_mut()
+            .enumerate()
+            .find(|(_, address_space)| address_space.state == AddressSpaceState::Vacant)
+        else {
+            return Err(ProcessError::Capacity);
+        };
+        address_space.state = AddressSpaceState::Reserved;
+        address_space.root = None;
+        Ok(AddressSpaceHandle { slot: slot as u8, generation: address_space.generation })
+    }
+
+    pub fn bind_root(
+        &mut self,
+        handle: AddressSpaceHandle,
+        root: AddressSpaceRoot,
+    ) -> Result<(), ProcessError> {
+        let address_space = self.current_mut(handle)?;
+        if address_space.root.is_some() {
+            return Err(ProcessError::AddressSpace);
+        }
+        address_space.root = Some(root);
+        Ok(())
+    }
+
+    pub fn root(&self, handle: AddressSpaceHandle) -> Option<AddressSpaceRoot> {
+        let address_space = self.slots.get(handle.slot as usize)?;
+        (address_space.generation == handle.generation
+            && address_space.state == AddressSpaceState::Reserved)
+            .then_some(address_space.root)
+            .flatten()
+    }
+
+    pub fn release(&mut self, handle: AddressSpaceHandle) -> Result<(), ProcessError> {
+        let address_space = self.current_mut(handle)?;
+        address_space.state = AddressSpaceState::Vacant;
+        address_space.root = None;
+        address_space.generation = next_generation(address_space.generation);
+        Ok(())
+    }
+
+    fn current_mut(
+        &mut self,
+        handle: AddressSpaceHandle,
+    ) -> Result<&mut AddressSpaceSlot, ProcessError> {
+        let Some(address_space) = self.slots.get_mut(handle.slot as usize) else {
+            return Err(ProcessError::InvalidHandle);
+        };
+        if address_space.generation != handle.generation
+            || address_space.state != AddressSpaceState::Reserved
+        {
+            return Err(ProcessError::InvalidHandle);
+        }
+        Ok(address_space)
+    }
+}
+
+impl Default for AddressSpaceTable {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -78,6 +200,7 @@ struct ProcessSlot {
     kind: ProcessKind,
     capabilities: Capabilities,
     entry: u64,
+    address_space: Option<AddressSpaceHandle>,
 }
 
 impl ProcessSlot {
@@ -87,16 +210,21 @@ impl ProcessSlot {
         kind: ProcessKind::Command,
         capabilities: Capabilities::NONE,
         entry: 0,
+        address_space: None,
     };
 }
 
 pub struct ProcessTable {
     slots: [ProcessSlot; MAX_USER_PROCESSES],
+    address_spaces: AddressSpaceTable,
 }
 
 impl ProcessTable {
     pub const fn new() -> Self {
-        Self { slots: [ProcessSlot::EMPTY; MAX_USER_PROCESSES] }
+        Self {
+            slots: [ProcessSlot::EMPTY; MAX_USER_PROCESSES],
+            address_spaces: AddressSpaceTable::new(),
+        }
     }
 
     pub fn start(
@@ -106,18 +234,20 @@ impl ProcessTable {
         capabilities: Capabilities,
     ) -> Result<ProcessHandle, ProcessError> {
         let entry = validate_elf(image)?;
-        let Some((slot, process)) = self
-            .slots
-            .iter_mut()
-            .enumerate()
-            .find(|(_, process)| process.state == ProcessState::Vacant)
+        let Some(slot) =
+            self.slots.iter_mut().enumerate().find_map(|(slot, process)| {
+                (process.state == ProcessState::Vacant).then_some(slot)
+            })
         else {
             return Err(ProcessError::Capacity);
         };
+        let address_space = self.address_spaces.reserve()?;
+        let process = &mut self.slots[slot];
         process.state = ProcessState::Starting;
         process.kind = kind;
         process.capabilities = capabilities;
         process.entry = entry;
+        process.address_space = Some(address_space);
         process.state = ProcessState::Running;
         Ok(ProcessHandle { slot: slot as u8, generation: process.generation })
     }
@@ -130,6 +260,31 @@ impl ProcessTable {
     pub fn capabilities(&self, handle: ProcessHandle) -> Option<Capabilities> {
         let process = self.slots.get(handle.slot as usize)?;
         (process.generation == handle.generation).then_some(process.capabilities)
+    }
+
+    pub fn address_space(&self, handle: ProcessHandle) -> Option<AddressSpaceHandle> {
+        let process = self.slots.get(handle.slot as usize)?;
+        (process.generation == handle.generation).then_some(process.address_space).flatten()
+    }
+
+    pub fn bind_address_space_root(
+        &mut self,
+        handle: ProcessHandle,
+        root: AddressSpaceRoot,
+    ) -> Result<(), ProcessError> {
+        let process = self.current_mut(handle)?;
+        if process.state != ProcessState::Running {
+            return Err(ProcessError::NotRunning);
+        }
+        let Some(address_space) = process.address_space else {
+            return Err(ProcessError::AddressSpace);
+        };
+        self.address_spaces.bind_root(address_space, root)
+    }
+
+    pub fn address_space_root(&self, handle: ProcessHandle) -> Option<AddressSpaceRoot> {
+        let address_space = self.address_space(handle)?;
+        self.address_spaces.root(address_space)
     }
 
     pub fn exit(&mut self, handle: ProcessHandle, status: u8) -> Result<(), ProcessError> {
@@ -151,6 +306,16 @@ impl ProcessTable {
     }
 
     pub fn reclaim(&mut self, handle: ProcessHandle) -> Result<(), ProcessError> {
+        let address_space = {
+            let process = self.current_mut(handle)?;
+            if !matches!(process.state, ProcessState::Exited(_) | ProcessState::Faulted(_)) {
+                return Err(ProcessError::NotRunning);
+            }
+            process.address_space
+        };
+        if let Some(address_space) = address_space {
+            self.address_spaces.release(address_space)?;
+        }
         let process = self.current_mut(handle)?;
         if !matches!(process.state, ProcessState::Exited(_) | ProcessState::Faulted(_)) {
             return Err(ProcessError::NotRunning);
@@ -158,6 +323,7 @@ impl ProcessTable {
         process.state = ProcessState::Vacant;
         process.entry = 0;
         process.capabilities = Capabilities::NONE;
+        process.address_space = None;
         process.generation = next_generation(process.generation);
         Ok(())
     }
@@ -307,5 +473,40 @@ mod tests {
         let mut image = image();
         image[68..72].copy_from_slice(&7u32.to_le_bytes());
         assert_eq!(validate_elf(&image), Err(ProcessError::InvalidImage));
+    }
+
+    #[test]
+    fn address_space_identity_is_bound_once_and_released_with_process() {
+        let image = image();
+        let mut table = ProcessTable::new();
+        let process = table.start(&image, ProcessKind::Terminal, Capabilities::SERVICE).unwrap();
+        let address_space = table.address_space(process).unwrap();
+        let root = AddressSpaceRoot::new(0x20_000).unwrap();
+        assert_eq!(table.address_space_root(process), None);
+        assert!(table.bind_address_space_root(process, root).is_ok());
+        assert_eq!(table.address_space_root(process), Some(root));
+        assert_eq!(
+            table.bind_address_space_root(process, AddressSpaceRoot::new(0x30_000).unwrap()),
+            Err(ProcessError::AddressSpace)
+        );
+        assert!(table.fault(process, 14).is_ok());
+        assert!(table.reclaim(process).is_ok());
+        assert_eq!(table.state(process), None);
+
+        let replacement = table.start(&image, ProcessKind::Command, Capabilities::COMMAND).unwrap();
+        assert_eq!(replacement.slot(), process.slot());
+        assert_ne!(replacement.generation(), process.generation());
+        assert_ne!(
+            table.address_space(replacement).unwrap().generation(),
+            address_space.generation()
+        );
+        assert!(table.bind_address_space_root(process, root).is_err());
+    }
+
+    #[test]
+    fn address_space_roots_are_page_aligned_and_nonzero() {
+        assert_eq!(AddressSpaceRoot::new(0), None);
+        assert_eq!(AddressSpaceRoot::new(0x123), None);
+        assert_eq!(AddressSpaceRoot::new(0x12_000).unwrap().raw(), 0x12_000);
     }
 }
