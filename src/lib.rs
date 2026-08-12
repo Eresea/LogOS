@@ -24,6 +24,7 @@ pub use scheduler::{
 };
 pub mod health;
 pub mod runtime;
+pub mod service_images;
 pub mod service_lifecycle;
 
 #[cfg(target_os = "uefi")]

@@ -23,3 +23,4 @@
 | [0019](0019-service-model-ownership.md) | Accepted | Input, Terminal, and Session state machines live in independent no-std service packages |
 | [0020](0020-service-entry-facades.md) | Accepted | Terminal, Session, and Commands expose one-message bounded service façades over their owned state |
 | [0021](0021-user-launch-contract.md) | Accepted | Loaded process launch metadata is published atomically with its scheduler task |
+| [0022](0022-service-image-manifest.md) | Accepted | Five fixed service image paths and capability grants are validated before loading |
