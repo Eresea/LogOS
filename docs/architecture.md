@@ -11,6 +11,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Control plane | `syscall` + `logos-abi` | fixed scalar syscall requests, typed service-generation capabilities, and explicit status results |
 | ELF page admission | `loader` | maps validated segments and fixed user stacks to owned frames, then populates them through a page-local sink with bounded reclamation |
 | User page tables | `page_table` | builds four-level user mappings with fixed root/intermediate-frame bounds, W^X/NX flags, conflict rejection, and grouped reclamation |
+| Service address spaces | `service_runtime` | loads five retained ELFs into owned frames and retains one isolated root per service before scheduler admission |
 | Font cache | `font` | fixed 8×16 scalar lookup, 1,024-entry cache, and deterministic replacement glyph |
 | Per-CPU state | `arch::CpuLocal` via `GS_BASE` | private scheduler/idle stacks, TSS ring-transition fallback, cursor/current task, ticks, online state |
 | Context boundary | `arch/context.rs` | timer, voluntary, ring-3 syscall dispatch, and user-fault entries save one GPR/RIP/RSP/RFLAGS/CS and x87/SSE frame shape |

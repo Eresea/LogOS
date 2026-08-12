@@ -62,6 +62,9 @@ static APIC_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS]
 static TRAMPOLINE_PAGE: AtomicUsize = AtomicUsize::new(0);
 static mut BOOT_RESOURCES: Option<BootResources> = None;
 static mut SERVICE_IMAGES: Option<ServiceImageBundle> = None;
+#[cfg(target_os = "uefi")]
+static mut SERVICE_RUNTIME: crate::service_runtime::ServiceRuntime =
+    crate::service_runtime::ServiceRuntime::new();
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -238,7 +241,60 @@ pub fn boot() -> Status {
     publish_boot_resources(memory_map, framebuffer);
     unsafe {
         SERVICE_IMAGES = Some(service_images);
+        let images = (*core::ptr::addr_of!(SERVICE_IMAGES))
+            .as_ref()
+            .unwrap_or_else(|| fatal(b"LogOS vNext: service image state"));
+        (*core::ptr::addr_of_mut!(SERVICE_RUNTIME)).start(images).unwrap_or_else(
+            |error| match error {
+                crate::service_runtime::ServiceRuntimeError::Resources => {
+                    fatal(b"LogOS vNext: service resources")
+                }
+                crate::service_runtime::ServiceRuntimeError::Image => {
+                    fatal(b"LogOS vNext: service image state")
+                }
+                crate::service_runtime::ServiceRuntimeError::Load(_) => {
+                    fatal(b"LogOS vNext: service image pages")
+                }
+                crate::service_runtime::ServiceRuntimeError::Populate(_) => {
+                    fatal(b"LogOS vNext: service page population")
+                }
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::Capacity,
+                ) => fatal(b"LogOS vNext: service table capacity"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::Exhausted,
+                ) => fatal(b"LogOS vNext: service table frames"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::Memory,
+                ) => fatal(b"LogOS vNext: service table memory"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::InvalidMapping,
+                ) => fatal(b"LogOS vNext: service table mapping"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::InvalidVirtualAddress,
+                ) => fatal(b"LogOS vNext: service table VA"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::InvalidFrame,
+                ) => fatal(b"LogOS vNext: service table frame"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::InvalidFlags,
+                ) => fatal(b"LogOS vNext: service table flags"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::Conflict,
+                ) => fatal(b"LogOS vNext: service table conflict"),
+                crate::service_runtime::ServiceRuntimeError::PageTableMap(_) => {
+                    fatal(b"LogOS vNext: service table map")
+                }
+            },
+        );
+        let runtime = &*core::ptr::addr_of!(SERVICE_RUNTIME);
+        for spec in crate::service_images::SERVICE_IMAGES {
+            if runtime.image(spec.service()).is_none() || runtime.root(spec.service()).is_none() {
+                fatal(b"LogOS vNext: service root state");
+            }
+        }
     }
+    proof_line(b"LogOS vNext: service address spaces ready");
     initialize_post_uefi(cpu_count);
     handoff_to_runtime();
     debug_line(b"LogOS vNext: core ready");
@@ -476,6 +532,16 @@ pub(crate) fn current_cr3() -> usize {
     let value: usize;
     unsafe { asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags)) };
     value
+}
+
+#[allow(dead_code)]
+pub(crate) fn switch_cr3(root: usize) {
+    if root == 0 || root & 0xfff != 0 {
+        fatal(b"LogOS vNext: invalid CR3");
+    }
+    unsafe {
+        asm!("mov cr3, {root}", root = in(reg) root, options(nostack, preserves_flags));
+    }
 }
 
 #[allow(clippy::needless_range_loop)]

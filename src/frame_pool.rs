@@ -59,6 +59,9 @@ impl FramePool {
                 let Some(address) = descriptor.physical_start.checked_add(offset) else {
                     return Err(FramePoolError::InvalidMap);
                 };
+                if address == 0 {
+                    continue;
+                }
                 self.frames[self.count] = address;
                 self.count += 1;
             }
@@ -137,5 +140,15 @@ mod tests {
         pool.initialize(&map).unwrap();
         assert_eq!(pool.capacity(), 0);
         assert_eq!(pool.allocate(), Err(FramePoolError::Exhausted));
+    }
+
+    #[test]
+    fn zero_frame_is_not_allocated() {
+        let mut map = MemoryMap::new();
+        map.push(MemoryDescriptor::new(0, 2, true).unwrap()).unwrap();
+        let mut pool = FramePool::empty();
+        pool.initialize(&map).unwrap();
+        assert_eq!(pool.capacity(), 1);
+        assert_eq!(pool.allocate().unwrap().raw(), 0x1000);
     }
 }

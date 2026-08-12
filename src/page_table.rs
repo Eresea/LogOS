@@ -13,6 +13,8 @@ const USER: u64 = 1 << 2;
 const HUGE: u64 = 1 << 7;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+#[cfg(target_os = "uefi")]
+const USER_PML4_INDEX: usize = 1;
 
 /// Maximum table frames needed by one root plus one private path per loaded page.
 pub const MAX_PAGE_TABLE_FRAMES: usize = 1 + MAX_LOAD_PAGES * 3;
@@ -23,6 +25,9 @@ pub enum PageTableError {
     Exhausted,
     Memory,
     InvalidMapping,
+    InvalidVirtualAddress,
+    InvalidFrame,
+    InvalidFlags,
     Conflict,
 }
 
@@ -175,12 +180,17 @@ fn validate_page(page: LoadedPage) -> Result<(), PageTableError> {
     if virtual_address == 0
         || virtual_address & (PAGE_SIZE - 1) != 0
         || virtual_address >= 0x0000_8000_0000_0000
-        || page.frame().raw() == 0
-        || page.frame().raw() & (PAGE_SIZE as u64 - 1) != 0
-        || !page.flags().user
-        || page.flags().writable && page.flags().executable
     {
-        return Err(PageTableError::InvalidMapping);
+        return Err(PageTableError::InvalidVirtualAddress);
+    }
+    if page.frame().raw() == 0
+        || page.frame().raw() & (PAGE_SIZE as u64 - 1) != 0
+        || page.frame().raw() & !ADDRESS_MASK != 0
+    {
+        return Err(PageTableError::InvalidFrame);
+    }
+    if !page.flags().user || page.flags().writable && page.flags().executable {
+        return Err(PageTableError::InvalidFlags);
     }
     Ok(())
 }
@@ -262,7 +272,10 @@ impl PageTableMemory for IdentityPageTableMemory {
                 source as *const u64,
                 Self::table(root).cast::<u64>(),
                 ENTRY_COUNT,
-            )
+            );
+            // The fixed service image/stack window owns PML4 slot 1. Any
+            // firmware branch there is discarded before user mappings grow.
+            (*Self::table(root))[USER_PML4_INDEX] = 0;
         };
         Ok(())
     }
@@ -280,11 +293,15 @@ impl crate::loader::PageSink for IdentityPageTableMemory {
         offset: usize,
         bytes: &[u8],
     ) -> Result<(), crate::loader::LoadError> {
-        if offset >= PAGE_SIZE || bytes.len() > PAGE_SIZE - offset {
+        if frame.raw() == 0
+            || frame.raw() & (PAGE_SIZE as u64 - 1) != 0
+            || offset >= PAGE_SIZE
+            || bytes.len() > PAGE_SIZE - offset
+        {
             return Err(crate::loader::LoadError::Write);
         }
-        // SAFETY: The frame is reserved and identity-mapped; the loader only
-        // supplies page-local ranges.
+        // SAFETY: The frame is reserved and identity-mapped during bootstrap;
+        // the loader supplies only page-local ranges.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),

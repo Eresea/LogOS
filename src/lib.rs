@@ -28,6 +28,8 @@ pub mod runtime;
 pub mod service_images;
 pub mod service_lifecycle;
 pub mod service_loader;
+#[cfg(target_os = "uefi")]
+mod service_runtime;
 
 #[cfg(target_os = "uefi")]
 mod runtime_entry;

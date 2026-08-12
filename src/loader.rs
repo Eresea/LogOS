@@ -6,7 +6,7 @@ use crate::process::{AddressSpaceRoot, ElfLoadPlan, MappingFlags, UserLaunch};
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_LOAD_PAGES: usize =
     crate::process::MAX_IMAGE_BYTES / PAGE_SIZE + crate::process::USER_STACK_PAGES + 2;
-pub const USER_STACK_BASE: usize = 0x0000_7000_0000_0000;
+pub const USER_STACK_BASE: usize = 0x0000_0080_0100_0000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadedPage {
@@ -48,6 +48,17 @@ pub trait PageSink {
     fn write(&mut self, frame: FrameAddress, offset: usize, bytes: &[u8]) -> Result<(), LoadError>;
 }
 
+/// Destination for population through the image's mapped virtual addresses.
+pub trait VirtualPageSink {
+    fn clear(&mut self, virtual_address: usize) -> Result<(), LoadError>;
+    fn write(
+        &mut self,
+        virtual_address: usize,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), LoadError>;
+}
+
 #[derive(Debug)]
 pub struct LoadedImage {
     entry: usize,
@@ -57,6 +68,15 @@ pub struct LoadedImage {
 }
 
 impl LoadedImage {
+    pub const fn empty() -> Self {
+        Self {
+            entry: 0,
+            stack_top: USER_STACK_BASE + crate::process::USER_STACK_PAGES * PAGE_SIZE,
+            pages: [None; MAX_LOAD_PAGES],
+            count: 0,
+        }
+    }
+
     pub fn load(plan: ElfLoadPlan, pool: &mut FramePool) -> Result<Self, LoadError> {
         let mut image = Self {
             entry: plan.entry(),
@@ -177,6 +197,71 @@ impl LoadedImage {
                 let copy_len = (overlap_end - overlap_start).min(file_bytes.len() - file_offset);
                 sink.write(
                     page.frame(),
+                    memory_offset,
+                    &file_bytes[file_offset..file_offset + copy_len],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Populate pages after their virtual mappings are active in the current
+    /// address space.
+    pub fn populate_virtual<S: VirtualPageSink>(
+        &self,
+        plan: ElfLoadPlan,
+        image: &[u8],
+        sink: &mut S,
+    ) -> Result<(), LoadError> {
+        if plan.entry() != self.entry {
+            return Err(LoadError::InvalidPlan);
+        }
+        for index in 0..plan.segment_count() {
+            let Some(segment) = plan.segment(index) else {
+                return Err(LoadError::InvalidPlan);
+            };
+            if segment.file_bytes(image).is_none() {
+                return Err(LoadError::InvalidPlan);
+            }
+        }
+
+        for page in self.pages[..self.count].iter().flatten() {
+            sink.clear(page.virtual_address)?;
+        }
+
+        for index in 0..plan.segment_count() {
+            let Some(segment) = plan.segment(index) else {
+                return Err(LoadError::InvalidPlan);
+            };
+            let Some(file_bytes) = segment.file_bytes(image) else {
+                return Err(LoadError::InvalidPlan);
+            };
+            let Some(segment_end) = segment.virtual_address().checked_add(segment.memory_size())
+            else {
+                return Err(LoadError::InvalidPlan);
+            };
+            let first_page = segment.virtual_address() & !(PAGE_SIZE - 1);
+            let Some(end_page) = align_up(segment_end) else {
+                return Err(LoadError::InvalidPlan);
+            };
+
+            for page_address in (first_page..end_page).step_by(PAGE_SIZE) {
+                let Some(page) = self.page_for_virtual(page_address) else {
+                    return Err(LoadError::InvalidPlan);
+                };
+                let overlap_start = page_address.max(segment.virtual_address());
+                let overlap_end = (page_address + PAGE_SIZE).min(segment_end);
+                if overlap_start >= overlap_end {
+                    continue;
+                }
+                let memory_offset = overlap_start - page_address;
+                let file_offset = overlap_start - segment.virtual_address();
+                if file_offset >= file_bytes.len() {
+                    continue;
+                }
+                let copy_len = (overlap_end - overlap_start).min(file_bytes.len() - file_offset);
+                sink.write(
+                    page.virtual_address,
                     memory_offset,
                     &file_bytes[file_offset..file_offset + copy_len],
                 )?;
