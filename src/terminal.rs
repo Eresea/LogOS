@@ -580,14 +580,15 @@ impl Terminal {
     }
 
     fn insert_chars(&mut self, count: usize) {
-        let count = count.min(self.columns - self.cursor_column);
-        for column in (self.cursor_column + count..self.columns).rev() {
+        let cursor_column = self.cursor_column.min(self.columns);
+        let count = count.min(self.columns.saturating_sub(cursor_column));
+        for column in (cursor_column + count..self.columns).rev() {
             let from = self.index(column - count, self.cursor_row);
             let to = self.index(column, self.cursor_row);
             self.active()[to] = self.active()[from];
             self.dirty[to] = true;
         }
-        for column in self.cursor_column..self.cursor_column + count {
+        for column in cursor_column..cursor_column + count {
             let index = self.index(column, self.cursor_row);
             self.active()[index] = Cell::EMPTY;
             self.dirty[index] = true;
@@ -595,8 +596,9 @@ impl Terminal {
     }
 
     fn delete_chars(&mut self, count: usize) {
-        let count = count.min(self.columns - self.cursor_column);
-        for column in self.cursor_column..self.columns - count {
+        let cursor_column = self.cursor_column.min(self.columns);
+        let count = count.min(self.columns.saturating_sub(cursor_column));
+        for column in cursor_column..self.columns - count {
             let from = self.index(column + count, self.cursor_row);
             let to = self.index(column, self.cursor_row);
             self.active()[to] = self.active()[from];
@@ -807,6 +809,14 @@ mod tests {
         assert_eq!(terminal.scrollback_lines(), 0);
         terminal.feed(b"\x1b[31mred\x1b[0m");
         assert!(drain(&mut terminal) > 0);
+    }
+
+    #[test]
+    fn edit_controls_at_the_right_edge_are_bounded() {
+        let mut terminal = Terminal::new();
+        terminal.feed(&[b'a'; 80]);
+        terminal.feed(b"\x1b[1P\x1b[1@");
+        assert_eq!(terminal.cursor(), (80, 0));
     }
 
     #[test]
