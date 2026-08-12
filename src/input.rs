@@ -217,28 +217,6 @@ const fn map_code(byte: u8, extended: bool) -> Option<KeyCode> {
     })
 }
 
-impl KeyCode {
-    pub const UNKNOWN: Self = Self::Unknown;
-    pub const ESCAPE: Self = Self::Escape;
-    pub const ENTER: Self = Self::Enter;
-    pub const BACKSPACE: Self = Self::Backspace;
-    pub const TAB: Self = Self::Tab;
-    pub const UP: Self = Self::Up;
-    pub const DOWN: Self = Self::Down;
-    pub const LEFT: Self = Self::Left;
-    pub const RIGHT: Self = Self::Right;
-    pub const HOME: Self = Self::Home;
-    pub const END: Self = Self::End;
-    pub const PAGE_UP: Self = Self::PageUp;
-    pub const PAGE_DOWN: Self = Self::PageDown;
-    pub const DELETE: Self = Self::Delete;
-    pub const CTRL: Self = Self(0x300);
-    pub const ALT: Self = Self(0x301);
-    pub const CAPS_LOCK: Self = Self(0x302);
-    pub const SHIFT_LEFT: Self = Self(0x303);
-    pub const SHIFT_RIGHT: Self = Self(0x304);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -15,7 +15,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Runtime operations | `runtime::Runtime` | one in-process fixed command/response mailbox over two generation-safe operation slots with explicit ready/waiting/complete/cancelled/timed-out states |
 | Service restart contract | `service_lifecycle::ServiceLifecycle` | fixed owner-held operation slots become explicitly `Restarted`; late completions are rejected and retries remain owner policy |
 | Health service | `health::HealthService` | one in-process fixed command/response mailbox for `Ping`; restart rejects the old completion and caller explicitly retries |
-| Terminal ABI | `terminal_abi` | fixed semantic input, session stream, cell-diff render, endpoint identity, and bounded-size message shapes |
+| Terminal ABI | `logos-abi` | fixed semantic input, session stream, cell-diff render, endpoint identity, service identities, capabilities, and bounded control-plane shapes |
 | IPC mechanics | `ipc::BoundedQueue` | fixed ring capacity, explicit full/empty outcomes, and doorbell edge notification; no allocation or serialization framework |
 | Input semantics | `input::InputDecoder` | PS/2 Set-2 bytes become semantic key events and committed text with bounded modifiers and layout state |
 | Terminal emulator | `terminal::Terminal` | bounded 160×100 cell state, 2,048-line scroll count, parser parameters, alternate screen, SGR, cursor/edit/erase controls, and dirty-cell output |
