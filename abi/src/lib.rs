@@ -7,7 +7,8 @@
 
 use core::{
     cell::UnsafeCell,
-    sync::atomic::{AtomicU16, Ordering},
+    mem::MaybeUninit,
+    sync::atomic::{AtomicBool, AtomicU16, Ordering},
 };
 
 pub const ABI_VERSION: u16 = 1;
@@ -36,6 +37,8 @@ pub const MAX_FRAMEBUFFER_BYTES: usize = 16 * 1024 * 1024;
 pub const DISPLAY_FRAMEBUFFER_BASE: usize = 0x0000_0100_1000_0000;
 pub const INPUT_KEYBOARD_RING_BASE: usize = 0x0000_0100_1100_0000;
 pub const KEYBOARD_RING_CAPACITY: usize = 256;
+pub const IPC_PAGE_BYTES: usize = 4096;
+pub const MAX_IPC_BYTES: usize = 256;
 pub const MAX_GLYPH_CACHE: usize = 1024;
 pub const MAX_CAPABILITIES: usize = 8;
 
@@ -412,6 +415,36 @@ impl StreamMessage {
     }
 }
 
+/// Compact stream payload for one-page service endpoint rings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct IpcBytes {
+    pub kind: MessageKind,
+    pub flags: u8,
+    pub len: u16,
+    pub bytes: [u8; MAX_IPC_BYTES],
+}
+
+impl IpcBytes {
+    pub const fn empty(kind: MessageKind) -> Self {
+        Self { kind, flags: 0, len: 0, bytes: [0; MAX_IPC_BYTES] }
+    }
+
+    pub fn from_bytes(kind: MessageKind, bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > MAX_IPC_BYTES {
+            return None;
+        }
+        let mut message = Self::empty(kind);
+        message.len = bytes.len() as u16;
+        message.bytes[..bytes.len()].copy_from_slice(bytes);
+        Some(message)
+    }
+
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        (self.len as usize <= MAX_IPC_BYTES).then(|| &self.bytes[..self.len as usize])
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct EndpointHeader {
@@ -497,6 +530,140 @@ impl EndpointHeader {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SharedSendError {
+    Full,
+    Stale,
+    Disconnected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SharedReceiveError {
+    Empty,
+    Stale,
+    Disconnected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Notify {
+    Notified,
+    AlreadyNotified,
+}
+
+#[derive(Debug)]
+pub struct Doorbell {
+    notified: AtomicBool,
+}
+
+impl Doorbell {
+    pub const fn new() -> Self {
+        Self { notified: AtomicBool::new(false) }
+    }
+
+    pub fn ring(&self) -> bool {
+        !self.notified.swap(true, Ordering::AcqRel)
+    }
+
+    pub fn take(&self) -> bool {
+        self.notified.swap(false, Ordering::AcqRel)
+    }
+}
+
+impl Default for Doorbell {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fixed SPSC ring that can be placed directly in a shared endpoint page.
+#[repr(C)]
+pub struct SharedIpc<T: Copy, const N: usize> {
+    endpoint: EndpointHeader,
+    connected: AtomicBool,
+    head: AtomicU16,
+    tail: AtomicU16,
+    doorbell: Doorbell,
+    entries: [UnsafeCell<MaybeUninit<T>>; N],
+}
+
+unsafe impl<T: Copy + Send, const N: usize> Send for SharedIpc<T, N> {}
+unsafe impl<T: Copy + Send, const N: usize> Sync for SharedIpc<T, N> {}
+
+impl<T: Copy, const N: usize> SharedIpc<T, N> {
+    pub const fn new(endpoint: EndpointHeader) -> Self {
+        assert!(N > 0 && N <= u16::MAX as usize);
+        Self {
+            endpoint,
+            connected: AtomicBool::new(true),
+            head: AtomicU16::new(0),
+            tail: AtomicU16::new(0),
+            doorbell: Doorbell::new(),
+            entries: [const { UnsafeCell::new(MaybeUninit::uninit()) }; N],
+        }
+    }
+
+    pub const fn endpoint(&self) -> EndpointHeader {
+        self.endpoint
+    }
+
+    pub fn disconnect(&self) {
+        self.connected.store(false, Ordering::Release);
+        self.doorbell.ring();
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
+    }
+
+    pub fn send(&self, identity: MessageIdentity, entry: T) -> Result<Notify, SharedSendError> {
+        if !identity.accepts(self.endpoint) {
+            return Err(SharedSendError::Stale);
+        }
+        if !self.connected.load(Ordering::Acquire) {
+            return Err(SharedSendError::Disconnected);
+        }
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Acquire);
+        if head.wrapping_sub(tail) >= N as u16 {
+            return Err(SharedSendError::Full);
+        }
+        let was_empty = head == tail;
+        let slot = usize::from(head) % N;
+        unsafe { (*self.entries[slot].get()).write(entry) };
+        self.head.store(head.wrapping_add(1), Ordering::Release);
+        Ok(if was_empty && self.doorbell.ring() {
+            Notify::Notified
+        } else {
+            Notify::AlreadyNotified
+        })
+    }
+
+    pub fn receive(&self, identity: MessageIdentity) -> Result<T, SharedReceiveError> {
+        if !identity.accepts(self.endpoint) {
+            return Err(SharedReceiveError::Stale);
+        }
+        if !self.connected.load(Ordering::Acquire) {
+            return Err(SharedReceiveError::Disconnected);
+        }
+        let tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
+        if tail == head {
+            return Err(SharedReceiveError::Empty);
+        }
+        let slot = usize::from(tail) % N;
+        let entry = unsafe { (*self.entries[slot].get()).assume_init_read() };
+        self.tail.store(tail.wrapping_add(1), Ordering::Release);
+        if tail.wrapping_add(1) == head {
+            self.doorbell.take();
+        }
+        Ok(entry)
+    }
+
+    pub fn pending(&self) -> usize {
+        self.head.load(Ordering::Acquire).wrapping_sub(self.tail.load(Ordering::Acquire)) as usize
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,5 +710,16 @@ mod tests {
             assert_eq!(ring.pop(), Some(byte as u8));
         }
         assert_eq!(ring.pop(), None);
+    }
+
+    #[test]
+    fn shared_rings_fit_their_endpoint_page() {
+        assert!(core::mem::size_of::<SharedIpc<InputMessage, 32>>() <= IPC_PAGE_BYTES);
+        assert!(core::mem::size_of::<SharedIpc<RenderMessage, 1>>() <= IPC_PAGE_BYTES);
+        assert!(core::mem::size_of::<SharedIpc<IpcBytes, 8>>() <= IPC_PAGE_BYTES);
+        assert_eq!(
+            IpcBytes::from_bytes(MessageKind::Text, b"ok").unwrap().as_bytes(),
+            Some(&b"ok"[..])
+        );
     }
 }
