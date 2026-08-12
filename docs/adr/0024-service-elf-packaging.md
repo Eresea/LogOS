@@ -7,9 +7,10 @@ Accepted
 ## Decision
 
 The five service binaries are built as `no_std` ELF executables for the
-official `x86_64-unknown-none` target. `scripts/build-services.ps1` emits the
-fixed ESP layout under `build/esp/EFI/LOGOS/` and rejects missing, non-ELF, or
-oversized artifacts.
+official `x86_64-unknown-none` target and linked as fixed-address `ET_EXEC`
+images at `0x400000`. `scripts/build-services.ps1` emits the fixed ESP layout
+under `build/esp/EFI/LOGOS/` and rejects missing, non-ELF, or oversized
+artifacts.
 
 The binaries currently contain bounded service entry stubs that idle. IPC
 loops, capability mapping, and process startup are separate implementation

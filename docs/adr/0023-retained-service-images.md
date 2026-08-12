@@ -11,9 +11,9 @@ and recorded as a page-aligned physical location. `ServiceImageBundle` owns
 five fixed records and retains only identity, byte length, and page allocation
 length after the firmware reader is gone.
 
-The UEFI filesystem adapter now populates these records before the handoff;
-boot orchestration will invoke it once the fixed ELF artifacts are packaged.
-The bundle does not own a filesystem handle, allocator, or service process.
+The UEFI filesystem adapter now populates these records before the handoff, and
+the QEMU runner stages the fixed artifacts into the ESP. The bundle does not
+own a filesystem handle, allocator, or service process.
 
 ## Consequences
 

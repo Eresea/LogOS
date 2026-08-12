@@ -4,7 +4,8 @@ Boot has three owners in one direction: **UEFI → Core → Runtime**. Ownership
 
 1. **UEFI enters Core on the bootstrap CPU.**
 2. **Core uses UEFI services to prepare the handoff.** It discovers a bounded set of healthy CPUs,
-   establishes timing, reserves the AP startup page, and prepares bootstrap-CPU local state.
+   establishes timing, reserves the AP startup page, loads the five bounded service ELF images from
+   the image ESP, and prepares bootstrap-CPU local state.
 3. **Core exits UEFI boot services.** This is the irreversible ownership boundary; no later stage may
    depend on firmware services.
 4. **Core prepares the bootstrap CPU.** It installs CPU-local execution and interrupt state, then

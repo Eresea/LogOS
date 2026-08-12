@@ -15,6 +15,7 @@ $buildArgs = @(
 )
 if ($Release) { $buildArgs += '--release' }
 
+$env:CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS = '-C relocation-model=static -C link-arg=--image-base=0x400000 -C link-arg=--no-pie'
 cargo @buildArgs
 
 $profile = if ($Release) { 'release' } else { 'debug' }

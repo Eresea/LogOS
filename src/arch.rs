@@ -16,6 +16,7 @@ use uefi::{
 use crate::{
     MAX_CPUS, SCHEDULER,
     boot_resources::{BootResources, FramebufferInfo, MemoryDescriptor, MemoryMap, PixelFormat},
+    service_loader::ServiceImageBundle,
 };
 
 const DEBUG_PORT: u16 = 0xe9;
@@ -60,6 +61,7 @@ static APIC_TIMER_COUNT: AtomicU32 = AtomicU32::new(10_000_000);
 static APIC_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 static TRAMPOLINE_PAGE: AtomicUsize = AtomicUsize::new(0);
 static mut BOOT_RESOURCES: Option<BootResources> = None;
+static mut SERVICE_IMAGES: Option<ServiceImageBundle> = None;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -208,8 +210,35 @@ pub fn boot() -> Status {
     stage_trampoline();
     install_cpu(0);
     let framebuffer = capture_gop();
+    let service_images = match crate::service_loader::load_from_esp() {
+        Ok(images) => images,
+        Err(crate::service_loader::UefiImageError::Firmware(_)) => {
+            fatal(b"LogOS vNext: service filesystem")
+        }
+        Err(crate::service_loader::UefiImageError::Path) => fatal(b"LogOS vNext: service path"),
+        Err(crate::service_loader::UefiImageError::NotRegularFile) => {
+            fatal(b"LogOS vNext: service file type")
+        }
+        Err(crate::service_loader::UefiImageError::Service(error)) => match error {
+            crate::service_loader::ServiceLoadError::Empty => fatal(b"LogOS vNext: service empty"),
+            crate::service_loader::ServiceLoadError::TooLarge => {
+                fatal(b"LogOS vNext: service size")
+            }
+            crate::service_loader::ServiceLoadError::InvalidElf(_) => {
+                fatal(b"LogOS vNext: service ELF")
+            }
+            crate::service_loader::ServiceLoadError::InvalidAddress
+            | crate::service_loader::ServiceLoadError::Duplicate => {
+                fatal(b"LogOS vNext: service record")
+            }
+        },
+    };
+    proof_line(b"LogOS vNext: service images ready");
     let memory_map = unsafe { boot::exit_boot_services(None) };
     publish_boot_resources(memory_map, framebuffer);
+    unsafe {
+        SERVICE_IMAGES = Some(service_images);
+    }
     initialize_post_uefi(cpu_count);
     handoff_to_runtime();
     debug_line(b"LogOS vNext: core ready");
@@ -282,6 +311,11 @@ fn publish_boot_resources(memory_map: impl UefiMemoryMap, framebuffer: Framebuff
 #[allow(dead_code)]
 pub(crate) fn boot_resources() -> Option<BootResources> {
     unsafe { BOOT_RESOURCES }
+}
+
+#[allow(dead_code)]
+pub(crate) fn service_images() -> Option<&'static ServiceImageBundle> {
+    unsafe { (*core::ptr::addr_of!(SERVICE_IMAGES)).as_ref() }
 }
 
 fn handoff_to_runtime() {

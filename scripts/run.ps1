@@ -26,8 +26,12 @@ if ($Proof) { $buildArgs += @('--features', 'qemu-proof') }
 if ($Release) { $buildArgs += '--release' }
 cargo @buildArgs
 
+& (Join-Path $PSScriptRoot 'build-services.ps1') -Release
+
 New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\BOOT') | Out-Null
 Copy-Item $efi (Join-Path $esp 'EFI\BOOT\BOOTX64.EFI') -Force
+New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\LOGOS') | Out-Null
+Copy-Item (Join-Path $repoRoot 'build\esp\EFI\LOGOS\*.ELF') (Join-Path $esp 'EFI\LOGOS') -Force
 
 $espPath = ((Resolve-Path $esp).Path).Replace('\', '/')
 $qemuArgs = @(
