@@ -15,7 +15,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Service process admission | `service_runtime` + `process` | binds each service root, capabilities, coalesced mappings, and validated user launch metadata without entering service RIPs prematurely |
 | User launch transition | `arch` + `scheduler` | selects the task root before restore and provides one fixed-selector `iretq` seam for future service entry |
 | Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Commands dependencies |
-| Service IPC pages | `service_ipc` + `page_table` | allocates five fixed generation-stamped endpoint pages and maps each only into its producer/consumer processes |
+| Service IPC pages | `service_ipc` + `page_table` | allocates five fixed generation-stamped endpoint pages, initializes their concrete ABI rings, and maps each only into its producer/consumer processes |
 | Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE`; no other service or kernel drawing path receives it |
 | Keyboard byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring and maps it only into Input at `INPUT_KEYBOARD_RING_BASE`; PS/2 decoding remains outside the kernel |
 | PS/2 interrupt adapter | `arch` | remaps the legacy PIC, unmasks only IRQ1 after the Input ring is published, and copies port `0x60` bytes into that ring; no key decoding occurs in Core |

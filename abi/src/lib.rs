@@ -39,6 +39,7 @@ pub const INPUT_KEYBOARD_RING_BASE: usize = 0x0000_0100_1100_0000;
 pub const KEYBOARD_RING_CAPACITY: usize = 256;
 pub const IPC_PAGE_BYTES: usize = 4096;
 pub const MAX_IPC_BYTES: usize = 256;
+pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
 pub const MAX_GLYPH_CACHE: usize = 1024;
 pub const MAX_CAPABILITIES: usize = 8;
 
@@ -663,6 +664,10 @@ impl<T: Copy, const N: usize> SharedIpc<T, N> {
         self.head.load(Ordering::Acquire).wrapping_sub(self.tail.load(Ordering::Acquire)) as usize
     }
 }
+
+pub type InputIpc = SharedIpc<InputMessage, 32>;
+pub type RenderIpc = SharedIpc<RenderMessage, 1>;
+pub type StreamIpc = SharedIpc<IpcBytes, 8>;
 
 #[cfg(test)]
 mod tests {

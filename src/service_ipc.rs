@@ -1,6 +1,6 @@
 //! Fixed shared endpoint-page allocation for the terminal graph.
 
-use logos_abi::ServiceId;
+use logos_abi::{EndpointHeader, SERVICE_IPC_BASE, ServiceId};
 
 use crate::{
     frame_pool::{FrameAddress, FramePool, FramePoolError},
@@ -8,7 +8,8 @@ use crate::{
 };
 
 pub const MAX_ENDPOINTS: usize = 5;
-pub const IPC_BASE: usize = 0x0000_0100_0200_0000;
+pub const IPC_BASE: usize = SERVICE_IPC_BASE;
+pub const SERVICE_EPOCH: u64 = 1;
 const PAGE_SIZE: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,6 +32,10 @@ impl IpcEndpoint {
 
     pub const fn generation(self) -> u16 {
         self.generation
+    }
+
+    pub const fn header(self) -> EndpointHeader {
+        EndpointHeader::new(self.generation, SERVICE_EPOCH)
     }
 
     pub const fn virtual_address(self) -> usize {

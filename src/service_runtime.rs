@@ -144,6 +144,7 @@ impl ServiceRuntime {
             let endpoint = graph
                 .endpoint(endpoint_index)
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?;
+            initialize_ipc_page(endpoint, endpoint_index);
             for service in [endpoint.producer(), endpoint.consumer()] {
                 let index = service_index(service);
                 let Some((process, _)) = self.launch(service) else {
@@ -339,6 +340,23 @@ fn capabilities(spec: &crate::service_images::ServiceImageSpec) -> Capabilities 
         index += 1;
     }
     capabilities
+}
+
+fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint, index: usize) {
+    let frame = endpoint.frame().raw() as usize;
+    // The frame pool is identity-mapped in the kernel root. The same physical
+    // page is then mapped into exactly the two endpoint participants.
+    unsafe {
+        match index {
+            0 => (frame as *mut logos_abi::InputIpc)
+                .write(logos_abi::InputIpc::new(endpoint.header())),
+            1 => (frame as *mut logos_abi::RenderIpc)
+                .write(logos_abi::RenderIpc::new(endpoint.header())),
+            2..=4 => (frame as *mut logos_abi::StreamIpc)
+                .write(logos_abi::StreamIpc::new(endpoint.header())),
+            _ => {}
+        }
+    }
 }
 
 fn map_loaded_pages(
