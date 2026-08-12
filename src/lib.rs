@@ -10,6 +10,7 @@ pub mod frame_pool;
 pub mod input;
 pub mod ipc;
 pub mod loader;
+pub mod page_table;
 pub mod process;
 mod scheduler;
 pub mod session;
