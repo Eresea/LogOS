@@ -1,0 +1,37 @@
+param(
+    [switch]$Release
+)
+
+$ErrorActionPreference = 'Stop'
+
+$installedTargets = rustup target list --installed
+if ($installedTargets -notcontains 'x86_64-unknown-none') {
+    throw 'x86_64-unknown-none is required; install it with rustup target add x86_64-unknown-none'
+}
+
+$buildArgs = @(
+    'build', '--target', 'x86_64-unknown-none',
+    '-p', 'logos-service-images', '--bins'
+)
+if ($Release) { $buildArgs += '--release' }
+
+cargo @buildArgs
+
+$profile = if ($Release) { 'release' } else { 'debug' }
+$output = Join-Path $PSScriptRoot '..\build\esp\EFI\LOGOS'
+New-Item -ItemType Directory -Force -Path $output | Out-Null
+
+$names = @('INPUT', 'DISPLAY', 'TERMINAL', 'SESSION', 'COMMANDS')
+foreach ($name in $names) {
+    $source = Join-Path $PSScriptRoot "..\target\x86_64-unknown-none\$profile\logos-$($name.ToLower())"
+    $destination = Join-Path $output "$name.ELF"
+    Copy-Item -LiteralPath $source -Destination $destination -Force
+    $file = Get-Item -LiteralPath $destination
+    if ($file.Length -eq 0 -or $file.Length -gt 512KB) {
+        throw "$name service image exceeds the fixed 512 KiB bound"
+    }
+    $magic = [System.IO.File]::ReadAllBytes($destination)[0..3]
+    if ([BitConverter]::ToString($magic) -ne '7F-45-4C-46') {
+        throw "$name service image is not ELF"
+    }
+}

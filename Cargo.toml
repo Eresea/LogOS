@@ -12,6 +12,7 @@ members = [
     "services/input",
     "services/session",
     "services/terminal",
+    "services/images",
 ]
 resolver = "3"
 

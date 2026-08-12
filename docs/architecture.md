@@ -31,6 +31,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | User launch contract | `process::UserLaunch` + `Scheduler::spawn_user` | a running process with a bound root publishes entry RIP, aligned stack top, root, and process generation before its task becomes runnable |
 | Service image manifest | `service_images::SERVICE_IMAGES` | five fixed ESP paths, process kinds, capability slots, and bounded ELF admission in dependency order |
 | Retained service images | `service_loader::ServiceImageBundle` | five validated ELF records with page-aligned retained addresses and no filesystem lifetime after UEFI exit |
+| Service ELF packaging | `services/images` + `scripts/build-services.ps1` | five independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
 | Service supervisor | `supervisor::ServiceSupervisor` | five-service lifecycle model, heartbeat timeouts, endpoint epochs, restart limits, and recovery transition |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
 | Terminal proof graph | `terminal_stack::TerminalStack` | deterministic Input → Terminal → Session → Terminal → Display path with generation-safe terminal restart |

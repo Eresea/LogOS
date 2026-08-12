@@ -25,3 +25,4 @@
 | [0021](0021-user-launch-contract.md) | Accepted | Loaded process launch metadata is published atomically with its scheduler task |
 | [0022](0022-service-image-manifest.md) | Accepted | Five fixed service image paths and capability grants are validated before loading |
 | [0023](0023-retained-service-images.md) | Accepted | Validated service ELF files become five fixed post-UEFI physical image records |
+| [0024](0024-service-elf-packaging.md) | Accepted | Five no_std service ELF artifacts are built and size/magic checked into the ESP staging layout |

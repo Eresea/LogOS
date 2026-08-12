@@ -45,6 +45,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos-service-images"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+ "logos-commands",
+ "logos-input",
+ "logos-session",
+ "logos-terminal",
+]
+
+[[package]]
 name = "logos-session"
 version = "0.1.0"
 dependencies = [
