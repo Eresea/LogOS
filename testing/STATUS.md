@@ -5,7 +5,8 @@ Status: active preemptive SMP Core milestone.
 ## Verified in this tree
 
 - `cargo test --lib`: scheduler transitions, publication-before-claim ordering, wake-pending,
-  stale generations, bounded capacity, completion/reuse, and concurrent claims pass.
+  stale generations, bounded capacity, completion/reuse, concurrent claims, and the host-only
+  service restart contract pass.
 - `cargo fmt --check` and host clippy with warnings denied pass.
 - UEFI debug build and `qemu-proof` build pass for `x86_64-unknown-uefi`.
 - QEMU proof reaches `LogOS vNext: QEMU proof PASS` with `-smp 1`, `-smp 2`, and `-smp 8`.

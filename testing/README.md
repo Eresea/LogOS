@@ -7,7 +7,8 @@ allocator-free scheduler state machine; QEMU is required for the assembly bounda
 
 `cargo test --lib` covers bounded capacity, generation-safe stale handles, runnable/running/
 blocked/completed transitions, wake-pending races, completion reuse, context-publication ordering,
-and simultaneous CPU claims. `cargo clippy --lib -- -D warnings` is required.
+simultaneous CPU claims, and the host-only service restart contract. `cargo clippy --lib -- -D warnings`
+is required.
 
 ## QEMU proof
 

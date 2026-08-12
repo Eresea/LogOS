@@ -9,6 +9,7 @@ pub use scheduler::{
     SpawnError, TASK_STACK_SIZE, TaskEntry, TaskHandle, TaskState,
 };
 pub mod runtime;
+pub mod service_lifecycle;
 
 #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
 mod proof;
