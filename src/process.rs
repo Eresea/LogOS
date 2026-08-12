@@ -38,6 +38,7 @@ pub enum ProcessError {
     InvalidHandle,
     NotRunning,
     AddressSpace,
+    PermissionDenied,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -298,6 +299,14 @@ pub struct Capabilities {
     pub process_control: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Capability {
+    Input,
+    Display,
+    Endpoints,
+    ProcessControl,
+}
+
 impl Capabilities {
     pub const NONE: Self =
         Self { input: false, display: false, endpoints: false, process_control: false };
@@ -307,6 +316,15 @@ impl Capabilities {
         Self { input: false, display: false, endpoints: true, process_control: true };
     pub const COMMAND: Self =
         Self { input: false, display: false, endpoints: true, process_control: false };
+
+    pub const fn allows(self, capability: Capability) -> bool {
+        match capability {
+            Capability::Input => self.input,
+            Capability::Display => self.display,
+            Capability::Endpoints => self.endpoints,
+            Capability::ProcessControl => self.process_control,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -376,6 +394,15 @@ impl ProcessTable {
     pub fn capabilities(&self, handle: ProcessHandle) -> Option<Capabilities> {
         let process = self.slots.get(handle.slot as usize)?;
         (process.generation == handle.generation).then_some(process.capabilities)
+    }
+
+    pub fn authorize(
+        &self,
+        handle: ProcessHandle,
+        capability: Capability,
+    ) -> Result<(), ProcessError> {
+        let capabilities = self.capabilities(handle).ok_or(ProcessError::InvalidHandle)?;
+        capabilities.allows(capability).then_some(()).ok_or(ProcessError::PermissionDenied)
     }
 
     pub fn address_space(&self, handle: ProcessHandle) -> Option<AddressSpaceHandle> {
@@ -672,5 +699,21 @@ mod tests {
             None
         );
         assert!(VirtualMapping::new(0x51_000, 0xb0_000, 1, MappingFlags::DATA).is_some());
+    }
+
+    #[test]
+    fn capability_checks_are_typed_and_generation_safe() {
+        let image = image();
+        let mut table = ProcessTable::new();
+        let service = table.start(&image, ProcessKind::Terminal, Capabilities::SERVICE).unwrap();
+        assert!(table.authorize(service, Capability::Input).is_ok());
+        assert!(table.authorize(service, Capability::Display).is_ok());
+        assert_eq!(
+            table.authorize(service, Capability::ProcessControl),
+            Err(ProcessError::PermissionDenied)
+        );
+        assert!(table.fault(service, 14).is_ok());
+        assert!(table.reclaim(service).is_ok());
+        assert_eq!(table.authorize(service, Capability::Input), Err(ProcessError::InvalidHandle));
     }
 }

@@ -7,3 +7,4 @@
 | [0003](0003-terminal-service-contracts.md) | Accepted | Bounded terminal service graph, typed pages, and restart-safe endpoint identity |
 | [0004](0004-ring3-proof-boundary.md) | Accepted | One fixed ring-3 proof domain with scheduler-owned fault containment |
 | [0005](0005-process-address-space-ownership.md) | Accepted | Process admission owns one generation-safe address-space identity |
+| [0006](0006-process-capability-authorization.md) | Accepted | Process handles authorize typed capability checks before service access |
