@@ -33,7 +33,11 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
     #[cfg(feature = "qemu-proof")]
     if vector == usize::from(SWITCH_VECTOR) {
         if let Some(handle) = current {
-            crate::user_mode::record_syscall(handle);
+            if crate::user_mode::is_user_task(handle)
+                && !crate::user_mode::dispatch_syscall(handle, fx_context)
+            {
+                fatal(b"LogOS vNext: unknown syscall");
+            }
         }
     }
     if vector == usize::from(TIMER_VECTOR) {

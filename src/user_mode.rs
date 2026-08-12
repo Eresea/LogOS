@@ -15,7 +15,8 @@ const USER: u64 = 1 << 2;
 const USER_CODE_VA: usize = 0x0000_0080_0000_0000;
 const USER_STACK_VA: usize = USER_CODE_VA + PAGE_SIZE;
 const SWITCH_VECTOR: u8 = 49;
-const PROOF_IMAGE_LEN: usize = 0x84;
+const PROOF_IMAGE_LEN: usize = 0x89;
+const SYSCALL_YIELD: usize = 1;
 
 #[repr(C, align(4096))]
 struct PageTable([u64; 512]);
@@ -77,12 +78,23 @@ pub(crate) fn faulted(handle: TaskHandle, vector: usize) -> bool {
     true
 }
 
-pub(crate) fn record_syscall(handle: TaskHandle) {
-    if !USER_FAULTED.load(Ordering::Acquire)
-        && handle.raw() == USER_TASK_RAW.load(Ordering::Acquire)
+pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
+    if USER_FAULTED.load(Ordering::Acquire) || handle.raw() != USER_TASK_RAW.load(Ordering::Acquire)
     {
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+        return false;
     }
+    let gpr = unsafe { core::ptr::read_unaligned((fx_context as *const usize).add(64)) };
+    let number = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(14)) };
+    if number != SYSCALL_YIELD {
+        return false;
+    }
+    unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), 0) };
+    USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+pub(crate) fn is_user_task(handle: TaskHandle) -> bool {
+    handle.raw() == USER_TASK_RAW.load(Ordering::Acquire)
 }
 
 pub(crate) fn syscalls() -> u64 {
@@ -174,13 +186,18 @@ unsafe fn build_proof_image() {
         write_u64(image, 72, 0x80);
         write_u64(image, 80, USER_CODE_VA as u64);
         write_u64(image, 88, 0);
-        write_u64(image, 96, 4);
-        write_u64(image, 104, 4);
+        write_u64(image, 96, 9);
+        write_u64(image, 104, 9);
         write_u64(image, 112, PAGE_SIZE as u64);
-        *image.add(0x80) = 0xcd;
-        *image.add(0x81) = SWITCH_VECTOR;
-        *image.add(0x82) = 0x0f;
-        *image.add(0x83) = 0x0b;
+        *image.add(0x80) = 0xb8;
+        *image.add(0x81) = SYSCALL_YIELD as u8;
+        *image.add(0x82) = 0;
+        *image.add(0x83) = 0;
+        *image.add(0x84) = 0;
+        *image.add(0x85) = 0xcd;
+        *image.add(0x86) = SWITCH_VECTOR;
+        *image.add(0x87) = 0x0f;
+        *image.add(0x88) = 0x0b;
     }
 }
 
