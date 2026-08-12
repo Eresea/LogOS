@@ -8,6 +8,7 @@ pub const MAX_SERVICES: usize = 5;
 pub const HEARTBEAT_INTERVAL: u64 = 100;
 pub const MISSED_HEARTBEATS: u8 = 3;
 pub const MAX_RESTARTS: u8 = 3;
+const SUPERVISOR_FAULT_VECTOR: u8 = u8::MAX;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceId {
@@ -122,9 +123,13 @@ impl ServiceSupervisor {
         now: u64,
     ) -> Result<EndpointIdentity, SupervisorError> {
         let index = service.index();
-        let record = &mut self.services[index];
-        if record.state == ServiceState::Running {
-            return Ok(record.identity);
+        if self.services[index].state == ServiceState::Running {
+            return Ok(self.services[index].identity);
+        }
+        let old_process = self.services[index].process;
+        let replacing = old_process.is_some();
+        if let Some(process) = old_process {
+            self.reclaim_for_restart(process)?;
         }
         let capabilities = if service == ServiceId::Session {
             Capabilities::SESSION
@@ -134,10 +139,15 @@ impl ServiceSupervisor {
             Capabilities::SERVICE
         };
         let process = self.processes.start(image, service.kind(), capabilities)?;
+        let record = &mut self.services[index];
         record.process = Some(process);
         record.state = ServiceState::Running;
         record.last_heartbeat = now;
         record.missed_heartbeats = 0;
+        if replacing {
+            record.identity.generation = record.identity.generation.wrapping_add(1).max(1);
+            record.identity.service_epoch = record.identity.service_epoch.wrapping_add(1).max(1);
+        }
         Ok(record.identity)
     }
 
@@ -183,6 +193,11 @@ impl ServiceSupervisor {
             record.missed_heartbeats = record.missed_heartbeats.saturating_add(missed.max(1));
             record.last_heartbeat = now;
             if record.missed_heartbeats >= MISSED_HEARTBEATS {
+                if let Some(handle) = record.process {
+                    if self.processes.state(handle) == Some(ProcessState::Running) {
+                        let _ = self.processes.fault(handle, SUPERVISOR_FAULT_VECTOR);
+                    }
+                }
                 record.state = ServiceState::Unhealthy;
                 return Some(RestartEffects {
                     service: service_at(index),
@@ -210,12 +225,7 @@ impl ServiceSupervisor {
             return Err(SupervisorError::RestartLimit);
         }
         if let Some(handle) = old_process {
-            if matches!(
-                self.processes.state(handle),
-                Some(ProcessState::Exited(_) | ProcessState::Faulted(_))
-            ) {
-                self.processes.reclaim(handle)?;
-            }
+            self.reclaim_for_restart(handle)?;
         }
         let capabilities = if service == ServiceId::Session {
             Capabilities::SESSION
@@ -243,6 +253,21 @@ impl ServiceSupervisor {
 
     pub fn process_table(&self) -> &ProcessTable {
         &self.processes
+    }
+
+    fn reclaim_for_restart(&mut self, handle: ProcessHandle) -> Result<(), SupervisorError> {
+        match self.processes.state(handle) {
+            Some(ProcessState::Running) => {
+                self.processes.fault(handle, SUPERVISOR_FAULT_VECTOR)?;
+                self.processes.reclaim(handle)?;
+            }
+            Some(ProcessState::Exited(_) | ProcessState::Faulted(_)) => {
+                self.processes.reclaim(handle)?;
+            }
+            Some(ProcessState::Starting) => return Err(ProcessError::NotRunning.into()),
+            Some(ProcessState::Vacant) | None => {}
+        }
+        Ok(())
     }
 }
 
@@ -305,7 +330,10 @@ mod tests {
         let mut supervisor = ServiceSupervisor::new();
         supervisor.start(ServiceId::Input, &image, 0).unwrap();
         assert!(supervisor.tick(300).is_some());
-        supervisor.fault(ServiceId::Input, 13).unwrap();
+        assert_eq!(
+            supervisor.process_state(ServiceId::Input),
+            Some(ProcessState::Faulted(SUPERVISOR_FAULT_VECTOR))
+        );
         for _ in 0..MAX_RESTARTS {
             supervisor.restart(ServiceId::Input, &image, 1).unwrap();
             supervisor.fault(ServiceId::Input, 13).unwrap();
@@ -315,6 +343,19 @@ mod tests {
             Err(SupervisorError::RestartLimit)
         );
         assert!(supervisor.recovery());
+    }
+
+    #[test]
+    fn restart_reclaims_a_still_running_process_before_replacement() {
+        let image = image();
+        let mut supervisor = ServiceSupervisor::new();
+        supervisor.start(ServiceId::Terminal, &image, 0).unwrap();
+        let old = supervisor.services[ServiceId::Terminal.index()].process.unwrap();
+
+        supervisor.restart(ServiceId::Terminal, &image, 1).unwrap();
+
+        assert_eq!(supervisor.process_table().state(old), None);
+        assert_eq!(supervisor.process_state(ServiceId::Terminal), Some(ProcessState::Running));
     }
 
     #[test]
