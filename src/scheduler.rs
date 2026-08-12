@@ -1,0 +1,635 @@
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
+};
+
+pub const MAX_TASKS: usize = 8;
+pub const MAX_CPUS: usize = 8;
+pub const TASK_STACK_SIZE: usize = 16 * 1024;
+pub const SCHEDULER_STACK_SIZE: usize = 16 * 1024;
+pub const IDLE_STACK_SIZE: usize = 4 * 1024;
+
+const VACANT: u64 = 0;
+const INITIALIZING: u64 = 1;
+const RUNNABLE: u64 = 2;
+const RUNNING: u64 = 3;
+const BLOCKED: u64 = 4;
+const COMPLETED: u64 = 5;
+const STATE_MASK: u64 = 0x0f;
+const WAKE_PENDING: u64 = 1 << 4;
+const GENERATION_SHIFT: u32 = 8;
+const GENERATION_MASK: u64 = (1 << (64 - GENERATION_SHIFT)) - 1;
+const INITIAL_GENERATION: u64 = 1;
+const NO_CPU_TASK: u8 = u8::MAX;
+const NO_DEADLINE: u64 = u64::MAX;
+
+pub type TaskEntry = fn();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskState {
+    Runnable,
+    Running,
+    Blocked,
+    Completed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpawnError {
+    Capacity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TaskHandle {
+    slot: u8,
+    generation: u64,
+}
+
+impl TaskHandle {
+    pub const fn slot(self) -> usize {
+        self.slot as usize
+    }
+
+    pub const fn generation(self) -> u64 {
+        self.generation
+    }
+
+    pub const fn raw(self) -> u64 {
+        ((self.generation & GENERATION_MASK) << GENERATION_SHIFT) | self.slot as u64
+    }
+
+    pub const fn from_raw(raw: u64) -> Self {
+        Self { slot: raw as u8, generation: (raw >> GENERATION_SHIFT) & GENERATION_MASK }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FinishState {
+    Runnable,
+    Blocked,
+    TimedBlocked,
+    Completed,
+}
+
+#[repr(C, align(16))]
+struct TaskStack([u8; TASK_STACK_SIZE]);
+
+struct TaskSlot {
+    entry: AtomicUsize,
+    #[allow(dead_code)]
+    stack: UnsafeCell<TaskStack>,
+    state: AtomicU64,
+    wake_deadline: AtomicU64,
+    saved_rsp: AtomicUsize,
+    context_saved: AtomicBool,
+}
+
+impl TaskSlot {
+    const fn new() -> Self {
+        Self {
+            entry: AtomicUsize::new(0),
+            stack: UnsafeCell::new(TaskStack([0; TASK_STACK_SIZE])),
+            state: AtomicU64::new(pack(INITIAL_GENERATION, VACANT)),
+            wake_deadline: AtomicU64::new(NO_DEADLINE),
+            saved_rsp: AtomicUsize::new(0),
+            context_saved: AtomicBool::new(false),
+        }
+    }
+}
+
+struct CpuState {
+    online: AtomicBool,
+    cursor: AtomicUsize,
+    current_slot: AtomicU8,
+    current_generation: AtomicU64,
+    ticks: AtomicU64,
+    switches: AtomicU64,
+}
+
+impl CpuState {
+    const fn new() -> Self {
+        Self {
+            online: AtomicBool::new(false),
+            cursor: AtomicUsize::new(0),
+            current_slot: AtomicU8::new(NO_CPU_TASK),
+            current_generation: AtomicU64::new(0),
+            ticks: AtomicU64::new(0),
+            switches: AtomicU64::new(0),
+        }
+    }
+}
+
+pub struct Scheduler {
+    tasks: [TaskSlot; MAX_TASKS],
+    cpus: [CpuState; MAX_CPUS],
+}
+
+// A slot's mutable entry and stack are accessed only after a state CAS has
+// exclusively claimed the slot. Publication uses Release and all claimants
+// use Acquire, so the fixed storage is safe to share between CPUs.
+unsafe impl Sync for Scheduler {}
+
+impl Scheduler {
+    pub const fn new() -> Self {
+        Self {
+            tasks: [const { TaskSlot::new() }; MAX_TASKS],
+            cpus: [const { CpuState::new() }; MAX_CPUS],
+        }
+    }
+
+    pub fn online_cpu(&self, cpu: usize) -> bool {
+        let Some(cpu_state) = self.cpus.get(cpu) else {
+            return false;
+        };
+        cpu_state.online.store(true, Ordering::Release);
+        true
+    }
+
+    pub fn cpu_online(&self, cpu: usize) -> bool {
+        self.cpus.get(cpu).is_some_and(|state| state.online.load(Ordering::Acquire))
+    }
+
+    pub fn spawn(&self, entry: TaskEntry) -> Result<TaskHandle, SpawnError> {
+        for (index, slot) in self.tasks.iter().enumerate() {
+            let old = slot.state.load(Ordering::Acquire);
+            if state(old) != VACANT {
+                continue;
+            }
+            let generation = generation(old);
+            let reserved = pack(generation, INITIALIZING);
+            if slot
+                .state
+                .compare_exchange(old, reserved, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                continue;
+            }
+            slot.entry.store(entry as usize, Ordering::Release);
+            slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
+            slot.saved_rsp.store(0, Ordering::Release);
+            slot.context_saved.store(false, Ordering::Release);
+            slot.state.store(pack(generation, RUNNABLE), Ordering::Release);
+            return Ok(TaskHandle { slot: index as u8, generation });
+        }
+        Err(SpawnError::Capacity)
+    }
+
+    #[cfg_attr(not(target_os = "uefi"), allow(dead_code))]
+    /// Arm one bounded timer deadline for a currently running task.
+    pub(crate) fn arm_deadline(&self, handle: TaskHandle, deadline: u64) -> bool {
+        let Some(slot) = self.tasks.get(handle.slot as usize) else {
+            return false;
+        };
+        let word = slot.state.load(Ordering::Acquire);
+        if generation(word) != handle.generation || state(word) != RUNNING {
+            return false;
+        }
+        slot.wake_deadline.store(deadline, Ordering::Release);
+        true
+    }
+
+    #[cfg_attr(not(target_os = "uefi"), allow(dead_code))]
+    /// Wake blocked tasks whose deadlines have elapsed. Returns the wake count.
+    pub(crate) fn wake_due(&self, now: u64) -> usize {
+        let mut woken = 0;
+        for slot in &self.tasks {
+            let word = slot.state.load(Ordering::Acquire);
+            if state(word) != BLOCKED {
+                continue;
+            }
+            let deadline = slot.wake_deadline.load(Ordering::Acquire);
+            if deadline == NO_DEADLINE || deadline > now {
+                continue;
+            }
+            if slot
+                .wake_deadline
+                .compare_exchange(deadline, NO_DEADLINE, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                continue;
+            }
+            if slot
+                .state
+                .compare_exchange(
+                    word,
+                    pack(generation(word), RUNNABLE),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                woken += 1;
+            }
+        }
+        woken
+    }
+
+    pub fn state(&self, handle: TaskHandle) -> Option<TaskState> {
+        let slot = self.tasks.get(handle.slot as usize)?;
+        let word = slot.state.load(Ordering::Acquire);
+        if generation(word) != handle.generation {
+            return None;
+        }
+        match state(word) {
+            RUNNABLE => Some(TaskState::Runnable),
+            RUNNING => Some(TaskState::Running),
+            BLOCKED => Some(TaskState::Blocked),
+            COMPLETED => Some(TaskState::Completed),
+            _ => None,
+        }
+    }
+
+    pub fn wake(&self, handle: TaskHandle) -> bool {
+        let Some(slot) = self.tasks.get(handle.slot as usize) else {
+            return false;
+        };
+        loop {
+            let old = slot.state.load(Ordering::Acquire);
+            if generation(old) != handle.generation {
+                return false;
+            }
+            let next = match state(old) {
+                BLOCKED => {
+                    slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
+                    pack(handle.generation, RUNNABLE)
+                }
+                RUNNING => old | WAKE_PENDING,
+                RUNNABLE => old,
+                _ => return false,
+            };
+            if next == old {
+                return true;
+            }
+            if slot.state.compare_exchange(old, next, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                return true;
+            }
+        }
+    }
+
+    pub fn claim_next(&self, cpu: usize) -> Option<TaskHandle> {
+        let cpu_state = self.cpus.get(cpu)?;
+        if !cpu_state.online.load(Ordering::Acquire) {
+            return None;
+        }
+        let start = cpu_state.cursor.fetch_add(1, Ordering::Relaxed) % MAX_TASKS;
+        for offset in 0..MAX_TASKS {
+            let index = (start + offset) % MAX_TASKS;
+            let slot = &self.tasks[index];
+            let old = slot.state.load(Ordering::Acquire);
+            if state(old) != RUNNABLE {
+                continue;
+            }
+            let next = pack(generation(old), RUNNING);
+            if slot.state.compare_exchange(old, next, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                let handle = TaskHandle { slot: index as u8, generation: generation(old) };
+                cpu_state.current_slot.store(handle.slot, Ordering::Release);
+                cpu_state.current_generation.store(handle.generation, Ordering::Release);
+                cpu_state.switches.fetch_add(1, Ordering::Relaxed);
+                return Some(handle);
+            }
+        }
+        None
+    }
+
+    /// Publish a context only after the assembly path has left the task stack.
+    pub fn save_context(&self, handle: TaskHandle, saved_rsp: usize) -> bool {
+        let Some(slot) = self.tasks.get(handle.slot as usize) else {
+            return false;
+        };
+        let word = slot.state.load(Ordering::Acquire);
+        if generation(word) != handle.generation || state(word) != RUNNING {
+            return false;
+        }
+        slot.saved_rsp.store(saved_rsp, Ordering::Release);
+        slot.context_saved.store(true, Ordering::Release);
+        true
+    }
+
+    pub fn saved_context(&self, handle: TaskHandle) -> Option<usize> {
+        let slot = self.tasks.get(handle.slot as usize)?;
+        let word = slot.state.load(Ordering::Acquire);
+        (generation(word) == handle.generation && slot.context_saved.load(Ordering::Acquire))
+            .then(|| slot.saved_rsp.load(Ordering::Acquire))
+    }
+
+    pub fn finish(&self, handle: TaskHandle, outcome: FinishState) -> bool {
+        let Some(slot) = self.tasks.get(handle.slot as usize) else {
+            return false;
+        };
+        if !slot.context_saved.load(Ordering::Acquire) {
+            return false;
+        }
+        loop {
+            let old = slot.state.load(Ordering::Acquire);
+            if generation(old) != handle.generation || state(old) != RUNNING {
+                return false;
+            }
+            let next_state = match outcome {
+                FinishState::Runnable => RUNNABLE,
+                FinishState::Blocked if old & WAKE_PENDING == 0 => BLOCKED,
+                FinishState::Blocked => RUNNABLE,
+                FinishState::TimedBlocked if old & WAKE_PENDING == 0 => BLOCKED,
+                FinishState::TimedBlocked => RUNNABLE,
+                FinishState::Completed => COMPLETED,
+            };
+            if next_state != BLOCKED || matches!(outcome, FinishState::Blocked) {
+                slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
+            }
+            if slot
+                .state
+                .compare_exchange(
+                    old,
+                    pack(handle.generation, next_state),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    pub fn reclaim_completed(&self, handle: TaskHandle) -> bool {
+        let Some(slot) = self.tasks.get(handle.slot as usize) else {
+            return false;
+        };
+        let old = pack(handle.generation, COMPLETED);
+        if slot
+            .state
+            .compare_exchange(
+                old,
+                pack(handle.generation, INITIALIZING),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        slot.entry.store(0, Ordering::Release);
+        slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
+        slot.saved_rsp.store(0, Ordering::Release);
+        slot.context_saved.store(false, Ordering::Release);
+        slot.state.store(pack(next_generation(handle.generation), VACANT), Ordering::Release);
+        true
+    }
+
+    pub fn current_task(&self, cpu: usize) -> Option<TaskHandle> {
+        let cpu_state = self.cpus.get(cpu)?;
+        let slot = cpu_state.current_slot.load(Ordering::Acquire);
+        (slot != NO_CPU_TASK).then_some(TaskHandle {
+            slot,
+            generation: cpu_state.current_generation.load(Ordering::Acquire),
+        })
+    }
+
+    #[cfg_attr(not(target_os = "uefi"), allow(dead_code))]
+    pub(crate) fn clear_current(&self, cpu: usize) {
+        if let Some(cpu_state) = self.cpus.get(cpu) {
+            cpu_state.current_slot.store(NO_CPU_TASK, Ordering::Release);
+            cpu_state.current_generation.store(0, Ordering::Release);
+        }
+    }
+
+    #[cfg_attr(not(target_os = "uefi"), allow(dead_code))]
+    pub(crate) fn task_stack_top(&self, handle: TaskHandle) -> Option<usize> {
+        let slot = self.tasks.get(handle.slot as usize)?;
+        let word = slot.state.load(Ordering::Acquire);
+        (generation(word) == handle.generation)
+            .then(|| unsafe { (*slot.stack.get()).0.as_ptr_range().end as usize })
+    }
+
+    #[cfg_attr(not(target_os = "uefi"), allow(dead_code))]
+    pub(crate) fn set_initial_context(&self, handle: TaskHandle, saved_rsp: usize) -> bool {
+        let Some(slot) = self.tasks.get(handle.slot as usize) else {
+            return false;
+        };
+        let word = slot.state.load(Ordering::Acquire);
+        if generation(word) != handle.generation || state(word) != RUNNING {
+            return false;
+        }
+        if slot.context_saved.load(Ordering::Acquire) {
+            return true;
+        }
+        slot.saved_rsp.store(saved_rsp, Ordering::Release);
+        slot.context_saved.store(true, Ordering::Release);
+        true
+    }
+
+    pub fn record_tick(&self, cpu: usize) {
+        if let Some(cpu_state) = self.cpus.get(cpu) {
+            cpu_state.ticks.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn ticks(&self, cpu: usize) -> Option<u64> {
+        self.cpus.get(cpu).map(|state| state.ticks.load(Ordering::Acquire))
+    }
+
+    pub fn switches(&self, cpu: usize) -> Option<u64> {
+        self.cpus.get(cpu).map(|state| state.switches.load(Ordering::Acquire))
+    }
+
+    #[cfg_attr(not(target_os = "uefi"), allow(dead_code))]
+    pub(crate) fn cursor(&self, cpu: usize) -> Option<usize> {
+        self.cpus.get(cpu).map(|state| state.cursor.load(Ordering::Acquire))
+    }
+
+    pub fn entry(&self, handle: TaskHandle) -> Option<TaskEntry> {
+        let slot = self.tasks.get(handle.slot as usize)?;
+        let word = slot.state.load(Ordering::Acquire);
+        if generation(word) != handle.generation {
+            return None;
+        }
+        let pointer = slot.entry.load(Ordering::Acquire);
+        (pointer != 0).then(|| unsafe { core::mem::transmute(pointer) })
+    }
+}
+
+impl Default for Scheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const fn pack(generation: u64, state: u64) -> u64 {
+    ((generation & GENERATION_MASK) << GENERATION_SHIFT) | state
+}
+
+const fn generation(word: u64) -> u64 {
+    word >> GENERATION_SHIFT
+}
+
+const fn state(word: u64) -> u64 {
+    word & STATE_MASK
+}
+
+const fn next_generation(generation: u64) -> u64 {
+    let next = (generation & GENERATION_MASK).wrapping_add(1) & GENERATION_MASK;
+    if next == 0 { INITIAL_GENERATION } else { next }
+}
+
+pub static SCHEDULER: Scheduler = Scheduler::new();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+    use std::vec::Vec;
+
+    fn empty() {}
+
+    fn running(scheduler: &Scheduler) -> TaskHandle {
+        let handle = scheduler.spawn(empty).unwrap();
+        scheduler.online_cpu(0);
+        scheduler.claim_next(0).unwrap();
+        handle
+    }
+
+    #[test]
+    fn transitions_require_saved_context_before_requeue() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert!(!scheduler.finish(handle, FinishState::Runnable));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Running));
+        assert!(scheduler.save_context(handle, 0x1234));
+        assert!(scheduler.finish(handle, FinishState::Runnable));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+        assert_eq!(scheduler.saved_context(handle), Some(0x1234));
+    }
+
+    #[test]
+    fn blocked_task_wakes_and_duplicate_wakes_are_cheap() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert!(scheduler.save_context(handle, 0x2000));
+        assert!(scheduler.finish(handle, FinishState::Blocked));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Blocked));
+        assert!(scheduler.wake(handle));
+        assert!(scheduler.wake(handle));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+    }
+
+    #[test]
+    fn timed_wait_wakes_at_or_after_its_deadline() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert!(scheduler.arm_deadline(handle, 10));
+        assert!(scheduler.save_context(handle, 0x2200));
+        assert!(scheduler.finish(handle, FinishState::TimedBlocked));
+        assert_eq!(scheduler.wake_due(9), 0);
+        assert_eq!(scheduler.state(handle), Some(TaskState::Blocked));
+        assert_eq!(scheduler.wake_due(10), 1);
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+    }
+
+    #[test]
+    fn explicit_wake_cancels_a_timed_wait() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert!(scheduler.arm_deadline(handle, 20));
+        assert!(scheduler.save_context(handle, 0x2300));
+        assert!(scheduler.finish(handle, FinishState::TimedBlocked));
+        assert!(scheduler.wake(handle));
+        assert_eq!(scheduler.wake_due(20), 0);
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+    }
+
+    #[test]
+    fn wake_racing_with_timed_block_keeps_task_runnable() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert!(scheduler.arm_deadline(handle, 30));
+        assert!(scheduler.wake(handle));
+        assert!(scheduler.save_context(handle, 0x2500));
+        assert!(scheduler.finish(handle, FinishState::TimedBlocked));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+        assert_eq!(scheduler.wake_due(30), 0);
+    }
+
+    #[test]
+    fn concurrent_timer_scans_wake_a_waiter_once() {
+        let scheduler = Arc::new(Scheduler::new());
+        let handle = scheduler.spawn(empty).unwrap();
+        scheduler.online_cpu(0);
+        assert!(scheduler.claim_next(0).is_some());
+        assert!(scheduler.arm_deadline(handle, 40));
+        assert!(scheduler.save_context(handle, 0x2600));
+        assert!(scheduler.finish(handle, FinishState::TimedBlocked));
+        let mut workers = Vec::new();
+        for _ in 0..MAX_CPUS {
+            let scheduler = Arc::clone(&scheduler);
+            workers.push(thread::spawn(move || scheduler.wake_due(40)));
+        }
+        let wakes: usize = workers.into_iter().map(|worker| worker.join().unwrap()).sum();
+        assert_eq!(wakes, 1);
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+    }
+
+    #[test]
+    fn wake_pending_survives_a_concurrent_block_claim() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert!(scheduler.wake(handle));
+        assert!(scheduler.save_context(handle, 0x2400));
+        assert!(scheduler.finish(handle, FinishState::Blocked));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+    }
+
+    #[test]
+    fn wake_racing_with_block_keeps_task_runnable() {
+        let scheduler = Arc::new(Scheduler::new());
+        let handle = scheduler.spawn(empty).unwrap();
+        scheduler.online_cpu(0);
+        assert!(scheduler.claim_next(0).is_some());
+        assert!(scheduler.save_context(handle, 0x3000));
+        let wake_scheduler = Arc::clone(&scheduler);
+        let wake = thread::spawn(move || wake_scheduler.wake(handle));
+        assert!(wake.join().unwrap());
+        assert!(scheduler.finish(handle, FinishState::Blocked));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+    }
+
+    #[test]
+    fn stale_generation_cannot_touch_reused_slot() {
+        let scheduler = Scheduler::new();
+        let first = scheduler.spawn(empty).unwrap();
+        scheduler.online_cpu(0);
+        assert!(scheduler.claim_next(0).is_some());
+        assert!(scheduler.save_context(first, 0x4000));
+        assert!(scheduler.finish(first, FinishState::Completed));
+        assert!(scheduler.reclaim_completed(first));
+        let second = scheduler.spawn(empty).unwrap();
+        assert_eq!(first.slot(), second.slot());
+        assert_ne!(first.generation(), second.generation());
+        assert!(!scheduler.wake(first));
+        assert_eq!(scheduler.state(first), None);
+    }
+
+    #[test]
+    fn capacity_is_bounded() {
+        let scheduler = Scheduler::new();
+        for _ in 0..MAX_TASKS {
+            assert!(scheduler.spawn(empty).is_ok());
+        }
+        assert_eq!(scheduler.spawn(empty), Err(SpawnError::Capacity));
+    }
+
+    #[test]
+    fn concurrent_claims_never_duplicate_a_slot() {
+        let scheduler = Arc::new(Scheduler::new());
+        for cpu in 0..MAX_CPUS {
+            scheduler.online_cpu(cpu);
+        }
+        let handle = scheduler.spawn(empty).unwrap();
+        let mut workers = Vec::new();
+        for cpu in 0..MAX_CPUS {
+            let scheduler = Arc::clone(&scheduler);
+            workers.push(thread::spawn(move || scheduler.claim_next(cpu)));
+        }
+        let claims = workers.into_iter().filter_map(|worker| worker.join().unwrap()).count();
+        assert_eq!(claims, 1);
+        assert_eq!(scheduler.state(handle), Some(TaskState::Running));
+    }
+}

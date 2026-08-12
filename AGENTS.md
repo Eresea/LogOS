@@ -21,8 +21,8 @@ preemptive SMP Core: UEFI handoff, per-CPU setup, fixed-stack scheduler, and pro
 
 ## Ownership
 
-`src/main.rs` owns only the UEFI entry. `src/lib.rs` owns Core mechanisms and the host-tested
-scheduler state machine. Runtime, services, IPC, capabilities, allocation, and user mode remain
-deferred. `v1_docs/` and stale v1 evidence are historical reference only.
+`src/main.rs` owns only the UEFI entry. `src/lib.rs` owns the Core façade; `src/scheduler.rs` owns
+the host-tested scheduler state machine. Runtime, services, IPC, capabilities, allocation, and user
+mode remain deferred. `v1_docs/` and stale v1 evidence are historical reference only.
 
 Plan before coding, verify the result, and report remaining issues. Do not bundle unrelated changes.
