@@ -99,22 +99,17 @@ impl EnvEntry {
 }
 
 #[derive(Clone, Copy)]
-struct VolatileFile {
+struct VolatileFile<const BYTES: usize> {
     name: [u8; MAX_ENV_BYTES],
     name_len: usize,
-    bytes: [u8; MAX_VOLATILE_FILE_BYTES],
+    bytes: [u8; BYTES],
     len: usize,
     valid: bool,
 }
 
-impl VolatileFile {
-    const EMPTY: Self = Self {
-        name: [0; MAX_ENV_BYTES],
-        name_len: 0,
-        bytes: [0; MAX_VOLATILE_FILE_BYTES],
-        len: 0,
-        valid: false,
-    };
+impl<const BYTES: usize> VolatileFile<BYTES> {
+    const EMPTY: Self =
+        Self { name: [0; MAX_ENV_BYTES], name_len: 0, bytes: [0; BYTES], len: 0, valid: false };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -147,7 +142,7 @@ impl Child {
     const EMPTY: Self = Self { state: ChildState::Vacant, pid: 0 };
 }
 
-pub struct Session {
+pub struct SessionState<const FILES: usize, const FILE_BYTES: usize> {
     line: [u8; MAX_LINE_BYTES],
     line_len: usize,
     cursor: usize,
@@ -156,20 +151,25 @@ pub struct Session {
     history_cursor: usize,
     escape_state: u8,
     env: [EnvEntry; MAX_ENV_ENTRIES],
-    files: [VolatileFile; MAX_VOLATILE_FILES],
+    files: [VolatileFile<FILE_BYTES>; FILES],
     total_file_bytes: usize,
     children: [Child; MAX_CHILD_PROCESSES],
     next_pid: u16,
 }
 
+pub type Session = SessionState<MAX_VOLATILE_FILES, MAX_VOLATILE_FILE_BYTES>;
+
+const SERVICE_FILE_COUNT: usize = 2;
+const SERVICE_FILE_BYTES: usize = 1024;
+
 /// Entry-ready Session service façade over one bounded stream operation.
 pub struct SessionService {
-    session: Session,
+    session: SessionState<SERVICE_FILE_COUNT, SERVICE_FILE_BYTES>,
 }
 
 impl SessionService {
     pub const fn new() -> Self {
-        Self { session: Session::new() }
+        Self { session: SessionState::new() }
     }
 
     pub fn prompt(&self, output: &mut ShellOutput) {
@@ -180,7 +180,11 @@ impl SessionService {
         self.session.input(message.as_bytes()?)
     }
 
-    pub const fn session(&self) -> &Session {
+    pub fn input_bytes(&mut self, bytes: &[u8]) -> Option<ShellOutput> {
+        self.session.input(bytes)
+    }
+
+    pub const fn session(&self) -> &SessionState<SERVICE_FILE_COUNT, SERVICE_FILE_BYTES> {
         &self.session
     }
 }
@@ -191,7 +195,9 @@ impl Default for SessionService {
     }
 }
 
-impl Session {
+const _: () = assert!(core::mem::size_of::<SessionService>() <= logos_abi::MAX_SERVICE_IMAGE_BYTES);
+
+impl<const FILES: usize, const FILE_BYTES: usize> SessionState<FILES, FILE_BYTES> {
     pub const fn new() -> Self {
         Self {
             line: [0; MAX_LINE_BYTES],
@@ -202,7 +208,7 @@ impl Session {
             history_cursor: 0,
             escape_state: 0,
             env: [EnvEntry::EMPTY; MAX_ENV_ENTRIES],
-            files: [VolatileFile::EMPTY; MAX_VOLATILE_FILES],
+            files: [VolatileFile::EMPTY; FILES],
             total_file_bytes: 0,
             children: [Child::EMPTY; MAX_CHILD_PROCESSES],
             next_pid: 1,
@@ -514,12 +520,12 @@ impl Session {
         output.extend(&self.line[..self.line_len]);
     }
 
-    fn find_file(&self, name: &[u8]) -> Option<&VolatileFile> {
+    fn find_file(&self, name: &[u8]) -> Option<&VolatileFile<FILE_BYTES>> {
         self.files.iter().find(|file| file.valid && file.name[..file.name_len] == *name)
     }
 
     fn write_file(&mut self, name: &[u8], bytes: &[u8], append: bool) -> bool {
-        if name.is_empty() || name.len() > MAX_ENV_BYTES || bytes.len() > MAX_VOLATILE_FILE_BYTES {
+        if name.is_empty() || name.len() > MAX_ENV_BYTES || bytes.len() > FILE_BYTES {
             return false;
         }
         let index = if let Some((index, _)) = self
@@ -542,7 +548,7 @@ impl Session {
         let old_file_len = self.files[index].len;
         let old_len = if append { old_file_len } else { 0 };
         let new_len = old_len.saturating_add(bytes.len());
-        if new_len > MAX_VOLATILE_FILE_BYTES {
+        if new_len > FILE_BYTES {
             return false;
         }
         let new_total = self.total_file_bytes.saturating_sub(old_file_len).saturating_add(new_len);
@@ -557,7 +563,7 @@ impl Session {
     }
 }
 
-impl Default for Session {
+impl<const FILES: usize, const FILE_BYTES: usize> Default for SessionState<FILES, FILE_BYTES> {
     fn default() -> Self {
         Self::new()
     }
