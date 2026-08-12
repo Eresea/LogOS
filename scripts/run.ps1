@@ -17,6 +17,7 @@ $log = Join-Path $repoRoot "target\qemu-proof-$Cpus.log"
 $qemu = Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue
 $qemuPath = if ($qemu) { $qemu.Source } else { 'C:\Program Files\qemu\qemu-system-x86_64.exe' }
 $ovmf = if ($env:OVMF_CODE) { $env:OVMF_CODE } else { 'C:\Program Files\qemu\share\edk2-x86_64-code.fd' }
+$qmpPort = 4444
 
 if (-not (Test-Path $qemuPath)) { throw 'Install QEMU or add qemu-system-x86_64 to PATH.' }
 if (-not (Test-Path $ovmf)) { throw 'Set OVMF_CODE to an OVMF firmware file.' }
@@ -42,7 +43,7 @@ $qemuArgs = @(
 )
 if ($Proof) {
     Remove-Item $log -Force -ErrorAction SilentlyContinue
-    $qemuArgs += @('-debugcon', "file:$log", '-global', 'isa-debugcon.iobase=0xe9')
+    $qemuArgs += @('-debugcon', "file:$log", '-global', 'isa-debugcon.iobase=0xe9', '-qmp', "tcp:127.0.0.1:$qmpPort,server=on,wait=off")
 } else {
     $qemuArgs += @('-debugcon', 'stdio', '-global', 'isa-debugcon.iobase=0xe9')
     if (-not $Headless) { $qemuArgs = $qemuArgs | Where-Object { $_ -ne '-display' -and $_ -ne 'none' } }
@@ -80,11 +81,74 @@ while ([DateTime]::UtcNow -lt $deadline) {
     Start-Sleep -Milliseconds 250
 }
 
-if (-not $process.HasExited) { $process.Kill() }
-$process.WaitForExit()
 $result = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
 if (-not $passed) {
+    if (-not $process.HasExited) { $process.Kill() }
+    $process.WaitForExit()
     if ($result) { Write-Host $result }
     throw "QEMU proof failed or timed out for -smp $Cpus. Log: $log"
 }
+
+function Invoke-QmpCommand {
+    param(
+        [System.IO.StreamWriter]$Writer,
+        [System.IO.StreamReader]$Reader,
+        [hashtable]$Command
+    )
+    $Writer.WriteLine(($Command | ConvertTo-Json -Compress -Depth 10))
+    $line = $Reader.ReadLine()
+    if (-not $line) { throw 'QMP returned no response.' }
+    $response = $line | ConvertFrom-Json
+    if ($response.error) { throw "QMP command failed: $($response.error.desc)" }
+    return $response
+}
+
+function Connect-Qmp {
+    param([int]$Port)
+    $client = [System.Net.Sockets.TcpClient]::new()
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        try {
+            $client.Connect('127.0.0.1', $Port)
+            break
+        } catch {
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    if (-not $client.Connected) { throw 'QMP did not accept a connection.' }
+    $stream = $client.GetStream()
+    $stream.ReadTimeout = 2000
+    $reader = [System.IO.StreamReader]::new($stream)
+    $writer = [System.IO.StreamWriter]::new($stream)
+    $writer.AutoFlush = $true
+    if (-not $reader.ReadLine()) { throw 'QMP greeting missing.' }
+    Invoke-QmpCommand $writer $reader @{ execute = 'qmp_capabilities' } | Out-Null
+    return @{ Client = $client; Reader = $reader; Writer = $writer }
+}
+
+$proofBefore = Join-Path $repoRoot "target\qemu-proof-before-$Cpus.ppm"
+$proofAfter = Join-Path $repoRoot "target\qemu-proof-after-$Cpus.ppm"
+Remove-Item $proofBefore, $proofAfter -Force -ErrorAction SilentlyContinue
+$qmp = Connect-Qmp $qmpPort
+try {
+    Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofBefore } } | Out-Null
+    foreach ($key in @('e', 'c', 'h', 'o', 'space', 'p', 'r', 'o', 'o', 'f', 'ret')) {
+        Invoke-QmpCommand $qmp.Writer $qmp.Reader @{
+            execute = 'human-monitor-command'
+            arguments = @{ 'command-line' = "sendkey $key" }
+        } | Out-Null
+    }
+    Start-Sleep -Milliseconds 500
+    Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofAfter } } | Out-Null
+} finally {
+    $qmp.Client.Close()
+}
+if (-not (Test-Path $proofBefore) -or -not (Test-Path $proofAfter)) {
+    throw 'QEMU proof did not capture both framebuffer snapshots.'
+}
+if ((Get-FileHash $proofBefore).Hash -eq (Get-FileHash $proofAfter).Hash) {
+    throw 'QEMU keyboard injection did not change the rendered framebuffer.'
+}
+if (-not $process.HasExited) { $process.Kill() }
+$process.WaitForExit()
 Write-Host $result
