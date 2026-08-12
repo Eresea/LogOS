@@ -59,7 +59,7 @@ impl FramePool {
                 let Some(address) = descriptor.physical_start.checked_add(offset) else {
                     return Err(FramePoolError::InvalidMap);
                 };
-                if address == 0 {
+                if address == 0 || self.frames[..self.count].contains(&address) {
                     continue;
                 }
                 self.frames[self.count] = address;
@@ -88,6 +88,19 @@ impl FramePool {
             }
         }
         Err(FramePoolError::Exhausted)
+    }
+
+    pub fn reserve(&mut self, frame: FrameAddress) -> bool {
+        let mut reserved = false;
+        for index in 0..self.count {
+            if self.frames[index] == frame.0 {
+                let word = index / 64;
+                let bit = 1u64 << (index % 64);
+                self.used[word] |= bit;
+                reserved = true;
+            }
+        }
+        reserved
     }
 
     pub fn release(&mut self, frame: FrameAddress) -> Result<(), FramePoolError> {
@@ -150,5 +163,25 @@ mod tests {
         pool.initialize(&map).unwrap();
         assert_eq!(pool.capacity(), 1);
         assert_eq!(pool.allocate().unwrap().raw(), 0x1000);
+    }
+
+    #[test]
+    fn reserved_frame_is_not_reused() {
+        let mut map = MemoryMap::new();
+        map.push(MemoryDescriptor::new(0x1000, 2, true).unwrap()).unwrap();
+        let mut pool = FramePool::empty();
+        pool.initialize(&map).unwrap();
+        assert!(pool.reserve(FrameAddress::from_raw(0x1000)));
+        assert_eq!(pool.allocate().unwrap().raw(), 0x2000);
+    }
+
+    #[test]
+    fn duplicate_memory_descriptors_are_coalesced() {
+        let mut map = MemoryMap::new();
+        map.push(MemoryDescriptor::new(0x1000, 2, true).unwrap()).unwrap();
+        map.push(MemoryDescriptor::new(0x1000, 2, true).unwrap()).unwrap();
+        let mut pool = FramePool::empty();
+        pool.initialize(&map).unwrap();
+        assert_eq!(pool.capacity(), 2);
     }
 }

@@ -365,6 +365,12 @@ impl Scheduler {
         for offset in 0..MAX_TASKS {
             let index = (start + offset) % MAX_TASKS;
             let slot = &self.tasks[index];
+            // User address spaces currently have no cross-CPU TLB shootdown
+            // or per-CPU user-entry stack handoff. Keep ring-3 tasks on BSP
+            // until that migration boundary is implemented.
+            if cpu != 0 && slot.process.load(Ordering::Acquire) != 0 {
+                continue;
+            }
             let old = slot.state.load(Ordering::Acquire);
             if state(old) != RUNNABLE {
                 continue;

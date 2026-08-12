@@ -34,4 +34,5 @@
 | [0030](0030-user-launch-transition.md) | Accepted | Scheduler CR3 selection and validated ring-3 iret launch are centralized before service scheduling |
 | [0031](0031-service-startup-barrier.md) | Accepted | Five services advance through a fixed dependency-ordered launch barrier before execution |
 | [0032](0032-service-ipc-pages.md) | Accepted | Six generation-stamped endpoint pages are mapped only into their producer and consumer roots |
+| [0034](0034-ring3-bsp-affinity.md) | Accepted | Ring-3 tasks stay on the BSP until per-CPU user-entry and CR3/TLB migration is explicit |
 | [0033](0033-ps2-interrupt-boundary.md) | Accepted | Legacy PIC IRQ1 supplies bounded raw PS/2 bytes to Input; decoding remains in the service |

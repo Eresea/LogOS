@@ -86,6 +86,8 @@ impl ServiceRuntime {
         self.frame_pool
             .initialize(resources.memory_map())
             .map_err(|_| ServiceRuntimeError::Resources)?;
+        reserve_active_page_tables(&mut self.frame_pool, crate::arch::current_cr3());
+        self.frame_pool.reserve(FrameAddress::from_raw(0x8000));
 
         for (index, spec) in SERVICE_IMAGES.iter().enumerate() {
             let service = spec.service();
@@ -398,6 +400,41 @@ fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint, index: usize) 
             2..=5 => (frame as *mut logos_abi::StreamIpc)
                 .write(logos_abi::StreamIpc::new(endpoint.header())),
             _ => {}
+        }
+    }
+}
+
+fn reserve_active_page_tables(pool: &mut FramePool, root: usize) {
+    const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+    const PRESENT: u64 = 1;
+    const HUGE: u64 = 1 << 7;
+    let mut frames = [0u64; 256];
+    let mut levels = [0u8; 256];
+    let mut count = 1;
+    frames[0] = (root as u64) & ADDRESS_MASK;
+    levels[0] = 4;
+    while count != 0 {
+        count -= 1;
+        let frame = frames[count];
+        let level = levels[count];
+        if frame == 0 {
+            continue;
+        }
+        pool.reserve(FrameAddress::from_raw(frame));
+        if level == 1 {
+            continue;
+        }
+        for index in 0..512u64 {
+            let entry = unsafe { core::ptr::read_volatile((frame + index * 8) as *const u64) };
+            if entry & PRESENT == 0 || entry & HUGE != 0 {
+                continue;
+            }
+            if count == frames.len() {
+                return;
+            }
+            frames[count] = entry & ADDRESS_MASK;
+            levels[count] = level - 1;
+            count += 1;
         }
     }
 }
