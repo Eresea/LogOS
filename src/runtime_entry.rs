@@ -1,4 +1,8 @@
-use crate::{arch_fatal, current_ticks, health, runtime, sleep_current_for};
+use crate::{
+    arch_fatal, current_ticks,
+    health::{CommandError, HealthCommand, HealthError, HealthResponse, HealthService},
+    runtime, sleep_current_for,
+};
 
 #[cfg(feature = "qemu-proof")]
 use crate::proof;
@@ -48,30 +52,45 @@ pub(crate) fn run() {
     #[cfg(feature = "qemu-proof")]
     proof::runtime_slot_reused();
 
-    let mut health = health::HealthService::new();
-    let ping = health.start_ping(1).unwrap_or_else(|_| arch_fatal(b"LogOS vNext: health start"));
+    let mut health = HealthService::new();
+    let ping = match send_health(&mut health, HealthCommand::Ping { request_id: 1 }) {
+        HealthResponse::PingAccepted(handle) => handle,
+        _ => arch_fatal(b"LogOS vNext: health start"),
+    };
     sleep_current_for(1);
-    if health.restart() != 1 {
+    if send_health(&mut health, HealthCommand::Restart) != (HealthResponse::Restarted { count: 1 })
+    {
         arch_fatal(b"LogOS vNext: health restart");
     }
     #[cfg(feature = "qemu-proof")]
     proof::health_restarted();
-    if health.complete_ping(ping) || health.state(ping) != Some(health::PingState::Restarted) {
+    if send_health(&mut health, HealthCommand::CompletePing { handle: ping })
+        != HealthResponse::Rejected(HealthError::StaleOperation)
+    {
         arch_fatal(b"LogOS vNext: health stale completion");
     }
     #[cfg(feature = "qemu-proof")]
     proof::health_late_completion_rejected();
-    if !health.reclaim_ping(ping) {
+    if send_health(&mut health, HealthCommand::Reclaim { handle: ping })
+        != HealthResponse::Reclaimed(ping)
+    {
         arch_fatal(b"LogOS vNext: health reclaim");
     }
-    let retry = health.start_ping(2).unwrap_or_else(|_| arch_fatal(b"LogOS vNext: health retry"));
+    let retry = match send_health(&mut health, HealthCommand::Ping { request_id: 2 }) {
+        HealthResponse::PingAccepted(handle) => handle,
+        _ => arch_fatal(b"LogOS vNext: health retry"),
+    };
     sleep_current_for(1);
-    if !health.complete_ping(retry) {
+    if send_health(&mut health, HealthCommand::CompletePing { handle: retry })
+        != HealthResponse::PingCompleted(retry)
+    {
         arch_fatal(b"LogOS vNext: health complete");
     }
     #[cfg(feature = "qemu-proof")]
     proof::health_retry_completed();
-    if !health.reclaim_ping(retry) {
+    if send_health(&mut health, HealthCommand::Reclaim { handle: retry })
+        != HealthResponse::Reclaimed(retry)
+    {
         arch_fatal(b"LogOS vNext: health reclaim");
     }
 
@@ -80,4 +99,14 @@ pub(crate) fn run() {
         #[cfg(feature = "qemu-proof")]
         proof::runtime_wait_resumed();
     }
+}
+
+fn send_health(health: &mut HealthService, command: HealthCommand) -> HealthResponse {
+    if health.submit(command) == Err(CommandError::Busy) {
+        arch_fatal(b"LogOS vNext: health mailbox");
+    }
+    if !health.step() {
+        arch_fatal(b"LogOS vNext: health step");
+    }
+    health.take_response().unwrap_or_else(|| arch_fatal(b"LogOS vNext: health response"))
 }

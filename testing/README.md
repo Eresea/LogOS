@@ -24,8 +24,8 @@ Each proof requires UEFI entry, the Core-ready marker, a root-task handoff throu
 scheduler path, repeated cancellable timer waits by the root task, two non-yielding assembly tasks
 with preserved GPR/flags/XMM canaries and sustained progress, timer ticks on every online CPU,
 repeated preemptive switches, a completed task reclaimed and replaced in the same slot with stale
-handle rejection, the in-process Health Ping restart/retry path, and a blocked task woken by
-another CPU for SMP (same CPU for `-smp 1`). The runner captures debugcon output and fails on
-timeout or fatal output.
+handle rejection, the typed in-process Health Ping command/response and restart/retry path, and a
+blocked task woken by another CPU for SMP (same CPU for `-smp 1`). The runner captures debugcon
+output and fails on timeout or fatal output.
 
 `v1_docs/` and old v1 evidence are historical; they are not active proof criteria.

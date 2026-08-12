@@ -14,7 +14,8 @@ Status: active preemptive SMP Core milestone.
   CPU-bound tasks, GPR/flags/XMM preservation, per-CPU timer ticks, repeated preemption, a bounded
   Runtime timeout/completion/cancel lifecycle with generation-safe slot reuse, a real completed
   task reclaimed and replaced in the same scheduler slot with stale-handle rejection, and
-  the in-process Health Ping restart/retry path and blocked/wake (cross-CPU for SMP runs).
+  the typed in-process Health Ping command/response and restart/retry path and blocked/wake
+  (cross-CPU for SMP runs).
 - The local-APIC period is measured against the calibrated TSC on the BSP and each AP before its
   timer is enabled.
 - Non-proof UEFI boot reaches `LogOS vNext: core ready` and remains in the scheduler for 1, 2, and
