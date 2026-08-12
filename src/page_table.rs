@@ -14,7 +14,7 @@ const HUGE: u64 = 1 << 7;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 #[cfg(target_os = "uefi")]
-const USER_PML4_INDEX: usize = 1;
+const USER_PML4_INDEX: usize = 2;
 
 /// Maximum table frames needed by one root plus one private path per loaded page.
 pub const MAX_PAGE_TABLE_FRAMES: usize = 1 + MAX_LOAD_PAGES * 3;

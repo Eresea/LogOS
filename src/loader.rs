@@ -6,7 +6,7 @@ use crate::process::{AddressSpaceRoot, ElfLoadPlan, MappingFlags, UserLaunch};
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_LOAD_PAGES: usize =
     crate::process::MAX_IMAGE_BYTES / PAGE_SIZE + crate::process::USER_STACK_PAGES + 2;
-pub const USER_STACK_BASE: usize = 0x0000_0080_0100_0000;
+pub const USER_STACK_BASE: usize = 0x0000_0100_0100_0000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadedPage {

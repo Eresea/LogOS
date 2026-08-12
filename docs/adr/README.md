@@ -31,3 +31,4 @@
 | [0027](0027-bounded-page-table-builder.md) | Accepted | Four-level user page tables are built through a bounded architecture memory seam |
 | [0028](0028-service-address-space-bootstrap.md) | Accepted | Five retained service ELFs are populated into owned frames and isolated roots after UEFI exit |
 | [0029](0029-service-process-admission.md) | Accepted | Services receive generation-safe process handles, mappings, capabilities, and launch records before scheduling |
+| [0030](0030-user-launch-transition.md) | Accepted | Scheduler CR3 selection and validated ring-3 iret launch are centralized before service scheduling |

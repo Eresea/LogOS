@@ -65,6 +65,7 @@ static mut SERVICE_IMAGES: Option<ServiceImageBundle> = None;
 #[cfg(target_os = "uefi")]
 static mut SERVICE_RUNTIME: crate::service_runtime::ServiceRuntime =
     crate::service_runtime::ServiceRuntime::new();
+static KERNEL_CR3: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -550,8 +551,33 @@ pub(crate) fn switch_cr3(root: usize) {
     }
 }
 
+pub(crate) fn prepare_task_address_space(root: usize) {
+    let root = if root == 0 { KERNEL_CR3.load(Ordering::Acquire) } else { root };
+    switch_cr3(root);
+}
+
+#[allow(dead_code)]
+pub(crate) fn enter_user_launch(launch: crate::process::UserLaunch) -> ! {
+    unsafe {
+        asm!(
+            "push {user_data}",
+            "push {user_stack}",
+            "pushfq",
+            "push {user_code}",
+            "push {user_entry}",
+            "iretq",
+            user_data = const USER_DATA_SELECTOR,
+            user_stack = in(reg) launch.stack_top() - 8,
+            user_code = const USER_CODE_SELECTOR,
+            user_entry = in(reg) launch.entry(),
+            options(noreturn),
+        );
+    }
+}
+
 #[allow(clippy::needless_range_loop)]
 fn initialize_post_uefi(cpu_count: usize) {
+    KERNEL_CR3.store(current_cr3(), Ordering::Release);
     install_gdt(0);
     install_idt(0);
     configure_sse();

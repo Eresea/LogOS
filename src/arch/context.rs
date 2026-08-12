@@ -104,8 +104,7 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         fatal(b"LogOS vNext: TSS task stack");
     };
     set_task_kernel_stack(cpu, stack_top);
-    #[cfg(feature = "qemu-proof")]
-    crate::user_mode::prepare_address_space(SCHEDULER.address_space(next).unwrap_or(0));
+    crate::arch::prepare_task_address_space(SCHEDULER.address_space(next).unwrap_or(0));
     SCHEDULER.saved_context(next).unwrap_or_else(|| fatal(b"LogOS vNext: no context"))
 }
 

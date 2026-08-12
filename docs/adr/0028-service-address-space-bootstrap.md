@@ -13,7 +13,7 @@ reserved user PML4 branch; image bytes are populated through the bounded
 identity-mapped bootstrap sink before the roots are retained for process
 binding.
 
-Service images are linked at `0x0000_0080_0000_0000`, with stacks in a nearby
+Service images are linked at `0x0000_0100_0000_0000`, with stacks in a nearby
 separate window. The service roots are not scheduled yet; this commit proves
 resource ownership and address-space construction only.
 
