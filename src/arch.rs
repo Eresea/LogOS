@@ -698,6 +698,10 @@ pub(crate) fn current_cpu() -> usize {
     unsafe { (*(read_gs() as *const CpuLocal)).cpu_index as usize }
 }
 
+pub(crate) fn current_ticks() -> u64 {
+    TIMER_TICKS.load(Ordering::Acquire)
+}
+
 unsafe extern "C" {
     fn default_interrupt();
     fn context_timer_interrupt();

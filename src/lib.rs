@@ -476,6 +476,8 @@ const fn next_generation(generation: u64) -> u64 {
 
 pub static SCHEDULER: Scheduler = Scheduler::new();
 
+pub mod runtime;
+
 #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
 mod proof;
 
@@ -485,6 +487,48 @@ mod proof;
 pub(crate) fn runtime_entry() {
     #[cfg(feature = "qemu-proof")]
     proof::handoff_started();
+
+    let mut runtime = runtime::Runtime::new();
+    let timed = runtime.submit().unwrap_or_else(|_| arch_fatal(b"LogOS vNext: runtime capacity"));
+    let deadline = current_ticks().saturating_add(1);
+    if !runtime.wait(timed, deadline) {
+        arch_fatal(b"LogOS vNext: runtime wait");
+    }
+    sleep_current_for(3);
+    if !runtime.timeout(timed, current_ticks()) {
+        arch_fatal(b"LogOS vNext: runtime timeout");
+    }
+    #[cfg(feature = "qemu-proof")]
+    proof::runtime_timed_out();
+    if !runtime.reclaim(timed) {
+        arch_fatal(b"LogOS vNext: runtime reclaim");
+    }
+
+    let completed = runtime.submit().unwrap_or_else(|_| arch_fatal(b"LogOS vNext: runtime reuse"));
+    if !runtime.wait(completed, current_ticks().saturating_add(3)) {
+        arch_fatal(b"LogOS vNext: runtime wait");
+    }
+    sleep_current_for(3);
+    if !runtime.complete(completed) {
+        arch_fatal(b"LogOS vNext: runtime complete");
+    }
+    #[cfg(feature = "qemu-proof")]
+    proof::runtime_completed();
+    if !runtime.reclaim(completed) {
+        arch_fatal(b"LogOS vNext: runtime reclaim");
+    }
+
+    let replacement =
+        runtime.submit().unwrap_or_else(|_| arch_fatal(b"LogOS vNext: runtime reuse"));
+    if replacement.slot() != timed.slot() || replacement.generation() == timed.generation() {
+        arch_fatal(b"LogOS vNext: runtime generation");
+    }
+    if !runtime.cancel(replacement) || !runtime.reclaim(replacement) {
+        arch_fatal(b"LogOS vNext: runtime cancel");
+    }
+    #[cfg(feature = "qemu-proof")]
+    proof::runtime_slot_reused();
+
     loop {
         sleep_current_for(3);
         #[cfg(feature = "qemu-proof")]
@@ -523,6 +567,11 @@ pub fn sleep_current_for(ticks: u64) {
 #[cfg_attr(not(feature = "qemu-proof"), allow(dead_code))]
 pub(crate) fn current_cpu() -> usize {
     arch::current_cpu()
+}
+
+#[cfg(target_os = "uefi")]
+fn current_ticks() -> u64 {
+    arch::current_ticks()
 }
 
 #[cfg(target_os = "uefi")]

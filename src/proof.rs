@@ -12,6 +12,9 @@ static BLOCK_RESUMED: AtomicBool = AtomicBool::new(false);
 static WAKE_DONE: AtomicBool = AtomicBool::new(false);
 static HANDOFF_STARTED: AtomicBool = AtomicBool::new(false);
 static RUNTIME_WAKE_CYCLES: AtomicU64 = AtomicU64::new(0);
+static RUNTIME_TIMED_OUT: AtomicBool = AtomicBool::new(false);
+static RUNTIME_COMPLETED: AtomicBool = AtomicBool::new(false);
+static RUNTIME_SLOT_REUSED: AtomicBool = AtomicBool::new(false);
 static PASSED: AtomicBool = AtomicBool::new(false);
 static REPORTED: AtomicBool = AtomicBool::new(false);
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
@@ -40,6 +43,18 @@ pub fn runtime_wait_resumed() {
     RUNTIME_WAKE_CYCLES.fetch_add(1, Ordering::Relaxed);
 }
 
+pub fn runtime_timed_out() {
+    RUNTIME_TIMED_OUT.store(true, Ordering::Release);
+}
+
+pub fn runtime_completed() {
+    RUNTIME_COMPLETED.store(true, Ordering::Release);
+}
+
+pub fn runtime_slot_reused() {
+    RUNTIME_SLOT_REUSED.store(true, Ordering::Release);
+}
+
 pub fn observe(cpu: usize) {
     if PASSED.load(Ordering::Acquire) {
         if cpu == 0 && !REPORTED.swap(true, Ordering::AcqRel) {
@@ -58,6 +73,9 @@ pub fn observe(cpu: usize) {
         && switches > 20
         && HANDOFF_STARTED.load(Ordering::Acquire)
         && RUNTIME_WAKE_CYCLES.load(Ordering::Acquire) >= 3
+        && RUNTIME_TIMED_OUT.load(Ordering::Acquire)
+        && RUNTIME_COMPLETED.load(Ordering::Acquire)
+        && RUNTIME_SLOT_REUSED.load(Ordering::Acquire)
         && BLOCK_RESUMED.load(Ordering::Acquire)
         && WAKE_DONE.load(Ordering::Acquire)
         && wake_cpus_differ

@@ -12,6 +12,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Scheduler | `Scheduler` | eight generation-safe slots, atomic lifecycle/wake word, CAS `Runnable → Running`, no task-body lock |
 | Task primitives | `spawn`, `wake`, `yield_current`, `block_current`, `reclaim_completed` | explicit runnable/blocked/completed states and cheap wake-pending race handling |
 | Timed wait | `sleep_current_for`, `wake_due` | one fixed deadline per slot; explicit wake cancels the deadline and BSP timer scans remain bounded |
+| Runtime operations | `runtime::Runtime` | two fixed operation slots with explicit ready/waiting/complete/cancelled/timed-out states and generation-safe reclamation |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
 | Runtime handoff | `handoff_to_runtime` | registers one root `TaskEntry`; the scheduler starts it through the normal context path |
 | Proof workload | `qemu-proof` feature | assembly CPU-bound canaries, timer/switch counters, cross-CPU block/wake, structured PASS |
@@ -21,7 +22,8 @@ sequential INIT/SIPI/SIPI. x2APIC IDs, malformed topology, more than eight CPUs,
 IPIs for wakeups, affinity, priorities, AVX/XSAVE, user mode, Runtime, services, and IPC are not
 part of this milestone.
 
-The handoff is only a root task registration. Core does not inspect, schedule, or orchestrate Runtime
-state; future Runtime code replaces the single entry function and continues to use the same scheduler.
+The handoff registers one root task. That task owns the first fixed Runtime operation table; Core does
+not inspect, schedule, or orchestrate Runtime state. Runtime operations use the scheduler's sleep and
+wake primitives but retain their own deadlines, terminal states, and generation checks.
 
 `v1_docs/` is historical and is not an active architecture contract.
