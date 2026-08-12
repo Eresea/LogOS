@@ -31,7 +31,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Health service | `health::HealthService` | one in-process fixed command/response mailbox for `Ping`; restart rejects the old completion and caller explicitly retries |
 | Terminal ABI | `logos-abi` | fixed semantic input, session stream, cell-diff render, endpoint identity, service identities, capabilities, and bounded control-plane shapes |
 | IPC mechanics | `logos-abi::SharedIpc` + `ipc::BoundedQueue` | fixed SPSC rings are usable by kernel and services, fit bounded endpoint pages, and report full/empty/stale/disconnected outcomes without allocation or serialization |
-| Input service model | `logos-input::InputDecoder` | PS/2 Set-2 bytes become semantic key events and committed text with bounded modifiers and layout state |
+| Input service | `services/images/src/input` + `logos-input::InputDecoder` | consumes the Input-only PS/2 byte mapping, produces semantic key/text messages on the Input→Terminal ring, and owns modifier/layout state |
 | Terminal service model | `logos-terminal::Terminal` | bounded 160×100 cell state, 2,048-line scroll count, parser parameters, alternate screen, SGR, cursor/edit/erase controls, and dirty-cell output |
 | Display state | `display::Display` | validates cell diffs, dimensions, positions, endpoint generations, and dirty-cell rasterization through the fixed glyph cache |
 | Session service model | `logos-session::Session` | bounded line editing, history, environment, four-stage pipelines, eight child slots, and volatile redirection files |
