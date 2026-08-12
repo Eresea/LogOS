@@ -8,7 +8,8 @@ Accepted
 
 The five service binaries are built as `no_std` ELF executables for the
 official `x86_64-unknown-none` target and linked as fixed-address `ET_EXEC`
-images at `0x400000`. `scripts/build-services.ps1` emits the fixed ESP layout
+images at `0x0000_0080_0000_0000`, outside the inherited low kernel mapping.
+`scripts/build-services.ps1` emits the fixed ESP layout
 under `build/esp/EFI/LOGOS/` and rejects missing, non-ELF, or oversized
 artifacts.
 

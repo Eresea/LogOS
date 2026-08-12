@@ -5,7 +5,7 @@ use crate::{
     loader::{LoadedImage, LoadedPage, MAX_LOAD_PAGES, PAGE_SIZE},
 };
 
-#[cfg(test)]
+#[cfg(any(test, target_os = "uefi"))]
 const ENTRY_COUNT: usize = 512;
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
@@ -36,6 +36,10 @@ pub trait PageTableMemory {
         index: usize,
         value: u64,
     ) -> Result<(), PageTableError>;
+
+    fn seed_kernel_root(&mut self, _root: FrameAddress) -> Result<(), PageTableError> {
+        Ok(())
+    }
 }
 
 pub struct PageTableBuilder {
@@ -58,6 +62,10 @@ impl PageTableBuilder {
         let mut builder =
             Self { frames: [None; MAX_PAGE_TABLE_FRAMES], count: 1, root, mapped_pages: 0 };
         builder.frames[0] = Some(root);
+        if memory.seed_kernel_root(root).is_err() {
+            builder.reclaim(pool, memory);
+            return Err(PageTableError::Memory);
+        }
         Ok(builder)
     }
 
@@ -190,6 +198,101 @@ fn map_pool_error(error: FramePoolError) -> PageTableError {
     match error {
         FramePoolError::Exhausted => PageTableError::Exhausted,
         FramePoolError::InvalidMap => PageTableError::Memory,
+    }
+}
+
+#[cfg(target_os = "uefi")]
+/// Identity-mapped page-table and image memory access used after UEFI exits.
+///
+/// UEFI leaves the kernel's current identity mappings active while this
+/// adapter constructs the first service roots. Every frame passed to it comes
+/// from the retained conventional-memory map and must remain reserved.
+pub struct IdentityPageTableMemory;
+
+#[cfg(target_os = "uefi")]
+impl IdentityPageTableMemory {
+    const fn table(frame: FrameAddress) -> *mut [u64; ENTRY_COUNT] {
+        frame.raw() as usize as *mut [u64; ENTRY_COUNT]
+    }
+
+    fn valid_index(index: usize) -> Result<(), PageTableError> {
+        (index < ENTRY_COUNT).then_some(()).ok_or(PageTableError::Memory)
+    }
+}
+
+#[cfg(target_os = "uefi")]
+impl PageTableMemory for IdentityPageTableMemory {
+    fn clear(&mut self, frame: FrameAddress) -> Result<(), PageTableError> {
+        if frame.raw() == 0 || frame.raw() & (PAGE_SIZE as u64 - 1) != 0 {
+            return Err(PageTableError::Memory);
+        }
+        // SAFETY: The frame is reserved by FramePool and identity-mapped by
+        // the active kernel page tables during this bootstrap phase.
+        unsafe { core::ptr::write_bytes(Self::table(frame).cast::<u8>(), 0, PAGE_SIZE) };
+        Ok(())
+    }
+
+    fn read(&self, frame: FrameAddress, index: usize) -> Result<u64, PageTableError> {
+        Self::valid_index(index)?;
+        // SAFETY: See `clear`; the table frame remains reserved and mapped.
+        Ok(unsafe { (*Self::table(frame))[index] })
+    }
+
+    fn write(
+        &mut self,
+        frame: FrameAddress,
+        index: usize,
+        value: u64,
+    ) -> Result<(), PageTableError> {
+        Self::valid_index(index)?;
+        // SAFETY: See `clear`; the table frame remains reserved and mapped.
+        unsafe { (*Self::table(frame))[index] = value };
+        Ok(())
+    }
+
+    fn seed_kernel_root(&mut self, root: FrameAddress) -> Result<(), PageTableError> {
+        let source = crate::arch::current_cr3() as u64 & ADDRESS_MASK;
+        if source == 0 || source == root.raw() {
+            return Err(PageTableError::Memory);
+        }
+        // SAFETY: `source` is the active CR3 root; `root` is a newly allocated
+        // reserved frame. Both are identity-mapped during bootstrap.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                source as *const u64,
+                Self::table(root).cast::<u64>(),
+                ENTRY_COUNT,
+            )
+        };
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "uefi")]
+impl crate::loader::PageSink for IdentityPageTableMemory {
+    fn clear(&mut self, frame: FrameAddress) -> Result<(), crate::loader::LoadError> {
+        <Self as PageTableMemory>::clear(self, frame).map_err(|_| crate::loader::LoadError::Write)
+    }
+
+    fn write(
+        &mut self,
+        frame: FrameAddress,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), crate::loader::LoadError> {
+        if offset >= PAGE_SIZE || bytes.len() > PAGE_SIZE - offset {
+            return Err(crate::loader::LoadError::Write);
+        }
+        // SAFETY: The frame is reserved and identity-mapped; the loader only
+        // supplies page-local ranges.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                (frame.raw() as usize + offset) as *mut u8,
+                bytes.len(),
+            )
+        };
+        Ok(())
     }
 }
 
