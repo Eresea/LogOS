@@ -67,14 +67,17 @@ impl Display {
         {
             return Err(DisplayError::InvalidMessage);
         }
-        if message.kind == MessageKind::FullRedraw {
-            self.cells.fill(Cell::EMPTY);
-        }
         for index in 0..message.count as usize {
             let position = usize::from(message.positions[index]);
             if position >= rows * MAX_COLUMNS || position % MAX_COLUMNS >= columns {
                 return Err(DisplayError::InvalidMessage);
             }
+        }
+        if message.kind == MessageKind::FullRedraw {
+            self.cells.fill(Cell::EMPTY);
+        }
+        for index in 0..message.count as usize {
+            let position = usize::from(message.positions[index]);
             self.cells[position] = message.cells[index];
         }
         self.columns = columns;
@@ -118,5 +121,30 @@ mod tests {
             display.apply(6, &RenderMessage::empty(MessageKind::RenderCells)),
             Err(DisplayError::StaleGeneration)
         );
+    }
+
+    #[test]
+    fn malformed_render_is_atomic() {
+        let mut display = Display::new(7);
+        let mut valid = RenderMessage::empty(MessageKind::RenderCells);
+        valid.columns = 80;
+        valid.rows = 25;
+        valid.count = 1;
+        valid.positions[0] = 0;
+        valid.cells[0].codepoint = b'A' as u32;
+        display.apply(7, &valid).unwrap();
+        let applied = display.applied_cells();
+
+        let mut invalid = RenderMessage::empty(MessageKind::FullRedraw);
+        invalid.columns = 80;
+        invalid.rows = 25;
+        invalid.count = 2;
+        invalid.positions[0] = 0;
+        invalid.positions[1] = (25 * MAX_COLUMNS) as u16;
+        invalid.cells[0].codepoint = b'X' as u32;
+
+        assert_eq!(display.apply(7, &invalid), Err(DisplayError::InvalidMessage));
+        assert_eq!(display.cell(0, 0).unwrap().codepoint, b'A' as u32);
+        assert_eq!(display.applied_cells(), applied);
     }
 }
