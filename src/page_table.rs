@@ -143,6 +143,19 @@ impl PageTableBuilder {
         Ok(())
     }
 
+    pub fn map_raw_page<M: PageTableMemory>(
+        &mut self,
+        virtual_address: usize,
+        frame: FrameAddress,
+        flags: crate::process::MappingFlags,
+        pool: &mut FramePool,
+        memory: &mut M,
+    ) -> Result<(), PageTableError> {
+        let page = LoadedPage::from_parts(virtual_address, frame, flags)
+            .ok_or(PageTableError::InvalidMapping)?;
+        self.map_page(page, pool, memory)
+    }
+
     pub fn reclaim<M: PageTableMemory>(&mut self, pool: &mut FramePool, _memory: &mut M) {
         for frame in self.frames[..self.count].iter().flatten() {
             let _ = pool.release(*frame);

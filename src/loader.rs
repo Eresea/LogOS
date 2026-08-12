@@ -16,6 +16,18 @@ pub struct LoadedPage {
 }
 
 impl LoadedPage {
+    pub(crate) fn from_parts(
+        virtual_address: usize,
+        frame: FrameAddress,
+        flags: MappingFlags,
+    ) -> Option<Self> {
+        if virtual_address & (PAGE_SIZE - 1) == 0 {
+            Some(Self { virtual_address, frame, flags })
+        } else {
+            None
+        }
+    }
+
     pub const fn virtual_address(self) -> usize {
         self.virtual_address
     }

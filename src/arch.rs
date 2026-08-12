@@ -292,6 +292,15 @@ pub fn boot() -> Status {
                 crate::service_runtime::ServiceRuntimeError::Startup(_) => {
                     fatal(b"LogOS vNext: service startup")
                 }
+                crate::service_runtime::ServiceRuntimeError::Ipc(_) => {
+                    fatal(b"LogOS vNext: service IPC pages")
+                }
+                crate::service_runtime::ServiceRuntimeError::IpcMapping(_) => {
+                    fatal(b"LogOS vNext: service IPC mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::IpcProcess(_) => {
+                    fatal(b"LogOS vNext: service IPC process")
+                }
             },
         );
         let runtime = &*core::ptr::addr_of!(SERVICE_RUNTIME);

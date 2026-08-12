@@ -9,9 +9,11 @@ use crate::{
     loader::{LoadError, LoadedImage},
     page_table::{IdentityPageTableMemory, PageTableBuilder, PageTableError},
     process::{
-        AddressSpaceRoot, Capabilities, ProcessError, ProcessHandle, UserLaunch, VirtualMapping,
+        AddressSpaceRoot, Capabilities, MappingFlags, ProcessError, ProcessHandle, UserLaunch,
+        VirtualMapping,
     },
     service_images::SERVICE_IMAGES,
+    service_ipc::{IpcError, ServiceIpcGraph},
     service_loader::ServiceImageBundle,
     service_startup::ServiceStartup,
 };
@@ -28,6 +30,9 @@ pub enum ServiceRuntimeError {
     PageTableMap(PageTableError),
     Process(ProcessError),
     Startup(crate::service_startup::StartupError),
+    Ipc(IpcError),
+    IpcMapping(PageTableError),
+    IpcProcess(ProcessError),
 }
 
 pub struct ServiceRuntime {
@@ -38,6 +43,7 @@ pub struct ServiceRuntime {
     processes: crate::process::ProcessTable,
     launches: [Option<(ProcessHandle, UserLaunch)>; SERVICE_COUNT],
     startup: ServiceStartup,
+    ipc: Option<ServiceIpcGraph>,
 }
 
 impl ServiceRuntime {
@@ -56,6 +62,7 @@ impl ServiceRuntime {
             processes: crate::process::ProcessTable::new(),
             launches: [None; SERVICE_COUNT],
             startup: ServiceStartup::new(),
+            ipc: None,
         }
     }
 
@@ -118,7 +125,42 @@ impl ServiceRuntime {
             self.table_ready[index] = true;
             self.startup.mark_address_space(service).map_err(ServiceRuntimeError::Startup)?;
             self.startup.mark_process(service).map_err(ServiceRuntimeError::Startup)?;
-            self.startup.mark_launch_ready(service).map_err(ServiceRuntimeError::Startup)?;
+        }
+        let mut memory = IdentityPageTableMemory;
+        let graph = ServiceIpcGraph::allocate(&mut self.frame_pool, &mut memory)
+            .map_err(ServiceRuntimeError::Ipc)?;
+        for endpoint_index in 0..graph.count() {
+            let endpoint = graph
+                .endpoint(endpoint_index)
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?;
+            for service in [endpoint.producer(), endpoint.consumer()] {
+                let index = service_index(service);
+                let Some((process, _)) = self.launch(service) else {
+                    return Err(ServiceRuntimeError::IpcProcess(ProcessError::InvalidHandle));
+                };
+                let tables = unsafe { self.tables[index].assume_init_mut() };
+                tables
+                    .map_raw_page(
+                        endpoint.virtual_address(),
+                        endpoint.frame(),
+                        MappingFlags::DATA,
+                        &mut self.frame_pool,
+                        &mut memory,
+                    )
+                    .map_err(ServiceRuntimeError::IpcMapping)?;
+                let mapping = VirtualMapping::new(
+                    endpoint.virtual_address(),
+                    endpoint.frame().raw() as usize,
+                    1,
+                    MappingFlags::DATA,
+                )
+                .ok_or(ServiceRuntimeError::IpcProcess(ProcessError::AddressSpace))?;
+                self.processes.map(process, mapping).map_err(ServiceRuntimeError::IpcProcess)?;
+            }
+        }
+        self.ipc = Some(graph);
+        for spec in SERVICE_IMAGES {
+            self.startup.mark_launch_ready(spec.service()).map_err(ServiceRuntimeError::Startup)?;
         }
         Ok(())
     }
