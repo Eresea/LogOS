@@ -3,9 +3,20 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
-use uefi::{boot, prelude::*, proto::pi::mp::MpServices};
+use uefi::{
+    boot,
+    mem::memory_map::MemoryMap as UefiMemoryMap,
+    prelude::*,
+    proto::{
+        console::gop::{GraphicsOutput, PixelFormat as UefiPixelFormat},
+        pi::mp::MpServices,
+    },
+};
 
-use crate::{MAX_CPUS, SCHEDULER};
+use crate::{
+    MAX_CPUS, SCHEDULER,
+    boot_resources::{BootResources, FramebufferInfo, MemoryDescriptor, MemoryMap, PixelFormat},
+};
 
 const DEBUG_PORT: u16 = 0xe9;
 const APIC_BASE_MSR: u32 = 0x1b;
@@ -48,6 +59,7 @@ static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
 static APIC_TIMER_COUNT: AtomicU32 = AtomicU32::new(10_000_000);
 static APIC_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 static TRAMPOLINE_PAGE: AtomicUsize = AtomicUsize::new(0);
+static mut BOOT_RESOURCES: Option<BootResources> = None;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -195,11 +207,81 @@ pub fn boot() -> Status {
     measure_tsc();
     stage_trampoline();
     install_cpu(0);
-    let _memory_map = unsafe { boot::exit_boot_services(None) };
+    let framebuffer = capture_gop();
+    let memory_map = unsafe { boot::exit_boot_services(None) };
+    publish_boot_resources(memory_map, framebuffer);
     initialize_post_uefi(cpu_count);
     handoff_to_runtime();
     debug_line(b"LogOS vNext: core ready");
     enter_scheduler(0)
+}
+
+fn capture_gop() -> FramebufferInfo {
+    let handle = boot::get_handle_for_protocol::<GraphicsOutput>()
+        .unwrap_or_else(|_| fatal(b"LogOS vNext: GOP unavailable"));
+    let mut gop = boot::open_protocol_exclusive::<GraphicsOutput>(handle)
+        .unwrap_or_else(|_| fatal(b"LogOS vNext: GOP open"));
+    let mut selected: Option<(usize, uefi::proto::console::gop::Mode, PixelFormat)> = None;
+    for mode in gop.modes() {
+        let info = mode.info();
+        let (width, height) = info.resolution();
+        let format = match info.pixel_format() {
+            UefiPixelFormat::Rgb => PixelFormat::Rgb8,
+            UefiPixelFormat::Bgr => PixelFormat::Bgr8,
+            UefiPixelFormat::Bitmask | UefiPixelFormat::BltOnly => continue,
+        };
+        let Some(bytes) = (height as u64)
+            .checked_mul(info.stride() as u64)
+            .and_then(|pixels| pixels.checked_mul(4))
+        else {
+            continue;
+        };
+        if bytes > logos_abi::MAX_FRAMEBUFFER_BYTES as u64 {
+            continue;
+        }
+        let candidate = (width.saturating_mul(height), mode, format);
+        if selected.as_ref().is_none_or(|current| candidate.0 > current.0) {
+            selected = Some(candidate);
+        }
+    }
+    let Some((_, mode, format)) = selected else { fatal(b"LogOS vNext: GOP mode capacity") };
+    gop.set_mode(&mode).unwrap_or_else(|_| fatal(b"LogOS vNext: GOP mode"));
+    let info = gop.current_mode_info();
+    let (width, height) = info.resolution();
+    let mut framebuffer = gop.frame_buffer();
+    FramebufferInfo::new(
+        framebuffer.as_mut_ptr() as u64,
+        framebuffer.size() as u64,
+        width as u32,
+        height as u32,
+        info.stride() as u32,
+        format,
+    )
+    .unwrap_or_else(|| fatal(b"LogOS vNext: GOP metadata"))
+}
+
+fn publish_boot_resources(memory_map: impl UefiMemoryMap, framebuffer: FramebufferInfo) {
+    let mut copied = MemoryMap::new();
+    for descriptor in memory_map.entries() {
+        let entry = MemoryDescriptor::new(
+            descriptor.phys_start,
+            descriptor.page_count,
+            descriptor.ty == uefi::mem::memory_map::MemoryType::CONVENTIONAL,
+        )
+        .unwrap_or_else(|| fatal(b"LogOS vNext: memory map"));
+        copied.push(entry).unwrap_or_else(|_| fatal(b"LogOS vNext: memory map capacity"));
+    }
+    let mut resources = BootResources::new(copied, crate::boot_resources::KeyboardResource::PS2);
+    resources.publish_framebuffer(framebuffer);
+    unsafe {
+        BOOT_RESOURCES = Some(resources);
+    }
+    proof_line(b"LogOS vNext: boot resources ready");
+}
+
+#[allow(dead_code)]
+pub(crate) fn boot_resources() -> Option<BootResources> {
+    unsafe { BOOT_RESOURCES }
 }
 
 fn handoff_to_runtime() {

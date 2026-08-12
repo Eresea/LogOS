@@ -1,3 +1,5 @@
+#![no_std]
+
 //! Fixed wire shapes shared by the terminal services.
 //!
 //! These are deliberately boring `repr(C)` values.  Services exchange values
