@@ -19,3 +19,4 @@
 | [0015](0015-service-control-plane.md) | Accepted | Control operations use typed capability-gated syscalls; terminal data remains shared IPC |
 | [0016](0016-elf-page-admission.md) | Accepted | Validated ELF plans acquire bounded segment and stack frames with explicit rollback |
 | [0017](0017-fixed-glyph-cache.md) | Accepted | Display resolves scalars through a fixed 8×16 glyph cache with deterministic fallback |
+| [0018](0018-display-raster-boundary.md) | Accepted | Display owns dirty-cell rasterization and pixel format conversion; terminal remains cell-only |

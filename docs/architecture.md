@@ -10,6 +10,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Physical frames | `frame_pool` | fixed frame addresses from copied conventional memory, capped at 65,536 frames with explicit reuse/exhaustion |
 | Control plane | `syscall` + `logos-abi` | fixed scalar syscall requests, typed service-generation capabilities, and explicit status results |
 | ELF page admission | `loader` | maps validated segments and fixed user stacks to owned frames with bounded reclamation |
+| Font cache | `font` | fixed 8×16 scalar lookup, 1,024-entry cache, and deterministic replacement glyph |
 | Per-CPU state | `arch::CpuLocal` via `GS_BASE` | private scheduler/idle stacks, TSS ring-transition fallback, cursor/current task, ticks, online state |
 | Context boundary | `arch/context.rs` | timer, voluntary, ring-3 syscall dispatch, and user-fault entries save one GPR/RIP/RSP/RFLAGS/CS and x87/SSE frame shape |
 | Publication | `Scheduler::save_context` + `finish` | outgoing task is claimable only after context-save publication |
@@ -23,7 +24,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | IPC mechanics | `ipc::BoundedQueue` | fixed ring capacity, explicit full/empty outcomes, and doorbell edge notification; no allocation or serialization framework |
 | Input semantics | `input::InputDecoder` | PS/2 Set-2 bytes become semantic key events and committed text with bounded modifiers and layout state |
 | Terminal emulator | `terminal::Terminal` | bounded 160×100 cell state, 2,048-line scroll count, parser parameters, alternate screen, SGR, cursor/edit/erase controls, and dirty-cell output |
-| Display state | `display::Display` | validates cell diffs, dimensions, positions, and endpoint generations; pixel/font ownership remains outside this model |
+| Display state | `display::Display` | validates cell diffs, dimensions, positions, endpoint generations, and dirty-cell rasterization through the fixed glyph cache |
 | Session shell | `session::Session` | bounded line editing, history, environment, four-stage pipelines, eight child slots, and volatile redirection files |
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 16 validated mappings per process, typed capability authorization, and exit/fault/reclaim outcomes |
 | Service supervisor | `supervisor::ServiceSupervisor` | five-service lifecycle model, heartbeat timeouts, endpoint epochs, restart limits, and recovery transition |
