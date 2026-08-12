@@ -36,6 +36,7 @@ pub enum TaskState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpawnError {
     Capacity,
+    AddressSpace,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +82,7 @@ struct TaskSlot {
     wake_deadline: AtomicU64,
     saved_rsp: AtomicUsize,
     context_saved: AtomicBool,
+    address_space: AtomicUsize,
 }
 
 impl TaskSlot {
@@ -92,6 +94,7 @@ impl TaskSlot {
             wake_deadline: AtomicU64::new(NO_DEADLINE),
             saved_rsp: AtomicUsize::new(0),
             context_saved: AtomicBool::new(false),
+            address_space: AtomicUsize::new(0),
         }
     }
 }
@@ -149,6 +152,17 @@ impl Scheduler {
     }
 
     pub fn spawn(&self, entry: TaskEntry) -> Result<TaskHandle, SpawnError> {
+        self.spawn_with_address_space(entry, 0)
+    }
+
+    pub fn spawn_with_address_space(
+        &self,
+        entry: TaskEntry,
+        address_space: usize,
+    ) -> Result<TaskHandle, SpawnError> {
+        if address_space != 0 && address_space & 0xfff != 0 {
+            return Err(SpawnError::AddressSpace);
+        }
         for (index, slot) in self.tasks.iter().enumerate() {
             let old = slot.state.load(Ordering::Acquire);
             if state(old) != VACANT {
@@ -167,6 +181,7 @@ impl Scheduler {
             slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
             slot.saved_rsp.store(0, Ordering::Release);
             slot.context_saved.store(false, Ordering::Release);
+            slot.address_space.store(address_space, Ordering::Release);
             slot.state.store(pack(generation, RUNNABLE), Ordering::Release);
             return Ok(TaskHandle { slot: index as u8, generation });
         }
@@ -367,6 +382,7 @@ impl Scheduler {
             return false;
         }
         slot.entry.store(0, Ordering::Release);
+        slot.address_space.store(0, Ordering::Release);
         slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
         slot.saved_rsp.store(0, Ordering::Release);
         slot.context_saved.store(false, Ordering::Release);
@@ -443,6 +459,12 @@ impl Scheduler {
         }
         let pointer = slot.entry.load(Ordering::Acquire);
         (pointer != 0).then(|| unsafe { core::mem::transmute(pointer) })
+    }
+
+    pub fn address_space(&self, handle: TaskHandle) -> Option<usize> {
+        let slot = self.tasks.get(handle.slot as usize)?;
+        let word = slot.state.load(Ordering::Acquire);
+        (generation(word) == handle.generation).then(|| slot.address_space.load(Ordering::Acquire))
     }
 }
 
@@ -614,6 +636,21 @@ mod tests {
             assert!(scheduler.spawn(empty).is_ok());
         }
         assert_eq!(scheduler.spawn(empty), Err(SpawnError::Capacity));
+    }
+
+    #[test]
+    fn address_space_root_is_published_with_task_generation() {
+        let scheduler = Scheduler::new();
+        assert_eq!(scheduler.spawn_with_address_space(empty, 0x123), Err(SpawnError::AddressSpace));
+        let handle = scheduler.spawn_with_address_space(empty, 0x40_000).unwrap();
+        assert_eq!(scheduler.address_space(handle), Some(0x40_000));
+        scheduler.online_cpu(0);
+        assert_eq!(scheduler.claim_next(0), Some(handle));
+        assert_eq!(scheduler.address_space(handle), Some(0x40_000));
+        assert!(scheduler.save_context(handle, 0x5000));
+        assert!(scheduler.finish(handle, FinishState::Completed));
+        assert!(scheduler.reclaim_completed(handle));
+        assert_eq!(scheduler.address_space(handle), None);
     }
 
     #[test]

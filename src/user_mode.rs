@@ -57,7 +57,7 @@ pub(crate) fn spawn_proof() {
     register_proof_process();
     crate::arch_proof_line(b"LogOS vNext: user space ready");
     let handle = SCHEDULER
-        .spawn(user_task_entry)
+        .spawn_with_address_space(user_task_entry, USER_CR3.load(Ordering::Acquire))
         .unwrap_or_else(|_| crate::arch_fatal(b"LogOS vNext: user task capacity"));
     USER_TASK_RAW.store(handle.raw(), Ordering::Release);
 }
@@ -104,17 +104,13 @@ pub(crate) fn is_user_task(handle: TaskHandle) -> bool {
     handle.raw() == USER_TASK_RAW.load(Ordering::Acquire)
 }
 
-pub(crate) fn prepare_task(handle: TaskHandle) {
-    let root = if is_user_task(handle) {
-        USER_CR3.load(Ordering::Acquire)
-    } else {
-        KERNEL_CR3.load(Ordering::Acquire)
-    };
+pub(crate) fn prepare_address_space(root: usize) {
+    let root = if root == 0 { KERNEL_CR3.load(Ordering::Acquire) } else { root };
     switch_cr3(root);
 }
 
 pub(crate) fn prepare_kernel() {
-    switch_cr3(KERNEL_CR3.load(Ordering::Acquire));
+    prepare_address_space(0);
 }
 
 fn switch_cr3(root: usize) {
