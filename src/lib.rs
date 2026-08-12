@@ -5,6 +5,7 @@ extern crate std;
 
 pub mod boot_resources;
 pub mod display;
+pub mod font;
 pub mod frame_pool;
 pub mod input;
 pub mod ipc;
