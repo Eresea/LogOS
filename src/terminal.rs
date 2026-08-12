@@ -676,7 +676,7 @@ impl Terminal {
 
     /// Convert a semantic input event into the terminal's session byte stream.
     pub fn input(&self, event: &InputMessage) -> Option<StreamMessage> {
-        if event.kind == MessageKind::Text && event.text_bytes().is_some() {
+        if matches!(event.kind, MessageKind::Text | MessageKind::Paste) {
             let bytes = event.text_bytes()?;
             if self.modes.bracketed_paste && event.kind == MessageKind::Paste {
                 let mut stream = StreamMessage::empty(MessageKind::SessionInput);
@@ -823,11 +823,14 @@ mod tests {
 
     #[test]
     fn semantic_input_maps_to_session_bytes() {
-        let terminal = Terminal::new();
+        let mut terminal = Terminal::new();
         let key = InputMessage::key(KeyCode::Up, KeyState::Pressed, 0);
         assert_eq!(terminal.input(&key).unwrap().as_bytes(), Some(&b"\x1b[A"[..]));
         let text = InputMessage::text(b"abc").unwrap();
         assert_eq!(terminal.input(&text).unwrap().as_bytes(), Some(&b"abc"[..]));
+        terminal.feed(b"\x1b[?2004h");
+        let paste = InputMessage::paste(b"abc").unwrap();
+        assert_eq!(terminal.input(&paste).unwrap().as_bytes(), Some(&b"\x1b[200~abc\x1b[201~"[..]));
     }
 
     #[test]

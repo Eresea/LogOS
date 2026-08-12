@@ -140,13 +140,21 @@ impl InputMessage {
     }
 
     pub fn text(bytes: &[u8]) -> Option<Self> {
+        Self::text_kind(MessageKind::Text, bytes)
+    }
+
+    pub fn paste(bytes: &[u8]) -> Option<Self> {
+        Self::text_kind(MessageKind::Paste, bytes)
+    }
+
+    fn text_kind(kind: MessageKind, bytes: &[u8]) -> Option<Self> {
         if bytes.is_empty() || bytes.len() > MAX_TEXT_BYTES {
             return None;
         }
         let mut text = [0; MAX_TEXT_BYTES];
         text[..bytes.len()].copy_from_slice(bytes);
         Some(Self {
-            kind: MessageKind::Text,
+            kind,
             state: KeyState::Pressed,
             code: 0,
             modifiers: 0,
@@ -156,7 +164,8 @@ impl InputMessage {
     }
 
     pub fn text_bytes(&self) -> Option<&[u8]> {
-        (self.kind == MessageKind::Text && self.len as usize <= MAX_TEXT_BYTES)
+        (matches!(self.kind, MessageKind::Text | MessageKind::Paste)
+            && self.len as usize <= MAX_TEXT_BYTES)
             .then(|| &self.text[..self.len as usize])
     }
 }
@@ -281,6 +290,7 @@ mod tests {
     fn message_lengths_are_bounded() {
         assert!(InputMessage::text(&[b'a'; MAX_TEXT_BYTES]).is_some());
         assert!(InputMessage::text(&[b'a'; MAX_TEXT_BYTES + 1]).is_none());
+        assert_eq!(InputMessage::paste(b"abc").unwrap().text_bytes(), Some(&b"abc"[..]));
         assert!(
             StreamMessage::from_bytes(MessageKind::SessionOutput, &[0; MAX_MESSAGE_BYTES - 4])
                 .is_some()
