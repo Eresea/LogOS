@@ -19,14 +19,41 @@ pub enum OperationState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SubmitError {
+pub enum RuntimeError {
     Capacity,
+    InvalidOperation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationHandle {
     slot: u8,
     generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeCommand {
+    Submit,
+    Wait { handle: OperationHandle, deadline: u64 },
+    Complete { handle: OperationHandle },
+    Cancel { handle: OperationHandle },
+    Timeout { handle: OperationHandle, now: u64 },
+    Reclaim { handle: OperationHandle },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandError {
+    Busy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeResponse {
+    Submitted(OperationHandle),
+    Waiting(OperationHandle),
+    Completed(OperationHandle),
+    Cancelled(OperationHandle),
+    TimedOut(OperationHandle),
+    Reclaimed(OperationHandle),
+    Rejected(RuntimeError),
 }
 
 impl OperationHandle {
@@ -54,18 +81,82 @@ impl OperationSlot {
 
 pub struct Runtime {
     operations: [OperationSlot; MAX_OPERATIONS],
+    command: Option<RuntimeCommand>,
+    response: Option<RuntimeResponse>,
 }
 
 impl Runtime {
     pub const fn new() -> Self {
-        Self { operations: [const { OperationSlot::new() }; MAX_OPERATIONS] }
+        Self {
+            operations: [const { OperationSlot::new() }; MAX_OPERATIONS],
+            command: None,
+            response: None,
+        }
     }
 
-    pub fn submit(&mut self) -> Result<OperationHandle, SubmitError> {
+    pub fn submit(&mut self, command: RuntimeCommand) -> Result<(), CommandError> {
+        if self.command.is_some() || self.response.is_some() {
+            return Err(CommandError::Busy);
+        }
+        self.command = Some(command);
+        Ok(())
+    }
+
+    pub fn step(&mut self) -> bool {
+        let Some(command) = self.command.take() else { return false };
+        self.response = Some(match command {
+            RuntimeCommand::Submit => match self.start() {
+                Ok(handle) => RuntimeResponse::Submitted(handle),
+                Err(error) => RuntimeResponse::Rejected(error),
+            },
+            RuntimeCommand::Wait { handle, deadline } => {
+                if self.wait_operation(handle, deadline) {
+                    RuntimeResponse::Waiting(handle)
+                } else {
+                    RuntimeResponse::Rejected(RuntimeError::InvalidOperation)
+                }
+            }
+            RuntimeCommand::Complete { handle } => {
+                if self.complete_operation(handle) {
+                    RuntimeResponse::Completed(handle)
+                } else {
+                    RuntimeResponse::Rejected(RuntimeError::InvalidOperation)
+                }
+            }
+            RuntimeCommand::Cancel { handle } => {
+                if self.cancel_operation(handle) {
+                    RuntimeResponse::Cancelled(handle)
+                } else {
+                    RuntimeResponse::Rejected(RuntimeError::InvalidOperation)
+                }
+            }
+            RuntimeCommand::Timeout { handle, now } => {
+                if self.timeout_operation(handle, now) {
+                    RuntimeResponse::TimedOut(handle)
+                } else {
+                    RuntimeResponse::Rejected(RuntimeError::InvalidOperation)
+                }
+            }
+            RuntimeCommand::Reclaim { handle } => {
+                if self.reclaim_operation(handle) {
+                    RuntimeResponse::Reclaimed(handle)
+                } else {
+                    RuntimeResponse::Rejected(RuntimeError::InvalidOperation)
+                }
+            }
+        });
+        true
+    }
+
+    pub fn take_response(&mut self) -> Option<RuntimeResponse> {
+        self.response.take()
+    }
+
+    fn start(&mut self) -> Result<OperationHandle, RuntimeError> {
         let Some((slot, operation)) =
             self.operations.iter_mut().enumerate().find(|(_, operation)| operation.state == VACANT)
         else {
-            return Err(SubmitError::Capacity);
+            return Err(RuntimeError::Capacity);
         };
         operation.state = READY;
         operation.deadline = NO_DEADLINE;
@@ -87,7 +178,7 @@ impl Runtime {
         })
     }
 
-    pub fn wait(&mut self, handle: OperationHandle, deadline: u64) -> bool {
+    fn wait_operation(&mut self, handle: OperationHandle, deadline: u64) -> bool {
         let Some(operation) = self.current_mut(handle) else { return false };
         if operation.state != READY {
             return false;
@@ -97,7 +188,7 @@ impl Runtime {
         true
     }
 
-    pub fn complete(&mut self, handle: OperationHandle) -> bool {
+    fn complete_operation(&mut self, handle: OperationHandle) -> bool {
         let Some(operation) = self.current_mut(handle) else { return false };
         if operation.state != WAITING {
             return false;
@@ -107,7 +198,7 @@ impl Runtime {
         true
     }
 
-    pub fn cancel(&mut self, handle: OperationHandle) -> bool {
+    fn cancel_operation(&mut self, handle: OperationHandle) -> bool {
         let Some(operation) = self.current_mut(handle) else { return false };
         if !matches!(operation.state, READY | WAITING) {
             return false;
@@ -117,7 +208,7 @@ impl Runtime {
         true
     }
 
-    pub fn timeout(&mut self, handle: OperationHandle, now: u64) -> bool {
+    fn timeout_operation(&mut self, handle: OperationHandle, now: u64) -> bool {
         let Some(operation) = self.current_mut(handle) else { return false };
         if operation.state != WAITING || operation.deadline > now {
             return false;
@@ -127,7 +218,7 @@ impl Runtime {
         true
     }
 
-    pub fn reclaim(&mut self, handle: OperationHandle) -> bool {
+    fn reclaim_operation(&mut self, handle: OperationHandle) -> bool {
         let Some(operation) = self.current_mut(handle) else { return false };
         if !matches!(operation.state, COMPLETE | CANCELLED | TIMED_OUT) {
             return false;
@@ -163,34 +254,101 @@ mod tests {
     #[test]
     fn operations_are_bounded_and_generation_safe() {
         let mut runtime = Runtime::new();
-        let first = runtime.submit().unwrap();
-        assert_eq!(runtime.submit().unwrap().slot(), 1);
-        assert_eq!(runtime.submit(), Err(SubmitError::Capacity));
-        assert!(runtime.wait(first, 10));
-        assert!(runtime.complete(first));
+        let first = submit(&mut runtime);
+        let second = submit(&mut runtime);
+        assert_eq!(second.slot(), 1);
+        assert_eq!(
+            submit_response(&mut runtime, RuntimeCommand::Submit),
+            RuntimeResponse::Rejected(RuntimeError::Capacity)
+        );
+        assert_eq!(
+            submit_response(&mut runtime, RuntimeCommand::Wait { handle: first, deadline: 10 }),
+            RuntimeResponse::Waiting(first)
+        );
+        assert_eq!(
+            submit_response(&mut runtime, RuntimeCommand::Complete { handle: first }),
+            RuntimeResponse::Completed(first)
+        );
         assert_eq!(runtime.state(first), Some(OperationState::Complete));
-        assert!(runtime.reclaim(first));
-        let replacement = runtime.submit().unwrap();
+        assert_eq!(
+            submit_response(&mut runtime, RuntimeCommand::Reclaim { handle: first }),
+            RuntimeResponse::Reclaimed(first)
+        );
+        let replacement = submit(&mut runtime);
         assert_eq!(replacement.slot(), first.slot());
         assert_ne!(replacement.generation(), first.generation());
-        assert!(!runtime.cancel(first));
+        assert_eq!(
+            submit_response(&mut runtime, RuntimeCommand::Cancel { handle: first }),
+            RuntimeResponse::Rejected(RuntimeError::InvalidOperation)
+        );
     }
 
     #[test]
     fn timeout_and_cancel_are_terminal() {
         let mut runtime = Runtime::new();
-        let timed = runtime.submit().unwrap();
-        assert!(runtime.wait(timed, 10));
-        assert!(!runtime.timeout(timed, 9));
-        assert!(runtime.timeout(timed, 10));
+        let timed = submit(&mut runtime);
+        assert_eq!(
+            submit_response(&mut runtime, RuntimeCommand::Wait { handle: timed, deadline: 10 }),
+            RuntimeResponse::Waiting(timed)
+        );
+        assert_eq!(
+            submit_response(&mut runtime, RuntimeCommand::Timeout { handle: timed, now: 9 }),
+            RuntimeResponse::Rejected(RuntimeError::InvalidOperation)
+        );
+        assert_eq!(
+            submit_response(&mut runtime, RuntimeCommand::Timeout { handle: timed, now: 10 }),
+            RuntimeResponse::TimedOut(timed)
+        );
         assert_eq!(runtime.state(timed), Some(OperationState::TimedOut));
-        assert!(runtime.reclaim(timed));
+        assert_eq!(
+            submit_response(&mut runtime, RuntimeCommand::Reclaim { handle: timed }),
+            RuntimeResponse::Reclaimed(timed)
+        );
 
-        let cancelled = runtime.submit().unwrap();
-        assert!(runtime.wait(cancelled, 20));
-        assert!(runtime.cancel(cancelled));
+        let cancelled = submit(&mut runtime);
+        assert_eq!(
+            submit_response(&mut runtime, RuntimeCommand::Wait { handle: cancelled, deadline: 20 }),
+            RuntimeResponse::Waiting(cancelled)
+        );
+        assert_eq!(
+            submit_response(&mut runtime, RuntimeCommand::Cancel { handle: cancelled }),
+            RuntimeResponse::Cancelled(cancelled)
+        );
         assert_eq!(runtime.state(cancelled), Some(OperationState::Cancelled));
-        assert!(!runtime.timeout(cancelled, 20));
-        assert!(runtime.reclaim(cancelled));
+        assert_eq!(
+            submit_response(&mut runtime, RuntimeCommand::Timeout { handle: cancelled, now: 20 }),
+            RuntimeResponse::Rejected(RuntimeError::InvalidOperation)
+        );
+        assert_eq!(
+            submit_response(&mut runtime, RuntimeCommand::Reclaim { handle: cancelled }),
+            RuntimeResponse::Reclaimed(cancelled)
+        );
+    }
+
+    #[test]
+    fn mailbox_is_one_entry_and_response_must_be_drained() {
+        let mut runtime = Runtime::new();
+        assert!(runtime.submit(RuntimeCommand::Submit).is_ok());
+        assert_eq!(runtime.submit(RuntimeCommand::Submit), Err(CommandError::Busy));
+        assert!(runtime.step());
+        assert_eq!(runtime.submit(RuntimeCommand::Submit), Err(CommandError::Busy));
+        let Some(RuntimeResponse::Submitted(handle)) = runtime.take_response() else { panic!() };
+        assert_eq!(runtime.state(handle), Some(OperationState::Ready));
+        assert!(runtime.submit(RuntimeCommand::Cancel { handle }).is_ok());
+        assert!(runtime.step());
+        assert_eq!(runtime.take_response(), Some(RuntimeResponse::Cancelled(handle)));
+    }
+
+    fn submit(runtime: &mut Runtime) -> OperationHandle {
+        match submit_response(runtime, RuntimeCommand::Submit) {
+            RuntimeResponse::Submitted(handle) => handle,
+            _ => panic!(),
+        }
+    }
+
+    fn submit_response(runtime: &mut Runtime, command: RuntimeCommand) -> RuntimeResponse {
+        assert!(runtime.submit(command).is_ok());
+        assert!(runtime.step());
+        runtime.take_response().unwrap()
     }
 }

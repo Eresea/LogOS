@@ -13,8 +13,9 @@ Status: active preemptive SMP Core milestone.
   The proof exercises the root-task handoff, repeated cancellable timer waits, two non-yielding
   CPU-bound tasks, GPR/flags/XMM preservation, per-CPU timer ticks, repeated preemption, a bounded
   Runtime timeout/completion/cancel lifecycle with generation-safe slot reuse, a real completed
-  task reclaimed and replaced in the same scheduler slot with stale-handle rejection, and
-  the typed in-process Health Ping command/response and restart/retry path and blocked/wake
+  task reclaimed and replaced in the same scheduler slot with stale-handle rejection, the typed
+  in-process Runtime command/response lifecycle, and the typed in-process Health Ping
+  command/response and restart/retry path and blocked/wake
   (cross-CPU for SMP runs).
 - The local-APIC period is measured against the calibrated TSC on the BSP and each AP before its
   timer is enabled.

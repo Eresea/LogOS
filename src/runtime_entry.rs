@@ -1,7 +1,8 @@
 use crate::{
     arch_fatal, current_ticks,
     health::{CommandError, HealthCommand, HealthError, HealthResponse, HealthService},
-    runtime, sleep_current_for,
+    runtime::{CommandError as RuntimeCommandError, Runtime, RuntimeCommand, RuntimeResponse},
+    sleep_current_for,
 };
 
 #[cfg(feature = "qemu-proof")]
@@ -11,42 +12,68 @@ pub(crate) fn run() {
     #[cfg(feature = "qemu-proof")]
     proof::handoff_started();
 
-    let mut runtime = runtime::Runtime::new();
-    let timed = runtime.submit().unwrap_or_else(|_| arch_fatal(b"LogOS vNext: runtime capacity"));
+    let mut runtime = Runtime::new();
+    let timed = match send_runtime(&mut runtime, RuntimeCommand::Submit) {
+        RuntimeResponse::Submitted(handle) => handle,
+        _ => arch_fatal(b"LogOS vNext: runtime capacity"),
+    };
     let deadline = current_ticks().saturating_add(1);
-    if !runtime.wait(timed, deadline) {
+    if send_runtime(&mut runtime, RuntimeCommand::Wait { handle: timed, deadline })
+        != RuntimeResponse::Waiting(timed)
+    {
         arch_fatal(b"LogOS vNext: runtime wait");
     }
     sleep_current_for(3);
-    if !runtime.timeout(timed, current_ticks()) {
+    if send_runtime(&mut runtime, RuntimeCommand::Timeout { handle: timed, now: current_ticks() })
+        != RuntimeResponse::TimedOut(timed)
+    {
         arch_fatal(b"LogOS vNext: runtime timeout");
     }
     #[cfg(feature = "qemu-proof")]
     proof::runtime_timed_out();
-    if !runtime.reclaim(timed) {
+    if send_runtime(&mut runtime, RuntimeCommand::Reclaim { handle: timed })
+        != RuntimeResponse::Reclaimed(timed)
+    {
         arch_fatal(b"LogOS vNext: runtime reclaim");
     }
 
-    let completed = runtime.submit().unwrap_or_else(|_| arch_fatal(b"LogOS vNext: runtime reuse"));
-    if !runtime.wait(completed, current_ticks().saturating_add(3)) {
+    let completed = match send_runtime(&mut runtime, RuntimeCommand::Submit) {
+        RuntimeResponse::Submitted(handle) => handle,
+        _ => arch_fatal(b"LogOS vNext: runtime reuse"),
+    };
+    if send_runtime(
+        &mut runtime,
+        RuntimeCommand::Wait { handle: completed, deadline: current_ticks().saturating_add(3) },
+    ) != RuntimeResponse::Waiting(completed)
+    {
         arch_fatal(b"LogOS vNext: runtime wait");
     }
     sleep_current_for(3);
-    if !runtime.complete(completed) {
+    if send_runtime(&mut runtime, RuntimeCommand::Complete { handle: completed })
+        != RuntimeResponse::Completed(completed)
+    {
         arch_fatal(b"LogOS vNext: runtime complete");
     }
     #[cfg(feature = "qemu-proof")]
     proof::runtime_completed();
-    if !runtime.reclaim(completed) {
+    if send_runtime(&mut runtime, RuntimeCommand::Reclaim { handle: completed })
+        != RuntimeResponse::Reclaimed(completed)
+    {
         arch_fatal(b"LogOS vNext: runtime reclaim");
     }
 
-    let replacement =
-        runtime.submit().unwrap_or_else(|_| arch_fatal(b"LogOS vNext: runtime reuse"));
+    let replacement = match send_runtime(&mut runtime, RuntimeCommand::Submit) {
+        RuntimeResponse::Submitted(handle) => handle,
+        _ => arch_fatal(b"LogOS vNext: runtime reuse"),
+    };
     if replacement.slot() != timed.slot() || replacement.generation() == timed.generation() {
         arch_fatal(b"LogOS vNext: runtime generation");
     }
-    if !runtime.cancel(replacement) || !runtime.reclaim(replacement) {
+    if send_runtime(&mut runtime, RuntimeCommand::Cancel { handle: replacement })
+        != RuntimeResponse::Cancelled(replacement)
+        || send_runtime(&mut runtime, RuntimeCommand::Reclaim { handle: replacement })
+            != RuntimeResponse::Reclaimed(replacement)
+    {
         arch_fatal(b"LogOS vNext: runtime cancel");
     }
     #[cfg(feature = "qemu-proof")]
@@ -109,4 +136,14 @@ fn send_health(health: &mut HealthService, command: HealthCommand) -> HealthResp
         arch_fatal(b"LogOS vNext: health step");
     }
     health.take_response().unwrap_or_else(|| arch_fatal(b"LogOS vNext: health response"))
+}
+
+fn send_runtime(runtime: &mut Runtime, command: RuntimeCommand) -> RuntimeResponse {
+    if runtime.submit(command) == Err(RuntimeCommandError::Busy) {
+        arch_fatal(b"LogOS vNext: runtime mailbox");
+    }
+    if !runtime.step() {
+        arch_fatal(b"LogOS vNext: runtime step");
+    }
+    runtime.take_response().unwrap_or_else(|| arch_fatal(b"LogOS vNext: runtime response"))
 }
