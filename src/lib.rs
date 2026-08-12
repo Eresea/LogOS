@@ -3,7 +3,16 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod display;
+pub mod input;
+pub mod ipc;
+pub mod process;
 mod scheduler;
+pub mod session;
+pub mod supervisor;
+pub mod terminal;
+pub mod terminal_abi;
+pub mod terminal_stack;
 pub use scheduler::{
     FinishState, IDLE_STACK_SIZE, MAX_CPUS, MAX_TASKS, SCHEDULER, SCHEDULER_STACK_SIZE, Scheduler,
     SpawnError, TASK_STACK_SIZE, TaskEntry, TaskHandle, TaskState,
@@ -14,6 +23,10 @@ pub mod service_lifecycle;
 
 #[cfg(target_os = "uefi")]
 mod runtime_entry;
+
+#[cfg(target_os = "uefi")]
+#[allow(dead_code)]
+mod user_mode;
 
 #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
 mod proof;

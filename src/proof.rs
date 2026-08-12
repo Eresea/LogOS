@@ -1,5 +1,6 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+use crate::terminal_stack::TerminalStack;
 use crate::{MAX_CPUS, SCHEDULER, TaskEntry, TaskHandle, TaskState};
 
 static A_PROGRESS: AtomicU64 = AtomicU64::new(0);
@@ -24,9 +25,14 @@ static REPLACEMENT_RAN: AtomicBool = AtomicBool::new(false);
 static HEALTH_RESTARTED: AtomicBool = AtomicBool::new(false);
 static HEALTH_LATE_COMPLETION_REJECTED: AtomicBool = AtomicBool::new(false);
 static HEALTH_RETRY_COMPLETED: AtomicBool = AtomicBool::new(false);
+static TERMINAL_STARTED: AtomicBool = AtomicBool::new(false);
+static TERMINAL_RENDERED: AtomicBool = AtomicBool::new(false);
+static TERMINAL_INPUT: AtomicBool = AtomicBool::new(false);
+static TERMINAL_RESTARTED: AtomicBool = AtomicBool::new(false);
 static PASSED: AtomicBool = AtomicBool::new(false);
 static REPORTED: AtomicBool = AtomicBool::new(false);
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
+static mut TERMINAL_STACK: TerminalStack = TerminalStack::new();
 
 unsafe extern "C" {
     fn proof_task_a();
@@ -45,6 +51,31 @@ pub fn initialize(cpu_count: usize) {
     let completion = SCHEDULER.spawn(completion_task).expect("proof task capacity");
     COMPLETION_HANDLE.store(completion.raw(), Ordering::Release);
     SCHEDULER.spawn(reclaimer_task).expect("proof task capacity");
+}
+
+pub fn terminal_integration() {
+    let stack = unsafe { &mut *core::ptr::addr_of_mut!(TERMINAL_STACK) };
+    if stack.boot().is_err() {
+        crate::arch_fatal(b"LogOS vNext: terminal boot");
+    }
+    terminal_started();
+    if stack.display.size() != (80, 25)
+        || stack.display.cell(0, 0).map(|cell| cell.codepoint) != Some(b'l' as u32)
+    {
+        crate::arch_fatal(b"LogOS vNext: terminal render");
+    }
+    terminal_rendered();
+    if stack.feed_keyboard(&[0x1c]).is_err()
+        || stack.display.cell(7, 0).map(|cell| cell.codepoint) != Some(b'a' as u32)
+    {
+        crate::arch_fatal(b"LogOS vNext: terminal input");
+    }
+    terminal_input();
+    let old_generation = stack.terminal_endpoint.generation;
+    if stack.restart_terminal().is_err() || stack.terminal_endpoint.generation == old_generation {
+        crate::arch_fatal(b"LogOS vNext: terminal restart");
+    }
+    terminal_restarted();
 }
 
 pub fn handoff_started() {
@@ -83,6 +114,22 @@ pub fn health_retry_completed() {
     HEALTH_RETRY_COMPLETED.store(true, Ordering::Release);
 }
 
+pub fn terminal_started() {
+    TERMINAL_STARTED.store(true, Ordering::Release);
+}
+
+pub fn terminal_rendered() {
+    TERMINAL_RENDERED.store(true, Ordering::Release);
+}
+
+pub fn terminal_input() {
+    TERMINAL_INPUT.store(true, Ordering::Release);
+}
+
+pub fn terminal_restarted() {
+    TERMINAL_RESTARTED.store(true, Ordering::Release);
+}
+
 pub fn observe(cpu: usize) {
     if PASSED.load(Ordering::Acquire) {
         if cpu == 0 && !REPORTED.swap(true, Ordering::AcqRel) {
@@ -96,7 +143,7 @@ pub fn observe(cpu: usize) {
     let switches = (0..cpu_count).map(|index| SCHEDULER.switches(index).unwrap_or(0)).sum::<u64>();
     let wake_cpus_differ =
         cpu_count == 1 || BLOCK_CPU.load(Ordering::Acquire) != WAKE_CPU.load(Ordering::Acquire);
-    if timers
+    let conditions_met = timers
         && progress
         && switches > 20
         && HANDOFF_STARTED.load(Ordering::Acquire)
@@ -112,10 +159,16 @@ pub fn observe(cpu: usize) {
         && HEALTH_RESTARTED.load(Ordering::Acquire)
         && HEALTH_LATE_COMPLETION_REJECTED.load(Ordering::Acquire)
         && HEALTH_RETRY_COMPLETED.load(Ordering::Acquire)
+        && TERMINAL_STARTED.load(Ordering::Acquire)
+        && TERMINAL_RENDERED.load(Ordering::Acquire)
+        && TERMINAL_INPUT.load(Ordering::Acquire)
+        && TERMINAL_RESTARTED.load(Ordering::Acquire)
+        && crate::user_mode::syscalls() > 0
+        && crate::user_mode::fault_observed()
         && BLOCK_RESUMED.load(Ordering::Acquire)
         && WAKE_DONE.load(Ordering::Acquire)
-        && wake_cpus_differ
-    {
+        && wake_cpus_differ;
+    if conditions_met {
         PASSED.store(true, Ordering::Release);
         if cpu == 0 && !REPORTED.swap(true, Ordering::AcqRel) {
             crate::arch_proof_line(b"LogOS vNext: QEMU proof PASS");

@@ -29,10 +29,16 @@ const FX_CONTEXT_POINTER: usize = FX_STATE_SIZE;
 const GPR_WORDS: usize = 15;
 const VECTOR_OFFSET: usize = GPR_WORDS * 8;
 const IDT_ENTRIES: usize = 256;
+const USER_ENTRY_STACK_SIZE: usize = 16 * 1024;
+const KERNEL_CODE_SELECTOR: u16 = 0x08;
+const KERNEL_DATA_SELECTOR: u16 = 0x10;
+pub(crate) const USER_CODE_SELECTOR: u16 = 0x1b;
+pub(crate) const USER_DATA_SELECTOR: u16 = 0x23;
+const TSS_SELECTOR: u16 = 0x28;
 
-// Core tasks are ring-0 only: the hardware return frame carries RIP, CS, and
-// RFLAGS, while the flat kernel SS is implicit. The saved RSP is the canonical
-// frame pointer itself; no user-mode stack-segment frame is synthesized.
+// Core tasks normally run in ring 0. A bounded proof task may enter ring 3;
+// its active scheduler stack is also its TSS ring-transition stack so the
+// saved interrupt frame remains private to that task.
 
 static APIC: AtomicUsize = AtomicUsize::new(0);
 static TSC_PER_US: AtomicU64 = AtomicU64::new(1);
@@ -91,10 +97,39 @@ struct GdtPointer {
     base: u64,
 }
 
-static GDT: [u64; 3] = [0, 0x00af_9a00_0000_ffff, 0x00af_9200_0000_ffff];
-static mut CPU_GDTS: [[u64; 3]; MAX_CPUS] = [[0; 3]; MAX_CPUS];
+static GDT: [u64; 5] =
+    [0, 0x00af_9a00_0000_ffff, 0x00cf_9200_0000_ffff, 0x00af_fa00_0000_ffff, 0x00cf_f200_0000_ffff];
+static mut CPU_GDTS: [[u64; 7]; MAX_CPUS] = [[0; 7]; MAX_CPUS];
 static mut CPU_IDTS: [[IdtEntry; IDT_ENTRIES]; MAX_CPUS] =
     [[IdtEntry::MISSING; IDT_ENTRIES]; MAX_CPUS];
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct TaskStateSegment {
+    reserved: u32,
+    rsp: [u64; 3],
+    reserved_2: u64,
+    ist: [u64; 7],
+    reserved_3: u64,
+    reserved_4: u16,
+    iomap_base: u16,
+}
+
+impl TaskStateSegment {
+    const fn new() -> Self {
+        Self {
+            reserved: 0,
+            rsp: [0; 3],
+            reserved_2: 0,
+            ist: [0; 7],
+            reserved_3: 0,
+            reserved_4: 0,
+            iomap_base: core::mem::size_of::<Self>() as u16,
+        }
+    }
+}
+
+static mut CPU_TSS: [TaskStateSegment; MAX_CPUS] = [const { TaskStateSegment::new() }; MAX_CPUS];
 
 #[repr(C, align(16))]
 struct CpuStack<const N: usize>([u8; N]);
@@ -115,8 +150,10 @@ struct CpuLocal {
     current_generation: AtomicU64,
     tick_count: AtomicU64,
     switch_count: AtomicU64,
+    user_entry_stack_top: u64,
     scheduler_stack: CpuStack<{ crate::SCHEDULER_STACK_SIZE }>,
     idle_stack: CpuStack<{ crate::IDLE_STACK_SIZE }>,
+    user_entry_stack: CpuStack<USER_ENTRY_STACK_SIZE>,
 }
 
 impl CpuLocal {
@@ -134,8 +171,10 @@ impl CpuLocal {
             current_generation: AtomicU64::new(0),
             tick_count: AtomicU64::new(0),
             switch_count: AtomicU64::new(0),
+            user_entry_stack_top: 0,
             scheduler_stack: CpuStack([0; crate::SCHEDULER_STACK_SIZE]),
             idle_stack: CpuStack([0; crate::IDLE_STACK_SIZE]),
+            user_entry_stack: CpuStack([0; USER_ENTRY_STACK_SIZE]),
         }
     }
 
@@ -144,6 +183,7 @@ impl CpuLocal {
         self.cpu_index = index as u64;
         self.scheduler_stack_top = self.scheduler_stack.0.as_ptr_range().end as u64;
         self.idle_stack_top = self.idle_stack.0.as_ptr_range().end as u64;
+        self.user_entry_stack_top = self.user_entry_stack.0.as_ptr_range().end as u64;
     }
 }
 
@@ -316,7 +356,7 @@ fn install_cpu(index: usize) {
     }
 }
 
-fn current_cr3() -> usize {
+pub(crate) fn current_cr3() -> usize {
     let value: usize;
     unsafe { asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags)) };
     value
@@ -329,6 +369,8 @@ fn initialize_post_uefi(cpu_count: usize) {
     configure_sse();
     enable_local_apic();
     calibrate_timer();
+    #[cfg(feature = "qemu-proof")]
+    crate::proof::terminal_integration();
     start_aps(cpu_count);
     configure_timer();
     unsafe { CPU_LOCALS[0].online.store(true, Ordering::Release) };
@@ -347,6 +389,8 @@ fn initialize_post_uefi(cpu_count: usize) {
     }
     #[cfg(feature = "qemu-proof")]
     crate::proof::initialize(cpu_count);
+    #[cfg(feature = "qemu-proof")]
+    crate::user_mode::spawn_proof();
 }
 
 fn configure_timer() {
@@ -408,35 +452,79 @@ fn debug_line(message: &[u8]) {
 }
 
 fn install_gdt(cpu: usize) {
-    unsafe { CPU_GDTS[cpu].copy_from_slice(&GDT) };
+    unsafe {
+        CPU_GDTS[cpu][..GDT.len()].copy_from_slice(&GDT);
+        write_tss_rsp0(cpu, CPU_LOCALS[cpu].user_entry_stack_top);
+        let base = core::ptr::addr_of!(CPU_TSS[cpu]) as u64;
+        let limit = (core::mem::size_of::<TaskStateSegment>() - 1) as u64;
+        let low = (limit & 0xffff)
+            | ((base & 0x00ff_ffff) << 16)
+            | (0x89 << 40)
+            | ((limit & 0xf0000) << 32)
+            | ((base & 0xff00_0000) << 32);
+        CPU_GDTS[cpu][5] = low;
+        CPU_GDTS[cpu][6] = base >> 32;
+    }
     let pointer = GdtPointer {
-        limit: (core::mem::size_of::<[u64; 3]>() - 1) as u16,
+        limit: (core::mem::size_of::<[u64; 7]>() - 1) as u16,
         base: unsafe { CPU_GDTS[cpu].as_ptr() as u64 },
     };
     unsafe {
         asm!("lgdt [{}]", in(reg) &pointer);
         asm!(
-            "push 0x08",
+            "push {kernel_code}",
             "lea rax, [rip + 2f]",
             "push rax",
             "retfq",
             "2:",
-            "mov ax, 0x10",
+            "mov ax, {kernel_data}",
             "mov ds, ax",
             "mov es, ax",
             "mov ss, ax",
+            kernel_code = const KERNEL_CODE_SELECTOR,
+            kernel_data = const KERNEL_DATA_SELECTOR,
         );
+        asm!("mov ax, {tss}", "ltr ax", tss = const TSS_SELECTOR);
+    }
+}
+
+pub(crate) fn set_task_kernel_stack(cpu: usize, stack_top: usize) {
+    unsafe {
+        write_tss_rsp0(cpu, stack_top as u64);
+    }
+}
+
+unsafe fn write_tss_rsp0(cpu: usize, stack_top: u64) {
+    unsafe {
+        let tss = core::ptr::addr_of_mut!(CPU_TSS[cpu]).cast::<u8>();
+        core::ptr::write_unaligned(tss.add(4).cast::<u64>(), stack_top);
     }
 }
 
 fn install_idt(cpu: usize) {
     unsafe {
         let idt = &mut CPU_IDTS[cpu];
-        idt.fill(IdtEntry::new(default_interrupt as *const () as usize, 0x08, 0x8e));
-        idt[TIMER_VECTOR as usize] =
-            IdtEntry::new(context_timer_interrupt as *const () as usize, 0x08, 0x8e);
-        idt[SWITCH_VECTOR as usize] =
-            IdtEntry::new(context_switch_interrupt as *const () as usize, 0x08, 0x8e);
+        idt.fill(IdtEntry::new(
+            default_interrupt as *const () as usize,
+            KERNEL_CODE_SELECTOR,
+            0x8e,
+        ));
+        idt[TIMER_VECTOR as usize] = IdtEntry::new(
+            context_timer_interrupt as *const () as usize,
+            KERNEL_CODE_SELECTOR,
+            0x8e,
+        );
+        idt[SWITCH_VECTOR as usize] = IdtEntry::new(
+            context_switch_interrupt as *const () as usize,
+            KERNEL_CODE_SELECTOR,
+            0xee,
+        );
+        idt[6] =
+            IdtEntry::new(user_fault_no_error as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
+        idt[13] =
+            IdtEntry::new(user_gp_fault_error as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
+        idt[14] =
+            IdtEntry::new(user_pf_fault_error as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
     }
     load_idt(cpu);
 }
@@ -546,6 +634,9 @@ unsafe extern "C" {
     fn default_interrupt();
     fn context_timer_interrupt();
     fn context_switch_interrupt();
+    fn user_fault_no_error();
+    fn user_gp_fault_error();
+    fn user_pf_fault_error();
     fn task_bootstrap();
     fn ap_trampoline_start();
     fn ap_trampoline_end();

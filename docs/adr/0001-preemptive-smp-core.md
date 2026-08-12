@@ -33,6 +33,7 @@ narrow and xAPIC-only.
 
 ## Deferred
 
-Allocators, dynamic stacks, affinity, priorities, work stealing, wake IPIs, AVX/XSAVE, user mode,
-Runtime orchestration, services, IPC, capabilities, terminal, storage, and networking are outside
-Core. `v1_docs/` remains historical.
+Allocators, dynamic stacks, affinity, priorities, work stealing, wake IPIs, AVX/XSAVE, the general
+user process model, Runtime orchestration, services, IPC, capabilities, terminal, storage, and
+networking are outside Core. The fixed ring-3 proof boundary is recorded separately in ADR-0004.
+`v1_docs/` remains historical.
