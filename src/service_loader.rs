@@ -36,6 +36,16 @@ impl ServiceImageLocation {
         physical_address: usize,
         image_bytes: usize,
     ) -> Result<Self, ServiceLoadError> {
+        let allocation_bytes = align_up(image_bytes).ok_or(ServiceLoadError::InvalidAddress)?;
+        Self::with_allocation(service, physical_address, image_bytes, allocation_bytes)
+    }
+
+    fn with_allocation(
+        service: ServiceId,
+        physical_address: usize,
+        image_bytes: usize,
+        allocation_bytes: usize,
+    ) -> Result<Self, ServiceLoadError> {
         if physical_address == 0 || physical_address & (PAGE_SIZE - 1) != 0 {
             return Err(ServiceLoadError::InvalidAddress);
         }
@@ -45,7 +55,13 @@ impl ServiceImageLocation {
         if image_bytes > MAX_SERVICE_IMAGE_BYTES {
             return Err(ServiceLoadError::TooLarge);
         }
-        let allocation_bytes = align_up(image_bytes).ok_or(ServiceLoadError::InvalidAddress)?;
+        let minimum_allocation = align_up(image_bytes).ok_or(ServiceLoadError::InvalidAddress)?;
+        if allocation_bytes < minimum_allocation
+            || allocation_bytes & (PAGE_SIZE - 1) != 0
+            || allocation_bytes > MAX_SERVICE_IMAGE_BYTES
+        {
+            return Err(ServiceLoadError::InvalidAddress);
+        }
         physical_address.checked_add(allocation_bytes).ok_or(ServiceLoadError::InvalidAddress)?;
         Ok(Self { service, physical_address, image_bytes, allocation_bytes })
     }
@@ -115,6 +131,123 @@ impl Default for ServiceImageBundle {
     }
 }
 
+#[cfg(target_os = "uefi")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UefiImageError {
+    Firmware(uefi::Status),
+    Path,
+    NotRegularFile,
+    Service(ServiceLoadError),
+}
+
+#[cfg(target_os = "uefi")]
+/// Read every manifest image while UEFI services are still available.
+///
+/// Each file receives a bounded maximum allocation. The allocation remains
+/// identity-mapped and is represented by `ServiceImageBundle` after the UEFI
+/// handle is dropped.
+pub fn load_from_esp() -> Result<ServiceImageBundle, UefiImageError> {
+    use uefi::boot;
+
+    let mut filesystem = boot::get_image_file_system(boot::image_handle())
+        .map_err(|error| UefiImageError::Firmware(error.status()))?;
+    let mut root =
+        filesystem.open_volume().map_err(|error| UefiImageError::Firmware(error.status()))?;
+    let mut bundle = ServiceImageBundle::new();
+    for spec in SERVICE_IMAGES {
+        let pages = MAX_SERVICE_IMAGE_BYTES / PAGE_SIZE;
+        let allocation = boot::allocate_pages(
+            boot::AllocateType::AnyPages,
+            boot::MemoryType::LOADER_DATA,
+            pages,
+        )
+        .map_err(|error| {
+            free_bundle(&mut bundle);
+            UefiImageError::Firmware(error.status())
+        })?;
+        let allocation_bytes = pages * PAGE_SIZE;
+        let result = read_one_image(&mut root, spec, allocation, allocation_bytes);
+        match result {
+            Ok(location) => {
+                bundle.records[service_index(spec.service())] = Some(location);
+                bundle.count += 1;
+            }
+            Err(error) => {
+                let _ = unsafe { boot::free_pages(allocation, pages) };
+                free_bundle(&mut bundle);
+                return Err(error);
+            }
+        }
+    }
+    Ok(bundle)
+}
+
+#[cfg(target_os = "uefi")]
+fn read_one_image(
+    root: &mut uefi::proto::media::file::Directory,
+    spec: ServiceImageSpec,
+    allocation: core::ptr::NonNull<u8>,
+    allocation_bytes: usize,
+) -> Result<ServiceImageLocation, UefiImageError> {
+    use uefi::{
+        CStr16,
+        proto::media::file::{File, FileAttribute, FileMode},
+    };
+
+    let mut path = [0u16; 64];
+    let path_bytes = spec.path();
+    if path_bytes.len() + 1 > path.len() || path_bytes.iter().any(|byte| *byte > 0x7f) {
+        return Err(UefiImageError::Path);
+    }
+    for (index, byte) in path_bytes.iter().enumerate() {
+        path[index] = *byte as u16;
+    }
+    let path =
+        CStr16::from_u16_with_nul(&path[..=path_bytes.len()]).map_err(|_| UefiImageError::Path)?;
+    let file = root
+        .open(path, FileMode::Read, FileAttribute::empty())
+        .map_err(|error| UefiImageError::Firmware(error.status()))?;
+    let mut file = file.into_regular_file().ok_or(UefiImageError::NotRegularFile)?;
+    let buffer = unsafe { core::slice::from_raw_parts_mut(allocation.as_ptr(), allocation_bytes) };
+    let bytes = file.read(buffer).map_err(|error| UefiImageError::Firmware(error.status()))?;
+    if bytes == 0 {
+        return Err(UefiImageError::Service(ServiceLoadError::Empty));
+    }
+    if bytes == MAX_SERVICE_IMAGE_BYTES {
+        let mut extra = [0u8; 1];
+        let extra_bytes =
+            file.read(&mut extra).map_err(|error| UefiImageError::Firmware(error.status()))?;
+        if extra_bytes != 0 {
+            return Err(UefiImageError::Service(ServiceLoadError::TooLarge));
+        }
+    }
+    spec.validate_image(&buffer[..bytes])
+        .map_err(|error| UefiImageError::Service(ServiceLoadError::InvalidElf(error)))?;
+    ServiceImageLocation::with_allocation(
+        spec.service(),
+        allocation.as_ptr() as usize,
+        bytes,
+        allocation_bytes,
+    )
+    .map_err(UefiImageError::Service)
+}
+
+#[cfg(target_os = "uefi")]
+fn free_bundle(bundle: &mut ServiceImageBundle) {
+    use core::ptr::NonNull;
+    use uefi::boot;
+
+    for spec in SERVICE_IMAGES {
+        if let Some(location) = bundle.location(spec.service()) {
+            if let Some(pointer) = NonNull::new(location.physical_address() as *mut u8) {
+                let pages = location.allocation_bytes() / PAGE_SIZE;
+                let _ = unsafe { boot::free_pages(pointer, pages) };
+            }
+        }
+    }
+    bundle.clear();
+}
+
 const fn service_index(service: ServiceId) -> usize {
     match service {
         ServiceId::Input => 0,
@@ -162,6 +295,12 @@ mod tests {
         assert_eq!(location.physical_address(), 0x20_000);
         assert_eq!(location.image_bytes(), 128);
         assert_eq!(location.allocation_bytes(), PAGE_SIZE);
+        assert_eq!(
+            ServiceImageLocation::with_allocation(ServiceId::Input, 0x20_000, 128, PAGE_SIZE * 2)
+                .unwrap()
+                .allocation_bytes(),
+            PAGE_SIZE * 2
+        );
         assert_eq!(bundle.location(ServiceId::Input), Some(location));
         assert_eq!(bundle.count(), 1);
         assert!(!bundle.complete());
