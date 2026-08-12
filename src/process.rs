@@ -141,6 +141,7 @@ pub struct MappingFlags {
 impl MappingFlags {
     pub const CODE: Self = Self { user: true, writable: false, executable: true };
     pub const DATA: Self = Self { user: true, writable: true, executable: false };
+    pub const READ_ONLY_DATA: Self = Self { user: true, writable: false, executable: false };
 
     const fn valid(self) -> bool {
         self.user && !(self.writable && self.executable)

@@ -316,6 +316,12 @@ pub fn boot() -> Status {
                 crate::service_runtime::ServiceRuntimeError::FramebufferProcess(_) => {
                     fatal(b"LogOS vNext: framebuffer process mapping")
                 }
+                crate::service_runtime::ServiceRuntimeError::FramebufferConfig(_) => {
+                    fatal(b"LogOS vNext: framebuffer config mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::FramebufferConfigProcess(_) => {
+                    fatal(b"LogOS vNext: framebuffer config process mapping")
+                }
                 crate::service_runtime::ServiceRuntimeError::Keyboard(_) => {
                     fatal(b"LogOS vNext: keyboard mapping")
                 }

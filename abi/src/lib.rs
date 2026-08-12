@@ -35,6 +35,7 @@ pub const MAX_SERVICE_ENDPOINTS: usize = 32;
 pub const MAX_SERVICE_DATA_BYTES: usize = 1024 * 1024;
 pub const MAX_FRAMEBUFFER_BYTES: usize = 16 * 1024 * 1024;
 pub const DISPLAY_FRAMEBUFFER_BASE: usize = 0x0000_0100_1000_0000;
+pub const DISPLAY_CONFIG_BASE: usize = 0x0000_0100_1200_0000;
 pub const INPUT_KEYBOARD_RING_BASE: usize = 0x0000_0100_1100_0000;
 pub const KEYBOARD_RING_CAPACITY: usize = 256;
 pub const IPC_PAGE_BYTES: usize = 4096;
@@ -42,6 +43,35 @@ pub const MAX_IPC_BYTES: usize = 256;
 pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
 pub const MAX_GLYPH_CACHE: usize = 1024;
 pub const MAX_CAPABILITIES: usize = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum FramebufferFormat {
+    Bgr8 = 1,
+    Rgb8 = 2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct FramebufferConfig {
+    pub bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub format: FramebufferFormat,
+}
+
+impl FramebufferConfig {
+    pub const fn new(
+        bytes: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: FramebufferFormat,
+    ) -> Self {
+        Self { bytes, width, height, stride, format }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -668,6 +698,8 @@ impl<T: Copy, const N: usize> SharedIpc<T, N> {
 pub type InputIpc = SharedIpc<InputMessage, 32>;
 pub type RenderIpc = SharedIpc<RenderMessage, 1>;
 pub type StreamIpc = SharedIpc<IpcBytes, 8>;
+
+const _: () = assert!(core::mem::size_of::<FramebufferConfig>() <= IPC_PAGE_BYTES);
 
 #[cfg(test)]
 mod tests {

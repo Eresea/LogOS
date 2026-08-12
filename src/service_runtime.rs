@@ -35,6 +35,8 @@ pub enum ServiceRuntimeError {
     IpcProcess(ProcessError),
     Framebuffer(PageTableError),
     FramebufferProcess(ProcessError),
+    FramebufferConfig(PageTableError),
+    FramebufferConfigProcess(ProcessError),
     Keyboard(PageTableError),
     KeyboardProcess(ProcessError),
     TaskCapacity,
@@ -51,6 +53,7 @@ pub struct ServiceRuntime {
     launches: [Option<(ProcessHandle, UserLaunch)>; SERVICE_COUNT],
     startup: ServiceStartup,
     ipc: Option<ServiceIpcGraph>,
+    framebuffer_config_frame: Option<FrameAddress>,
     keyboard_frame: Option<FrameAddress>,
     tasks: [Option<crate::TaskHandle>; SERVICE_COUNT],
 }
@@ -72,6 +75,7 @@ impl ServiceRuntime {
             launches: [None; SERVICE_COUNT],
             startup: ServiceStartup::new(),
             ipc: None,
+            framebuffer_config_frame: None,
             keyboard_frame: None,
             tasks: [None; SERVICE_COUNT],
         }
@@ -171,7 +175,14 @@ impl ServiceRuntime {
             }
         }
         self.ipc = Some(graph);
-        self.map_framebuffer(resources.framebuffer().ok_or(ServiceRuntimeError::Resources)?)?;
+        let framebuffer = resources.framebuffer().ok_or(ServiceRuntimeError::Resources)?;
+        self.map_framebuffer(framebuffer)?;
+        let framebuffer_config_frame =
+            self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+        memory.clear(framebuffer_config_frame).map_err(ServiceRuntimeError::FramebufferConfig)?;
+        initialize_framebuffer_config(framebuffer_config_frame, framebuffer);
+        self.map_framebuffer_config(framebuffer_config_frame)?;
+        self.framebuffer_config_frame = Some(framebuffer_config_frame);
         let keyboard_frame =
             self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
         memory.clear(keyboard_frame).map_err(ServiceRuntimeError::Keyboard)?;
@@ -213,6 +224,11 @@ impl ServiceRuntime {
 
     pub(crate) fn keyboard_ring_address(&self) -> Option<usize> {
         self.keyboard_frame().map(|frame| frame.raw() as usize)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn framebuffer_config_frame(&self) -> Option<FrameAddress> {
+        self.framebuffer_config_frame
     }
 
     fn map_framebuffer(
@@ -287,6 +303,33 @@ impl ServiceRuntime {
         self.processes.map(process, mapping).map_err(ServiceRuntimeError::KeyboardProcess)
     }
 
+    fn map_framebuffer_config(&mut self, frame: FrameAddress) -> Result<(), ServiceRuntimeError> {
+        let service = ServiceId::Display;
+        let index = service_index(service);
+        let Some((process, _)) = self.launch(service) else {
+            return Err(ServiceRuntimeError::FramebufferConfigProcess(ProcessError::InvalidHandle));
+        };
+        let mut memory = IdentityPageTableMemory;
+        let tables = unsafe { self.tables[index].assume_init_mut() };
+        tables
+            .map_raw_page(
+                logos_abi::DISPLAY_CONFIG_BASE,
+                frame,
+                MappingFlags::READ_ONLY_DATA,
+                &mut self.frame_pool,
+                &mut memory,
+            )
+            .map_err(ServiceRuntimeError::FramebufferConfig)?;
+        let mapping = VirtualMapping::new(
+            logos_abi::DISPLAY_CONFIG_BASE,
+            frame.raw() as usize,
+            1,
+            MappingFlags::READ_ONLY_DATA,
+        )
+        .ok_or(ServiceRuntimeError::FramebufferConfigProcess(ProcessError::AddressSpace))?;
+        self.processes.map(process, mapping).map_err(ServiceRuntimeError::FramebufferConfigProcess)
+    }
+
     pub fn start_tasks(&mut self) -> Result<(), ServiceRuntimeError> {
         for spec in SERVICE_IMAGES {
             let service = spec.service();
@@ -357,6 +400,26 @@ fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint, index: usize) 
             _ => {}
         }
     }
+}
+
+fn initialize_framebuffer_config(
+    frame: FrameAddress,
+    framebuffer: crate::boot_resources::FramebufferInfo,
+) {
+    let format = match framebuffer.format() {
+        crate::boot_resources::PixelFormat::Bgr8 => logos_abi::FramebufferFormat::Bgr8,
+        crate::boot_resources::PixelFormat::Rgb8 => logos_abi::FramebufferFormat::Rgb8,
+    };
+    let config = logos_abi::FramebufferConfig::new(
+        framebuffer.bytes(),
+        framebuffer.width(),
+        framebuffer.height(),
+        framebuffer.stride(),
+        format,
+    );
+    // The frame is identity-mapped in the kernel root before it is mapped
+    // read-only by policy into the Display address space.
+    unsafe { (frame.raw() as usize as *mut logos_abi::FramebufferConfig).write(config) };
 }
 
 fn map_loaded_pages(
