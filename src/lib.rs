@@ -30,6 +30,7 @@ pub mod service_lifecycle;
 pub mod service_loader;
 #[cfg(target_os = "uefi")]
 mod service_runtime;
+pub mod service_startup;
 
 #[cfg(target_os = "uefi")]
 mod runtime_entry;

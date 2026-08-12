@@ -289,6 +289,9 @@ pub fn boot() -> Status {
                 crate::service_runtime::ServiceRuntimeError::Process(_) => {
                     fatal(b"LogOS vNext: service process")
                 }
+                crate::service_runtime::ServiceRuntimeError::Startup(_) => {
+                    fatal(b"LogOS vNext: service startup")
+                }
             },
         );
         let runtime = &*core::ptr::addr_of!(SERVICE_RUNTIME);
@@ -299,6 +302,9 @@ pub fn boot() -> Status {
             {
                 fatal(b"LogOS vNext: service root state");
             }
+        }
+        if !runtime.all_launch_ready() {
+            fatal(b"LogOS vNext: service launch barrier");
         }
     }
     proof_line(b"LogOS vNext: service address spaces ready");

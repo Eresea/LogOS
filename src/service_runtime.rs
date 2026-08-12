@@ -13,6 +13,7 @@ use crate::{
     },
     service_images::SERVICE_IMAGES,
     service_loader::ServiceImageBundle,
+    service_startup::ServiceStartup,
 };
 
 const SERVICE_COUNT: usize = SERVICE_IMAGES.len();
@@ -26,6 +27,7 @@ pub enum ServiceRuntimeError {
     PageTableRoot(PageTableError),
     PageTableMap(PageTableError),
     Process(ProcessError),
+    Startup(crate::service_startup::StartupError),
 }
 
 pub struct ServiceRuntime {
@@ -35,6 +37,7 @@ pub struct ServiceRuntime {
     table_ready: [bool; SERVICE_COUNT],
     processes: crate::process::ProcessTable,
     launches: [Option<(ProcessHandle, UserLaunch)>; SERVICE_COUNT],
+    startup: ServiceStartup,
 }
 
 impl ServiceRuntime {
@@ -52,6 +55,7 @@ impl ServiceRuntime {
             table_ready: [false; SERVICE_COUNT],
             processes: crate::process::ProcessTable::new(),
             launches: [None; SERVICE_COUNT],
+            startup: ServiceStartup::new(),
         }
     }
 
@@ -64,6 +68,7 @@ impl ServiceRuntime {
         for (index, spec) in SERVICE_IMAGES.iter().enumerate() {
             let service = spec.service();
             let image = unsafe { bundle.image(service) }.ok_or(ServiceRuntimeError::Image)?;
+            self.startup.mark_image(service).map_err(ServiceRuntimeError::Startup)?;
             let plan = spec.validate_image(image).map_err(|_| ServiceRuntimeError::Image)?;
             let loaded =
                 LoadedImage::load(plan, &mut self.frame_pool).map_err(ServiceRuntimeError::Load)?;
@@ -111,6 +116,9 @@ impl ServiceRuntime {
             self.images[index] = loaded;
             self.tables[index].write(tables);
             self.table_ready[index] = true;
+            self.startup.mark_address_space(service).map_err(ServiceRuntimeError::Startup)?;
+            self.startup.mark_process(service).map_err(ServiceRuntimeError::Startup)?;
+            self.startup.mark_launch_ready(service).map_err(ServiceRuntimeError::Startup)?;
         }
         Ok(())
     }
@@ -132,6 +140,10 @@ impl ServiceRuntime {
 
     pub fn launch(&self, service: ServiceId) -> Option<(ProcessHandle, UserLaunch)> {
         self.launches[service_index(service)]
+    }
+
+    pub fn all_launch_ready(&self) -> bool {
+        self.startup.all_launch_ready()
     }
 }
 
