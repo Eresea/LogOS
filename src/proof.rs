@@ -20,6 +20,9 @@ static COMPLETION_RECLAIMED: AtomicBool = AtomicBool::new(false);
 static COMPLETION_STALE_REJECTED: AtomicBool = AtomicBool::new(false);
 static COMPLETION_SLOT_REUSED: AtomicBool = AtomicBool::new(false);
 static REPLACEMENT_RAN: AtomicBool = AtomicBool::new(false);
+static HEALTH_RESTARTED: AtomicBool = AtomicBool::new(false);
+static HEALTH_LATE_COMPLETION_REJECTED: AtomicBool = AtomicBool::new(false);
+static HEALTH_RETRY_COMPLETED: AtomicBool = AtomicBool::new(false);
 static PASSED: AtomicBool = AtomicBool::new(false);
 static REPORTED: AtomicBool = AtomicBool::new(false);
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
@@ -63,6 +66,18 @@ pub fn runtime_slot_reused() {
     RUNTIME_SLOT_REUSED.store(true, Ordering::Release);
 }
 
+pub fn health_restarted() {
+    HEALTH_RESTARTED.store(true, Ordering::Release);
+}
+
+pub fn health_late_completion_rejected() {
+    HEALTH_LATE_COMPLETION_REJECTED.store(true, Ordering::Release);
+}
+
+pub fn health_retry_completed() {
+    HEALTH_RETRY_COMPLETED.store(true, Ordering::Release);
+}
+
 pub fn observe(cpu: usize) {
     if PASSED.load(Ordering::Acquire) {
         if cpu == 0 && !REPORTED.swap(true, Ordering::AcqRel) {
@@ -88,6 +103,9 @@ pub fn observe(cpu: usize) {
         && COMPLETION_STALE_REJECTED.load(Ordering::Acquire)
         && COMPLETION_SLOT_REUSED.load(Ordering::Acquire)
         && REPLACEMENT_RAN.load(Ordering::Acquire)
+        && HEALTH_RESTARTED.load(Ordering::Acquire)
+        && HEALTH_LATE_COMPLETION_REJECTED.load(Ordering::Acquire)
+        && HEALTH_RETRY_COMPLETED.load(Ordering::Acquire)
         && BLOCK_RESUMED.load(Ordering::Acquire)
         && WAKE_DONE.load(Ordering::Acquire)
         && wake_cpus_differ

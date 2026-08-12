@@ -8,8 +8,12 @@ pub use scheduler::{
     FinishState, IDLE_STACK_SIZE, MAX_CPUS, MAX_TASKS, SCHEDULER, SCHEDULER_STACK_SIZE, Scheduler,
     SpawnError, TASK_STACK_SIZE, TaskEntry, TaskHandle, TaskState,
 };
+pub mod health;
 pub mod runtime;
 pub mod service_lifecycle;
+
+#[cfg(target_os = "uefi")]
+mod runtime_entry;
 
 #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
 mod proof;
@@ -18,55 +22,7 @@ mod proof;
 /// entry without changing UEFI or scheduler ownership.
 #[cfg(target_os = "uefi")]
 pub(crate) fn runtime_entry() {
-    #[cfg(feature = "qemu-proof")]
-    proof::handoff_started();
-
-    let mut runtime = runtime::Runtime::new();
-    let timed = runtime.submit().unwrap_or_else(|_| arch_fatal(b"LogOS vNext: runtime capacity"));
-    let deadline = current_ticks().saturating_add(1);
-    if !runtime.wait(timed, deadline) {
-        arch_fatal(b"LogOS vNext: runtime wait");
-    }
-    sleep_current_for(3);
-    if !runtime.timeout(timed, current_ticks()) {
-        arch_fatal(b"LogOS vNext: runtime timeout");
-    }
-    #[cfg(feature = "qemu-proof")]
-    proof::runtime_timed_out();
-    if !runtime.reclaim(timed) {
-        arch_fatal(b"LogOS vNext: runtime reclaim");
-    }
-
-    let completed = runtime.submit().unwrap_or_else(|_| arch_fatal(b"LogOS vNext: runtime reuse"));
-    if !runtime.wait(completed, current_ticks().saturating_add(3)) {
-        arch_fatal(b"LogOS vNext: runtime wait");
-    }
-    sleep_current_for(3);
-    if !runtime.complete(completed) {
-        arch_fatal(b"LogOS vNext: runtime complete");
-    }
-    #[cfg(feature = "qemu-proof")]
-    proof::runtime_completed();
-    if !runtime.reclaim(completed) {
-        arch_fatal(b"LogOS vNext: runtime reclaim");
-    }
-
-    let replacement =
-        runtime.submit().unwrap_or_else(|_| arch_fatal(b"LogOS vNext: runtime reuse"));
-    if replacement.slot() != timed.slot() || replacement.generation() == timed.generation() {
-        arch_fatal(b"LogOS vNext: runtime generation");
-    }
-    if !runtime.cancel(replacement) || !runtime.reclaim(replacement) {
-        arch_fatal(b"LogOS vNext: runtime cancel");
-    }
-    #[cfg(feature = "qemu-proof")]
-    proof::runtime_slot_reused();
-
-    loop {
-        sleep_current_for(3);
-        #[cfg(feature = "qemu-proof")]
-        proof::runtime_wait_resumed();
-    }
+    runtime_entry::run()
 }
 
 pub fn boot() -> uefi::prelude::Status {
@@ -103,7 +59,7 @@ pub(crate) fn current_cpu() -> usize {
 }
 
 #[cfg(target_os = "uefi")]
-fn current_ticks() -> u64 {
+pub(crate) fn current_ticks() -> u64 {
     arch::current_ticks()
 }
 
