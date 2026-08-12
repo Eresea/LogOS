@@ -279,7 +279,7 @@ mod tests {
         image[54..56].copy_from_slice(&56u16.to_le_bytes());
         image[56..58].copy_from_slice(&1u16.to_le_bytes());
         image[64..68].copy_from_slice(&1u32.to_le_bytes());
-        image[68..72].copy_from_slice(&4u32.to_le_bytes());
+        image[68..72].copy_from_slice(&5u32.to_le_bytes());
         image[72..80].copy_from_slice(&0u64.to_le_bytes());
         image[80..88].copy_from_slice(&0x1000u64.to_le_bytes());
         image[96..104].copy_from_slice(&1u64.to_le_bytes());
