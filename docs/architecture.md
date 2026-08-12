@@ -16,11 +16,12 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | User launch transition | `arch` + `scheduler` | selects the task root before restore and provides one fixed-selector `iretq` seam for future service entry |
 | Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Commands dependencies |
 | Service IPC pages | `service_ipc` + `page_table` | allocates five fixed generation-stamped endpoint pages and maps each only into its producer/consumer processes |
+| Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE`; no other service or kernel drawing path receives it |
 | Font cache | `font` | fixed 8×16 scalar lookup, 1,024-entry cache, and deterministic replacement glyph |
 | Per-CPU state | `arch::CpuLocal` via `GS_BASE` | private scheduler/idle stacks, TSS ring-transition fallback, cursor/current task, ticks, online state |
 | Context boundary | `arch/context.rs` | timer, voluntary, ring-3 syscall dispatch, and user-fault entries save one GPR/RIP/RSP/RFLAGS/CS and x87/SSE frame shape |
 | Publication | `Scheduler::save_context` + `finish` | outgoing task is claimable only after context-save publication |
-| Scheduler | `Scheduler` | eight generation-safe slots, atomic lifecycle/wake word, published address-space root per task, CAS `Runnable → Running`, no task-body lock |
+| Scheduler | `Scheduler` | sixteen generation-safe slots, atomic lifecycle/wake word, published address-space root per task, CAS `Runnable → Running`, no task-body lock |
 | Task primitives | `spawn`, `wake`, `yield_current`, `block_current`, `reclaim_completed` | explicit runnable/blocked/completed states and cheap wake-pending race handling |
 | Timed wait | `sleep_current_for`, `wake_due` | one fixed deadline per slot; explicit wake cancels the deadline and BSP timer scans remain bounded |
 | Runtime operations | `runtime::Runtime` | one in-process fixed command/response mailbox over two generation-safe operation slots with explicit ready/waiting/complete/cancelled/timed-out states |

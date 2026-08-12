@@ -301,6 +301,12 @@ pub fn boot() -> Status {
                 crate::service_runtime::ServiceRuntimeError::IpcProcess(_) => {
                     fatal(b"LogOS vNext: service IPC process")
                 }
+                crate::service_runtime::ServiceRuntimeError::Framebuffer(_) => {
+                    fatal(b"LogOS vNext: framebuffer mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::FramebufferProcess(_) => {
+                    fatal(b"LogOS vNext: framebuffer process mapping")
+                }
                 crate::service_runtime::ServiceRuntimeError::TaskCapacity => {
                     fatal(b"LogOS vNext: service task capacity")
                 }

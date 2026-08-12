@@ -162,6 +162,38 @@ impl VirtualMapping {
         pages: usize,
         flags: MappingFlags,
     ) -> Option<Self> {
+        Self::new_with_limit(
+            virtual_address,
+            physical_address,
+            pages,
+            flags,
+            MAX_IMAGE_BYTES / 0x1000,
+        )
+    }
+
+    /// Create a device mapping using the bounded framebuffer range.
+    pub const fn new_device(
+        virtual_address: usize,
+        physical_address: usize,
+        pages: usize,
+        flags: MappingFlags,
+    ) -> Option<Self> {
+        Self::new_with_limit(
+            virtual_address,
+            physical_address,
+            pages,
+            flags,
+            logos_abi::MAX_FRAMEBUFFER_BYTES / 0x1000,
+        )
+    }
+
+    const fn new_with_limit(
+        virtual_address: usize,
+        physical_address: usize,
+        pages: usize,
+        flags: MappingFlags,
+        max_pages: usize,
+    ) -> Option<Self> {
         let Some(bytes) = pages.checked_mul(0x1000) else {
             return None;
         };
@@ -173,7 +205,7 @@ impl VirtualMapping {
             || virtual_address & 0xfff != 0
             || physical_address & 0xfff != 0
             || pages == 0
-            || pages > MAX_IMAGE_BYTES / 0x1000
+            || pages > max_pages
             || virtual_address >= 0x0000_8000_0000_0000
             || virtual_end > 0x0000_8000_0000_0000
             || physical_address.checked_add(bytes).is_none()
@@ -901,6 +933,24 @@ mod tests {
             None
         );
         assert!(VirtualMapping::new(0x51_000, 0xb0_000, 1, MappingFlags::DATA).is_some());
+        assert!(
+            VirtualMapping::new_device(
+                logos_abi::DISPLAY_FRAMEBUFFER_BASE,
+                0x100_000,
+                logos_abi::MAX_FRAMEBUFFER_BYTES / 0x1000,
+                MappingFlags::DATA,
+            )
+            .is_some()
+        );
+        assert!(
+            VirtualMapping::new_device(
+                logos_abi::DISPLAY_FRAMEBUFFER_BASE,
+                0x100_000,
+                logos_abi::MAX_FRAMEBUFFER_BYTES / 0x1000 + 1,
+                MappingFlags::DATA,
+            )
+            .is_none()
+        );
     }
 
     #[test]

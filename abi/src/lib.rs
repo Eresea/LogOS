@@ -28,6 +28,7 @@ pub const MAX_MANAGED_FRAMES: usize = 65_536;
 pub const MAX_SERVICE_ENDPOINTS: usize = 32;
 pub const MAX_SERVICE_DATA_BYTES: usize = 1024 * 1024;
 pub const MAX_FRAMEBUFFER_BYTES: usize = 16 * 1024 * 1024;
+pub const DISPLAY_FRAMEBUFFER_BASE: usize = 0x0000_0100_1000_0000;
 pub const MAX_GLYPH_CACHE: usize = 1024;
 pub const MAX_CAPABILITIES: usize = 8;
 

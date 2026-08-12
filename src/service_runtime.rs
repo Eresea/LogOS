@@ -5,7 +5,7 @@ use core::mem::MaybeUninit;
 use logos_abi::{CapabilityKind, ServiceId};
 
 use crate::{
-    frame_pool::FramePool,
+    frame_pool::{FrameAddress, FramePool},
     loader::{LoadError, LoadedImage},
     page_table::{IdentityPageTableMemory, PageTableBuilder, PageTableError},
     process::{
@@ -33,6 +33,8 @@ pub enum ServiceRuntimeError {
     Ipc(IpcError),
     IpcMapping(PageTableError),
     IpcProcess(ProcessError),
+    Framebuffer(PageTableError),
+    FramebufferProcess(ProcessError),
     TaskCapacity,
     TaskAddressSpace,
     TaskLaunch,
@@ -164,6 +166,7 @@ impl ServiceRuntime {
             }
         }
         self.ipc = Some(graph);
+        self.map_framebuffer(resources.framebuffer().ok_or(ServiceRuntimeError::Resources)?)?;
         for spec in SERVICE_IMAGES {
             self.startup.mark_launch_ready(spec.service()).map_err(ServiceRuntimeError::Startup)?;
         }
@@ -191,6 +194,51 @@ impl ServiceRuntime {
 
     pub fn all_launch_ready(&self) -> bool {
         self.startup.all_launch_ready()
+    }
+
+    fn map_framebuffer(
+        &mut self,
+        framebuffer: crate::boot_resources::FramebufferInfo,
+    ) -> Result<(), ServiceRuntimeError> {
+        let bytes = framebuffer
+            .bytes()
+            .checked_add(crate::boot_resources::PAGE_SIZE - 1)
+            .ok_or(ServiceRuntimeError::Framebuffer(PageTableError::InvalidMapping))?;
+        let pages = usize::try_from(bytes / crate::boot_resources::PAGE_SIZE)
+            .map_err(|_| ServiceRuntimeError::Framebuffer(PageTableError::InvalidMapping))?;
+        let service = ServiceId::Display;
+        let index = service_index(service);
+        let Some((process, _)) = self.launch(service) else {
+            return Err(ServiceRuntimeError::FramebufferProcess(ProcessError::InvalidHandle));
+        };
+        let mut memory = IdentityPageTableMemory;
+        let tables = unsafe { self.tables[index].assume_init_mut() };
+        for page in 0..pages {
+            let offset = (page as u64)
+                .checked_mul(crate::boot_resources::PAGE_SIZE)
+                .ok_or(ServiceRuntimeError::Framebuffer(PageTableError::InvalidMapping))?;
+            let physical = framebuffer
+                .base()
+                .checked_add(offset)
+                .ok_or(ServiceRuntimeError::Framebuffer(PageTableError::InvalidMapping))?;
+            tables
+                .map_raw_page(
+                    logos_abi::DISPLAY_FRAMEBUFFER_BASE + page * crate::loader::PAGE_SIZE,
+                    FrameAddress::from_raw(physical),
+                    MappingFlags::DATA,
+                    &mut self.frame_pool,
+                    &mut memory,
+                )
+                .map_err(ServiceRuntimeError::Framebuffer)?;
+        }
+        let mapping = VirtualMapping::new_device(
+            logos_abi::DISPLAY_FRAMEBUFFER_BASE,
+            framebuffer.base() as usize,
+            pages,
+            MappingFlags::DATA,
+        )
+        .ok_or(ServiceRuntimeError::FramebufferProcess(ProcessError::AddressSpace))?;
+        self.processes.map(process, mapping).map_err(ServiceRuntimeError::FramebufferProcess)
     }
 
     pub fn start_tasks(&mut self) -> Result<(), ServiceRuntimeError> {
