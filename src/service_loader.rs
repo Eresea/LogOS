@@ -114,11 +114,17 @@ impl ServiceImageBundle {
     }
 
     /// View one retained service image after the UEFI filesystem is gone.
+    ///
+    /// # Safety
+    ///
+    /// The caller must keep the retained allocations identity-mapped and
+    /// reserved for the lifetime of the returned slice.
     #[cfg(target_os = "uefi")]
     pub unsafe fn image(&self, service: ServiceId) -> Option<&[u8]> {
         // SAFETY: The caller assumes the retained-allocation invariant
         // documented by `ServiceImageLocation::bytes`.
-        unsafe { self.records[service_index(service)].as_ref().map(ServiceImageLocation::bytes) }
+        let location = self.records[service_index(service)].as_ref()?;
+        Some(unsafe { location.bytes() })
     }
 
     /// Admit one validated image whose bytes are already in retained memory.
