@@ -6,8 +6,9 @@ Accepted
 
 ## Decision
 
-The terminal graph owns five fixed shared endpoint pages: Input→Terminal,
-Terminal→Display, Terminal→Session, Session→Terminal, and Session→Commands.
+The terminal graph owns six fixed shared endpoint pages: Input→Terminal,
+Terminal→Display, Terminal→Session, Session→Terminal, Session→Commands, and
+Commands→Session.
 Each page receives one bounded frame, generation `1`, and a stable user VA.
 Only the producer and consumer roots receive that page, and each process gets
 one matching data mapping.

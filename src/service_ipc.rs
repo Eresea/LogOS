@@ -7,7 +7,7 @@ use crate::{
     page_table::PageTableMemory,
 };
 
-pub const MAX_ENDPOINTS: usize = 5;
+pub const MAX_ENDPOINTS: usize = 6;
 pub const IPC_BASE: usize = SERVICE_IPC_BASE;
 pub const SERVICE_EPOCH: u64 = 1;
 const PAGE_SIZE: usize = 4096;
@@ -70,6 +70,7 @@ impl ServiceIpcGraph {
             (ServiceId::Terminal, ServiceId::Session),
             (ServiceId::Session, ServiceId::Terminal),
             (ServiceId::Session, ServiceId::Commands),
+            (ServiceId::Commands, ServiceId::Session),
         ];
         let mut graph = Self { endpoints: [None; MAX_ENDPOINTS], count: 0 };
         for (index, (producer, consumer)) in pairs.into_iter().enumerate() {
@@ -145,10 +146,12 @@ mod tests {
         pool.initialize(&map).unwrap();
         let mut memory = Memory;
         let graph = ServiceIpcGraph::allocate(&mut pool, &mut memory).unwrap();
-        assert_eq!(graph.count(), 5);
+        assert_eq!(graph.count(), 6);
         assert_eq!(graph.endpoint(0).unwrap().producer(), ServiceId::Input);
         assert_eq!(graph.endpoint(0).unwrap().consumer(), ServiceId::Terminal);
-        assert_eq!(graph.endpoint(4).unwrap().virtual_address(), IPC_BASE + 4 * PAGE_SIZE);
-        assert_eq!(graph.endpoint(4).unwrap().generation(), 1);
+        assert_eq!(graph.endpoint(5).unwrap().producer(), ServiceId::Commands);
+        assert_eq!(graph.endpoint(5).unwrap().consumer(), ServiceId::Session);
+        assert_eq!(graph.endpoint(5).unwrap().virtual_address(), IPC_BASE + 5 * PAGE_SIZE);
+        assert_eq!(graph.endpoint(5).unwrap().generation(), 1);
     }
 }

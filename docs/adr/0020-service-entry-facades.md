@@ -18,5 +18,6 @@ shared-ring message identity.
 
 - Service loops have deterministic work units and no hidden queue ownership.
 - Existing model tests remain valid while the real IPC graph is introduced.
-- Session-to-Commands routing is still pending; Session currently retains its
-  model-level built-in policy until that protocol is wired.
+- Session-to-Commands routing is carried by the fixed request and response
+  rings; Session retains only line editing and prompt state while Commands owns
+  live built-in execution.

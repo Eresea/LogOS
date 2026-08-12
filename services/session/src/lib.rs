@@ -184,6 +184,20 @@ impl SessionService {
         self.session.input(bytes)
     }
 
+    pub fn input_for_command(
+        &mut self,
+        bytes: &[u8],
+        command: &mut [u8; MAX_LINE_BYTES],
+        output: &mut ShellOutput,
+    ) -> Option<usize> {
+        self.session.input_for_command(bytes, command, output)
+    }
+
+    pub fn command_output(&self, bytes: &[u8], output: &mut ShellOutput) {
+        output.extend(bytes);
+        self.prompt(output);
+    }
+
     pub const fn session(&self) -> &SessionState<SERVICE_FILE_COUNT, SERVICE_FILE_BYTES> {
         &self.session
     }
@@ -232,16 +246,32 @@ impl<const FILES: usize, const FILE_BYTES: usize> SessionState<FILES, FILE_BYTES
     /// Consume terminal input.  Printable bytes edit the line; Enter runs it.
     pub fn input(&mut self, bytes: &[u8]) -> Option<ShellOutput> {
         let mut output = ShellOutput::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let command_len = self.input_for_command(bytes, &mut command, &mut output);
+        if let Some(length) = command_len {
+            output = self.execute(&command[..length]);
+            self.prompt(&mut output);
+            return Some(output);
+        }
+        (output.len > 0).then_some(output)
+    }
+
+    pub fn input_for_command(
+        &mut self,
+        bytes: &[u8],
+        command: &mut [u8; MAX_LINE_BYTES],
+        output: &mut ShellOutput,
+    ) -> Option<usize> {
         for &byte in bytes {
             if self.escape_state != 0 {
                 match (self.escape_state, byte) {
                     (1, b'[') => self.escape_state = 2,
                     (2, b'A') => {
-                        self.recall_history(true, &mut output);
+                        self.recall_history(true, output);
                         self.escape_state = 0;
                     }
                     (2, b'B') => {
-                        self.recall_history(false, &mut output);
+                        self.recall_history(false, output);
                         self.escape_state = 0;
                     }
                     _ => self.escape_state = 0,
@@ -257,11 +287,11 @@ impl<const FILES: usize, const FILE_BYTES: usize> SessionState<FILES, FILE_BYTES
                     let line = self.line;
                     let length = self.line_len;
                     self.record_history(&line[..length]);
+                    command[..length].copy_from_slice(&line[..length]);
                     self.line_len = 0;
                     self.cursor = 0;
-                    output = self.execute(&line[..length]);
-                    self.prompt(&mut output);
-                    return Some(output);
+                    output.extend(b"\r\n");
+                    return Some(length);
                 }
                 0x7f | 0x08 => {
                     if self.cursor > 0 {
@@ -283,7 +313,7 @@ impl<const FILES: usize, const FILE_BYTES: usize> SessionState<FILES, FILE_BYTES
                 _ => {}
             }
         }
-        (output.len > 0).then_some(output)
+        None
     }
 
     pub fn execute(&mut self, line: &[u8]) -> ShellOutput {

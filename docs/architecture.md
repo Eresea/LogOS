@@ -15,7 +15,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Service process admission | `service_runtime` + `process` | binds each service root, capabilities, coalesced mappings, and validated user launch metadata without entering service RIPs prematurely |
 | User launch transition | `arch` + `scheduler` | selects the task root before restore and provides one fixed-selector `iretq` seam for future service entry |
 | Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Commands dependencies |
-| Service IPC pages | `service_ipc` + `page_table` | allocates five fixed generation-stamped endpoint pages, initializes their concrete ABI rings, and maps each only into its producer/consumer processes |
+| Service IPC pages | `service_ipc` + `page_table` | allocates six fixed generation-stamped endpoint pages, initializes their concrete ABI rings, and maps each only into its producer/consumer processes |
 | Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE` plus one read-only `FramebufferConfig` page at `DISPLAY_CONFIG_BASE`; no other service or kernel drawing path receives it |
 | Keyboard byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring and maps it only into Input at `INPUT_KEYBOARD_RING_BASE`; PS/2 decoding remains outside the kernel |
 | PS/2 interrupt adapter | `arch` | remaps the legacy PIC, unmasks only IRQ1 after the Input ring is published, and copies port `0x60` bytes into that ring; no key decoding occurs in Core |
@@ -35,7 +35,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Terminal service | `services/images/src/terminal` + `logos-terminal::TerminalState` | ring-3 owns a bounded 80×25 live surface, consumes Input and Session rings, emits compact Session input and dirty-cell Display messages; the reusable host model remains bounded to 160×100 |
 | Display service | `services/images/src/display` + `logos-display` | ring-3 validates cell diffs and endpoint generations, then rasterizes dirty cells through the fixed glyph cache into its mapped GOP framebuffer |
 | Session service | `services/images/src/session` + `logos-session::SessionService` | ring-3 owns bounded line editing and shell state, emits prompt/output in backpressured 256-byte chunks, and uses a compact volatile-file budget; the host `Session` model retains the larger proof bounds |
-| Commands service model | `logos-commands::CommandService` | bounded built-ins, output, status, and clear-screen command effects |
+| Commands service | `services/images/src/commands` + `logos-commands::CommandService` | receives bounded Session requests, executes built-ins, and returns backpressured output over its reverse IPC ring |
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 16 validated mappings per process, typed capability authorization, and exit/fault/reclaim outcomes |
 | User launch contract | `process::UserLaunch` + `Scheduler::spawn_user` | a running process with a bound root publishes entry RIP, aligned stack top, root, and process generation before its task becomes runnable |
 | Service image manifest | `service_images::SERVICE_IMAGES` | five fixed ESP paths, process kinds, capability slots, and bounded ELF admission in dependency order |

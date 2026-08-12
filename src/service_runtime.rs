@@ -395,7 +395,7 @@ fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint, index: usize) 
                 .write(logos_abi::InputIpc::new(endpoint.header())),
             1 => (frame as *mut logos_abi::RenderIpc)
                 .write(logos_abi::RenderIpc::new(endpoint.header())),
-            2..=4 => (frame as *mut logos_abi::StreamIpc)
+            2..=5 => (frame as *mut logos_abi::StreamIpc)
                 .write(logos_abi::StreamIpc::new(endpoint.header())),
             _ => {}
         }

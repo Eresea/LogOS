@@ -133,7 +133,7 @@ pub const SERVICE_IMAGES: [ServiceImageSpec; 5] = [
             Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 1)),
             Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 2)),
             Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 3)),
-            None,
+            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 5)),
         ],
     ),
     ServiceImageSpec::new(
@@ -143,8 +143,8 @@ pub const SERVICE_IMAGES: [ServiceImageSpec; 5] = [
         [
             Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 1)),
             Some(CapabilityGrant::new(CapabilityKind::ProcessControl, 2)),
-            None,
-            None,
+            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 4)),
+            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 5)),
         ],
     ),
 ];
