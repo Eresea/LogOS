@@ -31,6 +31,21 @@ impl ServiceImageLocation {
         self.allocation_bytes
     }
 
+    /// View the retained image after UEFI has been exited.
+    ///
+    /// # Safety
+    ///
+    /// The caller must invoke this only while the UEFI allocation represented
+    /// by this record remains identity-mapped and reserved. The returned view
+    /// must not outlive the bundle or any architecture teardown of that
+    /// allocation.
+    #[cfg(target_os = "uefi")]
+    pub unsafe fn bytes(&self) -> &[u8] {
+        // SAFETY: The caller guarantees that the retained physical allocation
+        // is identity-mapped and remains live for the returned view.
+        unsafe { core::slice::from_raw_parts(self.physical_address as *const u8, self.image_bytes) }
+    }
+
     fn new(
         service: ServiceId,
         physical_address: usize,
@@ -96,6 +111,14 @@ impl ServiceImageBundle {
 
     pub const fn location(&self, service: ServiceId) -> Option<ServiceImageLocation> {
         self.records[service_index(service)]
+    }
+
+    /// View one retained service image after the UEFI filesystem is gone.
+    #[cfg(target_os = "uefi")]
+    pub unsafe fn image(&self, service: ServiceId) -> Option<&[u8]> {
+        // SAFETY: The caller assumes the retained-allocation invariant
+        // documented by `ServiceImageLocation::bytes`.
+        unsafe { self.records[service_index(service)].as_ref().map(ServiceImageLocation::bytes) }
     }
 
     /// Admit one validated image whose bytes are already in retained memory.

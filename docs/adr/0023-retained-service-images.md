@@ -13,7 +13,9 @@ length after the firmware reader is gone.
 
 The UEFI filesystem adapter now populates these records before the handoff, and
 the QEMU runner stages the fixed artifacts into the ESP. The bundle does not
-own a filesystem handle, allocator, or service process.
+own a filesystem handle, allocator, or service process. An explicitly unsafe,
+bundle-scoped byte view is the only post-UEFI access path to retained image
+contents.
 
 ## Consequences
 
