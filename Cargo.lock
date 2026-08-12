@@ -31,10 +31,34 @@ name = "logos-abi"
 version = "0.1.0"
 
 [[package]]
+name = "logos-input"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
+name = "logos-session"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
+name = "logos-terminal"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
 name = "logos-vnext"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
+ "logos-input",
+ "logos-session",
+ "logos-terminal",
  "uefi",
 ]
 

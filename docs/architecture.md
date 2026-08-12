@@ -22,10 +22,10 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Health service | `health::HealthService` | one in-process fixed command/response mailbox for `Ping`; restart rejects the old completion and caller explicitly retries |
 | Terminal ABI | `logos-abi` | fixed semantic input, session stream, cell-diff render, endpoint identity, service identities, capabilities, and bounded control-plane shapes |
 | IPC mechanics | `ipc::BoundedQueue` | fixed ring capacity, explicit full/empty outcomes, and doorbell edge notification; no allocation or serialization framework |
-| Input semantics | `input::InputDecoder` | PS/2 Set-2 bytes become semantic key events and committed text with bounded modifiers and layout state |
-| Terminal emulator | `terminal::Terminal` | bounded 160×100 cell state, 2,048-line scroll count, parser parameters, alternate screen, SGR, cursor/edit/erase controls, and dirty-cell output |
+| Input service model | `logos-input::InputDecoder` | PS/2 Set-2 bytes become semantic key events and committed text with bounded modifiers and layout state |
+| Terminal service model | `logos-terminal::Terminal` | bounded 160×100 cell state, 2,048-line scroll count, parser parameters, alternate screen, SGR, cursor/edit/erase controls, and dirty-cell output |
 | Display state | `display::Display` | validates cell diffs, dimensions, positions, endpoint generations, and dirty-cell rasterization through the fixed glyph cache |
-| Session shell | `session::Session` | bounded line editing, history, environment, four-stage pipelines, eight child slots, and volatile redirection files |
+| Session service model | `logos-session::Session` | bounded line editing, history, environment, four-stage pipelines, eight child slots, and volatile redirection files |
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 16 validated mappings per process, typed capability authorization, and exit/fault/reclaim outcomes |
 | Service supervisor | `supervisor::ServiceSupervisor` | five-service lifecycle model, heartbeat timeouts, endpoint epochs, restart limits, and recovery transition |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
