@@ -5,6 +5,7 @@ pub const MAX_SERVICE_PROCESSES: usize = 5;
 pub const MAX_COMMAND_PROCESSES: usize = 8;
 pub const MAX_RESERVED_PROCESSES: usize = 2;
 pub const MAX_ADDRESS_SPACES: usize = MAX_USER_PROCESSES;
+pub const MAX_MAPPINGS_PER_ADDRESS_SPACE: usize = 16;
 pub const USER_STACK_PAGES: usize = 8;
 pub const MAX_IMAGE_BYTES: usize = 512 * 1024;
 pub const MAX_PROGRAM_HEADERS: usize = 16;
@@ -84,6 +85,84 @@ impl AddressSpaceRoot {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MappingFlags {
+    pub user: bool,
+    pub writable: bool,
+    pub executable: bool,
+}
+
+impl MappingFlags {
+    pub const CODE: Self = Self { user: true, writable: false, executable: true };
+    pub const DATA: Self = Self { user: true, writable: true, executable: false };
+
+    const fn valid(self) -> bool {
+        self.user && !(self.writable && self.executable)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VirtualMapping {
+    virtual_address: usize,
+    physical_address: usize,
+    pages: usize,
+    flags: MappingFlags,
+}
+
+impl VirtualMapping {
+    pub const fn new(
+        virtual_address: usize,
+        physical_address: usize,
+        pages: usize,
+        flags: MappingFlags,
+    ) -> Option<Self> {
+        let Some(bytes) = pages.checked_mul(0x1000) else {
+            return None;
+        };
+        let Some(virtual_end) = virtual_address.checked_add(bytes) else {
+            return None;
+        };
+        if virtual_address == 0
+            || physical_address == 0
+            || virtual_address & 0xfff != 0
+            || physical_address & 0xfff != 0
+            || pages == 0
+            || pages > MAX_IMAGE_BYTES / 0x1000
+            || virtual_address >= 0x0000_8000_0000_0000
+            || virtual_end > 0x0000_8000_0000_0000
+            || physical_address.checked_add(bytes).is_none()
+            || !flags.valid()
+        {
+            return None;
+        }
+        Some(Self { virtual_address, physical_address, pages, flags })
+    }
+
+    pub const fn virtual_address(self) -> usize {
+        self.virtual_address
+    }
+
+    pub const fn physical_address(self) -> usize {
+        self.physical_address
+    }
+
+    pub const fn pages(self) -> usize {
+        self.pages
+    }
+
+    pub const fn flags(self) -> MappingFlags {
+        self.flags
+    }
+
+    const fn virtual_end(self) -> usize {
+        self.virtual_address + self.pages * 0x1000
+    }
+
+    const fn overlaps(self, other: Self) -> bool {
+        self.virtual_address < other.virtual_end() && other.virtual_address < self.virtual_end()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AddressSpaceState {
     Vacant,
     Reserved,
@@ -94,10 +173,16 @@ struct AddressSpaceSlot {
     generation: u64,
     state: AddressSpaceState,
     root: Option<AddressSpaceRoot>,
+    mappings: [Option<VirtualMapping>; MAX_MAPPINGS_PER_ADDRESS_SPACE],
 }
 
 impl AddressSpaceSlot {
-    const EMPTY: Self = Self { generation: 1, state: AddressSpaceState::Vacant, root: None };
+    const EMPTY: Self = Self {
+        generation: 1,
+        state: AddressSpaceState::Vacant,
+        root: None,
+        mappings: [None; MAX_MAPPINGS_PER_ADDRESS_SPACE],
+    };
 }
 
 pub struct AddressSpaceTable {
@@ -120,6 +205,7 @@ impl AddressSpaceTable {
         };
         address_space.state = AddressSpaceState::Reserved;
         address_space.root = None;
+        address_space.mappings = [None; MAX_MAPPINGS_PER_ADDRESS_SPACE];
         Ok(AddressSpaceHandle { slot: slot as u8, generation: address_space.generation })
     }
 
@@ -136,6 +222,35 @@ impl AddressSpaceTable {
         Ok(())
     }
 
+    pub fn map(
+        &mut self,
+        handle: AddressSpaceHandle,
+        mapping: VirtualMapping,
+    ) -> Result<(), ProcessError> {
+        let address_space = self.current_mut(handle)?;
+        if address_space.root.is_none() {
+            return Err(ProcessError::AddressSpace);
+        }
+        if address_space.mappings.iter().flatten().any(|existing| existing.overlaps(mapping)) {
+            return Err(ProcessError::AddressSpace);
+        }
+        let Some(slot) = address_space.mappings.iter_mut().find(|slot| slot.is_none()) else {
+            return Err(ProcessError::Capacity);
+        };
+        *slot = Some(mapping);
+        Ok(())
+    }
+
+    pub fn mapping(&self, handle: AddressSpaceHandle, index: usize) -> Option<VirtualMapping> {
+        let address_space = self.slots.get(handle.slot as usize)?;
+        if address_space.generation != handle.generation
+            || address_space.state != AddressSpaceState::Reserved
+        {
+            return None;
+        }
+        address_space.mappings.get(index).copied().flatten()
+    }
+
     pub fn root(&self, handle: AddressSpaceHandle) -> Option<AddressSpaceRoot> {
         let address_space = self.slots.get(handle.slot as usize)?;
         (address_space.generation == handle.generation
@@ -148,6 +263,7 @@ impl AddressSpaceTable {
         let address_space = self.current_mut(handle)?;
         address_space.state = AddressSpaceState::Vacant;
         address_space.root = None;
+        address_space.mappings = [None; MAX_MAPPINGS_PER_ADDRESS_SPACE];
         address_space.generation = next_generation(address_space.generation);
         Ok(())
     }
@@ -285,6 +401,26 @@ impl ProcessTable {
     pub fn address_space_root(&self, handle: ProcessHandle) -> Option<AddressSpaceRoot> {
         let address_space = self.address_space(handle)?;
         self.address_spaces.root(address_space)
+    }
+
+    pub fn map(
+        &mut self,
+        handle: ProcessHandle,
+        mapping: VirtualMapping,
+    ) -> Result<(), ProcessError> {
+        let process = self.current_mut(handle)?;
+        if process.state != ProcessState::Running {
+            return Err(ProcessError::NotRunning);
+        }
+        let Some(address_space) = process.address_space else {
+            return Err(ProcessError::AddressSpace);
+        };
+        self.address_spaces.map(address_space, mapping)
+    }
+
+    pub fn mapping(&self, handle: ProcessHandle, index: usize) -> Option<VirtualMapping> {
+        let address_space = self.address_space(handle)?;
+        self.address_spaces.mapping(address_space, index)
     }
 
     pub fn exit(&mut self, handle: ProcessHandle, status: u8) -> Result<(), ProcessError> {
@@ -508,5 +644,33 @@ mod tests {
         assert_eq!(AddressSpaceRoot::new(0), None);
         assert_eq!(AddressSpaceRoot::new(0x123), None);
         assert_eq!(AddressSpaceRoot::new(0x12_000).unwrap().raw(), 0x12_000);
+    }
+
+    #[test]
+    fn mappings_require_a_root_and_reject_overlap_or_wx_pages() {
+        let image = image();
+        let mut table = ProcessTable::new();
+        let process = table.start(&image, ProcessKind::Terminal, Capabilities::SERVICE).unwrap();
+        let code = VirtualMapping::new(0x40_000, 0x80_000, 2, MappingFlags::CODE).unwrap();
+        let data = VirtualMapping::new(0x41_000, 0x90_000, 1, MappingFlags::DATA).unwrap();
+        assert_eq!(table.map(process, code), Err(ProcessError::AddressSpace));
+        assert!(
+            table
+                .bind_address_space_root(process, AddressSpaceRoot::new(0x20_000).unwrap())
+                .is_ok()
+        );
+        assert!(table.map(process, code).is_ok());
+        assert_eq!(table.map(process, data), Err(ProcessError::AddressSpace));
+        assert_eq!(table.mapping(process, 0), Some(code));
+        assert_eq!(
+            VirtualMapping::new(
+                0x50_000,
+                0xa0_000,
+                1,
+                MappingFlags { user: true, writable: true, executable: true },
+            ),
+            None
+        );
+        assert!(VirtualMapping::new(0x51_000, 0xb0_000, 1, MappingFlags::DATA).is_some());
     }
 }

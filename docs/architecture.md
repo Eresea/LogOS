@@ -21,7 +21,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Terminal emulator | `terminal::Terminal` | bounded 160×100 cell state, 2,048-line scroll count, parser parameters, alternate screen, SGR, cursor/edit/erase controls, and dirty-cell output |
 | Display state | `display::Display` | validates cell diffs, dimensions, positions, and endpoint generations; pixel/font ownership remains outside this model |
 | Session shell | `session::Session` | bounded line editing, history, environment, four-stage pipelines, eight child slots, and volatile redirection files |
-| Process admission | `process::ProcessTable` | fixed 16-slot process model, ELF64 admission checks, one generation-safe address-space identity per process, capability sets, and exit/fault/reclaim outcomes |
+| Process admission | `process::ProcessTable` | fixed 16-slot process model, ELF64 admission checks, one generation-safe address-space identity with 16 validated mappings per process, capability sets, and exit/fault/reclaim outcomes |
 | Service supervisor | `supervisor::ServiceSupervisor` | five-service lifecycle model, heartbeat timeouts, endpoint epochs, restart limits, and recovery transition |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed user root, code/stack pages, DPL-3 vector 49, and contained #UD/#GP/#PF for the registered task |
 | Terminal proof graph | `terminal_stack::TerminalStack` | deterministic Input → Terminal → Session → Terminal → Display path with generation-safe terminal restart |

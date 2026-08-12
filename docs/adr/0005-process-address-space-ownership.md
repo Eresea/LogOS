@@ -6,10 +6,12 @@
 ## Decision
 
 Every admitted process reserves exactly one generation-safe address-space identity. The process owns
-that identity until exit or fault reclamation. A page-aligned root may be bound once; stale process
-or address-space handles cannot affect a replacement slot.
+that identity until exit or fault reclamation. A page-aligned root may be bound once, and the bound
+space owns a fixed overlap-checked mapping inventory; stale process or address-space handles cannot
+affect a replacement slot.
 
 ## Scope
 
-This slice records ownership only. It does not switch CR3, allocate page tables, load ELF segments,
-map capabilities, or make the existing fixed ring-3 proof image a general process.
+This slice records ownership and validates mapping descriptions only. It does not switch CR3,
+allocate hardware page tables, load ELF segments, map capabilities, or make the existing fixed ring-3
+proof image a general process.
