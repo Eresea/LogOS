@@ -301,6 +301,15 @@ pub fn boot() -> Status {
                 crate::service_runtime::ServiceRuntimeError::IpcProcess(_) => {
                     fatal(b"LogOS vNext: service IPC process")
                 }
+                crate::service_runtime::ServiceRuntimeError::TaskCapacity => {
+                    fatal(b"LogOS vNext: service task capacity")
+                }
+                crate::service_runtime::ServiceRuntimeError::TaskAddressSpace => {
+                    fatal(b"LogOS vNext: service task address space")
+                }
+                crate::service_runtime::ServiceRuntimeError::TaskLaunch => {
+                    fatal(b"LogOS vNext: service task launch")
+                }
             },
         );
         let runtime = &*core::ptr::addr_of!(SERVICE_RUNTIME);
@@ -569,6 +578,26 @@ pub(crate) fn switch_cr3(root: usize) {
 pub(crate) fn prepare_task_address_space(root: usize) {
     let root = if root == 0 { KERNEL_CR3.load(Ordering::Acquire) } else { root };
     switch_cr3(root);
+}
+
+pub(crate) fn start_services() {
+    unsafe {
+        (*core::ptr::addr_of_mut!(SERVICE_RUNTIME)).start_tasks().unwrap_or_else(
+            |error| match error {
+                crate::service_runtime::ServiceRuntimeError::TaskCapacity => {
+                    fatal(b"LogOS vNext: service task capacity")
+                }
+                crate::service_runtime::ServiceRuntimeError::TaskAddressSpace => {
+                    fatal(b"LogOS vNext: service task address space")
+                }
+                crate::service_runtime::ServiceRuntimeError::TaskLaunch => {
+                    fatal(b"LogOS vNext: service task launch")
+                }
+                _ => fatal(b"LogOS vNext: service task startup"),
+            },
+        );
+    }
+    proof_line(b"LogOS vNext: service tasks started");
 }
 
 #[allow(dead_code)]

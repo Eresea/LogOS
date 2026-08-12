@@ -5,7 +5,7 @@ use core::{
 
 use crate::process::{ProcessHandle, UserLaunch};
 
-pub const MAX_TASKS: usize = 8;
+pub const MAX_TASKS: usize = 16;
 pub const MAX_CPUS: usize = 8;
 pub const TASK_STACK_SIZE: usize = 16 * 1024;
 pub const SCHEDULER_STACK_SIZE: usize = 16 * 1024;
@@ -129,6 +129,10 @@ impl ScheduledUserLaunch {
 
     pub const fn address_space_root(self) -> usize {
         self.launch.address_space_root().raw()
+    }
+
+    pub const fn launch(self) -> UserLaunch {
+        self.launch
     }
 }
 

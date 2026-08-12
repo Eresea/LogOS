@@ -33,6 +33,9 @@ pub enum ServiceRuntimeError {
     Ipc(IpcError),
     IpcMapping(PageTableError),
     IpcProcess(ProcessError),
+    TaskCapacity,
+    TaskAddressSpace,
+    TaskLaunch,
 }
 
 pub struct ServiceRuntime {
@@ -44,6 +47,7 @@ pub struct ServiceRuntime {
     launches: [Option<(ProcessHandle, UserLaunch)>; SERVICE_COUNT],
     startup: ServiceStartup,
     ipc: Option<ServiceIpcGraph>,
+    tasks: [Option<crate::TaskHandle>; SERVICE_COUNT],
 }
 
 impl ServiceRuntime {
@@ -63,6 +67,7 @@ impl ServiceRuntime {
             launches: [None; SERVICE_COUNT],
             startup: ServiceStartup::new(),
             ipc: None,
+            tasks: [None; SERVICE_COUNT],
         }
     }
 
@@ -187,6 +192,25 @@ impl ServiceRuntime {
     pub fn all_launch_ready(&self) -> bool {
         self.startup.all_launch_ready()
     }
+
+    pub fn start_tasks(&mut self) -> Result<(), ServiceRuntimeError> {
+        for spec in SERVICE_IMAGES {
+            let service = spec.service();
+            let Some((process, launch)) = self.launch(service) else {
+                return Err(ServiceRuntimeError::TaskLaunch);
+            };
+            let task = crate::SCHEDULER.spawn_user(service_task_entry, process, launch).map_err(
+                |error| match error {
+                    crate::SpawnError::Capacity => ServiceRuntimeError::TaskCapacity,
+                    crate::SpawnError::AddressSpace => ServiceRuntimeError::TaskAddressSpace,
+                    crate::SpawnError::UserLaunch => ServiceRuntimeError::TaskLaunch,
+                },
+            )?;
+            self.tasks[service_index(service)] = Some(task);
+            self.startup.start(service).map_err(ServiceRuntimeError::Startup)?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for ServiceRuntime {
@@ -261,4 +285,15 @@ fn map_loaded_pages(
         index += pages;
     }
     Ok(())
+}
+
+fn service_task_entry() {
+    let cpu = crate::current_cpu();
+    let Some(task) = crate::SCHEDULER.current_task(cpu) else {
+        crate::arch_fatal(b"LogOS vNext: service task");
+    };
+    let Some(launch) = crate::SCHEDULER.user_launch(task) else {
+        crate::arch_fatal(b"LogOS vNext: service launch");
+    };
+    crate::arch::enter_user_launch(launch.launch());
 }

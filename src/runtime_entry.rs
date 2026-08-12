@@ -9,6 +9,7 @@ use crate::{
 use crate::proof;
 
 pub(crate) fn run() {
+    crate::start_services();
     #[cfg(feature = "qemu-proof")]
     proof::handoff_started();
 

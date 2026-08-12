@@ -26,6 +26,7 @@ pub use scheduler::{
 pub mod health;
 pub mod runtime;
 pub mod service_images;
+pub mod service_ipc;
 pub mod service_lifecycle;
 pub mod service_loader;
 #[cfg(target_os = "uefi")]
@@ -63,6 +64,11 @@ pub fn boot() -> uefi::prelude::Status {
 #[cfg(target_os = "uefi")]
 pub fn yield_current() {
     arch::yield_current()
+}
+
+#[cfg(target_os = "uefi")]
+pub(crate) fn start_services() {
+    arch::start_services()
 }
 
 #[cfg(target_os = "uefi")]
