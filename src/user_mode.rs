@@ -1,6 +1,10 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::{USER_CODE_SELECTOR, USER_DATA_SELECTOR};
+use crate::process::{
+    AddressSpaceRoot, Capabilities, ElfLoadPlan, MappingFlags, ProcessHandle, ProcessKind,
+    ProcessTable, VirtualMapping,
+};
 use crate::{SCHEDULER, TaskHandle};
 
 const PAGE_SIZE: usize = 4096;
@@ -11,6 +15,7 @@ const USER: u64 = 1 << 2;
 const USER_CODE_VA: usize = 0x0000_0080_0000_0000;
 const USER_STACK_VA: usize = USER_CODE_VA + PAGE_SIZE;
 const SWITCH_VECTOR: u8 = 49;
+const PROOF_IMAGE_LEN: usize = 0x84;
 
 #[repr(C, align(4096))]
 struct PageTable([u64; 512]);
@@ -24,6 +29,9 @@ static mut USER_PD: PageTable = PageTable([0; 512]);
 static mut USER_PT: PageTable = PageTable([0; 512]);
 static mut USER_CODE_PAGE: UserPage = UserPage(proof_code_page());
 static mut USER_STACK_PAGE: UserPage = UserPage([0; PAGE_SIZE]);
+static mut USER_IMAGE: [u8; PROOF_IMAGE_LEN] = [0; PROOF_IMAGE_LEN];
+static mut USER_PROCESS_TABLE: ProcessTable = ProcessTable::new();
+static mut USER_PROCESS: Option<ProcessHandle> = None;
 
 static USER_CR3: AtomicUsize = AtomicUsize::new(0);
 static USER_TASK_RAW: AtomicU64 = AtomicU64::new(0);
@@ -42,6 +50,7 @@ const fn proof_code_page() -> [u8; PAGE_SIZE] {
 
 pub(crate) fn spawn_proof() {
     build_address_space(crate::arch::current_cr3() & ADDRESS_MASK);
+    register_proof_process();
     crate::arch_proof_line(b"LogOS vNext: user space ready");
     let handle = SCHEDULER
         .spawn(user_task_entry)
@@ -54,6 +63,15 @@ pub(crate) fn faulted(handle: TaskHandle, vector: usize) -> bool {
         return false;
     }
     USER_FAULT_VECTOR.store(vector, Ordering::Release);
+    let process = unsafe { *core::ptr::addr_of!(USER_PROCESS) };
+    let Some(process) = process else {
+        return false;
+    };
+    if unsafe { (*core::ptr::addr_of_mut!(USER_PROCESS_TABLE)).fault(process, vector as u8) }
+        .is_err()
+    {
+        return false;
+    }
     USER_FAULTED.store(true, Ordering::Release);
     crate::arch_proof_line(b"LogOS vNext: user exception contained");
     true
@@ -93,6 +111,89 @@ fn build_address_space(kernel_cr3: usize) {
             page_address(core::ptr::addr_of!(USER_STACK_PAGE)) | PRESENT | WRITABLE | USER;
     }
     USER_CR3.store(core::ptr::addr_of!(USER_PML4) as usize, Ordering::Release);
+}
+
+fn register_proof_process() {
+    unsafe {
+        build_proof_image();
+        let image = core::slice::from_raw_parts(
+            core::ptr::addr_of!(USER_IMAGE).cast::<u8>(),
+            PROOF_IMAGE_LEN,
+        );
+        let plan = ElfLoadPlan::parse(image)
+            .unwrap_or_else(|_| crate::arch_fatal(b"LogOS vNext: proof ELF"));
+        let segment =
+            plan.segment(0).unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: proof segment"));
+        let process = (*core::ptr::addr_of_mut!(USER_PROCESS_TABLE))
+            .start(image, ProcessKind::Terminal, Capabilities::SERVICE)
+            .unwrap_or_else(|_| crate::arch_fatal(b"LogOS vNext: proof process"));
+        let root = AddressSpaceRoot::new(core::ptr::addr_of!(USER_PML4) as usize)
+            .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: proof root"));
+        let table = &mut *core::ptr::addr_of_mut!(USER_PROCESS_TABLE);
+        table
+            .bind_address_space_root(process, root)
+            .unwrap_or_else(|_| crate::arch_fatal(b"LogOS vNext: proof root bind"));
+        let code_page = core::ptr::addr_of_mut!(USER_CODE_PAGE).cast::<u8>();
+        core::ptr::write_bytes(code_page, 0, PAGE_SIZE);
+        let file = segment
+            .file_bytes(image)
+            .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: proof bytes"));
+        core::ptr::copy_nonoverlapping(file.as_ptr(), code_page, file.len());
+        let code_mapping =
+            VirtualMapping::new(USER_CODE_VA, code_page as usize, 1, segment.flags())
+                .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: proof code map"));
+        table
+            .map(process, code_mapping)
+            .unwrap_or_else(|_| crate::arch_fatal(b"LogOS vNext: proof code map"));
+        let stack_page = core::ptr::addr_of_mut!(USER_STACK_PAGE).cast::<u8>();
+        let stack_mapping =
+            VirtualMapping::new(USER_STACK_VA, stack_page as usize, 1, MappingFlags::DATA)
+                .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: proof stack map"));
+        table
+            .map(process, stack_mapping)
+            .unwrap_or_else(|_| crate::arch_fatal(b"LogOS vNext: proof stack map"));
+        *core::ptr::addr_of_mut!(USER_PROCESS) = Some(process);
+    }
+}
+
+unsafe fn build_proof_image() {
+    unsafe {
+        let image = core::ptr::addr_of_mut!(USER_IMAGE).cast::<u8>();
+        core::ptr::write_bytes(image, 0, PROOF_IMAGE_LEN);
+        core::ptr::copy_nonoverlapping(b"\x7fELF".as_ptr(), image, 4);
+        *image.add(4) = 2;
+        *image.add(5) = 1;
+        write_u16(image, 16, 2);
+        write_u16(image, 18, 0x3e);
+        write_u64(image, 24, USER_CODE_VA as u64);
+        write_u64(image, 32, 64);
+        write_u16(image, 54, 56);
+        write_u16(image, 56, 1);
+        write_u32(image, 64, 1);
+        write_u32(image, 68, 5);
+        write_u64(image, 72, 0x80);
+        write_u64(image, 80, USER_CODE_VA as u64);
+        write_u64(image, 88, 0);
+        write_u64(image, 96, 4);
+        write_u64(image, 104, 4);
+        write_u64(image, 112, PAGE_SIZE as u64);
+        *image.add(0x80) = 0xcd;
+        *image.add(0x81) = SWITCH_VECTOR;
+        *image.add(0x82) = 0x0f;
+        *image.add(0x83) = 0x0b;
+    }
+}
+
+unsafe fn write_u16(base: *mut u8, offset: usize, value: u16) {
+    unsafe { core::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), base.add(offset), 2) };
+}
+
+unsafe fn write_u32(base: *mut u8, offset: usize, value: u32) {
+    unsafe { core::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), base.add(offset), 4) };
+}
+
+unsafe fn write_u64(base: *mut u8, offset: usize, value: u64) {
+    unsafe { core::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), base.add(offset), 8) };
 }
 
 fn table_address(table: *const PageTable) -> u64 {

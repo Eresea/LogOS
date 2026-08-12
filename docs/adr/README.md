@@ -9,3 +9,4 @@
 | [0005](0005-process-address-space-ownership.md) | Accepted | Process admission owns one generation-safe address-space identity |
 | [0006](0006-process-capability-authorization.md) | Accepted | Process handles authorize typed capability checks before service access |
 | [0007](0007-bounded-elf-load-plans.md) | Accepted | ELF admission produces a bounded executable load plan |
+| [0008](0008-proof-process-uses-model.md) | Accepted | The ring-3 proof registers through the process model and mapping contract |
