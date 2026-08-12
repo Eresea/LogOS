@@ -6,9 +6,9 @@
 extern crate std;
 
 use logos_abi::{
-    Cell, InputMessage, KeyCode, KeyState, MAX_COLUMNS, MAX_RENDER_CELLS, MAX_ROWS,
-    MAX_SCROLLBACK_LINES, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind, RenderMessage,
-    StreamMessage,
+    Cell, DEFAULT_COLUMNS, DEFAULT_ROWS, InputMessage, KeyCode, KeyState, MAX_COLUMNS,
+    MAX_RENDER_CELLS, MAX_ROWS, MAX_SCROLLBACK_LINES, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT,
+    MessageKind, RenderMessage, StreamMessage,
 };
 
 const ATTR_BOLD: u16 = 1 << 0;
@@ -122,7 +122,11 @@ impl Parser {
     }
 }
 
-pub struct Terminal {
+pub struct TerminalState<const CELL_COUNT: usize> {
+    default_columns: usize,
+    default_rows: usize,
+    max_columns: usize,
+    max_rows: usize,
     columns: usize,
     rows: usize,
     cursor_column: usize,
@@ -132,9 +136,9 @@ pub struct Terminal {
     style: Style,
     saved_style: Style,
     modes: TerminalModes,
-    screen: [Cell; MAX_COLUMNS * MAX_ROWS],
-    alternate: [Cell; MAX_COLUMNS * MAX_ROWS],
-    dirty: [bool; MAX_COLUMNS * MAX_ROWS],
+    screen: [Cell; CELL_COUNT],
+    alternate: [Cell; CELL_COUNT],
+    dirty: [bool; CELL_COUNT],
     parser: Parser,
     scrollback_lines: usize,
     bell: bool,
@@ -145,12 +149,20 @@ pub struct Terminal {
 /// Entry-ready Terminal service façade. IPC validation remains in the kernel;
 /// this type owns only terminal state and one-message transformations.
 pub struct TerminalService {
-    terminal: Terminal,
+    terminal: TerminalState<{ DEFAULT_COLUMNS * DEFAULT_ROWS }>,
 }
+
+const _: () =
+    assert!(core::mem::size_of::<TerminalService>() <= logos_abi::MAX_SERVICE_IMAGE_BYTES);
 
 impl TerminalService {
     pub const fn new() -> Self {
-        Self { terminal: Terminal::new() }
+        Self {
+            terminal: TerminalState::<{ DEFAULT_COLUMNS * DEFAULT_ROWS }>::new_with_size(
+                DEFAULT_COLUMNS,
+                DEFAULT_ROWS,
+            ),
+        }
     }
 
     pub fn input(&self, event: &InputMessage) -> Option<StreamMessage> {
@@ -163,11 +175,15 @@ impl TerminalService {
         }
     }
 
+    pub fn session_output_bytes(&mut self, bytes: &[u8]) {
+        self.terminal.feed(bytes);
+    }
+
     pub fn next_render(&mut self) -> Option<RenderMessage> {
         self.terminal.next_render()
     }
 
-    pub const fn terminal(&self) -> &Terminal {
+    pub const fn terminal(&self) -> &TerminalState<{ DEFAULT_COLUMNS * DEFAULT_ROWS }> {
         &self.terminal
     }
 }
@@ -178,11 +194,32 @@ impl Default for TerminalService {
     }
 }
 
-impl Terminal {
+impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     pub const fn new() -> Self {
+        Self::new_with_limits(DEFAULT_COLUMNS, DEFAULT_ROWS, MAX_COLUMNS, MAX_ROWS)
+    }
+
+    pub const fn new_with_size(columns: usize, rows: usize) -> Self {
+        Self::new_with_limits(columns, rows, columns, rows)
+    }
+
+    pub const fn new_with_limits(
+        default_columns: usize,
+        default_rows: usize,
+        max_columns: usize,
+        max_rows: usize,
+    ) -> Self {
+        assert!(default_columns > 0 && default_rows > 0);
+        assert!(max_columns > 0 && max_rows > 0);
+        assert!(default_columns <= max_columns && default_rows <= max_rows);
+        assert!(max_columns * max_rows <= CELL_COUNT);
         Self {
-            columns: logos_abi::DEFAULT_COLUMNS,
-            rows: logos_abi::DEFAULT_ROWS,
+            default_columns,
+            default_rows,
+            max_columns,
+            max_rows,
+            columns: default_columns,
+            rows: default_rows,
             cursor_column: 0,
             cursor_row: 0,
             saved_column: 0,
@@ -190,9 +227,9 @@ impl Terminal {
             style: Style::DEFAULT,
             saved_style: Style::DEFAULT,
             modes: TerminalModes::DEFAULT,
-            screen: [Cell::EMPTY; MAX_COLUMNS * MAX_ROWS],
-            alternate: [Cell::EMPTY; MAX_COLUMNS * MAX_ROWS],
-            dirty: [true; MAX_COLUMNS * MAX_ROWS],
+            screen: [Cell::EMPTY; CELL_COUNT],
+            alternate: [Cell::EMPTY; CELL_COUNT],
+            dirty: [true; CELL_COUNT],
             parser: Parser::new(),
             scrollback_lines: 0,
             bell: false,
@@ -221,7 +258,7 @@ impl Terminal {
     }
 
     pub fn resize(&mut self, columns: usize, rows: usize) -> Result<(), TerminalError> {
-        if !(1..=MAX_COLUMNS).contains(&columns) || !(1..=MAX_ROWS).contains(&rows) {
+        if !(1..=self.max_columns).contains(&columns) || !(1..=self.max_rows).contains(&rows) {
             return Err(TerminalError::InvalidSize);
         }
         self.columns = columns;
@@ -233,8 +270,8 @@ impl Terminal {
     }
 
     pub fn reset(&mut self) {
-        self.columns = logos_abi::DEFAULT_COLUMNS;
-        self.rows = logos_abi::DEFAULT_ROWS;
+        self.columns = self.default_columns;
+        self.rows = self.default_rows;
         self.cursor_column = 0;
         self.cursor_row = 0;
         self.saved_column = 0;
@@ -508,12 +545,12 @@ impl Terminal {
         self.parser.state = ParserState::Ground;
     }
 
-    fn active(&mut self) -> &mut [Cell; MAX_COLUMNS * MAX_ROWS] {
+    fn active(&mut self) -> &mut [Cell; CELL_COUNT] {
         if self.modes.alternate_screen { &mut self.alternate } else { &mut self.screen }
     }
 
     fn index(&self, column: usize, row: usize) -> usize {
-        row * MAX_COLUMNS + column
+        row * self.columns + column
     }
 
     fn put(&mut self, codepoint: u32) {
@@ -703,7 +740,7 @@ impl Terminal {
             for column in 0..self.columns {
                 let index = self.index(column, row);
                 if self.dirty[index] && count < MAX_RENDER_CELLS {
-                    message.positions[count] = index as u16;
+                    message.positions[count] = (row * MAX_COLUMNS + column) as u16;
                     message.cells[count] = self.active()[index];
                     self.dirty[index] = false;
                     count += 1;
@@ -846,11 +883,13 @@ const fn shifted_ascii(byte: u8) -> u8 {
     }
 }
 
-impl Default for Terminal {
+impl<const CELL_COUNT: usize> Default for TerminalState<CELL_COUNT> {
     fn default() -> Self {
         Self::new()
     }
 }
+
+pub type Terminal = TerminalState<{ MAX_COLUMNS * MAX_ROWS }>;
 
 const fn ansi_color(index: u16, bright: bool) -> u32 {
     palette((index as u8) + if bright { 8 } else { 0 })
