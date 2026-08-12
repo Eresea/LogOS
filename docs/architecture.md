@@ -28,12 +28,18 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Session service model | `logos-session::Session` | bounded line editing, history, environment, four-stage pipelines, eight child slots, and volatile redirection files |
 | Commands service model | `logos-commands::CommandService` | bounded built-ins, output, status, and clear-screen command effects |
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 16 validated mappings per process, typed capability authorization, and exit/fault/reclaim outcomes |
+| User launch contract | `process::UserLaunch` + `Scheduler::spawn_user` | a running process with a bound root publishes entry RIP, aligned stack top, root, and process generation before its task becomes runnable |
 | Service supervisor | `supervisor::ServiceSupervisor` | five-service lifecycle model, heartbeat timeouts, endpoint epochs, restart limits, and recovery transition |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
 | Terminal proof graph | `terminal_stack::TerminalStack` | deterministic Input → Terminal → Session → Terminal → Display path with generation-safe terminal restart |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
 | Runtime handoff | `handoff_to_runtime` | registers one root `TaskEntry`; the scheduler starts it through the normal context path |
 | Proof workload | `qemu-proof` feature | assembly CPU-bound canaries, timer/switch counters, cross-CPU block/wake, structured PASS |
+
+The process-to-scheduler handoff is now explicit: a running process with a bound root produces one
+validated `UserLaunch`, and the scheduler publishes its entry, stack, root, and process generation
+before marking the task runnable. Hardware page-table construction and ring-3 entry still consume
+the existing follow-on boundary.
 
 AP startup is deliberately narrow: xAPIC IDs, low-memory trampoline, current CR3, fixed stacks, and
 sequential INIT/SIPI/SIPI. x2APIC IDs, malformed topology, more than eight CPUs, allocators, APIC

@@ -54,6 +54,14 @@ impl ProcessHandle {
     pub const fn generation(self) -> u64 {
         self.generation
     }
+
+    pub const fn raw(self) -> u64 {
+        (self.generation << 8) | self.slot as u64
+    }
+
+    pub const fn from_raw(raw: u64) -> Self {
+        Self { slot: raw as u8, generation: raw >> 8 }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,6 +90,44 @@ impl AddressSpaceRoot {
 
     pub const fn raw(self) -> usize {
         self.0
+    }
+}
+
+/// Immutable register metadata needed to enter a loaded user image.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UserLaunch {
+    entry: usize,
+    stack_top: usize,
+    address_space_root: AddressSpaceRoot,
+}
+
+impl UserLaunch {
+    pub const fn new(
+        entry: usize,
+        stack_top: usize,
+        address_space_root: AddressSpaceRoot,
+    ) -> Option<Self> {
+        if entry == 0
+            || entry >= 0x0000_8000_0000_0000
+            || stack_top == 0
+            || stack_top & 0xfff != 0
+            || stack_top > 0x0000_8000_0000_0000
+        {
+            return None;
+        }
+        Some(Self { entry, stack_top, address_space_root })
+    }
+
+    pub const fn entry(self) -> usize {
+        self.entry
+    }
+
+    pub const fn stack_top(self) -> usize {
+        self.stack_top
+    }
+
+    pub const fn address_space_root(self) -> AddressSpaceRoot {
+        self.address_space_root
     }
 }
 
@@ -428,6 +474,24 @@ impl ProcessTable {
     pub fn address_space_root(&self, handle: ProcessHandle) -> Option<AddressSpaceRoot> {
         let address_space = self.address_space(handle)?;
         self.address_spaces.root(address_space)
+    }
+
+    /// Produce launch metadata only after the process has a bound root.
+    pub fn user_launch(
+        &self,
+        handle: ProcessHandle,
+        entry: usize,
+        stack_top: usize,
+    ) -> Result<UserLaunch, ProcessError> {
+        let process = self.slots.get(handle.slot as usize).ok_or(ProcessError::InvalidHandle)?;
+        if process.generation != handle.generation {
+            return Err(ProcessError::InvalidHandle);
+        }
+        if process.state != ProcessState::Running {
+            return Err(ProcessError::NotRunning);
+        }
+        let root = self.address_space_root(handle).ok_or(ProcessError::AddressSpace)?;
+        UserLaunch::new(entry, stack_top, root).ok_or(ProcessError::AddressSpace)
     }
 
     pub fn map(
@@ -795,6 +859,20 @@ mod tests {
         assert_eq!(AddressSpaceRoot::new(0), None);
         assert_eq!(AddressSpaceRoot::new(0x123), None);
         assert_eq!(AddressSpaceRoot::new(0x12_000).unwrap().raw(), 0x12_000);
+    }
+
+    #[test]
+    fn user_launch_requires_a_bound_root_and_preserves_register_metadata() {
+        let image = image();
+        let mut table = ProcessTable::new();
+        let process = table.start(&image, ProcessKind::Terminal, Capabilities::SERVICE).unwrap();
+        assert_eq!(table.user_launch(process, 0x1000, 0x8000), Err(ProcessError::AddressSpace));
+        let root = AddressSpaceRoot::new(0x20_000).unwrap();
+        table.bind_address_space_root(process, root).unwrap();
+        let launch = table.user_launch(process, 0x1000, 0x8000).unwrap();
+        assert_eq!(launch.entry(), 0x1000);
+        assert_eq!(launch.stack_top(), 0x8000);
+        assert_eq!(launch.address_space_root(), root);
     }
 
     #[test]

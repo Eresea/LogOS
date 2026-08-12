@@ -19,8 +19,8 @@ pub mod terminal;
 pub mod terminal_abi;
 pub mod terminal_stack;
 pub use scheduler::{
-    FinishState, IDLE_STACK_SIZE, MAX_CPUS, MAX_TASKS, SCHEDULER, SCHEDULER_STACK_SIZE, Scheduler,
-    SpawnError, TASK_STACK_SIZE, TaskEntry, TaskHandle, TaskState,
+    FinishState, IDLE_STACK_SIZE, MAX_CPUS, MAX_TASKS, SCHEDULER, SCHEDULER_STACK_SIZE,
+    ScheduledUserLaunch, Scheduler, SpawnError, TASK_STACK_SIZE, TaskEntry, TaskHandle, TaskState,
 };
 pub mod health;
 pub mod runtime;

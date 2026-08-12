@@ -1,7 +1,7 @@
 //! Bounded ELF page admission backed by the fixed frame pool.
 
 use crate::frame_pool::{FrameAddress, FramePool, FramePoolError};
-use crate::process::{ElfLoadPlan, MappingFlags};
+use crate::process::{AddressSpaceRoot, ElfLoadPlan, MappingFlags, UserLaunch};
 
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_LOAD_PAGES: usize =
@@ -99,6 +99,10 @@ impl LoadedImage {
         self.count
     }
 
+    pub fn user_launch(&self, root: AddressSpaceRoot) -> Option<UserLaunch> {
+        UserLaunch::new(self.entry, self.stack_top, root)
+    }
+
     pub fn page(&self, index: usize) -> Option<LoadedPage> {
         self.pages.get(index).copied().flatten()
     }
@@ -178,6 +182,11 @@ mod tests {
         assert_eq!(loaded.page_count(), 9);
         let first = loaded.page(0).unwrap();
         assert_eq!(first.virtual_address(), 0x1000);
+        let root = AddressSpaceRoot::new(0x20_000).unwrap();
+        let launch = loaded.user_launch(root).unwrap();
+        assert_eq!(launch.entry(), loaded.entry());
+        assert_eq!(launch.stack_top(), loaded.stack_top());
+        assert_eq!(launch.address_space_root(), root);
         loaded.reclaim(&mut pool);
         assert_eq!(loaded.page_count(), 0);
         let reused = pool.allocate().unwrap().raw();

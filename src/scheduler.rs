@@ -3,6 +3,8 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 
+use crate::process::{ProcessHandle, UserLaunch};
+
 pub const MAX_TASKS: usize = 8;
 pub const MAX_CPUS: usize = 8;
 pub const TASK_STACK_SIZE: usize = 16 * 1024;
@@ -37,6 +39,7 @@ pub enum TaskState {
 pub enum SpawnError {
     Capacity,
     AddressSpace,
+    UserLaunch,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,6 +86,9 @@ struct TaskSlot {
     saved_rsp: AtomicUsize,
     context_saved: AtomicBool,
     address_space: AtomicUsize,
+    process: AtomicU64,
+    user_entry: AtomicUsize,
+    user_stack_top: AtomicUsize,
 }
 
 impl TaskSlot {
@@ -95,7 +101,34 @@ impl TaskSlot {
             saved_rsp: AtomicUsize::new(0),
             context_saved: AtomicBool::new(false),
             address_space: AtomicUsize::new(0),
+            process: AtomicU64::new(0),
+            user_entry: AtomicUsize::new(0),
+            user_stack_top: AtomicUsize::new(0),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScheduledUserLaunch {
+    process: ProcessHandle,
+    launch: UserLaunch,
+}
+
+impl ScheduledUserLaunch {
+    pub const fn process(self) -> ProcessHandle {
+        self.process
+    }
+
+    pub const fn entry(self) -> usize {
+        self.launch.entry()
+    }
+
+    pub const fn stack_top(self) -> usize {
+        self.launch.stack_top()
+    }
+
+    pub const fn address_space_root(self) -> usize {
+        self.launch.address_space_root().raw()
     }
 }
 
@@ -160,8 +193,38 @@ impl Scheduler {
         entry: TaskEntry,
         address_space: usize,
     ) -> Result<TaskHandle, SpawnError> {
+        self.spawn_internal(entry, address_space, None)
+    }
+
+    /// Reserve a scheduler slot for a loaded process.
+    ///
+    /// `entry` remains the kernel trampoline for now. The user register set is
+    /// published atomically with the task's runnable state for the future
+    /// ring-3 context path.
+    pub fn spawn_user(
+        &self,
+        entry: TaskEntry,
+        process: ProcessHandle,
+        launch: UserLaunch,
+    ) -> Result<TaskHandle, SpawnError> {
+        self.spawn_internal(
+            entry,
+            launch.address_space_root().raw(),
+            Some(ScheduledUserLaunch { process, launch }),
+        )
+    }
+
+    fn spawn_internal(
+        &self,
+        entry: TaskEntry,
+        address_space: usize,
+        user_launch: Option<ScheduledUserLaunch>,
+    ) -> Result<TaskHandle, SpawnError> {
         if address_space != 0 && address_space & 0xfff != 0 {
             return Err(SpawnError::AddressSpace);
+        }
+        if user_launch.is_some_and(|launch| launch.process().raw() == 0) {
+            return Err(SpawnError::UserLaunch);
         }
         for (index, slot) in self.tasks.iter().enumerate() {
             let old = slot.state.load(Ordering::Acquire);
@@ -182,6 +245,15 @@ impl Scheduler {
             slot.saved_rsp.store(0, Ordering::Release);
             slot.context_saved.store(false, Ordering::Release);
             slot.address_space.store(address_space, Ordering::Release);
+            if let Some(launch) = user_launch {
+                slot.process.store(launch.process().raw(), Ordering::Release);
+                slot.user_entry.store(launch.entry(), Ordering::Release);
+                slot.user_stack_top.store(launch.stack_top(), Ordering::Release);
+            } else {
+                slot.process.store(0, Ordering::Release);
+                slot.user_entry.store(0, Ordering::Release);
+                slot.user_stack_top.store(0, Ordering::Release);
+            }
             slot.state.store(pack(generation, RUNNABLE), Ordering::Release);
             return Ok(TaskHandle { slot: index as u8, generation });
         }
@@ -383,6 +455,9 @@ impl Scheduler {
         }
         slot.entry.store(0, Ordering::Release);
         slot.address_space.store(0, Ordering::Release);
+        slot.process.store(0, Ordering::Release);
+        slot.user_entry.store(0, Ordering::Release);
+        slot.user_stack_top.store(0, Ordering::Release);
         slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
         slot.saved_rsp.store(0, Ordering::Release);
         slot.context_saved.store(false, Ordering::Release);
@@ -465,6 +540,26 @@ impl Scheduler {
         let slot = self.tasks.get(handle.slot as usize)?;
         let word = slot.state.load(Ordering::Acquire);
         (generation(word) == handle.generation).then(|| slot.address_space.load(Ordering::Acquire))
+    }
+
+    pub fn user_launch(&self, handle: TaskHandle) -> Option<ScheduledUserLaunch> {
+        let slot = self.tasks.get(handle.slot as usize)?;
+        let word = slot.state.load(Ordering::Acquire);
+        if generation(word) != handle.generation {
+            return None;
+        }
+        let process = ProcessHandle::from_raw(slot.process.load(Ordering::Acquire));
+        if process.raw() == 0 {
+            return None;
+        }
+        let root =
+            crate::process::AddressSpaceRoot::new(slot.address_space.load(Ordering::Acquire))?;
+        let launch = UserLaunch::new(
+            slot.user_entry.load(Ordering::Acquire),
+            slot.user_stack_top.load(Ordering::Acquire),
+            root,
+        )?;
+        Some(ScheduledUserLaunch { process, launch })
     }
 }
 
@@ -651,6 +746,29 @@ mod tests {
         assert!(scheduler.finish(handle, FinishState::Completed));
         assert!(scheduler.reclaim_completed(handle));
         assert_eq!(scheduler.address_space(handle), None);
+    }
+
+    #[test]
+    fn loaded_user_launch_is_published_with_task_generation() {
+        let scheduler = Scheduler::new();
+        let process = ProcessHandle::from_raw(0x100);
+        let root = crate::process::AddressSpaceRoot::new(0x80_000).unwrap();
+        let launch = UserLaunch::new(0x4000, 0x9000, root).unwrap();
+        let handle = scheduler.spawn_user(empty, process, launch).unwrap();
+        let scheduled = scheduler.user_launch(handle).unwrap();
+        assert_eq!(scheduled.process(), process);
+        assert_eq!(scheduled.entry(), 0x4000);
+        assert_eq!(scheduled.stack_top(), 0x9000);
+        assert_eq!(scheduled.address_space_root(), 0x80_000);
+    }
+
+    #[test]
+    fn user_launch_rejects_null_process_handles() {
+        let scheduler = Scheduler::new();
+        let process = ProcessHandle::from_raw(0);
+        let root = crate::process::AddressSpaceRoot::new(0x80_000).unwrap();
+        let launch = UserLaunch::new(0x4000, 0x9000, root).unwrap();
+        assert_eq!(scheduler.spawn_user(empty, process, launch), Err(SpawnError::UserLaunch));
     }
 
     #[test]
