@@ -2,7 +2,8 @@
 
 use crate::terminal_abi::{
     Cell, InputMessage, KeyCode, KeyState, MAX_COLUMNS, MAX_RENDER_CELLS, MAX_ROWS,
-    MAX_SCROLLBACK_LINES, MessageKind, RenderMessage, StreamMessage,
+    MAX_SCROLLBACK_LINES, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind, RenderMessage,
+    StreamMessage,
 };
 
 const ATTR_BOLD: u16 = 1 << 0;
@@ -700,6 +701,19 @@ impl Terminal {
             return None;
         }
         let code = KeyCode::from_raw(event.code);
+        if let Some(byte) = code.character_byte() {
+            let byte = modified_character(byte, event.modifiers);
+            if event.modifiers & MOD_CTRL != 0 {
+                return StreamMessage::from_bytes(
+                    MessageKind::SessionInput,
+                    &[control_byte(byte)?],
+                );
+            }
+            if event.modifiers & MOD_ALT != 0 {
+                let bytes = [b'\x1b', byte];
+                return StreamMessage::from_bytes(MessageKind::SessionInput, &bytes);
+            }
+        }
         let bytes: &[u8] = match code {
             KeyCode::Escape => b"\x1b",
             KeyCode::Enter => b"\r",
@@ -741,6 +755,53 @@ impl Terminal {
             _ => return None,
         };
         StreamMessage::from_bytes(MessageKind::SessionInput, bytes)
+    }
+}
+
+fn modified_character(byte: u8, modifiers: u16) -> u8 {
+    if byte.is_ascii_alphabetic() {
+        let upper = (modifiers & MOD_SHIFT != 0) ^ (modifiers & MOD_CAPS_LOCK != 0);
+        if upper { byte.to_ascii_uppercase() } else { byte.to_ascii_lowercase() }
+    } else if modifiers & MOD_SHIFT != 0 {
+        shifted_ascii(byte)
+    } else {
+        byte
+    }
+}
+
+fn control_byte(byte: u8) -> Option<u8> {
+    match byte {
+        b'?' => Some(0x7f),
+        b'a'..=b'z' | b'A'..=b'Z' => Some(byte.to_ascii_uppercase() & 0x1f),
+        b' '..=b'_' => Some(byte & 0x1f),
+        _ => None,
+    }
+}
+
+const fn shifted_ascii(byte: u8) -> u8 {
+    match byte {
+        b'1' => b'!',
+        b'2' => b'@',
+        b'3' => b'#',
+        b'4' => b'$',
+        b'5' => b'%',
+        b'6' => b'^',
+        b'7' => b'&',
+        b'8' => b'*',
+        b'9' => b'(',
+        b'0' => b')',
+        b'-' => b'_',
+        b'=' => b'+',
+        b'[' => b'{',
+        b']' => b'}',
+        b';' => b':',
+        b'\'' => b'"',
+        b',' => b'<',
+        b'.' => b'>',
+        b'/' => b'?',
+        b'`' => b'~',
+        b'\\' => b'|',
+        _ => byte,
     }
 }
 
@@ -841,6 +902,10 @@ mod tests {
         terminal.feed(b"\x1b[?2004h");
         let paste = InputMessage::paste(b"abc").unwrap();
         assert_eq!(terminal.input(&paste).unwrap().as_bytes(), Some(&b"\x1b[200~abc\x1b[201~"[..]));
+        let ctrl_c = InputMessage::key(KeyCode::character(b'c'), KeyState::Pressed, MOD_CTRL);
+        assert_eq!(terminal.input(&ctrl_c).unwrap().as_bytes(), Some(&[0x03][..]));
+        let alt_x = InputMessage::key(KeyCode::character(b'x'), KeyState::Pressed, MOD_ALT);
+        assert_eq!(terminal.input(&alt_x).unwrap().as_bytes(), Some(&b"\x1bx"[..]));
     }
 
     #[test]
