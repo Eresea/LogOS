@@ -547,7 +547,7 @@ impl LoadSegment {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ElfLoadPlan {
     entry: usize,
     segments: [Option<LoadSegment>; MAX_PROGRAM_HEADERS],
