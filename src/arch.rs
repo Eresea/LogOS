@@ -30,7 +30,14 @@ const APIC_TIMER_CURRENT: usize = 0x390;
 const APIC_TIMER_DIVIDE: usize = 0x3e0;
 const APIC_ICR_LOW: usize = 0x300;
 const APIC_ICR_HIGH: usize = 0x310;
+const PIC_MASTER_COMMAND: u16 = 0x20;
+const PIC_MASTER_DATA: u16 = 0x21;
+const PIC_SLAVE_COMMAND: u16 = 0xa0;
+const PIC_SLAVE_DATA: u16 = 0xa1;
+const PIC_EOI: u8 = 0x20;
+const KEYBOARD_DATA_PORT: u16 = 0x60;
 const TIMER_VECTOR: u8 = 32;
+const KEYBOARD_VECTOR: u8 = 33;
 const SWITCH_VECTOR: u8 = 49;
 const ACTION_YIELD: u64 = 1;
 const ACTION_BLOCK: u64 = 2;
@@ -66,6 +73,8 @@ static mut SERVICE_IMAGES: Option<ServiceImageBundle> = None;
 static mut SERVICE_RUNTIME: crate::service_runtime::ServiceRuntime =
     crate::service_runtime::ServiceRuntime::new();
 static KERNEL_CR3: AtomicUsize = AtomicUsize::new(0);
+static KEYBOARD_RING: AtomicUsize = AtomicUsize::new(0);
+static KEYBOARD_DROPS: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -594,20 +603,23 @@ pub(crate) fn prepare_task_address_space(root: usize) {
 
 pub(crate) fn start_services() {
     unsafe {
-        (*core::ptr::addr_of_mut!(SERVICE_RUNTIME)).start_tasks().unwrap_or_else(
-            |error| match error {
-                crate::service_runtime::ServiceRuntimeError::TaskCapacity => {
-                    fatal(b"LogOS vNext: service task capacity")
-                }
-                crate::service_runtime::ServiceRuntimeError::TaskAddressSpace => {
-                    fatal(b"LogOS vNext: service task address space")
-                }
-                crate::service_runtime::ServiceRuntimeError::TaskLaunch => {
-                    fatal(b"LogOS vNext: service task launch")
-                }
-                _ => fatal(b"LogOS vNext: service task startup"),
-            },
-        );
+        let runtime = &mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME);
+        runtime.start_tasks().unwrap_or_else(|error| match error {
+            crate::service_runtime::ServiceRuntimeError::TaskCapacity => {
+                fatal(b"LogOS vNext: service task capacity")
+            }
+            crate::service_runtime::ServiceRuntimeError::TaskAddressSpace => {
+                fatal(b"LogOS vNext: service task address space")
+            }
+            crate::service_runtime::ServiceRuntimeError::TaskLaunch => {
+                fatal(b"LogOS vNext: service task launch")
+            }
+            _ => fatal(b"LogOS vNext: service task startup"),
+        });
+        let ring =
+            runtime.keyboard_ring_address().unwrap_or_else(|| fatal(b"LogOS vNext: keyboard ring"));
+        KEYBOARD_RING.store(ring, Ordering::Release);
+        enable_keyboard_irq();
     }
     proof_line(b"LogOS vNext: service tasks started");
 }
@@ -638,6 +650,7 @@ fn initialize_post_uefi(cpu_count: usize) {
     install_idt(0);
     configure_sse();
     enable_local_apic();
+    configure_pic();
     calibrate_timer();
     #[cfg(feature = "qemu-proof")]
     crate::user_mode::initialize_kernel_cr3(current_cr3());
@@ -786,6 +799,8 @@ fn install_idt(cpu: usize) {
             KERNEL_CODE_SELECTOR,
             0x8e,
         );
+        idt[KEYBOARD_VECTOR as usize] =
+            IdtEntry::new(keyboard_interrupt as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
         idt[SWITCH_VECTOR as usize] = IdtEntry::new(
             context_switch_interrupt as *const () as usize,
             KERNEL_CODE_SELECTOR,
@@ -838,6 +853,69 @@ fn enable_local_apic() {
         APIC.store(base, Ordering::Release);
         write_apic(APIC_SVR, read_apic(APIC_SVR) | 0x100 | 0xff);
     }
+}
+
+fn configure_pic() {
+    unsafe {
+        out_port(PIC_MASTER_COMMAND, 0x11);
+        io_wait();
+        out_port(PIC_SLAVE_COMMAND, 0x11);
+        io_wait();
+        out_port(PIC_MASTER_DATA, 0x20);
+        io_wait();
+        out_port(PIC_SLAVE_DATA, 0x28);
+        io_wait();
+        out_port(PIC_MASTER_DATA, 0x04);
+        io_wait();
+        out_port(PIC_SLAVE_DATA, 0x02);
+        io_wait();
+        out_port(PIC_MASTER_DATA, 0x01);
+        io_wait();
+        out_port(PIC_SLAVE_DATA, 0x01);
+        io_wait();
+        out_port(PIC_MASTER_DATA, 0xff);
+        out_port(PIC_SLAVE_DATA, 0xff);
+    }
+}
+
+fn enable_keyboard_irq() {
+    unsafe {
+        let mask = in_port(PIC_MASTER_DATA);
+        out_port(PIC_MASTER_DATA, mask & !(1 << 1));
+    }
+}
+
+pub(super) fn handle_keyboard_interrupt() {
+    let byte = unsafe { in_port(KEYBOARD_DATA_PORT) };
+    let ring = KEYBOARD_RING.load(Ordering::Acquire);
+    if ring != 0 {
+        // The frame is identity-mapped in the kernel root and is mapped into
+        // Input separately by the service runtime.
+        if unsafe { (&*(ring as *const logos_abi::KeyboardByteRing)).push(byte) }.is_err() {
+            KEYBOARD_DROPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    unsafe {
+        out_port(PIC_MASTER_COMMAND, PIC_EOI);
+    }
+}
+
+unsafe fn io_wait() {
+    unsafe { out_port(0x80, 0) };
+}
+
+unsafe fn out_port(port: u16, value: u8) {
+    unsafe {
+        asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags))
+    };
+}
+
+unsafe fn in_port(port: u16) -> u8 {
+    let value: u8;
+    unsafe {
+        asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags))
+    };
+    value
 }
 
 fn write_gs(local: &CpuLocal) {
@@ -905,6 +983,7 @@ unsafe fn rdmsr(msr: u32) -> u64 {
 unsafe extern "C" {
     fn default_interrupt();
     fn context_timer_interrupt();
+    fn keyboard_interrupt();
     fn context_switch_interrupt();
     fn user_fault_no_error();
     fn user_gp_fault_error();

@@ -55,6 +55,9 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         #[cfg(feature = "qemu-proof")]
         crate::proof::observe(cpu);
     }
+    if vector == usize::from(KEYBOARD_VECTOR) {
+        handle_keyboard_interrupt();
+    }
     let local = unsafe { &*core::ptr::addr_of_mut!(CPU_LOCALS).cast::<CpuLocal>().add(cpu) };
     unsafe { write_apic(APIC_EOI, 0) };
     if let Some(current) = current {
@@ -305,6 +308,10 @@ global_asm!(
     ".global context_timer_interrupt",
     "context_timer_interrupt:",
     "push 32",
+    "jmp context_common",
+    ".global keyboard_interrupt",
+    "keyboard_interrupt:",
+    "push 33",
     "jmp context_common",
     ".global context_switch_interrupt",
     "context_switch_interrupt:",

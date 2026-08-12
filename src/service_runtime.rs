@@ -210,6 +210,10 @@ impl ServiceRuntime {
         self.keyboard_frame
     }
 
+    pub(crate) fn keyboard_ring_address(&self) -> Option<usize> {
+        self.keyboard_frame().map(|frame| frame.raw() as usize)
+    }
+
     fn map_framebuffer(
         &mut self,
         framebuffer: crate::boot_resources::FramebufferInfo,
