@@ -12,6 +12,7 @@ pub mod process;
 mod scheduler;
 pub mod session;
 pub mod supervisor;
+pub mod syscall;
 pub mod terminal;
 pub mod terminal_abi;
 pub mod terminal_stack;

@@ -29,6 +29,7 @@ pub const MAX_SERVICE_ENDPOINTS: usize = 32;
 pub const MAX_SERVICE_DATA_BYTES: usize = 1024 * 1024;
 pub const MAX_FRAMEBUFFER_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_GLYPH_CACHE: usize = 1024;
+pub const MAX_CAPABILITIES: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -98,6 +99,33 @@ impl Capability {
         slot: u16,
     ) -> Self {
         Self { kind, service, generation, rights, slot }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct SyscallRequest {
+    pub kind: SyscallKind,
+    pub capability: Capability,
+    pub args: [u64; 4],
+}
+
+impl SyscallRequest {
+    pub const fn new(kind: SyscallKind, capability: Capability) -> Self {
+        Self { kind, capability, args: [0; 4] }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct SyscallResponse {
+    pub status: SyscallStatus,
+    pub value: u64,
+}
+
+impl SyscallResponse {
+    pub const fn new(status: SyscallStatus, value: u64) -> Self {
+        Self { status, value }
     }
 }
 

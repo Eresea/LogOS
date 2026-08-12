@@ -16,3 +16,4 @@
 | [0012](0012-service-abi-boundary.md) | Accepted | Kernel and terminal services share only fixed ABI values; control-plane syscalls and data-plane IPC remain distinct |
 | [0013](0013-boot-resource-publication.md) | Accepted | UEFI handles become bounded copied resource descriptors before `ExitBootServices` |
 | [0014](0014-bounded-frame-supply.md) | Accepted | User address spaces consume only a fixed conventional-frame pool with explicit exhaustion and release |
+| [0015](0015-service-control-plane.md) | Accepted | Control operations use typed capability-gated syscalls; terminal data remains shared IPC |
