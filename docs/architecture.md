@@ -33,7 +33,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | IPC mechanics | `logos-abi::SharedIpc` + `ipc::BoundedQueue` | fixed SPSC rings are usable by kernel and services, fit bounded endpoint pages, and report full/empty/stale/disconnected outcomes without allocation or serialization |
 | Input service | `services/images/src/input` + `logos-input::InputDecoder` | consumes the Input-only PS/2 byte mapping, produces semantic key/text messages on the Input→Terminal ring, and owns modifier/layout state |
 | Terminal service | `services/images/src/terminal` + `logos-terminal::TerminalState` | ring-3 owns a bounded 80×25 live surface, consumes Input and Session rings, emits compact Session input and dirty-cell Display messages; the reusable host model remains bounded to 160×100 |
-| Display state | `display::Display` | validates cell diffs, dimensions, positions, endpoint generations, and dirty-cell rasterization through the fixed glyph cache |
+| Display service | `services/images/src/display` + `logos-display` | ring-3 validates cell diffs and endpoint generations, then rasterizes dirty cells through the fixed glyph cache into its mapped GOP framebuffer |
 | Session service model | `logos-session::Session` | bounded line editing, history, environment, four-stage pipelines, eight child slots, and volatile redirection files |
 | Commands service model | `logos-commands::CommandService` | bounded built-ins, output, status, and clear-screen command effects |
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 16 validated mappings per process, typed capability authorization, and exit/fault/reclaim outcomes |

@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 logos-abi = { path = "../../abi" }
 logos-commands = { path = "../commands" }
+logos-display = { path = "../display" }
 logos-input = { path = "../input" }
 logos-session = { path = "../session" }
 logos-terminal = { path = "../terminal" }

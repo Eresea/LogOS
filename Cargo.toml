@@ -9,6 +9,7 @@ license = "MIT"
 members = [
     "abi",
     "services/commands",
+    "services/display",
     "services/input",
     "services/session",
     "services/terminal",

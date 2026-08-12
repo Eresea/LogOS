@@ -38,6 +38,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos-display"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
 name = "logos-input"
 version = "0.1.0"
 dependencies = [
@@ -50,6 +57,7 @@ version = "0.1.0"
 dependencies = [
  "logos-abi",
  "logos-commands",
+ "logos-display",
  "logos-input",
  "logos-session",
  "logos-terminal",
