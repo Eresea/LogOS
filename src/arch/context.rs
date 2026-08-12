@@ -81,6 +81,8 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         local.current_generation.store(0, Ordering::Release);
     }
     let Some(next) = SCHEDULER.claim_next(cpu) else {
+        #[cfg(feature = "qemu-proof")]
+        crate::user_mode::prepare_kernel();
         set_task_kernel_stack(cpu, unsafe {
             (*core::ptr::addr_of!(CPU_LOCALS).cast::<CpuLocal>().add(cpu)).user_entry_stack_top
         } as usize);
@@ -97,6 +99,8 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         fatal(b"LogOS vNext: TSS task stack");
     };
     set_task_kernel_stack(cpu, stack_top);
+    #[cfg(feature = "qemu-proof")]
+    crate::user_mode::prepare_task(next);
     SCHEDULER.saved_context(next).unwrap_or_else(|| fatal(b"LogOS vNext: no context"))
 }
 

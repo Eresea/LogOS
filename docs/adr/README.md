@@ -11,3 +11,4 @@
 | [0007](0007-bounded-elf-load-plans.md) | Accepted | ELF admission produces a bounded executable load plan |
 | [0008](0008-proof-process-uses-model.md) | Accepted | The ring-3 proof registers through the process model and mapping contract |
 | [0009](0009-bounded-syscall-dispatch.md) | Accepted | Vector 49 dispatches one validated user syscall payload |
+| [0010](0010-scheduler-cr3-selection.md) | Accepted | Scheduler handoff selects the kernel or proof CR3 explicitly |

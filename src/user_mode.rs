@@ -35,6 +35,7 @@ static mut USER_PROCESS_TABLE: ProcessTable = ProcessTable::new();
 static mut USER_PROCESS: Option<ProcessHandle> = None;
 
 static USER_CR3: AtomicUsize = AtomicUsize::new(0);
+static KERNEL_CR3: AtomicUsize = AtomicUsize::new(0);
 static USER_TASK_RAW: AtomicU64 = AtomicU64::new(0);
 static USER_SYSCALLS: AtomicU64 = AtomicU64::new(0);
 static USER_FAULTED: AtomicBool = AtomicBool::new(false);
@@ -50,13 +51,19 @@ const fn proof_code_page() -> [u8; PAGE_SIZE] {
 }
 
 pub(crate) fn spawn_proof() {
-    build_address_space(crate::arch::current_cr3() & ADDRESS_MASK);
+    let kernel_cr3 = crate::arch::current_cr3() & ADDRESS_MASK;
+    KERNEL_CR3.store(kernel_cr3, Ordering::Release);
+    build_address_space(kernel_cr3);
     register_proof_process();
     crate::arch_proof_line(b"LogOS vNext: user space ready");
     let handle = SCHEDULER
         .spawn(user_task_entry)
         .unwrap_or_else(|_| crate::arch_fatal(b"LogOS vNext: user task capacity"));
     USER_TASK_RAW.store(handle.raw(), Ordering::Release);
+}
+
+pub(crate) fn initialize_kernel_cr3(root: usize) {
+    KERNEL_CR3.store(root & ADDRESS_MASK, Ordering::Release);
 }
 
 pub(crate) fn faulted(handle: TaskHandle, vector: usize) -> bool {
@@ -95,6 +102,28 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
 
 pub(crate) fn is_user_task(handle: TaskHandle) -> bool {
     handle.raw() == USER_TASK_RAW.load(Ordering::Acquire)
+}
+
+pub(crate) fn prepare_task(handle: TaskHandle) {
+    let root = if is_user_task(handle) {
+        USER_CR3.load(Ordering::Acquire)
+    } else {
+        KERNEL_CR3.load(Ordering::Acquire)
+    };
+    switch_cr3(root);
+}
+
+pub(crate) fn prepare_kernel() {
+    switch_cr3(KERNEL_CR3.load(Ordering::Acquire));
+}
+
+fn switch_cr3(root: usize) {
+    if root == 0 {
+        crate::arch_fatal(b"LogOS vNext: missing CR3");
+    }
+    unsafe {
+        core::arch::asm!("mov cr3, {root}", root = in(reg) root, options(nostack, preserves_flags));
+    }
 }
 
 pub(crate) fn syscalls() -> u64 {

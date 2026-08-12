@@ -370,6 +370,8 @@ fn initialize_post_uefi(cpu_count: usize) {
     enable_local_apic();
     calibrate_timer();
     #[cfg(feature = "qemu-proof")]
+    crate::user_mode::initialize_kernel_cr3(current_cr3());
+    #[cfg(feature = "qemu-proof")]
     crate::proof::terminal_integration();
     start_aps(cpu_count);
     configure_timer();
