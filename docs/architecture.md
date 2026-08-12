@@ -7,7 +7,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | --- | --- | --- |
 | UEFI handoff | `arch::boot` | discovers 1–8 healthy CPUs, stages fixed AP trampoline, exits boot services |
 | Per-CPU state | `arch::CpuLocal` via `GS_BASE` | private scheduler/idle stacks, cursor/current task, ticks, online state |
-| Context boundary | `context_common` | timer and voluntary entries save the same GPR/RIP/RSP/RFLAGS/CS and x87/SSE frame, then switch to scheduler stack |
+| Context boundary | `arch/context.rs` | timer and voluntary entries save the same GPR/RIP/RSP/RFLAGS/CS and x87/SSE frame, then switch to scheduler stack |
 | Publication | `Scheduler::save_context` + `finish` | outgoing task is claimable only after context-save publication |
 | Scheduler | `Scheduler` | eight generation-safe slots, atomic lifecycle/wake word, CAS `Runnable → Running`, no task-body lock |
 | Task primitives | `spawn`, `wake`, `yield_current`, `block_current`, `reclaim_completed` | explicit runnable/blocked/completed states and cheap wake-pending race handling |
