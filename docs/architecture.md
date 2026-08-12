@@ -6,6 +6,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Boundary | Owner | Invariant / proof |
 | --- | --- | --- |
 | UEFI handoff | `arch::boot` | discovers 1–8 healthy CPUs, stages fixed AP trampoline, exits boot services |
+| Boot resources | `boot_resources` | copies bounded memory-map, GOP framebuffer, and PS/2 identities before UEFI handles are discarded |
 | Per-CPU state | `arch::CpuLocal` via `GS_BASE` | private scheduler/idle stacks, TSS ring-transition fallback, cursor/current task, ticks, online state |
 | Context boundary | `arch/context.rs` | timer, voluntary, ring-3 syscall dispatch, and user-fault entries save one GPR/RIP/RSP/RFLAGS/CS and x87/SSE frame shape |
 | Publication | `Scheduler::save_context` + `finish` | outgoing task is claimable only after context-save publication |

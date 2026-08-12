@@ -14,3 +14,4 @@
 | [0010](0010-scheduler-cr3-selection.md) | Accepted | Scheduler handoff selects the kernel or proof CR3 explicitly |
 | [0011](0011-scheduler-address-space-roots.md) | Accepted | Task slots publish one bounded address-space root for handoff |
 | [0012](0012-service-abi-boundary.md) | Accepted | Kernel and terminal services share only fixed ABI values; control-plane syscalls and data-plane IPC remain distinct |
+| [0013](0013-boot-resource-publication.md) | Accepted | UEFI handles become bounded copied resource descriptors before `ExitBootServices` |
