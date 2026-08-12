@@ -5,6 +5,11 @@
 //! These are deliberately boring `repr(C)` values.  Services exchange values
 //! through bounded pages; they never share Rust references or kernel objects.
 
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicU16, Ordering},
+};
+
 pub const ABI_VERSION: u16 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 4096;
 pub const IPC_RING_SLOTS: usize = 8;
@@ -29,6 +34,8 @@ pub const MAX_SERVICE_ENDPOINTS: usize = 32;
 pub const MAX_SERVICE_DATA_BYTES: usize = 1024 * 1024;
 pub const MAX_FRAMEBUFFER_BYTES: usize = 16 * 1024 * 1024;
 pub const DISPLAY_FRAMEBUFFER_BASE: usize = 0x0000_0100_1000_0000;
+pub const INPUT_KEYBOARD_RING_BASE: usize = 0x0000_0100_1100_0000;
+pub const KEYBOARD_RING_CAPACITY: usize = 256;
 pub const MAX_GLYPH_CACHE: usize = 1024;
 pub const MAX_CAPABILITIES: usize = 8;
 
@@ -415,6 +422,65 @@ pub struct EndpointHeader {
     pub consumer: u16,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyboardRingError {
+    Full,
+}
+
+/// Kernel-produced, Input-consumed PS/2 byte ring.
+#[repr(C)]
+pub struct KeyboardByteRing {
+    head: AtomicU16,
+    tail: AtomicU16,
+    bytes: [UnsafeCell<u8>; KEYBOARD_RING_CAPACITY],
+}
+
+unsafe impl Sync for KeyboardByteRing {}
+
+impl KeyboardByteRing {
+    pub const fn new() -> Self {
+        Self {
+            head: AtomicU16::new(0),
+            tail: AtomicU16::new(0),
+            bytes: [const { UnsafeCell::new(0) }; KEYBOARD_RING_CAPACITY],
+        }
+    }
+
+    pub fn push(&self, byte: u8) -> Result<(), KeyboardRingError> {
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Acquire);
+        if head.wrapping_sub(tail) >= KEYBOARD_RING_CAPACITY as u16 {
+            return Err(KeyboardRingError::Full);
+        }
+        let slot = usize::from(head) % KEYBOARD_RING_CAPACITY;
+        unsafe { *self.bytes[slot].get() = byte };
+        self.head.store(head.wrapping_add(1), Ordering::Release);
+        Ok(())
+    }
+
+    pub fn pop(&self) -> Option<u8> {
+        let tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
+        if tail == head {
+            return None;
+        }
+        let slot = usize::from(tail) % KEYBOARD_RING_CAPACITY;
+        let byte = unsafe { *self.bytes[slot].get() };
+        self.tail.store(tail.wrapping_add(1), Ordering::Release);
+        Some(byte)
+    }
+
+    pub fn pending(&self) -> usize {
+        self.head.load(Ordering::Acquire).wrapping_sub(self.tail.load(Ordering::Acquire)) as usize
+    }
+}
+
+impl Default for KeyboardByteRing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EndpointHeader {
     pub const fn new(generation: u16, service_epoch: u64) -> Self {
         Self { abi_version: ABI_VERSION, generation, service_epoch, producer: 0, consumer: 0 }
@@ -463,5 +529,19 @@ mod tests {
         assert!(header.accepts(4, 8));
         assert!(!header.accepts(3, 8));
         assert!(!header.accepts(4, 9));
+    }
+
+    #[test]
+    fn keyboard_ring_is_bounded_and_fifo() {
+        let ring = KeyboardByteRing::new();
+        for byte in 0..KEYBOARD_RING_CAPACITY as u16 {
+            assert!(ring.push(byte as u8).is_ok());
+        }
+        assert_eq!(ring.push(0xff), Err(KeyboardRingError::Full));
+        assert_eq!(ring.pending(), KEYBOARD_RING_CAPACITY);
+        for byte in 0..KEYBOARD_RING_CAPACITY as u16 {
+            assert_eq!(ring.pop(), Some(byte as u8));
+        }
+        assert_eq!(ring.pop(), None);
     }
 }

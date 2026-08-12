@@ -7,7 +7,7 @@ use logos_abi::{CapabilityKind, ServiceId};
 use crate::{
     frame_pool::{FrameAddress, FramePool},
     loader::{LoadError, LoadedImage},
-    page_table::{IdentityPageTableMemory, PageTableBuilder, PageTableError},
+    page_table::{IdentityPageTableMemory, PageTableBuilder, PageTableError, PageTableMemory},
     process::{
         AddressSpaceRoot, Capabilities, MappingFlags, ProcessError, ProcessHandle, UserLaunch,
         VirtualMapping,
@@ -35,6 +35,8 @@ pub enum ServiceRuntimeError {
     IpcProcess(ProcessError),
     Framebuffer(PageTableError),
     FramebufferProcess(ProcessError),
+    Keyboard(PageTableError),
+    KeyboardProcess(ProcessError),
     TaskCapacity,
     TaskAddressSpace,
     TaskLaunch,
@@ -49,6 +51,7 @@ pub struct ServiceRuntime {
     launches: [Option<(ProcessHandle, UserLaunch)>; SERVICE_COUNT],
     startup: ServiceStartup,
     ipc: Option<ServiceIpcGraph>,
+    keyboard_frame: Option<FrameAddress>,
     tasks: [Option<crate::TaskHandle>; SERVICE_COUNT],
 }
 
@@ -69,6 +72,7 @@ impl ServiceRuntime {
             launches: [None; SERVICE_COUNT],
             startup: ServiceStartup::new(),
             ipc: None,
+            keyboard_frame: None,
             tasks: [None; SERVICE_COUNT],
         }
     }
@@ -167,6 +171,11 @@ impl ServiceRuntime {
         }
         self.ipc = Some(graph);
         self.map_framebuffer(resources.framebuffer().ok_or(ServiceRuntimeError::Resources)?)?;
+        let keyboard_frame =
+            self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+        memory.clear(keyboard_frame).map_err(ServiceRuntimeError::Keyboard)?;
+        self.map_keyboard_ring(keyboard_frame)?;
+        self.keyboard_frame = Some(keyboard_frame);
         for spec in SERVICE_IMAGES {
             self.startup.mark_launch_ready(spec.service()).map_err(ServiceRuntimeError::Startup)?;
         }
@@ -194,6 +203,11 @@ impl ServiceRuntime {
 
     pub fn all_launch_ready(&self) -> bool {
         self.startup.all_launch_ready()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn keyboard_frame(&self) -> Option<FrameAddress> {
+        self.keyboard_frame
     }
 
     fn map_framebuffer(
@@ -239,6 +253,33 @@ impl ServiceRuntime {
         )
         .ok_or(ServiceRuntimeError::FramebufferProcess(ProcessError::AddressSpace))?;
         self.processes.map(process, mapping).map_err(ServiceRuntimeError::FramebufferProcess)
+    }
+
+    fn map_keyboard_ring(&mut self, frame: FrameAddress) -> Result<(), ServiceRuntimeError> {
+        let service = ServiceId::Input;
+        let index = service_index(service);
+        let Some((process, _)) = self.launch(service) else {
+            return Err(ServiceRuntimeError::KeyboardProcess(ProcessError::InvalidHandle));
+        };
+        let mut memory = IdentityPageTableMemory;
+        let tables = unsafe { self.tables[index].assume_init_mut() };
+        tables
+            .map_raw_page(
+                logos_abi::INPUT_KEYBOARD_RING_BASE,
+                frame,
+                MappingFlags::DATA,
+                &mut self.frame_pool,
+                &mut memory,
+            )
+            .map_err(ServiceRuntimeError::Keyboard)?;
+        let mapping = VirtualMapping::new(
+            logos_abi::INPUT_KEYBOARD_RING_BASE,
+            frame.raw() as usize,
+            1,
+            MappingFlags::DATA,
+        )
+        .ok_or(ServiceRuntimeError::KeyboardProcess(ProcessError::AddressSpace))?;
+        self.processes.map(process, mapping).map_err(ServiceRuntimeError::KeyboardProcess)
     }
 
     pub fn start_tasks(&mut self) -> Result<(), ServiceRuntimeError> {

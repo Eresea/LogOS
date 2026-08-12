@@ -307,6 +307,12 @@ pub fn boot() -> Status {
                 crate::service_runtime::ServiceRuntimeError::FramebufferProcess(_) => {
                     fatal(b"LogOS vNext: framebuffer process mapping")
                 }
+                crate::service_runtime::ServiceRuntimeError::Keyboard(_) => {
+                    fatal(b"LogOS vNext: keyboard mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::KeyboardProcess(_) => {
+                    fatal(b"LogOS vNext: keyboard process mapping")
+                }
                 crate::service_runtime::ServiceRuntimeError::TaskCapacity => {
                     fatal(b"LogOS vNext: service task capacity")
                 }
