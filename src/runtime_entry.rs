@@ -13,9 +13,20 @@ pub(crate) fn run() {
     proof::handoff_started();
 
     let mut runtime = Runtime::new();
-    let timed = match send_runtime(&mut runtime, RuntimeCommand::Submit) {
-        RuntimeResponse::Submitted(handle) => handle,
-        _ => arch_fatal(b"LogOS vNext: runtime capacity"),
+    if runtime.submit(RuntimeCommand::Submit).is_err() {
+        arch_fatal(b"LogOS vNext: runtime capacity");
+    }
+    if runtime.submit(RuntimeCommand::Submit) != Err(RuntimeCommandError::Busy) {
+        arch_fatal(b"LogOS vNext: runtime mailbox capacity");
+    }
+    #[cfg(feature = "qemu-proof")]
+    proof::runtime_mailbox_busy();
+    if !runtime.step() {
+        arch_fatal(b"LogOS vNext: runtime step");
+    }
+    let timed = match runtime.take_response() {
+        Some(RuntimeResponse::Submitted(handle)) => handle,
+        _ => arch_fatal(b"LogOS vNext: runtime capacity response"),
     };
     let deadline = current_ticks().saturating_add(1);
     if send_runtime(&mut runtime, RuntimeCommand::Wait { handle: timed, deadline })

@@ -15,6 +15,7 @@ static RUNTIME_WAKE_CYCLES: AtomicU64 = AtomicU64::new(0);
 static RUNTIME_TIMED_OUT: AtomicBool = AtomicBool::new(false);
 static RUNTIME_COMPLETED: AtomicBool = AtomicBool::new(false);
 static RUNTIME_SLOT_REUSED: AtomicBool = AtomicBool::new(false);
+static RUNTIME_MAILBOX_BUSY: AtomicBool = AtomicBool::new(false);
 static COMPLETION_HANDLE: AtomicU64 = AtomicU64::new(0);
 static COMPLETION_RECLAIMED: AtomicBool = AtomicBool::new(false);
 static COMPLETION_STALE_REJECTED: AtomicBool = AtomicBool::new(false);
@@ -66,6 +67,10 @@ pub fn runtime_slot_reused() {
     RUNTIME_SLOT_REUSED.store(true, Ordering::Release);
 }
 
+pub fn runtime_mailbox_busy() {
+    RUNTIME_MAILBOX_BUSY.store(true, Ordering::Release);
+}
+
 pub fn health_restarted() {
     HEALTH_RESTARTED.store(true, Ordering::Release);
 }
@@ -99,6 +104,7 @@ pub fn observe(cpu: usize) {
         && RUNTIME_TIMED_OUT.load(Ordering::Acquire)
         && RUNTIME_COMPLETED.load(Ordering::Acquire)
         && RUNTIME_SLOT_REUSED.load(Ordering::Acquire)
+        && RUNTIME_MAILBOX_BUSY.load(Ordering::Acquire)
         && COMPLETION_RECLAIMED.load(Ordering::Acquire)
         && COMPLETION_STALE_REJECTED.load(Ordering::Acquire)
         && COMPLETION_SLOT_REUSED.load(Ordering::Acquire)
