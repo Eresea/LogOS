@@ -509,56 +509,159 @@ impl Default for ProcessTable {
 }
 
 pub fn validate_elf(image: &[u8]) -> Result<u64, ProcessError> {
-    if image.len() < 64
-        || image.len() > MAX_IMAGE_BYTES
-        || &image[..4] != ELF_MAGIC
-        || image[4] != 2
-        || image[5] != 1
-        || read_u16(image, 18) != Some(0x3e)
-        || read_u16(image, 16) != Some(2)
-    {
-        return Err(ProcessError::InvalidImage);
+    Ok(ElfLoadPlan::parse(image)?.entry() as u64)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LoadSegment {
+    file_offset: usize,
+    virtual_address: usize,
+    file_size: usize,
+    memory_size: usize,
+    flags: MappingFlags,
+}
+
+impl LoadSegment {
+    pub const fn file_offset(self) -> usize {
+        self.file_offset
     }
-    let entry = read_u64(image, 24).ok_or(ProcessError::InvalidImage)?;
-    let ph_offset = read_u64(image, 32).ok_or(ProcessError::InvalidImage)? as usize;
-    let ph_entry_size = read_u16(image, 54).ok_or(ProcessError::InvalidImage)? as usize;
-    let ph_count = read_u16(image, 56).ok_or(ProcessError::InvalidImage)? as usize;
-    if entry == 0
-        || ph_entry_size < 56
-        || ph_count == 0
-        || ph_count > MAX_PROGRAM_HEADERS
-        || ph_offset.checked_add(ph_entry_size * ph_count).is_none()
-        || ph_offset + ph_entry_size * ph_count > image.len()
-    {
-        return Err(ProcessError::InvalidImage);
+
+    pub const fn virtual_address(self) -> usize {
+        self.virtual_address
     }
-    let mut load_segments = 0;
-    for index in 0..ph_count {
-        let offset = ph_offset + index * ph_entry_size;
-        let kind = read_u32_at(image, offset).ok_or(ProcessError::InvalidImage)?;
-        if kind != 1 {
-            continue;
-        }
-        load_segments += 1;
-        let flags = read_u32_at(image, offset + 4).ok_or(ProcessError::InvalidImage)?;
-        let file_offset =
-            read_u64_at(image, offset + 8).ok_or(ProcessError::InvalidImage)? as usize;
-        let virtual_address = read_u64_at(image, offset + 16).ok_or(ProcessError::InvalidImage)?;
-        let file_size = read_u64_at(image, offset + 32).ok_or(ProcessError::InvalidImage)? as usize;
-        let memory_size =
-            read_u64_at(image, offset + 40).ok_or(ProcessError::InvalidImage)? as usize;
-        if memory_size == 0
-            || file_size > memory_size
-            || file_offset.checked_add(file_size).is_none()
-            || file_offset + file_size > image.len()
-            || virtual_address < 0x1000
-            || virtual_address.checked_add(memory_size as u64).is_none()
-            || flags & 0x1 != 0 && flags & 0x2 != 0
+
+    pub const fn file_size(self) -> usize {
+        self.file_size
+    }
+
+    pub const fn memory_size(self) -> usize {
+        self.memory_size
+    }
+
+    pub const fn flags(self) -> MappingFlags {
+        self.flags
+    }
+
+    pub fn file_bytes(self, image: &[u8]) -> Option<&[u8]> {
+        image.get(self.file_offset..self.file_offset + self.file_size)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ElfLoadPlan {
+    entry: usize,
+    segments: [Option<LoadSegment>; MAX_PROGRAM_HEADERS],
+    count: usize,
+    memory_bytes: usize,
+}
+
+impl ElfLoadPlan {
+    pub fn parse(image: &[u8]) -> Result<Self, ProcessError> {
+        if image.len() < 64
+            || image.len() > MAX_IMAGE_BYTES
+            || &image[..4] != ELF_MAGIC
+            || image[4] != 2
+            || image[5] != 1
+            || read_u16(image, 18) != Some(0x3e)
+            || read_u16(image, 16) != Some(2)
         {
             return Err(ProcessError::InvalidImage);
         }
+        let entry = usize_from_u64(read_u64(image, 24).ok_or(ProcessError::InvalidImage)?)?;
+        let ph_offset = usize_from_u64(read_u64(image, 32).ok_or(ProcessError::InvalidImage)?)?;
+        let ph_entry_size = read_u16(image, 54).ok_or(ProcessError::InvalidImage)? as usize;
+        let ph_count = read_u16(image, 56).ok_or(ProcessError::InvalidImage)? as usize;
+        let ph_bytes = ph_entry_size.checked_mul(ph_count).ok_or(ProcessError::InvalidImage)?;
+        if entry == 0
+            || ph_entry_size < 56
+            || ph_count == 0
+            || ph_count > MAX_PROGRAM_HEADERS
+            || ph_offset.checked_add(ph_bytes).is_none()
+            || ph_offset + ph_bytes > image.len()
+        {
+            return Err(ProcessError::InvalidImage);
+        }
+        let mut plan =
+            Self { entry, segments: [None; MAX_PROGRAM_HEADERS], count: 0, memory_bytes: 0 };
+        let mut entry_executable = false;
+        for index in 0..ph_count {
+            let offset = ph_offset + index * ph_entry_size;
+            let kind = read_u32_at(image, offset).ok_or(ProcessError::InvalidImage)?;
+            if kind != 1 {
+                continue;
+            }
+            let flags = read_u32_at(image, offset + 4).ok_or(ProcessError::InvalidImage)?;
+            let file_offset =
+                usize_from_u64(read_u64_at(image, offset + 8).ok_or(ProcessError::InvalidImage)?)?;
+            let virtual_address =
+                usize_from_u64(read_u64_at(image, offset + 16).ok_or(ProcessError::InvalidImage)?)?;
+            let file_size =
+                usize_from_u64(read_u64_at(image, offset + 32).ok_or(ProcessError::InvalidImage)?)?;
+            let memory_size =
+                usize_from_u64(read_u64_at(image, offset + 40).ok_or(ProcessError::InvalidImage)?)?;
+            let Some(file_end) = file_offset.checked_add(file_size) else {
+                return Err(ProcessError::InvalidImage);
+            };
+            let Some(virtual_end) = virtual_address.checked_add(memory_size) else {
+                return Err(ProcessError::InvalidImage);
+            };
+            if memory_size == 0
+                || file_size > memory_size
+                || file_end > image.len()
+                || virtual_address < 0x1000
+                || virtual_end > 0x0000_8000_0000_0000
+                || memory_size > MAX_IMAGE_BYTES
+                || flags & 0x1 != 0 && flags & 0x2 != 0
+                || plan.memory_bytes.checked_add(memory_size).is_none()
+                || plan.memory_bytes + memory_size > MAX_IMAGE_BYTES
+            {
+                return Err(ProcessError::InvalidImage);
+            }
+            let segment = LoadSegment {
+                file_offset,
+                virtual_address,
+                file_size,
+                memory_size,
+                flags: MappingFlags {
+                    user: true,
+                    writable: flags & 0x2 != 0,
+                    executable: flags & 0x1 != 0,
+                },
+            };
+            if plan.count == MAX_PROGRAM_HEADERS {
+                return Err(ProcessError::InvalidImage);
+            }
+            entry_executable |=
+                segment.flags.executable && segment.virtual_address <= entry && entry < virtual_end;
+            plan.segments[plan.count] = Some(segment);
+            plan.count += 1;
+            plan.memory_bytes += memory_size;
+        }
+        if plan.count == 0 || !entry_executable {
+            return Err(ProcessError::InvalidImage);
+        }
+        Ok(plan)
     }
-    (load_segments > 0).then_some(entry).ok_or(ProcessError::InvalidImage)
+
+    pub const fn entry(self) -> usize {
+        self.entry
+    }
+
+    pub const fn segment_count(self) -> usize {
+        self.count
+    }
+
+    pub const fn memory_bytes(self) -> usize {
+        self.memory_bytes
+    }
+
+    pub const fn segment(self, index: usize) -> Option<LoadSegment> {
+        if index < self.count { self.segments[index] } else { None }
+    }
+}
+
+fn usize_from_u64(value: u64) -> Result<usize, ProcessError> {
+    (value <= usize::MAX as u64).then_some(value as usize).ok_or(ProcessError::InvalidImage)
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
@@ -610,7 +713,7 @@ mod tests {
         image[54..56].copy_from_slice(&56u16.to_le_bytes());
         image[56..58].copy_from_slice(&1u16.to_le_bytes());
         image[64..68].copy_from_slice(&1u32.to_le_bytes());
-        image[68..72].copy_from_slice(&4u32.to_le_bytes());
+        image[68..72].copy_from_slice(&5u32.to_le_bytes());
         image[72..80].copy_from_slice(&0u64.to_le_bytes());
         image[80..88].copy_from_slice(&0x1000u64.to_le_bytes());
         image[96..104].copy_from_slice(&1u64.to_le_bytes());
@@ -636,6 +739,27 @@ mod tests {
         let mut image = image();
         image[68..72].copy_from_slice(&7u32.to_le_bytes());
         assert_eq!(validate_elf(&image), Err(ProcessError::InvalidImage));
+    }
+
+    #[test]
+    fn elf_plan_exposes_bounded_segment_metadata() {
+        let image = image();
+        let plan = ElfLoadPlan::parse(&image).unwrap();
+        assert_eq!(plan.entry(), 0x1000);
+        assert_eq!(plan.segment_count(), 1);
+        assert_eq!(plan.memory_bytes(), 0x1000);
+        let segment = plan.segment(0).unwrap();
+        assert_eq!(segment.virtual_address(), 0x1000);
+        assert_eq!(segment.memory_size(), 0x1000);
+        assert_eq!(segment.file_bytes(&image).unwrap().len(), 1);
+        assert_eq!(plan.segment(1), None);
+    }
+
+    #[test]
+    fn elf_entry_must_land_in_executable_segment() {
+        let mut image = image();
+        image[68..72].copy_from_slice(&4u32.to_le_bytes());
+        assert_eq!(ElfLoadPlan::parse(&image), Err(ProcessError::InvalidImage));
     }
 
     #[test]
