@@ -21,3 +21,4 @@
 | [0017](0017-fixed-glyph-cache.md) | Accepted | Display resolves scalars through a fixed 8×16 glyph cache with deterministic fallback |
 | [0018](0018-display-raster-boundary.md) | Accepted | Display owns dirty-cell rasterization and pixel format conversion; terminal remains cell-only |
 | [0019](0019-service-model-ownership.md) | Accepted | Input, Terminal, and Session state machines live in independent no-std service packages |
+| [0020](0020-service-entry-facades.md) | Accepted | Terminal, Session, and Commands expose one-message bounded service façades over their owned state |

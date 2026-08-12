@@ -26,6 +26,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Terminal service model | `logos-terminal::Terminal` | bounded 160×100 cell state, 2,048-line scroll count, parser parameters, alternate screen, SGR, cursor/edit/erase controls, and dirty-cell output |
 | Display state | `display::Display` | validates cell diffs, dimensions, positions, endpoint generations, and dirty-cell rasterization through the fixed glyph cache |
 | Session service model | `logos-session::Session` | bounded line editing, history, environment, four-stage pipelines, eight child slots, and volatile redirection files |
+| Commands service model | `logos-commands::CommandService` | bounded built-ins, output, status, and clear-screen command effects |
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 16 validated mappings per process, typed capability authorization, and exit/fault/reclaim outcomes |
 | Service supervisor | `supervisor::ServiceSupervisor` | five-service lifecycle model, heartbeat timeouts, endpoint epochs, restart limits, and recovery transition |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |

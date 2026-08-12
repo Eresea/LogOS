@@ -6,7 +6,13 @@ rust-version = "1.85"
 license = "MIT"
 
 [workspace]
-members = ["abi", "services/input", "services/terminal", "services/session"]
+members = [
+    "abi",
+    "services/commands",
+    "services/input",
+    "services/session",
+    "services/terminal",
+]
 resolver = "3"
 
 [lints.rust]
@@ -15,6 +21,7 @@ unsafe_op_in_unsafe_fn = "warn"
 [dependencies]
 uefi = { version = "0.35" }
 logos-abi = { path = "abi" }
+logos-commands = { path = "services/commands" }
 logos-input = { path = "services/input" }
 logos-terminal = { path = "services/terminal" }
 logos-session = { path = "services/session" }

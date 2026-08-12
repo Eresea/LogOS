@@ -142,6 +142,42 @@ pub struct Terminal {
     title_len: usize,
 }
 
+/// Entry-ready Terminal service façade. IPC validation remains in the kernel;
+/// this type owns only terminal state and one-message transformations.
+pub struct TerminalService {
+    terminal: Terminal,
+}
+
+impl TerminalService {
+    pub const fn new() -> Self {
+        Self { terminal: Terminal::new() }
+    }
+
+    pub fn input(&self, event: &InputMessage) -> Option<StreamMessage> {
+        self.terminal.input(event)
+    }
+
+    pub fn session_output(&mut self, message: &StreamMessage) {
+        if let Some(bytes) = message.as_bytes() {
+            self.terminal.feed(bytes);
+        }
+    }
+
+    pub fn next_render(&mut self) -> Option<RenderMessage> {
+        self.terminal.next_render()
+    }
+
+    pub const fn terminal(&self) -> &Terminal {
+        &self.terminal
+    }
+}
+
+impl Default for TerminalService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Terminal {
     pub const fn new() -> Self {
         Self {

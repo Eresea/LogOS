@@ -162,6 +162,35 @@ pub struct Session {
     next_pid: u16,
 }
 
+/// Entry-ready Session service façade over one bounded stream operation.
+pub struct SessionService {
+    session: Session,
+}
+
+impl SessionService {
+    pub const fn new() -> Self {
+        Self { session: Session::new() }
+    }
+
+    pub fn prompt(&self, output: &mut ShellOutput) {
+        self.session.prompt(output);
+    }
+
+    pub fn input(&mut self, message: &logos_abi::StreamMessage) -> Option<ShellOutput> {
+        self.session.input(message.as_bytes()?)
+    }
+
+    pub const fn session(&self) -> &Session {
+        &self.session
+    }
+}
+
+impl Default for SessionService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Session {
     pub const fn new() -> Self {
         Self {
