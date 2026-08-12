@@ -9,6 +9,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Boot resources | `boot_resources` | copies bounded memory-map, GOP framebuffer, and PS/2 identities before UEFI handles are discarded |
 | Physical frames | `frame_pool` | fixed frame addresses from copied conventional memory, capped at 65,536 frames with explicit reuse/exhaustion |
 | Control plane | `syscall` + `logos-abi` | fixed scalar syscall requests, typed service-generation capabilities, and explicit status results |
+| ELF page admission | `loader` | maps validated segments and fixed user stacks to owned frames with bounded reclamation |
 | Per-CPU state | `arch::CpuLocal` via `GS_BASE` | private scheduler/idle stacks, TSS ring-transition fallback, cursor/current task, ticks, online state |
 | Context boundary | `arch/context.rs` | timer, voluntary, ring-3 syscall dispatch, and user-fault entries save one GPR/RIP/RSP/RFLAGS/CS and x87/SSE frame shape |
 | Publication | `Scheduler::save_context` + `finish` | outgoing task is claimable only after context-save publication |
