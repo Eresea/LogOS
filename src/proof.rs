@@ -15,6 +15,11 @@ static RUNTIME_WAKE_CYCLES: AtomicU64 = AtomicU64::new(0);
 static RUNTIME_TIMED_OUT: AtomicBool = AtomicBool::new(false);
 static RUNTIME_COMPLETED: AtomicBool = AtomicBool::new(false);
 static RUNTIME_SLOT_REUSED: AtomicBool = AtomicBool::new(false);
+static COMPLETION_HANDLE: AtomicU64 = AtomicU64::new(0);
+static COMPLETION_RECLAIMED: AtomicBool = AtomicBool::new(false);
+static COMPLETION_STALE_REJECTED: AtomicBool = AtomicBool::new(false);
+static COMPLETION_SLOT_REUSED: AtomicBool = AtomicBool::new(false);
+static REPLACEMENT_RAN: AtomicBool = AtomicBool::new(false);
 static PASSED: AtomicBool = AtomicBool::new(false);
 static REPORTED: AtomicBool = AtomicBool::new(false);
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
@@ -33,6 +38,9 @@ pub fn initialize(cpu_count: usize) {
     SCHEDULER.spawn(a).expect("proof task capacity");
     SCHEDULER.spawn(b).expect("proof task capacity");
     SCHEDULER.spawn(wake_task).expect("proof task capacity");
+    let completion = SCHEDULER.spawn(completion_task).expect("proof task capacity");
+    COMPLETION_HANDLE.store(completion.raw(), Ordering::Release);
+    SCHEDULER.spawn(reclaimer_task).expect("proof task capacity");
 }
 
 pub fn handoff_started() {
@@ -76,6 +84,10 @@ pub fn observe(cpu: usize) {
         && RUNTIME_TIMED_OUT.load(Ordering::Acquire)
         && RUNTIME_COMPLETED.load(Ordering::Acquire)
         && RUNTIME_SLOT_REUSED.load(Ordering::Acquire)
+        && COMPLETION_RECLAIMED.load(Ordering::Acquire)
+        && COMPLETION_STALE_REJECTED.load(Ordering::Acquire)
+        && COMPLETION_SLOT_REUSED.load(Ordering::Acquire)
+        && REPLACEMENT_RAN.load(Ordering::Acquire)
         && BLOCK_RESUMED.load(Ordering::Acquire)
         && WAKE_DONE.load(Ordering::Acquire)
         && wake_cpus_differ
@@ -116,6 +128,42 @@ fn wake_task() {
                 }
             }
         }
+        crate::yield_current();
+    }
+}
+
+fn completion_task() {}
+
+fn reclaimer_task() {
+    loop {
+        let raw = COMPLETION_HANDLE.load(Ordering::Acquire);
+        if raw != 0 {
+            let completed = TaskHandle::from_raw(raw);
+            if SCHEDULER.state(completed) == Some(TaskState::Completed)
+                && SCHEDULER.reclaim_completed(completed)
+            {
+                COMPLETION_RECLAIMED.store(true, Ordering::Release);
+                let stale_rejected =
+                    !SCHEDULER.wake(completed) && SCHEDULER.state(completed).is_none();
+                COMPLETION_STALE_REJECTED.store(stale_rejected, Ordering::Release);
+                let replacement = SCHEDULER.spawn(replacement_task).expect("proof task capacity");
+                COMPLETION_SLOT_REUSED.store(
+                    replacement.slot() == completed.slot()
+                        && replacement.generation() != completed.generation(),
+                    Ordering::Release,
+                );
+                loop {
+                    crate::yield_current();
+                }
+            }
+        }
+        crate::yield_current();
+    }
+}
+
+fn replacement_task() {
+    REPLACEMENT_RAN.store(true, Ordering::Release);
+    loop {
         crate::yield_current();
     }
 }

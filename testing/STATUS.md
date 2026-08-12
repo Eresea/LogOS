@@ -11,8 +11,9 @@ Status: active preemptive SMP Core milestone.
 - QEMU proof reaches `LogOS vNext: QEMU proof PASS` with `-smp 1`, `-smp 2`, and `-smp 8`.
   The proof exercises the root-task handoff, repeated cancellable timer waits, two non-yielding
   CPU-bound tasks, GPR/flags/XMM preservation, per-CPU timer ticks, repeated preemption, a bounded
-  Runtime timeout/completion/cancel lifecycle with generation-safe slot reuse, and blocked/wake
-  (cross-CPU for SMP runs).
+  Runtime timeout/completion/cancel lifecycle with generation-safe slot reuse, a real completed
+  task reclaimed and replaced in the same scheduler slot with stale-handle rejection, and
+  blocked/wake (cross-CPU for SMP runs).
 - The local-APIC period is measured against the calibrated TSC on the BSP and each AP before its
   timer is enabled.
 - Non-proof UEFI boot reaches `LogOS vNext: core ready` and remains in the scheduler for 1, 2, and
