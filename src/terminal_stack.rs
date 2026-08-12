@@ -12,6 +12,18 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Stamped<T: Copy> {
+    identity: crate::terminal_abi::MessageIdentity,
+    payload: T,
+}
+
+impl<T: Copy> Stamped<T> {
+    const fn new(identity: crate::terminal_abi::MessageIdentity, payload: T) -> Self {
+        Self { identity, payload }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StackError {
     InputBackpressure,
     TerminalBackpressure,
@@ -30,10 +42,10 @@ pub struct TerminalStack {
     pub terminal: Terminal,
     pub session: Session,
     pub display: Display,
-    input_to_terminal: BoundedQueue<InputMessage, IPC_RING_SLOTS>,
-    terminal_to_session: BoundedQueue<StreamMessage, IPC_RING_SLOTS>,
-    session_to_terminal: BoundedQueue<StreamMessage, IPC_RING_SLOTS>,
-    terminal_to_display: BoundedQueue<RenderMessage, IPC_RING_SLOTS>,
+    input_to_terminal: BoundedQueue<Stamped<InputMessage>, IPC_RING_SLOTS>,
+    terminal_to_session: BoundedQueue<Stamped<StreamMessage>, IPC_RING_SLOTS>,
+    session_to_terminal: BoundedQueue<Stamped<StreamMessage>, IPC_RING_SLOTS>,
+    terminal_to_display: BoundedQueue<Stamped<RenderMessage>, IPC_RING_SLOTS>,
     pub input_endpoint: EndpointHeader,
     pub terminal_endpoint: EndpointHeader,
     pub session_endpoint: EndpointHeader,
@@ -66,9 +78,13 @@ impl TerminalStack {
     pub fn feed_keyboard(&mut self, bytes: &[u8]) -> Result<(), StackError> {
         for &byte in bytes {
             if let Some(DecodedInput { key, text }) = self.input.feed(byte) {
-                self.input_to_terminal.send(key).map_err(|_| StackError::InputBackpressure)?;
+                self.input_to_terminal
+                    .send(Stamped::new(self.input_endpoint.identity(), key))
+                    .map_err(|_| StackError::InputBackpressure)?;
                 if let Some(text) = text {
-                    self.input_to_terminal.send(text).map_err(|_| StackError::InputBackpressure)?;
+                    self.input_to_terminal
+                        .send(Stamped::new(self.input_endpoint.identity(), text))
+                        .map_err(|_| StackError::InputBackpressure)?;
                 }
             }
             self.pump()?;
@@ -79,11 +95,17 @@ impl TerminalStack {
     pub fn feed_session_output(&mut self, bytes: &[u8]) -> Result<(), StackError> {
         let message = StreamMessage::from_bytes(MessageKind::SessionOutput, bytes)
             .ok_or(StackError::SessionBackpressure)?;
-        self.session_to_terminal.send(message).map_err(|_| StackError::SessionBackpressure)?;
+        self.session_to_terminal
+            .send(Stamped::new(self.session_endpoint.identity(), message))
+            .map_err(|_| StackError::SessionBackpressure)?;
         self.pump()
     }
 
     pub fn restart_terminal(&mut self) -> Result<(), StackError> {
+        self.input_to_terminal.clear();
+        self.terminal_to_session.clear();
+        self.session_to_terminal.clear();
+        self.terminal_to_display.clear();
         self.terminal_endpoint.generation =
             self.terminal_endpoint.generation.wrapping_add(1).max(1);
         self.terminal_endpoint.service_epoch =
@@ -98,33 +120,40 @@ impl TerminalStack {
 
     pub fn pump(&mut self) -> Result<(), StackError> {
         while let Ok(input) = self.input_to_terminal.receive() {
-            if !self
-                .input_endpoint
-                .accepts(self.input_endpoint.generation, self.input_endpoint.service_epoch)
-            {
+            if !input.identity.accepts(self.input_endpoint) {
                 continue;
             }
-            if let Some(message) = self.terminal.input(&input) {
+            if let Some(message) = self.terminal.input(&input.payload) {
                 self.terminal_to_session
-                    .send(message)
+                    .send(Stamped::new(self.terminal_endpoint.identity(), message))
                     .map_err(|_| StackError::TerminalBackpressure)?;
             }
         }
         while let Ok(message) = self.terminal_to_session.receive() {
-            let Some(bytes) = message.as_bytes() else { continue };
+            if !message.identity.accepts(self.terminal_endpoint) {
+                continue;
+            }
+            let Some(bytes) = message.payload.as_bytes() else { continue };
             if let Some(output) = self.session.input(bytes) {
                 self.queue_session_output(output)?;
             }
         }
         while let Ok(message) = self.session_to_terminal.receive() {
-            let Some(bytes) = message.as_bytes() else { continue };
+            if !message.identity.accepts(self.session_endpoint) {
+                continue;
+            }
+            let Some(bytes) = message.payload.as_bytes() else { continue };
             self.terminal.feed(bytes);
         }
         while let Some(render) = self.terminal.next_render() {
-            self.terminal_to_display.send(render).map_err(|_| StackError::TerminalBackpressure)?;
+            self.terminal_to_display
+                .send(Stamped::new(self.terminal_endpoint.identity(), render))
+                .map_err(|_| StackError::TerminalBackpressure)?;
             let render =
                 self.terminal_to_display.receive().map_err(|_| StackError::TerminalBackpressure)?;
-            self.display.apply(self.display_endpoint.generation, &render)?;
+            if render.identity.accepts(self.terminal_endpoint) {
+                self.display.apply(self.display_endpoint.generation, &render.payload)?;
+            }
         }
         Ok(())
     }
@@ -144,7 +173,9 @@ impl TerminalStack {
         }
         let message = StreamMessage::from_bytes(MessageKind::SessionOutput, output.as_bytes())
             .ok_or(StackError::SessionBackpressure)?;
-        self.session_to_terminal.send(message).map_err(|_| StackError::SessionBackpressure)
+        self.session_to_terminal
+            .send(Stamped::new(self.session_endpoint.identity(), message))
+            .map_err(|_| StackError::SessionBackpressure)
     }
 }
 
@@ -160,7 +191,8 @@ mod tests {
     use crate::ipc::ReceiveError;
     use std::sync::{Mutex, MutexGuard};
 
-    static STACKS: [Mutex<TerminalStack>; 4] = [
+    static STACKS: [Mutex<TerminalStack>; 5] = [
+        const { Mutex::new(TerminalStack::new()) },
         const { Mutex::new(TerminalStack::new()) },
         const { Mutex::new(TerminalStack::new()) },
         const { Mutex::new(TerminalStack::new()) },
@@ -203,6 +235,33 @@ mod tests {
             stack.display.apply(old, &RenderMessage::empty(MessageKind::RenderCells)),
             Err(DisplayError::StaleGeneration)
         );
+    }
+
+    #[test]
+    fn late_messages_from_replaced_terminal_are_rejected() {
+        let mut stack = stack(4);
+        stack.boot().unwrap();
+        let old_terminal = stack.terminal_endpoint;
+        stack.restart_terminal().unwrap();
+
+        let session_input =
+            StreamMessage::from_bytes(MessageKind::SessionInput, b"stale\r").unwrap();
+        stack
+            .terminal_to_session
+            .send(Stamped::new(old_terminal.identity(), session_input))
+            .unwrap();
+
+        let mut render = RenderMessage::empty(MessageKind::RenderCells);
+        render.columns = 80;
+        render.rows = 25;
+        render.count = 1;
+        render.positions[0] = 0;
+        render.cells[0].codepoint = b'X' as u32;
+        stack.terminal_to_display.send(Stamped::new(old_terminal.identity(), render)).unwrap();
+
+        stack.pump().unwrap();
+        assert_eq!(stack.session.line_len(), 0);
+        assert_eq!(stack.display.cell(0, 0).unwrap().codepoint, b'l' as u32);
     }
 
     #[test]

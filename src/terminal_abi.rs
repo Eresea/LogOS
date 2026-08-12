@@ -101,6 +101,23 @@ pub const MOD_NUM_LOCK: u16 = 1 << 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
+pub struct MessageIdentity {
+    pub generation: u16,
+    pub service_epoch: u64,
+}
+
+impl MessageIdentity {
+    pub const fn new(generation: u16, service_epoch: u64) -> Self {
+        Self { generation, service_epoch }
+    }
+
+    pub const fn accepts(self, endpoint: EndpointHeader) -> bool {
+        endpoint.accepts(self.generation, self.service_epoch)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
 pub struct InputMessage {
     pub kind: MessageKind,
     pub state: KeyState,
@@ -242,6 +259,10 @@ impl EndpointHeader {
         self.abi_version == ABI_VERSION
             && self.generation == generation
             && self.service_epoch == service_epoch
+    }
+
+    pub const fn identity(self) -> MessageIdentity {
+        MessageIdentity::new(self.generation, self.service_epoch)
     }
 }
 
