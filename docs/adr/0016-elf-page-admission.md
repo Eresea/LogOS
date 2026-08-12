@@ -12,9 +12,11 @@ eight-page user stack. Segment overlap, address overflow, frame exhaustion,
 and mapping capacity fail the admission and release every frame acquired by
 that attempt.
 
-The current slice records ownership and mapping intent. Hardware page-table
-construction and segment byte copying are separate steps so they can be
-verified without dereferencing arbitrary physical addresses in host tests.
+The loader exposes a page-local `PageSink` boundary for population. It clears
+every owned page, then copies validated file bytes in bounded chunks; an
+architecture adapter remains responsible for mapping each physical frame.
+Hardware page-table construction is still separate so host tests never
+dereference arbitrary physical addresses.
 
 ## Consequences
 

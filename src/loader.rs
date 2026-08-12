@@ -35,6 +35,17 @@ pub enum LoadError {
     Capacity,
     Exhausted,
     Overlap,
+    Write,
+}
+
+/// Destination for bytes belonging to a loaded user image.
+///
+/// The loader only supplies page-local operations. An architecture adapter owns the
+/// unsafe mapping from a `FrameAddress` to writable memory; host tests can use a fixed
+/// byte array instead.
+pub trait PageSink {
+    fn clear(&mut self, frame: FrameAddress) -> Result<(), LoadError>;
+    fn write(&mut self, frame: FrameAddress, offset: usize, bytes: &[u8]) -> Result<(), LoadError>;
 }
 
 #[derive(Debug)]
@@ -107,6 +118,73 @@ impl LoadedImage {
         self.pages.get(index).copied().flatten()
     }
 
+    /// Populate owned pages from the validated ELF image.
+    ///
+    /// All pages are cleared first, which makes both BSS and the user stack
+    /// deterministic. Segment bytes are then copied in page-local chunks.
+    pub fn populate<S: PageSink>(
+        &self,
+        plan: ElfLoadPlan,
+        image: &[u8],
+        sink: &mut S,
+    ) -> Result<(), LoadError> {
+        if plan.entry() != self.entry {
+            return Err(LoadError::InvalidPlan);
+        }
+        for index in 0..plan.segment_count() {
+            let Some(segment) = plan.segment(index) else {
+                return Err(LoadError::InvalidPlan);
+            };
+            if segment.file_bytes(image).is_none() {
+                return Err(LoadError::InvalidPlan);
+            }
+        }
+
+        for page in self.pages[..self.count].iter().flatten() {
+            sink.clear(page.frame)?;
+        }
+
+        for index in 0..plan.segment_count() {
+            let Some(segment) = plan.segment(index) else {
+                return Err(LoadError::InvalidPlan);
+            };
+            let Some(file_bytes) = segment.file_bytes(image) else {
+                return Err(LoadError::InvalidPlan);
+            };
+            let Some(segment_end) = segment.virtual_address().checked_add(segment.memory_size())
+            else {
+                return Err(LoadError::InvalidPlan);
+            };
+            let first_page = segment.virtual_address() & !(PAGE_SIZE - 1);
+            let Some(end_page) = align_up(segment_end) else {
+                return Err(LoadError::InvalidPlan);
+            };
+
+            for page_address in (first_page..end_page).step_by(PAGE_SIZE) {
+                let Some(page) = self.page_for_virtual(page_address) else {
+                    return Err(LoadError::InvalidPlan);
+                };
+                let overlap_start = page_address.max(segment.virtual_address());
+                let overlap_end = (page_address + PAGE_SIZE).min(segment_end);
+                if overlap_start >= overlap_end {
+                    continue;
+                }
+                let memory_offset = overlap_start - page_address;
+                let file_offset = overlap_start - segment.virtual_address();
+                if file_offset >= file_bytes.len() {
+                    continue;
+                }
+                let copy_len = (overlap_end - overlap_start).min(file_bytes.len() - file_offset);
+                sink.write(
+                    page.frame(),
+                    memory_offset,
+                    &file_bytes[file_offset..file_offset + copy_len],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn reclaim(&mut self, pool: &mut FramePool) {
         for page in self.pages[..self.count].iter().flatten() {
             let _ = pool.release(page.frame);
@@ -136,6 +214,14 @@ impl LoadedImage {
         self.count += 1;
         Ok(())
     }
+
+    fn page_for_virtual(&self, virtual_address: usize) -> Option<LoadedPage> {
+        self.pages[..self.count]
+            .iter()
+            .flatten()
+            .find(|page| page.virtual_address == virtual_address)
+            .copied()
+    }
 }
 
 fn align_up(address: usize) -> Option<usize> {
@@ -147,6 +233,59 @@ mod tests {
     use super::*;
     use crate::boot_resources::{MemoryDescriptor, MemoryMap};
     use crate::process::ProcessError;
+
+    struct TestSink {
+        frames: [Option<FrameAddress>; MAX_LOAD_PAGES],
+        bytes: [[u8; PAGE_SIZE]; MAX_LOAD_PAGES],
+        count: usize,
+    }
+
+    impl TestSink {
+        fn new() -> Self {
+            Self {
+                frames: [None; MAX_LOAD_PAGES],
+                bytes: [[0; PAGE_SIZE]; MAX_LOAD_PAGES],
+                count: 0,
+            }
+        }
+
+        fn slot(&mut self, frame: FrameAddress) -> Result<usize, LoadError> {
+            if let Some(index) =
+                self.frames[..self.count].iter().position(|entry| *entry == Some(frame))
+            {
+                return Ok(index);
+            }
+            if self.count == MAX_LOAD_PAGES {
+                return Err(LoadError::Write);
+            }
+            let index = self.count;
+            self.frames[index] = Some(frame);
+            self.count += 1;
+            Ok(index)
+        }
+    }
+
+    impl PageSink for TestSink {
+        fn clear(&mut self, frame: FrameAddress) -> Result<(), LoadError> {
+            let index = self.slot(frame)?;
+            self.bytes[index].fill(0);
+            Ok(())
+        }
+
+        fn write(
+            &mut self,
+            frame: FrameAddress,
+            offset: usize,
+            bytes: &[u8],
+        ) -> Result<(), LoadError> {
+            if offset >= PAGE_SIZE || bytes.len() > PAGE_SIZE - offset {
+                return Err(LoadError::Write);
+            }
+            let index = self.slot(frame)?;
+            self.bytes[index][offset..offset + bytes.len()].copy_from_slice(bytes);
+            Ok(())
+        }
+    }
 
     fn image() -> [u8; 128] {
         let mut image = [0; 128];
@@ -207,5 +346,42 @@ mod tests {
     #[test]
     fn invalid_elf_plan_is_not_constructible() {
         assert_eq!(ElfLoadPlan::parse(&[0; 64]), Err(ProcessError::InvalidImage));
+    }
+
+    fn populated_image() -> [u8; 128] {
+        let mut image = image();
+        image[24..32].copy_from_slice(&0x1003u64.to_le_bytes());
+        image[72..80].copy_from_slice(&120u64.to_le_bytes());
+        image[80..88].copy_from_slice(&0x1003u64.to_le_bytes());
+        image[96..104].copy_from_slice(&2u64.to_le_bytes());
+        image[104..112].copy_from_slice(&0x1005u64.to_le_bytes());
+        image[120] = 0xaa;
+        image[121] = 0xbb;
+        image
+    }
+
+    #[test]
+    fn population_copies_file_and_zeroes_bss_and_stack() {
+        let image = populated_image();
+        let plan = ElfLoadPlan::parse(&image).unwrap();
+        let mut map = MemoryMap::new();
+        map.push(MemoryDescriptor::new(0x1000, 16, true).unwrap()).unwrap();
+        let mut pool = FramePool::empty();
+        pool.initialize(&map).unwrap();
+        let loaded = LoadedImage::load(plan, &mut pool).unwrap();
+        let mut sink = TestSink::new();
+
+        loaded.populate(plan, &image, &mut sink).unwrap();
+
+        let first = loaded.page(0).unwrap().frame();
+        let first_slot = sink.slot(first).unwrap();
+        assert_eq!(sink.bytes[first_slot][3..5], [0xaa, 0xbb]);
+        assert!(sink.bytes[first_slot][5..].iter().all(|byte| *byte == 0));
+        let second = loaded.page(1).unwrap().frame();
+        let second_slot = sink.slot(second).unwrap();
+        assert!(sink.bytes[second_slot].iter().all(|byte| *byte == 0));
+        let stack = loaded.page(loaded.page_count() - 1).unwrap().frame();
+        let stack_slot = sink.slot(stack).unwrap();
+        assert!(sink.bytes[stack_slot].iter().all(|byte| *byte == 0));
     }
 }

@@ -27,3 +27,4 @@
 | [0023](0023-retained-service-images.md) | Accepted | Validated service ELF files become five fixed post-UEFI physical image records |
 | [0024](0024-service-elf-packaging.md) | Accepted | Five no_std service ELF artifacts are built and size/magic checked into the ESP staging layout |
 | [0025](0025-service-image-boot-handoff.md) | Accepted | UEFI loads and retains all five validated service images before ExitBootServices |
+| [0026](0026-elf-page-population.md) | Accepted | Loaded images populate owned frames through a bounded page-local sink |
