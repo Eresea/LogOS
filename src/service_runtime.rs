@@ -2,12 +2,15 @@
 
 use core::mem::MaybeUninit;
 
-use logos_abi::ServiceId;
+use logos_abi::{CapabilityKind, ServiceId};
 
 use crate::{
     frame_pool::FramePool,
     loader::{LoadError, LoadedImage},
     page_table::{IdentityPageTableMemory, PageTableBuilder, PageTableError},
+    process::{
+        AddressSpaceRoot, Capabilities, ProcessError, ProcessHandle, UserLaunch, VirtualMapping,
+    },
     service_images::SERVICE_IMAGES,
     service_loader::ServiceImageBundle,
 };
@@ -22,6 +25,7 @@ pub enum ServiceRuntimeError {
     Populate(LoadError),
     PageTableRoot(PageTableError),
     PageTableMap(PageTableError),
+    Process(ProcessError),
 }
 
 pub struct ServiceRuntime {
@@ -29,6 +33,8 @@ pub struct ServiceRuntime {
     images: [LoadedImage; SERVICE_COUNT],
     tables: [MaybeUninit<PageTableBuilder>; SERVICE_COUNT],
     table_ready: [bool; SERVICE_COUNT],
+    processes: crate::process::ProcessTable,
+    launches: [Option<(ProcessHandle, UserLaunch)>; SERVICE_COUNT],
 }
 
 impl ServiceRuntime {
@@ -44,6 +50,8 @@ impl ServiceRuntime {
             ],
             tables: [const { MaybeUninit::uninit() }; SERVICE_COUNT],
             table_ready: [false; SERVICE_COUNT],
+            processes: crate::process::ProcessTable::new(),
+            launches: [None; SERVICE_COUNT],
         }
     }
 
@@ -79,6 +87,27 @@ impl ServiceRuntime {
                 loaded.reclaim(&mut self.frame_pool);
                 return Err(ServiceRuntimeError::PageTableMap(error));
             }
+            let process = self
+                .processes
+                .start(image, spec.process_kind(), capabilities(spec))
+                .map_err(ServiceRuntimeError::Process)?;
+            let root = AddressSpaceRoot::new(tables.root().raw() as usize)
+                .ok_or(ServiceRuntimeError::Process(ProcessError::AddressSpace))?;
+            if let Err(error) = self.processes.bind_address_space_root(process, root) {
+                let _ = self.processes.exit(process, 1);
+                let _ = self.processes.reclaim(process);
+                return Err(ServiceRuntimeError::Process(error));
+            }
+            if let Err(error) = map_loaded_pages(&mut self.processes, process, &loaded) {
+                let _ = self.processes.exit(process, 1);
+                let _ = self.processes.reclaim(process);
+                return Err(ServiceRuntimeError::Process(error));
+            }
+            let launch = self
+                .processes
+                .user_launch(process, loaded.entry(), loaded.stack_top())
+                .map_err(ServiceRuntimeError::Process)?;
+            self.launches[index] = Some((process, launch));
             self.images[index] = loaded;
             self.tables[index].write(tables);
             self.table_ready[index] = true;
@@ -100,6 +129,10 @@ impl ServiceRuntime {
         // initialized and remains true for the runtime lifetime.
         Some(unsafe { self.tables[index].assume_init_ref().root().raw() as usize })
     }
+
+    pub fn launch(&self, service: ServiceId) -> Option<(ProcessHandle, UserLaunch)> {
+        self.launches[service_index(service)]
+    }
 }
 
 impl Default for ServiceRuntime {
@@ -116,4 +149,62 @@ const fn service_index(service: ServiceId) -> usize {
         ServiceId::Session => 3,
         ServiceId::Commands => 4,
     }
+}
+
+fn capabilities(spec: &crate::service_images::ServiceImageSpec) -> Capabilities {
+    let mut capabilities = Capabilities::NONE;
+    let mut index = 0;
+    while index < spec.capability_count() {
+        let Some(grant) = spec.capability(index) else {
+            break;
+        };
+        match grant.kind {
+            CapabilityKind::IpcEndpoint => capabilities.endpoints = true,
+            CapabilityKind::KeyboardBytes => capabilities.input = true,
+            CapabilityKind::Framebuffer => capabilities.display = true,
+            CapabilityKind::ProcessControl => capabilities.process_control = true,
+            CapabilityKind::ServiceControl => {}
+        }
+        index += 1;
+    }
+    capabilities
+}
+
+fn map_loaded_pages(
+    processes: &mut crate::process::ProcessTable,
+    process: ProcessHandle,
+    image: &LoadedImage,
+) -> Result<(), ProcessError> {
+    let mut index = 0;
+    while index < image.page_count() {
+        let Some(first) = image.page(index) else {
+            return Err(ProcessError::AddressSpace);
+        };
+        let mut pages = 1;
+        while index + pages < image.page_count() {
+            let Some(previous) = image.page(index + pages - 1) else {
+                return Err(ProcessError::AddressSpace);
+            };
+            let Some(next) = image.page(index + pages) else {
+                return Err(ProcessError::AddressSpace);
+            };
+            if previous.flags() != next.flags()
+                || previous.virtual_address() + crate::loader::PAGE_SIZE != next.virtual_address()
+                || previous.frame().raw() + crate::loader::PAGE_SIZE as u64 != next.frame().raw()
+            {
+                break;
+            }
+            pages += 1;
+        }
+        let mapping = VirtualMapping::new(
+            first.virtual_address(),
+            first.frame().raw() as usize,
+            pages,
+            first.flags(),
+        )
+        .ok_or(ProcessError::AddressSpace)?;
+        processes.map(process, mapping)?;
+        index += pages;
+    }
+    Ok(())
 }

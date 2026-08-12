@@ -30,3 +30,4 @@
 | [0026](0026-elf-page-population.md) | Accepted | Loaded images populate owned frames through a bounded page-local sink |
 | [0027](0027-bounded-page-table-builder.md) | Accepted | Four-level user page tables are built through a bounded architecture memory seam |
 | [0028](0028-service-address-space-bootstrap.md) | Accepted | Five retained service ELFs are populated into owned frames and isolated roots after UEFI exit |
+| [0029](0029-service-process-admission.md) | Accepted | Services receive generation-safe process handles, mappings, capabilities, and launch records before scheduling |

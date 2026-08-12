@@ -285,11 +285,17 @@ pub fn boot() -> Status {
                 crate::service_runtime::ServiceRuntimeError::PageTableMap(_) => {
                     fatal(b"LogOS vNext: service table map")
                 }
+                crate::service_runtime::ServiceRuntimeError::Process(_) => {
+                    fatal(b"LogOS vNext: service process")
+                }
             },
         );
         let runtime = &*core::ptr::addr_of!(SERVICE_RUNTIME);
         for spec in crate::service_images::SERVICE_IMAGES {
-            if runtime.image(spec.service()).is_none() || runtime.root(spec.service()).is_none() {
+            if runtime.image(spec.service()).is_none()
+                || runtime.root(spec.service()).is_none()
+                || runtime.launch(spec.service()).is_none()
+            {
                 fatal(b"LogOS vNext: service root state");
             }
         }
