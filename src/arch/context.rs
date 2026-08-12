@@ -31,12 +31,17 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         false
     };
     #[cfg(feature = "qemu-proof")]
+    let mut user_fault = user_fault;
+    #[cfg(feature = "qemu-proof")]
     if vector == usize::from(SWITCH_VECTOR) {
         if let Some(handle) = current {
             if crate::user_mode::is_user_task(handle)
                 && !crate::user_mode::dispatch_syscall(handle, fx_context)
             {
-                fatal(b"LogOS vNext: unknown syscall");
+                if !crate::user_mode::syscall_faulted(handle) {
+                    fatal(b"LogOS vNext: syscall fault");
+                }
+                user_fault = true;
             }
         }
     }

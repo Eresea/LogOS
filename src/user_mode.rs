@@ -70,6 +70,17 @@ pub(crate) fn faulted(handle: TaskHandle, vector: usize) -> bool {
     if !matches!(vector, 6 | 13 | 14) || handle.raw() != USER_TASK_RAW.load(Ordering::Acquire) {
         return false;
     }
+    mark_fault(vector)
+}
+
+pub(crate) fn syscall_faulted(handle: TaskHandle) -> bool {
+    if !is_user_task(handle) {
+        return false;
+    }
+    mark_fault(SWITCH_VECTOR as usize)
+}
+
+fn mark_fault(vector: usize) -> bool {
     USER_FAULT_VECTOR.store(vector, Ordering::Release);
     let process = unsafe { *core::ptr::addr_of!(USER_PROCESS) };
     let Some(process) = process else {
