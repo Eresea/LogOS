@@ -1,10 +1,6 @@
 //! Fixed dependency barrier for service startup.
 
-use crate::service_images::SERVICE_IMAGES;
 use logos_abi::ServiceId;
-
-const SERVICE_COUNT: usize = SERVICE_IMAGES.len();
-const ALL_SERVICES: u8 = (1 << SERVICE_COUNT) - 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartupError {
@@ -76,6 +72,7 @@ mod tests {
 
     #[test]
     fn graph_starts_in_dependency_order() {
+        let all_services = (1 << crate::service_images::SERVICE_IMAGES.len()) - 1;
         let mut startup = ServiceStartup::new();
         startup.mark_launch_ready();
         assert!(startup.all_launch_ready());
@@ -84,6 +81,6 @@ mod tests {
         startup.start(ServiceId::Terminal).unwrap();
         startup.start(ServiceId::Session).unwrap();
         startup.start(ServiceId::Commands).unwrap();
-        assert_eq!(startup.started, ALL_SERVICES);
+        assert_eq!(startup.started, all_services);
     }
 }
