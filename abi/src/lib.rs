@@ -11,7 +11,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU16, Ordering},
 };
 
-pub const ABI_VERSION: u16 = 1;
+pub const ABI_VERSION: u16 = 2;
 pub const MAX_TEXT_BYTES: usize = 64;
 pub const MAX_RENDER_CELLS: usize = 128;
 pub const MAX_COLUMNS: usize = 160;
@@ -21,16 +21,9 @@ pub const DEFAULT_ROWS: usize = 25;
 pub const MAX_SCROLLBACK_LINES: usize = 2048;
 pub const MAX_HISTORY_ENTRIES: usize = 64;
 pub const MAX_HISTORY_BYTES: usize = 256;
-pub const MAX_CHILD_PROCESSES: usize = 8;
-pub const MAX_PIPELINE_STAGES: usize = 4;
-pub const MAX_VOLATILE_FILES: usize = 32;
-pub const MAX_VOLATILE_FILE_BYTES: usize = 16 * 1024;
-
 pub const MAX_SERVICE_IMAGE_BYTES: usize = 512 * 1024;
 pub const MAX_MEMORY_DESCRIPTORS: usize = 256;
 pub const MAX_MANAGED_FRAMES: usize = 65_536;
-pub const MAX_SERVICE_ENDPOINTS: usize = 32;
-pub const MAX_SERVICE_DATA_BYTES: usize = 1024 * 1024;
 pub const MAX_FRAMEBUFFER_BYTES: usize = 16 * 1024 * 1024;
 pub const DISPLAY_FRAMEBUFFER_BASE: usize = 0x0000_0100_1000_0000;
 pub const DISPLAY_CONFIG_BASE: usize = 0x0000_0100_1200_0000;
@@ -81,10 +74,32 @@ pub enum ServiceId {
     Commands = 5,
 }
 
+impl ServiceId {
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Input => 0,
+            Self::Display => 1,
+            Self::Terminal => 2,
+            Self::Session => 3,
+            Self::Commands => 4,
+        }
+    }
+
+    pub const fn from_index(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(Self::Input),
+            1 => Some(Self::Display),
+            2 => Some(Self::Terminal),
+            3 => Some(Self::Session),
+            4 => Some(Self::Commands),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum MessageKind {
-    Empty = 0,
     Key = 1,
     Text = 2,
     Paste = 3,
@@ -92,10 +107,6 @@ pub enum MessageKind {
     SessionOutput = 5,
     RenderCells = 6,
     FullRedraw = 7,
-    Resize = 8,
-    Reset = 9,
-    Heartbeat = 10,
-    Fault = 11,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -337,8 +348,6 @@ pub struct EndpointHeader {
     pub abi_version: u16,
     pub generation: u16,
     pub service_epoch: u64,
-    pub producer: u16,
-    pub consumer: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -402,7 +411,7 @@ impl Default for KeyboardByteRing {
 
 impl EndpointHeader {
     pub const fn new(generation: u16, service_epoch: u64) -> Self {
-        Self { abi_version: ABI_VERSION, generation, service_epoch, producer: 0, consumer: 0 }
+        Self { abi_version: ABI_VERSION, generation, service_epoch }
     }
 
     pub const fn accepts(self, generation: u16, service_epoch: u64) -> bool {

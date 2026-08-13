@@ -32,7 +32,7 @@ impl ServiceStartup {
     }
 
     pub const fn state(&self, service: ServiceId) -> StartupState {
-        self.states[index(service)]
+        self.states[service.index()]
     }
 
     pub fn mark_image(&mut self, service: ServiceId) -> Result<(), StartupError> {
@@ -58,7 +58,7 @@ impl ServiceStartup {
         if !dependencies_started(service, &self.states) {
             return Err(StartupError::Dependency);
         }
-        self.states[index(service)] = StartupState::Started;
+        self.states[service.index()] = StartupState::Started;
         Ok(())
     }
 
@@ -78,7 +78,7 @@ impl ServiceStartup {
         if next as u8 != current.saturating_add(1) {
             return Err(StartupError::InvalidTransition);
         }
-        self.states[index(service)] = next;
+        self.states[service.index()] = next;
         Ok(())
     }
 }
@@ -86,16 +86,6 @@ impl ServiceStartup {
 impl Default for ServiceStartup {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-const fn index(service: ServiceId) -> usize {
-    match service {
-        ServiceId::Input => 0,
-        ServiceId::Display => 1,
-        ServiceId::Terminal => 2,
-        ServiceId::Session => 3,
-        ServiceId::Commands => 4,
     }
 }
 

@@ -1,9 +1,6 @@
 //! Fixed user-process and ELF admission model.
 
 pub const MAX_USER_PROCESSES: usize = 16;
-pub const MAX_SERVICE_PROCESSES: usize = 5;
-pub const MAX_COMMAND_PROCESSES: usize = 8;
-pub const MAX_RESERVED_PROCESSES: usize = 2;
 pub const MAX_ADDRESS_SPACES: usize = MAX_USER_PROCESSES;
 pub const MAX_MAPPINGS_PER_ADDRESS_SPACE: usize = 16;
 pub const USER_STACK_PAGES: usize = 8;

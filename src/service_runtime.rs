@@ -179,7 +179,7 @@ impl ServiceRuntime {
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?;
             initialize_ipc_page(endpoint, endpoint_index);
             for service in [endpoint.producer(), endpoint.consumer()] {
-                let index = service_index(service);
+                let index = service.index();
                 let Some((process, _)) = self.launch(service) else {
                     return Err(ServiceRuntimeError::IpcProcess(ProcessError::InvalidHandle));
                 };
@@ -225,12 +225,12 @@ impl ServiceRuntime {
     }
 
     pub fn image(&self, service: ServiceId) -> Option<&LoadedImage> {
-        let index = service_index(service);
+        let index = service.index();
         if self.table_ready[index] { Some(&self.images[index]) } else { None }
     }
 
     pub fn root(&self, service: ServiceId) -> Option<usize> {
-        let index = service_index(service);
+        let index = service.index();
         if !self.table_ready[index] {
             return None;
         }
@@ -240,7 +240,7 @@ impl ServiceRuntime {
     }
 
     pub fn launch(&self, service: ServiceId) -> Option<(ProcessHandle, UserLaunch)> {
-        self.launches[service_index(service)]
+        self.launches[service.index()]
     }
 
     pub fn all_launch_ready(&self) -> bool {
@@ -272,7 +272,7 @@ impl ServiceRuntime {
         let pages = usize::try_from(bytes / crate::boot_resources::PAGE_SIZE)
             .map_err(|_| ServiceRuntimeError::Framebuffer(PageTableError::InvalidMapping))?;
         let service = ServiceId::Display;
-        let index = service_index(service);
+        let index = service.index();
         let Some((process, _)) = self.launch(service) else {
             return Err(ServiceRuntimeError::FramebufferProcess(ProcessError::InvalidHandle));
         };
@@ -308,7 +308,7 @@ impl ServiceRuntime {
 
     fn map_keyboard_ring(&mut self, frame: FrameAddress) -> Result<(), ServiceRuntimeError> {
         let service = ServiceId::Input;
-        let index = service_index(service);
+        let index = service.index();
         let Some((process, _)) = self.launch(service) else {
             return Err(ServiceRuntimeError::KeyboardProcess(ProcessError::InvalidHandle));
         };
@@ -335,7 +335,7 @@ impl ServiceRuntime {
 
     fn map_framebuffer_config(&mut self, frame: FrameAddress) -> Result<(), ServiceRuntimeError> {
         let service = ServiceId::Display;
-        let index = service_index(service);
+        let index = service.index();
         let Some((process, _)) = self.launch(service) else {
             return Err(ServiceRuntimeError::FramebufferConfigProcess(ProcessError::InvalidHandle));
         };
@@ -373,14 +373,9 @@ impl ServiceRuntime {
                     crate::SpawnError::UserLaunch => ServiceRuntimeError::TaskLaunch,
                 },
             )?;
-            self.tasks[service_index(service)] = Some(task);
-            self.heartbeat_ticks[service_index(service)]
-                .store(crate::current_ticks(), Ordering::Release);
-            let identity = EndpointIdentity {
-                generation: self.ipc_generation,
-                service_epoch: self.service_epoch,
-            };
-            self.supervisor.register(service, process, identity, crate::current_ticks());
+            self.tasks[service.index()] = Some(task);
+            self.heartbeat_ticks[service.index()].store(crate::current_ticks(), Ordering::Release);
+            self.supervisor.register(service, crate::current_ticks());
             self.startup.start(service).map_err(ServiceRuntimeError::Startup)?;
         }
         Ok(())
@@ -392,7 +387,7 @@ impl ServiceRuntime {
         process: ProcessHandle,
         now: u64,
     ) -> bool {
-        let index = service_index(service);
+        let index = service.index();
         if self.launch(service).is_none_or(|(current, _)| current != process) {
             return false;
         }
@@ -404,11 +399,11 @@ impl ServiceRuntime {
 
     #[cfg(feature = "qemu-proof")]
     pub(crate) fn suppress_heartbeat(&self, service: ServiceId) {
-        self.suppressed_heartbeats[service_index(service)].store(true, Ordering::Release);
+        self.suppressed_heartbeats[service.index()].store(true, Ordering::Release);
     }
 
     pub(crate) fn heartbeat_tick(&self, service: ServiceId) -> u64 {
-        self.heartbeat_ticks[service_index(service)].load(Ordering::Acquire)
+        self.heartbeat_ticks[service.index()].load(Ordering::Acquire)
     }
 
     pub(crate) fn fault_process(
@@ -425,9 +420,7 @@ impl ServiceRuntime {
         crate::arch_proof_line(b"LogOS vNext: service restart begin");
         self.ipc_generation = self.ipc_generation.wrapping_add(1).max(1);
         self.service_epoch = self.service_epoch.wrapping_add(1).max(1);
-        let identity =
-            EndpointIdentity { generation: self.ipc_generation, service_epoch: self.service_epoch };
-        if !self.supervisor.prepare_restart(identity) {
+        if !self.supervisor.prepare_restart() {
             return Err(ServiceRuntimeError::RestartLimit);
         }
         self.stop_tasks()?;
@@ -471,7 +464,7 @@ impl ServiceRuntime {
         let mut heartbeats = [0; SERVICE_COUNT];
         let mut process_states = [None; SERVICE_COUNT];
         for spec in SERVICE_IMAGES {
-            let index = service_index(spec.service());
+            let index = spec.service().index();
             heartbeats[index] = self.heartbeat_tick(spec.service());
             process_states[index] =
                 self.launch(spec.service()).and_then(|(process, _)| self.processes.state(process));
@@ -543,16 +536,6 @@ fn old_identity_matches(identity: EndpointIdentity, header: logos_abi::EndpointH
 impl Default for ServiceRuntime {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-const fn service_index(service: ServiceId) -> usize {
-    match service {
-        ServiceId::Input => 0,
-        ServiceId::Display => 1,
-        ServiceId::Terminal => 2,
-        ServiceId::Session => 3,
-        ServiceId::Commands => 4,
     }
 }
 

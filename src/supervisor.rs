@@ -1,6 +1,6 @@
 //! Fixed health and restart policy for the live service graph.
 
-use crate::process::{ProcessHandle, ProcessState};
+use crate::process::ProcessState;
 use logos_abi::ServiceId;
 
 pub const MAX_SERVICES: usize = 5;
@@ -13,7 +13,6 @@ pub enum ServiceState {
     Stopped,
     Running,
     Unhealthy,
-    Recovery,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,8 +25,6 @@ pub struct EndpointIdentity {
 #[derive(Clone, Copy)]
 struct ServiceRecord {
     state: ServiceState,
-    process: Option<ProcessHandle>,
-    identity: EndpointIdentity,
     last_heartbeat: u64,
     missed_heartbeats: u8,
     restarts: u8,
@@ -35,14 +32,8 @@ struct ServiceRecord {
 
 #[allow(dead_code)]
 impl ServiceRecord {
-    const EMPTY: Self = Self {
-        state: ServiceState::Stopped,
-        process: None,
-        identity: EndpointIdentity { generation: 1, service_epoch: 1 },
-        last_heartbeat: 0,
-        missed_heartbeats: 0,
-        restarts: 0,
-    };
+    const EMPTY: Self =
+        Self { state: ServiceState::Stopped, last_heartbeat: 0, missed_heartbeats: 0, restarts: 0 };
 }
 
 /// Runtime supervisor policy for the real service graph.
@@ -61,17 +52,9 @@ impl LiveSupervisor {
         Self { records: [ServiceRecord::EMPTY; MAX_SERVICES], recovery: false }
     }
 
-    pub fn register(
-        &mut self,
-        service: ServiceId,
-        process: ProcessHandle,
-        identity: EndpointIdentity,
-        now: u64,
-    ) {
-        let record = &mut self.records[service_index(service)];
+    pub fn register(&mut self, service: ServiceId, now: u64) {
+        let record = &mut self.records[service.index()];
         record.state = ServiceState::Running;
-        record.process = Some(process);
-        record.identity = identity;
         record.last_heartbeat = now;
         record.missed_heartbeats = 0;
     }
@@ -89,7 +72,7 @@ impl LiveSupervisor {
             }
             if process_states[index].is_some_and(|state| !matches!(state, ProcessState::Running)) {
                 record.state = ServiceState::Unhealthy;
-                return Some(service_at(index));
+                return ServiceId::from_index(index);
             }
             if heartbeats[index] > record.last_heartbeat {
                 record.last_heartbeat = heartbeats[index];
@@ -104,21 +87,19 @@ impl LiveSupervisor {
             record.last_heartbeat = now;
             if record.missed_heartbeats >= MISSED_HEARTBEATS {
                 record.state = ServiceState::Unhealthy;
-                return Some(service_at(index));
+                return ServiceId::from_index(index);
             }
         }
         None
     }
 
-    pub fn prepare_restart(&mut self, identity: EndpointIdentity) -> bool {
+    pub fn prepare_restart(&mut self) -> bool {
         if self.recovery || self.records.iter().any(|record| record.restarts >= MAX_RESTARTS) {
             self.recovery = true;
             return false;
         }
         for record in &mut self.records {
             record.state = ServiceState::Stopped;
-            record.process = None;
-            record.identity = identity;
             record.last_heartbeat = 0;
             record.missed_heartbeats = 0;
             record.restarts += 1;
@@ -128,35 +109,13 @@ impl LiveSupervisor {
 
     #[cfg(test)]
     fn state(&self, service: ServiceId) -> ServiceState {
-        self.records[service_index(service)].state
+        self.records[service.index()].state
     }
 }
 
 impl Default for LiveSupervisor {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[allow(dead_code)]
-const fn service_index(service: ServiceId) -> usize {
-    match service {
-        ServiceId::Input => 0,
-        ServiceId::Display => 1,
-        ServiceId::Terminal => 2,
-        ServiceId::Session => 3,
-        ServiceId::Commands => 4,
-    }
-}
-
-#[allow(dead_code)]
-const fn service_at(index: usize) -> ServiceId {
-    match index {
-        0 => ServiceId::Input,
-        1 => ServiceId::Display,
-        2 => ServiceId::Terminal,
-        3 => ServiceId::Session,
-        _ => ServiceId::Commands,
     }
 }
 
@@ -167,14 +126,8 @@ mod tests {
     #[test]
     fn supervisor_quiesces_on_fault_and_rebinds_after_restart() {
         let mut supervisor = LiveSupervisor::new();
-        let identity = EndpointIdentity { generation: 7, service_epoch: 9 };
         for index in 0..MAX_SERVICES {
-            supervisor.register(
-                service_at(index),
-                ProcessHandle::from_raw(((index as u64 + 1) << 8) | index as u64),
-                identity,
-                1,
-            );
+            supervisor.register(ServiceId::from_index(index).unwrap(), 1);
         }
         assert_eq!(
             supervisor.poll(
@@ -184,10 +137,9 @@ mod tests {
             ),
             Some(ServiceId::Input)
         );
-        let rebound = EndpointIdentity { generation: 8, service_epoch: 10 };
-        assert!(supervisor.prepare_restart(rebound));
+        assert!(supervisor.prepare_restart());
         assert_eq!(supervisor.state(ServiceId::Terminal), ServiceState::Stopped);
-        supervisor.register(ServiceId::Terminal, ProcessHandle::from_raw(0x900), rebound, 20);
+        supervisor.register(ServiceId::Terminal, 20);
         assert_eq!(supervisor.state(ServiceId::Terminal), ServiceState::Running);
     }
 
@@ -195,11 +147,9 @@ mod tests {
     fn supervisor_enters_recovery_after_bounded_restarts() {
         let mut supervisor = LiveSupervisor::new();
         for _ in 0..MAX_RESTARTS {
-            assert!(
-                supervisor.prepare_restart(EndpointIdentity { generation: 2, service_epoch: 2 })
-            );
+            assert!(supervisor.prepare_restart());
         }
-        assert!(!supervisor.prepare_restart(EndpointIdentity { generation: 3, service_epoch: 3 }));
+        assert!(!supervisor.prepare_restart());
         assert!(supervisor.recovery);
     }
 }

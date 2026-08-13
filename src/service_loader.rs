@@ -110,7 +110,7 @@ impl ServiceImageBundle {
     }
 
     pub const fn location(&self, service: ServiceId) -> Option<ServiceImageLocation> {
-        self.records[service_index(service)]
+        self.records[service.index()]
     }
 
     /// View one retained service image after the UEFI filesystem is gone.
@@ -123,7 +123,7 @@ impl ServiceImageBundle {
     pub unsafe fn image(&self, service: ServiceId) -> Option<&[u8]> {
         // SAFETY: The caller assumes the retained-allocation invariant
         // documented by `ServiceImageLocation::bytes`.
-        let location = self.records[service_index(service)].as_ref()?;
+        let location = self.records[service.index()].as_ref()?;
         Some(unsafe { location.bytes() })
     }
 
@@ -137,7 +137,7 @@ impl ServiceImageBundle {
         physical_address: usize,
         image: &[u8],
     ) -> Result<ServiceImageLocation, ServiceLoadError> {
-        let index = service_index(spec.service());
+        let index = spec.service().index();
         if self.records[index].is_some() {
             return Err(ServiceLoadError::Duplicate);
         }
@@ -198,7 +198,7 @@ pub fn load_from_esp() -> Result<ServiceImageBundle, UefiImageError> {
         let result = read_one_image(&mut root, spec, allocation, allocation_bytes);
         match result {
             Ok(location) => {
-                bundle.records[service_index(spec.service())] = Some(location);
+                bundle.records[spec.service().index()] = Some(location);
                 bundle.count += 1;
             }
             Err(error) => {
@@ -275,16 +275,6 @@ fn free_bundle(bundle: &mut ServiceImageBundle) {
         }
     }
     bundle.clear();
-}
-
-const fn service_index(service: ServiceId) -> usize {
-    match service {
-        ServiceId::Input => 0,
-        ServiceId::Display => 1,
-        ServiceId::Terminal => 2,
-        ServiceId::Session => 3,
-        ServiceId::Commands => 4,
-    }
 }
 
 fn align_up(bytes: usize) -> Option<usize> {
