@@ -35,7 +35,7 @@ fixed, capability-scoped boundaries.
 | Input service | `services/images/src/input` + `logos-input::InputDecoder` | consumes the Input-only PS/2 byte mapping, produces semantic key/text messages on the Input→Terminal ring, and owns modifier/layout state |
 | Terminal service | `services/images/src/terminal` + `logos-terminal::TerminalState` | ring-3 owns a bounded 80×25 live surface, consumes Input and Session rings, emits compact Session input and dirty-cell Display messages; the reusable host model remains bounded to 160×100 |
 | Display service | `services/images/src/display` + `logos-display` | ring-3 validates cell diffs and endpoint generations, then rasterizes dirty cells through the fixed glyph cache into its mapped GOP framebuffer |
-| Session service | `services/images/src/session` + `logos-session::SessionService` | ring-3 owns bounded line editing and shell state, emits prompt/output in backpressured 256-byte chunks, and uses a compact volatile-file budget; the host `Session` model retains the larger proof bounds |
+| Session service | `services/images/src/session` + `logos-session::SessionService` | ring-3 owns bounded line editing and shell state, emits prompt/output in backpressured 256-byte chunks, and uses a compact volatile-file budget; no state survives restart or reboot |
 | Commands service | `services/images/src/commands` + `logos-commands::CommandService` | receives bounded Session requests, executes built-ins, and returns backpressured output over its reverse IPC ring |
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 16 validated mappings per process, typed capability authorization, and exit/fault/reclaim outcomes |
 | User launch contract | `process::UserLaunch` + `Scheduler::spawn_user` | a running process with a bound root publishes entry RIP, aligned stack top, root, and process generation before its task becomes runnable |
@@ -69,3 +69,10 @@ the live service images and supervisor-driven restart. The fixed scheduler task 
 bounded ELF teardown/rebuild cannot overwrite adjacent task metadata.
 
 `v1_docs/` is historical and is not an active architecture contract.
+
+## Future persistence boundary
+
+The current service graph has no persistence or reboot recovery. Live supervisor restart rebuilds
+volatile state and abandons in-flight work. Future durable state must be introduced through a bounded
+proto-filesystem/storage service with explicit ownership, journal, replay, and idempotency proofs;
+services must not invent ad hoc reboot pickup paths before that boundary exists.

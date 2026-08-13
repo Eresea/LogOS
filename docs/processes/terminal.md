@@ -22,6 +22,11 @@ and request a fresh Session prompt. The live supervisor stops every service task
 boundary, reclaims process mappings, page-table frames, image frames, and IPC pages, then rebuilds the
 graph with a new endpoint generation. Late messages from the previous generation are rejected.
 
+The restart path is deliberately volatile: terminal/session state and in-flight commands are not
+saved for a later reboot. A reboot starts from the fixed boot image and creates a new graph. Future
+reboot recovery belongs to a storage service backed by a proto-filesystem, with separate journal and
+idempotency proofs.
+
 This document describes the terminal contract path. The current QEMU proof validates service image
 loading, isolated roots, framebuffer and keyboard mappings, ring-3 entry, rendering, semantic input,
 fault containment, and one deterministic supervisor-driven restart.

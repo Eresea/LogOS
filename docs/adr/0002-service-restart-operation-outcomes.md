@@ -20,7 +20,8 @@ explicit operation outcome rather than being mistaken for successful work or sil
 - The owner must reclaim terminal operation records before their slots can be reused.
 - No automatic retry is performed. The owner may retry only when the operation is idempotent and its
   request identity makes replay safe.
-- Durable work must keep its resumable state outside the replaceable service instance.
+- This milestone has no durable work store. In-flight work is abandoned on a live restart or full
+  reboot unless a future storage service explicitly defines recovery semantics.
 - Scheduler slot generations and service epochs remain separate concepts and are not interchangeable.
 
 ## Consequences
@@ -32,10 +33,12 @@ records continue to consume slots.
 
 `service_lifecycle::ServiceLifecycle` is the host-tested contract model. It does not add service
 loading, IPC, persistence, retries, or a generic executor; those require a concrete service
-milestone and their own proofs.
+milestone and their own proofs. Live restart recovery is intentionally in-memory only; a full reboot
+starts from a clean service graph.
 
 ## Deferred
 
-Durable retry journals and idempotency contracts remain deferred. Supervisor-driven replacement and
-the QEMU restart proof are now part of the live service graph. IPC transport and capability
-validation are covered by the bounded service path.
+Durable retry journals, idempotency contracts, filesystem-backed state, and reboot recovery remain
+deferred until a proto-filesystem and storage service exist. Supervisor-driven replacement and the
+QEMU restart proof are now part of the live service graph. IPC transport and capability validation
+are covered by the bounded service path.
