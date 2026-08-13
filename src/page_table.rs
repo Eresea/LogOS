@@ -13,7 +13,7 @@ const USER: u64 = 1 << 2;
 const HUGE: u64 = 1 << 7;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
-#[cfg(target_os = "uefi")]
+#[cfg(any(test, target_os = "uefi"))]
 const USER_PML4_INDEX: usize = 2;
 
 /// Maximum table frames needed by one root plus one private path per loaded page.
@@ -286,12 +286,20 @@ impl PageTableMemory for IdentityPageTableMemory {
                 Self::table(root).cast::<u64>(),
                 ENTRY_COUNT,
             );
-            // The fixed service image/stack window owns PML4 slot 1. Any
-            // firmware branch there is discarded before user mappings grow.
-            (*Self::table(root))[USER_PML4_INDEX] = 0;
+            // Inherited firmware mappings remain kernel-only. The fixed
+            // service image/IPC window is rebuilt as user-accessible below.
+            sanitize_inherited_root(&mut *Self::table(root));
         };
         Ok(())
     }
+}
+
+#[cfg(any(test, target_os = "uefi"))]
+fn sanitize_inherited_root(root: &mut [u64; ENTRY_COUNT]) {
+    for entry in root.iter_mut() {
+        *entry &= !USER;
+    }
+    root[USER_PML4_INDEX] = 0;
 }
 
 #[cfg(target_os = "uefi")]
@@ -442,5 +450,17 @@ mod tests {
         let page = loaded.page(0).unwrap();
         tables.map_page(page, &mut pool, &mut memory).unwrap();
         assert_eq!(tables.map_page(page, &mut pool, &mut memory), Err(PageTableError::Conflict));
+    }
+
+    #[test]
+    fn inherited_root_is_kernel_only_before_user_mappings() {
+        let mut root = [0u64; ENTRY_COUNT];
+        root[0] = PRESENT | USER;
+        root[USER_PML4_INDEX] = PRESENT | WRITABLE | USER;
+
+        sanitize_inherited_root(&mut root);
+
+        assert_eq!(root[0], PRESENT);
+        assert_eq!(root[USER_PML4_INDEX], 0);
     }
 }
