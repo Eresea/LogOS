@@ -74,7 +74,6 @@ static mut SERVICE_RUNTIME: crate::service_runtime::ServiceRuntime =
     crate::service_runtime::ServiceRuntime::new();
 static KERNEL_CR3: AtomicUsize = AtomicUsize::new(0);
 static KEYBOARD_RING: AtomicUsize = AtomicUsize::new(0);
-static KEYBOARD_DROPS: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -377,6 +376,9 @@ fn capture_gop() -> FramebufferInfo {
     for mode in gop.modes() {
         let info = mode.info();
         let (width, height) = info.resolution();
+        if width < logos_abi::MIN_FRAMEBUFFER_WIDTH || height < logos_abi::MIN_FRAMEBUFFER_HEIGHT {
+            continue;
+        }
         let format = match info.pixel_format() {
             UefiPixelFormat::Rgb => PixelFormat::Rgb8,
             UefiPixelFormat::Bgr => PixelFormat::Bgr8,
@@ -1035,9 +1037,7 @@ pub(super) fn handle_keyboard_interrupt() {
     if ring != 0 {
         // The frame is identity-mapped in the kernel root and is mapped into
         // Input separately by the service runtime.
-        if unsafe { (&*(ring as *const logos_abi::KeyboardByteRing)).push(byte) }.is_err() {
-            KEYBOARD_DROPS.fetch_add(1, Ordering::Relaxed);
-        }
+        let _ = unsafe { (&*(ring as *const logos_abi::KeyboardByteRing)).push(byte) };
     }
     unsafe {
         out_port(PIC_MASTER_COMMAND, PIC_EOI);

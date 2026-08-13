@@ -8,7 +8,7 @@
 use core::{
     cell::UnsafeCell,
     mem::MaybeUninit,
-    sync::atomic::{AtomicBool, AtomicU16, Ordering},
+    sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
 };
 
 pub const ABI_VERSION: u16 = 2;
@@ -18,6 +18,10 @@ pub const MAX_COLUMNS: usize = 160;
 pub const MAX_ROWS: usize = 100;
 pub const DEFAULT_COLUMNS: usize = 80;
 pub const DEFAULT_ROWS: usize = 25;
+pub const DISPLAY_CELL_WIDTH: usize = 8;
+pub const DISPLAY_CELL_HEIGHT: usize = 16;
+pub const MIN_FRAMEBUFFER_WIDTH: usize = DEFAULT_COLUMNS * DISPLAY_CELL_WIDTH;
+pub const MIN_FRAMEBUFFER_HEIGHT: usize = DEFAULT_ROWS * DISPLAY_CELL_HEIGHT;
 pub const MAX_SCROLLBACK_LINES: usize = 2048;
 pub const MAX_HISTORY_ENTRIES: usize = 64;
 pub const MAX_HISTORY_BYTES: usize = 256;
@@ -359,6 +363,7 @@ pub enum KeyboardRingError {
 pub struct KeyboardByteRing {
     head: AtomicU16,
     tail: AtomicU16,
+    dropped: AtomicU64,
     bytes: [UnsafeCell<u8>; KEYBOARD_RING_CAPACITY],
 }
 
@@ -369,6 +374,7 @@ impl KeyboardByteRing {
         Self {
             head: AtomicU16::new(0),
             tail: AtomicU16::new(0),
+            dropped: AtomicU64::new(0),
             bytes: [const { UnsafeCell::new(0) }; KEYBOARD_RING_CAPACITY],
         }
     }
@@ -377,6 +383,7 @@ impl KeyboardByteRing {
         let head = self.head.load(Ordering::Relaxed);
         let tail = self.tail.load(Ordering::Acquire);
         if head.wrapping_sub(tail) >= KEYBOARD_RING_CAPACITY as u16 {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
             return Err(KeyboardRingError::Full);
         }
         let slot = usize::from(head) % KEYBOARD_RING_CAPACITY;
@@ -399,6 +406,10 @@ impl KeyboardByteRing {
 
     pub fn pending(&self) -> usize {
         self.head.load(Ordering::Acquire).wrapping_sub(self.tail.load(Ordering::Acquire)) as usize
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Acquire)
     }
 }
 
@@ -602,6 +613,7 @@ mod tests {
         }
         assert_eq!(ring.push(0xff), Err(KeyboardRingError::Full));
         assert_eq!(ring.pending(), KEYBOARD_RING_CAPACITY);
+        assert_eq!(ring.dropped(), 1);
         for byte in 0..KEYBOARD_RING_CAPACITY as u16 {
             assert_eq!(ring.pop(), Some(byte as u8));
         }
