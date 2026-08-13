@@ -730,10 +730,14 @@ pub(crate) fn start_services() {
         });
         let ring =
             runtime.keyboard_ring_address().unwrap_or_else(|| fatal(b"LogOS vNext: keyboard ring"));
-        KEYBOARD_RING.store(ring, Ordering::Release);
+        publish_keyboard_ring(ring);
         enable_keyboard_irq();
     }
     proof_line(b"LogOS vNext: service tasks started");
+}
+
+pub(crate) fn publish_keyboard_ring(address: usize) {
+    KEYBOARD_RING.store(address, Ordering::Release);
 }
 
 pub(crate) fn supervise_services() -> bool {
@@ -755,6 +759,7 @@ pub(crate) fn record_service_heartbeat(
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).record_heartbeat(service, process, now) }
 }
 
+#[cfg(feature = "qemu-proof")]
 pub(crate) fn suppress_service_heartbeat(service: logos_abi::ServiceId) {
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).suppress_heartbeat(service) }
 }

@@ -139,8 +139,9 @@ function Connect-Qmp {
 $proofBefore = Join-Path $repoRoot "target\qemu-proof-before-$Cpus.ppm"
 $proofAfter = Join-Path $repoRoot "target\qemu-proof-after-$Cpus.ppm"
 Remove-Item $proofBefore, $proofAfter -Force -ErrorAction SilentlyContinue
-$qmp = Connect-Qmp $qmpPort
+$qmp = $null
 try {
+    $qmp = Connect-Qmp $qmpPort
     Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofBefore } } | Out-Null
     foreach ($key in @('e', 'c', 'h', 'o', 'space', 'p', 'r', 'o', 'o', 'f', 'ret')) {
         Invoke-QmpCommand $qmp.Writer $qmp.Reader @{
@@ -150,20 +151,22 @@ try {
     }
     Start-Sleep -Milliseconds 500
     Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofAfter } } | Out-Null
+    if (-not (Test-Path $proofBefore) -or -not (Test-Path $proofAfter)) {
+        throw 'QEMU proof did not capture both framebuffer snapshots.'
+    }
+    if ((Get-FileHash $proofBefore).Hash -eq (Get-FileHash $proofAfter).Hash) {
+        throw 'QEMU keyboard injection did not change the rendered framebuffer.'
+    }
+    Write-Host $result
 } finally {
-    # The proof process is terminated below; avoid a blocking socket close on
-    # QEMU builds that keep the monitor stream open after screendump.
-    $qmp.Client.Client.LingerState = [System.Net.Sockets.LingerOption]::new($false, 0)
-    $qmp.Client.Client.Close()
+    # Stop QEMU before closing the monitor. Some Windows QEMU builds keep the
+    # monitor stream open after screendump and otherwise leave this runner stuck.
+    if (-not $process.HasExited) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($qmp) {
+        $qmp.Client.Client.LingerState = [System.Net.Sockets.LingerOption]::new($false, 0)
+        $qmp.Client.Client.Close()
+    }
+    $process.Dispose()
 }
-if (-not (Test-Path $proofBefore) -or -not (Test-Path $proofAfter)) {
-    throw 'QEMU proof did not capture both framebuffer snapshots.'
-}
-if ((Get-FileHash $proofBefore).Hash -eq (Get-FileHash $proofAfter).Hash) {
-    throw 'QEMU keyboard injection did not change the rendered framebuffer.'
-}
-if (-not $process.HasExited) {
-    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-}
-$process.Dispose()
-Write-Host $result

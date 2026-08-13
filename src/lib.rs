@@ -77,6 +77,7 @@ pub(crate) fn supervise_services() -> bool {
 }
 
 #[cfg(target_os = "uefi")]
+#[cfg(feature = "qemu-proof")]
 pub(crate) fn suppress_service_heartbeat(service: logos_abi::ServiceId) {
     arch::suppress_service_heartbeat(service)
 }

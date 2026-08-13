@@ -15,24 +15,14 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         let Some(handle) = current else {
             fatal(b"LogOS vNext: fault without task");
         };
-        #[cfg(feature = "qemu-proof")]
-        {
-            if !crate::user_mode::faulted(handle, vector) {
-                fatal(b"LogOS vNext: kernel fault");
-            }
-            true
+        if !crate::user_mode::faulted(handle, vector) {
+            fatal(b"LogOS vNext: kernel fault");
         }
-        #[cfg(not(feature = "qemu-proof"))]
-        {
-            let _ = handle;
-            fatal(b"LogOS vNext: user fault disabled");
-        }
+        true
     } else {
         false
     };
-    #[cfg(feature = "qemu-proof")]
     let mut user_fault = user_fault;
-    #[cfg(feature = "qemu-proof")]
     if vector == usize::from(SWITCH_VECTOR) {
         if let Some(handle) = current {
             if crate::user_mode::is_user_task(handle)

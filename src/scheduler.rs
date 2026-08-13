@@ -94,7 +94,6 @@ struct TaskSlot {
     process: AtomicU64,
     user_entry: AtomicUsize,
     user_stack_top: AtomicUsize,
-    user_task: AtomicBool,
     address_space_published: AtomicBool,
 }
 
@@ -111,7 +110,6 @@ impl TaskSlot {
             process: AtomicU64::new(0),
             user_entry: AtomicUsize::new(0),
             user_stack_top: AtomicUsize::new(0),
-            user_task: AtomicBool::new(false),
             address_space_published: AtomicBool::new(false),
         }
     }
@@ -260,12 +258,10 @@ impl Scheduler {
             slot.address_space.store(address_space, Ordering::Release);
             slot.address_space_published.store(address_space != 0, Ordering::Release);
             if let Some(launch) = user_launch {
-                slot.user_task.store(true, Ordering::Release);
                 slot.process.store(launch.process().raw(), Ordering::Release);
                 slot.user_entry.store(launch.entry(), Ordering::Release);
                 slot.user_stack_top.store(launch.stack_top(), Ordering::Release);
             } else {
-                slot.user_task.store(false, Ordering::Release);
                 slot.process.store(0, Ordering::Release);
                 slot.user_entry.store(0, Ordering::Release);
                 slot.user_stack_top.store(0, Ordering::Release);
@@ -507,7 +503,6 @@ impl Scheduler {
         slot.process.store(0, Ordering::Release);
         slot.user_entry.store(0, Ordering::Release);
         slot.user_stack_top.store(0, Ordering::Release);
-        slot.user_task.store(false, Ordering::Release);
         slot.address_space_published.store(false, Ordering::Release);
         slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
         slot.saved_rsp.store(0, Ordering::Release);

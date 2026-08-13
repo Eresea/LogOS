@@ -218,6 +218,7 @@ impl ServiceRuntime {
         memory.clear(keyboard_frame).map_err(ServiceRuntimeError::Keyboard)?;
         self.map_keyboard_ring(keyboard_frame)?;
         self.keyboard_frame = Some(keyboard_frame);
+        crate::arch::publish_keyboard_ring(keyboard_frame.raw() as usize);
         for spec in SERVICE_IMAGES {
             self.startup.mark_launch_ready(spec.service()).map_err(ServiceRuntimeError::Startup)?;
         }
@@ -402,6 +403,7 @@ impl ServiceRuntime {
         true
     }
 
+    #[cfg(feature = "qemu-proof")]
     pub(crate) fn suppress_heartbeat(&self, service: ServiceId) {
         self.suppressed_heartbeats[service_index(service)].store(true, Ordering::Release);
     }
