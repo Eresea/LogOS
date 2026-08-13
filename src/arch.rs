@@ -337,6 +337,15 @@ pub fn boot() -> Status {
                 crate::service_runtime::ServiceRuntimeError::TaskLaunch => {
                     fatal(b"LogOS vNext: service task launch")
                 }
+                crate::service_runtime::ServiceRuntimeError::TaskStop => {
+                    fatal(b"LogOS vNext: service task stop")
+                }
+                crate::service_runtime::ServiceRuntimeError::RestartLimit => {
+                    fatal(b"LogOS vNext: service restart limit")
+                }
+                crate::service_runtime::ServiceRuntimeError::StaleGeneration => {
+                    fatal(b"LogOS vNext: service stale generation")
+                }
             },
         );
         let runtime = &*core::ptr::addr_of!(SERVICE_RUNTIME);
@@ -592,6 +601,82 @@ pub(crate) fn current_cr3() -> usize {
     value
 }
 
+pub(crate) fn reserve_kernel_frames(pool: &mut crate::frame_pool::FramePool) {
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(crate::SCHEDULER) as usize,
+        core::mem::size_of::<crate::Scheduler>(),
+    );
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(CPU_LOCALS) as usize,
+        core::mem::size_of::<[CpuLocal; MAX_CPUS]>(),
+    );
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(SERVICE_RUNTIME) as usize,
+        core::mem::size_of::<crate::service_runtime::ServiceRuntime>(),
+    );
+    #[cfg(feature = "qemu-proof")]
+    {
+        crate::user_mode::reserve_frames(pool);
+        crate::proof::reserve_frames(pool);
+    }
+}
+
+pub(crate) fn reserve_storage_frames(
+    pool: &mut crate::frame_pool::FramePool,
+    address: usize,
+    bytes: usize,
+) {
+    let start = address & !0xfff;
+    let Some(end) = address.checked_add(bytes).and_then(|end| end.checked_add(0xfff)) else {
+        return;
+    };
+    let root = current_cr3() as u64 & 0x000f_ffff_ffff_f000;
+    for virtual_address in (start..end & !0xfff).step_by(0x1000) {
+        if let Some(frame) = translate_kernel_page(root, virtual_address as u64) {
+            pool.reserve(crate::frame_pool::FrameAddress::from_raw(frame));
+        }
+    }
+}
+
+fn translate_kernel_page(root: u64, virtual_address: u64) -> Option<u64> {
+    const PRESENT: u64 = 1;
+    const HUGE: u64 = 1 << 7;
+    const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+    let pml4 = root;
+    let pml4_entry = unsafe {
+        core::ptr::read_volatile((pml4 + ((virtual_address >> 36) & 0xff8)) as *const u64)
+    };
+    if pml4_entry & PRESENT == 0 {
+        return None;
+    }
+    let pdpt = pml4_entry & ADDRESS_MASK;
+    let pdpt_entry = unsafe {
+        core::ptr::read_volatile((pdpt + ((virtual_address >> 27) & 0xff8)) as *const u64)
+    };
+    if pdpt_entry & PRESENT == 0 {
+        return None;
+    }
+    if pdpt_entry & HUGE != 0 {
+        return Some((pdpt_entry & 0x000f_ffff_c000_0000) | (virtual_address & 0x3fff_ffff));
+    }
+    let pd = pdpt_entry & ADDRESS_MASK;
+    let pd_entry =
+        unsafe { core::ptr::read_volatile((pd + ((virtual_address >> 18) & 0xff8)) as *const u64) };
+    if pd_entry & PRESENT == 0 {
+        return None;
+    }
+    if pd_entry & HUGE != 0 {
+        return Some((pd_entry & 0x000f_ffff_ffe0_0000) | (virtual_address & 0x1f_ffff));
+    }
+    let pt = pd_entry & ADDRESS_MASK;
+    let pt_entry =
+        unsafe { core::ptr::read_volatile((pt + ((virtual_address >> 9) & 0xff8)) as *const u64) };
+    (pt_entry & PRESENT != 0).then_some((pt_entry & ADDRESS_MASK) | (virtual_address & 0xfff))
+}
+
 #[allow(dead_code)]
 pub(crate) fn switch_cr3(root: usize) {
     if root == 0 || root & 0xfff != 0 {
@@ -603,8 +688,26 @@ pub(crate) fn switch_cr3(root: usize) {
 }
 
 pub(crate) fn prepare_task_address_space(root: usize) {
-    let root = if root == 0 { KERNEL_CR3.load(Ordering::Acquire) } else { root };
+    let root = if root == 0 {
+        let kernel = KERNEL_CR3.load(Ordering::Acquire);
+        if kernel == 0 || kernel & 0xfff != 0 {
+            proof_line(b"LogOS vNext: invalid kernel CR3");
+        }
+        kernel
+    } else {
+        if root & 0xfff != 0 {
+            proof_line(b"LogOS vNext: invalid task CR3");
+        }
+        root
+    };
     switch_cr3(root);
+}
+
+pub(crate) fn restart_critical_section<R>(operation: impl FnOnce() -> R) -> R {
+    unsafe { asm!("cli", options(nomem, nostack, preserves_flags)) };
+    let result = operation();
+    unsafe { asm!("sti", options(nomem, nostack, preserves_flags)) };
+    result
 }
 
 pub(crate) fn start_services() {
@@ -620,6 +723,9 @@ pub(crate) fn start_services() {
             crate::service_runtime::ServiceRuntimeError::TaskLaunch => {
                 fatal(b"LogOS vNext: service task launch")
             }
+            crate::service_runtime::ServiceRuntimeError::TaskStop => {
+                fatal(b"LogOS vNext: service task stop")
+            }
             _ => fatal(b"LogOS vNext: service task startup"),
         });
         let ring =
@@ -628,6 +734,35 @@ pub(crate) fn start_services() {
         enable_keyboard_irq();
     }
     proof_line(b"LogOS vNext: service tasks started");
+}
+
+pub(crate) fn supervise_services() -> bool {
+    unsafe {
+        let Some(images) = (*core::ptr::addr_of!(SERVICE_IMAGES)).as_ref() else {
+            fatal(b"LogOS vNext: service image state");
+        };
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME))
+            .supervise(images, current_ticks())
+            .unwrap_or_else(|_| fatal(b"LogOS vNext: service restart"))
+    }
+}
+
+pub(crate) fn record_service_heartbeat(
+    service: logos_abi::ServiceId,
+    process: crate::process::ProcessHandle,
+    now: u64,
+) -> bool {
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).record_heartbeat(service, process, now) }
+}
+
+pub(crate) fn suppress_service_heartbeat(service: logos_abi::ServiceId) {
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).suppress_heartbeat(service) }
+}
+
+pub(crate) fn fault_service_process(process: crate::process::ProcessHandle, vector: u8) -> bool {
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).fault_process(process, vector).is_ok()
+    }
 }
 
 #[allow(dead_code)]
@@ -660,8 +795,6 @@ fn initialize_post_uefi(cpu_count: usize) {
     calibrate_timer();
     #[cfg(feature = "qemu-proof")]
     crate::user_mode::initialize_kernel_cr3(current_cr3());
-    #[cfg(feature = "qemu-proof")]
-    crate::proof::terminal_integration();
     start_aps(cpu_count);
     configure_timer();
     unsafe { CPU_LOCALS[0].online.store(true, Ordering::Release) };

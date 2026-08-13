@@ -106,6 +106,7 @@ pub enum SyscallKind {
     ProcessStart = 7,
     ProcessReap = 8,
     CapabilityMap = 9,
+    Heartbeat = 10,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -30,7 +30,6 @@ ELF/process path.
 
 ## Deferred
 
-Supervisor-driven process replacement, service heartbeat transport, and safe page-table teardown
-remain deferred. The current process table, capability mappings, fixed ELF packaging, hardware
-adapters, and ring-3 launch path are live; the host reference model must not be described as the
-runtime service implementation.
+Complex shell features, dynamic fonts, and additional hardware backends remain deferred. The live
+supervisor now owns heartbeat-driven replacement and safe page-table teardown; the host reference
+model remains a test oracle rather than the runtime service implementation.

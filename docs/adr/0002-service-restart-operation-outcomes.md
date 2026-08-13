@@ -36,6 +36,6 @@ milestone and their own proofs.
 
 ## Deferred
 
-Service replacement, durable retry journals, idempotency contracts, and QEMU restart proofs remain
-deferred until supervisor orchestration is wired to the live service graph. IPC transport and
-capability validation are now covered by the bounded service path.
+Durable retry journals and idempotency contracts remain deferred. Supervisor-driven replacement and
+the QEMU restart proof are now part of the live service graph. IPC transport and capability
+validation are covered by the bounded service path.

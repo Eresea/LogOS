@@ -17,5 +17,5 @@ maps sink failures to the bounded loader error set.
 - BSS and user-stack contents are deterministic before a process can run.
 - Host tests verify segment offsets, unaligned segments, zero fill, and frame
   ownership without unsafe physical dereferences.
-- Page-table construction and scheduler binding remain independent follow-on
-  work; no architecture-specific memory access enters the loader model.
+- Page-table construction and scheduler binding remain architecture-owned adapters; no
+  architecture-specific memory access enters the loader model.

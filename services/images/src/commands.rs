@@ -50,11 +50,9 @@ impl PendingOutput {
         }
         if self.pending && self.offset == self.len {
             let message = IpcBytes::empty(MessageKind::SessionOutput);
-            if self.len == 0 {
-                if ring.send(identity, message).is_ok() {
-                    self.pending = false;
-                    progressed = true;
-                }
+            if self.len == 0 && ring.send(identity, message).is_ok() {
+                self.pending = false;
+                progressed = true;
             }
         }
         if self.pending && self.offset == self.len && self.len != 0 {
@@ -75,7 +73,13 @@ pub extern "C" fn _start() -> ! {
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let input = unsafe { &*(SESSION_TO_COMMANDS as *const StreamIpc) };
     let output = unsafe { &*(COMMANDS_TO_SESSION as *const StreamIpc) };
+    let mut heartbeat_ticks = 0u16;
     loop {
+        heartbeat_ticks = heartbeat_ticks.wrapping_add(1);
+        if heartbeat_ticks == 1024 {
+            heartbeat_ticks = 0;
+            common::heartbeat(logos_abi::ServiceId::Commands);
+        }
         let input_identity = input.endpoint().identity();
         let output_identity = output.endpoint().identity();
         let mut progressed = pending.flush(output, output_identity);

@@ -12,5 +12,6 @@ processes use this same binding when they enter ring 3.
 
 ## Scope
 
-The slot stores a raw root, not a process or address-space capability handle. Lifetime validation
-and replacement-time address-space teardown remain deferred.
+The slot stores a raw root, not a process or address-space capability handle. The live supervisor
+validates task generations before teardown and clears the root before reuse; replacement reclaims
+process mappings and page-table frames before publishing a new service task.

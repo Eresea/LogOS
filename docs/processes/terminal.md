@@ -18,9 +18,10 @@ queue returns an error; it never overwrites an unread entry. Endpoint generation
 epochs reject late messages after a replacement.
 
 The host reference model can clear its screen model, advance its endpoint identity, rebind Display,
-and request a fresh Session prompt. Live endpoint generations are prepared for the supervisor, but
-live service restart and page-table teardown are not yet part of the boot acceptance proof.
+and request a fresh Session prompt. The live supervisor stops every service task at a scheduler
+boundary, reclaims process mappings, page-table frames, image frames, and IPC pages, then rebuilds the
+graph with a new endpoint generation. Late messages from the previous generation are rejected.
 
 This document describes the terminal contract path. The current QEMU proof validates service image
 loading, isolated roots, framebuffer and keyboard mappings, ring-3 entry, rendering, semantic input,
-and fault containment. It does not yet claim live restart recovery.
+fault containment, and one deterministic supervisor-driven restart.

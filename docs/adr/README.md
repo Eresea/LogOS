@@ -36,3 +36,4 @@
 | [0032](0032-service-ipc-pages.md) | Accepted | Six generation-stamped endpoint pages are mapped only into their producer and consumer roots |
 | [0034](0034-ring3-bsp-affinity.md) | Accepted | Ring-3 tasks stay on the BSP until per-CPU user-entry and CR3/TLB migration is explicit |
 | [0033](0033-ps2-interrupt-boundary.md) | Accepted | Legacy PIC IRQ1 supplies bounded raw PS/2 bytes to Input; decoding remains in the service |
+| [0035](0035-live-supervisor-restart.md) | Accepted | Supervisor-owned graph restart quiesces tasks, reclaims address spaces safely, and rejects stale IPC generations |

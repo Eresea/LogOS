@@ -17,6 +17,7 @@ const USER_STACK_VA: usize = USER_CODE_VA + PAGE_SIZE;
 const SWITCH_VECTOR: u8 = 49;
 const PROOF_IMAGE_LEN: usize = 0x89;
 const SYSCALL_YIELD: usize = 1;
+const SYSCALL_HEARTBEAT: usize = 10;
 
 #[repr(C, align(4096))]
 struct PageTable([u64; 512]);
@@ -66,18 +67,43 @@ pub(crate) fn initialize_kernel_cr3(root: usize) {
     KERNEL_CR3.store(root & ADDRESS_MASK, Ordering::Release);
 }
 
+pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
+    for (address, bytes) in [
+        (core::ptr::addr_of!(USER_PML4) as usize, core::mem::size_of::<PageTable>()),
+        (core::ptr::addr_of!(USER_PDPT) as usize, core::mem::size_of::<PageTable>()),
+        (core::ptr::addr_of!(USER_PD) as usize, core::mem::size_of::<PageTable>()),
+        (core::ptr::addr_of!(USER_PT) as usize, core::mem::size_of::<PageTable>()),
+        (core::ptr::addr_of!(USER_CODE_PAGE) as usize, core::mem::size_of::<UserPage>()),
+        (core::ptr::addr_of!(USER_STACK_PAGE) as usize, core::mem::size_of::<UserPage>()),
+        (core::ptr::addr_of!(USER_IMAGE) as usize, core::mem::size_of::<[u8; PROOF_IMAGE_LEN]>()),
+        (core::ptr::addr_of!(USER_PROCESS_TABLE) as usize, core::mem::size_of::<ProcessTable>()),
+        (core::ptr::addr_of!(USER_PROCESS) as usize, core::mem::size_of::<Option<ProcessHandle>>()),
+    ] {
+        crate::arch::reserve_storage_frames(pool, address, bytes);
+    }
+}
+
 pub(crate) fn faulted(handle: TaskHandle, vector: usize) -> bool {
-    if !matches!(vector, 6 | 13 | 14) || handle.raw() != USER_TASK_RAW.load(Ordering::Acquire) {
+    if !matches!(vector, 6 | 13 | 14) {
         return false;
+    }
+    if handle.raw() != USER_TASK_RAW.load(Ordering::Acquire) {
+        let Some(launch) = SCHEDULER.user_launch(handle) else {
+            return false;
+        };
+        return crate::arch::fault_service_process(launch.process(), vector as u8);
     }
     mark_fault(vector)
 }
 
 pub(crate) fn syscall_faulted(handle: TaskHandle) -> bool {
-    if !is_user_task(handle) {
-        return false;
+    if handle.raw() == USER_TASK_RAW.load(Ordering::Acquire) {
+        return mark_fault(SWITCH_VECTOR as usize);
     }
-    mark_fault(SWITCH_VECTOR as usize)
+    let Some(launch) = SCHEDULER.user_launch(handle) else {
+        return false;
+    };
+    crate::arch::fault_service_process(launch.process(), SWITCH_VECTOR)
 }
 
 fn mark_fault(vector: usize) -> bool {
@@ -97,22 +123,48 @@ fn mark_fault(vector: usize) -> bool {
 }
 
 pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
-    if USER_FAULTED.load(Ordering::Acquire) || handle.raw() != USER_TASK_RAW.load(Ordering::Acquire)
-    {
-        return false;
-    }
     let gpr = unsafe { core::ptr::read_unaligned((fx_context as *const usize).add(64)) };
     let number = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(14)) };
-    if number != SYSCALL_YIELD {
+    if number == SYSCALL_YIELD {
+        if USER_FAULTED.load(Ordering::Acquire)
+            || handle.raw() != USER_TASK_RAW.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), 0) };
+        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
+    if number != SYSCALL_HEARTBEAT {
+        return false;
+    }
+    let Some(launch) = SCHEDULER.user_launch(handle) else {
+        return false;
+    };
+    let service = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) };
+    let Some(service) = service_id(service) else {
+        return false;
+    };
+    if !crate::arch::record_service_heartbeat(service, launch.process(), crate::current_ticks()) {
         return false;
     }
     unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), 0) };
-    USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
     true
 }
 
 pub(crate) fn is_user_task(handle: TaskHandle) -> bool {
-    handle.raw() == USER_TASK_RAW.load(Ordering::Acquire)
+    handle.raw() == USER_TASK_RAW.load(Ordering::Acquire) || SCHEDULER.user_launch(handle).is_some()
+}
+
+fn service_id(raw: usize) -> Option<logos_abi::ServiceId> {
+    match raw {
+        1 => Some(logos_abi::ServiceId::Input),
+        2 => Some(logos_abi::ServiceId::Display),
+        3 => Some(logos_abi::ServiceId::Terminal),
+        4 => Some(logos_abi::ServiceId::Session),
+        5 => Some(logos_abi::ServiceId::Commands),
+        _ => None,
+    }
 }
 
 pub(crate) fn prepare_address_space(root: usize) {

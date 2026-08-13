@@ -20,7 +20,13 @@ pub extern "C" fn _start() -> ! {
     let display = unsafe { &*(TERMINAL_TO_DISPLAY as *const RenderIpc) };
     let session_input = unsafe { &*(TERMINAL_TO_SESSION as *const StreamIpc) };
     let session_output = unsafe { &*(SESSION_TO_TERMINAL as *const StreamIpc) };
+    let mut heartbeat_ticks = 0u16;
     loop {
+        heartbeat_ticks = heartbeat_ticks.wrapping_add(1);
+        if heartbeat_ticks == 1024 {
+            heartbeat_ticks = 0;
+            common::heartbeat(logos_abi::ServiceId::Terminal);
+        }
         let input_identity = input.endpoint().identity();
         let display_identity = display.endpoint().identity();
         let session_input_identity = session_input.endpoint().identity();

@@ -23,7 +23,7 @@ starts them.
 
 - Shared data-plane ownership is explicit and capability-scoped by endpoint
   membership.
-- A future restarted service can invalidate the generation without reusing
-  stale messages; the live restart supervisor is not yet wired.
+- A restarted graph receives a new generation and service epoch; stale messages
+  are rejected before they can reach a replacement service.
 - IPC frames are included in the same fixed frame-pool exhaustion boundary as
   image and page-table frames.

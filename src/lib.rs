@@ -72,6 +72,16 @@ pub(crate) fn start_services() {
 }
 
 #[cfg(target_os = "uefi")]
+pub(crate) fn supervise_services() -> bool {
+    arch::supervise_services()
+}
+
+#[cfg(target_os = "uefi")]
+pub(crate) fn suppress_service_heartbeat(service: logos_abi::ServiceId) {
+    arch::suppress_service_heartbeat(service)
+}
+
+#[cfg(target_os = "uefi")]
 pub fn block_current() {
     arch::block_current()
 }

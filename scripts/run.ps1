@@ -86,8 +86,10 @@ while ([DateTime]::UtcNow -lt $deadline) {
 
 $result = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
 if (-not $passed) {
-    if (-not $process.HasExited) { $process.Kill() }
-    $process.WaitForExit()
+    if (-not $process.HasExited) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    $process.Dispose()
     if ($result) { Write-Host $result }
     throw "QEMU proof failed or timed out for -smp $Cpus. Log: $log"
 }
@@ -99,9 +101,13 @@ function Invoke-QmpCommand {
         [hashtable]$Command
     )
     $Writer.WriteLine(($Command | ConvertTo-Json -Compress -Depth 10))
-    $line = $Reader.ReadLine()
-    if (-not $line) { throw 'QMP returned no response.' }
-    $response = $line | ConvertFrom-Json
+    do {
+        $read = $Reader.ReadLineAsync()
+        if (-not $read.Wait(2000)) { throw 'QMP response timed out.' }
+        $line = $read.Result
+        if (-not $line) { throw 'QMP returned no response.' }
+        $response = $line | ConvertFrom-Json
+    } while ($response.event)
     if ($response.error) { throw "QMP command failed: $($response.error.desc)" }
     return $response
 }
@@ -124,7 +130,8 @@ function Connect-Qmp {
     $reader = [System.IO.StreamReader]::new($stream)
     $writer = [System.IO.StreamWriter]::new($stream)
     $writer.AutoFlush = $true
-    if (-not $reader.ReadLine()) { throw 'QMP greeting missing.' }
+    $greeting = $reader.ReadLineAsync()
+    if (-not $greeting.Wait(2000) -or -not $greeting.Result) { throw 'QMP greeting missing.' }
     Invoke-QmpCommand $writer $reader @{ execute = 'qmp_capabilities' } | Out-Null
     return @{ Client = $client; Reader = $reader; Writer = $writer }
 }
@@ -144,7 +151,10 @@ try {
     Start-Sleep -Milliseconds 500
     Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofAfter } } | Out-Null
 } finally {
-    $qmp.Client.Close()
+    # The proof process is terminated below; avoid a blocking socket close on
+    # QEMU builds that keep the monitor stream open after screendump.
+    $qmp.Client.Client.LingerState = [System.Net.Sockets.LingerOption]::new($false, 0)
+    $qmp.Client.Client.Close()
 }
 if (-not (Test-Path $proofBefore) -or -not (Test-Path $proofAfter)) {
     throw 'QEMU proof did not capture both framebuffer snapshots.'
@@ -152,6 +162,8 @@ if (-not (Test-Path $proofBefore) -or -not (Test-Path $proofAfter)) {
 if ((Get-FileHash $proofBefore).Hash -eq (Get-FileHash $proofAfter).Hash) {
     throw 'QEMU keyboard injection did not change the rendered framebuffer.'
 }
-if (-not $process.HasExited) { $process.Kill() }
-$process.WaitForExit()
+if (-not $process.HasExited) {
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+}
+$process.Dispose()
 Write-Host $result

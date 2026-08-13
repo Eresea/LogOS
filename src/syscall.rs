@@ -46,7 +46,7 @@ pub fn authorize(context: ServiceContext, request: SyscallRequest) -> SyscallRes
     }
 
     let required = match request.kind {
-        SyscallKind::Yield | SyscallKind::Wait | SyscallKind::Exit => None,
+        SyscallKind::Yield | SyscallKind::Wait | SyscallKind::Exit | SyscallKind::Heartbeat => None,
         SyscallKind::IpcCreate | SyscallKind::IpcMap | SyscallKind::IpcSignal => {
             Some(CapabilityKind::IpcEndpoint)
         }

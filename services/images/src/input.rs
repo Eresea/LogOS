@@ -10,7 +10,13 @@ pub extern "C" fn _start() -> ! {
     let keyboard = unsafe { &*(INPUT_KEYBOARD_RING_BASE as *const KeyboardByteRing) };
     let output = unsafe { &*(SERVICE_IPC_BASE as *const InputIpc) };
     let mut decoder = logos_input::InputDecoder::new();
+    let mut heartbeat_ticks = 0u16;
     loop {
+        heartbeat_ticks = heartbeat_ticks.wrapping_add(1);
+        if heartbeat_ticks == 1024 {
+            heartbeat_ticks = 0;
+            common::heartbeat(logos_abi::ServiceId::Input);
+        }
         let Some(byte) = keyboard.pop() else {
             core::hint::spin_loop();
             continue;

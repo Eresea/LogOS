@@ -25,6 +25,7 @@ pub struct IpcEndpoint {
     producer: ServiceId,
     consumer: ServiceId,
     generation: u16,
+    service_epoch: u64,
     virtual_address: usize,
     frame: FrameAddress,
 }
@@ -43,7 +44,7 @@ impl IpcEndpoint {
     }
 
     pub const fn header(self) -> EndpointHeader {
-        EndpointHeader::new(self.generation, SERVICE_EPOCH)
+        EndpointHeader::new(self.generation, self.service_epoch)
     }
 
     pub const fn virtual_address(self) -> usize {
@@ -72,6 +73,15 @@ impl ServiceIpcGraph {
         pool: &mut FramePool,
         memory: &mut M,
     ) -> Result<Self, IpcError> {
+        Self::allocate_with_identity(pool, memory, 1, SERVICE_EPOCH)
+    }
+
+    pub fn allocate_with_identity<M: PageTableMemory>(
+        pool: &mut FramePool,
+        memory: &mut M,
+        generation: u16,
+        service_epoch: u64,
+    ) -> Result<Self, IpcError> {
         let mut graph = Self { endpoints: [None; MAX_ENDPOINTS], count: 0 };
         for (index, (producer, consumer)) in ENDPOINTS.into_iter().enumerate() {
             if index == MAX_ENDPOINTS {
@@ -83,18 +93,30 @@ impl ServiceIpcGraph {
             })?;
             if memory.clear(frame).is_err() {
                 let _ = pool.release(frame);
+                graph.reclaim(pool);
                 return Err(IpcError::Memory);
             }
             graph.endpoints[index] = Some(IpcEndpoint {
                 producer,
                 consumer,
-                generation: 1,
+                generation: generation.max(1),
+                service_epoch,
                 virtual_address: IPC_BASE + index * PAGE_SIZE,
                 frame,
             });
             graph.count += 1;
         }
         Ok(graph)
+    }
+
+    /// Disconnect and release every endpoint page owned by this graph.
+    pub fn reclaim(&mut self, pool: &mut FramePool) {
+        for (index, endpoint) in self.endpoints[..self.count].iter().flatten().enumerate() {
+            disconnect_ipc_page(*endpoint, index);
+            let _ = pool.release(endpoint.frame);
+        }
+        self.endpoints.fill(None);
+        self.count = 0;
     }
 
     pub const fn count(&self) -> usize {
@@ -128,6 +150,20 @@ impl ServiceIpcGraph {
             changed += 1;
         }
         changed
+    }
+}
+
+fn disconnect_ipc_page(endpoint: IpcEndpoint, index: usize) {
+    let frame = endpoint.frame.raw() as usize;
+    // All service tasks are quiesced before this is called, so replacing the
+    // page object cannot race with an old producer or consumer.
+    unsafe {
+        match index {
+            0 => (*(frame as *const logos_abi::InputIpc)).disconnect(),
+            1 => (*(frame as *const logos_abi::RenderIpc)).disconnect(),
+            2..=5 => (*(frame as *const logos_abi::StreamIpc)).disconnect(),
+            _ => {}
+        }
     }
 }
 

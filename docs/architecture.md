@@ -44,7 +44,7 @@ fixed, capability-scoped boundaries.
 | Retained service images | `service_loader::ServiceImageBundle` | five validated ELF records with page-aligned retained addresses, loaded before `ExitBootServices`, and no filesystem lifetime after UEFI exit |
 | Service ELF packaging | `services/images` + `scripts/build-services.ps1` | five independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
 | Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all five staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
-| Service supervisor | `supervisor::ServiceSupervisor` | host-tested five-service lifecycle model with heartbeat timeouts, endpoint epochs, restart limits, and recovery transition; live orchestration remains deferred |
+| Service supervisor | `supervisor::LiveSupervisor` + `service_runtime` | live heartbeat polling, graph-wide quiesce, generation-bumped IPC rebuild, bounded process/page-table/frame reclamation, and restart limits; the host supervisor remains the reference model |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
 | Terminal proof graph | `terminal_stack::TerminalStack` | host reference model for the deterministic Input → Terminal → Session → Terminal → Display path and generation-safe restart |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
@@ -53,8 +53,8 @@ fixed, capability-scoped boundaries.
 
 The process-to-scheduler handoff is now explicit: a running process with a bound root produces one
 validated `UserLaunch`, and the scheduler publishes its entry, stack, root, and process generation
-before marking the task runnable. Hardware page-table construction and ring-3 entry are part of the
-live service path; safe teardown for replacement remains a follow-on boundary.
+before marking the task runnable. Hardware page-table construction, ring-3 entry, and safe live
+replacement are part of the service path.
 
 AP startup is deliberately narrow: xAPIC IDs, low-memory trampoline, current CR3, fixed stacks, and
 sequential INIT/SIPI/SIPI. x2APIC IDs, malformed topology, more than eight CPUs, allocators, APIC
@@ -65,8 +65,7 @@ not inspect, schedule, or orchestrate Runtime state. Runtime operations use the 
 wake primitives but retain their own deadlines, terminal states, and slot generations. The five service
 ELFs are loaded before `ExitBootServices`, receive isolated roots and explicit mappings, and enter
 through the normal scheduler path. `TerminalStack` remains a host reference model, while QEMU exercises
-the live service images. Service restart orchestration and safe page-table teardown remain follow-on
-work. The terminal/display host integration still runs before AP startup, so the large reference model
-is not placed on a 16 KiB task stack.
+the live service images and supervisor-driven restart. The fixed scheduler task stack is 256 KiB so
+bounded ELF teardown/rebuild cannot overwrite adjacent task metadata.
 
 `v1_docs/` is historical and is not an active architecture contract.

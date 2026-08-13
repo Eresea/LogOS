@@ -3,6 +3,7 @@
 use crate::process::{
     Capabilities, ProcessError, ProcessHandle, ProcessKind, ProcessState, ProcessTable,
 };
+use logos_abi::ServiceId as AbiServiceId;
 
 pub const MAX_SERVICES: usize = 5;
 pub const HEARTBEAT_INTERVAL: u64 = 100;
@@ -110,10 +111,6 @@ impl ServiceSupervisor {
             services: [ServiceRecord::EMPTY; MAX_SERVICES],
             recovery: false,
         }
-    }
-
-    pub const fn recovery(&self) -> bool {
-        self.recovery
     }
 
     pub fn start(
@@ -255,6 +252,10 @@ impl ServiceSupervisor {
         &self.processes
     }
 
+    pub fn recovery(&self) -> bool {
+        self.recovery
+    }
+
     fn reclaim_for_restart(&mut self, handle: ProcessHandle) -> Result<(), SupervisorError> {
         match self.processes.state(handle) {
             Some(ProcessState::Running) => {
@@ -274,6 +275,144 @@ impl ServiceSupervisor {
 impl Default for ServiceSupervisor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+struct LiveServiceRecord {
+    state: ServiceState,
+    process: Option<ProcessHandle>,
+    identity: EndpointIdentity,
+    last_heartbeat: u64,
+    missed_heartbeats: u8,
+    restarts: u8,
+}
+
+#[allow(dead_code)]
+impl LiveServiceRecord {
+    const EMPTY: Self = Self {
+        state: ServiceState::Stopped,
+        process: None,
+        identity: EndpointIdentity { generation: 1, service_epoch: 1 },
+        last_heartbeat: 0,
+        missed_heartbeats: 0,
+        restarts: 0,
+    };
+}
+
+/// Runtime supervisor policy for the real service graph.
+///
+/// Resource ownership remains in `ServiceRuntime`; this type only tracks
+/// bounded health state and decides when the runtime must rebuild the graph.
+#[allow(dead_code)]
+pub(crate) struct LiveSupervisor {
+    records: [LiveServiceRecord; MAX_SERVICES],
+    recovery: bool,
+}
+
+#[allow(dead_code)]
+impl LiveSupervisor {
+    pub const fn new() -> Self {
+        Self { records: [LiveServiceRecord::EMPTY; MAX_SERVICES], recovery: false }
+    }
+
+    pub fn register(
+        &mut self,
+        service: AbiServiceId,
+        process: ProcessHandle,
+        identity: EndpointIdentity,
+        now: u64,
+    ) {
+        let record = &mut self.records[abi_service_index(service)];
+        record.state = ServiceState::Running;
+        record.process = Some(process);
+        record.identity = identity;
+        record.last_heartbeat = now;
+        record.missed_heartbeats = 0;
+    }
+
+    pub fn poll(
+        &mut self,
+        now: u64,
+        heartbeats: [u64; MAX_SERVICES],
+        process_states: [Option<ProcessState>; MAX_SERVICES],
+    ) -> Option<AbiServiceId> {
+        for index in 0..MAX_SERVICES {
+            let record = &mut self.records[index];
+            if record.state != ServiceState::Running {
+                continue;
+            }
+            if process_states[index].is_some_and(|state| !matches!(state, ProcessState::Running)) {
+                record.state = ServiceState::Unhealthy;
+                return Some(abi_service_at(index));
+            }
+            if heartbeats[index] > record.last_heartbeat {
+                record.last_heartbeat = heartbeats[index];
+                record.missed_heartbeats = 0;
+            }
+            if now.saturating_sub(record.last_heartbeat) < HEARTBEAT_INTERVAL {
+                continue;
+            }
+            let missed = (now.saturating_sub(record.last_heartbeat) / HEARTBEAT_INTERVAL)
+                .min(u64::from(u8::MAX)) as u8;
+            record.missed_heartbeats = record.missed_heartbeats.saturating_add(missed.max(1));
+            record.last_heartbeat = now;
+            if record.missed_heartbeats >= MISSED_HEARTBEATS {
+                record.state = ServiceState::Unhealthy;
+                return Some(abi_service_at(index));
+            }
+        }
+        None
+    }
+
+    pub fn prepare_restart(&mut self, identity: EndpointIdentity) -> bool {
+        if self.recovery || self.records.iter().any(|record| record.restarts >= MAX_RESTARTS) {
+            self.recovery = true;
+            return false;
+        }
+        for record in &mut self.records {
+            record.state = ServiceState::Stopped;
+            record.process = None;
+            record.identity = identity;
+            record.last_heartbeat = 0;
+            record.missed_heartbeats = 0;
+            record.restarts += 1;
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn state(&self, service: AbiServiceId) -> ServiceState {
+        self.records[abi_service_index(service)].state
+    }
+}
+
+impl Default for LiveSupervisor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(dead_code)]
+const fn abi_service_index(service: AbiServiceId) -> usize {
+    match service {
+        AbiServiceId::Input => 0,
+        AbiServiceId::Display => 1,
+        AbiServiceId::Terminal => 2,
+        AbiServiceId::Session => 3,
+        AbiServiceId::Commands => 4,
+    }
+}
+
+#[allow(dead_code)]
+const fn abi_service_at(index: usize) -> AbiServiceId {
+    match index {
+        0 => AbiServiceId::Input,
+        1 => AbiServiceId::Display,
+        2 => AbiServiceId::Terminal,
+        3 => AbiServiceId::Session,
+        _ => AbiServiceId::Commands,
     }
 }
 
@@ -365,5 +504,48 @@ mod tests {
             supervisor.start(ServiceId::Display, &[0; 64], 0),
             Err(SupervisorError::Process(ProcessError::InvalidImage))
         );
+    }
+
+    #[test]
+    fn live_supervisor_quiesces_on_fault_and_rebinds_after_restart() {
+        let mut supervisor = LiveSupervisor::new();
+        let identity = EndpointIdentity { generation: 7, service_epoch: 9 };
+        for index in 0..MAX_SERVICES {
+            supervisor.register(
+                abi_service_at(index),
+                ProcessHandle::from_raw(((index as u64 + 1) << 8) | index as u64),
+                identity,
+                1,
+            );
+        }
+        assert_eq!(
+            supervisor.poll(
+                HEARTBEAT_INTERVAL * u64::from(MISSED_HEARTBEATS) + 1,
+                [1; MAX_SERVICES],
+                [Some(ProcessState::Running); MAX_SERVICES]
+            ),
+            Some(AbiServiceId::Input)
+        );
+        assert!(supervisor.prepare_restart(EndpointIdentity { generation: 8, service_epoch: 10 }));
+        assert_eq!(supervisor.state(AbiServiceId::Terminal), ServiceState::Stopped);
+        supervisor.register(
+            AbiServiceId::Terminal,
+            ProcessHandle::from_raw(0x900),
+            EndpointIdentity { generation: 8, service_epoch: 10 },
+            20,
+        );
+        assert_eq!(supervisor.state(AbiServiceId::Terminal), ServiceState::Running);
+    }
+
+    #[test]
+    fn live_supervisor_enters_recovery_after_bounded_restarts() {
+        let mut supervisor = LiveSupervisor::new();
+        for _ in 0..MAX_RESTARTS {
+            assert!(
+                supervisor.prepare_restart(EndpointIdentity { generation: 2, service_epoch: 2 })
+            );
+        }
+        assert!(!supervisor.prepare_restart(EndpointIdentity { generation: 3, service_epoch: 3 }));
+        assert!(supervisor.recovery);
     }
 }

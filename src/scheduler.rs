@@ -7,6 +7,9 @@ use crate::process::{ProcessHandle, UserLaunch};
 
 pub const MAX_TASKS: usize = 16;
 pub const MAX_CPUS: usize = 8;
+#[cfg(target_os = "uefi")]
+pub const TASK_STACK_SIZE: usize = 256 * 1024;
+#[cfg(not(target_os = "uefi"))]
 pub const TASK_STACK_SIZE: usize = 16 * 1024;
 pub const SCHEDULER_STACK_SIZE: usize = 16 * 1024;
 pub const IDLE_STACK_SIZE: usize = 4 * 1024;
@@ -17,6 +20,7 @@ const RUNNABLE: u64 = 2;
 const RUNNING: u64 = 3;
 const BLOCKED: u64 = 4;
 const COMPLETED: u64 = 5;
+const STOPPING: u64 = 6;
 const STATE_MASK: u64 = 0x0f;
 const WAKE_PENDING: u64 = 1 << 4;
 const GENERATION_SHIFT: u32 = 8;
@@ -32,6 +36,7 @@ pub enum TaskState {
     Runnable,
     Running,
     Blocked,
+    Stopping,
     Completed,
 }
 
@@ -89,6 +94,8 @@ struct TaskSlot {
     process: AtomicU64,
     user_entry: AtomicUsize,
     user_stack_top: AtomicUsize,
+    user_task: AtomicBool,
+    address_space_published: AtomicBool,
 }
 
 impl TaskSlot {
@@ -104,6 +111,8 @@ impl TaskSlot {
             process: AtomicU64::new(0),
             user_entry: AtomicUsize::new(0),
             user_stack_top: AtomicUsize::new(0),
+            user_task: AtomicBool::new(false),
+            address_space_published: AtomicBool::new(false),
         }
     }
 }
@@ -249,11 +258,14 @@ impl Scheduler {
             slot.saved_rsp.store(0, Ordering::Release);
             slot.context_saved.store(false, Ordering::Release);
             slot.address_space.store(address_space, Ordering::Release);
+            slot.address_space_published.store(address_space != 0, Ordering::Release);
             if let Some(launch) = user_launch {
+                slot.user_task.store(true, Ordering::Release);
                 slot.process.store(launch.process().raw(), Ordering::Release);
                 slot.user_entry.store(launch.entry(), Ordering::Release);
                 slot.user_stack_top.store(launch.stack_top(), Ordering::Release);
             } else {
+                slot.user_task.store(false, Ordering::Release);
                 slot.process.store(0, Ordering::Release);
                 slot.user_entry.store(0, Ordering::Release);
                 slot.user_stack_top.store(0, Ordering::Release);
@@ -324,6 +336,7 @@ impl Scheduler {
             RUNNABLE => Some(TaskState::Runnable),
             RUNNING => Some(TaskState::Running),
             BLOCKED => Some(TaskState::Blocked),
+            STOPPING => Some(TaskState::Stopping),
             COMPLETED => Some(TaskState::Completed),
             _ => None,
         }
@@ -350,6 +363,31 @@ impl Scheduler {
             if next == old {
                 return true;
             }
+            if slot.state.compare_exchange(old, next, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                return true;
+            }
+        }
+    }
+
+    /// Request bounded termination of a task before reclaiming its address
+    /// space. Running tasks finish on their next scheduler boundary; tasks
+    /// that cannot be running are completed immediately.
+    pub fn request_stop(&self, handle: TaskHandle) -> bool {
+        let Some(slot) = self.tasks.get(handle.slot as usize) else {
+            return false;
+        };
+        loop {
+            let old = slot.state.load(Ordering::Acquire);
+            if generation(old) != handle.generation {
+                return false;
+            }
+            let next = match state(old) {
+                RUNNING => pack(handle.generation, STOPPING),
+                RUNNABLE | BLOCKED => pack(handle.generation, COMPLETED),
+                STOPPING | COMPLETED => return true,
+                _ => return false,
+            };
+            slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
             if slot.state.compare_exchange(old, next, Ordering::AcqRel, Ordering::Acquire).is_ok() {
                 return true;
             }
@@ -393,7 +431,7 @@ impl Scheduler {
             return false;
         };
         let word = slot.state.load(Ordering::Acquire);
-        if generation(word) != handle.generation || state(word) != RUNNING {
+        if generation(word) != handle.generation || !matches!(state(word), RUNNING | STOPPING) {
             return false;
         }
         slot.saved_rsp.store(saved_rsp, Ordering::Release);
@@ -417,7 +455,7 @@ impl Scheduler {
         }
         loop {
             let old = slot.state.load(Ordering::Acquire);
-            if generation(old) != handle.generation || state(old) != RUNNING {
+            if generation(old) != handle.generation || !matches!(state(old), RUNNING | STOPPING) {
                 return false;
             }
             let next_state = match outcome {
@@ -428,6 +466,7 @@ impl Scheduler {
                 FinishState::TimedBlocked => RUNNABLE,
                 FinishState::Completed => COMPLETED,
             };
+            let next_state = if state(old) == STOPPING { COMPLETED } else { next_state };
             if next_state != BLOCKED || matches!(outcome, FinishState::Blocked) {
                 slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
             }
@@ -468,6 +507,8 @@ impl Scheduler {
         slot.process.store(0, Ordering::Release);
         slot.user_entry.store(0, Ordering::Release);
         slot.user_stack_top.store(0, Ordering::Release);
+        slot.user_task.store(false, Ordering::Release);
+        slot.address_space_published.store(false, Ordering::Release);
         slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
         slot.saved_rsp.store(0, Ordering::Release);
         slot.context_saved.store(false, Ordering::Release);
@@ -549,7 +590,28 @@ impl Scheduler {
     pub fn address_space(&self, handle: TaskHandle) -> Option<usize> {
         let slot = self.tasks.get(handle.slot as usize)?;
         let word = slot.state.load(Ordering::Acquire);
-        (generation(word) == handle.generation).then(|| slot.address_space.load(Ordering::Acquire))
+        if generation(word) != handle.generation {
+            return None;
+        }
+        slot.address_space_published
+            .load(Ordering::Acquire)
+            .then(|| slot.address_space.load(Ordering::Acquire))
+            .or(Some(0))
+    }
+
+    #[cfg_attr(not(target_os = "uefi"), allow(dead_code))]
+    pub(crate) fn normalize_kernel_task(&self, handle: TaskHandle) {
+        let Some(slot) = self.tasks.get(handle.slot as usize) else {
+            return;
+        };
+        let word = slot.state.load(Ordering::Acquire);
+        if generation(word) == handle.generation
+            && !slot.address_space_published.load(Ordering::Acquire)
+        {
+            slot.address_space.store(0, Ordering::Release);
+            slot.user_entry.store(0, Ordering::Release);
+            slot.user_stack_top.store(0, Ordering::Release);
+        }
     }
 
     pub fn user_launch(&self, handle: TaskHandle) -> Option<ScheduledUserLaunch> {
@@ -732,6 +794,28 @@ mod tests {
         assert_ne!(first.generation(), second.generation());
         assert!(!scheduler.wake(first));
         assert_eq!(scheduler.state(first), None);
+    }
+
+    #[test]
+    fn stop_reclaims_runnable_task_without_running_old_context() {
+        let scheduler = Scheduler::new();
+        let handle = scheduler.spawn(empty).unwrap();
+        assert!(scheduler.request_stop(handle));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Completed));
+        assert!(scheduler.reclaim_completed(handle));
+        assert_eq!(scheduler.state(handle), None);
+    }
+
+    #[test]
+    fn stop_waits_for_running_task_to_publish_context() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert!(scheduler.request_stop(handle));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Stopping));
+        assert!(scheduler.save_context(handle, 0x4400));
+        assert!(scheduler.finish(handle, FinishState::Runnable));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Completed));
+        assert!(scheduler.reclaim_completed(handle));
     }
 
     #[test]

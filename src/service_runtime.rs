@@ -1,6 +1,9 @@
 //! Post-UEFI service image and address-space ownership.
 
-use core::mem::MaybeUninit;
+use core::{
+    mem::MaybeUninit,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use logos_abi::{CapabilityKind, ServiceId};
 
@@ -16,6 +19,7 @@ use crate::{
     service_ipc::{IpcError, ServiceIpcGraph},
     service_loader::ServiceImageBundle,
     service_startup::ServiceStartup,
+    supervisor::{EndpointIdentity, LiveSupervisor},
 };
 
 const SERVICE_COUNT: usize = SERVICE_IMAGES.len();
@@ -42,6 +46,9 @@ pub enum ServiceRuntimeError {
     TaskCapacity,
     TaskAddressSpace,
     TaskLaunch,
+    TaskStop,
+    RestartLimit,
+    StaleGeneration,
 }
 
 pub struct ServiceRuntime {
@@ -56,6 +63,12 @@ pub struct ServiceRuntime {
     framebuffer_config_frame: Option<FrameAddress>,
     keyboard_frame: Option<FrameAddress>,
     tasks: [Option<crate::TaskHandle>; SERVICE_COUNT],
+    heartbeat_ticks: [AtomicU64; SERVICE_COUNT],
+    supervisor: LiveSupervisor,
+    ipc_generation: u16,
+    service_epoch: u64,
+    suppressed_heartbeats: [AtomicBool; SERVICE_COUNT],
+    frame_pool_ready: bool,
 }
 
 impl ServiceRuntime {
@@ -78,16 +91,26 @@ impl ServiceRuntime {
             framebuffer_config_frame: None,
             keyboard_frame: None,
             tasks: [None; SERVICE_COUNT],
+            heartbeat_ticks: [const { AtomicU64::new(0) }; SERVICE_COUNT],
+            supervisor: LiveSupervisor::new(),
+            ipc_generation: 1,
+            service_epoch: 1,
+            suppressed_heartbeats: [const { AtomicBool::new(false) }; SERVICE_COUNT],
+            frame_pool_ready: false,
         }
     }
 
     pub fn start(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
         let resources = crate::arch::boot_resources().ok_or(ServiceRuntimeError::Resources)?;
-        self.frame_pool
-            .initialize(resources.memory_map())
-            .map_err(|_| ServiceRuntimeError::Resources)?;
-        reserve_active_page_tables(&mut self.frame_pool, crate::arch::current_cr3());
-        self.frame_pool.reserve(FrameAddress::from_raw(0x8000));
+        if !self.frame_pool_ready {
+            self.frame_pool
+                .initialize(resources.memory_map())
+                .map_err(|_| ServiceRuntimeError::Resources)?;
+            reserve_active_page_tables(&mut self.frame_pool, crate::arch::current_cr3());
+            self.frame_pool.reserve(FrameAddress::from_raw(0x8000));
+            crate::arch::reserve_kernel_frames(&mut self.frame_pool);
+            self.frame_pool_ready = true;
+        }
 
         for (index, spec) in SERVICE_IMAGES.iter().enumerate() {
             let service = spec.service();
@@ -144,8 +167,13 @@ impl ServiceRuntime {
             self.startup.mark_process(service).map_err(ServiceRuntimeError::Startup)?;
         }
         let mut memory = IdentityPageTableMemory;
-        let graph = ServiceIpcGraph::allocate(&mut self.frame_pool, &mut memory)
-            .map_err(ServiceRuntimeError::Ipc)?;
+        let graph = ServiceIpcGraph::allocate_with_identity(
+            &mut self.frame_pool,
+            &mut memory,
+            self.ipc_generation,
+            self.service_epoch,
+        )
+        .map_err(ServiceRuntimeError::Ipc)?;
         for endpoint_index in 0..graph.count() {
             let endpoint = graph
                 .endpoint(endpoint_index)
@@ -346,10 +374,169 @@ impl ServiceRuntime {
                 },
             )?;
             self.tasks[service_index(service)] = Some(task);
+            self.heartbeat_ticks[service_index(service)]
+                .store(crate::current_ticks(), Ordering::Release);
+            let identity = EndpointIdentity {
+                generation: self.ipc_generation,
+                service_epoch: self.service_epoch,
+            };
+            self.supervisor.register(service, process, identity, crate::current_ticks());
             self.startup.start(service).map_err(ServiceRuntimeError::Startup)?;
         }
         Ok(())
     }
+
+    pub(crate) fn record_heartbeat(
+        &self,
+        service: ServiceId,
+        process: ProcessHandle,
+        now: u64,
+    ) -> bool {
+        let index = service_index(service);
+        if self.launch(service).is_none_or(|(current, _)| current != process) {
+            return false;
+        }
+        if !self.suppressed_heartbeats[index].load(Ordering::Acquire) {
+            self.heartbeat_ticks[index].store(now, Ordering::Release);
+        }
+        true
+    }
+
+    pub(crate) fn suppress_heartbeat(&self, service: ServiceId) {
+        self.suppressed_heartbeats[service_index(service)].store(true, Ordering::Release);
+    }
+
+    pub(crate) fn heartbeat_tick(&self, service: ServiceId) -> u64 {
+        self.heartbeat_ticks[service_index(service)].load(Ordering::Acquire)
+    }
+
+    pub(crate) fn fault_process(
+        &mut self,
+        process: ProcessHandle,
+        vector: u8,
+    ) -> Result<(), crate::process::ProcessError> {
+        self.processes.fault(process, vector)
+    }
+
+    /// Stop every service task at a scheduler boundary before reclaiming any
+    /// process frames or page-table roots.
+    pub fn restart(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
+        crate::arch_proof_line(b"LogOS vNext: service restart begin");
+        self.ipc_generation = self.ipc_generation.wrapping_add(1).max(1);
+        self.service_epoch = self.service_epoch.wrapping_add(1).max(1);
+        let identity =
+            EndpointIdentity { generation: self.ipc_generation, service_epoch: self.service_epoch };
+        if !self.supervisor.prepare_restart(identity) {
+            return Err(ServiceRuntimeError::RestartLimit);
+        }
+        self.stop_tasks()?;
+        crate::arch::prepare_task_address_space(0);
+        let result = crate::arch::restart_critical_section(|| {
+            crate::arch_proof_line(b"LogOS vNext: service tasks quiesced");
+            self.reclaim_resources()?;
+            crate::arch_proof_line(b"LogOS vNext: service resources reclaimed");
+            self.start(bundle)?;
+            crate::arch_proof_line(b"LogOS vNext: service graph rebuilt");
+            for suppressed in &self.suppressed_heartbeats {
+                suppressed.store(false, Ordering::Release);
+            }
+            let old_identity = EndpointIdentity {
+                generation: self.ipc_generation.wrapping_sub(1).max(1),
+                service_epoch: self.service_epoch.wrapping_sub(1).max(1),
+            };
+            let stale_rejected = self.ipc.as_ref().is_some_and(|graph| {
+                (0..graph.count()).all(|index| {
+                    graph.endpoint(index).is_some_and(|endpoint| {
+                        !old_identity_matches(old_identity, endpoint.header())
+                    })
+                })
+            });
+            if !stale_rejected {
+                return Err(ServiceRuntimeError::StaleGeneration);
+            }
+            self.start_tasks()
+        });
+        if result.is_ok() {
+            crate::arch_proof_line(b"LogOS vNext: service restart complete");
+        }
+        result
+    }
+
+    pub fn supervise(
+        &mut self,
+        bundle: &ServiceImageBundle,
+        now: u64,
+    ) -> Result<bool, ServiceRuntimeError> {
+        let mut heartbeats = [0; SERVICE_COUNT];
+        let mut process_states = [None; SERVICE_COUNT];
+        for spec in SERVICE_IMAGES {
+            let index = service_index(spec.service());
+            heartbeats[index] = self.heartbeat_tick(spec.service());
+            process_states[index] =
+                self.launch(spec.service()).and_then(|(process, _)| self.processes.state(process));
+        }
+        if self.supervisor.poll(now, heartbeats, process_states).is_some() {
+            self.restart(bundle)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn stop_tasks(&mut self) -> Result<(), ServiceRuntimeError> {
+        for task in self.tasks.iter().flatten().copied() {
+            if !crate::SCHEDULER.request_stop(task) {
+                return Err(ServiceRuntimeError::TaskStop);
+            }
+        }
+        for task in self.tasks.iter().flatten().copied() {
+            let mut waited = 0;
+            while crate::SCHEDULER.state(task) != Some(crate::TaskState::Completed) {
+                if waited == 1024 {
+                    return Err(ServiceRuntimeError::TaskStop);
+                }
+                crate::sleep_current_for(1);
+                waited += 1;
+            }
+            if !crate::SCHEDULER.reclaim_completed(task) {
+                return Err(ServiceRuntimeError::TaskStop);
+            }
+        }
+        self.tasks.fill(None);
+        Ok(())
+    }
+
+    fn reclaim_resources(&mut self) -> Result<(), ServiceRuntimeError> {
+        if let Some(mut graph) = self.ipc.take() {
+            graph.reclaim(&mut self.frame_pool);
+        }
+        if let Some(frame) = self.keyboard_frame.take() {
+            let _ = self.frame_pool.release(frame);
+        }
+        if let Some(frame) = self.framebuffer_config_frame.take() {
+            let _ = self.frame_pool.release(frame);
+        }
+        for index in 0..SERVICE_COUNT {
+            if let Some((process, _)) = self.launches[index].take() {
+                if self.processes.state(process) == Some(crate::process::ProcessState::Running) {
+                    self.processes.fault(process, 0xff).map_err(ServiceRuntimeError::Process)?;
+                }
+                self.processes.reclaim(process).map_err(ServiceRuntimeError::Process)?;
+            }
+            if self.table_ready[index] {
+                let mut memory = IdentityPageTableMemory;
+                unsafe { self.tables[index].assume_init_mut() }
+                    .reclaim(&mut self.frame_pool, &mut memory);
+                self.table_ready[index] = false;
+            }
+            self.images[index].reclaim(&mut self.frame_pool);
+        }
+        self.startup = ServiceStartup::new();
+        Ok(())
+    }
+}
+
+fn old_identity_matches(identity: EndpointIdentity, header: logos_abi::EndpointHeader) -> bool {
+    logos_abi::MessageIdentity::new(identity.generation, identity.service_epoch).accepts(header)
 }
 
 impl Default for ServiceRuntime {
