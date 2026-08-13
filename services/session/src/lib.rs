@@ -1,42 +1,27 @@
 #![no_std]
 
-//! Bounded interactive session and POSIX-lite shell policy.
+//! Bounded command-line editing for the Session service.
+//!
+//! Commands are executed by the Commands service. Session only edits a line,
+//! forwards completed input, and prepends the prompt to command output.
 
 #[cfg(test)]
 extern crate std;
 
-use logos_abi::{
-    MAX_CHILD_PROCESSES, MAX_HISTORY_BYTES, MAX_HISTORY_ENTRIES, MAX_PIPELINE_STAGES,
-    MAX_VOLATILE_FILE_BYTES, MAX_VOLATILE_FILES,
-};
+use logos_abi::{MAX_HISTORY_BYTES, MAX_HISTORY_ENTRIES};
 
 pub const MAX_LINE_BYTES: usize = 256;
-pub const MAX_TOKENS: usize = 32;
-pub const MAX_TOKEN_BYTES: usize = 64;
-pub const MAX_ENV_ENTRIES: usize = 16;
-pub const MAX_ENV_BYTES: usize = 64;
-/// Shell output is deliberately chunked below the IPC maximum so the
-/// session's worst-case command path fits the existing fixed task stack.
 pub const MAX_OUTPUT_BYTES: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShellOutput {
     pub bytes: [u8; MAX_OUTPUT_BYTES],
     pub len: usize,
-    pub status: u8,
-    pub exit_requested: bool,
-    pub clear_screen: bool,
 }
 
 impl ShellOutput {
     pub const fn new() -> Self {
-        Self {
-            bytes: [0; MAX_OUTPUT_BYTES],
-            len: 0,
-            status: 0,
-            exit_requested: false,
-            clear_screen: false,
-        }
+        Self { bytes: [0; MAX_OUTPUT_BYTES], len: 0 }
     }
 
     pub fn push(&mut self, byte: u8) {
@@ -50,12 +35,6 @@ impl ShellOutput {
         let count = bytes.len().min(self.bytes.len() - self.len);
         self.bytes[self.len..self.len + count].copy_from_slice(&bytes[..count]);
         self.len += count;
-    }
-
-    pub fn line(&mut self, bytes: &[u8]) {
-        self.extend(bytes);
-        self.push(b'\r');
-        self.push(b'\n');
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -79,70 +58,7 @@ impl HistoryEntry {
     const EMPTY: Self = Self { bytes: [0; MAX_HISTORY_BYTES], len: 0 };
 }
 
-#[derive(Clone, Copy)]
-struct EnvEntry {
-    name: [u8; MAX_ENV_BYTES],
-    name_len: usize,
-    value: [u8; MAX_ENV_BYTES],
-    value_len: usize,
-    valid: bool,
-}
-
-impl EnvEntry {
-    const EMPTY: Self = Self {
-        name: [0; MAX_ENV_BYTES],
-        name_len: 0,
-        value: [0; MAX_ENV_BYTES],
-        value_len: 0,
-        valid: false,
-    };
-}
-
-#[derive(Clone, Copy)]
-struct VolatileFile<const BYTES: usize> {
-    name: [u8; MAX_ENV_BYTES],
-    name_len: usize,
-    bytes: [u8; BYTES],
-    len: usize,
-    valid: bool,
-}
-
-impl<const BYTES: usize> VolatileFile<BYTES> {
-    const EMPTY: Self =
-        Self { name: [0; MAX_ENV_BYTES], name_len: 0, bytes: [0; BYTES], len: 0, valid: false };
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Token {
-    bytes: [u8; MAX_TOKEN_BYTES],
-    len: usize,
-}
-
-impl Token {
-    const EMPTY: Self = Self { bytes: [0; MAX_TOKEN_BYTES], len: 0 };
-
-    fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChildState {
-    Vacant,
-    Running,
-}
-
-#[derive(Clone, Copy)]
-struct Child {
-    state: ChildState,
-    pid: u16,
-}
-
-impl Child {
-    const EMPTY: Self = Self { state: ChildState::Vacant, pid: 0 };
-}
-
-pub struct SessionState<const FILES: usize, const FILE_BYTES: usize> {
+pub struct LineEditor {
     line: [u8; MAX_LINE_BYTES],
     line_len: usize,
     cursor: usize,
@@ -150,38 +66,22 @@ pub struct SessionState<const FILES: usize, const FILE_BYTES: usize> {
     history_len: usize,
     history_cursor: usize,
     escape_state: u8,
-    env: [EnvEntry; MAX_ENV_ENTRIES],
-    files: [VolatileFile<FILE_BYTES>; FILES],
-    total_file_bytes: usize,
-    children: [Child; MAX_CHILD_PROCESSES],
-    next_pid: u16,
 }
 
-pub type Session = SessionState<MAX_VOLATILE_FILES, MAX_VOLATILE_FILE_BYTES>;
+pub type Session = LineEditor;
 
-const SERVICE_FILE_COUNT: usize = 2;
-const SERVICE_FILE_BYTES: usize = 1024;
-
-/// Entry-ready Session service façade over one bounded stream operation.
+/// Entry-ready Session facade over one bounded line-editing operation.
 pub struct SessionService {
-    session: SessionState<SERVICE_FILE_COUNT, SERVICE_FILE_BYTES>,
+    session: LineEditor,
 }
 
 impl SessionService {
     pub const fn new() -> Self {
-        Self { session: SessionState::new() }
+        Self { session: LineEditor::new() }
     }
 
     pub fn prompt(&self, output: &mut ShellOutput) {
         self.session.prompt(output);
-    }
-
-    pub fn input(&mut self, message: &logos_abi::StreamMessage) -> Option<ShellOutput> {
-        self.session.input(message.as_bytes()?)
-    }
-
-    pub fn input_bytes(&mut self, bytes: &[u8]) -> Option<ShellOutput> {
-        self.session.input(bytes)
     }
 
     pub fn input_for_command(
@@ -198,7 +98,7 @@ impl SessionService {
         self.prompt(output);
     }
 
-    pub const fn session(&self) -> &SessionState<SERVICE_FILE_COUNT, SERVICE_FILE_BYTES> {
+    pub const fn session(&self) -> &LineEditor {
         &self.session
     }
 }
@@ -211,7 +111,7 @@ impl Default for SessionService {
 
 const _: () = assert!(core::mem::size_of::<SessionService>() <= logos_abi::MAX_SERVICE_IMAGE_BYTES);
 
-impl<const FILES: usize, const FILE_BYTES: usize> SessionState<FILES, FILE_BYTES> {
+impl LineEditor {
     pub const fn new() -> Self {
         Self {
             line: [0; MAX_LINE_BYTES],
@@ -221,39 +121,15 @@ impl<const FILES: usize, const FILE_BYTES: usize> SessionState<FILES, FILE_BYTES
             history_len: 0,
             history_cursor: 0,
             escape_state: 0,
-            env: [EnvEntry::EMPTY; MAX_ENV_ENTRIES],
-            files: [VolatileFile::EMPTY; FILES],
-            total_file_bytes: 0,
-            children: [Child::EMPTY; MAX_CHILD_PROCESSES],
-            next_pid: 1,
         }
     }
 
     pub const fn line_len(&self) -> usize {
         self.line_len
     }
-    pub const fn child_capacity(&self) -> usize {
-        MAX_CHILD_PROCESSES
-    }
-    pub const fn volatile_bytes(&self) -> usize {
-        self.total_file_bytes
-    }
 
     pub fn prompt(&self, output: &mut ShellOutput) {
         output.extend(b"logos> ");
-    }
-
-    /// Consume terminal input.  Printable bytes edit the line; Enter runs it.
-    pub fn input(&mut self, bytes: &[u8]) -> Option<ShellOutput> {
-        let mut output = ShellOutput::new();
-        let mut command = [0; MAX_LINE_BYTES];
-        let command_len = self.input_for_command(bytes, &mut command, &mut output);
-        if let Some(length) = command_len {
-            output = self.execute(&command[..length]);
-            self.prompt(&mut output);
-            return Some(output);
-        }
-        (output.len > 0).then_some(output)
     }
 
     pub fn input_for_command(
@@ -316,204 +192,6 @@ impl<const FILES: usize, const FILE_BYTES: usize> SessionState<FILES, FILE_BYTES
         None
     }
 
-    pub fn execute(&mut self, line: &[u8]) -> ShellOutput {
-        let mut output = ShellOutput::new();
-        let mut tokens = [Token::EMPTY; MAX_TOKENS];
-        let token_count = tokenize(line, &mut tokens);
-        if token_count == 0 {
-            return output;
-        }
-        let mut stages = [0usize; MAX_PIPELINE_STAGES];
-        let mut stage_count = 1;
-        for (index, token) in tokens.iter().take(token_count).enumerate() {
-            if token.as_bytes() == b"|" {
-                if stage_count == MAX_PIPELINE_STAGES {
-                    output.status = 2;
-                    output.line(b"pipeline too long");
-                    return output;
-                }
-                stages[stage_count] = index + 1;
-                stage_count += 1;
-            }
-        }
-        let mut input = [0u8; MAX_OUTPUT_BYTES];
-        let mut input_len = 0;
-        for stage_index in 0..stage_count {
-            let start = stages[stage_index];
-            let stage_end = if stage_index + 1 < stage_count {
-                stages[stage_index + 1] - 1
-            } else {
-                token_count
-            };
-            let mut stage_output = ShellOutput::new();
-            self.run_command(&tokens[start..stage_end], &input[..input_len], &mut stage_output);
-            input[..stage_output.len].copy_from_slice(stage_output.as_bytes());
-            input_len = stage_output.len;
-            output.status = stage_output.status;
-            output.exit_requested |= stage_output.exit_requested;
-            output.clear_screen |= stage_output.clear_screen;
-        }
-        output.extend(&input[..input_len]);
-        output
-    }
-
-    fn run_command(&mut self, tokens: &[Token], input: &[u8], output: &mut ShellOutput) {
-        if tokens.is_empty() {
-            return;
-        }
-        let mut command_end = tokens.len();
-        let mut redirect: Option<(&[u8], bool)> = None;
-        for index in 1..tokens.len() {
-            if tokens[index].as_bytes() == b">" || tokens[index].as_bytes() == b">>" {
-                if index + 1 >= tokens.len() {
-                    output.status = 2;
-                    output.line(b"missing redirect target");
-                    return;
-                }
-                command_end = index;
-                redirect = Some((tokens[index + 1].as_bytes(), tokens[index].as_bytes() == b">>"));
-                break;
-            }
-        }
-        let command = tokens[0].as_bytes();
-        match command {
-            b"help" => output.line(b"help echo cat clear ps uptime env set exit"),
-            b"echo" => {
-                for (index, token) in tokens[1..command_end].iter().enumerate() {
-                    if index > 0 {
-                        output.push(b' ');
-                    }
-                    self.append_expanded(token.as_bytes(), output);
-                }
-                output.push(b'\r');
-                output.push(b'\n');
-            }
-            b"cat" => {
-                if command_end == 1 {
-                    output.extend(input);
-                } else {
-                    for token in &tokens[1..command_end] {
-                        if let Some(file) = self.find_file(token.as_bytes()) {
-                            output.extend(&file.bytes[..file.len]);
-                        } else {
-                            output.status = 1;
-                            output.line(b"cat: file not found");
-                        }
-                    }
-                }
-            }
-            b"clear" => {
-                output.clear_screen = true;
-                output.extend(b"\x1b[2J\x1b[H");
-            }
-            b"ps" => {
-                output.line(b"PID STATE COMMAND");
-                for child in self.children.iter().filter(|child| child.state == ChildState::Running)
-                {
-                    output.line(&format_pid(child.pid));
-                }
-            }
-            b"uptime" => output.line(b"uptime: bounded session clock"),
-            b"env" => {
-                for entry in self.env.iter().filter(|entry| entry.valid) {
-                    output.extend(&entry.name[..entry.name_len]);
-                    output.push(b'=');
-                    output.line(&entry.value[..entry.value_len]);
-                }
-            }
-            b"set" => {
-                if command_end != 2 || !self.set_env(tokens[1].as_bytes()) {
-                    output.status = 2;
-                    output.line(b"set: expected NAME=VALUE");
-                }
-            }
-            b"exit" => output.exit_requested = true,
-            _ => {
-                if command_end > 0 && self.allocate_child(output) {
-                    output.status = 127;
-                    output.extend(command);
-                    output.line(b": command not found");
-                    self.finish_child();
-                }
-            }
-        }
-        if let Some((name, append)) = redirect {
-            let bytes = output.as_bytes();
-            if !self.write_file(name, bytes, append) {
-                *output = ShellOutput::new();
-                output.status = 1;
-                output.line(b"redirect: volatile storage full");
-            } else {
-                output.len = 0;
-            }
-        }
-    }
-
-    fn allocate_child(&mut self, output: &mut ShellOutput) -> bool {
-        let Some(child) = self.children.iter_mut().find(|child| child.state == ChildState::Vacant)
-        else {
-            output.status = 1;
-            output.line(b"process capacity exhausted");
-            return false;
-        };
-        child.state = ChildState::Running;
-        child.pid = self.next_pid;
-        self.next_pid = self.next_pid.wrapping_add(1).max(1);
-        true
-    }
-
-    fn finish_child(&mut self) {
-        if let Some(child) =
-            self.children.iter_mut().find(|child| child.state == ChildState::Running)
-        {
-            child.state = ChildState::Vacant;
-        }
-    }
-
-    fn append_expanded(&self, bytes: &[u8], output: &mut ShellOutput) {
-        if bytes.first() != Some(&b'$') {
-            output.extend(bytes);
-            return;
-        }
-        let name = &bytes[1..];
-        if let Some(entry) =
-            self.env.iter().find(|entry| entry.valid && entry.name[..entry.name_len] == *name)
-        {
-            output.extend(&entry.value[..entry.value_len]);
-        }
-    }
-
-    fn set_env(&mut self, assignment: &[u8]) -> bool {
-        let Some(separator) = assignment.iter().position(|&byte| byte == b'=') else {
-            return false;
-        };
-        let name = &assignment[..separator];
-        let value = &assignment[separator + 1..];
-        if name.is_empty() || name.len() > MAX_ENV_BYTES || value.len() > MAX_ENV_BYTES {
-            return false;
-        }
-        let mut slot = None;
-        for (index, entry) in self.env.iter().enumerate() {
-            if entry.valid && entry.name[..entry.name_len] == *name {
-                slot = Some(index);
-                break;
-            }
-        }
-        if slot.is_none() {
-            slot = self.env.iter().position(|entry| !entry.valid);
-        }
-        let Some(slot) = slot else {
-            return false;
-        };
-        let entry = &mut self.env[slot];
-        entry.name[..name.len()].copy_from_slice(name);
-        entry.name_len = name.len();
-        entry.value[..value.len()].copy_from_slice(value);
-        entry.value_len = value.len();
-        entry.valid = true;
-        true
-    }
-
     fn record_history(&mut self, line: &[u8]) {
         if line.is_empty() {
             return;
@@ -549,126 +227,12 @@ impl<const FILES: usize, const FILE_BYTES: usize> SessionState<FILES, FILE_BYTES
         output.extend(b"\r\x1b[2Klogos> ");
         output.extend(&self.line[..self.line_len]);
     }
-
-    fn find_file(&self, name: &[u8]) -> Option<&VolatileFile<FILE_BYTES>> {
-        self.files.iter().find(|file| file.valid && file.name[..file.name_len] == *name)
-    }
-
-    fn write_file(&mut self, name: &[u8], bytes: &[u8], append: bool) -> bool {
-        if name.is_empty() || name.len() > MAX_ENV_BYTES || bytes.len() > FILE_BYTES {
-            return false;
-        }
-        let index = if let Some((index, _)) = self
-            .files
-            .iter()
-            .enumerate()
-            .find(|(_, file)| file.valid && file.name[..file.name_len] == *name)
-        {
-            index
-        } else if let Some((index, file)) =
-            self.files.iter_mut().enumerate().find(|(_, file)| !file.valid)
-        {
-            file.valid = true;
-            file.name_len = name.len();
-            file.name[..name.len()].copy_from_slice(name);
-            index
-        } else {
-            return false;
-        };
-        let old_file_len = self.files[index].len;
-        let old_len = if append { old_file_len } else { 0 };
-        let new_len = old_len.saturating_add(bytes.len());
-        if new_len > FILE_BYTES {
-            return false;
-        }
-        let new_total = self.total_file_bytes.saturating_sub(old_file_len).saturating_add(new_len);
-        if new_total > 512 * 1024 {
-            return false;
-        }
-        let file = &mut self.files[index];
-        file.bytes[old_len..new_len].copy_from_slice(bytes);
-        file.len = new_len;
-        self.total_file_bytes = new_total;
-        true
-    }
 }
 
-impl<const FILES: usize, const FILE_BYTES: usize> Default for SessionState<FILES, FILE_BYTES> {
+impl Default for LineEditor {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn tokenize(line: &[u8], tokens: &mut [Token; MAX_TOKENS]) -> usize {
-    let mut count = 0;
-    let mut index = 0;
-    while index < line.len() && count < MAX_TOKENS {
-        while index < line.len() && line[index].is_ascii_whitespace() {
-            index += 1;
-        }
-        if index == line.len() {
-            break;
-        }
-        let mut token = Token::EMPTY;
-        let mut quote = 0;
-        while index < line.len() {
-            let byte = line[index];
-            if quote == 0 && byte.is_ascii_whitespace() {
-                break;
-            }
-            if quote == 0 && (byte == b'|' || byte == b'>' || byte == b'<') {
-                if token.len > 0 {
-                    break;
-                }
-                token.bytes[0] = byte;
-                token.len = 1;
-                index += 1;
-                if byte == b'>' && index < line.len() && line[index] == b'>' {
-                    token.bytes[1] = b'>';
-                    token.len = 2;
-                    index += 1;
-                }
-                break;
-            }
-            if byte == b'\'' || byte == b'"' {
-                if quote == 0 {
-                    quote = byte;
-                    index += 1;
-                    continue;
-                }
-                if quote == byte {
-                    quote = 0;
-                    index += 1;
-                    continue;
-                }
-            }
-            if byte == b'\\' && index + 1 < line.len() {
-                index += 1;
-            }
-            if token.len < MAX_TOKEN_BYTES {
-                token.bytes[token.len] = line[index];
-                token.len += 1;
-            }
-            index += 1;
-        }
-        tokens[count] = token;
-        count += 1;
-    }
-    count
-}
-
-fn format_pid(pid: u16) -> [u8; 32] {
-    let mut output = [b' '; 32];
-    output[0] = b'0';
-    output[1] = b'x';
-    let mut value = pid as u32;
-    for index in (2..10).rev() {
-        let digit = (value & 0xf) as u8;
-        output[index] = if digit < 10 { b'0' + digit } else { b'a' + digit - 10 };
-        value >>= 4;
-    }
-    output[10..25].copy_from_slice(b" RUNNING command");
-    output
 }
 
 #[cfg(test)]
@@ -676,54 +240,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shell_runs_builtins_and_tracks_history() {
-        let mut session = Session::new();
-        let output = session.execute(b"echo hello");
-        assert_eq!(output.status, 0);
-        assert_eq!(&output.as_bytes()[..7], b"hello\r\n");
-        let output = session.execute(b"help");
-        assert!(output.as_bytes().windows(4).any(|window| window == b"echo"));
-        assert_eq!(session.execute(b"set NAME=value").status, 0);
-        assert_eq!(session.execute(b"echo $NAME").as_bytes(), b"value\r\n");
-    }
-
-    #[test]
-    fn pipelines_and_volatile_redirection_are_bounded() {
-        let mut session = Session::new();
-        let output = session.execute(b"echo hello > note");
-        assert_eq!(output.len, 0);
-        assert!(session.volatile_bytes() > 0);
-        let output = session.execute(b"cat note");
-        assert_eq!(output.as_bytes(), b"hello\r\n");
-        let output = session.execute(b"echo hello | cat");
-        assert_eq!(output.as_bytes(), b"hello\r\n");
-    }
-
-    #[test]
-    fn process_capacity_and_exit_are_explicit() {
-        let mut session = Session::new();
-        let output = session.execute(b"not-a-command");
-        assert_eq!(output.status, 127);
-        let output = session.execute(b"exit");
-        assert!(output.exit_requested);
-    }
-
-    #[test]
     fn line_input_commits_on_enter() {
-        let mut session = Session::new();
-        assert!(session.input(b"echo hi").is_some());
-        let output = session.input(b"\r").unwrap();
-        assert!(output.as_bytes().windows(2).any(|window| window == b"hi"));
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        assert_eq!(editor.input_for_command(b"echo hi", &mut command, &mut output), None);
+        assert_eq!(editor.input_for_command(b"\r", &mut command, &mut output), Some(7));
+        assert_eq!(&command[..7], b"echo hi");
     }
 
     #[test]
     fn history_navigation_is_bounded_and_redraws_the_line() {
-        let mut session = Session::new();
-        session.input(b"echo first\r");
-        session.input(b"echo second\r");
-        let output = session.input(b"\x1b[A").unwrap();
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"first\r", &mut command, &mut output);
+        editor.input_for_command(b"second\r", &mut command, &mut output);
+        output = ShellOutput::new();
+        editor.input_for_command(b"\x1b[A", &mut command, &mut output);
         assert!(output.as_bytes().windows(6).any(|window| window == b"second"));
-        let output = session.input(b"\x1b[B").unwrap();
+        output = ShellOutput::new();
+        editor.input_for_command(b"\x1b[B", &mut command, &mut output);
         assert!(output.as_bytes().windows(7).any(|window| window == b"logos> "));
+    }
+
+    #[test]
+    fn command_output_is_followed_by_a_prompt() {
+        let service = SessionService::new();
+        let mut output = ShellOutput::new();
+        service.command_output(b"ok\r\n", &mut output);
+        assert_eq!(output.as_bytes(), b"ok\r\nlogos> ");
     }
 }
