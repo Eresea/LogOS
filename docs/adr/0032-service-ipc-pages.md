@@ -23,7 +23,7 @@ starts them.
 
 ## Consequences
 
-- Shared data-plane membership is explicit and capability-scoped; services in
+- Shared data-plane membership is explicit and mapping-scoped; services in
   this milestone are trusted peers rather than mutually hostile sandboxes.
 - A restarted graph receives a new generation and service epoch; stale messages
   are rejected before they can reach a replacement service.

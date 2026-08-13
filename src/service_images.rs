@@ -2,40 +2,25 @@
 
 use logos_abi::{MAX_SERVICE_IMAGE_BYTES, ServiceId};
 
-use crate::process::{Capabilities, ElfLoadPlan, ProcessError, ProcessKind};
+use crate::process::{ElfLoadPlan, ProcessError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServiceImageSpec {
     service: ServiceId,
-    process_kind: ProcessKind,
     path: &'static [u8],
-    capabilities: Capabilities,
 }
 
 impl ServiceImageSpec {
-    const fn new(
-        service: ServiceId,
-        process_kind: ProcessKind,
-        path: &'static [u8],
-        capabilities: Capabilities,
-    ) -> Self {
-        Self { service, process_kind, path, capabilities }
+    const fn new(service: ServiceId, path: &'static [u8]) -> Self {
+        Self { service, path }
     }
 
     pub const fn service(self) -> ServiceId {
         self.service
     }
 
-    pub const fn process_kind(self) -> ProcessKind {
-        self.process_kind
-    }
-
     pub const fn path(self) -> &'static [u8] {
         self.path
-    }
-
-    pub const fn capabilities(self) -> Capabilities {
-        self.capabilities
     }
 
     pub fn validate_image(self, image: &[u8]) -> Result<ElfLoadPlan, ServiceImageError> {
@@ -52,36 +37,11 @@ pub enum ServiceImageError {
 }
 
 pub const SERVICE_IMAGES: [ServiceImageSpec; 5] = [
-    ServiceImageSpec::new(
-        ServiceId::Input,
-        ProcessKind::Input,
-        b"\\EFI\\LOGOS\\INPUT.ELF",
-        Capabilities::INPUT,
-    ),
-    ServiceImageSpec::new(
-        ServiceId::Display,
-        ProcessKind::Display,
-        b"\\EFI\\LOGOS\\DISPLAY.ELF",
-        Capabilities::DISPLAY,
-    ),
-    ServiceImageSpec::new(
-        ServiceId::Terminal,
-        ProcessKind::Terminal,
-        b"\\EFI\\LOGOS\\TERMINAL.ELF",
-        Capabilities::TERMINAL,
-    ),
-    ServiceImageSpec::new(
-        ServiceId::Session,
-        ProcessKind::Session,
-        b"\\EFI\\LOGOS\\SESSION.ELF",
-        Capabilities::SESSION,
-    ),
-    ServiceImageSpec::new(
-        ServiceId::Commands,
-        ProcessKind::Command,
-        b"\\EFI\\LOGOS\\COMMANDS.ELF",
-        Capabilities::COMMAND,
-    ),
+    ServiceImageSpec::new(ServiceId::Input, b"\\EFI\\LOGOS\\INPUT.ELF"),
+    ServiceImageSpec::new(ServiceId::Display, b"\\EFI\\LOGOS\\DISPLAY.ELF"),
+    ServiceImageSpec::new(ServiceId::Terminal, b"\\EFI\\LOGOS\\TERMINAL.ELF"),
+    ServiceImageSpec::new(ServiceId::Session, b"\\EFI\\LOGOS\\SESSION.ELF"),
+    ServiceImageSpec::new(ServiceId::Commands, b"\\EFI\\LOGOS\\COMMANDS.ELF"),
 ];
 
 pub const fn service_image(service: ServiceId) -> ServiceImageSpec {
@@ -135,14 +95,7 @@ mod tests {
         assert_eq!(SERVICE_IMAGES[2].service(), ServiceId::Terminal);
         assert_eq!(SERVICE_IMAGES[3].service(), ServiceId::Session);
         assert_eq!(SERVICE_IMAGES[4].service(), ServiceId::Commands);
-        assert_eq!(service_image(ServiceId::Terminal).process_kind(), ProcessKind::Terminal);
         assert_eq!(service_image(ServiceId::Display).path(), b"\\EFI\\LOGOS\\DISPLAY.ELF");
-    }
-
-    #[test]
-    fn capabilities_are_explicit_and_bounded() {
-        let terminal = service_image(ServiceId::Terminal);
-        assert_eq!(terminal.capabilities(), Capabilities::TERMINAL);
     }
 
     #[test]

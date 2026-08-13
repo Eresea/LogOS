@@ -1,6 +1,6 @@
 # ADR-0006: Process capability authorization
 
-- Status: Accepted
+- Status: Superseded by ADR-0036
 - Date: 2026-08-12
 
 ## Decision

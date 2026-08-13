@@ -482,6 +482,11 @@ impl Default for Doorbell {
 
 /// Fixed SPSC ring that can be placed directly in a shared endpoint page.
 #[repr(C)]
+/// Fixed SPSC transport for trusted producer/consumer peers.
+///
+/// Endpoint identity protects the kernel and restart generations; it is not a
+/// hostile-peer memory-isolation boundary, so service payload validation stays
+/// at the service boundary.
 pub struct SharedIpc<T: Copy, const N: usize> {
     endpoint: EndpointHeader,
     connected: AtomicBool,

@@ -137,10 +137,7 @@ impl ServiceRuntime {
                 loaded.reclaim(&mut self.frame_pool);
                 return Err(ServiceRuntimeError::PageTableMap(error));
             }
-            let process = self
-                .processes
-                .start(image, spec.process_kind(), spec.capabilities())
-                .map_err(ServiceRuntimeError::Process)?;
+            let process = self.processes.start(image).map_err(ServiceRuntimeError::Process)?;
             let root = AddressSpaceRoot::new(tables.root().raw() as usize)
                 .ok_or(ServiceRuntimeError::Process(ProcessError::AddressSpace))?;
             if let Err(error) = self.processes.bind_address_space_root(process, root) {

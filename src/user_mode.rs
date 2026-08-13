@@ -2,8 +2,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::{USER_CODE_SELECTOR, USER_DATA_SELECTOR};
 use crate::process::{
-    AddressSpaceRoot, Capabilities, ElfLoadPlan, MappingFlags, ProcessHandle, ProcessKind,
-    ProcessTable, VirtualMapping,
+    AddressSpaceRoot, ElfLoadPlan, MappingFlags, ProcessHandle, ProcessTable, VirtualMapping,
 };
 use crate::{SCHEDULER, TaskHandle};
 
@@ -225,7 +224,7 @@ fn register_proof_process() {
         let segment =
             plan.segment(0).unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: proof segment"));
         let process = (*core::ptr::addr_of_mut!(USER_PROCESS_TABLE))
-            .start(image, ProcessKind::Terminal, Capabilities::SERVICE)
+            .start(image)
             .unwrap_or_else(|_| crate::arch_fatal(b"LogOS vNext: proof process"));
         let root = AddressSpaceRoot::new(core::ptr::addr_of!(USER_PML4) as usize)
             .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: proof root"));

@@ -10,16 +10,6 @@ pub const MAX_PROGRAM_HEADERS: usize = 16;
 const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProcessKind {
-    Input,
-    Display,
-    Terminal,
-    Session,
-    Command,
-    Supervisor,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessState {
     Vacant,
     Starting,
@@ -35,7 +25,6 @@ pub enum ProcessError {
     InvalidHandle,
     NotRunning,
     AddressSpace,
-    PermissionDenied,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -367,67 +356,17 @@ impl Default for AddressSpaceTable {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Capabilities {
-    pub input: bool,
-    pub display: bool,
-    pub endpoints: bool,
-    pub process_control: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Capability {
-    Input,
-    Display,
-    Endpoints,
-    ProcessControl,
-}
-
-impl Capabilities {
-    pub const NONE: Self =
-        Self { input: false, display: false, endpoints: false, process_control: false };
-    pub const SERVICE: Self =
-        Self { input: true, display: true, endpoints: true, process_control: false };
-    pub const INPUT: Self =
-        Self { input: true, display: false, endpoints: true, process_control: false };
-    pub const DISPLAY: Self =
-        Self { input: false, display: true, endpoints: true, process_control: false };
-    pub const TERMINAL: Self =
-        Self { input: false, display: false, endpoints: true, process_control: false };
-    pub const SESSION: Self =
-        Self { input: false, display: false, endpoints: true, process_control: true };
-    pub const COMMAND: Self =
-        Self { input: false, display: false, endpoints: true, process_control: false };
-
-    pub const fn allows(self, capability: Capability) -> bool {
-        match capability {
-            Capability::Input => self.input,
-            Capability::Display => self.display,
-            Capability::Endpoints => self.endpoints,
-            Capability::ProcessControl => self.process_control,
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 struct ProcessSlot {
     generation: u64,
     state: ProcessState,
-    kind: ProcessKind,
-    capabilities: Capabilities,
     entry: u64,
     address_space: Option<AddressSpaceHandle>,
 }
 
 impl ProcessSlot {
-    const EMPTY: Self = Self {
-        generation: 1,
-        state: ProcessState::Vacant,
-        kind: ProcessKind::Command,
-        capabilities: Capabilities::NONE,
-        entry: 0,
-        address_space: None,
-    };
+    const EMPTY: Self =
+        Self { generation: 1, state: ProcessState::Vacant, entry: 0, address_space: None };
 }
 
 pub struct ProcessTable {
@@ -443,12 +382,7 @@ impl ProcessTable {
         }
     }
 
-    pub fn start(
-        &mut self,
-        image: &[u8],
-        kind: ProcessKind,
-        capabilities: Capabilities,
-    ) -> Result<ProcessHandle, ProcessError> {
+    pub fn start(&mut self, image: &[u8]) -> Result<ProcessHandle, ProcessError> {
         let entry = validate_elf(image)?;
         let Some(slot) =
             self.slots.iter_mut().enumerate().find_map(|(slot, process)| {
@@ -460,8 +394,6 @@ impl ProcessTable {
         let address_space = self.address_spaces.reserve()?;
         let process = &mut self.slots[slot];
         process.state = ProcessState::Starting;
-        process.kind = kind;
-        process.capabilities = capabilities;
         process.entry = entry;
         process.address_space = Some(address_space);
         process.state = ProcessState::Running;
@@ -471,20 +403,6 @@ impl ProcessTable {
     pub fn state(&self, handle: ProcessHandle) -> Option<ProcessState> {
         let process = self.slots.get(handle.slot as usize)?;
         (process.generation == handle.generation).then_some(process.state)
-    }
-
-    pub fn capabilities(&self, handle: ProcessHandle) -> Option<Capabilities> {
-        let process = self.slots.get(handle.slot as usize)?;
-        (process.generation == handle.generation).then_some(process.capabilities)
-    }
-
-    pub fn authorize(
-        &self,
-        handle: ProcessHandle,
-        capability: Capability,
-    ) -> Result<(), ProcessError> {
-        let capabilities = self.capabilities(handle).ok_or(ProcessError::InvalidHandle)?;
-        capabilities.allows(capability).then_some(()).ok_or(ProcessError::PermissionDenied)
     }
 
     pub fn address_space(&self, handle: ProcessHandle) -> Option<AddressSpaceHandle> {
@@ -585,7 +503,7 @@ impl ProcessTable {
         }
         process.state = ProcessState::Vacant;
         process.entry = 0;
-        process.capabilities = Capabilities::NONE;
+
         process.address_space = None;
         process.generation = next_generation(process.generation);
         Ok(())
@@ -826,7 +744,7 @@ mod tests {
         let image = image();
         assert_eq!(validate_elf(&image), Ok(0x1000));
         let mut table = ProcessTable::new();
-        let process = table.start(&image, ProcessKind::Terminal, Capabilities::SERVICE).unwrap();
+        let process = table.start(&image).unwrap();
         assert_eq!(table.state(process), Some(ProcessState::Running));
         assert!(table.fault(process, 14).is_ok());
         assert_eq!(table.state(process), Some(ProcessState::Faulted(14)));
@@ -866,7 +784,7 @@ mod tests {
     fn address_space_identity_is_bound_once_and_released_with_process() {
         let image = image();
         let mut table = ProcessTable::new();
-        let process = table.start(&image, ProcessKind::Terminal, Capabilities::SERVICE).unwrap();
+        let process = table.start(&image).unwrap();
         let address_space = table.address_space(process).unwrap();
         let root = AddressSpaceRoot::new(0x20_000).unwrap();
         assert_eq!(table.address_space_root(process), None);
@@ -880,7 +798,7 @@ mod tests {
         assert!(table.reclaim(process).is_ok());
         assert_eq!(table.state(process), None);
 
-        let replacement = table.start(&image, ProcessKind::Command, Capabilities::COMMAND).unwrap();
+        let replacement = table.start(&image).unwrap();
         assert_eq!(replacement.slot(), process.slot());
         assert_ne!(replacement.generation(), process.generation());
         assert_ne!(
@@ -901,7 +819,7 @@ mod tests {
     fn user_launch_requires_a_bound_root_and_preserves_register_metadata() {
         let image = image();
         let mut table = ProcessTable::new();
-        let process = table.start(&image, ProcessKind::Terminal, Capabilities::SERVICE).unwrap();
+        let process = table.start(&image).unwrap();
         assert_eq!(table.user_launch(process, 0x1000, 0x8000), Err(ProcessError::AddressSpace));
         let root = AddressSpaceRoot::new(0x20_000).unwrap();
         table.bind_address_space_root(process, root).unwrap();
@@ -915,7 +833,7 @@ mod tests {
     fn mappings_require_a_root_and_reject_overlap_or_wx_pages() {
         let image = image();
         let mut table = ProcessTable::new();
-        let process = table.start(&image, ProcessKind::Terminal, Capabilities::SERVICE).unwrap();
+        let process = table.start(&image).unwrap();
         let code = VirtualMapping::new(0x40_000, 0x80_000, 2, MappingFlags::CODE).unwrap();
         let data = VirtualMapping::new(0x41_000, 0x90_000, 1, MappingFlags::DATA).unwrap();
         assert_eq!(table.map(process, code), Err(ProcessError::AddressSpace));
@@ -955,21 +873,5 @@ mod tests {
             )
             .is_none()
         );
-    }
-
-    #[test]
-    fn capability_checks_are_typed_and_generation_safe() {
-        let image = image();
-        let mut table = ProcessTable::new();
-        let service = table.start(&image, ProcessKind::Terminal, Capabilities::SERVICE).unwrap();
-        assert!(table.authorize(service, Capability::Input).is_ok());
-        assert!(table.authorize(service, Capability::Display).is_ok());
-        assert_eq!(
-            table.authorize(service, Capability::ProcessControl),
-            Err(ProcessError::PermissionDenied)
-        );
-        assert!(table.fault(service, 14).is_ok());
-        assert!(table.reclaim(service).is_ok());
-        assert_eq!(table.authorize(service, Capability::Input), Err(ProcessError::InvalidHandle));
     }
 }
