@@ -82,10 +82,6 @@ name = "logos-vnext"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
- "logos-commands",
- "logos-input",
- "logos-session",
- "logos-terminal",
  "uefi",
 ]
 

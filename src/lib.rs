@@ -4,21 +4,12 @@
 extern crate std;
 
 pub mod boot_resources;
-pub mod display;
-pub mod font;
 pub mod frame_pool;
-pub mod input;
-pub mod ipc;
 pub mod loader;
 pub mod page_table;
 pub mod process;
 mod scheduler;
-pub mod session;
 pub mod supervisor;
-pub mod syscall;
-pub mod terminal;
-pub mod terminal_abi;
-pub mod terminal_stack;
 pub use scheduler::{
     FinishState, IDLE_STACK_SIZE, MAX_CPUS, MAX_TASKS, SCHEDULER, SCHEDULER_STACK_SIZE,
     ScheduledUserLaunch, Scheduler, SpawnError, TASK_STACK_SIZE, TaskEntry, TaskHandle, TaskState,
