@@ -3,9 +3,7 @@
 #[cfg(test)]
 extern crate std;
 
-use logos_abi::{
-    Cell, MAX_COLUMNS, MAX_GLYPH_CACHE, MAX_RENDER_CELLS, MAX_ROWS, MessageKind, RenderMessage,
-};
+use logos_abi::{Cell, MAX_COLUMNS, MAX_RENDER_CELLS, MAX_ROWS, MessageKind, RenderMessage};
 
 pub use logos_abi::FramebufferFormat as PixelFormat;
 
@@ -18,67 +16,6 @@ pub struct Glyph {
     pub rows: [u8; GLYPH_HEIGHT],
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GlyphId(u16);
-
-impl GlyphId {
-    pub const fn raw(self) -> usize {
-        self.0 as usize
-    }
-}
-
-#[derive(Clone, Copy)]
-struct GlyphSlot {
-    valid: bool,
-    scalar: u32,
-    glyph: Glyph,
-}
-
-impl GlyphSlot {
-    const EMPTY: Self = Self { valid: false, scalar: 0, glyph: Glyph { rows: [0; GLYPH_HEIGHT] } };
-}
-
-pub struct GlyphCache {
-    slots: [GlyphSlot; MAX_GLYPH_CACHE],
-    next: usize,
-}
-
-impl GlyphCache {
-    pub const fn new() -> Self {
-        Self { slots: [GlyphSlot::EMPTY; MAX_GLYPH_CACHE], next: 0 }
-    }
-
-    pub fn lookup(&mut self, scalar: u32) -> GlyphId {
-        let scalar = normalize_scalar(scalar);
-        if let Some(index) = self.slots.iter().position(|slot| slot.valid && slot.scalar == scalar)
-        {
-            return GlyphId(index as u16);
-        }
-        let index = self.next;
-        self.next = (self.next + 1) % MAX_GLYPH_CACHE;
-        self.slots[index] = GlyphSlot { valid: true, scalar, glyph: embedded_glyph(scalar) };
-        GlyphId(index as u16)
-    }
-
-    pub fn glyph(&self, id: GlyphId) -> Option<Glyph> {
-        self.slots.get(id.raw()).filter(|slot| slot.valid).map(|slot| slot.glyph)
-    }
-
-    pub fn len(&self) -> usize {
-        self.slots.iter().fold(0, |count, slot| count + slot.valid as usize)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-impl Default for GlyphCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 fn normalize_scalar(scalar: u32) -> u32 {
     if scalar <= 0x10ffff && !(0xd800..=0xdfff).contains(&scalar) {
         scalar
@@ -88,6 +25,7 @@ fn normalize_scalar(scalar: u32) -> u32 {
 }
 
 fn embedded_glyph(scalar: u32) -> Glyph {
+    let scalar = normalize_scalar(scalar);
     let byte = if scalar >= 'A' as u32 && scalar <= 'Z' as u32 {
         (scalar as u8).to_ascii_lowercase()
     } else {
@@ -242,7 +180,6 @@ impl Display {
         height: usize,
         stride: usize,
         format: PixelFormat,
-        font: &mut GlyphCache,
     ) -> Result<usize, DisplayError> {
         let required = stride.checked_mul(height).ok_or(DisplayError::InvalidFramebuffer)?;
         if self.columns == 0
@@ -262,8 +199,7 @@ impl Display {
                     continue;
                 }
                 let cell = self.cells[index];
-                let glyph_id = font.lookup(cell.codepoint);
-                let glyph = font.glyph(glyph_id).ok_or(DisplayError::InvalidFramebuffer)?;
+                let glyph = embedded_glyph(cell.codepoint);
                 for glyph_row in 0..GLYPH_HEIGHT {
                     for glyph_column in 0..GLYPH_WIDTH {
                         let foreground = glyph.rows[glyph_row] & (1 << (7 - glyph_column)) != 0;
@@ -302,13 +238,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fallback_and_cache_are_bounded() {
-        let mut cache = GlyphCache::new();
-        assert_eq!(cache.lookup(0xd800), cache.lookup(REPLACEMENT_SCALAR));
-        for scalar in 0..MAX_GLYPH_CACHE as u32 {
-            cache.lookup(scalar + 0x100);
-        }
-        assert_eq!(cache.len(), MAX_GLYPH_CACHE);
+    fn invalid_scalars_use_the_replacement_glyph() {
+        assert_eq!(embedded_glyph(0xd800), embedded_glyph(REPLACEMENT_SCALAR));
     }
 
     #[test]
@@ -319,15 +250,11 @@ mod tests {
         message.rows = 25;
         display.apply(7, &message).unwrap();
         let mut framebuffer = std::vec![0; 640 * 400 * 4];
-        let mut font = GlyphCache::new();
         assert_eq!(
-            display.render(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8, &mut font),
+            display.render(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8),
             Ok(80 * 25)
         );
-        assert_eq!(
-            display.render(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8, &mut font),
-            Ok(0)
-        );
+        assert_eq!(display.render(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8), Ok(0));
     }
 
     #[test]

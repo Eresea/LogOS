@@ -11,12 +11,10 @@ use logos_abi::{
 const TERMINAL_TO_DISPLAY: usize = SERVICE_IPC_BASE + IPC_PAGE_BYTES;
 
 static mut DISPLAY: logos_display::Display = logos_display::Display::new(1);
-static mut FONT: logos_display::GlyphCache = logos_display::GlyphCache::new();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     let display = unsafe { &mut *core::ptr::addr_of_mut!(DISPLAY) };
-    let font = unsafe { &mut *core::ptr::addr_of_mut!(FONT) };
     let ring = unsafe { &*(TERMINAL_TO_DISPLAY as *const RenderIpc) };
     let config = unsafe { &*(DISPLAY_CONFIG_BASE as *const FramebufferConfig) };
     let framebuffer = unsafe {
@@ -47,7 +45,6 @@ pub extern "C" fn _start() -> ! {
                     config.height as usize,
                     config.stride as usize * 4,
                     format,
-                    font,
                 );
             }
         }
