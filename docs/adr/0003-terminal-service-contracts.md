@@ -24,9 +24,8 @@ needs deterministic contracts and proof workloads before architecture-specific s
 ## Consequences
 
 Terminal policy is independently testable and has no direct hardware or scheduler dependency.
-Display and input can be replaced without changing terminal semantics. `TerminalStack` remains a
-deterministic host reference; the live service graph is loaded and scheduled through the bounded
-ELF/process path.
+Display and input can be replaced without changing terminal semantics. The live service graph is
+loaded and scheduled through the bounded ELF/process path.
 
 ## Deferred
 

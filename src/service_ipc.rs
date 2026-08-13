@@ -69,13 +69,6 @@ pub struct ServiceIpcGraph {
 }
 
 impl ServiceIpcGraph {
-    pub fn allocate<M: PageTableMemory>(
-        pool: &mut FramePool,
-        memory: &mut M,
-    ) -> Result<Self, IpcError> {
-        Self::allocate_with_identity(pool, memory, 1, SERVICE_EPOCH)
-    }
-
     pub fn allocate_with_identity<M: PageTableMemory>(
         pool: &mut FramePool,
         memory: &mut M,
@@ -84,9 +77,6 @@ impl ServiceIpcGraph {
     ) -> Result<Self, IpcError> {
         let mut graph = Self { endpoints: [None; MAX_ENDPOINTS], count: 0 };
         for (index, (producer, consumer)) in ENDPOINTS.into_iter().enumerate() {
-            if index == MAX_ENDPOINTS {
-                return Err(IpcError::Capacity);
-            }
             let frame = pool.allocate().map_err(|error| match error {
                 FramePoolError::Exhausted => IpcError::Exhausted,
                 FramePoolError::InvalidMap => IpcError::Memory,
@@ -125,31 +115,6 @@ impl ServiceIpcGraph {
 
     pub const fn endpoint(&self, index: usize) -> Option<IpcEndpoint> {
         if index < self.count { self.endpoints[index] } else { None }
-    }
-
-    pub fn for_service(&self, service: ServiceId, mut visit: impl FnMut(IpcEndpoint)) {
-        for endpoint in self.endpoints[..self.count].iter().flatten() {
-            if endpoint.producer == service || endpoint.consumer == service {
-                visit(*endpoint);
-            }
-        }
-    }
-
-    /// Advance every endpoint generation owned by a restarted service.
-    ///
-    /// The endpoint pages are reinitialized by the runtime after this call;
-    /// peers holding an older identity then receive `Stale` until they reread
-    /// the page header.
-    pub fn rebind(&mut self, service: ServiceId) -> usize {
-        let mut changed = 0;
-        for endpoint in self.endpoints[..self.count].iter_mut().flatten() {
-            if endpoint.producer != service && endpoint.consumer != service {
-                continue;
-            }
-            endpoint.generation = endpoint.generation.wrapping_add(1).max(1);
-            changed += 1;
-        }
-        changed
     }
 }
 
@@ -198,31 +163,15 @@ mod tests {
         let mut pool = FramePool::empty();
         pool.initialize(&map).unwrap();
         let mut memory = Memory;
-        let graph = ServiceIpcGraph::allocate(&mut pool, &mut memory).unwrap();
+        let graph =
+            ServiceIpcGraph::allocate_with_identity(&mut pool, &mut memory, 1, SERVICE_EPOCH)
+                .unwrap();
         assert_eq!(graph.count(), 6);
         assert_eq!(graph.endpoint(0).unwrap().producer(), ServiceId::Input);
         assert_eq!(graph.endpoint(0).unwrap().consumer(), ServiceId::Terminal);
         assert_eq!(graph.endpoint(5).unwrap().producer(), ServiceId::Commands);
         assert_eq!(graph.endpoint(5).unwrap().consumer(), ServiceId::Session);
         assert_eq!(graph.endpoint(5).unwrap().virtual_address(), IPC_BASE + 5 * PAGE_SIZE);
-        assert_eq!(graph.endpoint(5).unwrap().generation(), 1);
-    }
-
-    #[test]
-    fn rebinding_only_advances_owned_endpoints() {
-        let mut map = crate::boot_resources::MemoryMap::new();
-        map.push(MemoryDescriptor::new(0x1000, 8, true).unwrap()).unwrap();
-        let mut pool = FramePool::empty();
-        pool.initialize(&map).unwrap();
-        let mut memory = Memory;
-        let mut graph = ServiceIpcGraph::allocate(&mut pool, &mut memory).unwrap();
-
-        assert_eq!(graph.rebind(ServiceId::Terminal), 4);
-        assert_eq!(graph.endpoint(0).unwrap().generation(), 2);
-        assert_eq!(graph.endpoint(1).unwrap().generation(), 2);
-        assert_eq!(graph.endpoint(2).unwrap().generation(), 2);
-        assert_eq!(graph.endpoint(3).unwrap().generation(), 2);
-        assert_eq!(graph.endpoint(4).unwrap().generation(), 1);
         assert_eq!(graph.endpoint(5).unwrap().generation(), 1);
     }
 }

@@ -12,7 +12,6 @@ use core::{
 };
 
 pub const ABI_VERSION: u16 = 1;
-pub const IPC_RING_SLOTS: usize = 8;
 pub const MAX_TEXT_BYTES: usize = 64;
 pub const MAX_RENDER_CELLS: usize = 128;
 pub const MAX_COLUMNS: usize = 160;
@@ -42,7 +41,6 @@ pub const MAX_IPC_BYTES: usize = 256;
 pub const IPC_FLAG_MORE: u8 = 1 << 0;
 pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
 pub const MAX_GLYPH_CACHE: usize = 1024;
-pub const MAX_CAPABILITIES: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -81,42 +79,6 @@ pub enum ServiceId {
     Terminal = 3,
     Session = 4,
     Commands = 5,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum CapabilityKind {
-    IpcEndpoint = 1,
-    KeyboardBytes = 2,
-    Framebuffer = 3,
-    ProcessControl = 4,
-    ServiceControl = 5,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(C)]
-pub struct ServiceDescriptor {
-    pub service: ServiceId,
-    pub generation: u16,
-    pub epoch: u64,
-    pub image_bytes: u32,
-    pub data_bytes: u32,
-    pub stack_pages: u16,
-    pub capability_count: u16,
-}
-
-impl ServiceDescriptor {
-    pub const fn new(service: ServiceId, generation: u16, epoch: u64) -> Self {
-        Self {
-            service,
-            generation,
-            epoch,
-            image_bytes: 0,
-            data_bytes: 0,
-            stack_pages: 8,
-            capability_count: 0,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

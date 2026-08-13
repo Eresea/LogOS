@@ -391,6 +391,12 @@ impl Capabilities {
         Self { input: false, display: false, endpoints: false, process_control: false };
     pub const SERVICE: Self =
         Self { input: true, display: true, endpoints: true, process_control: false };
+    pub const INPUT: Self =
+        Self { input: true, display: false, endpoints: true, process_control: false };
+    pub const DISPLAY: Self =
+        Self { input: false, display: true, endpoints: true, process_control: false };
+    pub const TERMINAL: Self =
+        Self { input: false, display: false, endpoints: true, process_control: false };
     pub const SESSION: Self =
         Self { input: false, display: false, endpoints: true, process_control: true };
     pub const COMMAND: Self =

@@ -1,31 +1,15 @@
 //! Fixed manifest for the ring-3 service images.
 
-use logos_abi::{
-    CapabilityKind, MAX_CAPABILITIES, MAX_SERVICE_IMAGE_BYTES, ServiceDescriptor, ServiceId,
-};
+use logos_abi::{MAX_SERVICE_IMAGE_BYTES, ServiceId};
 
-use crate::process::{ElfLoadPlan, ProcessError, ProcessKind};
-
-pub const MAX_IMAGE_CAPABILITIES: usize = 4;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CapabilityGrant {
-    pub kind: CapabilityKind,
-    pub slot: u16,
-}
-
-impl CapabilityGrant {
-    const fn new(kind: CapabilityKind, slot: u16) -> Self {
-        Self { kind, slot }
-    }
-}
+use crate::process::{Capabilities, ElfLoadPlan, ProcessError, ProcessKind};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServiceImageSpec {
     service: ServiceId,
     process_kind: ProcessKind,
     path: &'static [u8],
-    capabilities: [Option<CapabilityGrant>; MAX_IMAGE_CAPABILITIES],
+    capabilities: Capabilities,
 }
 
 impl ServiceImageSpec {
@@ -33,7 +17,7 @@ impl ServiceImageSpec {
         service: ServiceId,
         process_kind: ProcessKind,
         path: &'static [u8],
-        capabilities: [Option<CapabilityGrant>; MAX_IMAGE_CAPABILITIES],
+        capabilities: Capabilities,
     ) -> Self {
         Self { service, process_kind, path, capabilities }
     }
@@ -50,31 +34,8 @@ impl ServiceImageSpec {
         self.path
     }
 
-    pub const fn capability_count(self) -> usize {
-        let mut count = 0;
-        while count < MAX_IMAGE_CAPABILITIES {
-            if self.capabilities[count].is_some() {
-                count += 1;
-            } else {
-                break;
-            }
-        }
-        count
-    }
-
-    pub const fn capability(self, index: usize) -> Option<CapabilityGrant> {
-        if index < MAX_IMAGE_CAPABILITIES { self.capabilities[index] } else { None }
-    }
-
-    pub fn descriptor(self, image_bytes: usize) -> Result<ServiceDescriptor, ServiceImageError> {
-        validate_image_bytes(image_bytes)?;
-        if self.capability_count() > MAX_CAPABILITIES {
-            return Err(ServiceImageError::CapabilityLimit);
-        }
-        let mut descriptor = ServiceDescriptor::new(self.service, 1, 1);
-        descriptor.image_bytes = image_bytes as u32;
-        descriptor.capability_count = self.capability_count() as u16;
-        Ok(descriptor)
+    pub const fn capabilities(self) -> Capabilities {
+        self.capabilities
     }
 
     pub fn validate_image(self, image: &[u8]) -> Result<ElfLoadPlan, ServiceImageError> {
@@ -88,7 +49,6 @@ pub enum ServiceImageError {
     Empty,
     TooLarge,
     InvalidElf(ProcessError),
-    CapabilityLimit,
 }
 
 pub const SERVICE_IMAGES: [ServiceImageSpec; 5] = [
@@ -96,56 +56,31 @@ pub const SERVICE_IMAGES: [ServiceImageSpec; 5] = [
         ServiceId::Input,
         ProcessKind::Input,
         b"\\EFI\\LOGOS\\INPUT.ELF",
-        [
-            Some(CapabilityGrant::new(CapabilityKind::KeyboardBytes, 0)),
-            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 1)),
-            None,
-            None,
-        ],
+        Capabilities::INPUT,
     ),
     ServiceImageSpec::new(
         ServiceId::Display,
         ProcessKind::Display,
         b"\\EFI\\LOGOS\\DISPLAY.ELF",
-        [
-            Some(CapabilityGrant::new(CapabilityKind::Framebuffer, 0)),
-            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 1)),
-            None,
-            None,
-        ],
+        Capabilities::DISPLAY,
     ),
     ServiceImageSpec::new(
         ServiceId::Terminal,
         ProcessKind::Terminal,
         b"\\EFI\\LOGOS\\TERMINAL.ELF",
-        [
-            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 1)),
-            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 2)),
-            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 3)),
-            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 4)),
-        ],
+        Capabilities::TERMINAL,
     ),
     ServiceImageSpec::new(
         ServiceId::Session,
         ProcessKind::Session,
         b"\\EFI\\LOGOS\\SESSION.ELF",
-        [
-            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 1)),
-            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 2)),
-            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 3)),
-            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 5)),
-        ],
+        Capabilities::SESSION,
     ),
     ServiceImageSpec::new(
         ServiceId::Commands,
         ProcessKind::Command,
         b"\\EFI\\LOGOS\\COMMANDS.ELF",
-        [
-            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 1)),
-            Some(CapabilityGrant::new(CapabilityKind::ProcessControl, 2)),
-            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 4)),
-            Some(CapabilityGrant::new(CapabilityKind::IpcEndpoint, 5)),
-        ],
+        Capabilities::COMMAND,
     ),
 ];
 
@@ -205,22 +140,19 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_are_explicit_and_descriptors_are_bounded() {
+    fn capabilities_are_explicit_and_bounded() {
         let terminal = service_image(ServiceId::Terminal);
-        assert_eq!(terminal.capability_count(), 4);
-        assert_eq!(terminal.capability(0).unwrap().slot, 1);
-        assert_eq!(terminal.capability(3).unwrap().slot, 4);
-        let descriptor = terminal.descriptor(128).unwrap();
-        assert_eq!(descriptor.image_bytes, 128);
-        assert_eq!(descriptor.capability_count, 4);
-        assert_eq!(descriptor.stack_pages, 8);
+        assert_eq!(terminal.capabilities(), Capabilities::TERMINAL);
     }
 
     #[test]
     fn image_validation_rejects_empty_oversize_and_malformed_inputs() {
         let spec = service_image(ServiceId::Input);
         assert_eq!(spec.validate_image(&[]), Err(ServiceImageError::Empty));
-        assert_eq!(spec.descriptor(MAX_SERVICE_IMAGE_BYTES + 1), Err(ServiceImageError::TooLarge));
+        assert_eq!(
+            validate_image_bytes(MAX_SERVICE_IMAGE_BYTES + 1),
+            Err(ServiceImageError::TooLarge)
+        );
         assert!(matches!(spec.validate_image(&[0; 64]), Err(ServiceImageError::InvalidElf(_))));
         assert_eq!(spec.validate_image(&image()).unwrap().entry(), 0x1000);
     }

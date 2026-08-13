@@ -40,7 +40,7 @@ fixed, capability-scoped boundaries.
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 16 validated mappings per process, typed capability authorization, and exit/fault/reclaim outcomes |
 | User launch contract | `process::UserLaunch` + `Scheduler::spawn_user` | a running process with a bound root publishes entry RIP, aligned stack top, root, and process generation before its task becomes runnable |
 | Ring-3 CPU affinity | `scheduler::claim_next` | ring-3 tasks remain on BSP until per-CPU user-entry stacks and CR3/TLB migration are explicitly implemented; kernel scheduling remains SMP |
-| Service image manifest | `service_images::SERVICE_IMAGES` | five fixed ESP paths, process kinds, capability slots, and bounded ELF admission in dependency order |
+| Service image manifest | `service_images::SERVICE_IMAGES` | five fixed ESP paths, process kinds, enforced process capabilities, and bounded ELF admission in dependency order |
 | Retained service images | `service_loader::ServiceImageBundle` | five validated ELF records with page-aligned retained addresses, loaded before `ExitBootServices`, and no filesystem lifetime after UEFI exit |
 | Service ELF packaging | `services/images` + `scripts/build-services.ps1` | five independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
 | Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all five staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
@@ -63,8 +63,8 @@ The handoff registers one root task. That task owns the first fixed Runtime oper
 not inspect, schedule, or orchestrate Runtime state. Runtime operations use the scheduler's sleep and
 wake primitives but retain their own deadlines, terminal states, and slot generations. The five service
 ELFs are loaded before `ExitBootServices`, receive isolated roots and explicit mappings, and enter
-through the normal scheduler path. `TerminalStack` remains a host reference model, while QEMU exercises
-the live service images and supervisor-driven restart. The fixed scheduler task stack is 256 KiB so
+through the normal scheduler path. QEMU exercises the live service images and supervisor-driven restart.
+The fixed scheduler task stack is 256 KiB so
 bounded ELF teardown/rebuild cannot overwrite adjacent task metadata.
 
 `v1_docs/` is historical and is not an active architecture contract.

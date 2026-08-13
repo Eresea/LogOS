@@ -5,15 +5,14 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-use logos_abi::{CapabilityKind, ServiceId};
+use logos_abi::ServiceId;
 
 use crate::{
     frame_pool::{FrameAddress, FramePool},
     loader::{LoadError, LoadedImage},
     page_table::{IdentityPageTableMemory, PageTableBuilder, PageTableError, PageTableMemory},
     process::{
-        AddressSpaceRoot, Capabilities, MappingFlags, ProcessError, ProcessHandle, UserLaunch,
-        VirtualMapping,
+        AddressSpaceRoot, MappingFlags, ProcessError, ProcessHandle, UserLaunch, VirtualMapping,
     },
     service_images::SERVICE_IMAGES,
     service_ipc::{IpcError, ServiceIpcGraph},
@@ -141,7 +140,7 @@ impl ServiceRuntime {
             }
             let process = self
                 .processes
-                .start(image, spec.process_kind(), capabilities(spec))
+                .start(image, spec.process_kind(), spec.capabilities())
                 .map_err(ServiceRuntimeError::Process)?;
             let root = AddressSpaceRoot::new(tables.root().raw() as usize)
                 .ok_or(ServiceRuntimeError::Process(ProcessError::AddressSpace))?;
@@ -555,25 +554,6 @@ const fn service_index(service: ServiceId) -> usize {
         ServiceId::Session => 3,
         ServiceId::Commands => 4,
     }
-}
-
-fn capabilities(spec: &crate::service_images::ServiceImageSpec) -> Capabilities {
-    let mut capabilities = Capabilities::NONE;
-    let mut index = 0;
-    while index < spec.capability_count() {
-        let Some(grant) = spec.capability(index) else {
-            break;
-        };
-        match grant.kind {
-            CapabilityKind::IpcEndpoint => capabilities.endpoints = true,
-            CapabilityKind::KeyboardBytes => capabilities.input = true,
-            CapabilityKind::Framebuffer => capabilities.display = true,
-            CapabilityKind::ProcessControl => capabilities.process_control = true,
-            CapabilityKind::ServiceControl => {}
-        }
-        index += 1;
-    }
-    capabilities
 }
 
 fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint, index: usize) {
