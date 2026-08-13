@@ -17,8 +17,8 @@ fixed, capability-scoped boundaries.
 | User launch transition | `arch` + `scheduler` | selects the task root before restore and provides the fixed-selector `iretq` path for service entry |
 | Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Commands dependencies |
 | Service IPC pages | `service_ipc` + `page_table` | allocates six fixed generation-stamped endpoint pages and maps each only into its producer/consumer processes; producer/consumer peers are trusted, so shared pages are not a hostile-peer isolation boundary |
-| Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE` plus one read-only `FramebufferConfig` page at `DISPLAY_CONFIG_BASE`; no other service or kernel drawing path receives it |
-| Keyboard byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring and maps it only into Input at `INPUT_KEYBOARD_RING_BASE`; PS/2 decoding remains outside the kernel |
+| Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE` plus one read-only `FramebufferConfig` page at `DISPLAY_CONFIG_BASE`; boot rejects modes below the fixed 80×25/8×16 profile; no other service or kernel drawing path receives it |
+| Keyboard byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring with an observable drop counter and maps it only into Input at `INPUT_KEYBOARD_RING_BASE`; PS/2 decoding remains outside the kernel |
 | PS/2 interrupt adapter | `arch` | remaps the legacy PIC, unmasks only IRQ1 after the Input ring is published, and copies port `0x60` bytes into that ring; no key decoding occurs in Core |
 | Font cache | `logos-display` | fixed 8×16 scalar lookup, 1,024-entry cache, and deterministic replacement glyph |
 | Per-CPU state | `arch::CpuLocal` via `GS_BASE` | private scheduler/idle stacks, TSS ring-transition fallback, cursor/current task, ticks, online state |
@@ -75,3 +75,13 @@ The current service graph has no persistence or reboot recovery. Live supervisor
 volatile state and abandons in-flight work. Future durable state must be introduced through a bounded
 proto-filesystem/storage service with explicit ownership, journal, replay, and idempotency proofs;
 services must not invent ad hoc reboot pickup paths before that boundary exists.
+
+## Deferred next-step improvements
+
+The terminal milestone deliberately leaves four broader improvements for later proofs:
+
+- blocking IPC and wait syscalls, once service workloads can replace spin loops without weakening
+  bounded scheduling;
+- hostile-peer IPC isolation, which requires a new data-plane design beyond trusted shared pages;
+- persistence and reboot recovery, which belong behind the storage/journal boundary above; and
+- a generalized service topology, after the fixed five-service graph has stable lifecycle evidence.

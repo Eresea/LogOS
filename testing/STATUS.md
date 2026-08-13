@@ -15,8 +15,9 @@ Status: active preemptive SMP Core milestone.
   Runtime timeout/completion/cancel lifecycle with generation-safe slot reuse, a real completed
   task reclaimed and replaced in the same scheduler slot with stale-handle rejection, the typed
   in-process Runtime command/response lifecycle and mailbox backpressure, and the typed
-  in-process Health Ping command/response and restart/retry path and blocked/wake
-  (cross-CPU for SMP runs).
+  in-process Health Ping command/response and restart/retry path, the loaded ring-3 service graph,
+  framebuffer/keyboard mappings, semantic input, rendering, and supervisor restart, plus
+  blocked/wake (cross-CPU for SMP runs).
 - The local-APIC period is measured against the calibrated TSC on the BSP and each AP before its
   timer is enabled.
 - Non-proof UEFI boot reaches `LogOS vNext: core ready` and remains in the scheduler for 1, 2, and
@@ -24,9 +25,9 @@ Status: active preemptive SMP Core milestone.
 
 ## Deliberate limits
 
-The proof does not claim user mode, AVX/XSAVE, affinity, priorities, wake IPIs, dynamic stacks,
-allocators, Runtime orchestration beyond the first bounded operation table, IPC, capabilities,
-terminal, storage, or networking. AP startup
+The proof does not claim AVX/XSAVE, affinity, priorities, wake IPIs, dynamic stacks, allocators,
+Runtime orchestration beyond the first bounded operation table, hostile-peer IPC isolation, storage,
+or networking. AP startup
 is limited to healthy xAPIC IDs, eight CPUs, fixed low-memory trampoline staging, and current CR3.
 
 `v1_docs/` and reviewed v1 status records are historical reference only.
