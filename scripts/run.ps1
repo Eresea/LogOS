@@ -6,7 +6,9 @@ param(
     [ValidateRange(1, 8)]
     [int]$Cpus = 1,
     [ValidateRange(1, 300)]
-    [int]$TimeoutSeconds = 60
+    [int]$TimeoutSeconds = 60,
+    [ValidateRange(1024, 65535)]
+    [int]$QmpPort = 4444
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,8 +22,6 @@ $log = Join-Path $repoRoot "target\qemu-proof-$Cpus.log"
 $qemu = Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue
 $qemuPath = if ($qemu) { $qemu.Source } else { 'C:\Program Files\qemu\qemu-system-x86_64.exe' }
 $ovmf = if ($env:OVMF_CODE) { $env:OVMF_CODE } else { 'C:\Program Files\qemu\share\edk2-x86_64-code.fd' }
-$qmpPort = 4444
-
 if (-not (Test-Path $qemuPath)) { throw 'Install QEMU or add qemu-system-x86_64 to PATH.' }
 if (-not (Test-Path $ovmf)) { throw 'Set OVMF_CODE to an OVMF firmware file.' }
 
@@ -46,7 +46,7 @@ $qemuArgs = @(
 )
 if ($Proof) {
     Remove-Item $log -Force -ErrorAction SilentlyContinue
-    $qemuArgs += @('-debugcon', "file:$log", '-global', 'isa-debugcon.iobase=0xe9', '-qmp', "tcp:127.0.0.1:$qmpPort,server=on,wait=off")
+    $qemuArgs += @('-debugcon', "file:$log", '-global', 'isa-debugcon.iobase=0xe9', '-qmp', "tcp:127.0.0.1:$QmpPort,server=on,wait=off")
 } else {
     $qemuArgs += @('-debugcon', 'stdio', '-global', 'isa-debugcon.iobase=0xe9')
     if ($interactiveMode) { $qemuArgs = $qemuArgs | Where-Object { $_ -ne '-display' -and $_ -ne 'none' } }
@@ -141,7 +141,7 @@ $proofAfter = Join-Path $repoRoot "target\qemu-proof-after-$Cpus.ppm"
 Remove-Item $proofBefore, $proofAfter -Force -ErrorAction SilentlyContinue
 $qmp = $null
 try {
-    $qmp = Connect-Qmp $qmpPort
+    $qmp = Connect-Qmp $QmpPort
     Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofBefore } } | Out-Null
     foreach ($key in @('e', 'c', 'h', 'o', 'space', 'p', 'r', 'o', 'o', 'f', 'ret')) {
         Invoke-QmpCommand $qmp.Writer $qmp.Reader @{
