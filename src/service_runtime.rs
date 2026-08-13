@@ -114,7 +114,6 @@ impl ServiceRuntime {
         for (index, spec) in SERVICE_IMAGES.iter().enumerate() {
             let service = spec.service();
             let image = unsafe { bundle.image(service) }.ok_or(ServiceRuntimeError::Image)?;
-            self.startup.mark_image(service).map_err(ServiceRuntimeError::Startup)?;
             let plan = spec.validate_image(image).map_err(|_| ServiceRuntimeError::Image)?;
             let loaded =
                 LoadedImage::load(plan, &mut self.frame_pool).map_err(ServiceRuntimeError::Load)?;
@@ -162,8 +161,6 @@ impl ServiceRuntime {
             self.images[index] = loaded;
             self.tables[index].write(tables);
             self.table_ready[index] = true;
-            self.startup.mark_address_space(service).map_err(ServiceRuntimeError::Startup)?;
-            self.startup.mark_process(service).map_err(ServiceRuntimeError::Startup)?;
         }
         let mut memory = IdentityPageTableMemory;
         let graph = ServiceIpcGraph::allocate_with_identity(
@@ -218,9 +215,7 @@ impl ServiceRuntime {
         self.map_keyboard_ring(keyboard_frame)?;
         self.keyboard_frame = Some(keyboard_frame);
         crate::arch::publish_keyboard_ring(keyboard_frame.raw() as usize);
-        for spec in SERVICE_IMAGES {
-            self.startup.mark_launch_ready(spec.service()).map_err(ServiceRuntimeError::Startup)?;
-        }
+        self.startup.mark_launch_ready();
         Ok(())
     }
 

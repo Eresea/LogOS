@@ -4,17 +4,7 @@ use crate::service_images::SERVICE_IMAGES;
 use logos_abi::ServiceId;
 
 const SERVICE_COUNT: usize = SERVICE_IMAGES.len();
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum StartupState {
-    Empty,
-    ImageReady,
-    AddressSpaceReady,
-    ProcessReady,
-    LaunchReady,
-    Started,
-}
+const ALL_SERVICES: u8 = (1 << SERVICE_COUNT) - 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartupError {
@@ -23,63 +13,33 @@ pub enum StartupError {
 }
 
 pub struct ServiceStartup {
-    states: [StartupState; SERVICE_COUNT],
+    started: u8,
+    launch_ready: bool,
 }
 
 impl ServiceStartup {
     pub const fn new() -> Self {
-        Self { states: [StartupState::Empty; SERVICE_COUNT] }
+        Self { started: 0, launch_ready: false }
     }
 
-    pub const fn state(&self, service: ServiceId) -> StartupState {
-        self.states[service.index()]
-    }
-
-    pub fn mark_image(&mut self, service: ServiceId) -> Result<(), StartupError> {
-        self.advance(service, StartupState::ImageReady)
-    }
-
-    pub fn mark_address_space(&mut self, service: ServiceId) -> Result<(), StartupError> {
-        self.advance(service, StartupState::AddressSpaceReady)
-    }
-
-    pub fn mark_process(&mut self, service: ServiceId) -> Result<(), StartupError> {
-        self.advance(service, StartupState::ProcessReady)
-    }
-
-    pub fn mark_launch_ready(&mut self, service: ServiceId) -> Result<(), StartupError> {
-        self.advance(service, StartupState::LaunchReady)
+    pub fn mark_launch_ready(&mut self) {
+        self.launch_ready = true;
     }
 
     pub fn start(&mut self, service: ServiceId) -> Result<(), StartupError> {
-        if self.state(service) != StartupState::LaunchReady {
+        let bit = 1 << service.index();
+        if !self.launch_ready || self.started & bit != 0 {
             return Err(StartupError::InvalidTransition);
         }
-        if !dependencies_started(service, &self.states) {
+        if !dependencies_started(service, self.started) {
             return Err(StartupError::Dependency);
         }
-        self.states[service.index()] = StartupState::Started;
+        self.started |= bit;
         Ok(())
     }
 
     pub fn all_launch_ready(&self) -> bool {
-        let mut index = 0;
-        while index < SERVICE_COUNT {
-            if self.states[index] != StartupState::LaunchReady {
-                return false;
-            }
-            index += 1;
-        }
-        true
-    }
-
-    fn advance(&mut self, service: ServiceId, next: StartupState) -> Result<(), StartupError> {
-        let current = self.state(service) as u8;
-        if next as u8 != current.saturating_add(1) {
-            return Err(StartupError::InvalidTransition);
-        }
-        self.states[service.index()] = next;
-        Ok(())
+        self.launch_ready
     }
 }
 
@@ -89,14 +49,15 @@ impl Default for ServiceStartup {
     }
 }
 
-fn dependencies_started(service: ServiceId, states: &[StartupState; SERVICE_COUNT]) -> bool {
+fn dependencies_started(service: ServiceId, started: u8) -> bool {
     match service {
         ServiceId::Input | ServiceId::Display => true,
         ServiceId::Terminal => {
-            states[0] == StartupState::Started && states[1] == StartupState::Started
+            started & ((1 << ServiceId::Input.index()) | (1 << ServiceId::Display.index()))
+                == ((1 << ServiceId::Input.index()) | (1 << ServiceId::Display.index()))
         }
-        ServiceId::Session => states[2] == StartupState::Started,
-        ServiceId::Commands => states[3] == StartupState::Started,
+        ServiceId::Session => started & (1 << ServiceId::Terminal.index()) != 0,
+        ServiceId::Commands => started & (1 << ServiceId::Session.index()) != 0,
     }
 }
 
@@ -107,36 +68,22 @@ mod tests {
     #[test]
     fn transitions_are_bounded_and_dependency_ordered() {
         let mut startup = ServiceStartup::new();
-        startup.mark_image(ServiceId::Terminal).unwrap();
-        startup.mark_address_space(ServiceId::Terminal).unwrap();
-        startup.mark_process(ServiceId::Terminal).unwrap();
-        startup.mark_launch_ready(ServiceId::Terminal).unwrap();
-        assert_eq!(startup.start(ServiceId::Terminal), Err(StartupError::Dependency));
         assert_eq!(startup.start(ServiceId::Input), Err(StartupError::InvalidTransition));
-        assert!(!startup.all_launch_ready());
+        startup.mark_launch_ready();
+        assert_eq!(startup.start(ServiceId::Terminal), Err(StartupError::Dependency));
+        assert!(startup.all_launch_ready());
     }
 
     #[test]
     fn graph_starts_in_dependency_order() {
         let mut startup = ServiceStartup::new();
-        for service in [
-            ServiceId::Input,
-            ServiceId::Display,
-            ServiceId::Terminal,
-            ServiceId::Session,
-            ServiceId::Commands,
-        ] {
-            startup.mark_image(service).unwrap();
-            startup.mark_address_space(service).unwrap();
-            startup.mark_process(service).unwrap();
-            startup.mark_launch_ready(service).unwrap();
-        }
+        startup.mark_launch_ready();
         assert!(startup.all_launch_ready());
         startup.start(ServiceId::Input).unwrap();
         startup.start(ServiceId::Display).unwrap();
         startup.start(ServiceId::Terminal).unwrap();
         startup.start(ServiceId::Session).unwrap();
         startup.start(ServiceId::Commands).unwrap();
-        assert_eq!(startup.state(ServiceId::Commands), StartupState::Started);
+        assert_eq!(startup.started, ALL_SERVICES);
     }
 }
