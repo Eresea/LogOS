@@ -99,10 +99,6 @@ impl TerminalService {
     pub fn next_render(&mut self) -> Option<RenderMessage> {
         self.terminal.next_render()
     }
-
-    pub const fn terminal(&self) -> &TerminalState<{ DEFAULT_COLUMNS * DEFAULT_ROWS }> {
-        &self.terminal
-    }
 }
 
 impl Default for TerminalService {
@@ -121,14 +117,6 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             dirty: [true; CELL_COUNT],
             parser: Parser::new(),
         }
-    }
-
-    pub const fn columns(&self) -> usize {
-        DEFAULT_COLUMNS
-    }
-
-    pub const fn rows(&self) -> usize {
-        DEFAULT_ROWS
     }
 
     pub const fn cursor(&self) -> (usize, usize) {
