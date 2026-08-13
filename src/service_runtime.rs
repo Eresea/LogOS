@@ -22,6 +22,7 @@ use crate::{
 };
 
 const SERVICE_COUNT: usize = SERVICE_IMAGES.len();
+const MAX_ACTIVE_PAGE_TABLE_FRAMES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceRuntimeError {
@@ -105,7 +106,9 @@ impl ServiceRuntime {
             self.frame_pool
                 .initialize(resources.memory_map())
                 .map_err(|_| ServiceRuntimeError::Resources)?;
-            reserve_active_page_tables(&mut self.frame_pool, crate::arch::current_cr3());
+            if !reserve_active_page_tables(&mut self.frame_pool, crate::arch::current_cr3()) {
+                return Err(ServiceRuntimeError::Resources);
+            }
             self.frame_pool.reserve(FrameAddress::from_raw(0x8000));
             crate::arch::reserve_kernel_frames(&mut self.frame_pool);
             self.frame_pool_ready = true;
@@ -419,6 +422,7 @@ impl ServiceRuntime {
         crate::arch::prepare_task_address_space(0);
         let result = crate::arch::restart_critical_section(|| {
             crate::arch_proof_line(b"LogOS vNext: service tasks quiesced");
+            crate::arch::disable_keyboard_irq();
             self.reclaim_resources()?;
             crate::arch_proof_line(b"LogOS vNext: service resources reclaimed");
             self.start(bundle)?;
@@ -440,7 +444,11 @@ impl ServiceRuntime {
             if !stale_rejected {
                 return Err(ServiceRuntimeError::StaleGeneration);
             }
-            self.start_tasks()
+            let result = self.start_tasks();
+            if result.is_ok() {
+                crate::arch::enable_keyboard_irq();
+            }
+            result
         });
         if result.is_ok() {
             crate::arch_proof_line(b"LogOS vNext: service restart complete");
@@ -548,12 +556,12 @@ fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint, index: usize) 
     }
 }
 
-fn reserve_active_page_tables(pool: &mut FramePool, root: usize) {
+fn reserve_active_page_tables(pool: &mut FramePool, root: usize) -> bool {
     const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
     const PRESENT: u64 = 1;
     const HUGE: u64 = 1 << 7;
-    let mut frames = [0u64; 256];
-    let mut levels = [0u8; 256];
+    let mut frames = [0u64; MAX_ACTIVE_PAGE_TABLE_FRAMES];
+    let mut levels = [0u8; MAX_ACTIVE_PAGE_TABLE_FRAMES];
     let mut count = 1;
     frames[0] = (root as u64) & ADDRESS_MASK;
     levels[0] = 4;
@@ -574,13 +582,14 @@ fn reserve_active_page_tables(pool: &mut FramePool, root: usize) {
                 continue;
             }
             if count == frames.len() {
-                return;
+                return false;
             }
             frames[count] = entry & ADDRESS_MASK;
             levels[count] = level - 1;
             count += 1;
         }
     }
+    true
 }
 
 fn initialize_framebuffer_config(

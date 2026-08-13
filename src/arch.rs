@@ -74,6 +74,8 @@ static mut SERVICE_RUNTIME: crate::service_runtime::ServiceRuntime =
     crate::service_runtime::ServiceRuntime::new();
 static KERNEL_CR3: AtomicUsize = AtomicUsize::new(0);
 static KEYBOARD_RING: AtomicUsize = AtomicUsize::new(0);
+static KEYBOARD_IRQ_ENABLED: AtomicBool = AtomicBool::new(false);
+static KEYBOARD_IRQ_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -742,6 +744,18 @@ pub(crate) fn publish_keyboard_ring(address: usize) {
     KEYBOARD_RING.store(address, Ordering::Release);
 }
 
+pub(crate) fn disable_keyboard_irq() {
+    KEYBOARD_IRQ_ENABLED.store(false, Ordering::Release);
+    unsafe {
+        let mask = in_port(PIC_MASTER_DATA);
+        out_port(PIC_MASTER_DATA, mask | (1 << 1));
+    }
+    while KEYBOARD_IRQ_IN_FLIGHT.load(Ordering::Acquire) != 0 {
+        core::hint::spin_loop();
+    }
+    KEYBOARD_RING.store(0, Ordering::Release);
+}
+
 pub(crate) fn supervise_services() -> bool {
     unsafe {
         let Some(images) = (*core::ptr::addr_of!(SERVICE_IMAGES)).as_ref() else {
@@ -1024,7 +1038,8 @@ fn configure_pic() {
     }
 }
 
-fn enable_keyboard_irq() {
+pub(crate) fn enable_keyboard_irq() {
+    KEYBOARD_IRQ_ENABLED.store(true, Ordering::Release);
     unsafe {
         let mask = in_port(PIC_MASTER_DATA);
         out_port(PIC_MASTER_DATA, mask & !(1 << 1));
@@ -1032,13 +1047,17 @@ fn enable_keyboard_irq() {
 }
 
 pub(super) fn handle_keyboard_interrupt() {
+    KEYBOARD_IRQ_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
     let byte = unsafe { in_port(KEYBOARD_DATA_PORT) };
-    let ring = KEYBOARD_RING.load(Ordering::Acquire);
-    if ring != 0 {
-        // The frame is identity-mapped in the kernel root and is mapped into
-        // Input separately by the service runtime.
-        let _ = unsafe { (&*(ring as *const logos_abi::KeyboardByteRing)).push(byte) };
+    if KEYBOARD_IRQ_ENABLED.load(Ordering::Acquire) {
+        let ring = KEYBOARD_RING.load(Ordering::Acquire);
+        if ring != 0 {
+            // The frame is identity-mapped in the kernel root and is mapped into
+            // Input separately by the service runtime.
+            let _ = unsafe { (&*(ring as *const logos_abi::KeyboardByteRing)).push(byte) };
+        }
     }
+    KEYBOARD_IRQ_IN_FLIGHT.fetch_sub(1, Ordering::Release);
     unsafe {
         out_port(PIC_MASTER_COMMAND, PIC_EOI);
     }
