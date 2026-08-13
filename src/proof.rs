@@ -27,6 +27,7 @@ static HEALTH_RETRY_COMPLETED: AtomicBool = AtomicBool::new(false);
 static PASSED: AtomicBool = AtomicBool::new(false);
 static REPORTED: AtomicBool = AtomicBool::new(false);
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
+static LIVE_SERVICE_RESTARTED: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" {
     fn proof_task_a();
@@ -45,6 +46,22 @@ pub fn initialize(cpu_count: usize) {
     let completion = SCHEDULER.spawn(completion_task).expect("proof task capacity");
     COMPLETION_HANDLE.store(completion.raw(), Ordering::Release);
     SCHEDULER.spawn(reclaimer_task).expect("proof task capacity");
+}
+
+pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
+    for (address, bytes) in [
+        (core::ptr::addr_of!(A_PROGRESS) as usize, core::mem::size_of::<AtomicU64>()),
+        (core::ptr::addr_of!(B_PROGRESS) as usize, core::mem::size_of::<AtomicU64>()),
+        (core::ptr::addr_of!(BLOCK_HANDLE) as usize, core::mem::size_of::<AtomicU64>()),
+        (core::ptr::addr_of!(BLOCK_CPU) as usize, core::mem::size_of::<AtomicUsize>()),
+        (core::ptr::addr_of!(WAKE_CPU) as usize, core::mem::size_of::<AtomicUsize>()),
+        (core::ptr::addr_of!(BLOCK_STARTED) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(BLOCK_RESUMED) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(WAKE_DONE) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(HANDOFF_STARTED) as usize, core::mem::size_of::<AtomicBool>()),
+    ] {
+        crate::arch::reserve_storage_frames(pool, address, bytes);
+    }
 }
 
 pub fn handoff_started() {
@@ -83,6 +100,10 @@ pub fn health_retry_completed() {
     HEALTH_RETRY_COMPLETED.store(true, Ordering::Release);
 }
 
+pub fn live_service_restarted() {
+    LIVE_SERVICE_RESTARTED.store(true, Ordering::Release);
+}
+
 pub fn observe(cpu: usize) {
     if PASSED.load(Ordering::Acquire) {
         if cpu == 0 && !REPORTED.swap(true, Ordering::AcqRel) {
@@ -96,7 +117,7 @@ pub fn observe(cpu: usize) {
     let switches = (0..cpu_count).map(|index| SCHEDULER.switches(index).unwrap_or(0)).sum::<u64>();
     let wake_cpus_differ =
         cpu_count == 1 || BLOCK_CPU.load(Ordering::Acquire) != WAKE_CPU.load(Ordering::Acquire);
-    if timers
+    let conditions_met = timers
         && progress
         && switches > 20
         && HANDOFF_STARTED.load(Ordering::Acquire)
@@ -112,10 +133,13 @@ pub fn observe(cpu: usize) {
         && HEALTH_RESTARTED.load(Ordering::Acquire)
         && HEALTH_LATE_COMPLETION_REJECTED.load(Ordering::Acquire)
         && HEALTH_RETRY_COMPLETED.load(Ordering::Acquire)
+        && LIVE_SERVICE_RESTARTED.load(Ordering::Acquire)
+        && crate::user_mode::syscalls() > 0
+        && crate::user_mode::fault_observed()
         && BLOCK_RESUMED.load(Ordering::Acquire)
         && WAKE_DONE.load(Ordering::Acquire)
-        && wake_cpus_differ
-    {
+        && wake_cpus_differ;
+    if conditions_met {
         PASSED.store(true, Ordering::Release);
         if cpu == 0 && !REPORTED.swap(true, Ordering::AcqRel) {
             crate::arch_proof_line(b"LogOS vNext: QEMU proof PASS");

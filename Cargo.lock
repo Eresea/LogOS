@@ -27,9 +27,61 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "logos-abi"
+version = "0.1.0"
+
+[[package]]
+name = "logos-commands"
+version = "0.1.0"
+
+[[package]]
+name = "logos-display"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
+name = "logos-input"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+ "logos-commands",
+ "logos-session",
+ "logos-terminal",
+]
+
+[[package]]
+name = "logos-service-images"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+ "logos-commands",
+ "logos-display",
+ "logos-input",
+ "logos-session",
+ "logos-terminal",
+]
+
+[[package]]
+name = "logos-session"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
+name = "logos-terminal"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
 name = "logos-vnext"
 version = "0.1.0"
 dependencies = [
+ "logos-abi",
  "uefi",
 ]
 

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('all', 'host', 'uefi')]
+    [ValidateSet('all', 'host', 'uefi', 'services')]
     [string]$Stage = 'all',
     [switch]$Release
 )
@@ -28,4 +28,10 @@ if ($Stage -in @('all', 'uefi')) {
 
     Write-Host '== UEFI proof build =='
     cargo build --features qemu-proof --target x86_64-unknown-uefi
+}
+
+if ($Stage -in @('all', 'services')) {
+    Write-Host '== service ELF images =='
+    .\scripts\build-services.ps1 -Release
+    cargo clippy --target x86_64-unknown-none -p logos-service-images --bins -- -D warnings
 }

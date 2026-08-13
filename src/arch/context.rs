@@ -10,6 +10,31 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
     if HALTED.load(Ordering::Acquire) {
         fatal(b"LogOS vNext: halted");
     }
+    let current = SCHEDULER.current_task(cpu);
+    let user_fault = if matches!(vector, 6 | 13 | 14) {
+        let Some(handle) = current else {
+            fatal(b"LogOS vNext: fault without task");
+        };
+        if !crate::user_mode::faulted(handle, vector) {
+            fatal(b"LogOS vNext: kernel fault");
+        }
+        true
+    } else {
+        false
+    };
+    let mut user_fault = user_fault;
+    if vector == usize::from(SWITCH_VECTOR) {
+        if let Some(handle) = current {
+            if crate::user_mode::is_user_task(handle)
+                && !crate::user_mode::dispatch_syscall(handle, fx_context)
+            {
+                if !crate::user_mode::syscall_faulted(handle) {
+                    fatal(b"LogOS vNext: syscall fault");
+                }
+                user_fault = true;
+            }
+        }
+    }
     if vector == usize::from(TIMER_VECTOR) {
         if cpu == 0 {
             let now = TIMER_TICKS.fetch_add(1, Ordering::AcqRel) + 1;
@@ -20,13 +45,18 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         #[cfg(feature = "qemu-proof")]
         crate::proof::observe(cpu);
     }
+    if vector == usize::from(KEYBOARD_VECTOR) {
+        handle_keyboard_interrupt();
+    }
     let local = unsafe { &*core::ptr::addr_of_mut!(CPU_LOCALS).cast::<CpuLocal>().add(cpu) };
     unsafe { write_apic(APIC_EOI, 0) };
-    if let Some(current) = SCHEDULER.current_task(cpu) {
+    if let Some(current) = current {
         if !SCHEDULER.save_context(current, fx_context) {
             fatal(b"LogOS vNext: context save");
         }
-        let outcome = if vector == usize::from(TIMER_VECTOR) {
+        let outcome = if user_fault {
+            crate::FinishState::Completed
+        } else if vector == usize::from(TIMER_VECTOR) {
             crate::FinishState::Runnable
         } else {
             match local.pending_action.swap(0, Ordering::AcqRel) {
@@ -49,6 +79,11 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         local.current_generation.store(0, Ordering::Release);
     }
     let Some(next) = SCHEDULER.claim_next(cpu) else {
+        #[cfg(feature = "qemu-proof")]
+        crate::user_mode::prepare_kernel();
+        set_task_kernel_stack(cpu, unsafe {
+            (*core::ptr::addr_of!(CPU_LOCALS).cast::<CpuLocal>().add(cpu)).user_entry_stack_top
+        } as usize);
         return local.idle_context.load(Ordering::Acquire);
     };
     local.current_slot.store(next.slot(), Ordering::Release);
@@ -58,6 +93,13 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
     if SCHEDULER.saved_context(next).is_none() {
         initialize_task_context(next);
     }
+    let Some(stack_top) = SCHEDULER.task_stack_top(next) else {
+        fatal(b"LogOS vNext: TSS task stack");
+    };
+    set_task_kernel_stack(cpu, stack_top);
+    SCHEDULER.normalize_kernel_task(next);
+    let next_root = SCHEDULER.address_space(next).unwrap_or(0);
+    crate::arch::prepare_task_address_space(next_root);
     SCHEDULER.saved_context(next).unwrap_or_else(|| fatal(b"LogOS vNext: no context"))
 }
 
@@ -87,7 +129,10 @@ fn initialize_task_context(handle: crate::TaskHandle) {
             (gpr + VECTOR_OFFSET + 8) as *mut usize,
             task_bootstrap as *const () as usize,
         );
-        core::ptr::write_unaligned((gpr + VECTOR_OFFSET + 16) as *mut usize, 0x08);
+        core::ptr::write_unaligned(
+            (gpr + VECTOR_OFFSET + 16) as *mut usize,
+            KERNEL_CODE_SELECTOR as usize,
+        );
         core::ptr::write_unaligned((gpr + VECTOR_OFFSET + 24) as *mut usize, 0x202);
         // The save area is in push order (r15 first, rax last on restore).
         core::ptr::write_unaligned(gpr as *mut usize, top);
@@ -95,6 +140,7 @@ fn initialize_task_context(handle: crate::TaskHandle) {
     if !SCHEDULER.set_initial_context(handle, fx) {
         fatal(b"LogOS vNext: initial context");
     }
+    SCHEDULER.normalize_kernel_task(handle);
 }
 
 #[unsafe(no_mangle)]
@@ -256,9 +302,30 @@ global_asm!(
     "context_timer_interrupt:",
     "push 32",
     "jmp context_common",
+    ".global keyboard_interrupt",
+    "keyboard_interrupt:",
+    "push 33",
+    "jmp context_common",
     ".global context_switch_interrupt",
     "context_switch_interrupt:",
     "push 49",
+    "jmp context_common",
+    ".global user_fault_no_error",
+    "user_fault_no_error:",
+    "push 6",
+    "jmp context_common",
+    ".global user_gp_fault_error",
+    "user_gp_fault_error:",
+    "mov r12, [rsp]",
+    "add rsp, 8",
+    "push 13",
+    "jmp context_common",
+    ".global user_pf_fault_error",
+    "user_pf_fault_error:",
+    "mov r12, [rsp]",
+    "add rsp, 8",
+    "push 14",
+    "jmp context_common",
     "context_common:",
     "push rax",
     "push rcx",

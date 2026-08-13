@@ -9,8 +9,11 @@ use crate::{
 use crate::proof;
 
 pub(crate) fn run() {
+    crate::start_services();
     #[cfg(feature = "qemu-proof")]
     proof::handoff_started();
+    #[cfg(feature = "qemu-proof")]
+    crate::suppress_service_heartbeat(logos_abi::ServiceId::Terminal);
 
     let mut runtime = Runtime::new();
     if runtime.submit(RuntimeCommand::Submit).is_err() {
@@ -133,6 +136,10 @@ pub(crate) fn run() {
     }
 
     loop {
+        if crate::supervise_services() {
+            #[cfg(feature = "qemu-proof")]
+            proof::live_service_restarted();
+        }
         sleep_current_for(3);
         #[cfg(feature = "qemu-proof")]
         proof::runtime_wait_resumed();

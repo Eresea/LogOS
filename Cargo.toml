@@ -5,11 +5,24 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 
+[workspace]
+members = [
+    "abi",
+    "services/commands",
+    "services/display",
+    "services/input",
+    "services/session",
+    "services/terminal",
+    "services/images",
+]
+resolver = "3"
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
 
 [dependencies]
 uefi = { version = "0.35" }
+logos-abi = { path = "abi" }
 
 [features]
 default = []

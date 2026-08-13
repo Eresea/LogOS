@@ -3,17 +3,33 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod boot_resources;
+pub mod frame_pool;
+pub mod loader;
+pub mod page_table;
+pub mod process;
 mod scheduler;
+pub mod supervisor;
 pub use scheduler::{
-    FinishState, IDLE_STACK_SIZE, MAX_CPUS, MAX_TASKS, SCHEDULER, SCHEDULER_STACK_SIZE, Scheduler,
-    SpawnError, TASK_STACK_SIZE, TaskEntry, TaskHandle, TaskState,
+    FinishState, IDLE_STACK_SIZE, MAX_CPUS, MAX_TASKS, SCHEDULER, SCHEDULER_STACK_SIZE,
+    ScheduledUserLaunch, Scheduler, SpawnError, TASK_STACK_SIZE, TaskEntry, TaskHandle, TaskState,
 };
 pub mod health;
 pub mod runtime;
+pub mod service_images;
+pub mod service_ipc;
 pub mod service_lifecycle;
+pub mod service_loader;
+#[cfg(target_os = "uefi")]
+mod service_runtime;
+pub mod service_startup;
 
 #[cfg(target_os = "uefi")]
 mod runtime_entry;
+
+#[cfg(target_os = "uefi")]
+#[allow(dead_code)]
+mod user_mode;
 
 #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
 mod proof;
@@ -39,6 +55,22 @@ pub fn boot() -> uefi::prelude::Status {
 #[cfg(target_os = "uefi")]
 pub fn yield_current() {
     arch::yield_current()
+}
+
+#[cfg(target_os = "uefi")]
+pub(crate) fn start_services() {
+    arch::start_services()
+}
+
+#[cfg(target_os = "uefi")]
+pub(crate) fn supervise_services() -> bool {
+    arch::supervise_services()
+}
+
+#[cfg(target_os = "uefi")]
+#[cfg(feature = "qemu-proof")]
+pub(crate) fn suppress_service_heartbeat(service: logos_abi::ServiceId) {
+    arch::suppress_service_heartbeat(service)
 }
 
 #[cfg(target_os = "uefi")]

@@ -3,9 +3,21 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
-use uefi::{boot, prelude::*, proto::pi::mp::MpServices};
+use uefi::{
+    boot,
+    mem::memory_map::MemoryMap as UefiMemoryMap,
+    prelude::*,
+    proto::{
+        console::gop::{GraphicsOutput, PixelFormat as UefiPixelFormat},
+        pi::mp::MpServices,
+    },
+};
 
-use crate::{MAX_CPUS, SCHEDULER};
+use crate::{
+    MAX_CPUS, SCHEDULER,
+    boot_resources::{BootResources, FramebufferInfo, MemoryDescriptor, MemoryMap, PixelFormat},
+    service_loader::ServiceImageBundle,
+};
 
 const DEBUG_PORT: u16 = 0xe9;
 const APIC_BASE_MSR: u32 = 0x1b;
@@ -18,7 +30,14 @@ const APIC_TIMER_CURRENT: usize = 0x390;
 const APIC_TIMER_DIVIDE: usize = 0x3e0;
 const APIC_ICR_LOW: usize = 0x300;
 const APIC_ICR_HIGH: usize = 0x310;
+const PIC_MASTER_COMMAND: u16 = 0x20;
+const PIC_MASTER_DATA: u16 = 0x21;
+const PIC_SLAVE_COMMAND: u16 = 0xa0;
+const PIC_SLAVE_DATA: u16 = 0xa1;
+const PIC_EOI: u8 = 0x20;
+const KEYBOARD_DATA_PORT: u16 = 0x60;
 const TIMER_VECTOR: u8 = 32;
+const KEYBOARD_VECTOR: u8 = 33;
 const SWITCH_VECTOR: u8 = 49;
 const ACTION_YIELD: u64 = 1;
 const ACTION_BLOCK: u64 = 2;
@@ -29,10 +48,16 @@ const FX_CONTEXT_POINTER: usize = FX_STATE_SIZE;
 const GPR_WORDS: usize = 15;
 const VECTOR_OFFSET: usize = GPR_WORDS * 8;
 const IDT_ENTRIES: usize = 256;
+const USER_ENTRY_STACK_SIZE: usize = 16 * 1024;
+const KERNEL_CODE_SELECTOR: u16 = 0x08;
+const KERNEL_DATA_SELECTOR: u16 = 0x10;
+pub(crate) const USER_CODE_SELECTOR: u16 = 0x1b;
+pub(crate) const USER_DATA_SELECTOR: u16 = 0x23;
+const TSS_SELECTOR: u16 = 0x28;
 
-// Core tasks are ring-0 only: the hardware return frame carries RIP, CS, and
-// RFLAGS, while the flat kernel SS is implicit. The saved RSP is the canonical
-// frame pointer itself; no user-mode stack-segment frame is synthesized.
+// Core tasks normally run in ring 0. A bounded proof task may enter ring 3;
+// its active scheduler stack is also its TSS ring-transition stack so the
+// saved interrupt frame remains private to that task.
 
 static APIC: AtomicUsize = AtomicUsize::new(0);
 static TSC_PER_US: AtomicU64 = AtomicU64::new(1);
@@ -42,6 +67,13 @@ static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
 static APIC_TIMER_COUNT: AtomicU32 = AtomicU32::new(10_000_000);
 static APIC_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 static TRAMPOLINE_PAGE: AtomicUsize = AtomicUsize::new(0);
+static mut BOOT_RESOURCES: Option<BootResources> = None;
+static mut SERVICE_IMAGES: Option<ServiceImageBundle> = None;
+#[cfg(target_os = "uefi")]
+static mut SERVICE_RUNTIME: crate::service_runtime::ServiceRuntime =
+    crate::service_runtime::ServiceRuntime::new();
+static KERNEL_CR3: AtomicUsize = AtomicUsize::new(0);
+static KEYBOARD_RING: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -91,10 +123,39 @@ struct GdtPointer {
     base: u64,
 }
 
-static GDT: [u64; 3] = [0, 0x00af_9a00_0000_ffff, 0x00af_9200_0000_ffff];
-static mut CPU_GDTS: [[u64; 3]; MAX_CPUS] = [[0; 3]; MAX_CPUS];
+static GDT: [u64; 5] =
+    [0, 0x00af_9a00_0000_ffff, 0x00cf_9200_0000_ffff, 0x00af_fa00_0000_ffff, 0x00cf_f200_0000_ffff];
+static mut CPU_GDTS: [[u64; 7]; MAX_CPUS] = [[0; 7]; MAX_CPUS];
 static mut CPU_IDTS: [[IdtEntry; IDT_ENTRIES]; MAX_CPUS] =
     [[IdtEntry::MISSING; IDT_ENTRIES]; MAX_CPUS];
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct TaskStateSegment {
+    reserved: u32,
+    rsp: [u64; 3],
+    reserved_2: u64,
+    ist: [u64; 7],
+    reserved_3: u64,
+    reserved_4: u16,
+    iomap_base: u16,
+}
+
+impl TaskStateSegment {
+    const fn new() -> Self {
+        Self {
+            reserved: 0,
+            rsp: [0; 3],
+            reserved_2: 0,
+            ist: [0; 7],
+            reserved_3: 0,
+            reserved_4: 0,
+            iomap_base: core::mem::size_of::<Self>() as u16,
+        }
+    }
+}
+
+static mut CPU_TSS: [TaskStateSegment; MAX_CPUS] = [const { TaskStateSegment::new() }; MAX_CPUS];
 
 #[repr(C, align(16))]
 struct CpuStack<const N: usize>([u8; N]);
@@ -115,8 +176,10 @@ struct CpuLocal {
     current_generation: AtomicU64,
     tick_count: AtomicU64,
     switch_count: AtomicU64,
+    user_entry_stack_top: u64,
     scheduler_stack: CpuStack<{ crate::SCHEDULER_STACK_SIZE }>,
     idle_stack: CpuStack<{ crate::IDLE_STACK_SIZE }>,
+    user_entry_stack: CpuStack<USER_ENTRY_STACK_SIZE>,
 }
 
 impl CpuLocal {
@@ -134,8 +197,10 @@ impl CpuLocal {
             current_generation: AtomicU64::new(0),
             tick_count: AtomicU64::new(0),
             switch_count: AtomicU64::new(0),
+            user_entry_stack_top: 0,
             scheduler_stack: CpuStack([0; crate::SCHEDULER_STACK_SIZE]),
             idle_stack: CpuStack([0; crate::IDLE_STACK_SIZE]),
+            user_entry_stack: CpuStack([0; USER_ENTRY_STACK_SIZE]),
         }
     }
 
@@ -144,6 +209,7 @@ impl CpuLocal {
         self.cpu_index = index as u64;
         self.scheduler_stack_top = self.scheduler_stack.0.as_ptr_range().end as u64;
         self.idle_stack_top = self.idle_stack.0.as_ptr_range().end as u64;
+        self.user_entry_stack_top = self.user_entry_stack.0.as_ptr_range().end as u64;
     }
 }
 
@@ -155,11 +221,226 @@ pub fn boot() -> Status {
     measure_tsc();
     stage_trampoline();
     install_cpu(0);
-    let _memory_map = unsafe { boot::exit_boot_services(None) };
+    let framebuffer = capture_gop();
+    let service_images = match crate::service_loader::load_from_esp() {
+        Ok(images) => images,
+        Err(crate::service_loader::UefiImageError::Firmware(_)) => {
+            fatal(b"LogOS vNext: service filesystem")
+        }
+        Err(crate::service_loader::UefiImageError::Path) => fatal(b"LogOS vNext: service path"),
+        Err(crate::service_loader::UefiImageError::NotRegularFile) => {
+            fatal(b"LogOS vNext: service file type")
+        }
+        Err(crate::service_loader::UefiImageError::Service(error)) => match error {
+            crate::service_loader::ServiceLoadError::Empty => fatal(b"LogOS vNext: service empty"),
+            crate::service_loader::ServiceLoadError::TooLarge => {
+                fatal(b"LogOS vNext: service size")
+            }
+            crate::service_loader::ServiceLoadError::InvalidElf(_) => {
+                fatal(b"LogOS vNext: service ELF")
+            }
+            crate::service_loader::ServiceLoadError::InvalidAddress
+            | crate::service_loader::ServiceLoadError::Duplicate => {
+                fatal(b"LogOS vNext: service record")
+            }
+        },
+    };
+    proof_line(b"LogOS vNext: service images ready");
+    let memory_map = unsafe { boot::exit_boot_services(None) };
+    publish_boot_resources(memory_map, framebuffer);
+    unsafe {
+        SERVICE_IMAGES = Some(service_images);
+        let images = (*core::ptr::addr_of!(SERVICE_IMAGES))
+            .as_ref()
+            .unwrap_or_else(|| fatal(b"LogOS vNext: service image state"));
+        (*core::ptr::addr_of_mut!(SERVICE_RUNTIME)).start(images).unwrap_or_else(
+            |error| match error {
+                crate::service_runtime::ServiceRuntimeError::Resources => {
+                    fatal(b"LogOS vNext: service resources")
+                }
+                crate::service_runtime::ServiceRuntimeError::Image => {
+                    fatal(b"LogOS vNext: service image state")
+                }
+                crate::service_runtime::ServiceRuntimeError::Load(_) => {
+                    fatal(b"LogOS vNext: service image pages")
+                }
+                crate::service_runtime::ServiceRuntimeError::Populate(_) => {
+                    fatal(b"LogOS vNext: service page population")
+                }
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::Capacity,
+                ) => fatal(b"LogOS vNext: service table capacity"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::Exhausted,
+                ) => fatal(b"LogOS vNext: service table frames"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::Memory,
+                ) => fatal(b"LogOS vNext: service table memory"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::InvalidMapping,
+                ) => fatal(b"LogOS vNext: service table mapping"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::InvalidVirtualAddress,
+                ) => fatal(b"LogOS vNext: service table VA"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::InvalidFrame,
+                ) => fatal(b"LogOS vNext: service table frame"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::InvalidFlags,
+                ) => fatal(b"LogOS vNext: service table flags"),
+                crate::service_runtime::ServiceRuntimeError::PageTableRoot(
+                    crate::page_table::PageTableError::Conflict,
+                ) => fatal(b"LogOS vNext: service table conflict"),
+                crate::service_runtime::ServiceRuntimeError::PageTableMap(_) => {
+                    fatal(b"LogOS vNext: service table map")
+                }
+                crate::service_runtime::ServiceRuntimeError::Process(_) => {
+                    fatal(b"LogOS vNext: service process")
+                }
+                crate::service_runtime::ServiceRuntimeError::Startup(_) => {
+                    fatal(b"LogOS vNext: service startup")
+                }
+                crate::service_runtime::ServiceRuntimeError::Ipc(_) => {
+                    fatal(b"LogOS vNext: service IPC pages")
+                }
+                crate::service_runtime::ServiceRuntimeError::IpcMapping(_) => {
+                    fatal(b"LogOS vNext: service IPC mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::IpcProcess(_) => {
+                    fatal(b"LogOS vNext: service IPC process")
+                }
+                crate::service_runtime::ServiceRuntimeError::Framebuffer(_) => {
+                    fatal(b"LogOS vNext: framebuffer mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::FramebufferProcess(_) => {
+                    fatal(b"LogOS vNext: framebuffer process mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::FramebufferConfig(_) => {
+                    fatal(b"LogOS vNext: framebuffer config mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::FramebufferConfigProcess(_) => {
+                    fatal(b"LogOS vNext: framebuffer config process mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::Keyboard(_) => {
+                    fatal(b"LogOS vNext: keyboard mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::KeyboardProcess(_) => {
+                    fatal(b"LogOS vNext: keyboard process mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::TaskCapacity => {
+                    fatal(b"LogOS vNext: service task capacity")
+                }
+                crate::service_runtime::ServiceRuntimeError::TaskAddressSpace => {
+                    fatal(b"LogOS vNext: service task address space")
+                }
+                crate::service_runtime::ServiceRuntimeError::TaskLaunch => {
+                    fatal(b"LogOS vNext: service task launch")
+                }
+                crate::service_runtime::ServiceRuntimeError::TaskStop => {
+                    fatal(b"LogOS vNext: service task stop")
+                }
+                crate::service_runtime::ServiceRuntimeError::RestartLimit => {
+                    fatal(b"LogOS vNext: service restart limit")
+                }
+                crate::service_runtime::ServiceRuntimeError::StaleGeneration => {
+                    fatal(b"LogOS vNext: service stale generation")
+                }
+            },
+        );
+        let runtime = &*core::ptr::addr_of!(SERVICE_RUNTIME);
+        for spec in crate::service_images::SERVICE_IMAGES {
+            if runtime.image(spec.service()).is_none()
+                || runtime.root(spec.service()).is_none()
+                || runtime.launch(spec.service()).is_none()
+            {
+                fatal(b"LogOS vNext: service root state");
+            }
+        }
+        if !runtime.all_launch_ready() {
+            fatal(b"LogOS vNext: service launch barrier");
+        }
+    }
+    proof_line(b"LogOS vNext: service address spaces ready");
     initialize_post_uefi(cpu_count);
     handoff_to_runtime();
     debug_line(b"LogOS vNext: core ready");
     enter_scheduler(0)
+}
+
+fn capture_gop() -> FramebufferInfo {
+    let handle = boot::get_handle_for_protocol::<GraphicsOutput>()
+        .unwrap_or_else(|_| fatal(b"LogOS vNext: GOP unavailable"));
+    let mut gop = boot::open_protocol_exclusive::<GraphicsOutput>(handle)
+        .unwrap_or_else(|_| fatal(b"LogOS vNext: GOP open"));
+    let mut selected: Option<(usize, uefi::proto::console::gop::Mode, PixelFormat)> = None;
+    for mode in gop.modes() {
+        let info = mode.info();
+        let (width, height) = info.resolution();
+        if width < logos_abi::MIN_FRAMEBUFFER_WIDTH || height < logos_abi::MIN_FRAMEBUFFER_HEIGHT {
+            continue;
+        }
+        let format = match info.pixel_format() {
+            UefiPixelFormat::Rgb => PixelFormat::Rgb8,
+            UefiPixelFormat::Bgr => PixelFormat::Bgr8,
+            UefiPixelFormat::Bitmask | UefiPixelFormat::BltOnly => continue,
+        };
+        let Some(bytes) = (height as u64)
+            .checked_mul(info.stride() as u64)
+            .and_then(|pixels| pixels.checked_mul(4))
+        else {
+            continue;
+        };
+        if bytes > logos_abi::MAX_FRAMEBUFFER_BYTES as u64 {
+            continue;
+        }
+        let candidate = (width.saturating_mul(height), mode, format);
+        if selected.as_ref().is_none_or(|current| candidate.0 > current.0) {
+            selected = Some(candidate);
+        }
+    }
+    let Some((_, mode, format)) = selected else { fatal(b"LogOS vNext: GOP mode capacity") };
+    gop.set_mode(&mode).unwrap_or_else(|_| fatal(b"LogOS vNext: GOP mode"));
+    let info = gop.current_mode_info();
+    let (width, height) = info.resolution();
+    let mut framebuffer = gop.frame_buffer();
+    FramebufferInfo::new(
+        framebuffer.as_mut_ptr() as u64,
+        framebuffer.size() as u64,
+        width as u32,
+        height as u32,
+        info.stride() as u32,
+        format,
+    )
+    .unwrap_or_else(|| fatal(b"LogOS vNext: GOP metadata"))
+}
+
+fn publish_boot_resources(memory_map: impl UefiMemoryMap, framebuffer: FramebufferInfo) {
+    let mut copied = MemoryMap::new();
+    for descriptor in memory_map.entries() {
+        let entry = MemoryDescriptor::new(
+            descriptor.phys_start,
+            descriptor.page_count,
+            descriptor.ty == uefi::mem::memory_map::MemoryType::CONVENTIONAL,
+        )
+        .unwrap_or_else(|| fatal(b"LogOS vNext: memory map"));
+        copied.push(entry).unwrap_or_else(|_| fatal(b"LogOS vNext: memory map capacity"));
+    }
+    let mut resources = BootResources::new(copied, crate::boot_resources::KeyboardResource::PS2);
+    resources.publish_framebuffer(framebuffer);
+    unsafe {
+        BOOT_RESOURCES = Some(resources);
+    }
+    proof_line(b"LogOS vNext: boot resources ready");
+}
+
+#[allow(dead_code)]
+pub(crate) fn boot_resources() -> Option<BootResources> {
+    unsafe { BOOT_RESOURCES }
+}
+
+#[allow(dead_code)]
+pub(crate) fn service_images() -> Option<&'static ServiceImageBundle> {
+    unsafe { (*core::ptr::addr_of!(SERVICE_IMAGES)).as_ref() }
 }
 
 fn handoff_to_runtime() {
@@ -316,19 +597,211 @@ fn install_cpu(index: usize) {
     }
 }
 
-fn current_cr3() -> usize {
+pub(crate) fn current_cr3() -> usize {
     let value: usize;
     unsafe { asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags)) };
     value
 }
 
+pub(crate) fn reserve_kernel_frames(pool: &mut crate::frame_pool::FramePool) {
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(crate::SCHEDULER) as usize,
+        core::mem::size_of::<crate::Scheduler>(),
+    );
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(CPU_LOCALS) as usize,
+        core::mem::size_of::<[CpuLocal; MAX_CPUS]>(),
+    );
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(SERVICE_RUNTIME) as usize,
+        core::mem::size_of::<crate::service_runtime::ServiceRuntime>(),
+    );
+    #[cfg(feature = "qemu-proof")]
+    {
+        crate::user_mode::reserve_frames(pool);
+        crate::proof::reserve_frames(pool);
+    }
+}
+
+pub(crate) fn reserve_storage_frames(
+    pool: &mut crate::frame_pool::FramePool,
+    address: usize,
+    bytes: usize,
+) {
+    let start = address & !0xfff;
+    let Some(end) = address.checked_add(bytes).and_then(|end| end.checked_add(0xfff)) else {
+        return;
+    };
+    let root = current_cr3() as u64 & 0x000f_ffff_ffff_f000;
+    for virtual_address in (start..end & !0xfff).step_by(0x1000) {
+        if let Some(frame) = translate_kernel_page(root, virtual_address as u64) {
+            pool.reserve(crate::frame_pool::FrameAddress::from_raw(frame));
+        }
+    }
+}
+
+fn translate_kernel_page(root: u64, virtual_address: u64) -> Option<u64> {
+    const PRESENT: u64 = 1;
+    const HUGE: u64 = 1 << 7;
+    const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+    let pml4 = root;
+    let pml4_entry = unsafe {
+        core::ptr::read_volatile((pml4 + ((virtual_address >> 36) & 0xff8)) as *const u64)
+    };
+    if pml4_entry & PRESENT == 0 {
+        return None;
+    }
+    let pdpt = pml4_entry & ADDRESS_MASK;
+    let pdpt_entry = unsafe {
+        core::ptr::read_volatile((pdpt + ((virtual_address >> 27) & 0xff8)) as *const u64)
+    };
+    if pdpt_entry & PRESENT == 0 {
+        return None;
+    }
+    if pdpt_entry & HUGE != 0 {
+        return Some((pdpt_entry & 0x000f_ffff_c000_0000) | (virtual_address & 0x3fff_ffff));
+    }
+    let pd = pdpt_entry & ADDRESS_MASK;
+    let pd_entry =
+        unsafe { core::ptr::read_volatile((pd + ((virtual_address >> 18) & 0xff8)) as *const u64) };
+    if pd_entry & PRESENT == 0 {
+        return None;
+    }
+    if pd_entry & HUGE != 0 {
+        return Some((pd_entry & 0x000f_ffff_ffe0_0000) | (virtual_address & 0x1f_ffff));
+    }
+    let pt = pd_entry & ADDRESS_MASK;
+    let pt_entry =
+        unsafe { core::ptr::read_volatile((pt + ((virtual_address >> 9) & 0xff8)) as *const u64) };
+    (pt_entry & PRESENT != 0).then_some((pt_entry & ADDRESS_MASK) | (virtual_address & 0xfff))
+}
+
+#[allow(dead_code)]
+pub(crate) fn switch_cr3(root: usize) {
+    if root == 0 || root & 0xfff != 0 {
+        fatal(b"LogOS vNext: invalid CR3");
+    }
+    unsafe {
+        asm!("mov cr3, {root}", root = in(reg) root, options(nostack, preserves_flags));
+    }
+}
+
+pub(crate) fn prepare_task_address_space(root: usize) {
+    let root = if root == 0 {
+        let kernel = KERNEL_CR3.load(Ordering::Acquire);
+        if kernel == 0 || kernel & 0xfff != 0 {
+            proof_line(b"LogOS vNext: invalid kernel CR3");
+        }
+        kernel
+    } else {
+        if root & 0xfff != 0 {
+            proof_line(b"LogOS vNext: invalid task CR3");
+        }
+        root
+    };
+    switch_cr3(root);
+}
+
+pub(crate) fn restart_critical_section<R>(operation: impl FnOnce() -> R) -> R {
+    unsafe { asm!("cli", options(nomem, nostack, preserves_flags)) };
+    let result = operation();
+    unsafe { asm!("sti", options(nomem, nostack, preserves_flags)) };
+    result
+}
+
+pub(crate) fn start_services() {
+    unsafe {
+        let runtime = &mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME);
+        runtime.start_tasks().unwrap_or_else(|error| match error {
+            crate::service_runtime::ServiceRuntimeError::TaskCapacity => {
+                fatal(b"LogOS vNext: service task capacity")
+            }
+            crate::service_runtime::ServiceRuntimeError::TaskAddressSpace => {
+                fatal(b"LogOS vNext: service task address space")
+            }
+            crate::service_runtime::ServiceRuntimeError::TaskLaunch => {
+                fatal(b"LogOS vNext: service task launch")
+            }
+            crate::service_runtime::ServiceRuntimeError::TaskStop => {
+                fatal(b"LogOS vNext: service task stop")
+            }
+            _ => fatal(b"LogOS vNext: service task startup"),
+        });
+        let ring =
+            runtime.keyboard_ring_address().unwrap_or_else(|| fatal(b"LogOS vNext: keyboard ring"));
+        publish_keyboard_ring(ring);
+        enable_keyboard_irq();
+    }
+    proof_line(b"LogOS vNext: service tasks started");
+}
+
+pub(crate) fn publish_keyboard_ring(address: usize) {
+    KEYBOARD_RING.store(address, Ordering::Release);
+}
+
+pub(crate) fn supervise_services() -> bool {
+    unsafe {
+        let Some(images) = (*core::ptr::addr_of!(SERVICE_IMAGES)).as_ref() else {
+            fatal(b"LogOS vNext: service image state");
+        };
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME))
+            .supervise(images, current_ticks())
+            .unwrap_or_else(|_| fatal(b"LogOS vNext: service restart"))
+    }
+}
+
+pub(crate) fn record_service_heartbeat(
+    service: logos_abi::ServiceId,
+    process: crate::process::ProcessHandle,
+    now: u64,
+) -> bool {
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).record_heartbeat(service, process, now) }
+}
+
+#[cfg(feature = "qemu-proof")]
+pub(crate) fn suppress_service_heartbeat(service: logos_abi::ServiceId) {
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).suppress_heartbeat(service) }
+}
+
+pub(crate) fn fault_service_process(process: crate::process::ProcessHandle, vector: u8) -> bool {
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).fault_process(process, vector).is_ok()
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn enter_user_launch(launch: crate::process::UserLaunch) -> ! {
+    unsafe {
+        asm!(
+            "push {user_data}",
+            "push {user_stack}",
+            "pushfq",
+            "push {user_code}",
+            "push {user_entry}",
+            "iretq",
+            user_data = const USER_DATA_SELECTOR,
+            user_stack = in(reg) launch.stack_top() - 8,
+            user_code = const USER_CODE_SELECTOR,
+            user_entry = in(reg) launch.entry(),
+            options(noreturn),
+        );
+    }
+}
+
 #[allow(clippy::needless_range_loop)]
 fn initialize_post_uefi(cpu_count: usize) {
+    KERNEL_CR3.store(current_cr3(), Ordering::Release);
     install_gdt(0);
     install_idt(0);
     configure_sse();
     enable_local_apic();
+    configure_pic();
     calibrate_timer();
+    #[cfg(feature = "qemu-proof")]
+    crate::user_mode::initialize_kernel_cr3(current_cr3());
     start_aps(cpu_count);
     configure_timer();
     unsafe { CPU_LOCALS[0].online.store(true, Ordering::Release) };
@@ -347,6 +820,8 @@ fn initialize_post_uefi(cpu_count: usize) {
     }
     #[cfg(feature = "qemu-proof")]
     crate::proof::initialize(cpu_count);
+    #[cfg(feature = "qemu-proof")]
+    crate::user_mode::spawn_proof();
 }
 
 fn configure_timer() {
@@ -408,35 +883,81 @@ fn debug_line(message: &[u8]) {
 }
 
 fn install_gdt(cpu: usize) {
-    unsafe { CPU_GDTS[cpu].copy_from_slice(&GDT) };
+    unsafe {
+        CPU_GDTS[cpu][..GDT.len()].copy_from_slice(&GDT);
+        write_tss_rsp0(cpu, CPU_LOCALS[cpu].user_entry_stack_top);
+        let base = core::ptr::addr_of!(CPU_TSS[cpu]) as u64;
+        let limit = (core::mem::size_of::<TaskStateSegment>() - 1) as u64;
+        let low = (limit & 0xffff)
+            | ((base & 0x00ff_ffff) << 16)
+            | (0x89 << 40)
+            | ((limit & 0xf0000) << 32)
+            | ((base & 0xff00_0000) << 32);
+        CPU_GDTS[cpu][5] = low;
+        CPU_GDTS[cpu][6] = base >> 32;
+    }
     let pointer = GdtPointer {
-        limit: (core::mem::size_of::<[u64; 3]>() - 1) as u16,
+        limit: (core::mem::size_of::<[u64; 7]>() - 1) as u16,
         base: unsafe { CPU_GDTS[cpu].as_ptr() as u64 },
     };
     unsafe {
         asm!("lgdt [{}]", in(reg) &pointer);
         asm!(
-            "push 0x08",
+            "push {kernel_code}",
             "lea rax, [rip + 2f]",
             "push rax",
             "retfq",
             "2:",
-            "mov ax, 0x10",
+            "mov ax, {kernel_data}",
             "mov ds, ax",
             "mov es, ax",
             "mov ss, ax",
+            kernel_code = const KERNEL_CODE_SELECTOR,
+            kernel_data = const KERNEL_DATA_SELECTOR,
         );
+        asm!("mov ax, {tss}", "ltr ax", tss = const TSS_SELECTOR);
+    }
+}
+
+pub(crate) fn set_task_kernel_stack(cpu: usize, stack_top: usize) {
+    unsafe {
+        write_tss_rsp0(cpu, stack_top as u64);
+    }
+}
+
+unsafe fn write_tss_rsp0(cpu: usize, stack_top: u64) {
+    unsafe {
+        let tss = core::ptr::addr_of_mut!(CPU_TSS[cpu]).cast::<u8>();
+        core::ptr::write_unaligned(tss.add(4).cast::<u64>(), stack_top);
     }
 }
 
 fn install_idt(cpu: usize) {
     unsafe {
         let idt = &mut CPU_IDTS[cpu];
-        idt.fill(IdtEntry::new(default_interrupt as *const () as usize, 0x08, 0x8e));
-        idt[TIMER_VECTOR as usize] =
-            IdtEntry::new(context_timer_interrupt as *const () as usize, 0x08, 0x8e);
-        idt[SWITCH_VECTOR as usize] =
-            IdtEntry::new(context_switch_interrupt as *const () as usize, 0x08, 0x8e);
+        idt.fill(IdtEntry::new(
+            default_interrupt as *const () as usize,
+            KERNEL_CODE_SELECTOR,
+            0x8e,
+        ));
+        idt[TIMER_VECTOR as usize] = IdtEntry::new(
+            context_timer_interrupt as *const () as usize,
+            KERNEL_CODE_SELECTOR,
+            0x8e,
+        );
+        idt[KEYBOARD_VECTOR as usize] =
+            IdtEntry::new(keyboard_interrupt as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
+        idt[SWITCH_VECTOR as usize] = IdtEntry::new(
+            context_switch_interrupt as *const () as usize,
+            KERNEL_CODE_SELECTOR,
+            0xee,
+        );
+        idt[6] =
+            IdtEntry::new(user_fault_no_error as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
+        idt[13] =
+            IdtEntry::new(user_gp_fault_error as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
+        idt[14] =
+            IdtEntry::new(user_pf_fault_error as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
     }
     load_idt(cpu);
 }
@@ -478,6 +999,67 @@ fn enable_local_apic() {
         APIC.store(base, Ordering::Release);
         write_apic(APIC_SVR, read_apic(APIC_SVR) | 0x100 | 0xff);
     }
+}
+
+fn configure_pic() {
+    unsafe {
+        out_port(PIC_MASTER_COMMAND, 0x11);
+        io_wait();
+        out_port(PIC_SLAVE_COMMAND, 0x11);
+        io_wait();
+        out_port(PIC_MASTER_DATA, 0x20);
+        io_wait();
+        out_port(PIC_SLAVE_DATA, 0x28);
+        io_wait();
+        out_port(PIC_MASTER_DATA, 0x04);
+        io_wait();
+        out_port(PIC_SLAVE_DATA, 0x02);
+        io_wait();
+        out_port(PIC_MASTER_DATA, 0x01);
+        io_wait();
+        out_port(PIC_SLAVE_DATA, 0x01);
+        io_wait();
+        out_port(PIC_MASTER_DATA, 0xff);
+        out_port(PIC_SLAVE_DATA, 0xff);
+    }
+}
+
+fn enable_keyboard_irq() {
+    unsafe {
+        let mask = in_port(PIC_MASTER_DATA);
+        out_port(PIC_MASTER_DATA, mask & !(1 << 1));
+    }
+}
+
+pub(super) fn handle_keyboard_interrupt() {
+    let byte = unsafe { in_port(KEYBOARD_DATA_PORT) };
+    let ring = KEYBOARD_RING.load(Ordering::Acquire);
+    if ring != 0 {
+        // The frame is identity-mapped in the kernel root and is mapped into
+        // Input separately by the service runtime.
+        let _ = unsafe { (&*(ring as *const logos_abi::KeyboardByteRing)).push(byte) };
+    }
+    unsafe {
+        out_port(PIC_MASTER_COMMAND, PIC_EOI);
+    }
+}
+
+unsafe fn io_wait() {
+    unsafe { out_port(0x80, 0) };
+}
+
+unsafe fn out_port(port: u16, value: u8) {
+    unsafe {
+        asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags))
+    };
+}
+
+unsafe fn in_port(port: u16) -> u8 {
+    let value: u8;
+    unsafe {
+        asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags))
+    };
+    value
 }
 
 fn write_gs(local: &CpuLocal) {
@@ -545,7 +1127,11 @@ unsafe fn rdmsr(msr: u32) -> u64 {
 unsafe extern "C" {
     fn default_interrupt();
     fn context_timer_interrupt();
+    fn keyboard_interrupt();
     fn context_switch_interrupt();
+    fn user_fault_no_error();
+    fn user_gp_fault_error();
+    fn user_pf_fault_error();
     fn task_bootstrap();
     fn ap_trampoline_start();
     fn ap_trampoline_end();

@@ -1,0 +1,44 @@
+[package]
+name = "logos-service-images"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[dependencies]
+logos-abi = { path = "../../abi" }
+logos-commands = { path = "../commands" }
+logos-display = { path = "../display" }
+logos-input = { path = "../input" }
+logos-session = { path = "../session" }
+logos-terminal = { path = "../terminal" }
+
+[[bin]]
+name = "logos-input"
+path = "src/input.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "logos-display"
+path = "src/display.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "logos-terminal"
+path = "src/terminal.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "logos-session"
+path = "src/session.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "logos-commands"
+path = "src/commands.rs"
+test = false
+bench = false

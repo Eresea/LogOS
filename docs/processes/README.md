@@ -4,3 +4,4 @@ These pages describe important flows without implementation detail. Use them to 
 ownership transfers, and dependencies remain structurally sound.
 
 - [Boot](boot.md): firmware entry to the first scheduled Runtime task.
+- [Terminal](terminal.md): bounded Input, Terminal, Session, and Display contract flow.

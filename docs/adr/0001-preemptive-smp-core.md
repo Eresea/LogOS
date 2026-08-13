@@ -5,7 +5,7 @@
 
 ## Decision
 
-Core uses eight fixed 16 KiB task stacks, fixed per-CPU scheduler stacks, and a bounded atomic
+UEFI Core uses fixed 256 KiB task stacks (the host model uses 16 KiB), fixed per-CPU scheduler stacks, and a bounded atomic
 slot state word containing generation, lifecycle, and wake-pending state. Each slot also has one
 bounded wake deadline. Timer and voluntary switch entry share one canonical saved frame. Assembly
 saves the complete outgoing frame on the task stack, switches to the per-CPU scheduler stack, and
@@ -33,6 +33,7 @@ narrow and xAPIC-only.
 
 ## Deferred
 
-Allocators, dynamic stacks, affinity, priorities, work stealing, wake IPIs, AVX/XSAVE, user mode,
-Runtime orchestration, services, IPC, capabilities, terminal, storage, and networking are outside
-Core. `v1_docs/` remains historical.
+Allocators, dynamic stacks, affinity, priorities, work stealing, wake IPIs, AVX/XSAVE, storage, and
+networking remain outside Core. The ring-3 service boundary is recorded separately in ADR-0004 and
+the terminal service contracts.
+`v1_docs/` remains historical.
