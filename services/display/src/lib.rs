@@ -100,7 +100,6 @@ pub struct Display {
     cursor_row: usize,
     cells: [Cell; MAX_COLUMNS * MAX_ROWS],
     dirty: [bool; MAX_COLUMNS * MAX_ROWS],
-    applied: usize,
 }
 
 impl Display {
@@ -113,7 +112,6 @@ impl Display {
             cursor_row: 0,
             cells: [Cell::EMPTY; MAX_COLUMNS * MAX_ROWS],
             dirty: [false; MAX_COLUMNS * MAX_ROWS],
-            applied: 0,
         }
     }
 
@@ -127,7 +125,6 @@ impl Display {
         self.generation = generation;
         self.cells.fill(Cell::EMPTY);
         self.dirty.fill(true);
-        self.applied = 0;
     }
 
     pub fn apply(&mut self, generation: u16, message: &RenderMessage) -> Result<(), DisplayError> {
@@ -169,7 +166,6 @@ impl Display {
         self.cursor_row = usize::from(message.cursor_row).min(rows - 1);
         self.dirty[old_cursor] = true;
         self.dirty[self.cursor_row * MAX_COLUMNS + self.cursor_column] = true;
-        self.applied += message.count as usize;
         Ok(())
     }
 
