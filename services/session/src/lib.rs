@@ -68,8 +68,6 @@ pub struct LineEditor {
     escape_state: u8,
 }
 
-pub type Session = LineEditor;
-
 /// Entry-ready Session facade over one bounded line-editing operation.
 pub struct SessionService {
     session: LineEditor,
