@@ -112,6 +112,23 @@ impl ServiceIpcGraph {
             }
         }
     }
+
+    /// Advance every endpoint generation owned by a restarted service.
+    ///
+    /// The endpoint pages are reinitialized by the runtime after this call;
+    /// peers holding an older identity then receive `Stale` until they reread
+    /// the page header.
+    pub fn rebind(&mut self, service: ServiceId) -> usize {
+        let mut changed = 0;
+        for endpoint in self.endpoints[..self.count].iter_mut().flatten() {
+            if endpoint.producer != service && endpoint.consumer != service {
+                continue;
+            }
+            endpoint.generation = endpoint.generation.wrapping_add(1).max(1);
+            changed += 1;
+        }
+        changed
+    }
 }
 
 #[cfg(test)]
@@ -152,6 +169,24 @@ mod tests {
         assert_eq!(graph.endpoint(5).unwrap().producer(), ServiceId::Commands);
         assert_eq!(graph.endpoint(5).unwrap().consumer(), ServiceId::Session);
         assert_eq!(graph.endpoint(5).unwrap().virtual_address(), IPC_BASE + 5 * PAGE_SIZE);
+        assert_eq!(graph.endpoint(5).unwrap().generation(), 1);
+    }
+
+    #[test]
+    fn rebinding_only_advances_owned_endpoints() {
+        let mut map = crate::boot_resources::MemoryMap::new();
+        map.push(MemoryDescriptor::new(0x1000, 8, true).unwrap()).unwrap();
+        let mut pool = FramePool::empty();
+        pool.initialize(&map).unwrap();
+        let mut memory = Memory;
+        let mut graph = ServiceIpcGraph::allocate(&mut pool, &mut memory).unwrap();
+
+        assert_eq!(graph.rebind(ServiceId::Terminal), 4);
+        assert_eq!(graph.endpoint(0).unwrap().generation(), 2);
+        assert_eq!(graph.endpoint(1).unwrap().generation(), 2);
+        assert_eq!(graph.endpoint(2).unwrap().generation(), 2);
+        assert_eq!(graph.endpoint(3).unwrap().generation(), 2);
+        assert_eq!(graph.endpoint(4).unwrap().generation(), 1);
         assert_eq!(graph.endpoint(5).unwrap().generation(), 1);
     }
 }

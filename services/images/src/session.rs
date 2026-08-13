@@ -103,10 +103,6 @@ pub extern "C" fn _start() -> ! {
     let output = unsafe { &*(SESSION_TO_TERMINAL as *const StreamIpc) };
     let commands = unsafe { &*(SESSION_TO_COMMANDS as *const StreamIpc) };
     let command_output = unsafe { &*(COMMANDS_TO_SESSION as *const StreamIpc) };
-    let input_identity = input.endpoint().identity();
-    let output_identity = output.endpoint().identity();
-    let commands_identity = commands.endpoint().identity();
-    let command_output_identity = command_output.endpoint().identity();
     let mut command_bytes = [0; MAX_LINE_BYTES];
     let mut command_response = [0; logos_session::MAX_OUTPUT_BYTES];
     let mut command_response_len = 0;
@@ -115,6 +111,10 @@ pub extern "C" fn _start() -> ! {
     session.prompt(&mut prompt);
     pending.stage(prompt.as_bytes());
     loop {
+        let input_identity = input.endpoint().identity();
+        let output_identity = output.endpoint().identity();
+        let commands_identity = commands.endpoint().identity();
+        let command_output_identity = command_output.endpoint().identity();
         let mut progressed = pending.flush(output, output_identity);
         if !pending.is_empty() {
             if !progressed {

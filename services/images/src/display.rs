@@ -22,8 +22,8 @@ pub extern "C" fn _start() -> ! {
     let framebuffer = unsafe {
         core::slice::from_raw_parts_mut(DISPLAY_FRAMEBUFFER_BASE as *mut u8, config.bytes as usize)
     };
-    let identity = ring.endpoint().identity();
     loop {
+        let identity = ring.endpoint().identity();
         let mut progressed = false;
         while let Ok(message) = ring.receive(identity) {
             progressed = true;

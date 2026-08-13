@@ -20,11 +20,11 @@ pub extern "C" fn _start() -> ! {
     let display = unsafe { &*(TERMINAL_TO_DISPLAY as *const RenderIpc) };
     let session_input = unsafe { &*(TERMINAL_TO_SESSION as *const StreamIpc) };
     let session_output = unsafe { &*(SESSION_TO_TERMINAL as *const StreamIpc) };
-    let input_identity = input.endpoint().identity();
-    let display_identity = display.endpoint().identity();
-    let session_input_identity = session_input.endpoint().identity();
-    let session_output_identity = session_output.endpoint().identity();
     loop {
+        let input_identity = input.endpoint().identity();
+        let display_identity = display.endpoint().identity();
+        let session_input_identity = session_input.endpoint().identity();
+        let session_output_identity = session_output.endpoint().identity();
         let mut progressed = false;
         while let Ok(event) = input.receive(input_identity) {
             progressed = true;

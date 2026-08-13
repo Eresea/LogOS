@@ -90,7 +90,7 @@ mod tests {
     fn builtins_are_bounded_and_deterministic() {
         let mut commands = CommandService::new();
         assert_eq!(commands.execute(b"echo hi").as_bytes(), b"hi\r\n");
-        assert_eq!(commands.execute(b"clear").clear_screen, true);
+        assert!(commands.execute(b"clear").clear_screen);
         assert_eq!(commands.execute(b"missing").status, 127);
     }
 

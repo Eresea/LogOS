@@ -75,9 +75,9 @@ pub extern "C" fn _start() -> ! {
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let input = unsafe { &*(SESSION_TO_COMMANDS as *const StreamIpc) };
     let output = unsafe { &*(COMMANDS_TO_SESSION as *const StreamIpc) };
-    let input_identity = input.endpoint().identity();
-    let output_identity = output.endpoint().identity();
     loop {
+        let input_identity = input.endpoint().identity();
+        let output_identity = output.endpoint().identity();
         let mut progressed = pending.flush(output, output_identity);
         if pending.pending {
             if !progressed {
