@@ -13,10 +13,10 @@
 | [0009](0009-bounded-syscall-dispatch.md) | Accepted | Vector 49 dispatches one validated user syscall payload |
 | [0010](0010-scheduler-cr3-selection.md) | Accepted | Scheduler handoff selects the kernel or proof CR3 explicitly |
 | [0011](0011-scheduler-address-space-roots.md) | Accepted | Task slots publish one bounded address-space root for handoff |
-| [0012](0012-service-abi-boundary.md) | Accepted | Kernel and terminal services share only fixed ABI values; control-plane syscalls and data-plane IPC remain distinct |
+| [0012](0012-service-abi-boundary.md) | Accepted | Kernel and terminal services share only fixed ABI values; service access is admission-time and data-plane IPC remains distinct |
 | [0013](0013-boot-resource-publication.md) | Accepted | UEFI handles become bounded copied resource descriptors before `ExitBootServices` |
 | [0014](0014-bounded-frame-supply.md) | Accepted | User address spaces consume only a fixed conventional-frame pool with explicit exhaustion and release |
-| [0015](0015-service-control-plane.md) | Accepted | Control operations use typed capability-gated syscalls; terminal data remains shared IPC |
+| [0015](0015-service-control-plane.md) | Superseded | Generic service syscall control plane deferred; proof-only Yield/Heartbeat remain |
 | [0016](0016-elf-page-admission.md) | Accepted | Validated ELF plans acquire bounded segment and stack frames with explicit rollback |
 | [0017](0017-fixed-glyph-cache.md) | Accepted | Display resolves scalars through a fixed 8×16 glyph cache with deterministic fallback |
 | [0018](0018-display-raster-boundary.md) | Accepted | Display owns dirty-cell rasterization and pixel format conversion; terminal remains cell-only |

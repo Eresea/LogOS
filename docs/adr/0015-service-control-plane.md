@@ -2,23 +2,21 @@
 
 ## Status
 
-Accepted
+Superseded
 
 ## Decision
 
-Service lifecycle, process, endpoint, and resource operations use fixed
-`SyscallRequest`/`SyscallResponse` values. A request carries scalar arguments
-and one typed capability; it never carries a Rust reference or implicit user
-pointer. The kernel validates service identity, endpoint generation, resource
-kind, and capability ownership before dispatch.
+The generic service syscall request/response ABI is deferred and removed from
+the active milestone. The implemented ring-3 boundary contains only the proof
+workload's Yield and Heartbeat paths; service lifecycle, process, endpoint, and
+resource access are established by kernel-side admission and fixed mappings.
 
-Terminal streams continue to use shared bounded IPC rings. Syscalls create,
-map, signal, wait, start, reap, or map resources; they do not become a second
-message transport.
+Terminal streams continue to use shared bounded IPC rings. A future control
+plane may add scalar operations, but it must not become a second message
+transport.
 
 ## Consequences
 
-- Resource failures are explicit and testable before hardware dispatch exists.
-- A restarted service cannot reuse its predecessor's capabilities.
-- The current syscall model is authorization-only; concrete page-table and
-  scheduler effects remain in the loader milestone.
+- The old request/response shapes remain historical evidence only.
+- A future syscall ABI must be reintroduced with a concrete dispatcher and
+  capability proof, rather than an authorization-only facade.
