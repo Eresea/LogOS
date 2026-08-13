@@ -8,12 +8,13 @@ Accepted
 
 The kernel and terminal services exchange only fixed `repr(C)` values from the
 `logos-abi` crate. Service-to-service terminal traffic uses bounded,
-generation-stamped shared IPC rings. Kernel/resource operations use explicit
-capability-gated syscall kinds and never carry Rust references or unvalidated
-user pointers.
+generation-stamped shared IPC rings. Kernel/resource access is established by
+process admission and fixed mappings; the proof-only syscall gate does not
+expose a general service control-plane ABI.
 
-The existing `terminal_abi` module remains a kernel compatibility re-export
-while the service crates are introduced. It is not a second ABI.
+The kernel imports the `logos-abi` crate directly; the former kernel
+`terminal_abi` compatibility re-export was removed once the service split was
+complete.
 
 ## Consequences
 
