@@ -48,8 +48,8 @@ pub extern "C" fn _start() -> ! {
         let Some(event) = decoder.feed(byte) else {
             continue;
         };
-        pending[0] = Some(event.key);
-        pending[1] = event.text;
+        pending[0] = Some(event.terminal_message());
+        pending[1] = None;
     }
 }
 

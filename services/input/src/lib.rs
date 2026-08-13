@@ -19,6 +19,18 @@ pub struct DecodedInput {
     pub text: Option<InputMessage>,
 }
 
+impl DecodedInput {
+    /// Select the one message the terminal graph should forward for this
+    /// physical input. Printable keys carry committed text; control and
+    /// navigation keys carry only the semantic key event.
+    pub const fn terminal_message(self) -> InputMessage {
+        match self.text {
+            Some(text) => text,
+            None => self.key,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InputDecoder {
     extended: bool,
@@ -100,7 +112,7 @@ impl InputDecoder {
         }
         let byte = key.character_byte()?;
         let byte = if byte.is_ascii_alphabetic() {
-            let upper = self.modifiers & (MOD_SHIFT | MOD_CAPS_LOCK) != 0;
+            let upper = (self.modifiers & MOD_SHIFT != 0) ^ (self.modifiers & MOD_CAPS_LOCK != 0);
             if upper { byte.to_ascii_uppercase() } else { byte.to_ascii_lowercase() }
         } else if self.modifiers & MOD_SHIFT != 0 {
             shifted_ascii(byte)
@@ -172,6 +184,7 @@ const fn map_code(byte: u8, extended: bool) -> Option<KeyCode> {
         0x11 => KeyCode::ALT,
         0x58 => KeyCode::CAPS_LOCK,
         0x16 => KeyCode::character(b'1'),
+        0x29 => KeyCode::character(b' '),
         0x1e => KeyCode::character(b'2'),
         0x26 => KeyCode::character(b'3'),
         0x25 => KeyCode::character(b'4'),
@@ -225,6 +238,9 @@ const fn map_code(byte: u8, extended: bool) -> Option<KeyCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use logos_commands::CommandService;
+    use logos_session::{MAX_LINE_BYTES, SessionService, ShellOutput};
+    use logos_terminal::TerminalService;
 
     #[test]
     fn set_two_decodes_key_and_committed_text() {
@@ -246,5 +262,51 @@ mod tests {
         let arrow = decoder.feed(0x75).unwrap();
         assert_eq!(KeyCode::from_raw(arrow.key.code), KeyCode::UP);
         assert!(arrow.text.is_none());
+    }
+
+    #[test]
+    fn shift_and_caps_lock_cancel_for_letters() {
+        let mut decoder = InputDecoder::new();
+        decoder.feed(0x58);
+        decoder.feed(0x12);
+        let event = decoder.feed(0x1c).unwrap();
+        assert_eq!(event.text.unwrap().text_bytes(), Some(&b"a"[..]));
+    }
+
+    #[test]
+    fn set_two_decodes_space() {
+        let mut decoder = InputDecoder::new();
+        let event = decoder.feed(0x29).unwrap();
+        assert_eq!(event.text.unwrap().text_bytes(), Some(&b" "[..]));
+    }
+
+    #[test]
+    fn terminal_graph_forwards_one_command_and_renders_output() {
+        let mut decoder = InputDecoder::new();
+        let mut terminal = TerminalService::new();
+        let mut session = SessionService::new();
+        let mut commands = CommandService::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut committed = None;
+
+        for scancode in [0x24, 0x21, 0x33, 0x44, 0x29, 0x4d, 0x2d, 0x44, 0x44, 0x2b, 0x5a] {
+            let message = decoder.feed(scancode).unwrap().terminal_message();
+            let Some(stream) = terminal.input(&message) else { continue };
+            let Some(bytes) = stream.as_bytes() else { continue };
+            let mut edit_output = ShellOutput::new();
+            if let Some(length) = session.input_for_command(bytes, &mut command, &mut edit_output) {
+                committed = Some(length);
+            }
+            terminal.session_output_bytes(edit_output.as_bytes());
+        }
+
+        let length = committed.expect("enter commits the command");
+        assert_eq!(&command[..length], b"echo proof");
+        let result = commands.execute(&command[..length]);
+        assert_eq!(result.as_bytes(), b"proof\r\n");
+        let mut output = ShellOutput::new();
+        session.command_output(result.as_bytes(), &mut output);
+        terminal.session_output_bytes(output.as_bytes());
+        assert!(terminal.next_render().is_some());
     }
 }

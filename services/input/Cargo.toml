@@ -11,3 +11,8 @@ bench = false
 
 [dependencies]
 logos-abi = { path = "../../abi" }
+
+[dev-dependencies]
+logos-commands = { path = "../commands" }
+logos-session = { path = "../session" }
+logos-terminal = { path = "../terminal" }
