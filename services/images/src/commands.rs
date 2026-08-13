@@ -75,11 +75,7 @@ pub extern "C" fn _start() -> ! {
     let output = unsafe { &*(COMMANDS_TO_SESSION as *const StreamIpc) };
     let mut heartbeat_ticks = 0u16;
     loop {
-        heartbeat_ticks = heartbeat_ticks.wrapping_add(1);
-        if heartbeat_ticks == 1024 {
-            heartbeat_ticks = 0;
-            common::heartbeat(logos_abi::ServiceId::Commands);
-        }
+        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Commands);
         let input_identity = input.endpoint().identity();
         let output_identity = output.endpoint().identity();
         let mut progressed = pending.flush(output, output_identity);

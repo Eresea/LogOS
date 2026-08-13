@@ -22,11 +22,7 @@ pub extern "C" fn _start() -> ! {
     };
     let mut heartbeat_ticks = 0u16;
     loop {
-        heartbeat_ticks = heartbeat_ticks.wrapping_add(1);
-        if heartbeat_ticks == 1024 {
-            heartbeat_ticks = 0;
-            common::heartbeat(logos_abi::ServiceId::Display);
-        }
+        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Display);
         let identity = ring.endpoint().identity();
         if display.generation() != identity.generation {
             display.replace_generation(identity.generation);

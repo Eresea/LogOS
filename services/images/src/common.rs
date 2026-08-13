@@ -20,3 +20,11 @@ pub fn heartbeat(service: ServiceId) {
         );
     }
 }
+
+pub fn heartbeat_tick(ticks: &mut u16, service: ServiceId) {
+    *ticks = ticks.wrapping_add(1);
+    if *ticks == 1024 {
+        *ticks = 0;
+        heartbeat(service);
+    }
+}

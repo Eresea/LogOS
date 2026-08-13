@@ -18,11 +18,7 @@ pub extern "C" fn _start() -> ! {
     let mut decoder = logos_input::InputDecoder::new();
     let mut heartbeat_ticks = 0u16;
     loop {
-        heartbeat_ticks = heartbeat_ticks.wrapping_add(1);
-        if heartbeat_ticks == 1024 {
-            heartbeat_ticks = 0;
-            common::heartbeat(logos_abi::ServiceId::Input);
-        }
+        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Input);
         if let Some(message) = pending[0] {
             let identity = output.endpoint().identity();
             match output.send(identity, message) {

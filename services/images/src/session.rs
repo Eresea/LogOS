@@ -112,11 +112,7 @@ pub extern "C" fn _start() -> ! {
     pending.stage(prompt.as_bytes());
     let mut heartbeat_ticks = 0u16;
     loop {
-        heartbeat_ticks = heartbeat_ticks.wrapping_add(1);
-        if heartbeat_ticks == 1024 {
-            heartbeat_ticks = 0;
-            common::heartbeat(logos_abi::ServiceId::Session);
-        }
+        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Session);
         let input_identity = input.endpoint().identity();
         let output_identity = output.endpoint().identity();
         let commands_identity = commands.endpoint().identity();
