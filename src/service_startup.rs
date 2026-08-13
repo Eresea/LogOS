@@ -1,8 +1,9 @@
 //! Fixed dependency barrier for service startup.
 
+use crate::service_images::SERVICE_IMAGES;
 use logos_abi::ServiceId;
 
-const SERVICE_COUNT: usize = 5;
+const SERVICE_COUNT: usize = SERVICE_IMAGES.len();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]

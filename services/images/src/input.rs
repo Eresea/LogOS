@@ -21,7 +21,7 @@ pub extern "C" fn _start() -> ! {
         let identity = output.endpoint().identity();
         let _ = output.send(identity, event.key);
         if let Some(text) = event.text {
-            let _ = output.send(output.endpoint().identity(), text);
+            let _ = output.send(identity, text);
         }
     }
 }

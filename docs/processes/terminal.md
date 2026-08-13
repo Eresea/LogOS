@@ -1,7 +1,8 @@
 # Terminal service flow
 
-The active terminal proof is a bounded service graph. Hardware and pixels are represented by
-adapter boundaries; the terminal state machine owns neither.
+The active terminal path is a bounded graph of five ELF-loaded ring-3 services. Hardware and pixels
+are represented by adapter boundaries; the terminal state machine owns neither. `TerminalStack` is
+kept as a host reference model for protocol tests.
 
 ```mermaid
 flowchart LR
@@ -16,10 +17,10 @@ Each edge is a fixed queue of eight entries. Payloads are copied into fixed-size
 queue returns an error; it never overwrites an unread entry. Endpoint generations and service
 epochs reject late messages after a replacement.
 
-Terminal restart clears its screen model, advances its endpoint identity, rebinds Display, and
-requests a fresh Session prompt. Session state is retained by the proof graph; terminal scrollback
-is not restored.
+The host reference model can clear its screen model, advance its endpoint identity, rebind Display,
+and request a fresh Session prompt. Live endpoint generations are prepared for the supervisor, but
+live service restart and page-table teardown are not yet part of the boot acceptance proof.
 
-This document describes the terminal contract path. Its current hardware proof is a separate fixed
-ring-3 task that validates entry and fault containment; the terminal service itself is not yet an
-ELF-loaded process and does not own capability mappings.
+This document describes the terminal contract path. The current QEMU proof validates service image
+loading, isolated roots, framebuffer and keyboard mappings, ring-3 entry, rendering, semantic input,
+and fault containment. It does not yet claim live restart recovery.

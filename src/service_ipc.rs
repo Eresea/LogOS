@@ -7,7 +7,15 @@ use crate::{
     page_table::PageTableMemory,
 };
 
-pub const MAX_ENDPOINTS: usize = 6;
+const ENDPOINTS: [(ServiceId, ServiceId); 6] = [
+    (ServiceId::Input, ServiceId::Terminal),
+    (ServiceId::Terminal, ServiceId::Display),
+    (ServiceId::Terminal, ServiceId::Session),
+    (ServiceId::Session, ServiceId::Terminal),
+    (ServiceId::Session, ServiceId::Commands),
+    (ServiceId::Commands, ServiceId::Session),
+];
+pub const MAX_ENDPOINTS: usize = ENDPOINTS.len();
 pub const IPC_BASE: usize = SERVICE_IPC_BASE;
 pub const SERVICE_EPOCH: u64 = 1;
 const PAGE_SIZE: usize = 4096;
@@ -64,16 +72,8 @@ impl ServiceIpcGraph {
         pool: &mut FramePool,
         memory: &mut M,
     ) -> Result<Self, IpcError> {
-        let pairs = [
-            (ServiceId::Input, ServiceId::Terminal),
-            (ServiceId::Terminal, ServiceId::Display),
-            (ServiceId::Terminal, ServiceId::Session),
-            (ServiceId::Session, ServiceId::Terminal),
-            (ServiceId::Session, ServiceId::Commands),
-            (ServiceId::Commands, ServiceId::Session),
-        ];
         let mut graph = Self { endpoints: [None; MAX_ENDPOINTS], count: 0 };
-        for (index, (producer, consumer)) in pairs.into_iter().enumerate() {
+        for (index, (producer, consumer)) in ENDPOINTS.into_iter().enumerate() {
             if index == MAX_ENDPOINTS {
                 return Err(IpcError::Capacity);
             }

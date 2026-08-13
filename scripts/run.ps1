@@ -1,6 +1,7 @@
 param(
     [switch]$Release,
     [switch]$Headless,
+    [switch]$Interactive,
     [switch]$Proof,
     [ValidateRange(1, 8)]
     [int]$Cpus = 1,
@@ -9,6 +10,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Interactive -and ($Headless -or $Proof)) { throw 'Choose exactly one of -Interactive, -Headless, or -Proof.' }
+$interactiveMode = $Interactive -or (-not $Headless -and -not $Proof)
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $profile = if ($Release) { 'release' } else { 'debug' }
 $efi = Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-vnext.efi"
@@ -46,7 +49,7 @@ if ($Proof) {
     $qemuArgs += @('-debugcon', "file:$log", '-global', 'isa-debugcon.iobase=0xe9', '-qmp', "tcp:127.0.0.1:$qmpPort,server=on,wait=off")
 } else {
     $qemuArgs += @('-debugcon', 'stdio', '-global', 'isa-debugcon.iobase=0xe9')
-    if (-not $Headless) { $qemuArgs = $qemuArgs | Where-Object { $_ -ne '-display' -and $_ -ne 'none' } }
+    if ($interactiveMode) { $qemuArgs = $qemuArgs | Where-Object { $_ -ne '-display' -and $_ -ne 'none' } }
 }
 
 if (-not $Proof) {

@@ -1,7 +1,8 @@
 # LogOS vNext Core architecture
 
 The package has two targets and no allocator: the UEFI binary in `src/main.rs` calls `boot()` in
-`src/lib.rs`. Core owns mechanisms only; Runtime and all services are deferred.
+`src/lib.rs`. Core owns mechanisms only; Runtime and the five terminal services execute through
+fixed, capability-scoped boundaries.
 
 | Boundary | Owner | Invariant / proof |
 | --- | --- | --- |
@@ -13,7 +14,7 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | User page tables | `page_table` | builds four-level user mappings with fixed root/intermediate-frame bounds, W^X/NX flags, conflict rejection, and grouped reclamation |
 | Service address spaces | `service_runtime` | loads five retained ELFs into owned frames and retains one isolated root per service before scheduler admission |
 | Service process admission | `service_runtime` + `process` | binds each service root, capabilities, coalesced mappings, and validated user launch metadata without entering service RIPs prematurely |
-| User launch transition | `arch` + `scheduler` | selects the task root before restore and provides one fixed-selector `iretq` seam for future service entry |
+| User launch transition | `arch` + `scheduler` | selects the task root before restore and provides the fixed-selector `iretq` path for service entry |
 | Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Commands dependencies |
 | Service IPC pages | `service_ipc` + `page_table` | allocates six fixed generation-stamped endpoint pages, initializes their concrete ABI rings, and maps each only into its producer/consumer processes |
 | Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE` plus one read-only `FramebufferConfig` page at `DISPLAY_CONFIG_BASE`; no other service or kernel drawing path receives it |
@@ -43,17 +44,17 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 | Retained service images | `service_loader::ServiceImageBundle` | five validated ELF records with page-aligned retained addresses, loaded before `ExitBootServices`, and no filesystem lifetime after UEFI exit |
 | Service ELF packaging | `services/images` + `scripts/build-services.ps1` | five independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
 | Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all five staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
-| Service supervisor | `supervisor::ServiceSupervisor` | five-service lifecycle model, heartbeat timeouts, endpoint epochs, restart limits, and recovery transition |
+| Service supervisor | `supervisor::ServiceSupervisor` | host-tested five-service lifecycle model with heartbeat timeouts, endpoint epochs, restart limits, and recovery transition; live orchestration remains deferred |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
-| Terminal proof graph | `terminal_stack::TerminalStack` | deterministic Input → Terminal → Session → Terminal → Display path with generation-safe terminal restart |
+| Terminal proof graph | `terminal_stack::TerminalStack` | host reference model for the deterministic Input → Terminal → Session → Terminal → Display path and generation-safe restart |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
 | Runtime handoff | `handoff_to_runtime` | registers one root `TaskEntry`; the scheduler starts it through the normal context path |
 | Proof workload | `qemu-proof` feature | assembly CPU-bound canaries, timer/switch counters, cross-CPU block/wake, structured PASS |
 
 The process-to-scheduler handoff is now explicit: a running process with a bound root produces one
 validated `UserLaunch`, and the scheduler publishes its entry, stack, root, and process generation
-before marking the task runnable. Hardware page-table construction and ring-3 entry still consume
-the existing follow-on boundary.
+before marking the task runnable. Hardware page-table construction and ring-3 entry are part of the
+live service path; safe teardown for replacement remains a follow-on boundary.
 
 AP startup is deliberately narrow: xAPIC IDs, low-memory trampoline, current CR3, fixed stacks, and
 sequential INIT/SIPI/SIPI. x2APIC IDs, malformed topology, more than eight CPUs, allocators, APIC
@@ -61,12 +62,11 @@ IPIs for wakeups, affinity, priorities, and AVX/XSAVE are not part of this miles
 
 The handoff registers one root task. That task owns the first fixed Runtime operation table; Core does
 not inspect, schedule, or orchestrate Runtime state. Runtime operations use the scheduler's sleep and
-wake primitives but retain their own deadlines, terminal states, and slot generations. The terminal
-contracts and service graph remain host-tested bounded models. The QEMU proof now adds one static
-ring-3 domain, a vector-49 entry, and a contained user exception. Process admission now owns a
-generation-safe address-space identity, while root binding, mapping, capabilities, syscall payloads,
-and ELF image loading remain follow-on Core work. The terminal/display
-integration still runs before AP startup, so the large terminal state is not placed on a 16 KiB task
-stack.
+wake primitives but retain their own deadlines, terminal states, and slot generations. The five service
+ELFs are loaded before `ExitBootServices`, receive isolated roots and explicit mappings, and enter
+through the normal scheduler path. `TerminalStack` remains a host reference model, while QEMU exercises
+the live service images. Service restart orchestration and safe page-table teardown remain follow-on
+work. The terminal/display host integration still runs before AP startup, so the large reference model
+is not placed on a 16 KiB task stack.
 
 `v1_docs/` is historical and is not an active architecture contract.

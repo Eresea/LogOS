@@ -18,19 +18,19 @@ needs deterministic contracts and proof workloads before architecture-specific s
 - Queue saturation, malformed pages, stale identities, and service restart are explicit outcomes.
 - The service graph is modeled as Input, Display, Terminal, Session, and Commands with a fixed
   supervisor lifecycle and no automatic replay of old operations.
-- QEMU proves terminal render, semantic input, and terminal rebind before AP startup; host tests
+- QEMU proves service image loading, ring-3 entry, terminal render, and semantic input; host tests
   prove the full Input → Terminal → Session → Display path and restart behavior.
 
 ## Consequences
 
 Terminal policy is independently testable and has no direct hardware or scheduler dependency.
-Display and input can be replaced without changing terminal semantics. The current `TerminalStack`
-is a deterministic contract proof; ADR-0004 separately proves the Core's first fixed ring-3 task,
-but the terminal service is not yet that task.
+Display and input can be replaced without changing terminal semantics. `TerminalStack` remains a
+deterministic host reference; the live service graph is loaded and scheduled through the bounded
+ELF/process path.
 
 ## Deferred
 
-General address-space/page-table ownership, capability mapping, syscall dispatch, fixed ELF image
-packaging, real hardware adapters, and supervisor-driven process replacement remain deferred. Until
-then, no code may describe the host-tested process table or the fixed proof image as the terminal's
-actual process isolation model.
+Supervisor-driven process replacement, service heartbeat transport, and safe page-table teardown
+remain deferred. The current process table, capability mappings, fixed ELF packaging, hardware
+adapters, and ring-3 launch path are live; the host reference model must not be described as the
+runtime service implementation.

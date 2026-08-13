@@ -11,5 +11,6 @@ published before AP startup so every CPU has a valid fallback.
 
 ## Scope
 
-This is the proof-domain lifecycle only. The scheduler does not yet carry a general process address-
-space handle, flush policy, or TLB isolation contract.
+This remains a bounded service-domain lifecycle. The scheduler carries the selected root needed for
+the current process launch path; general address-space handles, replacement flush policy, and TLB
+shootdown isolation remain outside this milestone.

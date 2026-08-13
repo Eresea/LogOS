@@ -179,6 +179,19 @@ impl Display {
         }
     }
 
+    pub const fn generation(&self) -> u16 {
+        self.generation
+    }
+
+    /// Rebind the renderer to a replacement producer and invalidate the old
+    /// surface so the next full redraw cannot inherit stale cells.
+    pub fn replace_generation(&mut self, generation: u16) {
+        self.generation = generation;
+        self.cells.fill(Cell::EMPTY);
+        self.dirty.fill(true);
+        self.applied = 0;
+    }
+
     pub fn apply(&mut self, generation: u16, message: &RenderMessage) -> Result<(), DisplayError> {
         if generation != self.generation {
             return Err(DisplayError::StaleGeneration);
@@ -315,5 +328,14 @@ mod tests {
             display.render(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8, &mut font),
             Ok(0)
         );
+    }
+
+    #[test]
+    fn replacement_generation_rejects_old_messages() {
+        let mut display = Display::new(1);
+        display.replace_generation(2);
+        let message = RenderMessage::empty(MessageKind::FullRedraw);
+        assert_eq!(display.apply(1, &message), Err(DisplayError::StaleGeneration));
+        assert_eq!(display.apply(2, &message), Err(DisplayError::InvalidMessage));
     }
 }

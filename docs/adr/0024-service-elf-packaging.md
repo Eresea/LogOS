@@ -13,14 +13,14 @@ images at `0x0000_0100_0000_0000`, outside the inherited low kernel mapping.
 under `build/esp/EFI/LOGOS/` and rejects missing, non-ELF, or oversized
 artifacts.
 
-The binaries currently contain bounded service entry stubs that idle. IPC
-loops, capability mapping, and process startup are separate implementation
-slices; the artifacts are not yet invoked by the kernel boot path.
+The binaries contain bounded service entry loops. IPC loops, capability mapping,
+and process startup are separate layers, all admitted by the kernel boot path
+after the retained ESP images are validated.
 
 ## Consequences
 
 - Service artifacts are independent ELF files with no kernel-module dependency.
 - The target is an explicit build prerequisite rather than an implicit host
   compiler assumption.
-- The current QEMU proof remains unchanged until real service entry loops are
-  ready.
+- The QEMU proof exercises the fixed service images through ring-3 entry and
+  the bounded terminal path.

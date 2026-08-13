@@ -20,5 +20,5 @@ the bound.
 - Page exhaustion can be tested and contained before a process is admitted.
 - Frame ownership is separate from process metadata and can be reclaimed with
   an address space.
-- The current implementation does not yet build hardware page tables or copy
-  ELF segments; those are the next loader slice.
+- The live loader builds bounded hardware page tables and copies validated ELF
+  segments. Replacement-time page-table teardown remains a separate proof.

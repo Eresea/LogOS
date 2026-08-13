@@ -24,6 +24,9 @@ pub extern "C" fn _start() -> ! {
     };
     loop {
         let identity = ring.endpoint().identity();
+        if display.generation() != identity.generation {
+            display.replace_generation(identity.generation);
+        }
         let mut progressed = false;
         while let Ok(message) = ring.receive(identity) {
             progressed = true;

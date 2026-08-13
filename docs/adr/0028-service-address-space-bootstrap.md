@@ -14,13 +14,13 @@ identity-mapped bootstrap sink before the roots are retained for process
 binding.
 
 Service images are linked at `0x0000_0100_0000_0000`, with stacks in a nearby
-separate window. The service roots are not scheduled yet; this commit proves
-resource ownership and address-space construction only.
+separate window. The roots are retained by the process table and scheduled
+through the bounded ring-3 launch path.
 
 ## Consequences
 
 - Service ELF bytes and page tables are real post-UEFI state, not metadata.
 - A failed image, population, or mapping operation remains before scheduler
   admission and releases the frames acquired for that attempt.
-- Switching into a service root is deferred until kernel-stack preservation and
-  process/task launch are integrated and separately proven.
+- Switching into a service root is live; replacement-time kernel-stack
+  preservation and page-table teardown remain separately bounded work.
