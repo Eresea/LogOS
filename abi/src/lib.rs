@@ -12,7 +12,6 @@ use core::{
 };
 
 pub const ABI_VERSION: u16 = 1;
-pub const MAX_MESSAGE_BYTES: usize = 4096;
 pub const IPC_RING_SLOTS: usize = 8;
 pub const MAX_TEXT_BYTES: usize = 64;
 pub const MAX_RENDER_CELLS: usize = 128;
@@ -340,35 +339,6 @@ impl RenderMessage {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(C)]
-pub struct StreamMessage {
-    pub kind: MessageKind,
-    pub flags: u8,
-    pub len: u16,
-    pub bytes: [u8; MAX_MESSAGE_BYTES - 4],
-}
-
-impl StreamMessage {
-    pub const fn empty(kind: MessageKind) -> Self {
-        Self { kind, flags: 0, len: 0, bytes: [0; MAX_MESSAGE_BYTES - 4] }
-    }
-
-    pub fn from_bytes(kind: MessageKind, bytes: &[u8]) -> Option<Self> {
-        if bytes.len() > MAX_MESSAGE_BYTES - 4 {
-            return None;
-        }
-        let mut message = Self::empty(kind);
-        message.len = bytes.len() as u16;
-        message.bytes[..bytes.len()].copy_from_slice(bytes);
-        Some(message)
-    }
-
-    pub fn as_bytes(&self) -> Option<&[u8]> {
-        (self.len as usize <= self.bytes.len()).then(|| &self.bytes[..self.len as usize])
-    }
-}
-
 /// Compact stream payload for one-page service endpoint rings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -640,13 +610,9 @@ mod tests {
         assert!(InputMessage::text(&[b'a'; MAX_TEXT_BYTES]).is_some());
         assert!(InputMessage::text(&[b'a'; MAX_TEXT_BYTES + 1]).is_none());
         assert_eq!(InputMessage::paste(b"abc").unwrap().text_bytes(), Some(&b"abc"[..]));
+        assert!(IpcBytes::from_bytes(MessageKind::SessionOutput, &[0; MAX_IPC_BYTES]).is_some());
         assert!(
-            StreamMessage::from_bytes(MessageKind::SessionOutput, &[0; MAX_MESSAGE_BYTES - 4])
-                .is_some()
-        );
-        assert!(
-            StreamMessage::from_bytes(MessageKind::SessionOutput, &[0; MAX_MESSAGE_BYTES - 3])
-                .is_none()
+            IpcBytes::from_bytes(MessageKind::SessionOutput, &[0; MAX_IPC_BYTES + 1]).is_none()
         );
     }
 

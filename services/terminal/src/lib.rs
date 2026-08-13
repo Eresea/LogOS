@@ -6,9 +6,9 @@
 extern crate std;
 
 use logos_abi::{
-    Cell, DEFAULT_COLUMNS, DEFAULT_ROWS, InputMessage, KeyCode, KeyState, MAX_COLUMNS,
+    Cell, DEFAULT_COLUMNS, DEFAULT_ROWS, InputMessage, IpcBytes, KeyCode, KeyState, MAX_COLUMNS,
     MAX_RENDER_CELLS, MAX_ROWS, MAX_SCROLLBACK_LINES, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT,
-    MessageKind, RenderMessage, StreamMessage,
+    MessageKind, RenderMessage,
 };
 
 const ATTR_BOLD: u16 = 1 << 0;
@@ -165,11 +165,11 @@ impl TerminalService {
         }
     }
 
-    pub fn input(&self, event: &InputMessage) -> Option<StreamMessage> {
+    pub fn input(&self, event: &InputMessage) -> Option<IpcBytes> {
         self.terminal.input(event)
     }
 
-    pub fn session_output(&mut self, message: &StreamMessage) {
+    pub fn session_output(&mut self, message: &IpcBytes) {
         if let Some(bytes) = message.as_bytes() {
             self.terminal.feed(bytes);
         }
@@ -756,11 +756,11 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     }
 
     /// Convert a semantic input event into the terminal's session byte stream.
-    pub fn input(&self, event: &InputMessage) -> Option<StreamMessage> {
+    pub fn input(&self, event: &InputMessage) -> Option<IpcBytes> {
         if matches!(event.kind, MessageKind::Text | MessageKind::Paste) {
             let bytes = event.text_bytes()?;
             if self.modes.bracketed_paste && event.kind == MessageKind::Paste {
-                let mut stream = StreamMessage::empty(MessageKind::SessionInput);
+                let mut stream = IpcBytes::empty(MessageKind::SessionInput);
                 let prefix = b"\x1b[200~";
                 let suffix = b"\x1b[201~";
                 if prefix.len() + bytes.len() + suffix.len() > stream.bytes.len() {
@@ -773,7 +773,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
                 stream.len = (prefix.len() + bytes.len() + suffix.len()) as u16;
                 return Some(stream);
             }
-            return StreamMessage::from_bytes(MessageKind::SessionInput, bytes);
+            return IpcBytes::from_bytes(MessageKind::SessionInput, bytes);
         }
         if event.kind != MessageKind::Key || event.state == KeyState::Released {
             return None;
@@ -782,14 +782,11 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         if let Some(byte) = code.character_byte() {
             let byte = modified_character(byte, event.modifiers);
             if event.modifiers & MOD_CTRL != 0 {
-                return StreamMessage::from_bytes(
-                    MessageKind::SessionInput,
-                    &[control_byte(byte)?],
-                );
+                return IpcBytes::from_bytes(MessageKind::SessionInput, &[control_byte(byte)?]);
             }
             if event.modifiers & MOD_ALT != 0 {
                 let bytes = [b'\x1b', byte];
-                return StreamMessage::from_bytes(MessageKind::SessionInput, &bytes);
+                return IpcBytes::from_bytes(MessageKind::SessionInput, &bytes);
             }
         }
         let bytes: &[u8] = match code {
@@ -832,7 +829,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             KeyCode::PageDown => b"\x1b[6~",
             _ => return None,
         };
-        StreamMessage::from_bytes(MessageKind::SessionInput, bytes)
+        IpcBytes::from_bytes(MessageKind::SessionInput, bytes)
     }
 }
 

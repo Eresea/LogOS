@@ -3,8 +3,6 @@
 #[cfg(test)]
 extern crate std;
 
-use logos_abi::MAX_MESSAGE_BYTES;
-
 pub const MAX_COMMAND_BYTES: usize = 256;
 pub const MAX_OUTPUT_BYTES: usize = 512;
 
@@ -54,7 +52,7 @@ impl CommandService {
 
     pub fn execute(&mut self, line: &[u8]) -> CommandOutput {
         let mut output = CommandOutput::new();
-        if line.len() > MAX_COMMAND_BYTES || line.len() > MAX_MESSAGE_BYTES - 4 {
+        if line.len() > MAX_COMMAND_BYTES {
             output.status = 2;
             output.extend(b"command too long\r\n");
             return output;

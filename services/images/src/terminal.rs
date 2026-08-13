@@ -3,9 +3,7 @@
 
 mod common;
 
-use logos_abi::{
-    InputIpc, IpcBytes, MessageKind, RenderIpc, SERVICE_IPC_BASE, SharedSendError, StreamIpc,
-};
+use logos_abi::{InputIpc, IpcBytes, RenderIpc, SERVICE_IPC_BASE, SharedSendError, StreamIpc};
 
 const PAGE_BYTES: usize = logos_abi::IPC_PAGE_BYTES;
 const INPUT_TO_TERMINAL: usize = SERVICE_IPC_BASE;
@@ -52,18 +50,13 @@ pub extern "C" fn _start() -> ! {
             while let Ok(event) = input.receive(input_identity) {
                 progressed = true;
                 if let Some(message) = terminal.input(&event) {
-                    if let Some(bytes) = IpcBytes::from_bytes(
-                        MessageKind::SessionInput,
-                        message.as_bytes().unwrap_or_default(),
-                    ) {
-                        match session_input.send(session_input_identity, bytes) {
-                            Ok(_) => {}
-                            Err(SharedSendError::Full) => {
-                                *pending_session_input = Some(bytes);
-                                break;
-                            }
-                            Err(SharedSendError::Stale | SharedSendError::Disconnected) => {}
+                    match session_input.send(session_input_identity, message) {
+                        Ok(_) => {}
+                        Err(SharedSendError::Full) => {
+                            *pending_session_input = Some(message);
+                            break;
                         }
+                        Err(SharedSendError::Stale | SharedSendError::Disconnected) => {}
                     }
                 }
             }
