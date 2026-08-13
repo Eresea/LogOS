@@ -44,10 +44,6 @@ impl InputDecoder {
         Self { extended: false, break_code: false, modifiers: 0, caps_lock: false }
     }
 
-    pub const fn modifiers(&self) -> u16 {
-        self.modifiers
-    }
-
     /// Feed one PS/2 Set-2 byte. Prefix bytes produce no event.
     pub fn feed(&mut self, byte: u8) -> Option<DecodedInput> {
         match byte {

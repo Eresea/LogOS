@@ -95,10 +95,6 @@ impl SessionService {
         output.extend(bytes);
         self.prompt(output);
     }
-
-    pub const fn session(&self) -> &LineEditor {
-        &self.session
-    }
 }
 
 impl Default for SessionService {
@@ -120,10 +116,6 @@ impl LineEditor {
             history_cursor: 0,
             escape_state: 0,
         }
-    }
-
-    pub const fn line_len(&self) -> usize {
-        self.line_len
     }
 
     pub fn prompt(&self, output: &mut ShellOutput) {
