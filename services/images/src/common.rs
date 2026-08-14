@@ -45,7 +45,7 @@ pub fn heartbeat(service: ServiceId) {
             "int 49",
             in("rdi") service as usize,
             lateout("rax") _,
-            options(nostack, preserves_flags),
+            options(preserves_flags),
         );
     }
 }
@@ -67,7 +67,7 @@ pub fn wait(mask: u64, service: ServiceId) {
             in("rdi") mask as usize,
             in("rsi") WAIT_TIMEOUT_TICKS as usize,
             lateout("rax") _,
-            options(nostack, preserves_flags),
+            options(preserves_flags),
         );
     }
     heartbeat(service);
@@ -85,7 +85,7 @@ pub fn notify(mask: u64) {
             "int 49",
             in("rdi") mask as usize,
             lateout("rax") _,
-            options(nostack, preserves_flags),
+            options(preserves_flags),
         );
     }
 }
@@ -164,7 +164,7 @@ fn ipc_syscall(number: usize, capability_slot: usize, length: usize) -> IpcStatu
             inout("rax") raw,
             in("rdi") capability_slot,
             in("rsi") length,
-            options(nostack, preserves_flags),
+            options(preserves_flags),
         );
     }
     IpcStatus::from_raw(raw).unwrap_or(IpcStatus::Malformed)
