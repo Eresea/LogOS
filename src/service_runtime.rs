@@ -106,6 +106,17 @@ impl ServiceRuntime {
     }
 
     pub fn start(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
+        let result = self.start_inner(bundle);
+        if let Err(error) = result {
+            if let Err(cleanup_error) = self.reclaim_resources() {
+                return Err(cleanup_error);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn start_inner(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
         let resources = crate::arch::boot_resources().ok_or(ServiceRuntimeError::Resources)?;
         if !self.frame_pool_ready {
             if let Some(framebuffer) = resources.framebuffer() {
@@ -195,6 +206,7 @@ impl ServiceRuntime {
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?;
             initialize_ipc_page(endpoint, endpoint_index);
         }
+        self.ipc = Some(graph);
         for spec in SERVICE_IMAGES {
             let service = spec.service();
             let index = service.index();
@@ -202,6 +214,7 @@ impl ServiceRuntime {
                 return Err(ServiceRuntimeError::IpcPrivateProcess(ProcessError::InvalidHandle));
             };
             let staging = self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+            self.ipc_staging_frames[index] = Some(staging);
             memory.clear(staging).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
             self.map_ipc_private_page(
                 process,
@@ -209,11 +222,15 @@ impl ServiceRuntime {
                 logos_abi::IPC_STAGING_BASE,
                 MappingFlags::DATA,
             )?;
-            self.ipc_staging_frames[index] = Some(staging);
-
-            let capabilities = graph.capabilities(service).map_err(ServiceRuntimeError::Ipc)?;
+            let capabilities = self
+                .ipc
+                .as_ref()
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?
+                .capabilities(service)
+                .map_err(ServiceRuntimeError::Ipc)?;
             let capability_frame =
                 self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+            self.ipc_capability_frames[index] = Some(capability_frame);
             memory.clear(capability_frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
             unsafe {
                 (capability_frame.raw() as usize as *mut logos_abi::IpcCapabilityPage)
@@ -225,9 +242,7 @@ impl ServiceRuntime {
                 logos_abi::IPC_CAPABILITY_BASE,
                 MappingFlags::READ_ONLY_DATA,
             )?;
-            self.ipc_capability_frames[index] = Some(capability_frame);
         }
-        self.ipc = Some(graph);
         let framebuffer = resources.framebuffer().ok_or(ServiceRuntimeError::Resources)?;
         self.map_framebuffer(framebuffer)?;
         let framebuffer_config_frame =
