@@ -10,7 +10,7 @@ fixed service boundaries.
 | Boot resources | `boot_resources` | copies bounded memory-map, GOP framebuffer, and PS/2 identities before UEFI handles are discarded |
 | Physical frames | `frame_pool` + `memory` | copied UEFI descriptors normalize into sorted disjoint runs; indexed bitmap words, generation-safe leases, bounded batches, reservations, zeroed/dirty state, per-CPU caches, sharded pools, and remote frees stay capped at 65,536 frames |
 | Memory subsystem contracts | `memory` | fixed async wait nodes, cancellation/deadlines, address-space generations, 4 KiB VM map operations, batched TLB queues, page-table caches, slab/page heap handles, pressure/reclaim callbacks, ownership quotas, and atomic observability are present before architecture-specific expansion |
-| Control plane | `process` + `service_runtime` | admission-time fixed service mappings; generic service syscalls and capability authorization are deferred |
+| Control plane | `process` + `user_mode` | admission-time fixed service mappings plus bounded Wait/Notify event syscalls; generic service syscalls and capability authorization remain deferred |
 | ELF page admission | `loader` | maps validated segments and fixed user stacks to owned frames, then populates them through a page-local sink with bounded reclamation |
 | User page tables | `page_table` | builds four-level user mappings with fixed root/intermediate-frame bounds, W^X/NX flags, conflict rejection, and grouped reclamation |
 | Service address spaces | `service_runtime` | loads five retained ELFs into owned frames and retains one isolated root per service before scheduler admission |
@@ -23,7 +23,7 @@ fixed service boundaries.
 | PS/2 interrupt adapter | `arch` | remaps the legacy PIC, unmasks only IRQ1 after the Input ring is published, and copies port `0x60` bytes into that ring; no key decoding occurs in Core |
 | Font rendering | `logos-display` | fixed 8×16 anti-aliased JetBrains Mono coverage atlas with deterministic replacement glyph |
 | Per-CPU state | `arch::CpuLocal` via `GS_BASE` | private scheduler/idle stacks, TSS ring-transition fallback, cursor/current task, ticks, online state |
-| Context boundary | `arch/context.rs` | timer, voluntary, ring-3 syscall dispatch, and user-fault entries save one GPR/RIP/RSP/RFLAGS/CS and x87/SSE frame shape |
+| Context boundary | `arch/context.rs` | timer, voluntary, Wait/Notify syscall dispatch, and user-fault entries save one GPR/RIP/RSP/RFLAGS/CS and x87/SSE frame shape |
 | Publication | `Scheduler::save_context` + `finish` | outgoing task is claimable only after context-save publication |
 | Scheduler | `Scheduler` | sixteen generation-safe slots, atomic lifecycle/wake word, published address-space root per task, CAS `Runnable → Running`, no task-body lock |
 | Task primitives | `spawn`, `wake`, `yield_current`, `block_current`, `reclaim_completed` | explicit runnable/blocked/completed states and cheap wake-pending race handling |
@@ -32,7 +32,7 @@ fixed service boundaries.
 | Service restart contract | `service_lifecycle::ServiceLifecycle` | fixed owner-held operation slots become explicitly `Restarted`; late completions are rejected and retries remain owner policy |
 | Health service | `health::HealthService` | one in-process fixed command/response mailbox for `Ping`; restart rejects the old completion and caller explicitly retries |
 | Terminal ABI | `logos-abi` | fixed semantic input, session stream, cell-diff render, endpoint identity, and service identities |
-| IPC mechanics | `logos-abi::SharedIpc` | fixed SPSC rings fit bounded endpoint pages and report full/empty/stale/disconnected outcomes without allocation or serialization |
+| IPC mechanics | `logos-abi::SharedIpc` + `scheduler::Scheduler` | fixed SPSC rings fit bounded endpoint pages; empty/full edges signal bounded event masks, while stale/disconnected outcomes remain generation-safe |
 | Input service | `services/images/src/input` + `logos-input::InputDecoder` | consumes the Input-only PS/2 byte mapping, produces semantic key/text messages on the Input→Terminal ring, and owns modifier/layout state |
 | Terminal service | `services/images/src/terminal` + `logos-terminal::TerminalState` | ring-3 owns a bounded fixed 80×25 live surface, consumes Input and Session rings, and emits compact Session input and dirty-cell Display messages |
 | Display service | `services/images/src/display` + `logos-display` | ring-3 validates cell diffs and endpoint generations, then rasterizes dirty cells through embedded glyphs into its mapped GOP framebuffer |
@@ -49,7 +49,7 @@ fixed service boundaries.
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
 | Runtime handoff | `handoff_to_runtime` | registers one root `TaskEntry`; the scheduler starts it through the normal context path |
-| Proof workload | `qemu-proof` feature | assembly CPU-bound canaries, timer/switch counters, cross-CPU block/wake, structured PASS |
+| Proof workload | `qemu-proof` feature | assembly CPU-bound canaries, timer/switch counters, event waits, IPC backpressure edges, keyboard wake, cross-CPU block/wake, structured PASS |
 
 The process-to-scheduler handoff is now explicit: a running process with a bound root produces one
 validated `UserLaunch`, and the scheduler publishes its entry, stack, root, and process generation
@@ -79,10 +79,8 @@ services must not invent ad hoc reboot pickup paths before that boundary exists.
 
 ## Deferred next-step improvements
 
-The terminal milestone deliberately leaves four broader improvements for later proofs:
+The terminal milestone deliberately leaves three broader improvements for later proofs:
 
-- blocking IPC and wait syscalls, once service workloads can replace spin loops without weakening
-  bounded scheduling;
 - hostile-peer IPC isolation, which requires a new data-plane design beyond trusted shared pages;
 - persistence and reboot recovery, which belong behind the storage/journal boundary above; and
 - a generalized service topology, after the fixed five-service graph has stable lifecycle evidence.
