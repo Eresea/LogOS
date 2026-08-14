@@ -810,6 +810,21 @@ pub(crate) fn record_service_heartbeat(
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).record_heartbeat(service, process, now) }
 }
 
+pub(crate) fn ipc_send(
+    process: crate::process::ProcessHandle,
+    capability_slot: usize,
+    length: usize,
+) -> crate::service_ipc::IpcOutcome {
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).ipc_send(process, capability_slot, length) }
+}
+
+pub(crate) fn ipc_receive(
+    process: crate::process::ProcessHandle,
+    capability_slot: usize,
+) -> crate::service_ipc::IpcOutcome {
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).ipc_receive(process, capability_slot) }
+}
+
 #[cfg(feature = "qemu-proof")]
 pub(crate) fn suppress_service_heartbeat(service: logos_abi::ServiceId) {
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).suppress_heartbeat(service) }

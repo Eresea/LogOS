@@ -476,6 +476,128 @@ impl ServiceRuntime {
         self.heartbeat_ticks[service.index()].load(Ordering::Acquire)
     }
 
+    pub(crate) fn ipc_send(
+        &self,
+        process: ProcessHandle,
+        capability_slot: usize,
+        length: usize,
+    ) -> crate::service_ipc::IpcOutcome {
+        let Some(service) = self.service_for_process(process) else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let Some(graph) = self.ipc.as_ref() else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Disconnected,
+                notified: false,
+            };
+        };
+        let Some(capability_frame) = self.ipc_capability_frames[service.index()] else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let Some(capability) = (unsafe {
+            (&*(capability_frame.raw() as usize as *const logos_abi::IpcCapabilityPage))
+                .get(capability_slot)
+        }) else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        if length > crate::loader::PAGE_SIZE {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Malformed,
+                notified: false,
+            };
+        }
+        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
+        };
+        let outcome = graph.send(service, capability, bytes);
+        if outcome.notified {
+            crate::arch::signal_events(logos_abi::ipc_read_event_mask(
+                capability.endpoint as usize,
+            ));
+        }
+        outcome
+    }
+
+    pub(crate) fn ipc_receive(
+        &self,
+        process: ProcessHandle,
+        capability_slot: usize,
+    ) -> crate::service_ipc::IpcOutcome {
+        let Some(service) = self.service_for_process(process) else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let Some(graph) = self.ipc.as_ref() else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Disconnected,
+                notified: false,
+            };
+        };
+        let Some(capability_frame) = self.ipc_capability_frames[service.index()] else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let Some(capability) = (unsafe {
+            (&*(capability_frame.raw() as usize as *const logos_abi::IpcCapabilityPage))
+                .get(capability_slot)
+        }) else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let Some(index) = capability.endpoint_index() else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let length = crate::service_ipc::ServiceIpcGraph::message_size(index);
+        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let bytes = unsafe {
+            core::slice::from_raw_parts_mut(staging_frame.raw() as usize as *mut u8, length)
+        };
+        let outcome = graph.receive(service, capability, bytes);
+        if outcome.notified {
+            crate::arch::signal_events(logos_abi::ipc_write_event_mask(
+                capability.endpoint as usize,
+            ));
+        }
+        outcome
+    }
+
+    fn service_for_process(&self, process: ProcessHandle) -> Option<ServiceId> {
+        SERVICE_IMAGES.iter().find_map(|spec| {
+            self.launch(spec.service())
+                .is_some_and(|(current, _)| current == process)
+                .then_some(spec.service())
+        })
+    }
+
     pub(crate) fn fault_process(
         &mut self,
         process: ProcessHandle,

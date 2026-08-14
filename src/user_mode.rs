@@ -18,6 +18,8 @@ const PROOF_IMAGE_LEN: usize = 0x89;
 const SYSCALL_YIELD: usize = 1;
 const SYSCALL_WAIT: usize = 2;
 const SYSCALL_NOTIFY: usize = 3;
+const SYSCALL_IPC_SEND: usize = logos_abi::IPC_SYSCALL_SEND;
+const SYSCALL_IPC_RECEIVE: usize = logos_abi::IPC_SYSCALL_RECEIVE;
 const SYSCALL_HEARTBEAT: usize = 10;
 
 #[repr(C, align(4096))]
@@ -168,6 +170,27 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
         }
         let woken = crate::arch::signal_events(mask);
         unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), woken) };
+        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
+    if number == SYSCALL_IPC_SEND {
+        let Some(launch) = SCHEDULER.user_launch(handle) else {
+            return false;
+        };
+        let capability_slot = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) };
+        let length = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(9)) };
+        let outcome = crate::arch::ipc_send(launch.process(), capability_slot, length);
+        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), outcome.status as usize) };
+        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
+    if number == SYSCALL_IPC_RECEIVE {
+        let Some(launch) = SCHEDULER.user_launch(handle) else {
+            return false;
+        };
+        let capability_slot = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) };
+        let outcome = crate::arch::ipc_receive(launch.process(), capability_slot);
+        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), outcome.status as usize) };
         USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
         return true;
     }

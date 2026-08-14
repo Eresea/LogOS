@@ -1,6 +1,11 @@
 //! Fixed shared endpoint-page allocation for the terminal graph.
 
-use logos_abi::{EndpointHeader, IpcCapabilityPage, IpcRights, SERVICE_IPC_BASE, ServiceId};
+use core::{mem, ptr};
+
+use logos_abi::{
+    EndpointHeader, IpcCapability, IpcCapabilityPage, IpcRights, IpcStatus, Notify,
+    SERVICE_IPC_BASE, ServiceId,
+};
 
 use crate::{
     frame_pool::{FrameAddress, FramePool, FramePoolError},
@@ -61,6 +66,18 @@ pub enum IpcError {
     Capacity,
     Exhausted,
     Memory,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IpcOutcome {
+    pub status: IpcStatus,
+    pub notified: bool,
+}
+
+impl IpcOutcome {
+    const fn new(status: IpcStatus, notified: bool) -> Self {
+        Self { status, notified }
+    }
 }
 
 pub struct ServiceIpcGraph {
@@ -144,6 +161,160 @@ impl ServiceIpcGraph {
         }
         page
     }
+
+    pub fn send(&self, service: ServiceId, capability: IpcCapability, bytes: &[u8]) -> IpcOutcome {
+        let index = match self.authorized_endpoint(service, capability, IpcRights::Send) {
+            Ok(index) => index,
+            Err(status) => return IpcOutcome::new(status, false),
+        };
+        if bytes.len() != Self::message_size(index) {
+            return IpcOutcome::new(IpcStatus::Malformed, false);
+        }
+        let Some(frame) = self.endpoint(index).map(|endpoint| endpoint.frame().raw() as usize)
+        else {
+            return IpcOutcome::new(IpcStatus::Unauthorized, false);
+        };
+        let identity = capability_identity(capability);
+        let result = unsafe { send_bytes(frame, index, identity, bytes) };
+        match result {
+            Ok(notify) => IpcOutcome::new(IpcStatus::Ok, notify == Notify::Notified),
+            Err(IpcStatus::Full) => IpcOutcome::new(IpcStatus::Full, false),
+            Err(status) => IpcOutcome::new(status, false),
+        }
+    }
+
+    pub fn receive(
+        &self,
+        service: ServiceId,
+        capability: IpcCapability,
+        bytes: &mut [u8],
+    ) -> IpcOutcome {
+        let index = match self.authorized_endpoint(service, capability, IpcRights::Receive) {
+            Ok(index) => index,
+            Err(status) => return IpcOutcome::new(status, false),
+        };
+        if bytes.len() != Self::message_size(index) {
+            return IpcOutcome::new(IpcStatus::Malformed, false);
+        }
+        let Some(frame) = self.endpoint(index).map(|endpoint| endpoint.frame().raw() as usize)
+        else {
+            return IpcOutcome::new(IpcStatus::Unauthorized, false);
+        };
+        let identity = capability_identity(capability);
+        let result = unsafe { receive_bytes(frame, index, identity, bytes) };
+        match result {
+            Ok(notify) => IpcOutcome::new(IpcStatus::Ok, notify == Notify::Notified),
+            Err(IpcStatus::Empty) => IpcOutcome::new(IpcStatus::Empty, false),
+            Err(status) => IpcOutcome::new(status, false),
+        }
+    }
+
+    fn authorized_endpoint(
+        &self,
+        service: ServiceId,
+        capability: IpcCapability,
+        rights: IpcRights,
+    ) -> Result<usize, IpcStatus> {
+        let Some(index) = capability.endpoint_index() else {
+            return Err(IpcStatus::Unauthorized);
+        };
+        let Some(endpoint) = self.endpoint(index) else {
+            return Err(IpcStatus::Unauthorized);
+        };
+        let owns_endpoint = match rights {
+            IpcRights::Send => endpoint.producer() == service,
+            IpcRights::Receive => endpoint.consumer() == service,
+        };
+        if !owns_endpoint || !capability.rights.allows(rights) {
+            return Err(IpcStatus::Unauthorized);
+        }
+        if capability.generation != endpoint.generation()
+            || capability.service_epoch != endpoint.header().service_epoch
+        {
+            return Err(IpcStatus::Stale);
+        }
+        Ok(index)
+    }
+
+    pub fn message_size(index: usize) -> usize {
+        endpoint_message_size(index)
+    }
+}
+
+fn capability_identity(capability: IpcCapability) -> logos_abi::MessageIdentity {
+    logos_abi::MessageIdentity::new(capability.generation, capability.service_epoch)
+}
+
+fn endpoint_message_size(index: usize) -> usize {
+    match index {
+        0 => mem::size_of::<logos_abi::InputMessage>(),
+        1 => mem::size_of::<logos_abi::RenderMessage>(),
+        2..=5 => mem::size_of::<logos_abi::IpcBytes>(),
+        _ => 0,
+    }
+}
+
+unsafe fn send_bytes(
+    frame: usize,
+    index: usize,
+    identity: logos_abi::MessageIdentity,
+    bytes: &[u8],
+) -> Result<Notify, IpcStatus> {
+    match index {
+        0 => unsafe { send_typed::<logos_abi::InputMessage, 32>(frame, identity, bytes) },
+        1 => unsafe { send_typed::<logos_abi::RenderMessage, 1>(frame, identity, bytes) },
+        2..=5 => unsafe { send_typed::<logos_abi::IpcBytes, 8>(frame, identity, bytes) },
+        _ => Err(IpcStatus::Unauthorized),
+    }
+}
+
+unsafe fn receive_bytes(
+    frame: usize,
+    index: usize,
+    identity: logos_abi::MessageIdentity,
+    bytes: &mut [u8],
+) -> Result<Notify, IpcStatus> {
+    match index {
+        0 => unsafe { receive_typed::<logos_abi::InputMessage, 32>(frame, identity, bytes) },
+        1 => unsafe { receive_typed::<logos_abi::RenderMessage, 1>(frame, identity, bytes) },
+        2..=5 => unsafe { receive_typed::<logos_abi::IpcBytes, 8>(frame, identity, bytes) },
+        _ => Err(IpcStatus::Unauthorized),
+    }
+}
+
+unsafe fn send_typed<T: Copy, const N: usize>(
+    frame: usize,
+    identity: logos_abi::MessageIdentity,
+    bytes: &[u8],
+) -> Result<Notify, IpcStatus> {
+    if bytes.len() != mem::size_of::<T>() {
+        return Err(IpcStatus::Malformed);
+    }
+    let entry = unsafe { ptr::read_unaligned(bytes.as_ptr() as *const T) };
+    let ring = unsafe { &*(frame as *const logos_abi::SharedIpc<T, N>) };
+    ring.send(identity, entry).map_err(|error| match error {
+        logos_abi::SharedSendError::Full => IpcStatus::Full,
+        logos_abi::SharedSendError::Stale => IpcStatus::Stale,
+        logos_abi::SharedSendError::Disconnected => IpcStatus::Disconnected,
+    })
+}
+
+unsafe fn receive_typed<T: Copy, const N: usize>(
+    frame: usize,
+    identity: logos_abi::MessageIdentity,
+    bytes: &mut [u8],
+) -> Result<Notify, IpcStatus> {
+    if bytes.len() != mem::size_of::<T>() {
+        return Err(IpcStatus::Malformed);
+    }
+    let ring = unsafe { &*(frame as *const logos_abi::SharedIpc<T, N>) };
+    let (entry, notify) = ring.receive_with_notify(identity).map_err(|error| match error {
+        logos_abi::SharedReceiveError::Empty => IpcStatus::Empty,
+        logos_abi::SharedReceiveError::Stale => IpcStatus::Stale,
+        logos_abi::SharedReceiveError::Disconnected => IpcStatus::Disconnected,
+    })?;
+    unsafe { ptr::write_unaligned(bytes.as_mut_ptr() as *mut T, entry) };
+    Ok(notify)
 }
 
 fn disconnect_ipc_page(endpoint: IpcEndpoint, index: usize) {
@@ -206,5 +377,26 @@ mod tests {
         assert_eq!(terminal.get(1).unwrap().rights, IpcRights::Send);
         assert_eq!(terminal.get(3).unwrap().rights, IpcRights::Receive);
         assert_eq!(terminal.get(4), None);
+    }
+
+    #[test]
+    fn graph_rejects_wrong_direction_stale_and_malformed_operations() {
+        let mut map = crate::boot_resources::MemoryMap::new();
+        map.push(MemoryDescriptor::new(0x1000, 8, true).unwrap()).unwrap();
+        let mut pool = FramePool::empty();
+        pool.initialize(&map).unwrap();
+        let mut memory = Memory;
+        let graph = ServiceIpcGraph::allocate_with_identity(&mut pool, &mut memory, 2, 9).unwrap();
+        let input_send = graph.capabilities(ServiceId::Input).get(0).unwrap();
+        assert_eq!(
+            graph.send(ServiceId::Terminal, input_send, &[]).status,
+            logos_abi::IpcStatus::Unauthorized
+        );
+        let stale = logos_abi::IpcCapability::new(0, IpcRights::Send, 1, 9).unwrap();
+        assert_eq!(graph.send(ServiceId::Input, stale, &[]).status, logos_abi::IpcStatus::Stale);
+        assert_eq!(
+            graph.send(ServiceId::Input, input_send, &[]).status,
+            logos_abi::IpcStatus::Malformed
+        );
     }
 }
