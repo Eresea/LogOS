@@ -33,6 +33,12 @@ static BACKPRESSURE_FULL: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_BLOCKED: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_WAKE: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_RESUMED: AtomicBool = AtomicBool::new(false);
+static RING3_CPU_MASK: AtomicUsize = AtomicUsize::new(0);
+static RING3_AP_REPORTED: AtomicBool = AtomicBool::new(false);
+static RING3_CR3_VALID: AtomicBool = AtomicBool::new(false);
+static RESCHEDULE_IPIS: AtomicU64 = AtomicU64::new(0);
+static EVENT_WAKE_IPI_SENT: AtomicBool = AtomicBool::new(false);
+static EVENT_WAKE_IPI_RECEIVED: AtomicBool = AtomicBool::new(false);
 static PROBE_RING: logos_abi::RenderIpc =
     logos_abi::RenderIpc::new(logos_abi::EndpointHeader::new(1, 1));
 
@@ -73,6 +79,12 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
         (core::ptr::addr_of!(BACKPRESSURE_BLOCKED) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(BACKPRESSURE_WAKE) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(BACKPRESSURE_RESUMED) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(RING3_CPU_MASK) as usize, core::mem::size_of::<AtomicUsize>()),
+        (core::ptr::addr_of!(RING3_AP_REPORTED) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(RING3_CR3_VALID) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(RESCHEDULE_IPIS) as usize, core::mem::size_of::<AtomicU64>()),
+        (core::ptr::addr_of!(EVENT_WAKE_IPI_SENT) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(EVENT_WAKE_IPI_RECEIVED) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(PROBE_RING) as usize, core::mem::size_of::<logos_abi::RenderIpc>()),
     ] {
         crate::arch::reserve_storage_frames(pool, address, bytes);
@@ -119,6 +131,37 @@ pub fn live_service_restarted() {
     LIVE_SERVICE_RESTARTED.store(true, Ordering::Release);
 }
 
+pub fn observe_ring3_cpu(cpu: usize, expected_root: usize, actual_root: usize) {
+    if cpu < MAX_CPUS {
+        let previous = RING3_CPU_MASK.fetch_or(1usize << cpu, Ordering::AcqRel);
+        if cpu != 0
+            && previous & (1usize << cpu) == 0
+            && !RING3_AP_REPORTED.swap(true, Ordering::AcqRel)
+        {
+            crate::arch_proof_line(b"LogOS vNext: ring3 AP execution");
+        }
+    }
+    if expected_root != actual_root {
+        crate::arch_fatal(b"LogOS vNext: ring3 CR3 mismatch");
+    }
+    RING3_CR3_VALID.store(true, Ordering::Release);
+}
+
+pub fn reschedule_ipi_received(_cpu: usize) {
+    if RESCHEDULE_IPIS.fetch_add(1, Ordering::Relaxed) == 0 {
+        crate::arch_proof_line(b"LogOS vNext: reschedule IPI received");
+    }
+    if EVENT_WAKE_IPI_SENT.load(Ordering::Acquire)
+        && !EVENT_WAKE_IPI_RECEIVED.swap(true, Ordering::AcqRel)
+    {
+        crate::arch_proof_line(b"LogOS vNext: event wake reschedule IPI");
+    }
+}
+
+pub fn event_wake_ipi_sent() {
+    EVENT_WAKE_IPI_SENT.store(true, Ordering::Release);
+}
+
 pub fn observe(cpu: usize) {
     if PASSED.load(Ordering::Acquire) {
         if cpu == 0 && !REPORTED.swap(true, Ordering::AcqRel) {
@@ -132,6 +175,10 @@ pub fn observe(cpu: usize) {
     let switches = (0..cpu_count).map(|index| SCHEDULER.switches(index).unwrap_or(0)).sum::<u64>();
     let wake_cpus_differ =
         cpu_count == 1 || BLOCK_CPU.load(Ordering::Acquire) != WAKE_CPU.load(Ordering::Acquire);
+    let ring3_cpus = RING3_CPU_MASK.load(Ordering::Acquire);
+    let ring3_migrated = cpu_count == 1 || ring3_cpus & !1 != 0;
+    let reschedule_ipi = cpu_count == 1 || RESCHEDULE_IPIS.load(Ordering::Acquire) != 0;
+    let event_wake_ipi = cpu_count == 1 || EVENT_WAKE_IPI_RECEIVED.load(Ordering::Acquire);
     let write_event_mask =
         ((1u64 << logos_abi::IPC_ENDPOINT_COUNT) - 1) << logos_abi::IPC_WRITE_EVENT_BASE;
     let conditions_met = timers
@@ -160,6 +207,10 @@ pub fn observe(cpu: usize) {
         && BACKPRESSURE_WAKE.load(Ordering::Acquire)
         && BACKPRESSURE_RESUMED.load(Ordering::Acquire)
         && crate::user_mode::fault_observed()
+        && RING3_CR3_VALID.load(Ordering::Acquire)
+        && ring3_migrated
+        && reschedule_ipi
+        && event_wake_ipi
         && BLOCK_RESUMED.load(Ordering::Acquire)
         && WAKE_DONE.load(Ordering::Acquire)
         && wake_cpus_differ;
@@ -190,7 +241,7 @@ fn wake_task() {
                 let cpu = crate::current_cpu();
                 let blocked = BLOCK_CPU.load(Ordering::Acquire);
                 if CPU_COUNT.load(Ordering::Acquire) == 1 || cpu != blocked {
-                    if SCHEDULER.wake(handle) {
+                    if crate::arch::wake_task(handle) {
                         WAKE_CPU.store(cpu, Ordering::Release);
                         WAKE_DONE.store(true, Ordering::Release);
                     }
@@ -250,7 +301,7 @@ fn try_backpressure_wake() {
     if notification != logos_abi::Notify::Notified {
         crate::arch_fatal(b"LogOS vNext: backpressure probe edge");
     }
-    SCHEDULER.signal_events(event);
+    crate::arch::signal_events(event);
     BACKPRESSURE_WAKE.store(true, Ordering::Release);
 }
 
@@ -267,7 +318,7 @@ fn reclaimer_task() {
             {
                 COMPLETION_RECLAIMED.store(true, Ordering::Release);
                 let stale_rejected =
-                    !SCHEDULER.wake(completed) && SCHEDULER.state(completed).is_none();
+                    !crate::arch::wake_task(completed) && SCHEDULER.state(completed).is_none();
                 COMPLETION_STALE_REJECTED.store(stale_rejected, Ordering::Release);
                 let replacement = SCHEDULER.spawn(replacement_task).expect("proof task capacity");
                 COMPLETION_SLOT_REUSED.store(
