@@ -123,15 +123,13 @@ pub fn capability(slot: usize) -> Option<logos_abi::IpcCapability> {
 
 #[inline(always)]
 fn ipc_syscall(number: usize, capability_slot: usize, length: usize) -> IpcStatus {
-    let raw: usize;
+    let mut raw = number;
     unsafe {
         asm!(
-            "mov eax, {number}",
             "int 49",
-            number = in(reg) number,
+            inout("rax") raw,
             in("rdi") capability_slot,
             in("rsi") length,
-            lateout("rax") raw,
             options(nostack, preserves_flags),
         );
     }

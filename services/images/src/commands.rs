@@ -48,11 +48,9 @@ impl PendingOutput {
         }
         if self.pending && self.offset == self.len {
             let message = IpcBytes::empty(MessageKind::SessionOutput);
-            if self.len == 0 {
-                if common::ipc_send(capability_slot, &message) == IpcStatus::Ok {
-                    self.pending = false;
-                    progressed = true;
-                }
+            if self.len == 0 && common::ipc_send(capability_slot, &message) == IpcStatus::Ok {
+                self.pending = false;
+                progressed = true;
             }
         }
         if self.pending && self.offset == self.len && self.len != 0 {

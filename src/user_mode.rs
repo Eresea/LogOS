@@ -179,9 +179,11 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
         };
         let capability_slot = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) };
         let length = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(9)) };
+        prepare_kernel();
         let outcome = crate::arch::ipc_send(launch.process(), capability_slot, length);
         unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), outcome.status as usize) };
         USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+        prepare_address_space(launch.address_space_root());
         return true;
     }
     if number == SYSCALL_IPC_RECEIVE {
@@ -189,9 +191,11 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
             return false;
         };
         let capability_slot = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) };
+        prepare_kernel();
         let outcome = crate::arch::ipc_receive(launch.process(), capability_slot);
         unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), outcome.status as usize) };
         USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+        prepare_address_space(launch.address_space_root());
         return true;
     }
     if number != SYSCALL_HEARTBEAT {

@@ -649,6 +649,21 @@ pub(crate) fn reserve_kernel_frames(pool: &mut crate::frame_pool::FramePool) {
         core::ptr::addr_of!(SERVICE_RUNTIME) as usize,
         core::mem::size_of::<crate::service_runtime::ServiceRuntime>(),
     );
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(CPU_GDTS) as usize,
+        core::mem::size_of::<[[u64; 7]; MAX_CPUS]>(),
+    );
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(CPU_IDTS) as usize,
+        core::mem::size_of::<[[IdtEntry; IDT_ENTRIES]; MAX_CPUS]>(),
+    );
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(CPU_TSS) as usize,
+        core::mem::size_of::<[TaskStateSegment; MAX_CPUS]>(),
+    );
     #[cfg(feature = "qemu-proof")]
     {
         crate::user_mode::reserve_frames(pool);
