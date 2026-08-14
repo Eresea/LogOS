@@ -34,9 +34,10 @@
 | [0030](0030-user-launch-transition.md) | Accepted | Scheduler CR3 selection and validated ring-3 iret launch are centralized before service scheduling |
 | [0031](0031-service-startup-barrier.md) | Accepted | Five services advance through a fixed dependency-ordered launch barrier before execution |
 | [0032](0032-service-ipc-pages.md) | Accepted | Six generation-stamped endpoint pages are mapped only into their producer and consumer roots |
-| [0034](0034-ring3-bsp-affinity.md) | Accepted | Ring-3 tasks stay on the BSP until per-CPU user-entry and CR3/TLB migration is explicit |
+| [0034](0034-ring3-bsp-affinity.md) | Superseded | Historical BSP-only guard replaced by bounded ring-3 SMP migration in ADR-0039 |
 | [0033](0033-ps2-interrupt-boundary.md) | Accepted | Legacy PIC IRQ1 supplies bounded raw PS/2 bytes to Input; decoding remains in the service |
 | [0035](0035-live-supervisor-restart.md) | Accepted | Supervisor-owned graph restart quiesces tasks, reclaims address spaces safely, and rejects stale IPC generations |
 | [0036](0036-deferred-capability-metadata.md) | Accepted | Remove unenforced capability metadata and keep authorization deferred until a real enforcement boundary exists |
 | [0037](0037-bounded-memory-subsystem.md) | Accepted | Layered bounded physical, virtual, async, SMP, heap, pressure, and observability contracts behind stable frame interfaces |
 | [0038](0038-event-driven-blocking-ipc.md) | Accepted | Fixed Wait/Notify event masks block empty receivers and full senders without replacing shared-page IPC |
+| [0039](0039-ring3-smp-migration.md) | Accepted | Ring-3 tasks migrate across online CPUs with CR3-first handoff and bounded reschedule IPIs |

@@ -23,10 +23,10 @@ fixed service boundaries.
 | PS/2 interrupt adapter | `arch` | remaps the legacy PIC, unmasks only IRQ1 after the Input ring is published, and copies port `0x60` bytes into that ring; no key decoding occurs in Core |
 | Font rendering | `logos-display` | fixed 8×16 anti-aliased JetBrains Mono coverage atlas with deterministic replacement glyph |
 | Per-CPU state | `arch::CpuLocal` via `GS_BASE` | private scheduler/idle stacks, TSS ring-transition fallback, cursor/current task, ticks, online state |
-| Context boundary | `arch/context.rs` | timer, voluntary, Wait/Notify syscall dispatch, and user-fault entries save one GPR/RIP/RSP/RFLAGS/CS and x87/SSE frame shape |
+| Context boundary | `arch/context.rs` | timer, voluntary, reschedule IPI, Wait/Notify syscall dispatch, and user-fault entries save one GPR/RIP/RSP/RFLAGS/CS and x87/SSE frame shape |
 | Publication | `Scheduler::save_context` + `finish` | outgoing task is claimable only after context-save publication |
-| Scheduler | `Scheduler` | sixteen generation-safe slots, atomic lifecycle/wake word, published address-space root per task, CAS `Runnable → Running`, no task-body lock |
-| Task primitives | `spawn`, `wake`, `yield_current`, `block_current`, `reclaim_completed` | explicit runnable/blocked/completed states and cheap wake-pending race handling |
+| Scheduler | `Scheduler` | sixteen generation-safe slots, atomic lifecycle/wake word, published address-space root per task, CAS `Runnable → Running` on any online CPU, no task-body lock |
+| Task primitives | `spawn`, `wake`, `yield_current`, `block_current`, `reclaim_completed` | explicit runnable/blocked/completed states, cheap wake-pending race handling, and bounded reschedule IPIs for hardware wakeups |
 | Timed wait | `sleep_current_for`, `wake_due` | one fixed deadline per slot; explicit wake cancels the deadline and BSP timer scans remain bounded |
 | Runtime operations | `runtime::Runtime` | one in-process fixed command/response mailbox over two generation-safe operation slots with explicit ready/waiting/complete/cancelled/timed-out states |
 | Service restart contract | `service_lifecycle::ServiceLifecycle` | fixed owner-held operation slots become explicitly `Restarted`; late completions are rejected and retries remain owner policy |
@@ -40,7 +40,7 @@ fixed service boundaries.
 | Commands service | `services/images/src/commands` + `logos-commands::CommandService` | receives bounded Session requests, executes built-ins, and returns backpressured output over its reverse IPC ring |
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 16 validated mappings per process, and exit/fault/reclaim outcomes |
 | User launch contract | `process::UserLaunch` + `Scheduler::spawn_user` | a running process with a bound root publishes entry RIP, aligned stack top, root, and process generation before its task becomes runnable |
-| Ring-3 CPU affinity | `scheduler::claim_next` | ring-3 tasks remain on BSP until per-CPU user-entry stacks and CR3/TLB migration are explicitly implemented; kernel scheduling remains SMP |
+| Ring-3 CPU migration | `scheduler::claim_next` + `arch::context` | published ring-3 tasks may migrate after a context boundary; the target loads CR3 and its TSS `RSP0` before restore, while live mappings remain immutable |
 | Service image manifest | `service_images::SERVICE_IMAGES` | five fixed ESP paths and bounded ELF admission in dependency order |
 | Retained service images | `service_loader::ServiceImageBundle` | five validated ELF records with page-aligned retained addresses, loaded before `ExitBootServices`, and no filesystem lifetime after UEFI exit |
 | Service ELF packaging | `services/images` + `scripts/build-services.ps1` | five independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
@@ -49,16 +49,16 @@ fixed service boundaries.
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
 | Runtime handoff | `handoff_to_runtime` | registers one root `TaskEntry`; the scheduler starts it through the normal context path |
-| Proof workload | `qemu-proof` feature | assembly CPU-bound canaries, timer/switch counters, event waits, IPC backpressure edges, keyboard wake, cross-CPU block/wake, structured PASS |
+| Proof workload | `qemu-proof` feature | assembly CPU-bound canaries, timer/switch counters, post-CR3 ring-3 migration, reschedule IPIs, event waits, IPC backpressure edges, keyboard wake, cross-CPU block/wake, structured PASS |
 
 The process-to-scheduler handoff is now explicit: a running process with a bound root produces one
 validated `UserLaunch`, and the scheduler publishes its entry, stack, root, and process generation
 before marking the task runnable. Hardware page-table construction, ring-3 entry, and safe live
 replacement are part of the service path.
 
-AP startup is deliberately narrow: xAPIC IDs, low-memory trampoline, current CR3, fixed stacks, and
-sequential INIT/SIPI/SIPI. x2APIC IDs, malformed topology, more than eight CPUs, allocators, APIC
-IPIs for wakeups, affinity, priorities, and AVX/XSAVE are not part of this milestone.
+AP startup is deliberately narrow: xAPIC IDs, low-memory trampoline, current CR3, NXE, fixed
+stacks, and sequential INIT/SIPI/SIPI. x2APIC IDs, malformed topology, more than eight CPUs,
+allocators, affinity, priorities, and AVX/XSAVE are not part of this milestone.
 
 The handoff registers one root task. That task owns the first fixed Runtime operation table; Core does
 not inspect, schedule, or orchestrate Runtime state. Runtime operations use the scheduler's sleep and
