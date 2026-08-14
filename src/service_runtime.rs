@@ -620,7 +620,13 @@ impl ServiceRuntime {
                     continue;
                 };
                 let address = mapping.virtual_address();
-                if (logos_abi::SERVICE_IPC_BASE..legacy_end).contains(&address) {
+                let Some(mapping_bytes) = mapping.pages().checked_mul(crate::loader::PAGE_SIZE) else {
+                    return false;
+                };
+                let Some(mapping_end) = address.checked_add(mapping_bytes) else {
+                    return false;
+                };
+                if address < legacy_end && mapping_end > logos_abi::SERVICE_IPC_BASE {
                     return false;
                 }
                 if address == logos_abi::IPC_STAGING_BASE {

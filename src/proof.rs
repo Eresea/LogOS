@@ -36,7 +36,8 @@ static BACKPRESSURE_RESUMED: AtomicBool = AtomicBool::new(false);
 static RING3_CPU_MASK: AtomicUsize = AtomicUsize::new(0);
 static RING3_AP_REPORTED: AtomicBool = AtomicBool::new(false);
 static RING3_CR3_VALID: AtomicBool = AtomicBool::new(false);
-static HOSTILE_IPC_REJECTED: AtomicBool = AtomicBool::new(false);
+static HOSTILE_IPC_PROCESS_REJECTED: AtomicBool = AtomicBool::new(false);
+static HOSTILE_IPC_SYSCALL_REJECTED: AtomicBool = AtomicBool::new(false);
 static RESCHEDULE_IPIS: AtomicU64 = AtomicU64::new(0);
 static EVENT_WAKE_IPI_SENT: AtomicBool = AtomicBool::new(false);
 static EVENT_WAKE_IPI_RECEIVED: AtomicBool = AtomicBool::new(false);
@@ -84,7 +85,14 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
         (core::ptr::addr_of!(RING3_CPU_MASK) as usize, core::mem::size_of::<AtomicUsize>()),
         (core::ptr::addr_of!(RING3_AP_REPORTED) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(RING3_CR3_VALID) as usize, core::mem::size_of::<AtomicBool>()),
-        (core::ptr::addr_of!(HOSTILE_IPC_REJECTED) as usize, core::mem::size_of::<AtomicBool>()),
+        (
+            core::ptr::addr_of!(HOSTILE_IPC_PROCESS_REJECTED) as usize,
+            core::mem::size_of::<AtomicBool>(),
+        ),
+        (
+            core::ptr::addr_of!(HOSTILE_IPC_SYSCALL_REJECTED) as usize,
+            core::mem::size_of::<AtomicBool>(),
+        ),
         (core::ptr::addr_of!(RESCHEDULE_IPIS) as usize, core::mem::size_of::<AtomicU64>()),
         (core::ptr::addr_of!(EVENT_WAKE_IPI_SENT) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(EVENT_WAKE_IPI_RECEIVED) as usize, core::mem::size_of::<AtomicBool>()),
@@ -211,7 +219,8 @@ pub fn observe(cpu: usize) {
         && BACKPRESSURE_RESUMED.load(Ordering::Acquire)
         && crate::user_mode::fault_observed()
         && RING3_CR3_VALID.load(Ordering::Acquire)
-        && HOSTILE_IPC_REJECTED.load(Ordering::Acquire)
+        && HOSTILE_IPC_PROCESS_REJECTED.load(Ordering::Acquire)
+        && HOSTILE_IPC_SYSCALL_REJECTED.load(Ordering::Acquire)
         && ring3_migrated
         && reschedule_ipi
         && event_wake_ipi
@@ -238,7 +247,11 @@ fn verify_hostile_ipc_boundary() {
     {
         crate::arch_fatal(b"LogOS vNext: hostile IPC rejection");
     }
-    HOSTILE_IPC_REJECTED.store(true, Ordering::Release);
+    HOSTILE_IPC_PROCESS_REJECTED.store(true, Ordering::Release);
+}
+
+pub fn hostile_ipc_syscall_rejected() {
+    HOSTILE_IPC_SYSCALL_REJECTED.store(true, Ordering::Release);
 }
 
 fn block_task() {

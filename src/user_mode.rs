@@ -182,6 +182,10 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
         prepare_kernel();
         let outcome = crate::arch::ipc_send(launch.process(), capability_slot, length);
         unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), outcome.status as usize) };
+        #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
+        if outcome.status == logos_abi::IpcStatus::Unauthorized {
+            crate::proof::hostile_ipc_syscall_rejected();
+        }
         USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
         prepare_address_space(launch.address_space_root());
         return true;
@@ -194,6 +198,10 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
         prepare_kernel();
         let outcome = crate::arch::ipc_receive(launch.process(), capability_slot);
         unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), outcome.status as usize) };
+        #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
+        if outcome.status == logos_abi::IpcStatus::Unauthorized {
+            crate::proof::hostile_ipc_syscall_rejected();
+        }
         USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
         prepare_address_space(launch.address_space_root());
         return true;
