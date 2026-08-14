@@ -5,14 +5,26 @@ mod common;
 
 use logos_abi::{InputMessage, IpcBytes, IpcStatus, KeyCode, KeyState, MessageKind};
 
-const INPUT_CAPABILITY: usize =
-    common::capability_slot(logos_abi::ServiceId::Terminal, 0, logos_abi::IpcRights::Receive);
-const DISPLAY_CAPABILITY: usize =
-    common::capability_slot(logos_abi::ServiceId::Terminal, 1, logos_abi::IpcRights::Send);
-const SESSION_INPUT_CAPABILITY: usize =
-    common::capability_slot(logos_abi::ServiceId::Terminal, 2, logos_abi::IpcRights::Send);
-const SESSION_OUTPUT_CAPABILITY: usize =
-    common::capability_slot(logos_abi::ServiceId::Terminal, 3, logos_abi::IpcRights::Receive);
+const INPUT_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Terminal,
+    logos_abi::IpcEndpointId::InputToTerminal,
+    logos_abi::IpcRights::Receive,
+);
+const DISPLAY_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Terminal,
+    logos_abi::IpcEndpointId::TerminalToDisplay,
+    logos_abi::IpcRights::Send,
+);
+const SESSION_INPUT_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Terminal,
+    logos_abi::IpcEndpointId::TerminalToSession,
+    logos_abi::IpcRights::Send,
+);
+const SESSION_OUTPUT_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Terminal,
+    logos_abi::IpcEndpointId::SessionToTerminal,
+    logos_abi::IpcRights::Receive,
+);
 
 static mut TERMINAL: logos_terminal::TerminalService = logos_terminal::TerminalService::new();
 static mut PENDING_RENDER: Option<logos_abi::RenderMessage> = None;
@@ -32,7 +44,10 @@ pub extern "C" fn _start() -> ! {
                 IpcStatus::Ok => {
                     *pending_session_input = None;
                 }
-                IpcStatus::Full => wait_mask |= common::ipc_write_event(2),
+                IpcStatus::Full => {
+                    wait_mask |=
+                        common::ipc_write_event(logos_abi::IpcEndpointId::TerminalToSession)
+                }
                 IpcStatus::Stale
                 | IpcStatus::Disconnected
                 | IpcStatus::Unauthorized
@@ -48,7 +63,9 @@ pub extern "C" fn _start() -> ! {
                         IpcStatus::Ok => {}
                         IpcStatus::Full => {
                             *pending_session_input = Some(message);
-                            wait_mask |= common::ipc_write_event(2);
+                            wait_mask |= common::ipc_write_event(
+                                logos_abi::IpcEndpointId::TerminalToSession,
+                            );
                             break;
                         }
                         IpcStatus::Stale
@@ -60,7 +77,7 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             if pending_session_input.is_none() {
-                wait_mask |= common::ipc_read_event(0);
+                wait_mask |= common::ipc_read_event(logos_abi::IpcEndpointId::InputToTerminal);
             }
         }
         let mut message = IpcBytes::empty(MessageKind::SessionOutput);
@@ -69,7 +86,7 @@ pub extern "C" fn _start() -> ! {
                 terminal.session_output_bytes(bytes);
             }
         }
-        wait_mask |= common::ipc_read_event(3);
+        wait_mask |= common::ipc_read_event(logos_abi::IpcEndpointId::SessionToTerminal);
         if pending_render.is_none() {
             *pending_render = terminal.next_render();
         }
@@ -78,7 +95,10 @@ pub extern "C" fn _start() -> ! {
                 IpcStatus::Ok => {
                     *pending_render = None;
                 }
-                IpcStatus::Full => wait_mask |= common::ipc_write_event(1),
+                IpcStatus::Full => {
+                    wait_mask |=
+                        common::ipc_write_event(logos_abi::IpcEndpointId::TerminalToDisplay)
+                }
                 IpcStatus::Stale
                 | IpcStatus::Disconnected
                 | IpcStatus::Unauthorized

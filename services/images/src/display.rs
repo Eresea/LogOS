@@ -7,8 +7,11 @@ use logos_abi::{
     DISPLAY_CONFIG_BASE, DISPLAY_FRAMEBUFFER_BASE, FramebufferConfig, FramebufferFormat, IpcStatus,
     MessageKind, RenderMessage,
 };
-const INPUT_CAPABILITY: usize =
-    common::capability_slot(logos_abi::ServiceId::Display, 1, logos_abi::IpcRights::Receive);
+const INPUT_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Display,
+    logos_abi::IpcEndpointId::TerminalToDisplay,
+    logos_abi::IpcRights::Receive,
+);
 
 static mut DISPLAY: logos_display::Display = logos_display::Display::new(1);
 
@@ -49,7 +52,10 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if !progressed {
-            common::wait(common::ipc_read_event(1), logos_abi::ServiceId::Display);
+            common::wait(
+                common::ipc_read_event(logos_abi::IpcEndpointId::TerminalToDisplay),
+                logos_abi::ServiceId::Display,
+            );
         }
     }
 }

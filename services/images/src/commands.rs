@@ -5,10 +5,16 @@ mod common;
 
 use logos_abi::{IPC_FLAG_MORE, IpcBytes, IpcStatus, MessageKind};
 
-const INPUT_CAPABILITY: usize =
-    common::capability_slot(logos_abi::ServiceId::Commands, 4, logos_abi::IpcRights::Receive);
-const OUTPUT_CAPABILITY: usize =
-    common::capability_slot(logos_abi::ServiceId::Commands, 5, logos_abi::IpcRights::Send);
+const INPUT_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Commands,
+    logos_abi::IpcEndpointId::SessionToCommands,
+    logos_abi::IpcRights::Receive,
+);
+const OUTPUT_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Commands,
+    logos_abi::IpcEndpointId::CommandsToSession,
+    logos_abi::IpcRights::Send,
+);
 
 struct PendingOutput {
     bytes: [u8; logos_commands::MAX_OUTPUT_BYTES],
@@ -77,7 +83,10 @@ pub extern "C" fn _start() -> ! {
         let mut progressed = pending.flush(OUTPUT_CAPABILITY);
         if pending.pending {
             if !progressed {
-                common::wait(common::ipc_write_event(5), logos_abi::ServiceId::Commands);
+                common::wait(
+                    common::ipc_write_event(logos_abi::IpcEndpointId::CommandsToSession),
+                    logos_abi::ServiceId::Commands,
+                );
             }
             continue;
         }
@@ -96,7 +105,10 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if !progressed {
-            common::wait(common::ipc_read_event(4), logos_abi::ServiceId::Commands);
+            common::wait(
+                common::ipc_read_event(logos_abi::IpcEndpointId::SessionToCommands),
+                logos_abi::ServiceId::Commands,
+            );
         }
     }
 }

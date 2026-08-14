@@ -11,13 +11,13 @@ use crate::{
     page_table::PageTableMemory,
 };
 
-const ENDPOINTS: [(ServiceId, ServiceId); 6] = [
-    (ServiceId::Input, ServiceId::Terminal),
-    (ServiceId::Terminal, ServiceId::Display),
-    (ServiceId::Terminal, ServiceId::Session),
-    (ServiceId::Session, ServiceId::Terminal),
-    (ServiceId::Session, ServiceId::Commands),
-    (ServiceId::Commands, ServiceId::Session),
+const ENDPOINTS: [logos_abi::IpcEndpointId; logos_abi::IPC_ENDPOINT_COUNT] = [
+    logos_abi::IpcEndpointId::InputToTerminal,
+    logos_abi::IpcEndpointId::TerminalToDisplay,
+    logos_abi::IpcEndpointId::TerminalToSession,
+    logos_abi::IpcEndpointId::SessionToTerminal,
+    logos_abi::IpcEndpointId::SessionToCommands,
+    logos_abi::IpcEndpointId::CommandsToSession,
 ];
 pub const MAX_ENDPOINTS: usize = ENDPOINTS.len();
 pub const SERVICE_EPOCH: u64 = 1;
@@ -89,7 +89,9 @@ impl ServiceIpcGraph {
             return Err(IpcError::InvalidIdentity);
         }
         let mut graph = Self { endpoints: [None; MAX_ENDPOINTS], count: 0 };
-        for (index, (producer, consumer)) in ENDPOINTS.into_iter().enumerate() {
+        for (index, endpoint_id) in ENDPOINTS.into_iter().enumerate() {
+            let producer = endpoint_id.producer();
+            let consumer = endpoint_id.consumer();
             let frame = match pool.allocate() {
                 Ok(frame) => frame,
                 Err(FramePoolError::Exhausted) => {
@@ -162,7 +164,10 @@ impl ServiceIpcGraph {
             if slot == page.capabilities.len() {
                 return Err(IpcError::Capacity);
             }
-            if logos_abi::ipc_capability_slot(service, index, rights) != Some(slot) {
+            let Some(endpoint_id) = logos_abi::IpcEndpointId::from_index(index) else {
+                return Err(IpcError::InvalidIdentity);
+            };
+            if logos_abi::ipc_capability_slot(service, endpoint_id, rights) != Some(slot) {
                 return Err(IpcError::InvalidIdentity);
             }
             page.capabilities[slot] = logos_abi::IpcCapability::new(

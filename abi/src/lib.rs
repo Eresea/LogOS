@@ -219,25 +219,84 @@ impl ServiceId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IpcEndpointId {
+    InputToTerminal = 0,
+    TerminalToDisplay = 1,
+    TerminalToSession = 2,
+    SessionToTerminal = 3,
+    SessionToCommands = 4,
+    CommandsToSession = 5,
+}
+
+impl IpcEndpointId {
+    pub const COUNT: usize = IPC_ENDPOINT_COUNT;
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    pub const fn from_index(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(Self::InputToTerminal),
+            1 => Some(Self::TerminalToDisplay),
+            2 => Some(Self::TerminalToSession),
+            3 => Some(Self::SessionToTerminal),
+            4 => Some(Self::SessionToCommands),
+            5 => Some(Self::CommandsToSession),
+            _ => None,
+        }
+    }
+
+    pub const fn producer(self) -> ServiceId {
+        match self {
+            Self::InputToTerminal => ServiceId::Input,
+            Self::TerminalToDisplay | Self::TerminalToSession => ServiceId::Terminal,
+            Self::SessionToTerminal | Self::SessionToCommands => ServiceId::Session,
+            Self::CommandsToSession => ServiceId::Commands,
+        }
+    }
+
+    pub const fn consumer(self) -> ServiceId {
+        match self {
+            Self::InputToTerminal | Self::SessionToTerminal => ServiceId::Terminal,
+            Self::TerminalToDisplay => ServiceId::Display,
+            Self::TerminalToSession | Self::CommandsToSession => ServiceId::Session,
+            Self::SessionToCommands => ServiceId::Commands,
+        }
+    }
+
+    pub const fn read_event_mask(self) -> u64 {
+        ipc_read_event_mask(self.index())
+    }
+
+    pub const fn write_event_mask(self) -> u64 {
+        ipc_write_event_mask(self.index())
+    }
+}
+
+const _: () = assert!(IpcEndpointId::COUNT == IPC_ENDPOINT_COUNT);
+
 /// Fixed capability-page slot for one edge of the service graph.
 pub const fn ipc_capability_slot(
     service: ServiceId,
-    endpoint: usize,
+    endpoint: IpcEndpointId,
     rights: IpcRights,
 ) -> Option<usize> {
     match (service, endpoint, rights) {
-        (ServiceId::Input, 0, IpcRights::Send) => Some(0),
-        (ServiceId::Display, 1, IpcRights::Receive) => Some(0),
-        (ServiceId::Terminal, 0, IpcRights::Receive) => Some(0),
-        (ServiceId::Terminal, 1, IpcRights::Send) => Some(1),
-        (ServiceId::Terminal, 2, IpcRights::Send) => Some(2),
-        (ServiceId::Terminal, 3, IpcRights::Receive) => Some(3),
-        (ServiceId::Session, 2, IpcRights::Receive) => Some(0),
-        (ServiceId::Session, 3, IpcRights::Send) => Some(1),
-        (ServiceId::Session, 4, IpcRights::Send) => Some(2),
-        (ServiceId::Session, 5, IpcRights::Receive) => Some(3),
-        (ServiceId::Commands, 4, IpcRights::Receive) => Some(0),
-        (ServiceId::Commands, 5, IpcRights::Send) => Some(1),
+        (ServiceId::Input, IpcEndpointId::InputToTerminal, IpcRights::Send) => Some(0),
+        (ServiceId::Display, IpcEndpointId::TerminalToDisplay, IpcRights::Receive) => Some(0),
+        (ServiceId::Terminal, IpcEndpointId::InputToTerminal, IpcRights::Receive) => Some(0),
+        (ServiceId::Terminal, IpcEndpointId::TerminalToDisplay, IpcRights::Send) => Some(1),
+        (ServiceId::Terminal, IpcEndpointId::TerminalToSession, IpcRights::Send) => Some(2),
+        (ServiceId::Terminal, IpcEndpointId::SessionToTerminal, IpcRights::Receive) => Some(3),
+        (ServiceId::Session, IpcEndpointId::TerminalToSession, IpcRights::Receive) => Some(0),
+        (ServiceId::Session, IpcEndpointId::SessionToTerminal, IpcRights::Send) => Some(1),
+        (ServiceId::Session, IpcEndpointId::SessionToCommands, IpcRights::Send) => Some(2),
+        (ServiceId::Session, IpcEndpointId::CommandsToSession, IpcRights::Receive) => Some(3),
+        (ServiceId::Commands, IpcEndpointId::SessionToCommands, IpcRights::Receive) => Some(0),
+        (ServiceId::Commands, IpcEndpointId::CommandsToSession, IpcRights::Send) => Some(1),
         _ => None,
     }
 }
@@ -781,6 +840,9 @@ mod tests {
 
     #[test]
     fn ipc_metadata_matches_the_fixed_service_graph() {
+        assert_eq!(IpcEndpointId::TerminalToSession.producer(), ServiceId::Terminal);
+        assert_eq!(IpcEndpointId::TerminalToSession.consumer(), ServiceId::Session);
+        assert_eq!(IpcEndpointId::TerminalToSession.write_event_mask(), ipc_write_event_mask(2));
         assert_eq!(ipc_message_type(0), Some(IpcMessageType::Input));
         assert_eq!(ipc_message_type(1), Some(IpcMessageType::Render));
         assert_eq!(ipc_message_type(5), Some(IpcMessageType::Bytes));
@@ -788,8 +850,22 @@ mod tests {
         assert_eq!(ipc_message_size(0), Some(core::mem::size_of::<InputMessage>()));
         assert_eq!(ipc_message_size(1), Some(core::mem::size_of::<RenderMessage>()));
         assert_eq!(ipc_message_size(5), Some(core::mem::size_of::<IpcBytes>()));
-        assert_eq!(ipc_capability_slot(ServiceId::Terminal, 2, IpcRights::Send), Some(2));
-        assert_eq!(ipc_capability_slot(ServiceId::Terminal, 2, IpcRights::Receive), None);
+        assert_eq!(
+            ipc_capability_slot(
+                ServiceId::Terminal,
+                IpcEndpointId::TerminalToSession,
+                IpcRights::Send,
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            ipc_capability_slot(
+                ServiceId::Terminal,
+                IpcEndpointId::TerminalToSession,
+                IpcRights::Receive,
+            ),
+            None
+        );
     }
 
     #[test]

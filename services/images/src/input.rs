@@ -6,8 +6,11 @@ mod common;
 use logos_abi::{INPUT_KEYBOARD_RING_BASE, InputMessage, IpcStatus, KeyboardByteRing};
 
 static mut PENDING: [Option<InputMessage>; 2] = [None, None];
-const OUTPUT_CAPABILITY: usize =
-    common::capability_slot(logos_abi::ServiceId::Input, 0, logos_abi::IpcRights::Send);
+const OUTPUT_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Input,
+    logos_abi::IpcEndpointId::InputToTerminal,
+    logos_abi::IpcRights::Send,
+);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -24,7 +27,10 @@ pub extern "C" fn _start() -> ! {
                     pending[1] = None;
                 }
                 IpcStatus::Full => {
-                    common::wait(common::ipc_write_event(0), logos_abi::ServiceId::Input);
+                    common::wait(
+                        common::ipc_write_event(logos_abi::IpcEndpointId::InputToTerminal),
+                        logos_abi::ServiceId::Input,
+                    );
                     continue;
                 }
                 IpcStatus::Stale

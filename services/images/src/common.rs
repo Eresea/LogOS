@@ -12,13 +12,13 @@ pub fn idle() -> ! {
 pub const WAIT_TIMEOUT_TICKS: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS / 2;
 
 #[allow(dead_code)]
-pub const fn ipc_read_event(endpoint: usize) -> u64 {
-    logos_abi::ipc_read_event_mask(endpoint)
+pub const fn ipc_read_event(endpoint: logos_abi::IpcEndpointId) -> u64 {
+    endpoint.read_event_mask()
 }
 
 #[allow(dead_code)]
-pub const fn ipc_write_event(endpoint: usize) -> u64 {
-    logos_abi::ipc_write_event_mask(endpoint)
+pub const fn ipc_write_event(endpoint: logos_abi::IpcEndpointId) -> u64 {
+    endpoint.write_event_mask()
 }
 
 #[allow(dead_code)]
@@ -28,7 +28,7 @@ pub const fn keyboard_read_event() -> u64 {
 
 pub const fn capability_slot(
     service: ServiceId,
-    endpoint: usize,
+    endpoint: logos_abi::IpcEndpointId,
     rights: logos_abi::IpcRights,
 ) -> usize {
     match logos_abi::ipc_capability_slot(service, endpoint, rights) {
