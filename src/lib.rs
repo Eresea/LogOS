@@ -6,6 +6,7 @@ extern crate std;
 pub mod boot_resources;
 pub mod frame_pool;
 pub mod loader;
+pub mod memory;
 pub mod page_table;
 pub mod process;
 mod scheduler;
