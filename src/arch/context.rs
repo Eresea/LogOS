@@ -10,6 +10,10 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
     if HALTED.load(Ordering::Acquire) {
         fatal(b"LogOS vNext: halted");
     }
+    #[cfg(feature = "qemu-proof")]
+    if vector == usize::from(RESCHEDULE_VECTOR) {
+        crate::proof::reschedule_ipi_received(cpu);
+    }
     let current = SCHEDULER.current_task(cpu);
     let user_fault = if matches!(vector, 6 | 13 | 14) {
         let Some(handle) = current else {
@@ -38,7 +42,9 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
     if vector == usize::from(TIMER_VECTOR) {
         if cpu == 0 {
             let now = TIMER_TICKS.fetch_add(1, Ordering::AcqRel) + 1;
-            SCHEDULER.wake_due(now);
+            if SCHEDULER.wake_due(now) != 0 {
+                notify_reschedule_cpus(cpu);
+            }
         }
         SCHEDULER.record_tick(cpu);
         local_tick(cpu);
@@ -100,6 +106,10 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
     SCHEDULER.normalize_kernel_task(next);
     let next_root = SCHEDULER.address_space(next).unwrap_or(0);
     crate::arch::prepare_task_address_space(next_root);
+    #[cfg(feature = "qemu-proof")]
+    if next_root != 0 {
+        crate::proof::observe_ring3_cpu(cpu, next_root, crate::arch::current_cr3());
+    }
     SCHEDULER.saved_context(next).unwrap_or_else(|| fatal(b"LogOS vNext: no context"))
 }
 
@@ -245,7 +255,8 @@ global_asm!(
     "mov cr4, eax",
     "mov ecx, 0xc0000080",
     "rdmsr",
-    "or eax, 0x100",
+    // Preserve firmware EFER state and enable LME + NXE for service roots.
+    "or eax, 0x900",
     "wrmsr",
     "mov eax, cr0",
     "or eax, 0x80000001",
@@ -323,6 +334,10 @@ global_asm!(
     ".global context_switch_interrupt",
     "context_switch_interrupt:",
     "push 49",
+    "jmp context_common",
+    ".global context_reschedule_interrupt",
+    "context_reschedule_interrupt:",
+    "push 50",
     "jmp context_common",
     ".global user_fault_no_error",
     "user_fault_no_error:",

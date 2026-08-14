@@ -45,6 +45,7 @@ const KEYBOARD_DATA_PORT: u16 = 0x60;
 const TIMER_VECTOR: u8 = 32;
 const KEYBOARD_VECTOR: u8 = 33;
 const SWITCH_VECTOR: u8 = 49;
+const RESCHEDULE_VECTOR: u8 = 50;
 const ACTION_YIELD: u64 = 1;
 const ACTION_BLOCK: u64 = 2;
 const ACTION_COMPLETE: u64 = 3;
@@ -598,6 +599,27 @@ fn send_ipi(apic_id: u32, command: u32) {
     }
 }
 
+pub(super) fn notify_reschedule_cpus(source_cpu: usize) {
+    let cpu_count = CPU_COUNT.load(Ordering::Acquire);
+    let mut fallback = None;
+    // The global slot table makes one prompt sufficient; prefer an idle target
+    // and avoid an IPI fan-out when several wakeups arrive together.
+    for (cpu, apic_id) in APIC_IDS.iter().enumerate().take(cpu_count) {
+        if cpu == source_cpu || !SCHEDULER.cpu_online(cpu) {
+            continue;
+        }
+        fallback.get_or_insert((cpu, apic_id.load(Ordering::Acquire)));
+        if SCHEDULER.current_task(cpu).is_some() {
+            continue;
+        }
+        send_ipi(apic_id.load(Ordering::Acquire), u32::from(RESCHEDULE_VECTOR));
+        return;
+    }
+    if let Some((_, apic_id)) = fallback {
+        send_ipi(apic_id, u32::from(RESCHEDULE_VECTOR));
+    }
+}
+
 fn install_cpu(index: usize) {
     unsafe {
         CPU_LOCALS[index].initialize(index);
@@ -976,6 +998,11 @@ fn install_idt(cpu: usize) {
             KERNEL_CODE_SELECTOR,
             0xee,
         );
+        idt[RESCHEDULE_VECTOR as usize] = IdtEntry::new(
+            context_reschedule_interrupt as *const () as usize,
+            KERNEL_CODE_SELECTOR,
+            0x8e,
+        );
         idt[6] =
             IdtEntry::new(user_fault_no_error as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
         idt[13] =
@@ -1106,7 +1133,7 @@ pub(super) fn handle_keyboard_interrupt() {
                 unsafe { (&*(ring as *const logos_abi::KeyboardByteRing)).push(byte) }
             {
                 if notification == logos_abi::Notify::Notified {
-                    let woken = SCHEDULER.signal_events(logos_abi::keyboard_read_event_mask());
+                    let woken = signal_events(logos_abi::keyboard_read_event_mask());
                     #[cfg(feature = "qemu-proof")]
                     if woken > 0 {
                         proof_line(b"LogOS vNext: keyboard event wake");
@@ -1208,6 +1235,7 @@ unsafe extern "C" {
     fn context_timer_interrupt();
     fn keyboard_interrupt();
     fn context_switch_interrupt();
+    fn context_reschedule_interrupt();
     fn user_fault_no_error();
     fn user_gp_fault_error();
     fn user_pf_fault_error();
@@ -1240,7 +1268,24 @@ pub(crate) fn prepare_user_wait(
 }
 
 pub(crate) fn signal_events(mask: u64) -> usize {
-    SCHEDULER.signal_events(mask)
+    let previous_wakes = SCHEDULER.event_wakes();
+    let woken = SCHEDULER.signal_events(mask);
+    if SCHEDULER.event_wakes() != previous_wakes {
+        #[cfg(feature = "qemu-proof")]
+        crate::proof::event_wake_ipi_sent();
+        notify_reschedule_cpus(current_cpu());
+    }
+    woken
+}
+
+#[cfg_attr(not(feature = "qemu-proof"), allow(dead_code))]
+pub(crate) fn wake_task(handle: crate::TaskHandle) -> bool {
+    let was_blocked = SCHEDULER.state(handle) == Some(crate::TaskState::Blocked);
+    let woken = SCHEDULER.wake(handle);
+    if woken && was_blocked {
+        notify_reschedule_cpus(current_cpu());
+    }
+    woken
 }
 
 pub(crate) fn reset_events() {
