@@ -157,6 +157,10 @@ try {
     if ((Get-FileHash $proofBefore).Hash -eq (Get-FileHash $proofAfter).Hash) {
         throw 'QEMU keyboard injection did not change the rendered framebuffer.'
     }
+    $resultAfterInput = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
+    if ($resultAfterInput -notmatch 'LogOS vNext: keyboard event wake') {
+        throw 'QEMU keyboard input did not wake a blocked Input service.'
+    }
     Write-Host $result
 } finally {
     # Stop QEMU before closing the monitor. Some Windows QEMU builds keep the
