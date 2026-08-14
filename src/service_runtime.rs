@@ -108,7 +108,7 @@ impl ServiceRuntime {
     pub fn start(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
         let result = self.start_inner(bundle);
         if let Err(error) = result {
-            self.reclaim_resources().map_err(|_| error)?;
+            self.reclaim_resources()?;
             return Err(error);
         }
         Ok(())
@@ -146,45 +146,65 @@ impl ServiceRuntime {
             let service = spec.service();
             let image = unsafe { bundle.image(service) }.ok_or(ServiceRuntimeError::Image)?;
             let plan = spec.validate_image(image).map_err(|_| ServiceRuntimeError::Image)?;
-            let loaded =
+            let mut loaded =
                 LoadedImage::load(plan, &mut self.frame_pool).map_err(ServiceRuntimeError::Load)?;
             let mut memory = IdentityPageTableMemory;
             if let Err(error) = loaded.populate(plan, image, &mut memory) {
-                let mut loaded = loaded;
                 loaded.reclaim(&mut self.frame_pool);
                 return Err(ServiceRuntimeError::Populate(error));
             }
             let mut tables = match PageTableBuilder::new(&mut self.frame_pool, &mut memory) {
                 Ok(tables) => tables,
                 Err(error) => {
-                    let mut loaded = loaded;
                     loaded.reclaim(&mut self.frame_pool);
                     return Err(ServiceRuntimeError::PageTableRoot(error));
                 }
             };
             if let Err(error) = tables.map_image(&loaded, &mut self.frame_pool, &mut memory) {
                 tables.reclaim(&mut self.frame_pool, &mut memory);
-                let mut loaded = loaded;
                 loaded.reclaim(&mut self.frame_pool);
                 return Err(ServiceRuntimeError::PageTableMap(error));
             }
-            let process = self.processes.start(image).map_err(ServiceRuntimeError::Process)?;
-            let root = AddressSpaceRoot::new(tables.root().raw() as usize)
-                .ok_or(ServiceRuntimeError::Process(ProcessError::AddressSpace))?;
+            let process = match self.processes.start(image) {
+                Ok(process) => process,
+                Err(error) => {
+                    tables.reclaim(&mut self.frame_pool, &mut memory);
+                    loaded.reclaim(&mut self.frame_pool);
+                    return Err(ServiceRuntimeError::Process(error));
+                }
+            };
+            let Some(root) = AddressSpaceRoot::new(tables.root().raw() as usize) else {
+                let _ = self.processes.exit(process, 1);
+                let _ = self.processes.reclaim(process);
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+                loaded.reclaim(&mut self.frame_pool);
+                return Err(ServiceRuntimeError::Process(ProcessError::AddressSpace));
+            };
             if let Err(error) = self.processes.bind_address_space_root(process, root) {
                 let _ = self.processes.exit(process, 1);
                 let _ = self.processes.reclaim(process);
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+                loaded.reclaim(&mut self.frame_pool);
                 return Err(ServiceRuntimeError::Process(error));
             }
             if let Err(error) = map_loaded_pages(&mut self.processes, process, &loaded) {
                 let _ = self.processes.exit(process, 1);
                 let _ = self.processes.reclaim(process);
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+                loaded.reclaim(&mut self.frame_pool);
                 return Err(ServiceRuntimeError::Process(error));
             }
-            let launch = self
-                .processes
-                .user_launch(process, loaded.entry(), loaded.stack_top())
-                .map_err(ServiceRuntimeError::Process)?;
+            let launch =
+                match self.processes.user_launch(process, loaded.entry(), loaded.stack_top()) {
+                    Ok(launch) => launch,
+                    Err(error) => {
+                        let _ = self.processes.exit(process, 1);
+                        let _ = self.processes.reclaim(process);
+                        tables.reclaim(&mut self.frame_pool, &mut memory);
+                        loaded.reclaim(&mut self.frame_pool);
+                        return Err(ServiceRuntimeError::Process(error));
+                    }
+                };
             self.launches[index] = Some((process, launch));
             self.images[index] = loaded;
             self.tables[index].write(tables);
@@ -245,15 +265,15 @@ impl ServiceRuntime {
         self.map_framebuffer(framebuffer)?;
         let framebuffer_config_frame =
             self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+        self.framebuffer_config_frame = Some(framebuffer_config_frame);
         memory.clear(framebuffer_config_frame).map_err(ServiceRuntimeError::FramebufferConfig)?;
         initialize_framebuffer_config(framebuffer_config_frame, framebuffer);
         self.map_framebuffer_config(framebuffer_config_frame)?;
-        self.framebuffer_config_frame = Some(framebuffer_config_frame);
         let keyboard_frame =
             self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+        self.keyboard_frame = Some(keyboard_frame);
         memory.clear(keyboard_frame).map_err(ServiceRuntimeError::Keyboard)?;
         self.map_keyboard_ring(keyboard_frame)?;
-        self.keyboard_frame = Some(keyboard_frame);
         crate::arch::publish_keyboard_ring(keyboard_frame.raw() as usize);
         self.startup.mark_launch_ready();
         Ok(())
