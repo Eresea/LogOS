@@ -1,0 +1,15 @@
+[package]
+name = "logos-storage"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[lib]
+name = "logos_storage"
+path = "src/lib.rs"
+test = true
+bench = false
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
