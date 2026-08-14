@@ -18,6 +18,7 @@ fixed service boundaries.
 | User launch transition | `arch` + `scheduler` | selects the task root before restore and provides the fixed-selector `iretq` path for service entry |
 | Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Commands dependencies |
 | Service IPC boundary | `service_ipc` + `service_runtime` | keeps six kernel-owned bounded queues, maps exactly one writable staging page and one read-only capability page per service, and never maps queue frames into service roots |
+| Storage boundary | future Core block adapter + `logos-storage` format | Core owns device mechanics, DMA, queues, interrupts, reset, timeouts, and flush; the storage format owns superblocks, journal, replay, recovery, and durability; paths, namespaces, and device drivers remain deferred |
 | Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE` plus one read-only `FramebufferConfig` page at `DISPLAY_CONFIG_BASE`; boot rejects modes below the fixed 80×25/8×16 profile; no other service or kernel drawing path receives it |
 | Keyboard byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring with an observable drop counter and maps it only into Input at `INPUT_KEYBOARD_RING_BASE`; PS/2 decoding remains outside the kernel |
 | PS/2 interrupt adapter | `arch` | remaps the legacy PIC, unmasks only IRQ1 after the Input ring is published, and copies port `0x60` bytes into that ring; no key decoding occurs in Core |
@@ -73,9 +74,11 @@ and syscall depth cannot silently overwrite adjacent CPU metadata.
 ## Future persistence boundary
 
 The current service graph has no persistence or reboot recovery. Live supervisor restart rebuilds
-volatile state and abandons in-flight work. Future durable state must be introduced through a bounded
-proto-filesystem/storage service with explicit ownership, journal, replay, and idempotency proofs;
-services must not invent ad hoc reboot pickup paths before that boundary exists.
+volatile state and abandons in-flight work. Future durable state must be introduced through the bounded
+storage boundary in ADR-0041, with explicit ownership, journal, replay, durability, and idempotency
+proofs. Services must not invent ad hoc reboot pickup paths before that boundary exists. The first
+implementation is the host-tested `logos-storage` format crate; it does not yet provide a device
+driver, filesystem namespace, or file API.
 
 ## Deferred next-step improvements
 
