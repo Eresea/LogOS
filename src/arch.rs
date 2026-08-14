@@ -169,6 +169,30 @@ static mut CPU_TSS: [TaskStateSegment; MAX_CPUS] = [const { TaskStateSegment::ne
 #[repr(C, align(16))]
 struct CpuStack<const N: usize>([u8; N]);
 
+const SCHEDULER_STACK_GUARD: u8 = 0xa5;
+
+impl<const N: usize> CpuStack<N> {
+    const fn new() -> Self {
+        Self([0; N])
+    }
+
+    const fn with_scheduler_guard() -> Self {
+        let mut bytes = [0; N];
+        let mut index = 0;
+        while index < crate::scheduler::SCHEDULER_STACK_GUARD_BYTES {
+            bytes[index] = SCHEDULER_STACK_GUARD;
+            index += 1;
+        }
+        Self(bytes)
+    }
+
+    fn scheduler_guard_intact(&self) -> bool {
+        self.0[..crate::scheduler::SCHEDULER_STACK_GUARD_BYTES]
+            .iter()
+            .all(|byte| *byte == SCHEDULER_STACK_GUARD)
+    }
+}
+
 #[repr(C)]
 struct CpuLocal {
     // Keep the GS self-pointer at offset zero; assembly also uses the
@@ -207,9 +231,9 @@ impl CpuLocal {
             tick_count: AtomicU64::new(0),
             switch_count: AtomicU64::new(0),
             user_entry_stack_top: 0,
-            scheduler_stack: CpuStack([0; crate::SCHEDULER_STACK_SIZE]),
-            idle_stack: CpuStack([0; crate::IDLE_STACK_SIZE]),
-            user_entry_stack: CpuStack([0; USER_ENTRY_STACK_SIZE]),
+            scheduler_stack: CpuStack::with_scheduler_guard(),
+            idle_stack: CpuStack::new(),
+            user_entry_stack: CpuStack::new(),
         }
     }
 
@@ -219,6 +243,10 @@ impl CpuLocal {
         self.scheduler_stack_top = self.scheduler_stack.0.as_ptr_range().end as u64;
         self.idle_stack_top = self.idle_stack.0.as_ptr_range().end as u64;
         self.user_entry_stack_top = self.user_entry_stack.0.as_ptr_range().end as u64;
+    }
+
+    fn scheduler_stack_guard_intact(&self) -> bool {
+        self.scheduler_stack.scheduler_guard_intact()
     }
 }
 
@@ -312,11 +340,11 @@ pub fn boot() -> Status {
                 crate::service_runtime::ServiceRuntimeError::Ipc(_) => {
                     fatal(b"LogOS vNext: service IPC pages")
                 }
-                crate::service_runtime::ServiceRuntimeError::IpcMapping(_) => {
-                    fatal(b"LogOS vNext: service IPC mapping")
+                crate::service_runtime::ServiceRuntimeError::IpcPrivateMapping(_) => {
+                    fatal(b"LogOS vNext: service IPC private mapping")
                 }
-                crate::service_runtime::ServiceRuntimeError::IpcProcess(_) => {
-                    fatal(b"LogOS vNext: service IPC process")
+                crate::service_runtime::ServiceRuntimeError::IpcPrivateProcess(_) => {
+                    fatal(b"LogOS vNext: service IPC private process")
                 }
                 crate::service_runtime::ServiceRuntimeError::Framebuffer(_) => {
                     fatal(b"LogOS vNext: framebuffer mapping")
@@ -649,6 +677,21 @@ pub(crate) fn reserve_kernel_frames(pool: &mut crate::frame_pool::FramePool) {
         core::ptr::addr_of!(SERVICE_RUNTIME) as usize,
         core::mem::size_of::<crate::service_runtime::ServiceRuntime>(),
     );
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(CPU_GDTS) as usize,
+        core::mem::size_of::<[[u64; 7]; MAX_CPUS]>(),
+    );
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(CPU_IDTS) as usize,
+        core::mem::size_of::<[[IdtEntry; IDT_ENTRIES]; MAX_CPUS]>(),
+    );
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(CPU_TSS) as usize,
+        core::mem::size_of::<[TaskStateSegment; MAX_CPUS]>(),
+    );
     #[cfg(feature = "qemu-proof")]
     {
         crate::user_mode::reserve_frames(pool);
@@ -804,6 +847,26 @@ pub(crate) fn record_service_heartbeat(
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).record_heartbeat(service, process, now) }
 }
 
+pub(crate) fn ipc_send(
+    process: crate::process::ProcessHandle,
+    capability_slot: usize,
+    length: usize,
+) -> crate::service_ipc::IpcOutcome {
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).ipc_send(process, capability_slot, length) }
+}
+
+pub(crate) fn ipc_receive(
+    process: crate::process::ProcessHandle,
+    capability_slot: usize,
+) -> crate::service_ipc::IpcOutcome {
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).ipc_receive(process, capability_slot) }
+}
+
+#[cfg(feature = "qemu-proof")]
+pub(crate) fn hostile_ipc_layout_valid() -> bool {
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).hostile_ipc_layout_valid() }
+}
+
 #[cfg(feature = "qemu-proof")]
 pub(crate) fn suppress_service_heartbeat(service: logos_abi::ServiceId) {
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).suppress_heartbeat(service) }
@@ -846,7 +909,6 @@ fn initialize_post_uefi(cpu_count: usize) {
         fatal(b"LogOS vNext: keyboard controller");
     }
     calibrate_timer();
-    #[cfg(feature = "qemu-proof")]
     crate::user_mode::initialize_kernel_cr3(current_cr3());
     start_aps(cpu_count);
     configure_timer();

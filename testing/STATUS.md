@@ -19,7 +19,8 @@ Status: active preemptive SMP Core milestone.
   in-process Health Ping command/response and restart/retry path, the loaded ring-3 service graph,
   framebuffer/keyboard mappings, semantic input, rendering, and supervisor restart, plus
   blocked/wake (cross-CPU for SMP runs), post-CR3 ring-3 execution on an AP, and bounded reschedule
-  IPI delivery.
+  IPI delivery. Hostile-peer coverage rejects forged process access, wrong-direction capabilities,
+  stale and oversized operations, disconnected queues, and legacy endpoint mappings.
 - The local-APIC period is measured against the calibrated TSC on the BSP and each AP before its
   timer is enabled.
 - Non-proof UEFI boot reaches `LogOS vNext: core ready` and remains in the scheduler for 1, 2, and
@@ -28,8 +29,7 @@ Status: active preemptive SMP Core milestone.
 ## Deliberate limits
 
 The proof does not claim AVX/XSAVE, affinity, priorities, dynamic stacks, allocators,
-Runtime orchestration beyond the first bounded operation table, hostile-peer IPC isolation, storage,
-or networking. AP startup
+Runtime orchestration beyond the first bounded operation table, storage, or networking. AP startup
 is limited to healthy xAPIC IDs, eight CPUs, fixed low-memory trampoline staging, and current CR3.
 
 `v1_docs/` and reviewed v1 status records are historical reference only.

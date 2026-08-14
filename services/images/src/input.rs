@@ -3,35 +3,41 @@
 
 mod common;
 
-use logos_abi::{
-    INPUT_KEYBOARD_RING_BASE, InputIpc, InputMessage, KeyboardByteRing, SERVICE_IPC_BASE,
-    SharedSendError,
-};
+use logos_abi::{INPUT_KEYBOARD_RING_BASE, InputMessage, IpcStatus, KeyboardByteRing};
 
 static mut PENDING: [Option<InputMessage>; 2] = [None, None];
+const OUTPUT_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Input,
+    logos_abi::IpcEndpointId::InputToTerminal,
+    logos_abi::IpcRights::Send,
+);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     let keyboard = unsafe { &*(INPUT_KEYBOARD_RING_BASE as *const KeyboardByteRing) };
-    let output = unsafe { &*(SERVICE_IPC_BASE as *const InputIpc) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let mut decoder = logos_input::InputDecoder::new();
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Input);
         if let Some(message) = pending[0] {
-            let identity = output.endpoint().identity();
-            match output.send(identity, message) {
-                Ok(notification) => {
-                    common::notify_edge(common::ipc_read_event(0), notification);
+            match common::ipc_send(OUTPUT_CAPABILITY, &message) {
+                IpcStatus::Ok => {
                     pending[0] = pending[1];
                     pending[1] = None;
                 }
-                Err(SharedSendError::Full) => {
-                    common::wait(common::ipc_write_event(0), logos_abi::ServiceId::Input);
+                IpcStatus::Full => {
+                    common::wait(
+                        common::ipc_write_event(logos_abi::IpcEndpointId::InputToTerminal),
+                        logos_abi::ServiceId::Input,
+                    );
                     continue;
                 }
-                Err(SharedSendError::Stale | SharedSendError::Disconnected) => {
+                IpcStatus::Stale
+                | IpcStatus::Disconnected
+                | IpcStatus::Unauthorized
+                | IpcStatus::Malformed
+                | IpcStatus::Empty => {
                     pending[0] = None;
                     pending[1] = None;
                 }

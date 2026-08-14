@@ -3,16 +3,29 @@
 
 mod common;
 
-use logos_abi::{
-    IPC_FLAG_MORE, IPC_PAGE_BYTES, IpcBytes, MAX_IPC_BYTES, MessageKind, SERVICE_IPC_BASE,
-    StreamIpc,
-};
+use logos_abi::{IPC_FLAG_MORE, IpcBytes, IpcStatus, MAX_IPC_BYTES, MessageKind};
 use logos_session::MAX_LINE_BYTES;
 
-const TERMINAL_TO_SESSION: usize = SERVICE_IPC_BASE + IPC_PAGE_BYTES * 2;
-const SESSION_TO_TERMINAL: usize = SERVICE_IPC_BASE + IPC_PAGE_BYTES * 3;
-const SESSION_TO_COMMANDS: usize = SERVICE_IPC_BASE + IPC_PAGE_BYTES * 4;
-const COMMANDS_TO_SESSION: usize = SERVICE_IPC_BASE + IPC_PAGE_BYTES * 5;
+const INPUT_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Session,
+    logos_abi::IpcEndpointId::TerminalToSession,
+    logos_abi::IpcRights::Receive,
+);
+const OUTPUT_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Session,
+    logos_abi::IpcEndpointId::SessionToTerminal,
+    logos_abi::IpcRights::Send,
+);
+const COMMANDS_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Session,
+    logos_abi::IpcEndpointId::SessionToCommands,
+    logos_abi::IpcRights::Send,
+);
+const COMMAND_OUTPUT_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Session,
+    logos_abi::IpcEndpointId::CommandsToSession,
+    logos_abi::IpcRights::Receive,
+);
 
 struct PendingOutput {
     bytes: [u8; logos_session::MAX_OUTPUT_BYTES],
@@ -36,12 +49,7 @@ impl PendingOutput {
         self.offset = 0;
     }
 
-    fn flush(
-        &mut self,
-        ring: &StreamIpc,
-        identity: logos_abi::MessageIdentity,
-        read_event: u64,
-    ) -> bool {
+    fn flush(&mut self, capability_slot: usize) -> bool {
         let mut progressed = false;
         while self.offset < self.len {
             let end = (self.offset + MAX_IPC_BYTES).min(self.len);
@@ -50,8 +58,9 @@ impl PendingOutput {
             else {
                 break;
             };
-            let Ok(notification) = ring.send(identity, message) else { break };
-            common::notify_edge(read_event, notification);
+            if common::ipc_send(capability_slot, &message) != IpcStatus::Ok {
+                break;
+            }
             self.offset = end;
             progressed = true;
         }
@@ -103,10 +112,6 @@ pub extern "C" fn _start() -> ! {
     let session = unsafe { &mut *core::ptr::addr_of_mut!(SESSION) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let command = unsafe { &mut *core::ptr::addr_of_mut!(COMMAND) };
-    let input = unsafe { &*(TERMINAL_TO_SESSION as *const StreamIpc) };
-    let output = unsafe { &*(SESSION_TO_TERMINAL as *const StreamIpc) };
-    let commands = unsafe { &*(SESSION_TO_COMMANDS as *const StreamIpc) };
-    let command_output = unsafe { &*(COMMANDS_TO_SESSION as *const StreamIpc) };
     let mut command_bytes = [0; MAX_LINE_BYTES];
     let mut command_response = [0; logos_session::MAX_OUTPUT_BYTES];
     let mut command_response_len = 0;
@@ -117,21 +122,19 @@ pub extern "C" fn _start() -> ! {
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Session);
-        let input_identity = input.endpoint().identity();
-        let output_identity = output.endpoint().identity();
-        let commands_identity = commands.endpoint().identity();
-        let command_output_identity = command_output.endpoint().identity();
-        let mut progressed = pending.flush(output, output_identity, common::ipc_read_event(3));
+        let mut progressed = pending.flush(OUTPUT_CAPABILITY);
         if !pending.is_empty() {
             if !progressed {
-                common::wait(common::ipc_write_event(3), logos_abi::ServiceId::Session);
+                common::wait(
+                    common::ipc_write_event(logos_abi::IpcEndpointId::SessionToTerminal),
+                    logos_abi::ServiceId::Session,
+                );
             }
             continue;
         }
         if !command.is_empty() {
             if let Some(message) = command.take() {
-                if let Ok(notification) = commands.send(commands_identity, message) {
-                    common::notify_edge(common::ipc_read_event(4), notification);
+                if common::ipc_send(COMMANDS_CAPABILITY, &message) == IpcStatus::Ok {
                     waiting_for_command = true;
                     progressed = true;
                 } else {
@@ -139,15 +142,16 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             if !progressed {
-                common::wait(common::ipc_write_event(4), logos_abi::ServiceId::Session);
+                common::wait(
+                    common::ipc_write_event(logos_abi::IpcEndpointId::SessionToCommands),
+                    logos_abi::ServiceId::Session,
+                );
             }
             continue;
         }
         if waiting_for_command {
-            if let Ok((message, notification)) =
-                command_output.receive_with_notify(command_output_identity)
-            {
-                common::notify_edge(common::ipc_write_event(5), notification);
+            let mut message = IpcBytes::empty(MessageKind::SessionOutput);
+            if common::ipc_receive(COMMAND_OUTPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
                 if let Some(bytes) = message.as_bytes() {
                     let count = bytes.len().min(command_response.len() - command_response_len);
                     command_response[command_response_len..command_response_len + count]
@@ -165,12 +169,15 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             if !progressed {
-                common::wait(common::ipc_read_event(5), logos_abi::ServiceId::Session);
+                common::wait(
+                    common::ipc_read_event(logos_abi::IpcEndpointId::CommandsToSession),
+                    logos_abi::ServiceId::Session,
+                );
             }
             continue;
         }
-        while let Ok((message, notification)) = input.receive_with_notify(input_identity) {
-            common::notify_edge(common::ipc_write_event(2), notification);
+        let mut message = IpcBytes::empty(MessageKind::SessionInput);
+        while common::ipc_receive(INPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
             progressed = true;
             if message.kind != MessageKind::SessionInput {
                 continue;
@@ -190,7 +197,10 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if !progressed {
-            common::wait(common::ipc_read_event(2), logos_abi::ServiceId::Session);
+            common::wait(
+                common::ipc_read_event(logos_abi::IpcEndpointId::TerminalToSession),
+                logos_abi::ServiceId::Session,
+            );
         }
     }
 }

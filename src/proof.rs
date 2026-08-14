@@ -36,6 +36,8 @@ static BACKPRESSURE_RESUMED: AtomicBool = AtomicBool::new(false);
 static RING3_CPU_MASK: AtomicUsize = AtomicUsize::new(0);
 static RING3_AP_REPORTED: AtomicBool = AtomicBool::new(false);
 static RING3_CR3_VALID: AtomicBool = AtomicBool::new(false);
+static HOSTILE_IPC_PROCESS_REJECTED: AtomicBool = AtomicBool::new(false);
+static HOSTILE_IPC_SYSCALL_REJECTED: AtomicBool = AtomicBool::new(false);
 static RESCHEDULE_IPIS: AtomicU64 = AtomicU64::new(0);
 static EVENT_WAKE_IPI_SENT: AtomicBool = AtomicBool::new(false);
 static EVENT_WAKE_IPI_RECEIVED: AtomicBool = AtomicBool::new(false);
@@ -49,6 +51,7 @@ unsafe extern "C" {
 
 pub fn initialize(cpu_count: usize) {
     CPU_COUNT.store(cpu_count, Ordering::Release);
+    verify_hostile_ipc_boundary();
     let a: TaskEntry = unsafe { core::mem::transmute(proof_task_a as *const () as usize) };
     let b: TaskEntry = unsafe { core::mem::transmute(proof_task_b as *const () as usize) };
     let block = SCHEDULER.spawn(block_task).expect("proof task capacity");
@@ -82,6 +85,14 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
         (core::ptr::addr_of!(RING3_CPU_MASK) as usize, core::mem::size_of::<AtomicUsize>()),
         (core::ptr::addr_of!(RING3_AP_REPORTED) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(RING3_CR3_VALID) as usize, core::mem::size_of::<AtomicBool>()),
+        (
+            core::ptr::addr_of!(HOSTILE_IPC_PROCESS_REJECTED) as usize,
+            core::mem::size_of::<AtomicBool>(),
+        ),
+        (
+            core::ptr::addr_of!(HOSTILE_IPC_SYSCALL_REJECTED) as usize,
+            core::mem::size_of::<AtomicBool>(),
+        ),
         (core::ptr::addr_of!(RESCHEDULE_IPIS) as usize, core::mem::size_of::<AtomicU64>()),
         (core::ptr::addr_of!(EVENT_WAKE_IPI_SENT) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(EVENT_WAKE_IPI_RECEIVED) as usize, core::mem::size_of::<AtomicBool>()),
@@ -208,6 +219,8 @@ pub fn observe(cpu: usize) {
         && BACKPRESSURE_RESUMED.load(Ordering::Acquire)
         && crate::user_mode::fault_observed()
         && RING3_CR3_VALID.load(Ordering::Acquire)
+        && HOSTILE_IPC_PROCESS_REJECTED.load(Ordering::Acquire)
+        && HOSTILE_IPC_SYSCALL_REJECTED.load(Ordering::Acquire)
         && ring3_migrated
         && reschedule_ipi
         && event_wake_ipi
@@ -220,6 +233,25 @@ pub fn observe(cpu: usize) {
             crate::arch_proof_line(b"LogOS vNext: QEMU proof PASS");
         }
     }
+}
+
+fn verify_hostile_ipc_boundary() {
+    if !crate::arch::hostile_ipc_layout_valid() {
+        crate::arch_fatal(b"LogOS vNext: hostile IPC layout");
+    }
+    let forged_process = crate::process::ProcessHandle::from_raw(0);
+    let send = crate::arch::ipc_send(forged_process, 0, 0);
+    let receive = crate::arch::ipc_receive(forged_process, 0);
+    if send.status != logos_abi::IpcStatus::Unauthorized
+        || receive.status != logos_abi::IpcStatus::Unauthorized
+    {
+        crate::arch_fatal(b"LogOS vNext: hostile IPC rejection");
+    }
+    HOSTILE_IPC_PROCESS_REJECTED.store(true, Ordering::Release);
+}
+
+pub fn hostile_ipc_syscall_rejected() {
+    HOSTILE_IPC_SYSCALL_REJECTED.store(true, Ordering::Release);
 }
 
 fn block_task() {

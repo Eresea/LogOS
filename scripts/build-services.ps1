@@ -1,5 +1,6 @@
 param(
-    [switch]$Release
+    [switch]$Release,
+    [switch]$Proof
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,6 +14,7 @@ $buildArgs = @(
     'build', '--target', 'x86_64-unknown-none',
     '-p', 'logos-service-images', '--bins'
 )
+if ($Proof) { $buildArgs += @('--features', 'qemu-proof') }
 if ($Release) { $buildArgs += '--release' }
 
 $env:CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS = '-C relocation-model=static -C code-model=large -C link-arg=--image-base=0x10000000000 -C link-arg=--no-pie'

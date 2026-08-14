@@ -37,7 +37,13 @@ pub const IPC_PAGE_BYTES: usize = 4096;
 pub const MAX_IPC_BYTES: usize = 256;
 pub const IPC_FLAG_MORE: u8 = 1 << 0;
 pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
+pub const IPC_STAGING_BASE: usize = SERVICE_IPC_BASE + 0x10_000;
+pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x11_000;
+pub const MAX_IPC_CAPABILITIES: usize = 4;
 pub const SERVICE_HEARTBEAT_INTERVAL_TICKS: u64 = 100;
+
+pub const IPC_SYSCALL_SEND: usize = 4;
+pub const IPC_SYSCALL_RECEIVE: usize = 5;
 
 pub const IPC_ENDPOINT_COUNT: usize = 6;
 pub const IPC_READ_EVENT_BASE: usize = 0;
@@ -96,6 +102,100 @@ pub enum ServiceId {
     Commands = 5,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IpcRights {
+    Send = 1,
+    Receive = 2,
+}
+
+impl IpcRights {
+    pub const fn allows(self, requested: Self) -> bool {
+        matches!((self, requested), (Self::Send, Self::Send) | (Self::Receive, Self::Receive))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct IpcCapability {
+    pub endpoint: u8,
+    pub rights: IpcRights,
+    pub generation: u16,
+    pub service_epoch: u64,
+}
+
+impl IpcCapability {
+    pub const EMPTY: Self =
+        Self { endpoint: u8::MAX, rights: IpcRights::Send, generation: 0, service_epoch: 0 };
+
+    pub const fn new(
+        endpoint: usize,
+        rights: IpcRights,
+        generation: u16,
+        service_epoch: u64,
+    ) -> Option<Self> {
+        if endpoint >= IPC_ENDPOINT_COUNT || generation == 0 || service_epoch == 0 {
+            return None;
+        }
+        Some(Self { endpoint: endpoint as u8, rights, generation, service_epoch })
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.endpoint == u8::MAX
+    }
+
+    pub const fn endpoint_index(self) -> Option<usize> {
+        if self.endpoint < IPC_ENDPOINT_COUNT as u8 { Some(self.endpoint as usize) } else { None }
+    }
+}
+
+#[repr(C, align(16))]
+pub struct IpcCapabilityPage {
+    pub capabilities: [IpcCapability; MAX_IPC_CAPABILITIES],
+}
+
+impl IpcCapabilityPage {
+    pub const fn empty() -> Self {
+        Self { capabilities: [IpcCapability::EMPTY; MAX_IPC_CAPABILITIES] }
+    }
+
+    pub const fn get(&self, index: usize) -> Option<IpcCapability> {
+        if index < MAX_IPC_CAPABILITIES {
+            let capability = self.capabilities[index];
+            if !capability.is_empty() { Some(capability) } else { None }
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IpcStatus {
+    Ok = 0,
+    Full = 1,
+    Empty = 2,
+    Stale = 3,
+    Disconnected = 4,
+    Unauthorized = 5,
+    Malformed = 6,
+}
+
+impl IpcStatus {
+    pub const fn from_raw(raw: usize) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Ok),
+            1 => Some(Self::Full),
+            2 => Some(Self::Empty),
+            3 => Some(Self::Stale),
+            4 => Some(Self::Disconnected),
+            5 => Some(Self::Unauthorized),
+            6 => Some(Self::Malformed),
+            _ => None,
+        }
+    }
+}
+
 impl ServiceId {
     pub const fn index(self) -> usize {
         match self {
@@ -116,6 +216,88 @@ impl ServiceId {
             4 => Some(Self::Commands),
             _ => None,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IpcEndpointId {
+    InputToTerminal = 0,
+    TerminalToDisplay = 1,
+    TerminalToSession = 2,
+    SessionToTerminal = 3,
+    SessionToCommands = 4,
+    CommandsToSession = 5,
+}
+
+impl IpcEndpointId {
+    pub const COUNT: usize = IPC_ENDPOINT_COUNT;
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    pub const fn from_index(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(Self::InputToTerminal),
+            1 => Some(Self::TerminalToDisplay),
+            2 => Some(Self::TerminalToSession),
+            3 => Some(Self::SessionToTerminal),
+            4 => Some(Self::SessionToCommands),
+            5 => Some(Self::CommandsToSession),
+            _ => None,
+        }
+    }
+
+    pub const fn producer(self) -> ServiceId {
+        match self {
+            Self::InputToTerminal => ServiceId::Input,
+            Self::TerminalToDisplay | Self::TerminalToSession => ServiceId::Terminal,
+            Self::SessionToTerminal | Self::SessionToCommands => ServiceId::Session,
+            Self::CommandsToSession => ServiceId::Commands,
+        }
+    }
+
+    pub const fn consumer(self) -> ServiceId {
+        match self {
+            Self::InputToTerminal | Self::SessionToTerminal => ServiceId::Terminal,
+            Self::TerminalToDisplay => ServiceId::Display,
+            Self::TerminalToSession | Self::CommandsToSession => ServiceId::Session,
+            Self::SessionToCommands => ServiceId::Commands,
+        }
+    }
+
+    pub const fn read_event_mask(self) -> u64 {
+        ipc_read_event_mask(self.index())
+    }
+
+    pub const fn write_event_mask(self) -> u64 {
+        ipc_write_event_mask(self.index())
+    }
+}
+
+const _: () = assert!(IpcEndpointId::COUNT == IPC_ENDPOINT_COUNT);
+
+/// Fixed capability-page slot for one edge of the service graph.
+pub const fn ipc_capability_slot(
+    service: ServiceId,
+    endpoint: IpcEndpointId,
+    rights: IpcRights,
+) -> Option<usize> {
+    match (service, endpoint, rights) {
+        (ServiceId::Input, IpcEndpointId::InputToTerminal, IpcRights::Send) => Some(0),
+        (ServiceId::Display, IpcEndpointId::TerminalToDisplay, IpcRights::Receive) => Some(0),
+        (ServiceId::Terminal, IpcEndpointId::InputToTerminal, IpcRights::Receive) => Some(0),
+        (ServiceId::Terminal, IpcEndpointId::TerminalToDisplay, IpcRights::Send) => Some(1),
+        (ServiceId::Terminal, IpcEndpointId::TerminalToSession, IpcRights::Send) => Some(2),
+        (ServiceId::Terminal, IpcEndpointId::SessionToTerminal, IpcRights::Receive) => Some(3),
+        (ServiceId::Session, IpcEndpointId::TerminalToSession, IpcRights::Receive) => Some(0),
+        (ServiceId::Session, IpcEndpointId::SessionToTerminal, IpcRights::Send) => Some(1),
+        (ServiceId::Session, IpcEndpointId::SessionToCommands, IpcRights::Send) => Some(2),
+        (ServiceId::Session, IpcEndpointId::CommandsToSession, IpcRights::Receive) => Some(3),
+        (ServiceId::Commands, IpcEndpointId::SessionToCommands, IpcRights::Receive) => Some(0),
+        (ServiceId::Commands, IpcEndpointId::CommandsToSession, IpcRights::Send) => Some(1),
+        _ => None,
     }
 }
 
@@ -342,6 +524,31 @@ pub struct IpcBytes {
     pub flags: u8,
     pub len: u16,
     pub bytes: [u8; MAX_IPC_BYTES],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IpcMessageType {
+    Input,
+    Render,
+    Bytes,
+}
+
+pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
+    match endpoint {
+        0 => Some(IpcMessageType::Input),
+        1 => Some(IpcMessageType::Render),
+        2..=5 => Some(IpcMessageType::Bytes),
+        _ => None,
+    }
+}
+
+pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
+    match ipc_message_type(endpoint) {
+        Some(IpcMessageType::Input) => Some(core::mem::size_of::<InputMessage>()),
+        Some(IpcMessageType::Render) => Some(core::mem::size_of::<RenderMessage>()),
+        Some(IpcMessageType::Bytes) => Some(core::mem::size_of::<IpcBytes>()),
+        None => None,
+    }
 }
 
 impl IpcBytes {
@@ -607,6 +814,7 @@ pub type RenderIpc = SharedIpc<RenderMessage, 1>;
 pub type StreamIpc = SharedIpc<IpcBytes, 8>;
 
 const _: () = assert!(core::mem::size_of::<FramebufferConfig>() <= IPC_PAGE_BYTES);
+const _: () = assert!(core::mem::size_of::<IpcCapabilityPage>() <= IPC_PAGE_BYTES);
 
 #[cfg(test)]
 mod tests {
@@ -631,11 +839,66 @@ mod tests {
     }
 
     #[test]
+    fn ipc_metadata_matches_the_fixed_service_graph() {
+        assert_eq!(IpcEndpointId::TerminalToSession.producer(), ServiceId::Terminal);
+        assert_eq!(IpcEndpointId::TerminalToSession.consumer(), ServiceId::Session);
+        assert_eq!(IpcEndpointId::TerminalToSession.write_event_mask(), ipc_write_event_mask(2));
+        assert_eq!(ipc_message_type(0), Some(IpcMessageType::Input));
+        assert_eq!(ipc_message_type(1), Some(IpcMessageType::Render));
+        assert_eq!(ipc_message_type(5), Some(IpcMessageType::Bytes));
+        assert_eq!(ipc_message_type(6), None);
+        assert_eq!(ipc_message_size(0), Some(core::mem::size_of::<InputMessage>()));
+        assert_eq!(ipc_message_size(1), Some(core::mem::size_of::<RenderMessage>()));
+        assert_eq!(ipc_message_size(5), Some(core::mem::size_of::<IpcBytes>()));
+        assert_eq!(
+            ipc_capability_slot(
+                ServiceId::Terminal,
+                IpcEndpointId::TerminalToSession,
+                IpcRights::Send,
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            ipc_capability_slot(
+                ServiceId::Terminal,
+                IpcEndpointId::TerminalToSession,
+                IpcRights::Receive,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn endpoint_rejects_stale_identity() {
         let header = EndpointHeader::new(4, 8);
         assert!(header.accepts(4, 8));
         assert!(!header.accepts(3, 8));
         assert!(!header.accepts(4, 9));
+    }
+
+    #[test]
+    fn capabilities_are_bounded_and_generation_stamped() {
+        let capability = IpcCapability::new(2, IpcRights::Send, 3, 9).unwrap();
+        assert_eq!(capability.endpoint_index(), Some(2));
+        assert_eq!(capability.rights, IpcRights::Send);
+        assert!(IpcCapability::new(IPC_ENDPOINT_COUNT, IpcRights::Receive, 1, 1).is_none());
+        assert!(IpcCapability::new(0, IpcRights::Receive, 0, 1).is_none());
+    }
+
+    #[test]
+    fn capability_page_rejects_empty_and_out_of_range_slots() {
+        let mut page = IpcCapabilityPage::empty();
+        assert_eq!(page.get(0), None);
+        page.capabilities[0] = IpcCapability::new(0, IpcRights::Send, 1, 1).unwrap();
+        assert!(page.get(0).is_some());
+        assert_eq!(page.get(MAX_IPC_CAPABILITIES), None);
+    }
+
+    #[test]
+    fn ipc_status_round_trips_bounded_results() {
+        assert_eq!(IpcStatus::from_raw(IpcStatus::Ok as usize), Some(IpcStatus::Ok));
+        assert_eq!(IpcStatus::from_raw(IpcStatus::Malformed as usize), Some(IpcStatus::Malformed));
+        assert_eq!(IpcStatus::from_raw(usize::MAX), None);
     }
 
     #[test]
@@ -669,6 +932,16 @@ mod tests {
         assert_eq!(ring.send(identity, message), Err(SharedSendError::Full));
         assert_eq!(ring.receive_with_notify(identity), Ok((message, Notify::Notified)));
         assert_eq!(ring.receive(identity), Err(SharedReceiveError::Empty));
+    }
+
+    #[test]
+    fn shared_ring_rejects_disconnected_operations() {
+        let ring = RenderIpc::new(EndpointHeader::new(1, 1));
+        let identity = ring.endpoint().identity();
+        ring.disconnect();
+        let message = RenderMessage::empty(MessageKind::RenderCells);
+        assert_eq!(ring.send(identity, message), Err(SharedSendError::Disconnected));
+        assert_eq!(ring.receive(identity), Err(SharedReceiveError::Disconnected));
     }
 
     #[test]

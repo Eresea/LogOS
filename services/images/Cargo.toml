@@ -5,6 +5,9 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 
+[features]
+qemu-proof = []
+
 [dependencies]
 logos-abi = { path = "../../abi" }
 logos-commands = { path = "../commands" }

@@ -36,8 +36,8 @@ pub enum ServiceRuntimeError {
     Process(ProcessError),
     Startup(crate::service_startup::StartupError),
     Ipc(IpcError),
-    IpcMapping(PageTableError),
-    IpcProcess(ProcessError),
+    IpcPrivateMapping(PageTableError),
+    IpcPrivateProcess(ProcessError),
     Framebuffer(PageTableError),
     FramebufferProcess(ProcessError),
     FramebufferConfig(PageTableError),
@@ -61,6 +61,8 @@ pub struct ServiceRuntime {
     launches: [Option<(ProcessHandle, UserLaunch)>; SERVICE_COUNT],
     startup: ServiceStartup,
     ipc: Option<ServiceIpcGraph>,
+    ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
+    ipc_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
     framebuffer_config_frame: Option<FrameAddress>,
     keyboard_frame: Option<FrameAddress>,
     tasks: [Option<crate::TaskHandle>; SERVICE_COUNT],
@@ -89,6 +91,8 @@ impl ServiceRuntime {
             launches: [None; SERVICE_COUNT],
             startup: ServiceStartup::new(),
             ipc: None,
+            ipc_staging_frames: [None; SERVICE_COUNT],
+            ipc_capability_frames: [None; SERVICE_COUNT],
             framebuffer_config_frame: None,
             keyboard_frame: None,
             tasks: [None; SERVICE_COUNT],
@@ -102,6 +106,15 @@ impl ServiceRuntime {
     }
 
     pub fn start(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
+        let result = self.start_inner(bundle);
+        if let Err(error) = result {
+            self.reclaim_resources()?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn start_inner(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
         let resources = crate::arch::boot_resources().ok_or(ServiceRuntimeError::Resources)?;
         if !self.frame_pool_ready {
             if let Some(framebuffer) = resources.framebuffer() {
@@ -133,45 +146,65 @@ impl ServiceRuntime {
             let service = spec.service();
             let image = unsafe { bundle.image(service) }.ok_or(ServiceRuntimeError::Image)?;
             let plan = spec.validate_image(image).map_err(|_| ServiceRuntimeError::Image)?;
-            let loaded =
+            let mut loaded =
                 LoadedImage::load(plan, &mut self.frame_pool).map_err(ServiceRuntimeError::Load)?;
             let mut memory = IdentityPageTableMemory;
             if let Err(error) = loaded.populate(plan, image, &mut memory) {
-                let mut loaded = loaded;
                 loaded.reclaim(&mut self.frame_pool);
                 return Err(ServiceRuntimeError::Populate(error));
             }
             let mut tables = match PageTableBuilder::new(&mut self.frame_pool, &mut memory) {
                 Ok(tables) => tables,
                 Err(error) => {
-                    let mut loaded = loaded;
                     loaded.reclaim(&mut self.frame_pool);
                     return Err(ServiceRuntimeError::PageTableRoot(error));
                 }
             };
             if let Err(error) = tables.map_image(&loaded, &mut self.frame_pool, &mut memory) {
                 tables.reclaim(&mut self.frame_pool, &mut memory);
-                let mut loaded = loaded;
                 loaded.reclaim(&mut self.frame_pool);
                 return Err(ServiceRuntimeError::PageTableMap(error));
             }
-            let process = self.processes.start(image).map_err(ServiceRuntimeError::Process)?;
-            let root = AddressSpaceRoot::new(tables.root().raw() as usize)
-                .ok_or(ServiceRuntimeError::Process(ProcessError::AddressSpace))?;
+            let process = match self.processes.start(image) {
+                Ok(process) => process,
+                Err(error) => {
+                    tables.reclaim(&mut self.frame_pool, &mut memory);
+                    loaded.reclaim(&mut self.frame_pool);
+                    return Err(ServiceRuntimeError::Process(error));
+                }
+            };
+            let Some(root) = AddressSpaceRoot::new(tables.root().raw() as usize) else {
+                let _ = self.processes.exit(process, 1);
+                let _ = self.processes.reclaim(process);
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+                loaded.reclaim(&mut self.frame_pool);
+                return Err(ServiceRuntimeError::Process(ProcessError::AddressSpace));
+            };
             if let Err(error) = self.processes.bind_address_space_root(process, root) {
                 let _ = self.processes.exit(process, 1);
                 let _ = self.processes.reclaim(process);
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+                loaded.reclaim(&mut self.frame_pool);
                 return Err(ServiceRuntimeError::Process(error));
             }
             if let Err(error) = map_loaded_pages(&mut self.processes, process, &loaded) {
                 let _ = self.processes.exit(process, 1);
                 let _ = self.processes.reclaim(process);
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+                loaded.reclaim(&mut self.frame_pool);
                 return Err(ServiceRuntimeError::Process(error));
             }
-            let launch = self
-                .processes
-                .user_launch(process, loaded.entry(), loaded.stack_top())
-                .map_err(ServiceRuntimeError::Process)?;
+            let launch =
+                match self.processes.user_launch(process, loaded.entry(), loaded.stack_top()) {
+                    Ok(launch) => launch,
+                    Err(error) => {
+                        let _ = self.processes.exit(process, 1);
+                        let _ = self.processes.reclaim(process);
+                        tables.reclaim(&mut self.frame_pool, &mut memory);
+                        loaded.reclaim(&mut self.frame_pool);
+                        return Err(ServiceRuntimeError::Process(error));
+                    }
+                };
             self.launches[index] = Some((process, launch));
             self.images[index] = loaded;
             self.tables[index].write(tables);
@@ -190,45 +223,57 @@ impl ServiceRuntime {
                 .endpoint(endpoint_index)
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?;
             initialize_ipc_page(endpoint, endpoint_index);
-            for service in [endpoint.producer(), endpoint.consumer()] {
-                let index = service.index();
-                let Some((process, _)) = self.launch(service) else {
-                    return Err(ServiceRuntimeError::IpcProcess(ProcessError::InvalidHandle));
-                };
-                let tables = unsafe { self.tables[index].assume_init_mut() };
-                tables
-                    .map_raw_page(
-                        endpoint.virtual_address(),
-                        endpoint.frame(),
-                        MappingFlags::DATA,
-                        &mut self.frame_pool,
-                        &mut memory,
-                    )
-                    .map_err(ServiceRuntimeError::IpcMapping)?;
-                let mapping = VirtualMapping::new(
-                    endpoint.virtual_address(),
-                    endpoint.frame().raw() as usize,
-                    1,
-                    MappingFlags::DATA,
-                )
-                .ok_or(ServiceRuntimeError::IpcProcess(ProcessError::AddressSpace))?;
-                self.processes.map(process, mapping).map_err(ServiceRuntimeError::IpcProcess)?;
-            }
         }
         self.ipc = Some(graph);
+        for spec in SERVICE_IMAGES {
+            let service = spec.service();
+            let index = service.index();
+            let Some((process, _)) = self.launch(service) else {
+                return Err(ServiceRuntimeError::IpcPrivateProcess(ProcessError::InvalidHandle));
+            };
+            let staging = self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+            self.ipc_staging_frames[index] = Some(staging);
+            memory.clear(staging).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+            self.map_ipc_private_page(
+                process,
+                staging,
+                logos_abi::IPC_STAGING_BASE,
+                MappingFlags::DATA,
+            )?;
+            let capabilities = self
+                .ipc
+                .as_ref()
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?
+                .capabilities(service)
+                .map_err(ServiceRuntimeError::Ipc)?;
+            let capability_frame =
+                self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+            self.ipc_capability_frames[index] = Some(capability_frame);
+            memory.clear(capability_frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+            unsafe {
+                (capability_frame.raw() as usize as *mut logos_abi::IpcCapabilityPage)
+                    .write(capabilities);
+            }
+            self.map_ipc_private_page(
+                process,
+                capability_frame,
+                logos_abi::IPC_CAPABILITY_BASE,
+                MappingFlags::READ_ONLY_DATA,
+            )?;
+        }
         let framebuffer = resources.framebuffer().ok_or(ServiceRuntimeError::Resources)?;
         self.map_framebuffer(framebuffer)?;
         let framebuffer_config_frame =
             self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+        self.framebuffer_config_frame = Some(framebuffer_config_frame);
         memory.clear(framebuffer_config_frame).map_err(ServiceRuntimeError::FramebufferConfig)?;
         initialize_framebuffer_config(framebuffer_config_frame, framebuffer);
         self.map_framebuffer_config(framebuffer_config_frame)?;
-        self.framebuffer_config_frame = Some(framebuffer_config_frame);
         let keyboard_frame =
             self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+        self.keyboard_frame = Some(keyboard_frame);
         memory.clear(keyboard_frame).map_err(ServiceRuntimeError::Keyboard)?;
         self.map_keyboard_ring(keyboard_frame)?;
-        self.keyboard_frame = Some(keyboard_frame);
         crate::arch::publish_keyboard_ring(keyboard_frame.raw() as usize);
         self.startup.mark_launch_ready();
         Ok(())
@@ -343,6 +388,28 @@ impl ServiceRuntime {
         self.processes.map(process, mapping).map_err(ServiceRuntimeError::KeyboardProcess)
     }
 
+    fn map_ipc_private_page(
+        &mut self,
+        process: ProcessHandle,
+        frame: FrameAddress,
+        virtual_address: usize,
+        flags: MappingFlags,
+    ) -> Result<(), ServiceRuntimeError> {
+        let index = SERVICE_IMAGES
+            .iter()
+            .position(|spec| {
+                self.launch(spec.service()).is_some_and(|(handle, _)| handle == process)
+            })
+            .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::InvalidHandle))?;
+        let mut memory = IdentityPageTableMemory;
+        unsafe { self.tables[index].assume_init_mut() }
+            .map_raw_page(virtual_address, frame, flags, &mut self.frame_pool, &mut memory)
+            .map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+        let mapping = VirtualMapping::new(virtual_address, frame.raw() as usize, 1, flags)
+            .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::AddressSpace))?;
+        self.processes.map(process, mapping).map_err(ServiceRuntimeError::IpcPrivateProcess)
+    }
+
     fn map_framebuffer_config(&mut self, frame: FrameAddress) -> Result<(), ServiceRuntimeError> {
         let service = ServiceId::Display;
         let index = service.index();
@@ -414,6 +481,167 @@ impl ServiceRuntime {
 
     pub(crate) fn heartbeat_tick(&self, service: ServiceId) -> u64 {
         self.heartbeat_ticks[service.index()].load(Ordering::Acquire)
+    }
+
+    pub(crate) fn ipc_send(
+        &self,
+        process: ProcessHandle,
+        capability_slot: usize,
+        length: usize,
+    ) -> crate::service_ipc::IpcOutcome {
+        let Some(service) = self.service_for_process(process) else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let Some(graph) = self.ipc.as_ref() else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Disconnected,
+                notified: false,
+            };
+        };
+        let Some(capability_frame) = self.ipc_capability_frames[service.index()] else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let Some(capability) = (unsafe {
+            (&*(capability_frame.raw() as usize as *const logos_abi::IpcCapabilityPage))
+                .get(capability_slot)
+        }) else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        if length > crate::loader::PAGE_SIZE {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Malformed,
+                notified: false,
+            };
+        }
+        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
+        };
+        let outcome = graph.send(service, capability, bytes);
+        if outcome.notified {
+            crate::arch::signal_events(logos_abi::ipc_read_event_mask(
+                capability.endpoint as usize,
+            ));
+        }
+        outcome
+    }
+
+    pub(crate) fn ipc_receive(
+        &self,
+        process: ProcessHandle,
+        capability_slot: usize,
+    ) -> crate::service_ipc::IpcOutcome {
+        let Some(service) = self.service_for_process(process) else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let Some(graph) = self.ipc.as_ref() else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Disconnected,
+                notified: false,
+            };
+        };
+        let Some(capability_frame) = self.ipc_capability_frames[service.index()] else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let Some(capability) = (unsafe {
+            (&*(capability_frame.raw() as usize as *const logos_abi::IpcCapabilityPage))
+                .get(capability_slot)
+        }) else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let Some(index) = capability.endpoint_index() else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let length = crate::service_ipc::ServiceIpcGraph::message_size(index);
+        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let bytes = unsafe {
+            core::slice::from_raw_parts_mut(staging_frame.raw() as usize as *mut u8, length)
+        };
+        let outcome = graph.receive(service, capability, bytes);
+        if outcome.notified {
+            crate::arch::signal_events(logos_abi::ipc_write_event_mask(
+                capability.endpoint as usize,
+            ));
+        }
+        outcome
+    }
+
+    fn service_for_process(&self, process: ProcessHandle) -> Option<ServiceId> {
+        SERVICE_IMAGES.iter().find_map(|spec| {
+            self.launch(spec.service())
+                .is_some_and(|(current, _)| current == process)
+                .then_some(spec.service())
+        })
+    }
+
+    #[cfg(feature = "qemu-proof")]
+    pub(crate) fn hostile_ipc_layout_valid(&self) -> bool {
+        let legacy_end =
+            logos_abi::SERVICE_IPC_BASE + logos_abi::IPC_ENDPOINT_COUNT * crate::loader::PAGE_SIZE;
+        for spec in SERVICE_IMAGES {
+            let Some((process, _)) = self.launch(spec.service()) else {
+                return false;
+            };
+            let mut staging = false;
+            let mut capabilities = false;
+            for mapping_index in 0..crate::process::MAX_MAPPINGS_PER_ADDRESS_SPACE {
+                let Some(mapping) = self.processes.mapping(process, mapping_index) else {
+                    continue;
+                };
+                let address = mapping.virtual_address();
+                let Some(mapping_bytes) = mapping.pages().checked_mul(crate::loader::PAGE_SIZE)
+                else {
+                    return false;
+                };
+                let Some(mapping_end) = address.checked_add(mapping_bytes) else {
+                    return false;
+                };
+                if address < legacy_end && mapping_end > logos_abi::SERVICE_IPC_BASE {
+                    return false;
+                }
+                if address == logos_abi::IPC_STAGING_BASE {
+                    staging = mapping.flags() == MappingFlags::DATA;
+                }
+                if address == logos_abi::IPC_CAPABILITY_BASE {
+                    capabilities = mapping.flags() == MappingFlags::READ_ONLY_DATA;
+                }
+            }
+            if !staging || !capabilities {
+                return false;
+            }
+        }
+        true
     }
 
     pub(crate) fn fault_process(
@@ -516,14 +744,30 @@ impl ServiceRuntime {
     }
 
     fn reclaim_resources(&mut self) -> Result<(), ServiceRuntimeError> {
-        if let Some(mut graph) = self.ipc.take() {
-            graph.reclaim(&mut self.frame_pool);
+        if let Some(graph) = self.ipc.as_mut() {
+            graph.disconnect();
+            graph.reclaim(&mut self.frame_pool).map_err(ServiceRuntimeError::Ipc)?;
         }
-        if let Some(frame) = self.keyboard_frame.take() {
-            let _ = self.frame_pool.release(frame);
+        self.ipc = None;
+        if let Some(frame) = self.keyboard_frame {
+            self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.keyboard_frame = None;
         }
-        if let Some(frame) = self.framebuffer_config_frame.take() {
-            let _ = self.frame_pool.release(frame);
+        if let Some(frame) = self.framebuffer_config_frame {
+            self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.framebuffer_config_frame = None;
+        }
+        for index in 0..SERVICE_COUNT {
+            if let Some(frame) = self.ipc_staging_frames[index] {
+                self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+                self.ipc_staging_frames[index] = None;
+            }
+        }
+        for index in 0..SERVICE_COUNT {
+            if let Some(frame) = self.ipc_capability_frames[index] {
+                self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+                self.ipc_capability_frames[index] = None;
+            }
         }
         for index in 0..SERVICE_COUNT {
             if let Some((process, _)) = self.launches[index].take() {
@@ -557,8 +801,8 @@ impl Default for ServiceRuntime {
 
 fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint, index: usize) {
     let frame = endpoint.frame().raw() as usize;
-    // The frame pool is identity-mapped in the kernel root. The same physical
-    // page is then mapped into exactly the two endpoint participants.
+    // The frame pool is identity-mapped in the kernel root. Endpoint pages stay
+    // kernel-owned; services use private staging pages and syscalls instead.
     unsafe {
         match index {
             0 => (frame as *mut logos_abi::InputIpc)
