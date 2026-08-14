@@ -108,9 +108,7 @@ impl ServiceRuntime {
     pub fn start(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
         let result = self.start_inner(bundle);
         if let Err(error) = result {
-            if let Err(cleanup_error) = self.reclaim_resources() {
-                return Err(cleanup_error);
-            }
+            self.reclaim_resources().map_err(|_| error)?;
             return Err(error);
         }
         Ok(())
@@ -589,8 +587,8 @@ impl ServiceRuntime {
 
     #[cfg(feature = "qemu-proof")]
     pub(crate) fn hostile_ipc_layout_valid(&self) -> bool {
-        let legacy_end = logos_abi::SERVICE_IPC_BASE
-            + logos_abi::IPC_ENDPOINT_COUNT * crate::loader::PAGE_SIZE;
+        let legacy_end =
+            logos_abi::SERVICE_IPC_BASE + logos_abi::IPC_ENDPOINT_COUNT * crate::loader::PAGE_SIZE;
         for spec in SERVICE_IMAGES {
             let Some((process, _)) = self.launch(spec.service()) else {
                 return false;
