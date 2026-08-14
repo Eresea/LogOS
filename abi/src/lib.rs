@@ -37,7 +37,13 @@ pub const IPC_PAGE_BYTES: usize = 4096;
 pub const MAX_IPC_BYTES: usize = 256;
 pub const IPC_FLAG_MORE: u8 = 1 << 0;
 pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
+pub const IPC_STAGING_BASE: usize = SERVICE_IPC_BASE + 0x10_000;
+pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x11_000;
+pub const MAX_IPC_CAPABILITIES: usize = 4;
 pub const SERVICE_HEARTBEAT_INTERVAL_TICKS: u64 = 100;
+
+pub const IPC_SYSCALL_SEND: usize = 4;
+pub const IPC_SYSCALL_RECEIVE: usize = 5;
 
 pub const IPC_ENDPOINT_COUNT: usize = 6;
 pub const IPC_READ_EVENT_BASE: usize = 0;
@@ -94,6 +100,100 @@ pub enum ServiceId {
     Terminal = 3,
     Session = 4,
     Commands = 5,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IpcRights {
+    Send = 1,
+    Receive = 2,
+}
+
+impl IpcRights {
+    pub const fn allows(self, requested: Self) -> bool {
+        matches!((self, requested), (Self::Send, Self::Send) | (Self::Receive, Self::Receive))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct IpcCapability {
+    pub endpoint: u8,
+    pub rights: IpcRights,
+    pub generation: u16,
+    pub service_epoch: u64,
+}
+
+impl IpcCapability {
+    pub const EMPTY: Self =
+        Self { endpoint: u8::MAX, rights: IpcRights::Send, generation: 0, service_epoch: 0 };
+
+    pub const fn new(
+        endpoint: usize,
+        rights: IpcRights,
+        generation: u16,
+        service_epoch: u64,
+    ) -> Option<Self> {
+        if endpoint >= IPC_ENDPOINT_COUNT || generation == 0 || service_epoch == 0 {
+            return None;
+        }
+        Some(Self { endpoint: endpoint as u8, rights, generation, service_epoch })
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.endpoint == u8::MAX
+    }
+
+    pub const fn endpoint_index(self) -> Option<usize> {
+        if self.endpoint < IPC_ENDPOINT_COUNT as u8 { Some(self.endpoint as usize) } else { None }
+    }
+}
+
+#[repr(C, align(16))]
+pub struct IpcCapabilityPage {
+    pub capabilities: [IpcCapability; MAX_IPC_CAPABILITIES],
+}
+
+impl IpcCapabilityPage {
+    pub const fn empty() -> Self {
+        Self { capabilities: [IpcCapability::EMPTY; MAX_IPC_CAPABILITIES] }
+    }
+
+    pub const fn get(&self, index: usize) -> Option<IpcCapability> {
+        if index < MAX_IPC_CAPABILITIES {
+            let capability = self.capabilities[index];
+            if !capability.is_empty() { Some(capability) } else { None }
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IpcStatus {
+    Ok = 0,
+    Full = 1,
+    Empty = 2,
+    Stale = 3,
+    Disconnected = 4,
+    Unauthorized = 5,
+    Malformed = 6,
+}
+
+impl IpcStatus {
+    pub const fn from_raw(raw: usize) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Ok),
+            1 => Some(Self::Full),
+            2 => Some(Self::Empty),
+            3 => Some(Self::Stale),
+            4 => Some(Self::Disconnected),
+            5 => Some(Self::Unauthorized),
+            6 => Some(Self::Malformed),
+            _ => None,
+        }
+    }
 }
 
 impl ServiceId {
@@ -607,6 +707,7 @@ pub type RenderIpc = SharedIpc<RenderMessage, 1>;
 pub type StreamIpc = SharedIpc<IpcBytes, 8>;
 
 const _: () = assert!(core::mem::size_of::<FramebufferConfig>() <= IPC_PAGE_BYTES);
+const _: () = assert!(core::mem::size_of::<IpcCapabilityPage>() <= IPC_PAGE_BYTES);
 
 #[cfg(test)]
 mod tests {
@@ -636,6 +737,31 @@ mod tests {
         assert!(header.accepts(4, 8));
         assert!(!header.accepts(3, 8));
         assert!(!header.accepts(4, 9));
+    }
+
+    #[test]
+    fn capabilities_are_bounded_and_generation_stamped() {
+        let capability = IpcCapability::new(2, IpcRights::Send, 3, 9).unwrap();
+        assert_eq!(capability.endpoint_index(), Some(2));
+        assert_eq!(capability.rights, IpcRights::Send);
+        assert!(IpcCapability::new(IPC_ENDPOINT_COUNT, IpcRights::Receive, 1, 1).is_none());
+        assert!(IpcCapability::new(0, IpcRights::Receive, 0, 1).is_none());
+    }
+
+    #[test]
+    fn capability_page_rejects_empty_and_out_of_range_slots() {
+        let mut page = IpcCapabilityPage::empty();
+        assert_eq!(page.get(0), None);
+        page.capabilities[0] = IpcCapability::new(0, IpcRights::Send, 1, 1).unwrap();
+        assert!(page.get(0).is_some());
+        assert_eq!(page.get(MAX_IPC_CAPABILITIES), None);
+    }
+
+    #[test]
+    fn ipc_status_round_trips_bounded_results() {
+        assert_eq!(IpcStatus::from_raw(IpcStatus::Ok as usize), Some(IpcStatus::Ok));
+        assert_eq!(IpcStatus::from_raw(IpcStatus::Malformed as usize), Some(IpcStatus::Malformed));
+        assert_eq!(IpcStatus::from_raw(usize::MAX), None);
     }
 
     #[test]
