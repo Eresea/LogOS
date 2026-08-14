@@ -10,10 +10,18 @@ pub use logos_abi::FramebufferFormat as PixelFormat;
 pub const GLYPH_WIDTH: usize = 8;
 pub const GLYPH_HEIGHT: usize = 16;
 pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
+const ASCII_FIRST: u32 = 0x20;
+const ASCII_LAST: u32 = 0x7e;
+const ASCII_GLYPH_COUNT: usize = (ASCII_LAST - ASCII_FIRST + 1) as usize;
+// 8-bit coverage atlas generated from the bundled JetBrains Mono Regular font at 14 px,
+// aligned to baseline row 13 so descenders fit inside the 16 px cell.
+const FONT_DATA: &[u8] = include_bytes!("jetbrains_mono_8x16.bin");
+
+const _: () = assert!(FONT_DATA.len() == (ASCII_GLYPH_COUNT + 1) * GLYPH_HEIGHT * GLYPH_WIDTH);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Glyph {
-    pub rows: [u8; GLYPH_HEIGHT],
+    pub rows: [[u8; GLYPH_WIDTH]; GLYPH_HEIGHT],
 }
 
 fn normalize_scalar(scalar: u32) -> u32 {
@@ -26,63 +34,38 @@ fn normalize_scalar(scalar: u32) -> u32 {
 
 fn embedded_glyph(scalar: u32) -> Glyph {
     let scalar = normalize_scalar(scalar);
-    let byte = if scalar >= 'A' as u32 && scalar <= 'Z' as u32 {
-        (scalar as u8).to_ascii_lowercase()
+    let glyph_index = if (ASCII_FIRST..=ASCII_LAST).contains(&scalar) {
+        (scalar - ASCII_FIRST) as usize
     } else {
-        scalar as u8
+        ASCII_GLYPH_COUNT
     };
-    let pattern = match byte {
-        b'a' => [14, 17, 31, 17, 17, 17, 0],
-        b'b' => [30, 17, 17, 30, 17, 17, 30],
-        b'c' => [14, 17, 16, 16, 16, 17, 14],
-        b'd' => [30, 17, 17, 17, 17, 17, 30],
-        b'e' => [31, 16, 16, 30, 16, 16, 31],
-        b'f' => [31, 16, 16, 30, 16, 16, 16],
-        b'g' => [14, 17, 16, 23, 17, 17, 14],
-        b'h' => [17, 17, 17, 31, 17, 17, 17],
-        b'i' => [31, 4, 4, 4, 4, 4, 31],
-        b'j' => [1, 1, 1, 1, 17, 17, 14],
-        b'k' => [17, 18, 20, 24, 20, 18, 17],
-        b'l' => [16, 16, 16, 16, 16, 16, 31],
-        b'm' => [17, 27, 21, 21, 17, 17, 17],
-        b'n' => [17, 25, 21, 19, 17, 17, 17],
-        b'o' => [14, 17, 17, 17, 17, 17, 14],
-        b'p' => [30, 17, 17, 30, 16, 16, 16],
-        b'q' => [14, 17, 17, 17, 21, 18, 13],
-        b'r' => [30, 17, 17, 30, 20, 18, 17],
-        b's' => [15, 16, 16, 14, 1, 1, 30],
-        b't' => [31, 4, 4, 4, 4, 4, 4],
-        b'u' => [17, 17, 17, 17, 17, 17, 14],
-        b'v' => [17, 17, 17, 17, 17, 10, 4],
-        b'w' => [17, 17, 17, 21, 21, 21, 10],
-        b'x' => [17, 17, 10, 4, 10, 17, 17],
-        b'y' => [17, 17, 10, 4, 4, 4, 4],
-        b'z' => [31, 1, 2, 4, 8, 16, 31],
-        b'0' => [14, 17, 19, 21, 25, 17, 14],
-        b'1' => [4, 12, 4, 4, 4, 4, 14],
-        b'2' => [14, 17, 1, 2, 4, 8, 31],
-        b'3' => [30, 1, 1, 14, 1, 1, 30],
-        b'4' => [2, 6, 10, 18, 31, 2, 2],
-        b'5' => [31, 16, 16, 30, 1, 1, 30],
-        b'6' => [14, 16, 16, 30, 17, 17, 14],
-        b'7' => [31, 1, 2, 4, 8, 8, 8],
-        b'8' => [14, 17, 17, 14, 17, 17, 14],
-        b'9' => [14, 17, 17, 15, 1, 1, 14],
-        b' ' => [0; 7],
-        b'>' => [16, 8, 4, 2, 4, 8, 16],
-        b'<' => [1, 2, 4, 8, 4, 2, 1],
-        b'-' => [0, 0, 0, 31, 0, 0, 0],
-        b'_' => [0, 0, 0, 0, 0, 0, 31],
-        _ => [31, 17, 21, 17, 21, 17, 31],
-    };
-    let mut rows = [0; GLYPH_HEIGHT];
+    let mut rows = [[0; GLYPH_WIDTH]; GLYPH_HEIGHT];
+    let offset = glyph_index * GLYPH_HEIGHT * GLYPH_WIDTH;
     let mut row = 0;
-    while row < pattern.len() {
-        rows[row * 2] = pattern[row];
-        rows[row * 2 + 1] = pattern[row];
+    while row < GLYPH_HEIGHT {
+        let start = offset + row * GLYPH_WIDTH;
+        rows[row].copy_from_slice(&FONT_DATA[start..start + GLYPH_WIDTH]);
         row += 1;
     }
     Glyph { rows }
+}
+
+fn blend_channel(background: u8, foreground: u8, coverage: u8) -> u8 {
+    let coverage = u32::from(coverage);
+    let value = u32::from(background) * (255 - coverage) + u32::from(foreground) * coverage + 127;
+    (value / 255) as u8
+}
+
+fn blend_color(background: u32, foreground: u32, coverage: u8) -> u32 {
+    let red = blend_channel(
+        ((background >> 16) & 0xff) as u8,
+        ((foreground >> 16) & 0xff) as u8,
+        coverage,
+    );
+    let green =
+        blend_channel(((background >> 8) & 0xff) as u8, ((foreground >> 8) & 0xff) as u8, coverage);
+    let blue = blend_channel(background as u8, foreground as u8, coverage);
+    u32::from(red) << 16 | u32::from(green) << 8 | u32::from(blue)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -198,8 +181,11 @@ impl Display {
                 let glyph = embedded_glyph(cell.codepoint);
                 for glyph_row in 0..GLYPH_HEIGHT {
                     for glyph_column in 0..GLYPH_WIDTH {
-                        let foreground = glyph.rows[glyph_row] & (1 << (7 - glyph_column)) != 0;
-                        let color = if foreground { cell.foreground } else { cell.background };
+                        let color = blend_color(
+                            cell.background,
+                            cell.foreground,
+                            glyph.rows[glyph_row][glyph_column],
+                        );
                         let pixel = row * GLYPH_HEIGHT * stride
                             + glyph_row * stride
                             + (column * GLYPH_WIDTH + glyph_column) * 4;
@@ -236,6 +222,31 @@ mod tests {
     #[test]
     fn invalid_scalars_use_the_replacement_glyph() {
         assert_eq!(embedded_glyph(0xd800), embedded_glyph(REPLACEMENT_SCALAR));
+    }
+
+    #[test]
+    fn jetbrains_mono_preserves_ascii_case_and_coverage() {
+        assert_ne!(embedded_glyph('A' as u32), embedded_glyph('a' as u32));
+        assert_ne!(embedded_glyph('0' as u32), embedded_glyph('O' as u32));
+        assert_ne!(embedded_glyph('{' as u32), embedded_glyph('}' as u32));
+        assert_eq!(embedded_glyph(0x1f600), embedded_glyph(REPLACEMENT_SCALAR));
+        assert!(
+            embedded_glyph('A' as u32)
+                .rows
+                .iter()
+                .flatten()
+                .any(|coverage| *coverage > 0 && *coverage < 255)
+        );
+        assert!(
+            embedded_glyph('g' as u32).rows[GLYPH_HEIGHT - 1].iter().any(|coverage| *coverage > 0)
+        );
+    }
+
+    #[test]
+    fn coverage_blends_background_and_foreground() {
+        assert_eq!(blend_color(0x102030, 0xe0d0c0, 0), 0x102030);
+        assert_eq!(blend_color(0x102030, 0xe0d0c0, 255), 0xe0d0c0);
+        assert_eq!(blend_color(0x000000, 0xffffff, 128), 0x808080);
     }
 
     #[test]
