@@ -4,10 +4,15 @@
 extern crate std;
 
 mod journal;
+mod request;
 
 pub use journal::{
     FORMAT_VERSION, FormatError, JOURNAL_COMMIT_KIND, JournalRecord, MAX_RECORD_PAYLOAD_BYTES,
     MAX_RECORDS_PER_TRANSACTION, RecoverySummary, ReplayError, ReplaySink, Volume, VolumeInfo,
+};
+pub use request::{
+    BlockCompletion, BlockOperation, BlockRequest, BlockRequestError, BlockRequestId,
+    BlockRequestTable, BlockStatus, BufferToken, MAX_BLOCK_REQUESTS, MAX_BLOCKS_PER_REQUEST,
 };
 
 /// The logical storage block size used by the first format boundary.
