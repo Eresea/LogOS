@@ -7,6 +7,7 @@ use core::{
 
 use logos_abi::ServiceId;
 
+use crate::memory::{ExclusionKind, MemoryExclusion};
 use crate::{
     frame_pool::{FrameAddress, FramePool},
     loader::{LoadError, LoadedImage},
@@ -103,9 +104,23 @@ impl ServiceRuntime {
     pub fn start(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
         let resources = crate::arch::boot_resources().ok_or(ServiceRuntimeError::Resources)?;
         if !self.frame_pool_ready {
-            self.frame_pool
-                .initialize(resources.memory_map())
-                .map_err(|_| ServiceRuntimeError::Resources)?;
+            if let Some(framebuffer) = resources.framebuffer() {
+                let pages = framebuffer
+                    .bytes()
+                    .checked_add(crate::boot_resources::PAGE_SIZE - 1)
+                    .ok_or(ServiceRuntimeError::Resources)?
+                    / crate::boot_resources::PAGE_SIZE;
+                let exclusion =
+                    MemoryExclusion::new(framebuffer.base(), pages, ExclusionKind::Framebuffer)
+                        .ok_or(ServiceRuntimeError::Resources)?;
+                self.frame_pool
+                    .initialize_with_exclusions(resources.memory_map(), &[exclusion])
+                    .map_err(|_| ServiceRuntimeError::Resources)?;
+            } else {
+                self.frame_pool
+                    .initialize(resources.memory_map())
+                    .map_err(|_| ServiceRuntimeError::Resources)?;
+            }
             if !reserve_active_page_tables(&mut self.frame_pool, crate::arch::current_cr3()) {
                 return Err(ServiceRuntimeError::Resources);
             }

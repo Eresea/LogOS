@@ -1,23 +1,20 @@
-//! Fixed physical-frame supply for user address spaces.
+//! Stable physical-frame facade.
+//!
+//! Existing page-table and loader callers keep their `FrameAddress` and
+//! `FramePool` interfaces while the implementation uses normalized runs,
+//! indexed bitmap metadata, and generation-safe leases.
 
 use logos_abi::MAX_MANAGED_FRAMES;
 
-use crate::boot_resources::{MemoryMap, PAGE_SIZE};
+use crate::{
+    boot_resources::MemoryMap,
+    memory::{
+        FrameBatch, FrameError, FrameLease, FrameState, MemoryExclusion, NormalizedMemoryMap,
+        OwnerId, PhysicalFrameManager, normalize_memory_map,
+    },
+};
 
-const FRAME_WORDS: usize = MAX_MANAGED_FRAMES / 64;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FrameAddress(u64);
-
-impl FrameAddress {
-    pub(crate) const fn from_raw(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-}
+pub use crate::memory::FrameAddress;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FramePoolError {
@@ -26,113 +23,97 @@ pub enum FramePoolError {
 }
 
 pub struct FramePool {
-    frames: [u64; MAX_MANAGED_FRAMES],
-    used: [u64; FRAME_WORDS],
-    count: usize,
-    cursor: usize,
+    manager: PhysicalFrameManager,
 }
 
 impl FramePool {
     pub const fn empty() -> Self {
-        Self { frames: [0; MAX_MANAGED_FRAMES], used: [0; FRAME_WORDS], count: 0, cursor: 0 }
+        Self { manager: PhysicalFrameManager::empty() }
     }
 
     pub fn initialize(&mut self, memory_map: &MemoryMap) -> Result<(), FramePoolError> {
-        self.frames.fill(0);
-        self.used.fill(0);
-        self.count = 0;
-        self.cursor = 0;
-        let mut ordered = true;
-        let mut previous_start = 0;
-        for index in 0..memory_map.len() {
-            let Some(descriptor) = memory_map.get(index) else {
-                return Err(FramePoolError::InvalidMap);
-            };
-            if index != 0 && descriptor.physical_start < previous_start {
-                ordered = false;
-                break;
-            }
-            previous_start = descriptor.physical_start;
-        }
-        for index in 0..memory_map.len() {
-            let Some(descriptor) = memory_map.get(index) else {
-                return Err(FramePoolError::InvalidMap);
-            };
-            if !descriptor.available {
-                continue;
-            }
-            for page in 0..descriptor.pages {
-                if self.count == MAX_MANAGED_FRAMES {
-                    return Ok(());
-                }
-                let Some(offset) = page.checked_mul(PAGE_SIZE) else {
-                    return Err(FramePoolError::InvalidMap);
-                };
-                let Some(address) = descriptor.physical_start.checked_add(offset) else {
-                    return Err(FramePoolError::InvalidMap);
-                };
-                let duplicate = if ordered {
-                    self.count != 0 && address <= self.frames[self.count - 1]
-                } else {
-                    self.frames[..self.count].contains(&address)
-                };
-                if address == 0 || duplicate {
-                    continue;
-                }
-                self.frames[self.count] = address;
-                self.count += 1;
-            }
-        }
-        Ok(())
+        self.initialize_with_exclusions(memory_map, &[])
+    }
+
+    pub fn initialize_with_exclusions(
+        &mut self,
+        memory_map: &MemoryMap,
+        exclusions: &[MemoryExclusion],
+    ) -> Result<(), FramePoolError> {
+        let normalized =
+            normalize_memory_map(memory_map, exclusions).map_err(|_| FramePoolError::InvalidMap)?;
+        self.initialize_normalized(&normalized)
+    }
+
+    pub fn initialize_normalized(
+        &mut self,
+        normalized: &NormalizedMemoryMap,
+    ) -> Result<(), FramePoolError> {
+        self.manager.initialize(normalized).map_err(map_error)
     }
 
     pub const fn capacity(&self) -> usize {
-        self.count
+        self.manager.frame_count()
+    }
+
+    pub fn available(&self) -> usize {
+        self.manager.available()
     }
 
     pub fn allocate(&mut self) -> Result<FrameAddress, FramePoolError> {
-        if self.count == 0 {
-            return Err(FramePoolError::Exhausted);
-        }
-        for offset in 0..self.count {
-            let index = (self.cursor + offset) % self.count;
-            let word = index / 64;
-            let bit = 1u64 << (index % 64);
-            if self.used[word] & bit == 0 {
-                self.used[word] |= bit;
-                self.cursor = (index + 1) % self.count;
-                return Ok(FrameAddress(self.frames[index]));
-            }
-        }
-        Err(FramePoolError::Exhausted)
+        self.manager
+            .try_alloc(OwnerId::KERNEL, FrameState::Dirty)
+            .map(|lease| lease.address())
+            .map_err(map_error)
     }
 
+    pub fn try_alloc(
+        &mut self,
+        owner: OwnerId,
+        state: FrameState,
+    ) -> Result<FrameLease, FramePoolError> {
+        self.manager.try_alloc(owner, state).map_err(map_error)
+    }
+
+    pub fn alloc_batch(
+        &mut self,
+        owner: OwnerId,
+        count: usize,
+        state: FrameState,
+    ) -> Result<FrameBatch, FramePoolError> {
+        self.manager.alloc_batch(owner, count, state).map_err(map_error)
+    }
+
+    pub fn free(&mut self, lease: FrameLease) -> Result<(), FramePoolError> {
+        self.manager.free(lease).map_err(map_error)
+    }
+
+    pub fn free_batch(&mut self, batch: FrameBatch) -> Result<(), FramePoolError> {
+        self.manager.free_batch(batch).map_err(map_error)
+    }
+
+    /// Reserve a boot-owned frame by physical address.
     pub fn reserve(&mut self, frame: FrameAddress) -> bool {
-        let mut reserved = false;
-        for index in 0..self.count {
-            if self.frames[index] == frame.0 {
-                let word = index / 64;
-                let bit = 1u64 << (index % 64);
-                self.used[word] |= bit;
-                reserved = true;
-            }
-        }
-        reserved
+        self.manager.reserve(frame, OwnerId::KERNEL).is_ok()
     }
 
+    pub fn reserve_batch(&mut self, frames: &[FrameAddress]) -> Result<FrameBatch, FramePoolError> {
+        self.manager.reserve_batch(frames, OwnerId::KERNEL).map_err(map_error)
+    }
+
+    pub fn release_reservation(&mut self, lease: FrameLease) -> Result<(), FramePoolError> {
+        self.manager.release_reservation(lease).map_err(map_error)
+    }
+
+    /// Legacy release accepts a generation-stamped address returned by
+    /// `allocate`; raw addresses remain supported for old boot code through a
+    /// lookup and current-generation validation inside the manager.
     pub fn release(&mut self, frame: FrameAddress) -> Result<(), FramePoolError> {
-        let Some(index) = self.frames[..self.count].iter().position(|address| *address == frame.0)
-        else {
-            return Err(FramePoolError::InvalidMap);
-        };
-        let word = index / 64;
-        let bit = 1u64 << (index % 64);
-        if self.used[word] & bit == 0 {
-            return Err(FramePoolError::InvalidMap);
-        }
-        self.used[word] &= !bit;
-        self.cursor = index;
-        Ok(())
+        self.manager.release_address(frame).map_err(map_error)
+    }
+
+    pub const fn manager(&self) -> &PhysicalFrameManager {
+        &self.manager
     }
 }
 
@@ -142,63 +123,18 @@ impl Default for FramePool {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::boot_resources::MemoryDescriptor;
-
-    #[test]
-    fn pool_allocates_and_reuses_fixed_frames() {
-        let mut map = MemoryMap::new();
-        map.push(MemoryDescriptor::new(0x1000, 2, true).unwrap()).unwrap();
-        let mut pool = FramePool::empty();
-        pool.initialize(&map).unwrap();
-        assert_eq!(pool.capacity(), 2);
-        let first = pool.allocate().unwrap();
-        let second = pool.allocate().unwrap();
-        assert_ne!(first, second);
-        assert_eq!(pool.allocate(), Err(FramePoolError::Exhausted));
-        pool.release(first).unwrap();
-        assert_eq!(pool.allocate(), Ok(first));
-    }
-
-    #[test]
-    fn reserved_memory_is_not_allocated() {
-        let mut map = MemoryMap::new();
-        map.push(MemoryDescriptor::new(0x1000, 2, false).unwrap()).unwrap();
-        let mut pool = FramePool::empty();
-        pool.initialize(&map).unwrap();
-        assert_eq!(pool.capacity(), 0);
-        assert_eq!(pool.allocate(), Err(FramePoolError::Exhausted));
-    }
-
-    #[test]
-    fn zero_frame_is_not_allocated() {
-        let mut map = MemoryMap::new();
-        map.push(MemoryDescriptor::new(0, 2, true).unwrap()).unwrap();
-        let mut pool = FramePool::empty();
-        pool.initialize(&map).unwrap();
-        assert_eq!(pool.capacity(), 1);
-        assert_eq!(pool.allocate().unwrap().raw(), 0x1000);
-    }
-
-    #[test]
-    fn reserved_frame_is_not_reused() {
-        let mut map = MemoryMap::new();
-        map.push(MemoryDescriptor::new(0x1000, 2, true).unwrap()).unwrap();
-        let mut pool = FramePool::empty();
-        pool.initialize(&map).unwrap();
-        assert!(pool.reserve(FrameAddress::from_raw(0x1000)));
-        assert_eq!(pool.allocate().unwrap().raw(), 0x2000);
-    }
-
-    #[test]
-    fn duplicate_memory_descriptors_are_coalesced() {
-        let mut map = MemoryMap::new();
-        map.push(MemoryDescriptor::new(0x1000, 2, true).unwrap()).unwrap();
-        map.push(MemoryDescriptor::new(0x1000, 2, true).unwrap()).unwrap();
-        let mut pool = FramePool::empty();
-        pool.initialize(&map).unwrap();
-        assert_eq!(pool.capacity(), 2);
+fn map_error(error: FrameError) -> FramePoolError {
+    match error {
+        FrameError::Exhausted => FramePoolError::Exhausted,
+        FrameError::InvalidMap => FramePoolError::InvalidMap,
+        FrameError::InvalidFrame
+        | FrameError::NotReservation
+        | FrameError::StaleHandle
+        | FrameError::WrongOwner
+        | FrameError::Capacity
+        | FrameError::AlreadyUsed => FramePoolError::InvalidMap,
+        FrameError::BatchCapacity => FramePoolError::Exhausted,
     }
 }
+
+const _: usize = MAX_MANAGED_FRAMES;

@@ -144,6 +144,13 @@ impl MemoryMap {
             .map(|entry| entry.pages)
             .sum()
     }
+
+    pub fn normalize(
+        &self,
+        exclusions: &[crate::memory::MemoryExclusion],
+    ) -> Result<crate::memory::NormalizedMemoryMap, crate::memory::NormalizationError> {
+        crate::memory::normalize_memory_map(self, exclusions)
+    }
 }
 
 impl Default for MemoryMap {
