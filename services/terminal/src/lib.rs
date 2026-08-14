@@ -6,7 +6,7 @@
 extern crate std;
 
 use logos_abi::{
-    Cell, DEFAULT_COLUMNS, DEFAULT_ROWS, InputMessage, IpcBytes, KeyCode, KeyState,
+    Cell, DEFAULT_COLUMNS, DEFAULT_ROWS, InputMessage, IpcBytes, KeyCode, KeyState, MAX_COLUMNS,
     MAX_RENDER_CELLS, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind, RenderMessage,
 };
 
@@ -300,7 +300,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             for column in 0..DEFAULT_COLUMNS {
                 let index = Self::index(column, row);
                 if self.dirty[index] && count < MAX_RENDER_CELLS {
-                    message.positions[count] = index as u16;
+                    message.positions[count] = (row * MAX_COLUMNS + column) as u16;
                     message.cells[count] = self.screen[index];
                     self.dirty[index] = false;
                     count += 1;
@@ -449,5 +449,19 @@ mod tests {
         let mut terminal = Terminal::new();
         assert!(drain(&mut terminal) > 1);
         assert!(terminal.next_render().is_none());
+    }
+
+    #[test]
+    fn render_positions_use_display_stride() {
+        let mut terminal = Terminal::new();
+        let mut saw_second_row = false;
+        while let Some(message) = terminal.next_render() {
+            for index in 0..message.count as usize {
+                if message.positions[index] == MAX_COLUMNS as u16 {
+                    saw_second_row = true;
+                }
+            }
+        }
+        assert!(saw_second_row);
     }
 }

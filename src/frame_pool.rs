@@ -42,6 +42,18 @@ impl FramePool {
         self.used.fill(0);
         self.count = 0;
         self.cursor = 0;
+        let mut ordered = true;
+        let mut previous_start = 0;
+        for index in 0..memory_map.len() {
+            let Some(descriptor) = memory_map.get(index) else {
+                return Err(FramePoolError::InvalidMap);
+            };
+            if index != 0 && descriptor.physical_start < previous_start {
+                ordered = false;
+                break;
+            }
+            previous_start = descriptor.physical_start;
+        }
         for index in 0..memory_map.len() {
             let Some(descriptor) = memory_map.get(index) else {
                 return Err(FramePoolError::InvalidMap);
@@ -59,7 +71,12 @@ impl FramePool {
                 let Some(address) = descriptor.physical_start.checked_add(offset) else {
                     return Err(FramePoolError::InvalidMap);
                 };
-                if address == 0 || self.frames[..self.count].contains(&address) {
+                let duplicate = if ordered {
+                    self.count != 0 && address <= self.frames[self.count - 1]
+                } else {
+                    self.frames[..self.count].contains(&address)
+                };
+                if address == 0 || duplicate {
                     continue;
                 }
                 self.frames[self.count] = address;

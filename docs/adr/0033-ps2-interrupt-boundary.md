@@ -7,10 +7,10 @@ Accepted
 ## Decision
 
 The kernel owns only the PS/2 transport boundary. It remaps the legacy PIC,
-keeps all legacy IRQs masked until the Input service ring is published, then
-unmasks IRQ1 and copies each byte from port `0x60` into the fixed
-`KeyboardByteRing`. The Input service owns Set-2 decoding and semantic message
-construction.
+disables i8042 Set-1 translation so the device emits Set-2 bytes, keeps all
+legacy IRQs masked until the Input service ring is published, then unmasks IRQ1
+and copies each byte from port `0x60` into the fixed `KeyboardByteRing`. The
+Input service owns Set-2 decoding and semantic message construction.
 
 ## Consequences
 

@@ -14,9 +14,9 @@ use uefi::{
 };
 
 use crate::{
-    MAX_CPUS, SCHEDULER,
     boot_resources::{BootResources, FramebufferInfo, MemoryDescriptor, MemoryMap, PixelFormat},
     service_loader::ServiceImageBundle,
+    MAX_CPUS, SCHEDULER,
 };
 
 const DEBUG_PORT: u16 = 0xe9;
@@ -35,6 +35,12 @@ const PIC_MASTER_DATA: u16 = 0x21;
 const PIC_SLAVE_COMMAND: u16 = 0xa0;
 const PIC_SLAVE_DATA: u16 = 0xa1;
 const PIC_EOI: u8 = 0x20;
+const KEYBOARD_STATUS_PORT: u16 = 0x64;
+const KEYBOARD_COMMAND_PORT: u16 = 0x64;
+const KEYBOARD_READ_CONFIG: u8 = 0x20;
+const KEYBOARD_WRITE_CONFIG: u8 = 0x60;
+const KEYBOARD_INPUT_FULL: u8 = 1 << 1;
+const KEYBOARD_OUTPUT_FULL: u8 = 1;
 const KEYBOARD_DATA_PORT: u16 = 0x60;
 const TIMER_VECTOR: u8 = 32;
 const KEYBOARD_VECTOR: u8 = 33;
@@ -813,6 +819,9 @@ fn initialize_post_uefi(cpu_count: usize) {
     configure_sse();
     enable_local_apic();
     configure_pic();
+    if !configure_keyboard() {
+        fatal(b"LogOS vNext: keyboard controller");
+    }
     calibrate_timer();
     #[cfg(feature = "qemu-proof")]
     crate::user_mode::initialize_kernel_cr3(current_cr3());
@@ -1036,6 +1045,44 @@ fn configure_pic() {
         out_port(PIC_MASTER_DATA, 0xff);
         out_port(PIC_SLAVE_DATA, 0xff);
     }
+}
+
+fn configure_keyboard() -> bool {
+    unsafe {
+        let mut ready = false;
+        for _ in 0..1_000_000 {
+            if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
+                out_port(KEYBOARD_COMMAND_PORT, KEYBOARD_READ_CONFIG);
+                ready = true;
+                break;
+            }
+        }
+        if !ready {
+            return false;
+        }
+        if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_OUTPUT_FULL == 0 {
+            return false;
+        }
+        let config = in_port(KEYBOARD_DATA_PORT) & !0x40;
+        ready = false;
+        for _ in 0..1_000_000 {
+            if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
+                out_port(KEYBOARD_COMMAND_PORT, KEYBOARD_WRITE_CONFIG);
+                ready = true;
+                break;
+            }
+        }
+        if !ready {
+            return false;
+        }
+        for _ in 0..1_000_000 {
+            if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
+                out_port(KEYBOARD_DATA_PORT, config);
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub(crate) fn enable_keyboard_irq() {

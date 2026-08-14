@@ -38,18 +38,18 @@ New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\LOGOS') | Out-Null
 Copy-Item (Join-Path $repoRoot 'build\esp\EFI\LOGOS\*.ELF') (Join-Path $esp 'EFI\LOGOS') -Force
 
 $espPath = ((Resolve-Path $esp).Path).Replace('\', '/')
+$display = if ($interactiveMode) { 'gtk' } else { 'none' }
 $qemuArgs = @(
     '-machine', 'q35', '-m', '128M', '-smp', $Cpus,
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
     '-drive', "format=raw,file=fat:rw:$espPath",
-    '-display', 'none'
+    '-display', $display
 )
 if ($Proof) {
     Remove-Item $log -Force -ErrorAction SilentlyContinue
     $qemuArgs += @('-debugcon', "file:$log", '-global', 'isa-debugcon.iobase=0xe9', '-qmp', "tcp:127.0.0.1:$QmpPort,server=on,wait=off")
 } else {
     $qemuArgs += @('-debugcon', 'stdio', '-global', 'isa-debugcon.iobase=0xe9')
-    if ($interactiveMode) { $qemuArgs = $qemuArgs | Where-Object { $_ -ne '-display' -and $_ -ne 'none' } }
 }
 
 if (-not $Proof) {
@@ -143,7 +143,7 @@ $qmp = $null
 try {
     $qmp = Connect-Qmp $QmpPort
     Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofBefore } } | Out-Null
-    foreach ($key in @('e', 'c', 'h', 'o', 'space', 'p', 'r', 'o', 'o', 'f', 'ret')) {
+    foreach ($key in @('e', 'c', 'h', 'o', 'spc', 'p', 'r', 'o', 'o', 'f', 'ret')) {
         Invoke-QmpCommand $qmp.Writer $qmp.Reader @{
             execute = 'human-monitor-command'
             arguments = @{ 'command-line' = "sendkey $key" }
