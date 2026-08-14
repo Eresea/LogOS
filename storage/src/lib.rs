@@ -3,6 +3,13 @@
 #[cfg(test)]
 extern crate std;
 
+mod journal;
+
+pub use journal::{
+    FORMAT_VERSION, FormatError, JOURNAL_COMMIT_KIND, JournalRecord, MAX_RECORD_PAYLOAD_BYTES,
+    MAX_RECORDS_PER_TRANSACTION, RecoverySummary, ReplayError, ReplaySink, Volume, VolumeInfo,
+};
+
 /// The logical storage block size used by the first format boundary.
 pub const BLOCK_BYTES: usize = 4096;
 
