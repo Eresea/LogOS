@@ -38,6 +38,24 @@ pub const MAX_IPC_BYTES: usize = 256;
 pub const IPC_FLAG_MORE: u8 = 1 << 0;
 pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
 
+pub const IPC_ENDPOINT_COUNT: usize = 6;
+pub const IPC_READ_EVENT_BASE: usize = 0;
+pub const IPC_WRITE_EVENT_BASE: usize = IPC_READ_EVENT_BASE + IPC_ENDPOINT_COUNT;
+pub const KEYBOARD_READ_EVENT: usize = IPC_WRITE_EVENT_BASE + IPC_ENDPOINT_COUNT;
+pub const EVENT_COUNT: usize = KEYBOARD_READ_EVENT + 1;
+
+pub const fn ipc_read_event_mask(endpoint: usize) -> u64 {
+    if endpoint < IPC_ENDPOINT_COUNT { 1u64 << (IPC_READ_EVENT_BASE + endpoint) } else { 0 }
+}
+
+pub const fn ipc_write_event_mask(endpoint: usize) -> u64 {
+    if endpoint < IPC_ENDPOINT_COUNT { 1u64 << (IPC_WRITE_EVENT_BASE + endpoint) } else { 0 }
+}
+
+pub const fn keyboard_read_event_mask() -> u64 {
+    1u64 << KEYBOARD_READ_EVENT
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum FramebufferFormat {
@@ -379,17 +397,18 @@ impl KeyboardByteRing {
         }
     }
 
-    pub fn push(&self, byte: u8) -> Result<(), KeyboardRingError> {
+    pub fn push(&self, byte: u8) -> Result<Notify, KeyboardRingError> {
         let head = self.head.load(Ordering::Relaxed);
         let tail = self.tail.load(Ordering::Acquire);
         if head.wrapping_sub(tail) >= KEYBOARD_RING_CAPACITY as u16 {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return Err(KeyboardRingError::Full);
         }
+        let was_empty = head == tail;
         let slot = usize::from(head) % KEYBOARD_RING_CAPACITY;
         unsafe { *self.bytes[slot].get() = byte };
         self.head.store(head.wrapping_add(1), Ordering::Release);
-        Ok(())
+        Ok(if was_empty { Notify::Notified } else { Notify::AlreadyNotified })
     }
 
     pub fn pop(&self) -> Option<u8> {
@@ -549,6 +568,13 @@ impl<T: Copy, const N: usize> SharedIpc<T, N> {
     }
 
     pub fn receive(&self, identity: MessageIdentity) -> Result<T, SharedReceiveError> {
+        self.receive_with_notify(identity).map(|(entry, _)| entry)
+    }
+
+    pub fn receive_with_notify(
+        &self,
+        identity: MessageIdentity,
+    ) -> Result<(T, Notify), SharedReceiveError> {
         if !identity.accepts(self.endpoint) {
             return Err(SharedReceiveError::Stale);
         }
@@ -560,13 +586,14 @@ impl<T: Copy, const N: usize> SharedIpc<T, N> {
         if tail == head {
             return Err(SharedReceiveError::Empty);
         }
+        let was_full = head.wrapping_sub(tail) >= N as u16;
         let slot = usize::from(tail) % N;
         let entry = unsafe { (*self.entries[slot].get()).assume_init_read() };
         self.tail.store(tail.wrapping_add(1), Ordering::Release);
         if tail.wrapping_add(1) == head {
             self.doorbell.take();
         }
-        Ok(entry)
+        Ok((entry, if was_full { Notify::Notified } else { Notify::AlreadyNotified }))
     }
 
     pub fn pending(&self) -> usize {
@@ -623,6 +650,42 @@ mod tests {
             assert_eq!(ring.pop(), Some(byte as u8));
         }
         assert_eq!(ring.pop(), None);
+    }
+
+    #[test]
+    fn keyboard_ring_reports_only_the_empty_to_nonempty_edge() {
+        let ring = KeyboardByteRing::new();
+        assert_eq!(ring.push(1), Ok(Notify::Notified));
+        assert_eq!(ring.push(2), Ok(Notify::AlreadyNotified));
+    }
+
+    #[test]
+    fn shared_ring_reports_the_full_to_not_full_edge() {
+        let ring = RenderIpc::new(EndpointHeader::new(1, 1));
+        let identity = ring.endpoint().identity();
+        let message = RenderMessage::empty(MessageKind::RenderCells);
+        assert_eq!(ring.send(identity, message), Ok(Notify::Notified));
+        assert_eq!(ring.send(identity, message), Err(SharedSendError::Full));
+        assert_eq!(ring.receive_with_notify(identity), Ok((message, Notify::Notified)));
+        assert_eq!(ring.receive(identity), Err(SharedReceiveError::Empty));
+    }
+
+    #[test]
+    fn event_masks_are_fixed_and_disjoint() {
+        let mut all = 0;
+        for endpoint in 0..IPC_ENDPOINT_COUNT {
+            let read = ipc_read_event_mask(endpoint);
+            let write = ipc_write_event_mask(endpoint);
+            assert_eq!(all & read, 0);
+            all |= read;
+            assert_eq!(all & write, 0);
+            all |= write;
+        }
+        let keyboard = keyboard_read_event_mask();
+        assert_eq!(all & keyboard, 0);
+        all |= keyboard;
+        assert_eq!(EVENT_COUNT, 13);
+        assert_eq!(all.count_ones(), EVENT_COUNT as u32);
     }
 
     #[test]
