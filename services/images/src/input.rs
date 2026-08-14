@@ -6,7 +6,8 @@ mod common;
 use logos_abi::{INPUT_KEYBOARD_RING_BASE, InputMessage, IpcStatus, KeyboardByteRing};
 
 static mut PENDING: [Option<InputMessage>; 2] = [None, None];
-const OUTPUT_CAPABILITY: usize = 0;
+const OUTPUT_CAPABILITY: usize =
+    common::capability_slot(logos_abi::ServiceId::Input, 0, logos_abi::IpcRights::Send);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {

@@ -3,8 +3,7 @@
 use core::{mem, ptr};
 
 use logos_abi::{
-    EndpointHeader, IpcCapability, IpcCapabilityPage, IpcRights, IpcStatus, Notify,
-    SERVICE_IPC_BASE, ServiceId,
+    EndpointHeader, IpcCapability, IpcCapabilityPage, IpcRights, IpcStatus, Notify, ServiceId,
 };
 
 use crate::{
@@ -21,9 +20,7 @@ const ENDPOINTS: [(ServiceId, ServiceId); 6] = [
     (ServiceId::Commands, ServiceId::Session),
 ];
 pub const MAX_ENDPOINTS: usize = ENDPOINTS.len();
-pub const IPC_BASE: usize = SERVICE_IPC_BASE;
 pub const SERVICE_EPOCH: u64 = 1;
-const PAGE_SIZE: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IpcEndpoint {
@@ -31,7 +28,6 @@ pub struct IpcEndpoint {
     consumer: ServiceId,
     generation: u16,
     service_epoch: u64,
-    virtual_address: usize,
     frame: FrameAddress,
 }
 
@@ -50,10 +46,6 @@ impl IpcEndpoint {
 
     pub const fn header(self) -> EndpointHeader {
         EndpointHeader::new(self.generation, self.service_epoch)
-    }
-
-    pub const fn virtual_address(self) -> usize {
-        self.virtual_address
     }
 
     pub const fn frame(self) -> FrameAddress {
@@ -107,14 +99,8 @@ impl ServiceIpcGraph {
                 graph.reclaim(pool);
                 return Err(IpcError::Memory);
             }
-            graph.endpoints[index] = Some(IpcEndpoint {
-                producer,
-                consumer,
-                generation,
-                service_epoch,
-                virtual_address: IPC_BASE + index * PAGE_SIZE,
-                frame,
-            });
+            graph.endpoints[index] =
+                Some(IpcEndpoint { producer, consumer, generation, service_epoch, frame });
             graph.count += 1;
         }
         Ok(graph)
@@ -153,6 +139,9 @@ impl ServiceIpcGraph {
             let Some(rights) = rights else { continue };
             if slot == page.capabilities.len() {
                 return Err(IpcError::Capacity);
+            }
+            if logos_abi::ipc_capability_slot(service, index, rights) != Some(slot) {
+                return Err(IpcError::InvalidIdentity);
             }
             page.capabilities[slot] = logos_abi::IpcCapability::new(
                 index,
@@ -241,21 +230,12 @@ impl ServiceIpcGraph {
     }
 
     pub fn message_size(index: usize) -> usize {
-        endpoint_message_size(index)
+        logos_abi::ipc_message_size(index).unwrap_or(0)
     }
 }
 
 fn capability_identity(capability: IpcCapability) -> logos_abi::MessageIdentity {
     logos_abi::MessageIdentity::new(capability.generation, capability.service_epoch)
-}
-
-fn endpoint_message_size(index: usize) -> usize {
-    match index {
-        0 => mem::size_of::<logos_abi::InputMessage>(),
-        1 => mem::size_of::<logos_abi::RenderMessage>(),
-        2..=5 => mem::size_of::<logos_abi::IpcBytes>(),
-        _ => 0,
-    }
 }
 
 unsafe fn send_bytes(
@@ -264,10 +244,16 @@ unsafe fn send_bytes(
     identity: logos_abi::MessageIdentity,
     bytes: &[u8],
 ) -> Result<Notify, IpcStatus> {
-    match index {
-        0 => unsafe { send_typed::<logos_abi::InputMessage, 32>(frame, identity, bytes) },
-        1 => unsafe { send_typed::<logos_abi::RenderMessage, 1>(frame, identity, bytes) },
-        2..=5 => unsafe { send_typed::<logos_abi::IpcBytes, 8>(frame, identity, bytes) },
+    match logos_abi::ipc_message_type(index) {
+        Some(logos_abi::IpcMessageType::Input) => unsafe {
+            send_typed::<logos_abi::InputMessage, 32>(frame, identity, bytes)
+        },
+        Some(logos_abi::IpcMessageType::Render) => unsafe {
+            send_typed::<logos_abi::RenderMessage, 1>(frame, identity, bytes)
+        },
+        Some(logos_abi::IpcMessageType::Bytes) => unsafe {
+            send_typed::<logos_abi::IpcBytes, 8>(frame, identity, bytes)
+        },
         _ => Err(IpcStatus::Unauthorized),
     }
 }
@@ -278,10 +264,16 @@ unsafe fn receive_bytes(
     identity: logos_abi::MessageIdentity,
     bytes: &mut [u8],
 ) -> Result<Notify, IpcStatus> {
-    match index {
-        0 => unsafe { receive_typed::<logos_abi::InputMessage, 32>(frame, identity, bytes) },
-        1 => unsafe { receive_typed::<logos_abi::RenderMessage, 1>(frame, identity, bytes) },
-        2..=5 => unsafe { receive_typed::<logos_abi::IpcBytes, 8>(frame, identity, bytes) },
+    match logos_abi::ipc_message_type(index) {
+        Some(logos_abi::IpcMessageType::Input) => unsafe {
+            receive_typed::<logos_abi::InputMessage, 32>(frame, identity, bytes)
+        },
+        Some(logos_abi::IpcMessageType::Render) => unsafe {
+            receive_typed::<logos_abi::RenderMessage, 1>(frame, identity, bytes)
+        },
+        Some(logos_abi::IpcMessageType::Bytes) => unsafe {
+            receive_typed::<logos_abi::IpcBytes, 8>(frame, identity, bytes)
+        },
         _ => Err(IpcStatus::Unauthorized),
     }
 }
@@ -374,7 +366,6 @@ mod tests {
         assert_eq!(graph.endpoint(0).unwrap().consumer(), ServiceId::Terminal);
         assert_eq!(graph.endpoint(5).unwrap().producer(), ServiceId::Commands);
         assert_eq!(graph.endpoint(5).unwrap().consumer(), ServiceId::Session);
-        assert_eq!(graph.endpoint(5).unwrap().virtual_address(), IPC_BASE + 5 * PAGE_SIZE);
         assert_eq!(graph.endpoint(5).unwrap().generation(), 1);
         let terminal = graph.capabilities(ServiceId::Terminal).unwrap();
         assert_eq!(terminal.get(0).unwrap().rights, IpcRights::Receive);

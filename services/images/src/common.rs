@@ -26,6 +26,17 @@ pub const fn keyboard_read_event() -> u64 {
     logos_abi::keyboard_read_event_mask()
 }
 
+pub const fn capability_slot(
+    service: ServiceId,
+    endpoint: usize,
+    rights: logos_abi::IpcRights,
+) -> usize {
+    match logos_abi::ipc_capability_slot(service, endpoint, rights) {
+        Some(slot) => slot,
+        None => logos_abi::MAX_IPC_CAPABILITIES,
+    }
+}
+
 #[inline(always)]
 pub fn heartbeat(service: ServiceId) {
     unsafe {
@@ -125,12 +136,7 @@ pub fn ipc_receive<T: Copy>(capability_slot: usize, message: &mut T) -> IpcStatu
 }
 
 fn endpoint_message_size(endpoint: Option<usize>) -> Option<usize> {
-    match endpoint {
-        Some(0) => Some(mem::size_of::<logos_abi::InputMessage>()),
-        Some(1) => Some(mem::size_of::<logos_abi::RenderMessage>()),
-        Some(2..=5) => Some(mem::size_of::<logos_abi::IpcBytes>()),
-        _ => None,
-    }
+    endpoint.and_then(logos_abi::ipc_message_size)
 }
 
 #[inline(always)]

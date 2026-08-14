@@ -6,10 +6,14 @@ mod common;
 use logos_abi::{IPC_FLAG_MORE, IpcBytes, IpcStatus, MAX_IPC_BYTES, MessageKind};
 use logos_session::MAX_LINE_BYTES;
 
-const INPUT_CAPABILITY: usize = 0;
-const OUTPUT_CAPABILITY: usize = 1;
-const COMMANDS_CAPABILITY: usize = 2;
-const COMMAND_OUTPUT_CAPABILITY: usize = 3;
+const INPUT_CAPABILITY: usize =
+    common::capability_slot(logos_abi::ServiceId::Session, 2, logos_abi::IpcRights::Receive);
+const OUTPUT_CAPABILITY: usize =
+    common::capability_slot(logos_abi::ServiceId::Session, 3, logos_abi::IpcRights::Send);
+const COMMANDS_CAPABILITY: usize =
+    common::capability_slot(logos_abi::ServiceId::Session, 4, logos_abi::IpcRights::Send);
+const COMMAND_OUTPUT_CAPABILITY: usize =
+    common::capability_slot(logos_abi::ServiceId::Session, 5, logos_abi::IpcRights::Receive);
 
 struct PendingOutput {
     bytes: [u8; logos_session::MAX_OUTPUT_BYTES],

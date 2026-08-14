@@ -5,10 +5,14 @@ mod common;
 
 use logos_abi::{InputMessage, IpcBytes, IpcStatus, KeyCode, KeyState, MessageKind};
 
-const INPUT_CAPABILITY: usize = 0;
-const DISPLAY_CAPABILITY: usize = 1;
-const SESSION_INPUT_CAPABILITY: usize = 2;
-const SESSION_OUTPUT_CAPABILITY: usize = 3;
+const INPUT_CAPABILITY: usize =
+    common::capability_slot(logos_abi::ServiceId::Terminal, 0, logos_abi::IpcRights::Receive);
+const DISPLAY_CAPABILITY: usize =
+    common::capability_slot(logos_abi::ServiceId::Terminal, 1, logos_abi::IpcRights::Send);
+const SESSION_INPUT_CAPABILITY: usize =
+    common::capability_slot(logos_abi::ServiceId::Terminal, 2, logos_abi::IpcRights::Send);
+const SESSION_OUTPUT_CAPABILITY: usize =
+    common::capability_slot(logos_abi::ServiceId::Terminal, 3, logos_abi::IpcRights::Receive);
 
 static mut TERMINAL: logos_terminal::TerminalService = logos_terminal::TerminalService::new();
 static mut PENDING_RENDER: Option<logos_abi::RenderMessage> = None;

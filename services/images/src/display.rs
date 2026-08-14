@@ -7,7 +7,8 @@ use logos_abi::{
     DISPLAY_CONFIG_BASE, DISPLAY_FRAMEBUFFER_BASE, FramebufferConfig, FramebufferFormat, IpcStatus,
     MessageKind, RenderMessage,
 };
-const INPUT_CAPABILITY: usize = 0;
+const INPUT_CAPABILITY: usize =
+    common::capability_slot(logos_abi::ServiceId::Display, 1, logos_abi::IpcRights::Receive);
 
 static mut DISPLAY: logos_display::Display = logos_display::Display::new(1);
 

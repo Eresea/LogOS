@@ -5,8 +5,10 @@ mod common;
 
 use logos_abi::{IPC_FLAG_MORE, IpcBytes, IpcStatus, MessageKind};
 
-const INPUT_CAPABILITY: usize = 0;
-const OUTPUT_CAPABILITY: usize = 1;
+const INPUT_CAPABILITY: usize =
+    common::capability_slot(logos_abi::ServiceId::Commands, 4, logos_abi::IpcRights::Receive);
+const OUTPUT_CAPABILITY: usize =
+    common::capability_slot(logos_abi::ServiceId::Commands, 5, logos_abi::IpcRights::Send);
 
 struct PendingOutput {
     bytes: [u8; logos_commands::MAX_OUTPUT_BYTES],

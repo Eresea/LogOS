@@ -219,6 +219,29 @@ impl ServiceId {
     }
 }
 
+/// Fixed capability-page slot for one edge of the service graph.
+pub const fn ipc_capability_slot(
+    service: ServiceId,
+    endpoint: usize,
+    rights: IpcRights,
+) -> Option<usize> {
+    match (service, endpoint, rights) {
+        (ServiceId::Input, 0, IpcRights::Send) => Some(0),
+        (ServiceId::Display, 1, IpcRights::Receive) => Some(0),
+        (ServiceId::Terminal, 0, IpcRights::Receive) => Some(0),
+        (ServiceId::Terminal, 1, IpcRights::Send) => Some(1),
+        (ServiceId::Terminal, 2, IpcRights::Send) => Some(2),
+        (ServiceId::Terminal, 3, IpcRights::Receive) => Some(3),
+        (ServiceId::Session, 2, IpcRights::Receive) => Some(0),
+        (ServiceId::Session, 3, IpcRights::Send) => Some(1),
+        (ServiceId::Session, 4, IpcRights::Send) => Some(2),
+        (ServiceId::Session, 5, IpcRights::Receive) => Some(3),
+        (ServiceId::Commands, 4, IpcRights::Receive) => Some(0),
+        (ServiceId::Commands, 5, IpcRights::Send) => Some(1),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum MessageKind {
@@ -442,6 +465,31 @@ pub struct IpcBytes {
     pub flags: u8,
     pub len: u16,
     pub bytes: [u8; MAX_IPC_BYTES],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IpcMessageType {
+    Input,
+    Render,
+    Bytes,
+}
+
+pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
+    match endpoint {
+        0 => Some(IpcMessageType::Input),
+        1 => Some(IpcMessageType::Render),
+        2..=5 => Some(IpcMessageType::Bytes),
+        _ => None,
+    }
+}
+
+pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
+    match ipc_message_type(endpoint) {
+        Some(IpcMessageType::Input) => Some(core::mem::size_of::<InputMessage>()),
+        Some(IpcMessageType::Render) => Some(core::mem::size_of::<RenderMessage>()),
+        Some(IpcMessageType::Bytes) => Some(core::mem::size_of::<IpcBytes>()),
+        None => None,
+    }
 }
 
 impl IpcBytes {
@@ -729,6 +777,19 @@ mod tests {
         assert!(
             IpcBytes::from_bytes(MessageKind::SessionOutput, &[0; MAX_IPC_BYTES + 1]).is_none()
         );
+    }
+
+    #[test]
+    fn ipc_metadata_matches_the_fixed_service_graph() {
+        assert_eq!(ipc_message_type(0), Some(IpcMessageType::Input));
+        assert_eq!(ipc_message_type(1), Some(IpcMessageType::Render));
+        assert_eq!(ipc_message_type(5), Some(IpcMessageType::Bytes));
+        assert_eq!(ipc_message_type(6), None);
+        assert_eq!(ipc_message_size(0), Some(core::mem::size_of::<InputMessage>()));
+        assert_eq!(ipc_message_size(1), Some(core::mem::size_of::<RenderMessage>()));
+        assert_eq!(ipc_message_size(5), Some(core::mem::size_of::<IpcBytes>()));
+        assert_eq!(ipc_capability_slot(ServiceId::Terminal, 2, IpcRights::Send), Some(2));
+        assert_eq!(ipc_capability_slot(ServiceId::Terminal, 2, IpcRights::Receive), None);
     }
 
     #[test]

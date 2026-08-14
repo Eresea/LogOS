@@ -620,7 +620,8 @@ impl ServiceRuntime {
                     continue;
                 };
                 let address = mapping.virtual_address();
-                let Some(mapping_bytes) = mapping.pages().checked_mul(crate::loader::PAGE_SIZE) else {
+                let Some(mapping_bytes) = mapping.pages().checked_mul(crate::loader::PAGE_SIZE)
+                else {
                     return false;
                 };
                 let Some(mapping_end) = address.checked_add(mapping_bytes) else {
