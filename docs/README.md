@@ -1,6 +1,7 @@
 # Active documentation
 
 - [Architecture](architecture.md): current Core ownership and fixed boundaries.
+- [Terminal commands](terminal-commands.md): commands available inside the LogOS terminal.
 - [Processes](processes/README.md): simple structural descriptions of important flows.
 - [Development](development.md): formatting, host checks, UEFI builds, and proof runner.
 - [ADR index](adr/README.md): irreversible Core decisions.

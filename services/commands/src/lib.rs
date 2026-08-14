@@ -58,9 +58,12 @@ impl CommandService {
             return output;
         }
         match line {
-            b"help" => output.extend(b"help echo clear\r\n"),
+            b"help" => output.extend(b"help echo clear true false version uname\r\n"),
             b"clear" => output.clear_screen = true,
             b"true" => {}
+            b"false" => output.status = 1,
+            b"version" => output.extend(b"LogOS vNext 0.1.0\r\n"),
+            b"uname" => output.extend(b"LogOS\r\n"),
             _ if line.starts_with(b"echo ") => {
                 output.extend(&line[5..]);
                 output.extend(b"\r\n");
@@ -87,8 +90,16 @@ mod tests {
     #[test]
     fn builtins_are_bounded_and_deterministic() {
         let mut commands = CommandService::new();
+        assert_eq!(
+            commands.execute(b"help").as_bytes(),
+            b"help echo clear true false version uname\r\n"
+        );
         assert_eq!(commands.execute(b"echo hi").as_bytes(), b"hi\r\n");
         assert!(commands.execute(b"clear").clear_screen);
+        assert_eq!(commands.execute(b"true").status, 0);
+        assert_eq!(commands.execute(b"false").status, 1);
+        assert_eq!(commands.execute(b"version").as_bytes(), b"LogOS vNext 0.1.0\r\n");
+        assert_eq!(commands.execute(b"uname").as_bytes(), b"LogOS\r\n");
         assert_eq!(commands.execute(b"missing").status, 127);
     }
 
