@@ -363,8 +363,11 @@ impl Scheduler {
                 continue;
             }
             let handle = TaskHandle { slot: index as u8, generation: generation(word) };
+            let was_blocked = state(word) == BLOCKED;
             if self.wake(handle) {
-                self.event_wakes.fetch_add(1, Ordering::Relaxed);
+                if was_blocked {
+                    self.event_wakes.fetch_add(1, Ordering::Relaxed);
+                }
                 woken += 1;
             }
         }
@@ -514,12 +517,6 @@ impl Scheduler {
         for offset in 0..MAX_TASKS {
             let index = (start + offset) % MAX_TASKS;
             let slot = &self.tasks[index];
-            // User address spaces currently have no cross-CPU TLB shootdown
-            // or per-CPU user-entry stack handoff. Keep ring-3 tasks on BSP
-            // until that migration boundary is implemented.
-            if cpu != 0 && slot.process.load(Ordering::Acquire) != 0 {
-                continue;
-            }
             let old = slot.state.load(Ordering::Acquire);
             if state(old) != RUNNABLE {
                 continue;
@@ -778,6 +775,7 @@ pub static SCHEDULER: Scheduler = Scheduler::new();
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::Barrier;
     use std::thread;
     use std::vec::Vec;
 
@@ -985,6 +983,28 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_cpu_claims_never_duplicate_a_task() {
+        let scheduler = Arc::new(Scheduler::new());
+        let handle = scheduler.spawn(empty).unwrap();
+        for cpu in 0..MAX_CPUS {
+            scheduler.online_cpu(cpu);
+        }
+        let barrier = Arc::new(Barrier::new(MAX_CPUS));
+        let mut workers = Vec::new();
+        for cpu in 0..MAX_CPUS {
+            let scheduler = Arc::clone(&scheduler);
+            let barrier = Arc::clone(&barrier);
+            workers.push(thread::spawn(move || {
+                barrier.wait();
+                scheduler.claim_next(cpu)
+            }));
+        }
+        let claims: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+        assert_eq!(claims.iter().flatten().count(), 1);
+        assert_eq!(claims.into_iter().flatten().next(), Some(handle));
+    }
+
+    #[test]
     fn stop_reclaims_runnable_task_without_running_old_context() {
         let scheduler = Scheduler::new();
         let handle = scheduler.spawn(empty).unwrap();
@@ -1028,6 +1048,36 @@ mod tests {
         assert!(scheduler.finish(handle, FinishState::Completed));
         assert!(scheduler.reclaim_completed(handle));
         assert_eq!(scheduler.address_space(handle), None);
+    }
+
+    #[test]
+    fn user_task_can_be_claimed_by_a_non_bsp_cpu() {
+        let scheduler = Scheduler::new();
+        let process = ProcessHandle::from_raw(0x100);
+        let root = crate::process::AddressSpaceRoot::new(0x80_000).unwrap();
+        let launch = UserLaunch::new(0x4000, 0x9000, root).unwrap();
+        let handle = scheduler.spawn_user(empty, process, launch).unwrap();
+        scheduler.online_cpu(1);
+
+        assert_eq!(scheduler.claim_next(1), Some(handle));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Running));
+    }
+
+    #[test]
+    fn user_task_migrates_after_context_publication() {
+        let scheduler = Scheduler::new();
+        let process = ProcessHandle::from_raw(0x100);
+        let root = crate::process::AddressSpaceRoot::new(0x80_000).unwrap();
+        let launch = UserLaunch::new(0x4000, 0x9000, root).unwrap();
+        let handle = scheduler.spawn_user(empty, process, launch).unwrap();
+        scheduler.online_cpu(0);
+        scheduler.online_cpu(1);
+
+        assert_eq!(scheduler.claim_next(0), Some(handle));
+        assert!(scheduler.save_context(handle, 0x5000));
+        assert!(scheduler.finish(handle, FinishState::Runnable));
+        assert_eq!(scheduler.claim_next(1), Some(handle));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Running));
     }
 
     #[test]
