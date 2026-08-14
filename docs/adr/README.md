@@ -43,3 +43,4 @@
 | [0039](0039-ring3-smp-migration.md) | Accepted | Ring-3 tasks migrate across online CPUs with CR3-first handoff and bounded reschedule IPIs |
 | [0040](0040-hostile-peer-ipc.md) | Accepted | Kernel-owned bounded queues enforce process-bound directional capabilities through private staging pages |
 | [0041](0041-storage-boundary.md) | Accepted | Core owns block mechanics while a bounded storage format owns journal, replay, recovery, and durability |
+| [0042](0042-virtio-block-transport.md) | Accepted | Fixed VirtIO block request chains translate 4096-byte LogOS blocks to 512-byte sectors before hardware integration |
