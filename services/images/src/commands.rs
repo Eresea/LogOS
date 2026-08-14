@@ -30,7 +30,12 @@ impl PendingOutput {
         self.pending = true;
     }
 
-    fn flush(&mut self, ring: &StreamIpc, identity: logos_abi::MessageIdentity) -> bool {
+    fn flush(
+        &mut self,
+        ring: &StreamIpc,
+        identity: logos_abi::MessageIdentity,
+        read_event: u64,
+    ) -> bool {
         let mut progressed = false;
         while self.offset < self.len {
             let end = (self.offset + logos_abi::MAX_IPC_BYTES).min(self.len);
@@ -42,17 +47,19 @@ impl PendingOutput {
             if end < self.len {
                 message.flags = IPC_FLAG_MORE;
             }
-            if ring.send(identity, message).is_err() {
-                break;
-            }
+            let Ok(notification) = ring.send(identity, message) else { break };
+            common::notify_edge(read_event, notification);
             self.offset = end;
             progressed = true;
         }
         if self.pending && self.offset == self.len {
             let message = IpcBytes::empty(MessageKind::SessionOutput);
-            if self.len == 0 && ring.send(identity, message).is_ok() {
-                self.pending = false;
-                progressed = true;
+            if self.len == 0 {
+                if let Ok(notification) = ring.send(identity, message) {
+                    common::notify_edge(read_event, notification);
+                    self.pending = false;
+                    progressed = true;
+                }
             }
         }
         if self.pending && self.offset == self.len && self.len != 0 {
@@ -78,14 +85,15 @@ pub extern "C" fn _start() -> ! {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Commands);
         let input_identity = input.endpoint().identity();
         let output_identity = output.endpoint().identity();
-        let mut progressed = pending.flush(output, output_identity);
+        let mut progressed = pending.flush(output, output_identity, common::ipc_read_event(5));
         if pending.pending {
             if !progressed {
-                core::hint::spin_loop();
+                common::wait(common::ipc_write_event(5), logos_abi::ServiceId::Commands);
             }
             continue;
         }
-        if let Ok(message) = input.receive(input_identity) {
+        if let Ok((message, notification)) = input.receive_with_notify(input_identity) {
+            common::notify_edge(common::ipc_write_event(4), notification);
             progressed = true;
             if message.kind == MessageKind::SessionInput {
                 if let Some(bytes) = message.as_bytes() {
@@ -99,7 +107,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if !progressed {
-            core::hint::spin_loop();
+            common::wait(common::ipc_read_event(4), logos_abi::ServiceId::Commands);
         }
     }
 }

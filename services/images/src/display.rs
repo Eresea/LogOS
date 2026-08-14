@@ -28,7 +28,8 @@ pub extern "C" fn _start() -> ! {
             display.replace_generation(identity.generation);
         }
         let mut progressed = false;
-        while let Ok(message) = ring.receive(identity) {
+        while let Ok((message, notification)) = ring.receive_with_notify(identity) {
+            common::notify_edge(common::ipc_write_event(1), notification);
             progressed = true;
             if display.apply(identity.generation, &message).is_ok() {
                 let format = match config.format {
@@ -45,7 +46,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if !progressed {
-            core::hint::spin_loop();
+            common::wait(common::ipc_read_event(1), logos_abi::ServiceId::Display);
         }
     }
 }
