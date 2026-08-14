@@ -93,22 +93,25 @@ impl ServiceIpcGraph {
             let frame = match pool.allocate() {
                 Ok(frame) => frame,
                 Err(FramePoolError::Exhausted) => {
-                    graph.reclaim(pool);
+                    if graph.reclaim(pool).is_err() {
+                        return Err(IpcError::Memory);
+                    }
                     return Err(IpcError::Exhausted);
                 }
                 Err(FramePoolError::InvalidMap) => {
-                    graph.reclaim(pool);
+                    if graph.reclaim(pool).is_err() {
+                        return Err(IpcError::Memory);
+                    }
                     return Err(IpcError::Memory);
                 }
             };
-            if memory.clear(frame).is_err() {
-                let _ = pool.release(frame);
-                graph.reclaim(pool);
-                return Err(IpcError::Memory);
-            }
             graph.endpoints[index] =
                 Some(IpcEndpoint { producer, consumer, generation, service_epoch, frame });
             graph.count += 1;
+            if memory.clear(frame).is_err() {
+                graph.reclaim(pool).map_err(|_| IpcError::Memory)?;
+                return Err(IpcError::Memory);
+            }
         }
         Ok(graph)
     }
@@ -121,12 +124,18 @@ impl ServiceIpcGraph {
     }
 
     /// Release every endpoint page owned by this graph.
-    pub fn reclaim(&mut self, pool: &mut FramePool) {
-        for endpoint in self.endpoints[..self.count].iter().flatten() {
-            let _ = pool.release(endpoint.frame);
+    pub fn reclaim(&mut self, pool: &mut FramePool) -> Result<(), IpcError> {
+        for index in 0..self.count {
+            let Some(endpoint) = self.endpoints[index] else { continue };
+            if pool.release(endpoint.frame).is_err() {
+                return Err(IpcError::Memory);
+            }
+            self.endpoints[index] = None;
         }
-        self.endpoints.fill(None);
-        self.count = 0;
+        if self.count == 0 || self.endpoints[..self.count].iter().all(Option::is_none) {
+            self.count = 0;
+        }
+        Ok(())
     }
 
     pub const fn count(&self) -> usize {

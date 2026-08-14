@@ -744,24 +744,31 @@ impl ServiceRuntime {
     }
 
     fn reclaim_resources(&mut self) -> Result<(), ServiceRuntimeError> {
-        if let Some(mut graph) = self.ipc.take() {
+        if let Some(graph) = self.ipc.as_mut() {
             graph.disconnect();
-            graph.reclaim(&mut self.frame_pool);
+            graph.reclaim(&mut self.frame_pool).map_err(ServiceRuntimeError::Ipc)?;
         }
-        if let Some(frame) = self.keyboard_frame.take() {
-            let _ = self.frame_pool.release(frame);
+        self.ipc = None;
+        if let Some(frame) = self.keyboard_frame {
+            self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.keyboard_frame = None;
         }
-        if let Some(frame) = self.framebuffer_config_frame.take() {
-            let _ = self.frame_pool.release(frame);
+        if let Some(frame) = self.framebuffer_config_frame {
+            self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.framebuffer_config_frame = None;
         }
-        for frame in self.ipc_staging_frames.iter_mut().flatten() {
-            let _ = self.frame_pool.release(*frame);
+        for index in 0..SERVICE_COUNT {
+            if let Some(frame) = self.ipc_staging_frames[index] {
+                self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+                self.ipc_staging_frames[index] = None;
+            }
         }
-        self.ipc_staging_frames.fill(None);
-        for frame in self.ipc_capability_frames.iter_mut().flatten() {
-            let _ = self.frame_pool.release(*frame);
+        for index in 0..SERVICE_COUNT {
+            if let Some(frame) = self.ipc_capability_frames[index] {
+                self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+                self.ipc_capability_frames[index] = None;
+            }
         }
-        self.ipc_capability_frames.fill(None);
         for index in 0..SERVICE_COUNT {
             if let Some((process, _)) = self.launches[index].take() {
                 if self.processes.state(process) == Some(crate::process::ProcessState::Running) {
