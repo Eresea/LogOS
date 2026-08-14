@@ -72,6 +72,7 @@ impl BlockRequestId {
 pub enum BlockStatus {
     Success,
     Io,
+    Unsupported,
     TimedOut,
     DeviceReset,
     Cancelled,
@@ -225,7 +226,7 @@ impl<const CAPACITY: usize> Default for BlockRequestTable<CAPACITY> {
     }
 }
 
-fn validate_request(request: BlockRequest) -> Result<(), BlockRequestError> {
+pub(crate) fn validate_request(request: BlockRequest) -> Result<(), BlockRequestError> {
     match request.operation {
         BlockOperation::Flush => {
             if request.blocks != 0 || request.buffer != BufferToken::NONE {

@@ -5,6 +5,7 @@ extern crate std;
 
 mod journal;
 mod request;
+mod virtio;
 
 pub use journal::{
     FORMAT_VERSION, FormatError, JOURNAL_COMMIT_KIND, JournalRecord, MAX_RECORD_PAYLOAD_BYTES,
@@ -13,6 +14,12 @@ pub use journal::{
 pub use request::{
     BlockCompletion, BlockOperation, BlockRequest, BlockRequestError, BlockRequestId,
     BlockRequestTable, BlockStatus, BufferToken, MAX_BLOCK_REQUESTS, MAX_BLOCKS_PER_REQUEST,
+};
+pub use virtio::{
+    MAX_VIRTIO_QUEUE_DEPTH, SECTORS_PER_LOGOS_BLOCK, VIRTIO_BLK_STATUS_IOERR, VIRTIO_BLK_STATUS_OK,
+    VIRTIO_BLK_STATUS_UNSUPP, VIRTIO_BLK_TYPE_FLUSH, VIRTIO_BLK_TYPE_IN, VIRTIO_BLK_TYPE_OUT,
+    VIRTIO_SECTOR_BYTES, VirtioBlkChain, VirtioBlkHeader, VirtioBlkQueue, VirtioDataDescriptor,
+    VirtioQueueError, encode_virtio_request,
 };
 
 /// The logical storage block size used by the first format boundary.
