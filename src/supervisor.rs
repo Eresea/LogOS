@@ -4,7 +4,7 @@ use crate::process::ProcessState;
 use logos_abi::ServiceId;
 
 pub const MAX_SERVICES: usize = 5;
-pub const HEARTBEAT_INTERVAL: u64 = 100;
+pub const HEARTBEAT_INTERVAL: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS;
 pub const MISSED_HEARTBEATS: u8 = 3;
 pub const MAX_RESTARTS: u8 = 3;
 

@@ -36,7 +36,12 @@ impl PendingOutput {
         self.offset = 0;
     }
 
-    fn flush(&mut self, ring: &StreamIpc, identity: logos_abi::MessageIdentity) -> bool {
+    fn flush(
+        &mut self,
+        ring: &StreamIpc,
+        identity: logos_abi::MessageIdentity,
+        read_event: u64,
+    ) -> bool {
         let mut progressed = false;
         while self.offset < self.len {
             let end = (self.offset + MAX_IPC_BYTES).min(self.len);
@@ -45,9 +50,8 @@ impl PendingOutput {
             else {
                 break;
             };
-            if ring.send(identity, message).is_err() {
-                break;
-            }
+            let Ok(notification) = ring.send(identity, message) else { break };
+            common::notify_edge(read_event, notification);
             self.offset = end;
             progressed = true;
         }
@@ -117,16 +121,17 @@ pub extern "C" fn _start() -> ! {
         let output_identity = output.endpoint().identity();
         let commands_identity = commands.endpoint().identity();
         let command_output_identity = command_output.endpoint().identity();
-        let mut progressed = pending.flush(output, output_identity);
+        let mut progressed = pending.flush(output, output_identity, common::ipc_read_event(3));
         if !pending.is_empty() {
             if !progressed {
-                core::hint::spin_loop();
+                common::wait(common::ipc_write_event(3), logos_abi::ServiceId::Session);
             }
             continue;
         }
         if !command.is_empty() {
             if let Some(message) = command.take() {
-                if commands.send(commands_identity, message).is_ok() {
+                if let Ok(notification) = commands.send(commands_identity, message) {
+                    common::notify_edge(common::ipc_read_event(4), notification);
                     waiting_for_command = true;
                     progressed = true;
                 } else {
@@ -134,12 +139,15 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             if !progressed {
-                core::hint::spin_loop();
+                common::wait(common::ipc_write_event(4), logos_abi::ServiceId::Session);
             }
             continue;
         }
         if waiting_for_command {
-            if let Ok(message) = command_output.receive(command_output_identity) {
+            if let Ok((message, notification)) =
+                command_output.receive_with_notify(command_output_identity)
+            {
+                common::notify_edge(common::ipc_write_event(5), notification);
                 if let Some(bytes) = message.as_bytes() {
                     let count = bytes.len().min(command_response.len() - command_response_len);
                     command_response[command_response_len..command_response_len + count]
@@ -157,11 +165,12 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             if !progressed {
-                core::hint::spin_loop();
+                common::wait(common::ipc_read_event(5), logos_abi::ServiceId::Session);
             }
             continue;
         }
-        while let Ok(message) = input.receive(input_identity) {
+        while let Ok((message, notification)) = input.receive_with_notify(input_identity) {
+            common::notify_edge(common::ipc_write_event(2), notification);
             progressed = true;
             if message.kind != MessageKind::SessionInput {
                 continue;
@@ -181,7 +190,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if !progressed {
-            core::hint::spin_loop();
+            common::wait(common::ipc_read_event(2), logos_abi::ServiceId::Session);
         }
     }
 }

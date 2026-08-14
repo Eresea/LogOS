@@ -14,9 +14,9 @@ use uefi::{
 };
 
 use crate::{
+    MAX_CPUS, SCHEDULER,
     boot_resources::{BootResources, FramebufferInfo, MemoryDescriptor, MemoryMap, PixelFormat},
     service_loader::ServiceImageBundle,
-    MAX_CPUS, SCHEDULER,
 };
 
 const DEBUG_PORT: u16 = 0xe9;
@@ -722,6 +722,7 @@ pub(crate) fn restart_critical_section<R>(operation: impl FnOnce() -> R) -> R {
 
 pub(crate) fn start_services() {
     unsafe {
+        reset_events();
         let runtime = &mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME);
         runtime.start_tasks().unwrap_or_else(|error| match error {
             crate::service_runtime::ServiceRuntimeError::TaskCapacity => {
@@ -1101,7 +1102,19 @@ pub(super) fn handle_keyboard_interrupt() {
         if ring != 0 {
             // The frame is identity-mapped in the kernel root and is mapped into
             // Input separately by the service runtime.
-            let _ = unsafe { (&*(ring as *const logos_abi::KeyboardByteRing)).push(byte) };
+            if let Ok(notification) =
+                unsafe { (&*(ring as *const logos_abi::KeyboardByteRing)).push(byte) }
+            {
+                if notification == logos_abi::Notify::Notified {
+                    let woken = SCHEDULER.signal_events(logos_abi::keyboard_read_event_mask());
+                    #[cfg(feature = "qemu-proof")]
+                    if woken > 0 {
+                        proof_line(b"LogOS vNext: keyboard event wake");
+                    }
+                    #[cfg(not(feature = "qemu-proof"))]
+                    let _ = woken;
+                }
+            }
         }
     }
     KEYBOARD_IRQ_IN_FLIGHT.fetch_sub(1, Ordering::Release);
@@ -1216,6 +1229,22 @@ pub fn block_current() {
 
 pub fn sleep_current_for(ticks: u64) {
     context::sleep_current_for(ticks);
+}
+
+pub(crate) fn prepare_user_wait(
+    handle: crate::TaskHandle,
+    mask: u64,
+    timeout: u64,
+) -> Option<bool> {
+    context::prepare_wait(handle, mask, timeout)
+}
+
+pub(crate) fn signal_events(mask: u64) -> usize {
+    SCHEDULER.signal_events(mask)
+}
+
+pub(crate) fn reset_events() {
+    SCHEDULER.reset_events();
 }
 
 #[cfg_attr(not(feature = "qemu-proof"), allow(dead_code))]

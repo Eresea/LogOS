@@ -5,14 +5,15 @@ Status: active preemptive SMP Core milestone.
 ## Verified in this tree
 
 - `cargo test --lib`: scheduler transitions, publication-before-claim ordering, wake-pending,
-  stale generations, bounded capacity, completion/reuse, concurrent claims, and the host-only
-  service restart contract pass.
+  event wait/signal races, timeout cleanup, stale generations, bounded capacity, completion/reuse,
+  concurrent claims, ABI edge notifications, and the host-only service restart contract pass.
 - `cargo fmt --check` and host clippy with warnings denied pass.
 - UEFI debug build and `qemu-proof` build pass for `x86_64-unknown-uefi`.
 - QEMU proof reaches `LogOS vNext: QEMU proof PASS` with `-smp 1`, `-smp 2`, and `-smp 8`.
   The proof exercises the root-task handoff, repeated cancellable timer waits, two non-yielding
   CPU-bound tasks, GPR/flags/XMM preservation, per-CPU timer ticks, repeated preemption, a bounded
-  Runtime timeout/completion/cancel lifecycle with generation-safe slot reuse, a real completed
+  Runtime timeout/completion/cancel lifecycle with generation-safe slot reuse, event-driven service
+  waits and IPC backpressure notifications, keyboard wakeup, a real completed
   task reclaimed and replaced in the same scheduler slot with stale-handle rejection, the typed
   in-process Runtime command/response lifecycle and mailbox backpressure, and the typed
   in-process Health Ping command/response and restart/retry path, the loaded ring-3 service graph,

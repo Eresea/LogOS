@@ -22,12 +22,13 @@ pub extern "C" fn _start() -> ! {
         if let Some(message) = pending[0] {
             let identity = output.endpoint().identity();
             match output.send(identity, message) {
-                Ok(_) => {
+                Ok(notification) => {
+                    common::notify_edge(common::ipc_read_event(0), notification);
                     pending[0] = pending[1];
                     pending[1] = None;
                 }
                 Err(SharedSendError::Full) => {
-                    core::hint::spin_loop();
+                    common::wait(common::ipc_write_event(0), logos_abi::ServiceId::Input);
                     continue;
                 }
                 Err(SharedSendError::Stale | SharedSendError::Disconnected) => {
@@ -38,7 +39,7 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
         let Some(byte) = keyboard.pop() else {
-            core::hint::spin_loop();
+            common::wait(common::keyboard_read_event(), logos_abi::ServiceId::Input);
             continue;
         };
         let Some(event) = decoder.feed(byte) else {

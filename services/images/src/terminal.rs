@@ -31,53 +31,66 @@ pub extern "C" fn _start() -> ! {
         let display_identity = display.endpoint().identity();
         let session_input_identity = session_input.endpoint().identity();
         let session_output_identity = session_output.endpoint().identity();
-        let mut progressed = false;
+        let mut wait_mask = 0;
         if let Some(message) = *pending_session_input {
             match session_input.send(session_input_identity, message) {
-                Ok(_) => *pending_session_input = None,
-                Err(SharedSendError::Full) => {}
+                Ok(notification) => {
+                    common::notify_edge(common::ipc_read_event(2), notification);
+                    *pending_session_input = None;
+                }
+                Err(SharedSendError::Full) => wait_mask |= common::ipc_write_event(2),
                 Err(SharedSendError::Stale | SharedSendError::Disconnected) => {
                     *pending_session_input = None
                 }
             }
-            progressed = true;
         }
         if pending_session_input.is_none() {
-            while let Ok(event) = input.receive(input_identity) {
-                progressed = true;
+            while let Ok((event, notification)) = input.receive_with_notify(input_identity) {
+                common::notify_edge(common::ipc_write_event(0), notification);
                 if let Some(message) = terminal.input(&event) {
                     match session_input.send(session_input_identity, message) {
-                        Ok(_) => {}
+                        Ok(notification) => {
+                            common::notify_edge(common::ipc_read_event(2), notification);
+                        }
                         Err(SharedSendError::Full) => {
                             *pending_session_input = Some(message);
+                            wait_mask |= common::ipc_write_event(2);
                             break;
                         }
                         Err(SharedSendError::Stale | SharedSendError::Disconnected) => {}
                     }
                 }
             }
+            if pending_session_input.is_none() {
+                wait_mask |= common::ipc_read_event(0);
+            }
         }
-        while let Ok(message) = session_output.receive(session_output_identity) {
-            progressed = true;
+        while let Ok((message, notification)) =
+            session_output.receive_with_notify(session_output_identity)
+        {
+            common::notify_edge(common::ipc_write_event(3), notification);
             if let Some(bytes) = message.as_bytes() {
                 terminal.session_output_bytes(bytes);
             }
         }
+        wait_mask |= common::ipc_read_event(3);
         if pending_render.is_none() {
             *pending_render = terminal.next_render();
         }
         if let Some(render) = *pending_render {
             match display.send(display_identity, render) {
-                Ok(_) => *pending_render = None,
-                Err(SharedSendError::Full) => {}
+                Ok(notification) => {
+                    common::notify_edge(common::ipc_read_event(1), notification);
+                    *pending_render = None;
+                }
+                Err(SharedSendError::Full) => wait_mask |= common::ipc_write_event(1),
                 Err(SharedSendError::Stale | SharedSendError::Disconnected) => {
                     *pending_render = None
                 }
             }
-            progressed = true;
         }
-        if !progressed {
-            core::hint::spin_loop();
+        if wait_mask != 0 {
+            common::wait(wait_mask, logos_abi::ServiceId::Terminal);
         }
     }
 }

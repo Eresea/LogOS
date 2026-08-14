@@ -438,6 +438,7 @@ impl ServiceRuntime {
         let result = crate::arch::restart_critical_section(|| {
             crate::arch_proof_line(b"LogOS vNext: service tasks quiesced");
             crate::arch::disable_keyboard_irq();
+            crate::arch::reset_events();
             self.reclaim_resources()?;
             crate::arch_proof_line(b"LogOS vNext: service resources reclaimed");
             self.start(bundle)?;

@@ -39,3 +39,4 @@
 | [0035](0035-live-supervisor-restart.md) | Accepted | Supervisor-owned graph restart quiesces tasks, reclaims address spaces safely, and rejects stale IPC generations |
 | [0036](0036-deferred-capability-metadata.md) | Accepted | Remove unenforced capability metadata and keep authorization deferred until a real enforcement boundary exists |
 | [0037](0037-bounded-memory-subsystem.md) | Accepted | Layered bounded physical, virtual, async, SMP, heap, pressure, and observability contracts behind stable frame interfaces |
+| [0038](0038-event-driven-blocking-ipc.md) | Accepted | Fixed Wait/Notify event masks block empty receivers and full senders without replacing shared-page IPC |

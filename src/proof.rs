@@ -28,6 +28,13 @@ static PASSED: AtomicBool = AtomicBool::new(false);
 static REPORTED: AtomicBool = AtomicBool::new(false);
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
 static LIVE_SERVICE_RESTARTED: AtomicBool = AtomicBool::new(false);
+static BACKPRESSURE_HANDLE: AtomicU64 = AtomicU64::new(0);
+static BACKPRESSURE_FULL: AtomicBool = AtomicBool::new(false);
+static BACKPRESSURE_BLOCKED: AtomicBool = AtomicBool::new(false);
+static BACKPRESSURE_WAKE: AtomicBool = AtomicBool::new(false);
+static BACKPRESSURE_RESUMED: AtomicBool = AtomicBool::new(false);
+static PROBE_RING: logos_abi::RenderIpc =
+    logos_abi::RenderIpc::new(logos_abi::EndpointHeader::new(1, 1));
 
 unsafe extern "C" {
     fn proof_task_a();
@@ -43,6 +50,8 @@ pub fn initialize(cpu_count: usize) {
     SCHEDULER.spawn(a).expect("proof task capacity");
     SCHEDULER.spawn(b).expect("proof task capacity");
     SCHEDULER.spawn(wake_task).expect("proof task capacity");
+    let backpressure = SCHEDULER.spawn(backpressure_sender_task).expect("proof task capacity");
+    BACKPRESSURE_HANDLE.store(backpressure.raw(), Ordering::Release);
     let completion = SCHEDULER.spawn(completion_task).expect("proof task capacity");
     COMPLETION_HANDLE.store(completion.raw(), Ordering::Release);
     SCHEDULER.spawn(reclaimer_task).expect("proof task capacity");
@@ -59,6 +68,12 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
         (core::ptr::addr_of!(BLOCK_RESUMED) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(WAKE_DONE) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(HANDOFF_STARTED) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(BACKPRESSURE_HANDLE) as usize, core::mem::size_of::<AtomicU64>()),
+        (core::ptr::addr_of!(BACKPRESSURE_FULL) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(BACKPRESSURE_BLOCKED) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(BACKPRESSURE_WAKE) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(BACKPRESSURE_RESUMED) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(PROBE_RING) as usize, core::mem::size_of::<logos_abi::RenderIpc>()),
     ] {
         crate::arch::reserve_storage_frames(pool, address, bytes);
     }
@@ -117,6 +132,8 @@ pub fn observe(cpu: usize) {
     let switches = (0..cpu_count).map(|index| SCHEDULER.switches(index).unwrap_or(0)).sum::<u64>();
     let wake_cpus_differ =
         cpu_count == 1 || BLOCK_CPU.load(Ordering::Acquire) != WAKE_CPU.load(Ordering::Acquire);
+    let write_event_mask =
+        ((1u64 << logos_abi::IPC_ENDPOINT_COUNT) - 1) << logos_abi::IPC_WRITE_EVENT_BASE;
     let conditions_met = timers
         && progress
         && switches > 20
@@ -135,6 +152,13 @@ pub fn observe(cpu: usize) {
         && HEALTH_RETRY_COMPLETED.load(Ordering::Acquire)
         && LIVE_SERVICE_RESTARTED.load(Ordering::Acquire)
         && crate::user_mode::syscalls() > 0
+        && crate::user_mode::blocked_waits() > 0
+        && SCHEDULER.event_wakes() > 0
+        && (SCHEDULER.event_signal_mask() & write_event_mask != 0)
+        && BACKPRESSURE_FULL.load(Ordering::Acquire)
+        && BACKPRESSURE_BLOCKED.load(Ordering::Acquire)
+        && BACKPRESSURE_WAKE.load(Ordering::Acquire)
+        && BACKPRESSURE_RESUMED.load(Ordering::Acquire)
         && crate::user_mode::fault_observed()
         && BLOCK_RESUMED.load(Ordering::Acquire)
         && WAKE_DONE.load(Ordering::Acquire)
@@ -180,10 +204,61 @@ fn wake_task() {
     }
 }
 
+fn backpressure_sender_task() {
+    let identity = logos_abi::MessageIdentity::new(1, 1);
+    let message = logos_abi::RenderMessage::empty(logos_abi::MessageKind::RenderCells);
+    let _ = PROBE_RING.send(identity, message);
+    if !matches!(PROBE_RING.send(identity, message), Err(logos_abi::SharedSendError::Full)) {
+        crate::arch_fatal(b"LogOS vNext: backpressure probe did not fill");
+    }
+    BACKPRESSURE_FULL.store(true, Ordering::Release);
+    let handle = TaskHandle::from_raw(BACKPRESSURE_HANDLE.load(Ordering::Acquire));
+    let event = logos_abi::ipc_write_event_mask(0);
+    loop {
+        match PROBE_RING.send(identity, message) {
+            Ok(_) => {
+                BACKPRESSURE_RESUMED.store(true, Ordering::Release);
+                break;
+            }
+            Err(logos_abi::SharedSendError::Full) => {
+                if SCHEDULER.wait_for_events(handle, event, u64::MAX) == Some(true) {
+                    BACKPRESSURE_BLOCKED.store(true, Ordering::Release);
+                    crate::block_current();
+                }
+            }
+            Err(_) => crate::arch_fatal(b"LogOS vNext: backpressure probe IPC"),
+        }
+    }
+    loop {
+        crate::yield_current();
+    }
+}
+
+fn try_backpressure_wake() {
+    let identity = logos_abi::MessageIdentity::new(1, 1);
+    let event = logos_abi::ipc_write_event_mask(0);
+    let raw = BACKPRESSURE_HANDLE.load(Ordering::Acquire);
+    if raw == 0
+        || !BACKPRESSURE_BLOCKED.load(Ordering::Acquire)
+        || SCHEDULER.state(TaskHandle::from_raw(raw)) != Some(TaskState::Blocked)
+    {
+        return;
+    }
+    let Ok((_, notification)) = PROBE_RING.receive_with_notify(identity) else {
+        return;
+    };
+    if notification != logos_abi::Notify::Notified {
+        crate::arch_fatal(b"LogOS vNext: backpressure probe edge");
+    }
+    SCHEDULER.signal_events(event);
+    BACKPRESSURE_WAKE.store(true, Ordering::Release);
+}
+
 fn completion_task() {}
 
 fn reclaimer_task() {
     loop {
+        try_backpressure_wake();
         let raw = COMPLETION_HANDLE.load(Ordering::Acquire);
         if raw != 0 {
             let completed = TaskHandle::from_raw(raw);
@@ -200,9 +275,6 @@ fn reclaimer_task() {
                         && replacement.generation() != completed.generation(),
                     Ordering::Release,
                 );
-                loop {
-                    crate::yield_current();
-                }
             }
         }
         crate::yield_current();
