@@ -30,7 +30,7 @@ if ($Proof) { $buildArgs += @('--features', 'qemu-proof') }
 if ($Release) { $buildArgs += '--release' }
 cargo @buildArgs
 
-& (Join-Path $PSScriptRoot 'build-services.ps1') -Release
+& (Join-Path $PSScriptRoot 'build-services.ps1') -Release -Proof:$Proof
 
 New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\BOOT') | Out-Null
 Copy-Item $efi (Join-Path $esp 'EFI\BOOT\BOOTX64.EFI') -Force

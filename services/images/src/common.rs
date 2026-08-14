@@ -140,6 +140,7 @@ fn endpoint_message_size(endpoint: Option<usize>) -> Option<usize> {
 }
 
 #[inline(always)]
+#[cfg(feature = "qemu-proof")]
 #[allow(dead_code)]
 pub fn ipc_probe(number: usize, capability_slot: usize, length: usize) -> IpcStatus {
     ipc_syscall(number, capability_slot, length)
