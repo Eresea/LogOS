@@ -38,6 +38,8 @@ pub enum ServiceRuntimeError {
     Ipc(IpcError),
     IpcMapping(PageTableError),
     IpcProcess(ProcessError),
+    IpcPrivateMapping(PageTableError),
+    IpcPrivateProcess(ProcessError),
     Framebuffer(PageTableError),
     FramebufferProcess(ProcessError),
     FramebufferConfig(PageTableError),
@@ -61,6 +63,8 @@ pub struct ServiceRuntime {
     launches: [Option<(ProcessHandle, UserLaunch)>; SERVICE_COUNT],
     startup: ServiceStartup,
     ipc: Option<ServiceIpcGraph>,
+    ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
+    ipc_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
     framebuffer_config_frame: Option<FrameAddress>,
     keyboard_frame: Option<FrameAddress>,
     tasks: [Option<crate::TaskHandle>; SERVICE_COUNT],
@@ -89,6 +93,8 @@ impl ServiceRuntime {
             launches: [None; SERVICE_COUNT],
             startup: ServiceStartup::new(),
             ipc: None,
+            ipc_staging_frames: [None; SERVICE_COUNT],
+            ipc_capability_frames: [None; SERVICE_COUNT],
             framebuffer_config_frame: None,
             keyboard_frame: None,
             tasks: [None; SERVICE_COUNT],
@@ -214,6 +220,38 @@ impl ServiceRuntime {
                 .ok_or(ServiceRuntimeError::IpcProcess(ProcessError::AddressSpace))?;
                 self.processes.map(process, mapping).map_err(ServiceRuntimeError::IpcProcess)?;
             }
+        }
+        for spec in SERVICE_IMAGES {
+            let service = spec.service();
+            let index = service.index();
+            let Some((process, _)) = self.launch(service) else {
+                return Err(ServiceRuntimeError::IpcPrivateProcess(ProcessError::InvalidHandle));
+            };
+            let staging = self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+            memory.clear(staging).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+            self.map_ipc_private_page(
+                process,
+                staging,
+                logos_abi::IPC_STAGING_BASE,
+                MappingFlags::DATA,
+            )?;
+            self.ipc_staging_frames[index] = Some(staging);
+
+            let capabilities = graph.capabilities(service);
+            let capability_frame =
+                self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+            memory.clear(capability_frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+            unsafe {
+                (capability_frame.raw() as usize as *mut logos_abi::IpcCapabilityPage)
+                    .write(capabilities);
+            }
+            self.map_ipc_private_page(
+                process,
+                capability_frame,
+                logos_abi::IPC_CAPABILITY_BASE,
+                MappingFlags::READ_ONLY_DATA,
+            )?;
+            self.ipc_capability_frames[index] = Some(capability_frame);
         }
         self.ipc = Some(graph);
         let framebuffer = resources.framebuffer().ok_or(ServiceRuntimeError::Resources)?;
@@ -341,6 +379,28 @@ impl ServiceRuntime {
         )
         .ok_or(ServiceRuntimeError::KeyboardProcess(ProcessError::AddressSpace))?;
         self.processes.map(process, mapping).map_err(ServiceRuntimeError::KeyboardProcess)
+    }
+
+    fn map_ipc_private_page(
+        &mut self,
+        process: ProcessHandle,
+        frame: FrameAddress,
+        virtual_address: usize,
+        flags: MappingFlags,
+    ) -> Result<(), ServiceRuntimeError> {
+        let index = SERVICE_IMAGES
+            .iter()
+            .position(|spec| {
+                self.launch(spec.service()).is_some_and(|(handle, _)| handle == process)
+            })
+            .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::InvalidHandle))?;
+        let mut memory = IdentityPageTableMemory;
+        unsafe { self.tables[index].assume_init_mut() }
+            .map_raw_page(virtual_address, frame, flags, &mut self.frame_pool, &mut memory)
+            .map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+        let mapping = VirtualMapping::new(virtual_address, frame.raw() as usize, 1, flags)
+            .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::AddressSpace))?;
+        self.processes.map(process, mapping).map_err(ServiceRuntimeError::IpcPrivateProcess)
     }
 
     fn map_framebuffer_config(&mut self, frame: FrameAddress) -> Result<(), ServiceRuntimeError> {
@@ -525,6 +585,14 @@ impl ServiceRuntime {
         if let Some(frame) = self.framebuffer_config_frame.take() {
             let _ = self.frame_pool.release(frame);
         }
+        for frame in self.ipc_staging_frames.iter_mut().flatten() {
+            let _ = self.frame_pool.release(*frame);
+        }
+        self.ipc_staging_frames.fill(None);
+        for frame in self.ipc_capability_frames.iter_mut().flatten() {
+            let _ = self.frame_pool.release(*frame);
+        }
+        self.ipc_capability_frames.fill(None);
         for index in 0..SERVICE_COUNT {
             if let Some((process, _)) = self.launches[index].take() {
                 if self.processes.state(process) == Some(crate::process::ProcessState::Running) {

@@ -1,6 +1,6 @@
 //! Fixed shared endpoint-page allocation for the terminal graph.
 
-use logos_abi::{EndpointHeader, SERVICE_IPC_BASE, ServiceId};
+use logos_abi::{EndpointHeader, IpcCapabilityPage, IpcRights, SERVICE_IPC_BASE, ServiceId};
 
 use crate::{
     frame_pool::{FrameAddress, FramePool, FramePoolError},
@@ -116,6 +116,34 @@ impl ServiceIpcGraph {
     pub const fn endpoint(&self, index: usize) -> Option<IpcEndpoint> {
         if index < self.count { self.endpoints[index] } else { None }
     }
+
+    pub fn capabilities(&self, service: ServiceId) -> IpcCapabilityPage {
+        let mut page = IpcCapabilityPage::empty();
+        let mut slot = 0;
+        for index in 0..self.count {
+            let Some(endpoint) = self.endpoints[index] else { continue };
+            let rights = if endpoint.producer() == service {
+                Some(IpcRights::Send)
+            } else if endpoint.consumer() == service {
+                Some(IpcRights::Receive)
+            } else {
+                None
+            };
+            let Some(rights) = rights else { continue };
+            if slot == page.capabilities.len() {
+                break;
+            }
+            page.capabilities[slot] = logos_abi::IpcCapability::new(
+                index,
+                rights,
+                endpoint.generation(),
+                endpoint.header().service_epoch,
+            )
+            .expect("fixed IPC endpoint capability");
+            slot += 1;
+        }
+        page
+    }
 }
 
 fn disconnect_ipc_page(endpoint: IpcEndpoint, index: usize) {
@@ -173,5 +201,10 @@ mod tests {
         assert_eq!(graph.endpoint(5).unwrap().consumer(), ServiceId::Session);
         assert_eq!(graph.endpoint(5).unwrap().virtual_address(), IPC_BASE + 5 * PAGE_SIZE);
         assert_eq!(graph.endpoint(5).unwrap().generation(), 1);
+        let terminal = graph.capabilities(ServiceId::Terminal);
+        assert_eq!(terminal.get(0).unwrap().rights, IpcRights::Receive);
+        assert_eq!(terminal.get(1).unwrap().rights, IpcRights::Send);
+        assert_eq!(terminal.get(3).unwrap().rights, IpcRights::Receive);
+        assert_eq!(terminal.get(4), None);
     }
 }
