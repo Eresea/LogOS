@@ -169,6 +169,30 @@ static mut CPU_TSS: [TaskStateSegment; MAX_CPUS] = [const { TaskStateSegment::ne
 #[repr(C, align(16))]
 struct CpuStack<const N: usize>([u8; N]);
 
+const SCHEDULER_STACK_GUARD: u8 = 0xa5;
+
+impl<const N: usize> CpuStack<N> {
+    const fn new() -> Self {
+        Self([0; N])
+    }
+
+    const fn with_scheduler_guard() -> Self {
+        let mut bytes = [0; N];
+        let mut index = 0;
+        while index < crate::scheduler::SCHEDULER_STACK_GUARD_BYTES {
+            bytes[index] = SCHEDULER_STACK_GUARD;
+            index += 1;
+        }
+        Self(bytes)
+    }
+
+    fn scheduler_guard_intact(&self) -> bool {
+        self.0[..crate::scheduler::SCHEDULER_STACK_GUARD_BYTES]
+            .iter()
+            .all(|byte| *byte == SCHEDULER_STACK_GUARD)
+    }
+}
+
 #[repr(C)]
 struct CpuLocal {
     // Keep the GS self-pointer at offset zero; assembly also uses the
@@ -207,9 +231,9 @@ impl CpuLocal {
             tick_count: AtomicU64::new(0),
             switch_count: AtomicU64::new(0),
             user_entry_stack_top: 0,
-            scheduler_stack: CpuStack([0; crate::SCHEDULER_STACK_SIZE]),
-            idle_stack: CpuStack([0; crate::IDLE_STACK_SIZE]),
-            user_entry_stack: CpuStack([0; USER_ENTRY_STACK_SIZE]),
+            scheduler_stack: CpuStack::with_scheduler_guard(),
+            idle_stack: CpuStack::new(),
+            user_entry_stack: CpuStack::new(),
         }
     }
 
@@ -219,6 +243,10 @@ impl CpuLocal {
         self.scheduler_stack_top = self.scheduler_stack.0.as_ptr_range().end as u64;
         self.idle_stack_top = self.idle_stack.0.as_ptr_range().end as u64;
         self.user_entry_stack_top = self.user_entry_stack.0.as_ptr_range().end as u64;
+    }
+
+    fn scheduler_stack_guard_intact(&self) -> bool {
+        self.scheduler_stack.scheduler_guard_intact()
     }
 }
 

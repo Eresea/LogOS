@@ -12,7 +12,10 @@ pub const TASK_STACK_SIZE: usize = 256 * 1024;
 #[cfg(not(target_os = "uefi"))]
 pub const TASK_STACK_SIZE: usize = 16 * 1024;
 pub const SCHEDULER_STACK_SIZE: usize = 64 * 1024;
+pub const SCHEDULER_STACK_GUARD_BYTES: usize = 256;
 pub const IDLE_STACK_SIZE: usize = 4 * 1024;
+
+const _: () = assert!(SCHEDULER_STACK_SIZE > SCHEDULER_STACK_GUARD_BYTES);
 
 const VACANT: u64 = 0;
 const INITIALIZING: u64 = 1;

@@ -10,6 +10,13 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
     if HALTED.load(Ordering::Acquire) {
         fatal(b"LogOS vNext: halted");
     }
+    let scheduler_stack_guard_intact = unsafe {
+        (&*core::ptr::addr_of!(CPU_LOCALS).cast::<CpuLocal>().add(cpu))
+            .scheduler_stack_guard_intact()
+    };
+    if !scheduler_stack_guard_intact {
+        fatal(b"LogOS vNext: scheduler stack overflow");
+    }
     #[cfg(feature = "qemu-proof")]
     if vector == usize::from(RESCHEDULE_VECTOR) {
         crate::proof::reschedule_ipi_received(cpu);
