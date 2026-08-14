@@ -90,10 +90,17 @@ impl ServiceIpcGraph {
         }
         let mut graph = Self { endpoints: [None; MAX_ENDPOINTS], count: 0 };
         for (index, (producer, consumer)) in ENDPOINTS.into_iter().enumerate() {
-            let frame = pool.allocate().map_err(|error| match error {
-                FramePoolError::Exhausted => IpcError::Exhausted,
-                FramePoolError::InvalidMap => IpcError::Memory,
-            })?;
+            let frame = match pool.allocate() {
+                Ok(frame) => frame,
+                Err(FramePoolError::Exhausted) => {
+                    graph.reclaim(pool);
+                    return Err(IpcError::Exhausted);
+                }
+                Err(FramePoolError::InvalidMap) => {
+                    graph.reclaim(pool);
+                    return Err(IpcError::Memory);
+                }
+            };
             if memory.clear(frame).is_err() {
                 let _ = pool.release(frame);
                 graph.reclaim(pool);
@@ -106,10 +113,16 @@ impl ServiceIpcGraph {
         Ok(graph)
     }
 
-    /// Disconnect and release every endpoint page owned by this graph.
-    pub fn reclaim(&mut self, pool: &mut FramePool) {
+    /// Disconnect every initialized endpoint queue.
+    pub fn disconnect(&self) {
         for (index, endpoint) in self.endpoints[..self.count].iter().flatten().enumerate() {
             disconnect_ipc_page(*endpoint, index);
+        }
+    }
+
+    /// Release every endpoint page owned by this graph.
+    pub fn reclaim(&mut self, pool: &mut FramePool) {
+        for endpoint in self.endpoints[..self.count].iter().flatten() {
             let _ = pool.release(endpoint.frame);
         }
         self.endpoints.fill(None);
@@ -425,5 +438,21 @@ mod tests {
             ServiceIpcGraph::allocate_with_identity(&mut pool, &mut memory, 1, 0),
             Err(IpcError::InvalidIdentity)
         ));
+    }
+
+    #[test]
+    fn graph_reclaims_partial_allocation_on_exhaustion() {
+        let mut map = crate::boot_resources::MemoryMap::new();
+        map.push(MemoryDescriptor::new(0x1000, 5, true).unwrap()).unwrap();
+        let mut pool = FramePool::empty();
+        pool.initialize(&map).unwrap();
+        let mut memory = Memory;
+        let available = pool.available();
+
+        assert!(matches!(
+            ServiceIpcGraph::allocate_with_identity(&mut pool, &mut memory, 1, 1),
+            Err(IpcError::Exhausted)
+        ));
+        assert_eq!(pool.available(), available);
     }
 }

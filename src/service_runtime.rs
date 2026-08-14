@@ -745,6 +745,7 @@ impl ServiceRuntime {
 
     fn reclaim_resources(&mut self) -> Result<(), ServiceRuntimeError> {
         if let Some(mut graph) = self.ipc.take() {
+            graph.disconnect();
             graph.reclaim(&mut self.frame_pool);
         }
         if let Some(frame) = self.keyboard_frame.take() {
