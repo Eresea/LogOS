@@ -863,6 +863,11 @@ pub(crate) fn ipc_receive(
 }
 
 #[cfg(feature = "qemu-proof")]
+pub(crate) fn hostile_ipc_layout_valid() -> bool {
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).hostile_ipc_layout_valid() }
+}
+
+#[cfg(feature = "qemu-proof")]
 pub(crate) fn suppress_service_heartbeat(service: logos_abi::ServiceId) {
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).suppress_heartbeat(service) }
 }

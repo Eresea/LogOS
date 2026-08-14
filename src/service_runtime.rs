@@ -587,6 +587,38 @@ impl ServiceRuntime {
         })
     }
 
+    #[cfg(feature = "qemu-proof")]
+    pub(crate) fn hostile_ipc_layout_valid(&self) -> bool {
+        let legacy_end = logos_abi::SERVICE_IPC_BASE
+            + logos_abi::IPC_ENDPOINT_COUNT * crate::loader::PAGE_SIZE;
+        for spec in SERVICE_IMAGES {
+            let Some((process, _)) = self.launch(spec.service()) else {
+                return false;
+            };
+            let mut staging = false;
+            let mut capabilities = false;
+            for mapping_index in 0..crate::process::MAX_MAPPINGS_PER_ADDRESS_SPACE {
+                let Some(mapping) = self.processes.mapping(process, mapping_index) else {
+                    continue;
+                };
+                let address = mapping.virtual_address();
+                if (logos_abi::SERVICE_IPC_BASE..legacy_end).contains(&address) {
+                    return false;
+                }
+                if address == logos_abi::IPC_STAGING_BASE {
+                    staging = mapping.flags() == MappingFlags::DATA;
+                }
+                if address == logos_abi::IPC_CAPABILITY_BASE {
+                    capabilities = mapping.flags() == MappingFlags::READ_ONLY_DATA;
+                }
+            }
+            if !staging || !capabilities {
+                return false;
+            }
+        }
+        true
+    }
+
     pub(crate) fn fault_process(
         &mut self,
         process: ProcessHandle,

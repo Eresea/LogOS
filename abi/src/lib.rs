@@ -798,6 +798,16 @@ mod tests {
     }
 
     #[test]
+    fn shared_ring_rejects_disconnected_operations() {
+        let ring = RenderIpc::new(EndpointHeader::new(1, 1));
+        let identity = ring.endpoint().identity();
+        ring.disconnect();
+        let message = RenderMessage::empty(MessageKind::RenderCells);
+        assert_eq!(ring.send(identity, message), Err(SharedSendError::Disconnected));
+        assert_eq!(ring.receive(identity), Err(SharedReceiveError::Disconnected));
+    }
+
+    #[test]
     fn event_masks_are_fixed_and_disjoint() {
         let mut all = 0;
         for endpoint in 0..IPC_ENDPOINT_COUNT {

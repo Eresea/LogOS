@@ -402,6 +402,21 @@ mod tests {
             graph.send(ServiceId::Input, input_send, &[]).status,
             logos_abi::IpcStatus::Malformed
         );
+        let wrong_rights = IpcCapability::new(0, IpcRights::Receive, 2, 9).unwrap();
+        assert_eq!(
+            graph.send(ServiceId::Input, wrong_rights, &[]).status,
+            logos_abi::IpcStatus::Unauthorized
+        );
+        let forged_owner = IpcCapability::new(0, IpcRights::Send, 2, 9).unwrap();
+        assert_eq!(
+            graph.send(ServiceId::Terminal, forged_owner, &[]).status,
+            logos_abi::IpcStatus::Unauthorized
+        );
+        let oversized = [0; logos_abi::IPC_PAGE_BYTES];
+        assert_eq!(
+            graph.send(ServiceId::Input, input_send, &oversized).status,
+            logos_abi::IpcStatus::Malformed
+        );
     }
 
     #[test]
