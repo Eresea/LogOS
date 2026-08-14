@@ -8,7 +8,7 @@ pub fn idle() -> ! {
     }
 }
 
-pub const WAIT_TIMEOUT_TICKS: u64 = 50;
+pub const WAIT_TIMEOUT_TICKS: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS / 2;
 
 pub const fn ipc_read_event(endpoint: usize) -> u64 {
     logos_abi::ipc_read_event_mask(endpoint)

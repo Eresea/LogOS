@@ -378,6 +378,7 @@ impl Scheduler {
         self.event_wakes.store(0, Ordering::Release);
         for slot in &self.tasks {
             slot.wait_mask.store(0, Ordering::Release);
+            slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
         }
     }
 
@@ -871,6 +872,19 @@ mod tests {
         assert!(scheduler.finish(handle, FinishState::TimedBlocked));
         assert_eq!(scheduler.wake_due(19), 0);
         assert_eq!(scheduler.wake_due(20), 1);
+        assert_eq!(scheduler.signal_events(event), 0);
+    }
+
+    #[test]
+    fn reset_events_clears_wait_deadlines() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        let event = logos_abi::keyboard_read_event_mask();
+        assert_eq!(scheduler.wait_for_events(handle, event, 20), Some(true));
+        assert!(scheduler.save_context(handle, 0x21d0));
+        assert!(scheduler.finish(handle, FinishState::TimedBlocked));
+        scheduler.reset_events();
+        assert_eq!(scheduler.wake_due(20), 0);
         assert_eq!(scheduler.signal_events(event), 0);
     }
 

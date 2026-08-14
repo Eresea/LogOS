@@ -52,7 +52,6 @@ pub fn initialize(cpu_count: usize) {
     SCHEDULER.spawn(wake_task).expect("proof task capacity");
     let backpressure = SCHEDULER.spawn(backpressure_sender_task).expect("proof task capacity");
     BACKPRESSURE_HANDLE.store(backpressure.raw(), Ordering::Release);
-    SCHEDULER.spawn(backpressure_consumer_task).expect("proof task capacity");
     let completion = SCHEDULER.spawn(completion_task).expect("proof task capacity");
     COMPLETION_HANDLE.store(completion.raw(), Ordering::Release);
     SCHEDULER.spawn(reclaimer_task).expect("proof task capacity");
@@ -235,36 +234,31 @@ fn backpressure_sender_task() {
     }
 }
 
-fn backpressure_consumer_task() {
+fn try_backpressure_wake() {
     let identity = logos_abi::MessageIdentity::new(1, 1);
     let event = logos_abi::ipc_write_event_mask(0);
-    loop {
-        let raw = BACKPRESSURE_HANDLE.load(Ordering::Acquire);
-        if raw != 0
-            && BACKPRESSURE_BLOCKED.load(Ordering::Acquire)
-            && SCHEDULER.state(TaskHandle::from_raw(raw)) == Some(TaskState::Blocked)
-        {
-            let Ok((_, notification)) = PROBE_RING.receive_with_notify(identity) else {
-                crate::yield_current();
-                continue;
-            };
-            if notification != logos_abi::Notify::Notified {
-                crate::arch_fatal(b"LogOS vNext: backpressure probe edge");
-            }
-            SCHEDULER.signal_events(event);
-            BACKPRESSURE_WAKE.store(true, Ordering::Release);
-            loop {
-                crate::yield_current();
-            }
-        }
-        crate::yield_current();
+    let raw = BACKPRESSURE_HANDLE.load(Ordering::Acquire);
+    if raw == 0
+        || !BACKPRESSURE_BLOCKED.load(Ordering::Acquire)
+        || SCHEDULER.state(TaskHandle::from_raw(raw)) != Some(TaskState::Blocked)
+    {
+        return;
     }
+    let Ok((_, notification)) = PROBE_RING.receive_with_notify(identity) else {
+        return;
+    };
+    if notification != logos_abi::Notify::Notified {
+        crate::arch_fatal(b"LogOS vNext: backpressure probe edge");
+    }
+    SCHEDULER.signal_events(event);
+    BACKPRESSURE_WAKE.store(true, Ordering::Release);
 }
 
 fn completion_task() {}
 
 fn reclaimer_task() {
     loop {
+        try_backpressure_wake();
         let raw = COMPLETION_HANDLE.load(Ordering::Acquire);
         if raw != 0 {
             let completed = TaskHandle::from_raw(raw);
@@ -281,9 +275,6 @@ fn reclaimer_task() {
                         && replacement.generation() != completed.generation(),
                     Ordering::Release,
                 );
-                loop {
-                    crate::yield_current();
-                }
             }
         }
         crate::yield_current();

@@ -41,7 +41,6 @@ static KERNEL_CR3: AtomicUsize = AtomicUsize::new(0);
 static USER_TASK_RAW: AtomicU64 = AtomicU64::new(0);
 static USER_SYSCALLS: AtomicU64 = AtomicU64::new(0);
 static USER_BLOCKED_WAITS: AtomicU64 = AtomicU64::new(0);
-static USER_BLOCKED_WAIT_MASK: AtomicU64 = AtomicU64::new(0);
 static USER_FAULTED: AtomicBool = AtomicBool::new(false);
 static USER_FAULT_VECTOR: AtomicUsize = AtomicUsize::new(0);
 
@@ -82,7 +81,6 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
         (core::ptr::addr_of!(USER_PROCESS_TABLE) as usize, core::mem::size_of::<ProcessTable>()),
         (core::ptr::addr_of!(USER_PROCESS) as usize, core::mem::size_of::<Option<ProcessHandle>>()),
         (core::ptr::addr_of!(USER_BLOCKED_WAITS) as usize, core::mem::size_of::<AtomicU64>()),
-        (core::ptr::addr_of!(USER_BLOCKED_WAIT_MASK) as usize, core::mem::size_of::<AtomicU64>()),
     ] {
         crate::arch::reserve_storage_frames(pool, address, bytes);
     }
@@ -153,7 +151,6 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
         };
         if should_block {
             USER_BLOCKED_WAITS.fetch_add(1, Ordering::Relaxed);
-            USER_BLOCKED_WAIT_MASK.fetch_or(mask, Ordering::Relaxed);
         }
         unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), 0) };
         USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
@@ -230,10 +227,6 @@ pub(crate) fn syscalls() -> u64 {
 
 pub(crate) fn blocked_waits() -> u64 {
     USER_BLOCKED_WAITS.load(Ordering::Acquire)
-}
-
-pub(crate) fn blocked_wait_mask() -> u64 {
-    USER_BLOCKED_WAIT_MASK.load(Ordering::Acquire)
 }
 
 pub(crate) fn fault_observed() -> bool {
