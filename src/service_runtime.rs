@@ -36,8 +36,6 @@ pub enum ServiceRuntimeError {
     Process(ProcessError),
     Startup(crate::service_startup::StartupError),
     Ipc(IpcError),
-    IpcMapping(PageTableError),
-    IpcProcess(ProcessError),
     IpcPrivateMapping(PageTableError),
     IpcPrivateProcess(ProcessError),
     Framebuffer(PageTableError),
@@ -196,30 +194,6 @@ impl ServiceRuntime {
                 .endpoint(endpoint_index)
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?;
             initialize_ipc_page(endpoint, endpoint_index);
-            for service in [endpoint.producer(), endpoint.consumer()] {
-                let index = service.index();
-                let Some((process, _)) = self.launch(service) else {
-                    return Err(ServiceRuntimeError::IpcProcess(ProcessError::InvalidHandle));
-                };
-                let tables = unsafe { self.tables[index].assume_init_mut() };
-                tables
-                    .map_raw_page(
-                        endpoint.virtual_address(),
-                        endpoint.frame(),
-                        MappingFlags::DATA,
-                        &mut self.frame_pool,
-                        &mut memory,
-                    )
-                    .map_err(ServiceRuntimeError::IpcMapping)?;
-                let mapping = VirtualMapping::new(
-                    endpoint.virtual_address(),
-                    endpoint.frame().raw() as usize,
-                    1,
-                    MappingFlags::DATA,
-                )
-                .ok_or(ServiceRuntimeError::IpcProcess(ProcessError::AddressSpace))?;
-                self.processes.map(process, mapping).map_err(ServiceRuntimeError::IpcProcess)?;
-            }
         }
         for spec in SERVICE_IMAGES {
             let service = spec.service();
@@ -747,8 +721,8 @@ impl Default for ServiceRuntime {
 
 fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint, index: usize) {
     let frame = endpoint.frame().raw() as usize;
-    // The frame pool is identity-mapped in the kernel root. The same physical
-    // page is then mapped into exactly the two endpoint participants.
+    // The frame pool is identity-mapped in the kernel root. Endpoint pages stay
+    // kernel-owned; services use private staging pages and syscalls instead.
     unsafe {
         match index {
             0 => (frame as *mut logos_abi::InputIpc)

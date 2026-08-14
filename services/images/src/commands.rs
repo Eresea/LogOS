@@ -3,12 +3,10 @@
 
 mod common;
 
-use logos_abi::{
-    IPC_FLAG_MORE, IPC_PAGE_BYTES, IpcBytes, MessageKind, SERVICE_IPC_BASE, StreamIpc,
-};
+use logos_abi::{IPC_FLAG_MORE, IpcBytes, IpcStatus, MessageKind};
 
-const SESSION_TO_COMMANDS: usize = SERVICE_IPC_BASE + IPC_PAGE_BYTES * 4;
-const COMMANDS_TO_SESSION: usize = SERVICE_IPC_BASE + IPC_PAGE_BYTES * 5;
+const INPUT_CAPABILITY: usize = 0;
+const OUTPUT_CAPABILITY: usize = 1;
 
 struct PendingOutput {
     bytes: [u8; logos_commands::MAX_OUTPUT_BYTES],
@@ -30,12 +28,7 @@ impl PendingOutput {
         self.pending = true;
     }
 
-    fn flush(
-        &mut self,
-        ring: &StreamIpc,
-        identity: logos_abi::MessageIdentity,
-        read_event: u64,
-    ) -> bool {
+    fn flush(&mut self, capability_slot: usize) -> bool {
         let mut progressed = false;
         while self.offset < self.len {
             let end = (self.offset + logos_abi::MAX_IPC_BYTES).min(self.len);
@@ -47,16 +40,16 @@ impl PendingOutput {
             if end < self.len {
                 message.flags = IPC_FLAG_MORE;
             }
-            let Ok(notification) = ring.send(identity, message) else { break };
-            common::notify_edge(read_event, notification);
+            if common::ipc_send(capability_slot, &message) != IpcStatus::Ok {
+                break;
+            }
             self.offset = end;
             progressed = true;
         }
         if self.pending && self.offset == self.len {
             let message = IpcBytes::empty(MessageKind::SessionOutput);
             if self.len == 0 {
-                if let Ok(notification) = ring.send(identity, message) {
-                    common::notify_edge(read_event, notification);
+                if common::ipc_send(capability_slot, &message) == IpcStatus::Ok {
                     self.pending = false;
                     progressed = true;
                 }
@@ -78,22 +71,18 @@ static mut PENDING: PendingOutput = PendingOutput::new();
 pub extern "C" fn _start() -> ! {
     let commands = unsafe { &mut *core::ptr::addr_of_mut!(COMMANDS) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
-    let input = unsafe { &*(SESSION_TO_COMMANDS as *const StreamIpc) };
-    let output = unsafe { &*(COMMANDS_TO_SESSION as *const StreamIpc) };
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Commands);
-        let input_identity = input.endpoint().identity();
-        let output_identity = output.endpoint().identity();
-        let mut progressed = pending.flush(output, output_identity, common::ipc_read_event(5));
+        let mut progressed = pending.flush(OUTPUT_CAPABILITY);
         if pending.pending {
             if !progressed {
                 common::wait(common::ipc_write_event(5), logos_abi::ServiceId::Commands);
             }
             continue;
         }
-        if let Ok((message, notification)) = input.receive_with_notify(input_identity) {
-            common::notify_edge(common::ipc_write_event(4), notification);
+        let mut message = IpcBytes::empty(MessageKind::SessionInput);
+        if common::ipc_receive(INPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
             progressed = true;
             if message.kind == MessageKind::SessionInput {
                 if let Some(bytes) = message.as_bytes() {

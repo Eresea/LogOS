@@ -1,6 +1,7 @@
 use core::arch::asm;
+use core::{mem, ptr};
 
-use logos_abi::ServiceId;
+use logos_abi::{IpcCapabilityPage, IpcStatus, ServiceId};
 
 pub fn idle() -> ! {
     loop {
@@ -10,10 +11,12 @@ pub fn idle() -> ! {
 
 pub const WAIT_TIMEOUT_TICKS: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS / 2;
 
+#[allow(dead_code)]
 pub const fn ipc_read_event(endpoint: usize) -> u64 {
     logos_abi::ipc_read_event_mask(endpoint)
 }
 
+#[allow(dead_code)]
 pub const fn ipc_write_event(endpoint: usize) -> u64 {
     logos_abi::ipc_write_event_mask(endpoint)
 }
@@ -60,6 +63,7 @@ pub fn wait(mask: u64, service: ServiceId) {
 }
 
 #[inline(always)]
+#[allow(dead_code)]
 pub fn notify(mask: u64) {
     if mask == 0 {
         return;
@@ -75,8 +79,61 @@ pub fn notify(mask: u64) {
     }
 }
 
+#[allow(dead_code)]
 pub fn notify_edge(mask: u64, notification: logos_abi::Notify) {
     if notification == logos_abi::Notify::Notified {
         notify(mask);
     }
+}
+
+#[inline(always)]
+#[allow(dead_code)]
+pub fn ipc_send<T: Copy>(capability_slot: usize, message: &T) -> IpcStatus {
+    if capability(capability_slot).is_none() {
+        return IpcStatus::Unauthorized;
+    }
+    unsafe {
+        ptr::write_unaligned(logos_abi::IPC_STAGING_BASE as *mut T, *message);
+    }
+    ipc_syscall(logos_abi::IPC_SYSCALL_SEND, capability_slot, mem::size_of::<T>())
+}
+
+#[inline(always)]
+#[allow(dead_code)]
+pub fn ipc_receive<T: Copy>(capability_slot: usize, message: &mut T) -> IpcStatus {
+    if capability(capability_slot).is_none() {
+        return IpcStatus::Unauthorized;
+    }
+    let status = ipc_syscall(logos_abi::IPC_SYSCALL_RECEIVE, capability_slot, 0);
+    if status == IpcStatus::Ok {
+        *message = unsafe { ptr::read_unaligned(logos_abi::IPC_STAGING_BASE as *const T) };
+    }
+    status
+}
+
+#[inline(always)]
+#[allow(dead_code)]
+pub fn capability(slot: usize) -> Option<logos_abi::IpcCapability> {
+    if slot >= logos_abi::MAX_IPC_CAPABILITIES {
+        return None;
+    }
+    let page = unsafe { &*(logos_abi::IPC_CAPABILITY_BASE as *const IpcCapabilityPage) };
+    page.get(slot)
+}
+
+#[inline(always)]
+fn ipc_syscall(number: usize, capability_slot: usize, length: usize) -> IpcStatus {
+    let raw: usize;
+    unsafe {
+        asm!(
+            "mov eax, {number}",
+            "int 49",
+            number = in(reg) number,
+            in("rdi") capability_slot,
+            in("rsi") length,
+            lateout("rax") raw,
+            options(nostack, preserves_flags),
+        );
+    }
+    IpcStatus::from_raw(raw).unwrap_or(IpcStatus::Malformed)
 }

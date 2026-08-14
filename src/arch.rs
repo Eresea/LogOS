@@ -312,12 +312,6 @@ pub fn boot() -> Status {
                 crate::service_runtime::ServiceRuntimeError::Ipc(_) => {
                     fatal(b"LogOS vNext: service IPC pages")
                 }
-                crate::service_runtime::ServiceRuntimeError::IpcMapping(_) => {
-                    fatal(b"LogOS vNext: service IPC mapping")
-                }
-                crate::service_runtime::ServiceRuntimeError::IpcProcess(_) => {
-                    fatal(b"LogOS vNext: service IPC process")
-                }
                 crate::service_runtime::ServiceRuntimeError::IpcPrivateMapping(_) => {
                     fatal(b"LogOS vNext: service IPC private mapping")
                 }
