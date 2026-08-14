@@ -89,26 +89,48 @@ pub fn notify_edge(mask: u64, notification: logos_abi::Notify) {
 #[inline(always)]
 #[allow(dead_code)]
 pub fn ipc_send<T: Copy>(capability_slot: usize, message: &T) -> IpcStatus {
-    if capability(capability_slot).is_none() {
+    let Some(capability) = capability(capability_slot) else {
         return IpcStatus::Unauthorized;
+    };
+    let Some(expected_length) = endpoint_message_size(capability.endpoint_index()) else {
+        return IpcStatus::Unauthorized;
+    };
+    let length = mem::size_of::<T>();
+    if length != expected_length || length > logos_abi::IPC_PAGE_BYTES {
+        return IpcStatus::Malformed;
     }
     unsafe {
         ptr::write_unaligned(logos_abi::IPC_STAGING_BASE as *mut T, *message);
     }
-    ipc_syscall(logos_abi::IPC_SYSCALL_SEND, capability_slot, mem::size_of::<T>())
+    ipc_syscall(logos_abi::IPC_SYSCALL_SEND, capability_slot, length)
 }
 
 #[inline(always)]
 #[allow(dead_code)]
 pub fn ipc_receive<T: Copy>(capability_slot: usize, message: &mut T) -> IpcStatus {
-    if capability(capability_slot).is_none() {
+    let Some(capability) = capability(capability_slot) else {
         return IpcStatus::Unauthorized;
+    };
+    let Some(expected_length) = endpoint_message_size(capability.endpoint_index()) else {
+        return IpcStatus::Unauthorized;
+    };
+    if mem::size_of::<T>() != expected_length || expected_length > logos_abi::IPC_PAGE_BYTES {
+        return IpcStatus::Malformed;
     }
     let status = ipc_syscall(logos_abi::IPC_SYSCALL_RECEIVE, capability_slot, 0);
     if status == IpcStatus::Ok {
         *message = unsafe { ptr::read_unaligned(logos_abi::IPC_STAGING_BASE as *const T) };
     }
     status
+}
+
+fn endpoint_message_size(endpoint: Option<usize>) -> Option<usize> {
+    match endpoint {
+        Some(0) => Some(mem::size_of::<logos_abi::InputMessage>()),
+        Some(1) => Some(mem::size_of::<logos_abi::RenderMessage>()),
+        Some(2..=5) => Some(mem::size_of::<logos_abi::IpcBytes>()),
+        _ => None,
+    }
 }
 
 #[inline(always)]
