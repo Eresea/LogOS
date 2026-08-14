@@ -66,6 +66,7 @@ pub enum IpcError {
     Capacity,
     Exhausted,
     Memory,
+    InvalidIdentity,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,6 +93,9 @@ impl ServiceIpcGraph {
         generation: u16,
         service_epoch: u64,
     ) -> Result<Self, IpcError> {
+        if generation == 0 || service_epoch == 0 {
+            return Err(IpcError::InvalidIdentity);
+        }
         let mut graph = Self { endpoints: [None; MAX_ENDPOINTS], count: 0 };
         for (index, (producer, consumer)) in ENDPOINTS.into_iter().enumerate() {
             let frame = pool.allocate().map_err(|error| match error {
@@ -106,7 +110,7 @@ impl ServiceIpcGraph {
             graph.endpoints[index] = Some(IpcEndpoint {
                 producer,
                 consumer,
-                generation: generation.max(1),
+                generation,
                 service_epoch,
                 virtual_address: IPC_BASE + index * PAGE_SIZE,
                 frame,
@@ -134,7 +138,7 @@ impl ServiceIpcGraph {
         if index < self.count { self.endpoints[index] } else { None }
     }
 
-    pub fn capabilities(&self, service: ServiceId) -> IpcCapabilityPage {
+    pub fn capabilities(&self, service: ServiceId) -> Result<IpcCapabilityPage, IpcError> {
         let mut page = IpcCapabilityPage::empty();
         let mut slot = 0;
         for index in 0..self.count {
@@ -148,7 +152,7 @@ impl ServiceIpcGraph {
             };
             let Some(rights) = rights else { continue };
             if slot == page.capabilities.len() {
-                break;
+                return Err(IpcError::Capacity);
             }
             page.capabilities[slot] = logos_abi::IpcCapability::new(
                 index,
@@ -156,10 +160,10 @@ impl ServiceIpcGraph {
                 endpoint.generation(),
                 endpoint.header().service_epoch,
             )
-            .expect("fixed IPC endpoint capability");
+            .ok_or(IpcError::InvalidIdentity)?;
             slot += 1;
         }
-        page
+        Ok(page)
     }
 
     pub fn send(&self, service: ServiceId, capability: IpcCapability, bytes: &[u8]) -> IpcOutcome {
@@ -372,7 +376,7 @@ mod tests {
         assert_eq!(graph.endpoint(5).unwrap().consumer(), ServiceId::Session);
         assert_eq!(graph.endpoint(5).unwrap().virtual_address(), IPC_BASE + 5 * PAGE_SIZE);
         assert_eq!(graph.endpoint(5).unwrap().generation(), 1);
-        let terminal = graph.capabilities(ServiceId::Terminal);
+        let terminal = graph.capabilities(ServiceId::Terminal).unwrap();
         assert_eq!(terminal.get(0).unwrap().rights, IpcRights::Receive);
         assert_eq!(terminal.get(1).unwrap().rights, IpcRights::Send);
         assert_eq!(terminal.get(3).unwrap().rights, IpcRights::Receive);
@@ -387,7 +391,7 @@ mod tests {
         pool.initialize(&map).unwrap();
         let mut memory = Memory;
         let graph = ServiceIpcGraph::allocate_with_identity(&mut pool, &mut memory, 2, 9).unwrap();
-        let input_send = graph.capabilities(ServiceId::Input).get(0).unwrap();
+        let input_send = graph.capabilities(ServiceId::Input).unwrap().get(0).unwrap();
         assert_eq!(
             graph.send(ServiceId::Terminal, input_send, &[]).status,
             logos_abi::IpcStatus::Unauthorized
@@ -398,5 +402,22 @@ mod tests {
             graph.send(ServiceId::Input, input_send, &[]).status,
             logos_abi::IpcStatus::Malformed
         );
+    }
+
+    #[test]
+    fn graph_rejects_invalid_identity_before_allocating() {
+        let mut map = crate::boot_resources::MemoryMap::new();
+        map.push(MemoryDescriptor::new(0x1000, 8, true).unwrap()).unwrap();
+        let mut pool = FramePool::empty();
+        pool.initialize(&map).unwrap();
+        let mut memory = Memory;
+        assert!(matches!(
+            ServiceIpcGraph::allocate_with_identity(&mut pool, &mut memory, 0, 1),
+            Err(IpcError::InvalidIdentity)
+        ));
+        assert!(matches!(
+            ServiceIpcGraph::allocate_with_identity(&mut pool, &mut memory, 1, 0),
+            Err(IpcError::InvalidIdentity)
+        ));
     }
 }

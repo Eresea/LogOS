@@ -211,7 +211,7 @@ impl ServiceRuntime {
             )?;
             self.ipc_staging_frames[index] = Some(staging);
 
-            let capabilities = graph.capabilities(service);
+            let capabilities = graph.capabilities(service).map_err(ServiceRuntimeError::Ipc)?;
             let capability_frame =
                 self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
             memory.clear(capability_frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
