@@ -798,7 +798,7 @@ impl NamespaceTransaction {
         if offset.checked_add(input.len()).is_none() || offset + input.len() > MAX_FILE_BYTES {
             return Err(NamespaceError::TooLarge);
         }
-        if replace {
+        if replace && record.length != 0 {
             let mut truncate = [0; 10];
             put_u16(&mut truncate, 0, id.slot);
             put_u32(&mut truncate, 2, id.generation);

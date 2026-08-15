@@ -92,6 +92,8 @@ enum StorageWork {
     Write,
     Remove,
     Move,
+    #[cfg(feature = "storage-proof")]
+    AbortProof,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -123,6 +125,7 @@ struct StorageClient {
     result: [u8; logos_commands::MAX_OUTPUT_BYTES],
     result_len: usize,
     failure: StorageApiStatus,
+    last_status: StorageApiStatus,
 }
 
 impl StorageClient {
@@ -145,19 +148,11 @@ impl StorageClient {
             result: [0; logos_commands::MAX_OUTPUT_BYTES],
             result_len: 0,
             failure: StorageApiStatus::Invalid,
+            last_status: StorageApiStatus::Invalid,
         }
     }
 
     fn start(&mut self, command: logos_commands::StorageCommand<'_>) -> bool {
-        if self.busy || self.done {
-            return false;
-        }
-        self.path_len = 0;
-        self.secondary_len = 0;
-        self.data_len = 0;
-        self.result_len = 0;
-        self.cursor = 0;
-        self.transaction_id = 0;
         let (work, phase, path, secondary, data) = match command {
             logos_commands::StorageCommand::List { path } => {
                 (StorageWork::List, StoragePhase::List, path, &[][..], &[][..])
@@ -178,6 +173,33 @@ impl StorageClient {
                 (StorageWork::Move, StoragePhase::Begin, from, to, &[][..])
             }
         };
+        self.start_work(work, phase, path, secondary, data)
+    }
+
+    #[cfg(feature = "storage-proof")]
+    fn start_proof_abort(&mut self, path: &[u8]) -> bool {
+        self.failure = StorageApiStatus::Ok;
+        self.start_work(StorageWork::AbortProof, StoragePhase::Begin, path, &[], &[])
+    }
+
+    fn start_work(
+        &mut self,
+        work: StorageWork,
+        phase: StoragePhase,
+        path: &[u8],
+        secondary: &[u8],
+        data: &[u8],
+    ) -> bool {
+        if self.busy || self.done {
+            return false;
+        }
+        self.path_len = 0;
+        self.secondary_len = 0;
+        self.data_len = 0;
+        self.result_len = 0;
+        self.cursor = 0;
+        self.transaction_id = 0;
+        self.last_status = StorageApiStatus::Invalid;
         if path.len() > self.path.len()
             || secondary.len() > self.secondary_path.len()
             || data.len() > self.data.len()
@@ -216,6 +238,8 @@ impl StorageClient {
                     StorageWork::Write => StorageApiOperation::Write,
                     StorageWork::Remove => StorageApiOperation::Remove,
                     StorageWork::Move => StorageApiOperation::Rename,
+                    #[cfg(feature = "storage-proof")]
+                    StorageWork::AbortProof => StorageApiOperation::CreateFile,
                     StorageWork::List | StorageWork::Cat => StorageApiOperation::Read,
                 };
                 (
@@ -324,7 +348,11 @@ impl StorageClient {
                 }
             }
             StoragePhase::Operation => {
-                self.phase = StoragePhase::Commit;
+                self.phase = if self.operation_aborts() {
+                    StoragePhase::Abort
+                } else {
+                    StoragePhase::Commit
+                };
                 self.next_request();
             }
             StoragePhase::Commit => self.succeed(),
@@ -364,7 +392,18 @@ impl StorageClient {
         self.result_len += count;
     }
 
+    #[cfg(feature = "storage-proof")]
+    fn operation_aborts(&self) -> bool {
+        matches!(self.work, StorageWork::AbortProof)
+    }
+
+    #[cfg(not(feature = "storage-proof"))]
+    const fn operation_aborts(&self) -> bool {
+        false
+    }
+
     fn fail(&mut self, status: StorageApiStatus) {
+        self.last_status = status;
         self.result_len = 0;
         self.append(status_text(status));
         self.phase = StoragePhase::Idle;
@@ -373,6 +412,7 @@ impl StorageClient {
     }
 
     fn succeed(&mut self) {
+        self.last_status = StorageApiStatus::Ok;
         if matches!(
             self.work,
             StorageWork::Touch | StorageWork::Write | StorageWork::Remove | StorageWork::Move
@@ -391,6 +431,12 @@ impl StorageClient {
             pending.stage(&self.result[..self.result_len]);
             self.done = false;
         }
+    }
+
+    #[cfg(feature = "storage-proof")]
+    fn discard_result(&mut self) -> StorageApiStatus {
+        self.done = false;
+        self.last_status
     }
 }
 
@@ -415,6 +461,12 @@ pub extern "C" fn _start() -> ! {
     let commands = unsafe { &mut *core::ptr::addr_of_mut!(COMMANDS) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
+    #[cfg(feature = "storage-proof")]
+    let mut proof_step = 0u8;
+    #[cfg(feature = "storage-proof")]
+    let mut proof_active = false;
+    #[cfg(feature = "storage-proof")]
+    let mut proof_recovery = false;
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Commands);
@@ -431,6 +483,11 @@ pub extern "C" fn _start() -> ! {
         if storage.active() {
             progressed |= storage.drive();
             if storage.done {
+                #[cfg(feature = "storage-proof")]
+                if !proof_active {
+                    storage.take_result(pending);
+                }
+                #[cfg(not(feature = "storage-proof"))]
                 storage.take_result(pending);
                 progressed = true;
             }
@@ -444,6 +501,78 @@ pub extern "C" fn _start() -> ! {
                     );
                 }
                 continue;
+            }
+        }
+        #[cfg(feature = "storage-proof")]
+        if storage.done && proof_active {
+            let status = storage.discard_result();
+            if proof_step == 0 && status == StorageApiStatus::AlreadyExists {
+                proof_recovery = true;
+            }
+            let accepted = if proof_recovery {
+                match proof_step {
+                    0 => status == StorageApiStatus::AlreadyExists,
+                    1 | 2 | 3 | 5 => status == StorageApiStatus::Ok,
+                    4 | 6 | 7 => {
+                        matches!(status, StorageApiStatus::Ok | StorageApiStatus::NotFound)
+                    }
+                    _ => false,
+                }
+            } else {
+                match proof_step {
+                    0 | 1 | 2 | 3 => status == StorageApiStatus::Ok,
+                    4 | 5 => status == StorageApiStatus::NotFound,
+                    _ => false,
+                }
+            };
+            if accepted {
+                proof_step = proof_step.saturating_add(1);
+                proof_active = false;
+                if (!proof_recovery && proof_step > 5) || (proof_recovery && proof_step > 7) {
+                    proof_step = u8::MAX;
+                    proof_active = false;
+                }
+            } else {
+                proof_step = u8::MAX;
+                proof_active = false;
+            }
+            progressed = true;
+        }
+        #[cfg(feature = "storage-proof")]
+        if !proof_active
+            && proof_step != u8::MAX
+            && !storage.active()
+            && !storage.done
+            && !pending.pending
+        {
+            let started = match proof_step {
+                0 => {
+                    storage.start(logos_commands::StorageCommand::Touch { path: b"/api-survivor" })
+                }
+                1 => storage.start(logos_commands::StorageCommand::Write {
+                    path: b"/api-survivor",
+                    data: b"durable-api",
+                }),
+                2 => storage.start_proof_abort(b"/api-aborted"),
+                3 if proof_recovery => {
+                    storage.start(logos_commands::StorageCommand::Touch { path: b"/api-removed" })
+                }
+                3 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-survivor" }),
+                4 if proof_recovery => {
+                    storage.start(logos_commands::StorageCommand::Remove { path: b"/api-removed" })
+                }
+                4 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-aborted" }),
+                5 if proof_recovery => {
+                    storage.start(logos_commands::StorageCommand::Cat { path: b"/api-survivor" })
+                }
+                5 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-removed" }),
+                6 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-aborted" }),
+                7 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-removed" }),
+                _ => false,
+            };
+            if started {
+                proof_active = true;
+                progressed = true;
             }
         }
         let mut message = IpcBytes::empty(MessageKind::SessionInput);

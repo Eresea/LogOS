@@ -5,6 +5,9 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+#[cfg(feature = "storage-proof")]
+use core::sync::atomic::AtomicU8;
+
 use logos_abi::ServiceId;
 
 use crate::memory::{ExclusionKind, MemoryExclusion};
@@ -74,6 +77,16 @@ pub struct ServiceRuntime {
     storage_response: Option<logos_abi::StorageResponse>,
     suppressed_heartbeats: [AtomicBool; SERVICE_COUNT],
     frame_pool_ready: bool,
+    #[cfg(feature = "storage-proof")]
+    storage_api_proof_mode: AtomicU8,
+    #[cfg(feature = "storage-proof")]
+    storage_api_proof_pending: AtomicU8,
+    #[cfg(feature = "storage-proof")]
+    storage_api_proof_path: AtomicU8,
+    #[cfg(feature = "storage-proof")]
+    storage_api_proof_missing: AtomicU8,
+    #[cfg(feature = "storage-proof")]
+    storage_api_proof_reported: AtomicU8,
 }
 
 impl ServiceRuntime {
@@ -107,6 +120,16 @@ impl ServiceRuntime {
             storage_response: None,
             suppressed_heartbeats: [const { AtomicBool::new(false) }; SERVICE_COUNT],
             frame_pool_ready: false,
+            #[cfg(feature = "storage-proof")]
+            storage_api_proof_mode: AtomicU8::new(0),
+            #[cfg(feature = "storage-proof")]
+            storage_api_proof_pending: AtomicU8::new(0),
+            #[cfg(feature = "storage-proof")]
+            storage_api_proof_path: AtomicU8::new(0),
+            #[cfg(feature = "storage-proof")]
+            storage_api_proof_missing: AtomicU8::new(0),
+            #[cfg(feature = "storage-proof")]
+            storage_api_proof_reported: AtomicU8::new(0),
         }
     }
 
@@ -529,6 +552,83 @@ impl ServiceRuntime {
         self.heartbeat_ticks[service.index()].load(Ordering::Acquire)
     }
 
+    #[cfg(feature = "storage-proof")]
+    fn observe_storage_api_request(&self, bytes: &[u8]) {
+        if bytes.len() != core::mem::size_of::<logos_abi::IpcBytes>() {
+            return;
+        }
+        let message =
+            unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<logos_abi::IpcBytes>()) };
+        let Ok(request) = logos_abi::StorageApiRequest::decode(&message) else {
+            return;
+        };
+        self.storage_api_proof_pending.store(request.operation as u8, Ordering::Release);
+        let path = if request.operation == logos_abi::StorageApiOperation::Read
+            && request.path == b"/api-aborted"
+        {
+            1
+        } else if request.operation == logos_abi::StorageApiOperation::Read
+            && request.path == b"/api-removed"
+        {
+            2
+        } else {
+            0
+        };
+        self.storage_api_proof_path.store(path, Ordering::Release);
+    }
+
+    #[cfg(feature = "storage-proof")]
+    fn observe_storage_api_response(&self, bytes: &[u8]) {
+        if bytes.len() != core::mem::size_of::<logos_abi::IpcBytes>() {
+            return;
+        }
+        let message =
+            unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<logos_abi::IpcBytes>()) };
+        let Ok(response) = logos_abi::StorageApiResponse::decode(&message) else {
+            return;
+        };
+        let operation = self.storage_api_proof_pending.load(Ordering::Acquire);
+        if operation == logos_abi::StorageApiOperation::CreateFile as u8 {
+            if self.storage_api_proof_mode.load(Ordering::Acquire) == 0 {
+                if response.status == logos_abi::StorageApiStatus::Ok {
+                    self.storage_api_proof_mode.store(1, Ordering::Release);
+                } else if response.status == logos_abi::StorageApiStatus::AlreadyExists {
+                    self.storage_api_proof_mode.store(2, Ordering::Release);
+                }
+            }
+        }
+        let mode = self.storage_api_proof_mode.load(Ordering::Acquire);
+        if operation == logos_abi::StorageApiOperation::Read as u8
+            && response.status == logos_abi::StorageApiStatus::Ok
+            && response.data == b"durable-api"
+            && mode != 0
+        {
+            let marker: &[u8] = if mode == 1 {
+                b"LogOS vNext: storage command API PASS"
+            } else {
+                b"LogOS vNext: storage command API recovery PASS"
+            };
+            let expected = if mode == 1 { 1 } else { 2 };
+            if self
+                .storage_api_proof_reported
+                .compare_exchange(0, expected, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                crate::arch_proof_line(marker);
+            }
+        }
+        if response.status == logos_abi::StorageApiStatus::NotFound {
+            let path = self.storage_api_proof_path.load(Ordering::Acquire);
+            if path != 0 {
+                let bit = 1u8 << (path - 1);
+                let missing = self.storage_api_proof_missing.fetch_or(bit, Ordering::AcqRel) | bit;
+                if missing == 0b11 {
+                    crate::arch_proof_line(b"LogOS vNext: storage command API cleanup PASS");
+                }
+            }
+        }
+    }
+
     pub(crate) fn ipc_send(
         &mut self,
         process: ProcessHandle,
@@ -721,6 +821,13 @@ impl ServiceRuntime {
         let bytes = unsafe {
             core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
         };
+        #[cfg(feature = "storage-proof")]
+        if service == ServiceId::Commands
+            && capability.endpoint_index()
+                == Some(logos_abi::IpcEndpointId::CommandsToStorage as usize)
+        {
+            self.observe_storage_api_request(bytes);
+        }
         let outcome = graph.send(service, capability, bytes);
         if outcome.notified {
             crate::arch::signal_events(logos_abi::ipc_read_event_mask(
@@ -812,6 +919,13 @@ impl ServiceRuntime {
             core::slice::from_raw_parts_mut(staging_frame.raw() as usize as *mut u8, length)
         };
         let outcome = graph.receive(service, capability, bytes);
+        #[cfg(feature = "storage-proof")]
+        if outcome.status == logos_abi::IpcStatus::Ok
+            && service == ServiceId::Commands
+            && index == logos_abi::IpcEndpointId::StorageToCommands as usize
+        {
+            self.observe_storage_api_response(bytes);
+        }
         if outcome.notified {
             crate::arch::signal_events(logos_abi::ipc_write_event_mask(
                 capability.endpoint as usize,

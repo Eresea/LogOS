@@ -218,7 +218,7 @@ pub fn parse_storage_command(
             };
             let from = &args[..separator];
             let to = trim_command(&args[separator + 1..]);
-            if from.is_empty() || to.is_empty() || to.iter().any(|byte| *byte == b' ') {
+            if from.is_empty() || to.is_empty() || to.contains(&b' ') {
                 return Err(StorageCommandError::Usage);
             }
             Ok(Some(StorageCommand::Move { from, to }))
@@ -228,7 +228,7 @@ pub fn parse_storage_command(
 }
 
 fn path_arg(args: &[u8]) -> Result<&[u8], StorageCommandError> {
-    if args.is_empty() || args.iter().any(|byte| *byte == b' ') {
+    if args.is_empty() || args.contains(&b' ') {
         return Err(StorageCommandError::Usage);
     }
     Ok(args)
