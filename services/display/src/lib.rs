@@ -168,6 +168,32 @@ fn styled_coverage(glyph: &Glyph, row: usize, column: usize, attributes: u16) ->
     coverage
 }
 
+fn is_background_only(cell: Cell, background: u32) -> bool {
+    cell.codepoint == b' ' as u32
+        && cell.attributes & CELL_ATTR_UNDERLINE == 0
+        && cell.background == background
+}
+
+fn pixel_bytes(color: u32, format: PixelFormat) -> [u8; 4] {
+    let red = ((color >> 16) & 0xff) as u8;
+    let green = ((color >> 8) & 0xff) as u8;
+    let blue = (color & 0xff) as u8;
+    match format {
+        PixelFormat::Rgb8 => [red, green, blue, 0],
+        PixelFormat::Bgr8 => [blue, green, red, 0],
+    }
+}
+
+fn fill_row(row: &mut [u8], pixel: [u8; 4]) {
+    row[..pixel.len()].copy_from_slice(&pixel);
+    let mut filled = pixel.len();
+    while filled < row.len() {
+        let copy_len = filled.min(row.len() - filled);
+        row.copy_within(..copy_len, filled);
+        filled += copy_len;
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DisplayError {
     InvalidMessage,
@@ -183,6 +209,8 @@ pub struct Display {
     cursor_row: usize,
     cells: [Cell; MAX_COLUMNS * MAX_ROWS],
     dirty: [bool; MAX_COLUMNS * MAX_ROWS],
+    surface_initialized: bool,
+    surface_background: u32,
 }
 
 impl Display {
@@ -195,6 +223,8 @@ impl Display {
             cursor_row: 0,
             cells: [Cell::EMPTY; MAX_COLUMNS * MAX_ROWS],
             dirty: [false; MAX_COLUMNS * MAX_ROWS],
+            surface_initialized: false,
+            surface_background: 0,
         }
     }
 
@@ -208,6 +238,8 @@ impl Display {
         self.generation = generation;
         self.cells.fill(Cell::EMPTY);
         self.dirty.fill(true);
+        self.surface_initialized = false;
+        self.surface_background = 0;
     }
 
     pub fn apply(&mut self, generation: u16, message: &RenderMessage) -> Result<(), DisplayError> {
@@ -236,11 +268,17 @@ impl Display {
         if message.kind == MessageKind::FullRedraw {
             self.cells.fill(Cell::EMPTY);
             self.dirty.fill(true);
+            self.surface_initialized = false;
+            self.surface_background = 0;
         }
         for index in 0..message.count as usize {
             let position = usize::from(message.positions[index]);
-            self.cells[position] = message.cells[index];
-            self.dirty[position] = true;
+            let cell = message.cells[index];
+            let was_unrendered = self.cells[position] == Cell::EMPTY;
+            self.cells[position] = cell;
+            self.dirty[position] = !(self.surface_initialized
+                && was_unrendered
+                && is_background_only(cell, self.surface_background));
         }
         let old_cursor = self.cursor_row * MAX_COLUMNS + self.cursor_column;
         self.columns = columns;
@@ -271,6 +309,17 @@ impl Display {
             return Err(DisplayError::InvalidFramebuffer);
         }
         let mut rendered = 0;
+        let first_render = !self.surface_initialized;
+        if first_render {
+            self.surface_background = self.cells[0].background;
+            let pixel = pixel_bytes(self.surface_background, format);
+            let row_bytes = self.columns * GLYPH_WIDTH * 4;
+            for row in 0..self.rows * GLYPH_HEIGHT {
+                let start = row * stride;
+                fill_row(&mut framebuffer[start..start + row_bytes], pixel);
+            }
+            self.surface_initialized = true;
+        }
         for row in 0..self.rows {
             for column in 0..self.columns {
                 let index = row * MAX_COLUMNS + column;
@@ -278,6 +327,11 @@ impl Display {
                     continue;
                 }
                 let cell = self.cells[index];
+                if first_render && is_background_only(cell, self.surface_background) {
+                    self.dirty[index] = false;
+                    rendered += 1;
+                    continue;
+                }
                 let glyph = embedded_glyph(cell.codepoint);
                 let foreground = styled_foreground(cell);
                 for glyph_row in 0..GLYPH_HEIGHT {
@@ -290,13 +344,7 @@ impl Display {
                         let pixel = row * GLYPH_HEIGHT * stride
                             + glyph_row * stride
                             + (column * GLYPH_WIDTH + glyph_column) * 4;
-                        let red = ((color >> 16) & 0xff) as u8;
-                        let green = ((color >> 8) & 0xff) as u8;
-                        let blue = (color & 0xff) as u8;
-                        let bytes = match format {
-                            PixelFormat::Rgb8 => [red, green, blue, 0],
-                            PixelFormat::Bgr8 => [blue, green, red, 0],
-                        };
+                        let bytes = pixel_bytes(color, format);
                         framebuffer[pixel..pixel + 4].copy_from_slice(&bytes);
                     }
                 }
@@ -389,6 +437,23 @@ mod tests {
             Ok(80 * 25)
         );
         assert_eq!(display.render(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8), Ok(0));
+    }
+
+    #[test]
+    fn initial_render_fills_background_before_incremental_cells() {
+        let mut display = Display::new(1);
+        let mut message = RenderMessage::empty(MessageKind::RenderCells);
+        message.columns = 2;
+        message.rows = 1;
+        message.count = 1;
+        message.positions[0] = 0;
+        message.cells[0] = Cell { background: 0x102030, ..Cell::EMPTY };
+        display.apply(1, &message).unwrap();
+
+        let mut framebuffer = std::vec![0; 16 * 16 * 4];
+        assert_eq!(display.render(&mut framebuffer, 16, 16, 16 * 4, PixelFormat::Bgr8), Ok(1));
+        assert_eq!(&framebuffer[..4], &[0x30, 0x20, 0x10, 0]);
+        assert_eq!(&framebuffer[15 * 4..16 * 4], &[0x30, 0x20, 0x10, 0]);
     }
 
     #[test]
