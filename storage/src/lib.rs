@@ -88,6 +88,8 @@ pub enum BlockError {
     OutOfBounds,
     Io,
     ReadOnly,
+    Unauthorized,
+    Stale,
     InvalidRequest,
 }
 
