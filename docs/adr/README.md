@@ -47,3 +47,4 @@
 | [0043](0043-virtio-device-ownership.md) | Accepted | Core owns VirtIO PCI, DMA, queues, interrupts, reset, and flush while storage owns logical durability |
 | [0044](0044-storage-service-ipc.md) | Accepted | Storage uses fixed kernel-mediated IPC and private staging pages without device access |
 | [0045](0045-bounded-object-namespace.md) | Accepted | A fixed storage-service object table provides generation-safe durable namespace operations |
+| [0046](0046-storage-service-lifecycle.md) | Accepted | Storage is admitted as the sixth fixed service while its kernel-mediated request endpoint remains separately gated |

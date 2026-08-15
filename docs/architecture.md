@@ -1,7 +1,7 @@
 # LogOS vNext Core architecture
 
 The package has two targets and no allocator: the UEFI binary in `src/main.rs` calls `boot()` in
-`src/lib.rs`. Core owns mechanisms only; Runtime and the five terminal services execute through
+`src/lib.rs`. Core owns mechanisms only; Runtime and the six fixed services execute through
 fixed service boundaries.
 
 | Boundary | Owner | Invariant / proof |
@@ -13,11 +13,11 @@ fixed service boundaries.
 | Control plane | `process` + `user_mode` | admission-time fixed service mappings plus bounded Wait/Notify, IpcSend, and IpcReceive syscalls with process-bound capability checks |
 | ELF page admission | `loader` | maps validated segments and fixed user stacks to owned frames, then populates them through a page-local sink with bounded reclamation |
 | User page tables | `page_table` | builds four-level user mappings with fixed root/intermediate-frame bounds, W^X/NX flags, conflict rejection, and grouped reclamation |
-| Service address spaces | `service_runtime` | loads five retained ELFs into owned frames and retains one isolated root per service before scheduler admission |
+| Service address spaces | `service_runtime` | loads six retained ELFs into owned frames and retains one isolated root per service before scheduler admission |
 | Service process admission | `service_runtime` + `process` | binds each service root, coalesced mappings, and validated user launch metadata without entering service RIPs prematurely |
 | User launch transition | `arch` + `scheduler` | selects the task root before restore and provides the fixed-selector `iretq` path for service entry |
-| Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Commands dependencies |
-| Service IPC boundary | `service_ipc` + `service_runtime` | keeps six kernel-owned bounded queues, maps exactly one writable staging page and one read-only capability page per service, and never maps queue frames into service roots |
+| Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Commands → Storage dependencies |
+| Service IPC boundary | `service_ipc` + `service_runtime` | keeps the six existing terminal queues, maps exactly one writable staging page and one read-only capability page per service, and never maps queue frames into service roots; storage requests remain a separately gated kernel endpoint |
 | Storage boundary | Core VirtIO block adapter + `logos-storage` format + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, interrupts, reset, timeouts, and flush; storage owns fixed request lifecycles, superblocks, journal, replay, recovery, durability, object IDs, namespace resolution, and bounded file operations; service requests use fixed ABI messages, process-bound capabilities, private staging pages, and kernel-owned IPC; Core stores no paths or namespace state |
 | Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE` plus one read-only `FramebufferConfig` page at `DISPLAY_CONFIG_BASE`; boot rejects modes below the fixed 80×25/8×16 profile; no other service or kernel drawing path receives it |
 | Keyboard byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring with an observable drop counter and maps it only into Input at `INPUT_KEYBOARD_RING_BASE`; PS/2 decoding remains outside the kernel |
@@ -42,10 +42,10 @@ fixed service boundaries.
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 16 validated mappings per process, and exit/fault/reclaim outcomes |
 | User launch contract | `process::UserLaunch` + `Scheduler::spawn_user` | a running process with a bound root publishes entry RIP, aligned stack top, root, and process generation before its task becomes runnable |
 | Ring-3 CPU migration | `scheduler::claim_next` + `arch::context` | published ring-3 tasks may migrate after a context boundary; the target loads CR3 and its TSS `RSP0` before restore, while live mappings remain immutable |
-| Service image manifest | `service_images::SERVICE_IMAGES` | five fixed ESP paths and bounded ELF admission in dependency order |
-| Retained service images | `service_loader::ServiceImageBundle` | five validated ELF records with page-aligned retained addresses, loaded before `ExitBootServices`, and no filesystem lifetime after UEFI exit |
-| Service ELF packaging | `services/images` + `scripts/build-services.ps1` | five independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
-| Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all five staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
+| Service image manifest | `service_images::SERVICE_IMAGES` | six fixed ESP paths and bounded ELF admission in dependency order |
+| Retained service images | `service_loader::ServiceImageBundle` | six validated ELF records with page-aligned retained addresses, loaded before `ExitBootServices`, and no filesystem lifetime after UEFI exit |
+| Service ELF packaging | `services/images` + `scripts/build-services.ps1` | six independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
+| Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all six staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
 | Service supervisor | `supervisor::LiveSupervisor` + `service_runtime` | live heartbeat polling, graph-wide quiesce, generation-bumped IPC rebuild, bounded process/page-table/frame reclamation, and restart limits |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
@@ -63,7 +63,7 @@ allocators, affinity, priorities, and AVX/XSAVE are not part of this milestone.
 
 The handoff registers one root task. That task owns the first fixed Runtime operation table; Core does
 not inspect, schedule, or orchestrate Runtime state. Runtime operations use the scheduler's sleep and
-wake primitives but retain their own deadlines, terminal states, and slot generations. The five service
+wake primitives but retain their own deadlines, terminal states, and slot generations. The six service
 ELFs are loaded before `ExitBootServices`, receive isolated roots and explicit mappings, and enter
 through the normal scheduler path. QEMU exercises the live service images and supervisor-driven restart.
 The fixed scheduler task stack is 64 KiB with a 256-byte canary so bounded interrupt
@@ -73,16 +73,15 @@ and syscall depth cannot silently overwrite adjacent CPU metadata.
 
 ## Future persistence boundary
 
-The current service graph has no persistence or reboot recovery. Live supervisor restart rebuilds
-volatile state and abandons in-flight work. Future durable state must be introduced through the bounded
-storage boundary in ADR-0041, with explicit ownership, journal, replay, durability, and idempotency
-proofs. Services must not invent ad hoc reboot pickup paths before that boundary exists. The first
-implementation is the host-tested `logos-storage` format crate; it does not yet provide a device
-driver, filesystem namespace, or file API.
+Live supervisor restart rebuilds volatile state and abandons in-flight work. Durable state is introduced
+through the bounded storage boundary in ADR-0041, with explicit ownership, journal, replay, durability,
+and idempotency proofs. The host-tested `logos-storage` and `logos-storage-service` packages provide
+the format, journal, namespace, file API, and IPC adapter. The boot image is admitted independently;
+functional kernel-mediated storage requests remain gated on the next endpoint proof.
 
 ## Deferred next-step improvements
 
 The terminal milestone deliberately leaves two broader improvements for later proofs:
 
 - persistence and reboot recovery, which belong behind the storage/journal boundary above; and
-- a generalized service topology, after the fixed five-service graph has stable lifecycle evidence.
+- a generalized service topology, after the fixed six-service graph has stable lifecycle evidence.
