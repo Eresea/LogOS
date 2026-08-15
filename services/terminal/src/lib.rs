@@ -13,7 +13,8 @@ use logos_abi::{
 
 const MAX_PARAMS: usize = 16;
 const REPLACEMENT_SCALAR: u32 = 0xfffd;
-pub const MAX_SCROLLBACK_LINES: usize = 64;
+/// Service-local storage cap; the ABI maximum is a protocol-wide ceiling.
+pub const TERMINAL_SCROLLBACK_LINES: usize = 64;
 const DEFAULT_FOREGROUND: u32 = 0x00d7_e3f4;
 const DEFAULT_BACKGROUND: u32 = 0x000b_1020;
 const ANSI_COLORS: [u32; 8] = [
@@ -110,7 +111,7 @@ pub struct TerminalState<const CELL_COUNT: usize> {
     utf8_codepoint: u32,
     utf8_remaining: u8,
     utf8_min: u32,
-    scrollback: [Cell; DEFAULT_COLUMNS * MAX_SCROLLBACK_LINES],
+    scrollback: [Cell; DEFAULT_COLUMNS * TERMINAL_SCROLLBACK_LINES],
     scrollback_start: usize,
     scrollback_len: usize,
     view_offset: usize,
@@ -168,7 +169,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             utf8_codepoint: 0,
             utf8_remaining: 0,
             utf8_min: 0,
-            scrollback: [blank_cell(); DEFAULT_COLUMNS * MAX_SCROLLBACK_LINES],
+            scrollback: [blank_cell(); DEFAULT_COLUMNS * TERMINAL_SCROLLBACK_LINES],
             scrollback_start: 0,
             scrollback_len: 0,
             view_offset: 0,
@@ -386,18 +387,18 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     }
 
     fn store_scrollback_line(&mut self, row: usize) {
-        let slot = if self.scrollback_len < MAX_SCROLLBACK_LINES {
-            (self.scrollback_start + self.scrollback_len) % MAX_SCROLLBACK_LINES
+        let slot = if self.scrollback_len < TERMINAL_SCROLLBACK_LINES {
+            (self.scrollback_start + self.scrollback_len) % TERMINAL_SCROLLBACK_LINES
         } else {
             let slot = self.scrollback_start;
-            self.scrollback_start = (self.scrollback_start + 1) % MAX_SCROLLBACK_LINES;
+            self.scrollback_start = (self.scrollback_start + 1) % TERMINAL_SCROLLBACK_LINES;
             slot
         };
         let source = row * DEFAULT_COLUMNS;
         let target = slot * DEFAULT_COLUMNS;
         self.scrollback[target..target + DEFAULT_COLUMNS]
             .copy_from_slice(&self.screen[source..source + DEFAULT_COLUMNS]);
-        self.scrollback_len = self.scrollback_len.saturating_add(1).min(MAX_SCROLLBACK_LINES);
+        self.scrollback_len = self.scrollback_len.saturating_add(1).min(TERMINAL_SCROLLBACK_LINES);
     }
 
     fn show_live_view(&mut self) {
@@ -427,7 +428,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         let top_line = self.scrollback_len.saturating_sub(self.view_offset);
         let line = top_line + row;
         if line < self.scrollback_len {
-            let slot = (self.scrollback_start + line) % MAX_SCROLLBACK_LINES;
+            let slot = (self.scrollback_start + line) % TERMINAL_SCROLLBACK_LINES;
             self.scrollback[slot * DEFAULT_COLUMNS + column]
         } else {
             self.screen[(line - self.scrollback_len) * DEFAULT_COLUMNS + column]
