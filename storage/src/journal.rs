@@ -1,6 +1,7 @@
 use crate::{BLOCK_BYTES, Block, BlockError, BlockIndex, BlockStore};
 
 pub const FORMAT_VERSION: u16 = 1;
+/// Reserved record kind used only for internal transaction commit markers.
 pub const JOURNAL_COMMIT_KIND: u16 = u16::MAX;
 pub const MAX_RECORDS_PER_TRANSACTION: usize = 8;
 
@@ -143,6 +144,9 @@ impl Volume {
     ) -> Result<u64, FormatError> {
         if records.len() > MAX_RECORDS_PER_TRANSACTION {
             return Err(FormatError::TransactionTooLarge);
+        }
+        if records.iter().any(|record| record.kind == JOURNAL_COMMIT_KIND) {
+            return Err(FormatError::InvalidRequest);
         }
 
         let mut required_blocks = records.len() as u64;
@@ -777,5 +781,14 @@ mod tests {
         let mut volume = Volume::format(&mut store).unwrap();
         let records = [JournalRecord { kind: 1, payload: b"x" }; MAX_RECORDS_PER_TRANSACTION + 1];
         assert_eq!(volume.commit(&mut store, &records), Err(FormatError::TransactionTooLarge));
+    }
+
+    #[test]
+    fn commit_marker_kind_is_reserved_for_internal_records() {
+        let mut store = CrashStore::<BLOCKS>::new();
+        let mut volume = Volume::format(&mut store).unwrap();
+        let records = [JournalRecord { kind: JOURNAL_COMMIT_KIND, payload: b"user" }];
+
+        assert_eq!(volume.commit(&mut store, &records), Err(FormatError::InvalidRequest));
     }
 }
