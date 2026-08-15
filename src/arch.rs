@@ -19,6 +19,8 @@ use crate::{
     service_loader::ServiceImageBundle,
 };
 
+mod virtio_device;
+
 const DEBUG_PORT: u16 = 0xe9;
 const APIC_BASE_MSR: u32 = 0x1b;
 const APIC_ID: usize = 0x20;
@@ -399,6 +401,11 @@ pub fn boot() -> Status {
     }
     proof_line(b"LogOS vNext: service address spaces ready");
     initialize_post_uefi(cpu_count);
+    if virtio_device::initialize_storage_device() {
+        proof_line(b"LogOS vNext: VirtIO block ready");
+    } else {
+        debug_line(b"LogOS vNext: VirtIO block unavailable");
+    }
     handoff_to_runtime();
     debug_line(b"LogOS vNext: core ready");
     enter_scheduler(0)

@@ -16,6 +16,7 @@ pub const VIRTIO_BLK_STATUS_OK: u8 = 0;
 pub const VIRTIO_BLK_STATUS_IOERR: u8 = 1;
 pub const VIRTIO_BLK_STATUS_UNSUPP: u8 = 2;
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VirtioBlkHeader {
     pub request_type: u32,
