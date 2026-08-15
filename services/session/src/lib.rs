@@ -278,11 +278,20 @@ impl LineEditor {
             1 => {
                 let candidate = COMMAND_SPECS[matches[0]].name;
                 let suffix = &candidate[prefix.len()..];
-                if self.line_len + suffix.len() <= MAX_LINE_BYTES {
-                    self.line[self.line_len..self.line_len + suffix.len()].copy_from_slice(suffix);
-                    self.line_len += suffix.len();
+                let trailing_space = usize::from(self.line_len + suffix.len() < MAX_LINE_BYTES);
+                let inserted_len = suffix.len() + trailing_space;
+                if self.line_len + inserted_len <= MAX_LINE_BYTES {
+                    let end = self.line_len + suffix.len();
+                    self.line[self.line_len..end].copy_from_slice(suffix);
+                    if trailing_space != 0 {
+                        self.line[end] = b' ';
+                    }
+                    self.line_len += inserted_len;
                     self.cursor = self.line_len;
                     output.extend(suffix);
+                    if trailing_space != 0 {
+                        output.push(b' ');
+                    }
                 }
             }
             _ => {
@@ -552,7 +561,7 @@ mod tests {
         let mut command = [0; MAX_LINE_BYTES];
         let mut output = ShellOutput::new();
         let length = editor.input_for_command(b"he\t\r", &mut command, &mut output).unwrap();
-        assert_eq!(&command[..length], b"help");
+        assert_eq!(&command[..length], b"help ");
 
         let mut editor = LineEditor::new();
         output = ShellOutput::new();
