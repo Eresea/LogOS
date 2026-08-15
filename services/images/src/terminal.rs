@@ -1,5 +1,6 @@
-#![no_std]
-#![no_main]
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", no_main)]
+#![cfg_attr(not(target_os = "none"), allow(dead_code, unused_imports, unused_variables))]
 
 mod common;
 
@@ -112,7 +113,11 @@ pub extern "C" fn _start() -> ! {
     }
 }
 
+#[cfg(target_os = "none")]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     common::idle()
 }
+
+#[cfg(not(target_os = "none"))]
+fn main() {}

@@ -2908,9 +2908,9 @@ mod tests {
         // Initialization remains single-owner before worker publication.
         Arc::get_mut(&mut allocator).unwrap().initialize(&normalized).unwrap();
         let mut workers = [const { None }; 4];
-        for cpu in 0..4 {
+        for (cpu, worker) in workers.iter_mut().enumerate() {
             let allocator = Arc::clone(&allocator);
-            workers[cpu] = Some(thread::spawn(move || {
+            *worker = Some(thread::spawn(move || {
                 let owner = OwnerId::new((cpu + 2) as u16).unwrap();
                 for _ in 0..100 {
                     loop {

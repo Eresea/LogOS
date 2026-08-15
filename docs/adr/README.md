@@ -7,7 +7,7 @@
 | [0003](0003-terminal-service-contracts.md) | Accepted | Bounded terminal service graph, typed pages, and restart-safe endpoint identity |
 | [0004](0004-ring3-proof-boundary.md) | Accepted | One fixed ring-3 proof domain with scheduler-owned fault containment |
 | [0005](0005-process-address-space-ownership.md) | Accepted | Process admission owns one generation-safe address-space identity |
-| [0006](0006-process-capability-authorization.md) | Superseded | Typed capability metadata was removed until an enforcing syscall boundary exists |
+| [0006](0006-process-capability-authorization.md) | Superseded by ADR-0036 | Typed capability metadata was removed until an enforcing syscall boundary exists |
 | [0007](0007-bounded-elf-load-plans.md) | Accepted | ELF admission produces a bounded executable load plan |
 | [0008](0008-proof-process-uses-model.md) | Accepted | The ring-3 proof registers through the process model and mapping contract |
 | [0009](0009-bounded-syscall-dispatch.md) | Accepted | Vector 49 dispatches one validated user syscall payload |
@@ -23,23 +23,23 @@
 | [0019](0019-service-model-ownership.md) | Accepted | Input, Terminal, and Session state machines live in independent no-std service packages |
 | [0020](0020-service-entry-facades.md) | Accepted | Terminal, Session, and Commands expose one-message bounded service façades over their owned state |
 | [0021](0021-user-launch-contract.md) | Accepted | Loaded process launch metadata is published atomically with its scheduler task |
-| [0022](0022-service-image-manifest.md) | Superseded | Five fixed service image paths are validated before loading; capability grants are deferred |
+| [0022](0022-service-image-manifest.md) | Accepted | Five fixed service image paths are validated before loading; capability grants are deferred |
 | [0023](0023-retained-service-images.md) | Accepted | Validated service ELF files become five fixed post-UEFI physical image records |
 | [0024](0024-service-elf-packaging.md) | Accepted | Five no_std service ELF artifacts are built and size/magic checked into the ESP staging layout |
 | [0025](0025-service-image-boot-handoff.md) | Accepted | UEFI loads and retains all five validated service images before ExitBootServices |
 | [0026](0026-elf-page-population.md) | Accepted | Loaded images populate owned frames through a bounded page-local sink |
 | [0027](0027-bounded-page-table-builder.md) | Accepted | Four-level user page tables are built through a bounded architecture memory seam |
 | [0028](0028-service-address-space-bootstrap.md) | Accepted | Five retained service ELFs are populated into owned frames and isolated roots after UEFI exit |
-| [0029](0029-service-process-admission.md) | Superseded | Services receive generation-safe process handles, mappings, and launch records before scheduling |
+| [0029](0029-service-process-admission.md) | Accepted | Services receive generation-safe process handles, mappings, and launch records before scheduling |
 | [0030](0030-user-launch-transition.md) | Accepted | Scheduler CR3 selection and validated ring-3 iret launch are centralized before service scheduling |
 | [0031](0031-service-startup-barrier.md) | Accepted | Five services advance through a fixed dependency-ordered launch barrier before execution |
-| [0032](0032-service-ipc-pages.md) | Superseded | Replaced by ADR-0040 kernel-owned queues and private service IPC pages |
-| [0034](0034-ring3-bsp-affinity.md) | Superseded | Historical BSP-only guard replaced by bounded ring-3 SMP migration in ADR-0039 |
+| [0032](0032-service-ipc-pages.md) | Accepted | Replaced by ADR-0040 kernel-owned queues and private service IPC pages |
 | [0033](0033-ps2-interrupt-boundary.md) | Accepted | Legacy PIC IRQ1 supplies bounded raw PS/2 bytes to Input; decoding remains in the service |
+| [0034](0034-ring3-bsp-affinity.md) | Superseded by ADR-0039 | Historical BSP-only guard replaced by bounded ring-3 SMP migration in ADR-0039 |
 | [0035](0035-live-supervisor-restart.md) | Accepted | Supervisor-owned graph restart quiesces tasks, reclaims address spaces safely, and rejects stale IPC generations |
-| [0036](0036-deferred-capability-metadata.md) | Superseded | Replaced by ADR-0040's enforced process-bound IPC capabilities |
+| [0036](0036-deferred-capability-metadata.md) | Accepted | Replaced by ADR-0040's enforced process-bound IPC capabilities |
 | [0037](0037-bounded-memory-subsystem.md) | Accepted | Layered bounded physical, virtual, async, SMP, heap, pressure, and observability contracts behind stable frame interfaces |
-| [0038](0038-event-driven-blocking-ipc.md) | Superseded | Event masks remain, but transport moved to kernel-owned queues in ADR-0040 |
+| [0038](0038-event-driven-blocking-ipc.md) | Accepted | Event masks remain, but transport moved to kernel-owned queues in ADR-0040 |
 | [0039](0039-ring3-smp-migration.md) | Accepted | Ring-3 tasks migrate across online CPUs with CR3-first handoff and bounded reschedule IPIs |
 | [0040](0040-hostile-peer-ipc.md) | Accepted | Kernel-owned bounded queues enforce process-bound directional capabilities through private staging pages |
 | [0041](0041-storage-boundary.md) | Accepted | Core owns block mechanics while a bounded storage format owns journal, replay, recovery, and durability |
