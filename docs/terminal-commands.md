@@ -37,6 +37,7 @@ rm /archive
 ```
 
 The command line is bounded to 256 bytes and command output to 512 bytes. Pipelines, redirection,
-environment variables, directories, and external programs are not implemented yet. Each mutating
+environment variables, directories, and external programs are not implemented yet. File paths are
+root-relative when written without a leading `/`; there is no current-directory state. Each mutating
 file command commits one bounded Storage transaction; transaction controls are API-only. Unknown
 commands print `command not found`.

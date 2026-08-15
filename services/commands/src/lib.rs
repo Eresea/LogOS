@@ -72,6 +72,23 @@ pub enum StorageCommandError {
     Usage,
 }
 
+/// Resolve shell paths against the fixed root because the shell has no cwd.
+pub fn root_relative_path<'a>(path: &[u8], output: &'a mut [u8]) -> Option<&'a [u8]> {
+    if path.is_empty() {
+        return Some(&output[..0]);
+    }
+    let prefix = usize::from(path.first().copied() != Some(b'/'));
+    let length = prefix.checked_add(path.len())?;
+    if length > output.len() {
+        return None;
+    }
+    if prefix != 0 {
+        output[0] = b'/';
+    }
+    output[prefix..length].copy_from_slice(path);
+    Some(&output[..length])
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommandOutput {
     pub bytes: [u8; MAX_OUTPUT_BYTES],
@@ -308,5 +325,15 @@ mod tests {
         );
         assert_eq!(parse_storage_command(b"write /file").unwrap_err(), StorageCommandError::Usage);
         assert!(parse_storage_command(b"not-storage").unwrap().is_none());
+    }
+
+    #[test]
+    fn shell_paths_are_root_relative_without_a_current_directory() {
+        let mut output = [0; 8];
+        assert_eq!(root_relative_path(b"marker", &mut output), Some(&b"/marker"[..]));
+        assert_eq!(root_relative_path(b"/marker", &mut output), Some(&b"/marker"[..]));
+        assert_eq!(root_relative_path(b"", &mut output), Some(&b""[..]));
+        assert_eq!(root_relative_path(b"toolong", &mut [0; 8]), Some(&b"/toolong"[..]));
+        assert_eq!(root_relative_path(b"toolong", &mut [0; 7]), None);
     }
 }

@@ -200,16 +200,22 @@ impl StorageClient {
         self.cursor = 0;
         self.transaction_id = 0;
         self.last_status = StorageApiStatus::Invalid;
-        if path.len() > self.path.len()
-            || secondary.len() > self.secondary_path.len()
-            || data.len() > self.data.len()
-        {
+        let Some(path_len) =
+            logos_commands::root_relative_path(path, &mut self.path).map(|path| path.len())
+        else {
+            return false;
+        };
+        let Some(secondary_len) =
+            logos_commands::root_relative_path(secondary, &mut self.secondary_path)
+                .map(|path| path.len())
+        else {
+            return false;
+        };
+        if data.len() > self.data.len() {
             return false;
         }
-        self.path[..path.len()].copy_from_slice(path);
-        self.path_len = path.len();
-        self.secondary_path[..secondary.len()].copy_from_slice(secondary);
-        self.secondary_len = secondary.len();
+        self.path_len = path_len;
+        self.secondary_len = secondary_len;
         self.data[..data.len()].copy_from_slice(data);
         self.data_len = data.len();
         self.work = work;
