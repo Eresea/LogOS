@@ -309,12 +309,12 @@ impl VirtioBlockDevice {
         self.queue.descriptors[last] =
             Descriptor { address: status_address, length: 1, flags: VIRTQ_DESC_F_WRITE, next: 0 };
         self.queue.available_ring[slot] = first as u16;
+        self.requests[slot] = Some(chain.request_id);
         fence(Ordering::Release);
         self.queue.available_index = used.wrapping_add(1);
         let notify_offset = unsafe { self.common.read_u16(0x1e)? } as u64;
         let notify_address = self.notify.address + notify_offset * self.notify_multiplier as u64;
         unsafe { write_volatile(notify_address as *mut u16, 0) };
-        self.requests[slot] = Some(chain.request_id);
         Ok(())
     }
 
@@ -326,6 +326,9 @@ impl VirtioBlockDevice {
         let slot = (self.used_index as usize) % QUEUE_SIZE;
         let element = unsafe { read_volatile(&self.queue.used_ring[slot]) };
         self.used_index = self.used_index.wrapping_add(1);
+        if element.id as usize >= QUEUE_SIZE {
+            return Err(DeviceError::InvalidCompletion);
+        }
         let request_id = self
             .requests
             .get_mut(element.id as usize)
@@ -341,6 +344,7 @@ impl VirtioBlockDevice {
 
     pub fn reset_device(&mut self) -> Result<(), DeviceError> {
         self.reset()?;
+        *self.queue = QueueMemory::new();
         self.requests.fill(None);
         self.used_index = 0;
         Ok(())
