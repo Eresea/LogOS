@@ -18,14 +18,21 @@ pub fn validate_request(
         return Err(StorageStatus::Stale);
     }
     if request.request_id == 0
+        || request.flags != 0
         || request.blocks > logos_abi::STORAGE_MAX_BLOCKS_PER_REQUEST
         || request.payload_bytes as usize > logos_abi::IPC_PAGE_BYTES
     {
         return Err(StorageStatus::Invalid);
     }
-    if matches!(request.operation, StorageOperation::Read | StorageOperation::Write)
-        != (request.blocks != 0)
-    {
+    if matches!(request.operation, StorageOperation::Read | StorageOperation::Write) {
+        if request.blocks != 1 || request.payload_bytes != logos_abi::STORAGE_BLOCK_BYTES {
+            return Err(StorageStatus::Invalid);
+        }
+    } else if request.operation == StorageOperation::AppendRecord {
+        if request.blocks != 0 || request.payload_bytes == 0 {
+            return Err(StorageStatus::Invalid);
+        }
+    } else if request.blocks != 0 || request.payload_bytes != 0 {
         return Err(StorageStatus::Invalid);
     }
     Ok(())
@@ -62,5 +69,23 @@ mod tests {
         assert_eq!(response.request_id, 4);
         assert_eq!(response.status, StorageStatus::Unsupported);
         assert_eq!(response.transaction_id, 3);
+    }
+
+    #[test]
+    fn mailbox_rejects_flags_and_wrong_block_payload_shapes() {
+        let mut request = StorageRequest::new(
+            StorageOperation::Read,
+            4,
+            1,
+            0,
+            2,
+            0,
+            1,
+            logos_abi::STORAGE_BLOCK_BYTES,
+            3,
+        )
+        .unwrap();
+        request.flags = 1;
+        assert_eq!(validate_request(request, 0, 1, 2), Err(StorageStatus::Invalid));
     }
 }

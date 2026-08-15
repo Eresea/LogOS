@@ -42,7 +42,8 @@ pub const STORAGE_DATA_BASE: usize = SERVICE_IPC_BASE + 0x11_000;
 pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x12_000;
 pub const MAX_IPC_CAPABILITIES: usize = 4;
 pub const SERVICE_HEARTBEAT_INTERVAL_TICKS: u64 = 100;
-pub const STORAGE_MAX_BLOCKS_PER_REQUEST: u16 = 16;
+pub const STORAGE_BLOCK_BYTES: u16 = 4096;
+pub const STORAGE_MAX_BLOCKS_PER_REQUEST: u16 = 1;
 
 pub const IPC_SYSCALL_SEND: usize = 4;
 pub const IPC_SYSCALL_RECEIVE: usize = 5;
@@ -264,8 +265,15 @@ impl StorageRequest {
         {
             return None;
         }
-        let block_operation = matches!(operation, StorageOperation::Read | StorageOperation::Write);
-        if block_operation != (blocks != 0) {
+        if matches!(operation, StorageOperation::Read | StorageOperation::Write) {
+            if blocks != 1 || payload_bytes != STORAGE_BLOCK_BYTES {
+                return None;
+            }
+        } else if matches!(operation, StorageOperation::AppendRecord) {
+            if blocks != 0 || payload_bytes == 0 {
+                return None;
+            }
+        } else if blocks != 0 || payload_bytes != 0 {
             return None;
         }
         Some(Self {
@@ -1123,8 +1131,9 @@ mod tests {
     #[test]
     fn storage_requests_are_bounded_and_generation_stamped() {
         let request =
-            StorageRequest::new(StorageOperation::Read, 7, 3, 1, 9, 12, 2, 4096, 4).unwrap();
+            StorageRequest::new(StorageOperation::Read, 7, 3, 1, 9, 12, 1, 4096, 4).unwrap();
         assert!(request.is_block_io());
+        assert!(StorageRequest::new(StorageOperation::Read, 7, 3, 1, 9, 12, 2, 4096, 4).is_none());
         assert!(StorageRequest::new(StorageOperation::Read, 7, 3, 1, 9, 12, 0, 0, 4).is_none());
         assert!(
             StorageRequest::new(
