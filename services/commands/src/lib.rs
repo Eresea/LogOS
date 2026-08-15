@@ -15,6 +15,16 @@ pub enum CommandKind {
     False,
     Version,
     Uname,
+    Shutdown,
+    Reboot,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub enum CommandAction {
+    None = 0,
+    Shutdown = logos_abi::POWER_SHUTDOWN,
+    Reboot = logos_abi::POWER_REBOOT,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,7 +33,7 @@ pub struct CommandSpec {
     pub kind: CommandKind,
 }
 
-pub const COMMAND_SPECS: [CommandSpec; 7] = [
+pub const COMMAND_SPECS: [CommandSpec; 9] = [
     CommandSpec { name: b"help", kind: CommandKind::Help },
     CommandSpec { name: b"echo", kind: CommandKind::Echo },
     CommandSpec { name: b"clear", kind: CommandKind::Clear },
@@ -31,6 +41,8 @@ pub const COMMAND_SPECS: [CommandSpec; 7] = [
     CommandSpec { name: b"false", kind: CommandKind::False },
     CommandSpec { name: b"version", kind: CommandKind::Version },
     CommandSpec { name: b"uname", kind: CommandKind::Uname },
+    CommandSpec { name: b"shutdown", kind: CommandKind::Shutdown },
+    CommandSpec { name: b"reboot", kind: CommandKind::Reboot },
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,11 +51,18 @@ pub struct CommandOutput {
     pub len: usize,
     pub status: u8,
     pub clear_screen: bool,
+    pub action: CommandAction,
 }
 
 impl CommandOutput {
     pub const fn new() -> Self {
-        Self { bytes: [0; MAX_OUTPUT_BYTES], len: 0, status: 0, clear_screen: false }
+        Self {
+            bytes: [0; MAX_OUTPUT_BYTES],
+            len: 0,
+            status: 0,
+            clear_screen: false,
+            action: CommandAction::None,
+        }
     }
 
     fn push(&mut self, byte: u8) {
@@ -124,6 +143,8 @@ impl CommandService {
                 CommandKind::False => output.status = 1,
                 CommandKind::Version => output.extend(b"LogOS vNext 0.1.0\r\n"),
                 CommandKind::Uname => output.extend(b"LogOS\r\n"),
+                CommandKind::Shutdown => output.action = CommandAction::Shutdown,
+                CommandKind::Reboot => output.action = CommandAction::Reboot,
             },
             None => {
                 output.status = 127;
@@ -161,7 +182,7 @@ mod tests {
         let mut commands = CommandService::new();
         assert_eq!(
             commands.execute(b"help").as_bytes(),
-            b"help echo clear true false version uname\r\n"
+            b"help echo clear true false version uname shutdown reboot\r\n"
         );
         assert_eq!(commands.execute(b"echo").as_bytes(), b"\r\n");
         assert_eq!(commands.execute(b"echo hi").as_bytes(), b"hi\r\n");
@@ -171,6 +192,8 @@ mod tests {
         assert_eq!(commands.execute(b"version").as_bytes(), b"LogOS vNext 0.1.0\r\n");
         assert_eq!(commands.execute(b" version ").as_bytes(), b"LogOS vNext 0.1.0\r\n");
         assert_eq!(commands.execute(b"uname").as_bytes(), b"LogOS\r\n");
+        assert_eq!(commands.execute(b"shutdown").action, CommandAction::Shutdown);
+        assert_eq!(commands.execute(b"reboot").action, CommandAction::Reboot);
         assert_eq!(commands.execute(b"missing").status, 127);
     }
 

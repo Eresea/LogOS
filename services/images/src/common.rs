@@ -136,6 +136,21 @@ pub fn ipc_receive<T: Copy>(capability_slot: usize, message: &mut T) -> IpcStatu
     status
 }
 
+#[inline(always)]
+#[allow(dead_code)]
+pub fn power(action: usize) -> usize {
+    let mut raw = logos_abi::POWER_SYSCALL;
+    unsafe {
+        asm!(
+            "int 49",
+            inout("rax") raw,
+            in("rdi") action,
+            options(preserves_flags),
+        );
+    }
+    raw
+}
+
 fn endpoint_message_size(endpoint: Option<usize>) -> Option<usize> {
     endpoint.and_then(logos_abi::ipc_message_size)
 }

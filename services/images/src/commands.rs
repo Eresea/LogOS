@@ -97,7 +97,12 @@ pub extern "C" fn _start() -> ! {
             if message.kind == MessageKind::SessionInput {
                 if let Some(bytes) = message.as_bytes() {
                     let result = commands.execute(bytes);
-                    if result.clear_screen {
+                    if result.action != logos_commands::CommandAction::None {
+                        let status = common::power(result.action as usize);
+                        if status != 0 {
+                            pending.stage(b"power action denied\r\n");
+                        }
+                    } else if result.clear_screen {
                         pending.stage(b"\x1b[2J\x1b[H");
                     } else {
                         pending.stage(result.as_bytes());

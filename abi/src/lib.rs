@@ -50,6 +50,9 @@ pub const STORAGE_MAX_BLOCKS_PER_REQUEST: u16 = 1;
 
 pub const IPC_SYSCALL_SEND: usize = 4;
 pub const IPC_SYSCALL_RECEIVE: usize = 5;
+pub const POWER_SYSCALL: usize = 11;
+pub const POWER_SHUTDOWN: usize = 1;
+pub const POWER_REBOOT: usize = 2;
 
 pub const IPC_ENDPOINT_COUNT: usize = 8;
 pub const IPC_READ_EVENT_BASE: usize = 0;

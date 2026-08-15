@@ -16,6 +16,7 @@ use uefi::{
 use crate::{
     MAX_CPUS, SCHEDULER,
     boot_resources::{BootResources, FramebufferInfo, MemoryDescriptor, MemoryMap, PixelFormat},
+    process::ProcessHandle,
     service_loader::ServiceImageBundle,
 };
 
@@ -76,6 +77,8 @@ const KEYBOARD_WRITE_CONFIG: u8 = 0x60;
 const KEYBOARD_INPUT_FULL: u8 = 1 << 1;
 const KEYBOARD_OUTPUT_FULL: u8 = 1;
 const KEYBOARD_DATA_PORT: u16 = 0x60;
+const ACPI_SHUTDOWN_PORT: u16 = 0x604;
+const RESET_CONTROL_PORT: u16 = 0xcf9;
 const TIMER_VECTOR: u8 = 32;
 const KEYBOARD_VECTOR: u8 = 33;
 const SWITCH_VECTOR: u8 = 49;
@@ -1024,6 +1027,44 @@ pub fn fatal(message: &[u8]) -> ! {
     }
 }
 
+pub(crate) fn power_control(process: ProcessHandle, action: usize) -> bool {
+    #[cfg(target_os = "uefi")]
+    {
+        let authorized = unsafe {
+            (&*core::ptr::addr_of!(SERVICE_RUNTIME))
+                .launch(logos_abi::ServiceId::Commands)
+                .is_some_and(|(current, _)| current == process)
+        };
+        if !authorized {
+            return false;
+        }
+        match action {
+            logos_abi::POWER_SHUTDOWN => shutdown_qemu(),
+            logos_abi::POWER_REBOOT => reboot_qemu(),
+            _ => false,
+        }
+    }
+    #[cfg(not(target_os = "uefi"))]
+    {
+        let _ = (process, action);
+        false
+    }
+}
+
+#[cfg(target_os = "uefi")]
+fn shutdown_qemu() -> ! {
+    debug_line(b"LogOS vNext: shutdown requested");
+    unsafe { out_word_port(ACPI_SHUTDOWN_PORT, 0x2000) };
+    fatal(b"LogOS vNext: shutdown returned")
+}
+
+#[cfg(target_os = "uefi")]
+fn reboot_qemu() -> ! {
+    debug_line(b"LogOS vNext: reboot requested");
+    unsafe { out_port(RESET_CONTROL_PORT, 0x06) };
+    fatal(b"LogOS vNext: reboot returned")
+}
+
 #[cfg_attr(not(feature = "qemu-proof"), allow(dead_code))]
 pub(crate) fn proof_line(message: &[u8]) {
     debug_line(message);
@@ -1268,6 +1309,12 @@ unsafe fn io_wait() {
 unsafe fn out_port(port: u16, value: u8) {
     unsafe {
         asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags))
+    };
+}
+
+unsafe fn out_word_port(port: u16, value: u16) {
+    unsafe {
+        asm!("out dx, ax", in("dx") port, in("ax") value, options(nomem, nostack, preserves_flags))
     };
 }
 

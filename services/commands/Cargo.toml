@@ -8,3 +8,6 @@ license = "MIT"
 [lib]
 test = true
 bench = false
+
+[dependencies]
+logos-abi = { path = "../../abi" }
