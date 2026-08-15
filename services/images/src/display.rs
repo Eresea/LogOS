@@ -35,22 +35,26 @@ pub extern "C" fn _start() -> ! {
             display.replace_generation(generation);
         }
         let mut progressed = false;
+        let mut render_pending = false;
         let mut message = RenderMessage::empty(MessageKind::RenderCells);
         while common::ipc_receive(INPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
             progressed = true;
             if display.apply(generation, &message).is_ok() {
-                let format = match config.format {
-                    FramebufferFormat::Bgr8 => logos_display::PixelFormat::Bgr8,
-                    FramebufferFormat::Rgb8 => logos_display::PixelFormat::Rgb8,
-                };
-                let _ = display.render(
-                    framebuffer,
-                    config.width as usize,
-                    config.height as usize,
-                    config.stride as usize * 4,
-                    format,
-                );
+                render_pending = true;
             }
+        }
+        if render_pending {
+            let format = match config.format {
+                FramebufferFormat::Bgr8 => logos_display::PixelFormat::Bgr8,
+                FramebufferFormat::Rgb8 => logos_display::PixelFormat::Rgb8,
+            };
+            let _ = display.render(
+                framebuffer,
+                config.width as usize,
+                config.height as usize,
+                config.stride as usize * 4,
+                format,
+            );
         }
         if !progressed {
             common::wait(
