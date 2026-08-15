@@ -3,7 +3,7 @@
 use core::{
     arch::asm,
     mem::MaybeUninit,
-    ptr::{read_volatile, write_volatile},
+    ptr::{copy_nonoverlapping, read_volatile, write_volatile},
     sync::atomic::{AtomicBool, Ordering, fence},
 };
 
@@ -73,10 +73,16 @@ struct QueueMemory {
     statuses: [u8; QUEUE_SIZE],
 }
 
-// One fixed, page-aligned Core-owned queue arena. The future frame allocator
-// will replace this singleton when multiple block devices are supported.
+#[repr(C, align(4096))]
+struct DmaMemory {
+    queue: QueueMemory,
+    data: [u8; logos_storage::BLOCK_BYTES],
+}
+
+// One fixed, page-aligned Core-owned DMA arena. The future frame allocator will
+// replace this singleton when multiple block devices are supported.
 #[unsafe(link_section = ".dma")]
-static mut QUEUE_MEMORY: QueueMemory = QueueMemory::new();
+static mut DMA_MEMORY: DmaMemory = DmaMemory::new();
 static mut DEVICE: MaybeUninit<VirtioBlockDevice> = MaybeUninit::uninit();
 static DEVICE_READY: AtomicBool = AtomicBool::new(false);
 static DEVICE_BUSY: AtomicBool = AtomicBool::new(false);
@@ -110,6 +116,12 @@ impl QueueMemory {
             headers: [VirtioBlkHeader { request_type: 0, reserved: 0, sector: 0 }; QUEUE_SIZE],
             statuses: [0xff; QUEUE_SIZE],
         }
+    }
+}
+
+impl DmaMemory {
+    const fn new() -> Self {
+        Self { queue: QueueMemory::new(), data: [0; logos_storage::BLOCK_BYTES] }
     }
 }
 
@@ -277,9 +289,9 @@ impl VirtioBlockDevice {
         let isr = region_for(&probe, probe.capabilities.isr)?;
         let device_config = region_for(&probe, probe.capabilities.device)?;
         let queue = unsafe {
-            let queue = &mut *core::ptr::addr_of_mut!(QUEUE_MEMORY);
-            *queue = QueueMemory::new();
-            queue
+            let dma = &mut *core::ptr::addr_of_mut!(DMA_MEMORY);
+            *dma = DmaMemory::new();
+            &mut dma.queue
         };
         let mut device = Self {
             common,
@@ -408,6 +420,12 @@ impl VirtioBlockDevice {
     }
 
     pub fn submit(&mut self, chain: VirtioBlkChain, data_address: u64) -> Result<(), DeviceError> {
+        if chain.data.is_some() && data_address != dma_data_address() {
+            return Err(DeviceError::InvalidCompletion);
+        }
+        if chain.data.is_none() && data_address != 0 {
+            return Err(DeviceError::InvalidCompletion);
+        }
         let available = unsafe { read_volatile(&self.queue.available_index) };
         if available != 0 && available as usize % QUEUE_SIZE == 0 {
             self.reset_device()?;
@@ -541,7 +559,7 @@ impl VirtioBlockDevice {
     fn transfer(
         &mut self,
         request: logos_abi::StorageRequest,
-        data_address: usize,
+        staging_address: usize,
     ) -> Result<(), DeviceError> {
         if request.blocks != 1 {
             return Err(DeviceError::InvalidCompletion);
@@ -559,8 +577,20 @@ impl VirtioBlockDevice {
         self.next_request_generation = self.next_request_generation.wrapping_add(1).max(1);
         let request_id = logos_storage::BlockRequestId::from_parts(0, generation)
             .ok_or(DeviceError::InvalidCompletion)?;
-        let buffer = logos_storage::BufferToken::new(data_address as u64)
+        if staging_address == 0 || staging_address % logos_storage::BLOCK_BYTES != 0 {
+            return Err(DeviceError::InvalidCompletion);
+        }
+        let buffer = logos_storage::BufferToken::new(dma_data_address())
             .ok_or(DeviceError::InvalidCompletion)?;
+        if request.operation == logos_abi::StorageOperation::Write {
+            unsafe {
+                copy_nonoverlapping(
+                    staging_address as *const u8,
+                    core::ptr::addr_of_mut!(DMA_MEMORY.data).cast::<u8>(),
+                    logos_storage::BLOCK_BYTES,
+                );
+            }
+        }
         self.submit(
             VirtioBlkChain {
                 request_id,
@@ -572,23 +602,33 @@ impl VirtioBlockDevice {
                 }),
                 blocks: 1,
             },
-            data_address as u64,
+            dma_data_address(),
         )?;
         for _ in 0..1_000_000 {
             if let Some(completion) = self.take_completion()? {
                 if completion.request_id != request_id {
                     return Err(DeviceError::StaleCompletion);
                 }
-                return match completion.status {
+                let result = match completion.status {
                     0 => {
                         #[cfg(feature = "storage-proof")]
-                        self.record_transfer_success(request, data_address);
+                        self.record_transfer_success(request, staging_address);
                         Ok(())
                     }
                     1 => Err(DeviceError::Io),
                     2 => Err(DeviceError::Unsupported),
                     _ => Err(DeviceError::InvalidCompletion),
                 };
+                if result.is_ok() && request.operation == logos_abi::StorageOperation::Read {
+                    unsafe {
+                        copy_nonoverlapping(
+                            core::ptr::addr_of!(DMA_MEMORY.data).cast::<u8>(),
+                            staging_address as *mut u8,
+                            logos_storage::BLOCK_BYTES,
+                        );
+                    }
+                }
+                return result;
             }
             core::hint::spin_loop();
         }
@@ -671,6 +711,10 @@ impl VirtioBlockDevice {
             super::proof_line(b"LogOS vNext: storage recovery PASS");
         }
     }
+}
+
+fn dma_data_address() -> u64 {
+    unsafe { core::ptr::addr_of!(DMA_MEMORY.data) as u64 }
 }
 
 fn region_for(
