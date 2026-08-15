@@ -36,6 +36,10 @@ pub(crate) fn transfer_storage_block(
     virtio_device::transfer_storage_block(request, data_address).map_err(|_| ())
 }
 
+pub(crate) fn handle_storage_interrupt() {
+    virtio_device::handle_storage_interrupt();
+}
+
 const DEBUG_PORT: u16 = 0xe9;
 const APIC_BASE_MSR: u32 = 0x1b;
 const APIC_ID: usize = 0x20;
@@ -63,6 +67,7 @@ const TIMER_VECTOR: u8 = 32;
 const KEYBOARD_VECTOR: u8 = 33;
 const SWITCH_VECTOR: u8 = 49;
 const RESCHEDULE_VECTOR: u8 = 50;
+pub(crate) const STORAGE_VECTOR: u8 = 0x52;
 const ACTION_YIELD: u64 = 1;
 const ACTION_BLOCK: u64 = 2;
 const ACTION_COMPLETE: u64 = 3;
@@ -1081,6 +1086,8 @@ fn install_idt(cpu: usize) {
         );
         idt[KEYBOARD_VECTOR as usize] =
             IdtEntry::new(keyboard_interrupt as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
+        idt[STORAGE_VECTOR as usize] =
+            IdtEntry::new(storage_interrupt as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
         idt[SWITCH_VECTOR as usize] = IdtEntry::new(
             context_switch_interrupt as *const () as usize,
             KERNEL_CODE_SELECTOR,
@@ -1322,6 +1329,7 @@ unsafe extern "C" {
     fn default_interrupt();
     fn context_timer_interrupt();
     fn keyboard_interrupt();
+    fn storage_interrupt();
     fn context_switch_interrupt();
     fn context_reschedule_interrupt();
     fn user_fault_no_error();

@@ -24,14 +24,19 @@ const COMMON_DEVICE_FEATURE_SELECT: usize = 0x00;
 const COMMON_DEVICE_FEATURE: usize = 0x04;
 const COMMON_DRIVER_FEATURE_SELECT: usize = 0x08;
 const COMMON_DRIVER_FEATURE: usize = 0x0c;
+const COMMON_MSIX_CONFIG: usize = 0x10;
 const COMMON_DEVICE_STATUS: usize = 0x14;
 const COMMON_QUEUE_SELECT: usize = 0x16;
 const COMMON_QUEUE_SIZE: usize = 0x18;
+const COMMON_QUEUE_MSIX_VECTOR: usize = 0x1a;
 const COMMON_QUEUE_ENABLE: usize = 0x1c;
 const COMMON_QUEUE_DESC: usize = 0x20;
 const COMMON_QUEUE_DRIVER: usize = 0x28;
 const COMMON_QUEUE_DEVICE: usize = 0x30;
 const ISR_CAP_OFFSET: usize = 0;
+const PCI_CAP_MSIX: u8 = 0x11;
+const MSIX_VECTOR_INDEX: u16 = 0;
+const MSIX_TABLE_ENTRY_BYTES: u32 = 16;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -73,6 +78,7 @@ static mut DEVICE: MaybeUninit<VirtioBlockDevice> = MaybeUninit::uninit();
 static DEVICE_READY: AtomicBool = AtomicBool::new(false);
 static STORAGE_WRITE_COMPLETE: AtomicBool = AtomicBool::new(false);
 static STORAGE_VALID_MEDIA: AtomicBool = AtomicBool::new(false);
+static STORAGE_INTERRUPT_COMPLETION: AtomicBool = AtomicBool::new(false);
 static STORAGE_PROOF_STATE: AtomicU8 = AtomicU8::new(0);
 
 const SUPERBLOCK_MAGIC: &[u8; 8] = b"LOGOSFS\0";
@@ -192,6 +198,11 @@ pub struct VirtioBlockDevice {
     used_index: u16,
     next_request_generation: u64,
     negotiated_features: u64,
+    pci_address: logos_storage::PciAddress,
+    bars: [u64; 6],
+    msix: Option<MsixCapability>,
+    interrupt_completion: Option<DeviceCompletion>,
+    interrupt_error: Option<DeviceError>,
 }
 
 pub(crate) fn initialize_storage_device() -> bool {
@@ -233,6 +244,15 @@ pub(crate) fn transfer_storage_block(
     }
 }
 
+pub(crate) fn handle_storage_interrupt() {
+    if !DEVICE_READY.load(Ordering::Acquire) {
+        return;
+    }
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(DEVICE).cast::<VirtioBlockDevice>()).handle_interrupt();
+    }
+}
+
 impl VirtioBlockDevice {
     pub fn initialize(writable: bool) -> Result<Self, DeviceError> {
         let probe = PciConfig::find().ok_or(DeviceError::NotFound)?;
@@ -256,6 +276,11 @@ impl VirtioBlockDevice {
             used_index: 0,
             next_request_generation: 1,
             negotiated_features: 0,
+            pci_address: probe.address,
+            bars: probe.bars,
+            msix: probe.msix,
+            interrupt_completion: None,
+            interrupt_error: None,
         };
         device.reset()?;
         unsafe { device.common.write_u8(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE)? };
@@ -278,6 +303,7 @@ impl VirtioBlockDevice {
             return Err(DeviceError::DeviceRejectedFeatures);
         }
         device.configure_queue()?;
+        device.configure_interrupts()?;
         unsafe {
             device.common.write_u8(
                 COMMON_DEVICE_STATUS,
@@ -328,8 +354,41 @@ impl VirtioBlockDevice {
             self.common.write_u64(COMMON_QUEUE_DESC, descriptors)?;
             self.common.write_u64(COMMON_QUEUE_DRIVER, driver)?;
             self.common.write_u64(COMMON_QUEUE_DEVICE, device)?;
+            self.common.write_u16(
+                COMMON_QUEUE_MSIX_VECTOR,
+                if self.msix.is_some() { MSIX_VECTOR_INDEX } else { u16::MAX },
+            )?;
             self.common.write_u16(COMMON_QUEUE_ENABLE, 1)
         }
+    }
+
+    fn configure_interrupts(&mut self) -> Result<(), DeviceError> {
+        let Some(msix) = self.msix else {
+            return Ok(());
+        };
+        let table_bar = *self.bars.get(msix.table_bar as usize).ok_or(DeviceError::MissingBar)?;
+        let table_address =
+            table_bar.checked_add(u64::from(msix.table_offset)).ok_or(DeviceError::InvalidBar)?;
+        let table = MmioRegion::new(table_address, MSIX_TABLE_ENTRY_BYTES)?;
+        let apic_id = super::APIC_IDS[0].load(Ordering::Acquire);
+        let message_address = 0xfee0_0000u64 | (u64::from(apic_id) << 12);
+        unsafe {
+            table.write_u32(12, 1)?;
+            table.write_u32(0, message_address as u32)?;
+            table.write_u32(4, (message_address >> 32) as u32)?;
+            table.write_u32(8, u32::from(super::STORAGE_VECTOR))?;
+            self.common.write_u16(COMMON_MSIX_CONFIG, MSIX_VECTOR_INDEX)?;
+            self.set_msix_enabled(msix.cap_offset)?;
+            table.write_u32(12, 0)?;
+        }
+        Ok(())
+    }
+
+    unsafe fn set_msix_enabled(&self, capability: u8) -> Result<(), DeviceError> {
+        let control = unsafe { config_read_u16(self.pci_address, capability.wrapping_add(2)) };
+        let enabled = (control | (1 << 15)) & !(1 << 14);
+        unsafe { config_write_u16(self.pci_address, capability.wrapping_add(2), enabled) };
+        Ok(())
     }
 
     pub fn submit(&mut self, chain: VirtioBlkChain, data_address: u64) -> Result<(), DeviceError> {
@@ -401,6 +460,31 @@ impl VirtioBlockDevice {
         Ok(Some(DeviceCompletion { request_id, status, bytes_written: element.length }))
     }
 
+    fn take_completion(&mut self) -> Result<Option<DeviceCompletion>, DeviceError> {
+        if let Some(error) = self.interrupt_error.take() {
+            return Err(error);
+        }
+        if self.interrupt_completion.is_some() {
+            return Ok(self.interrupt_completion.take());
+        }
+        self.poll_completion()
+    }
+
+    fn handle_interrupt(&mut self) {
+        let Ok(status) = self.interrupt_status() else {
+            self.interrupt_error = Some(DeviceError::Io);
+            return;
+        };
+        if status & 1 == 0 {
+            return;
+        }
+        STORAGE_INTERRUPT_COMPLETION.store(true, Ordering::Release);
+        match self.poll_completion() {
+            Ok(completion) => self.interrupt_completion = completion,
+            Err(error) => self.interrupt_error = Some(error),
+        }
+    }
+
     fn flush(&mut self) -> Result<(), DeviceError> {
         let generation = self.next_request_generation;
         self.next_request_generation = self.next_request_generation.wrapping_add(1).max(1);
@@ -416,7 +500,7 @@ impl VirtioBlockDevice {
             0,
         )?;
         for _ in 0..1_000_000 {
-            if let Some(completion) = self.poll_completion()? {
+            if let Some(completion) = self.take_completion()? {
                 if completion.request_id != request_id {
                     return Err(DeviceError::StaleCompletion);
                 }
@@ -473,7 +557,7 @@ impl VirtioBlockDevice {
             data_address as u64,
         )?;
         for _ in 0..1_000_000 {
-            if let Some(completion) = self.poll_completion()? {
+            if let Some(completion) = self.take_completion()? {
                 if completion.request_id != request_id {
                     return Err(DeviceError::StaleCompletion);
                 }
@@ -502,6 +586,8 @@ impl VirtioBlockDevice {
         *self.queue = QueueMemory::new();
         self.requests.fill(None);
         self.used_index = 0;
+        self.interrupt_completion = None;
+        self.interrupt_error = None;
         unsafe {
             self.common.write_u8(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE)?;
             self.common.write_u8(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER)?;
@@ -517,6 +603,9 @@ impl VirtioBlockDevice {
             }
         }
         self.configure_queue()?;
+        if self.msix.is_some() {
+            unsafe { self.common.write_u16(COMMON_MSIX_CONFIG, MSIX_VECTOR_INDEX)? };
+        }
         unsafe {
             self.common.write_u8(
                 COMMON_DEVICE_STATUS,
@@ -546,12 +635,14 @@ impl VirtioBlockDevice {
 
     fn record_flush_success(&self) {
         if STORAGE_WRITE_COMPLETE.swap(false, Ordering::AcqRel)
+            && STORAGE_INTERRUPT_COMPLETION.swap(false, Ordering::AcqRel)
             && STORAGE_PROOF_STATE
                 .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
             super::proof_line(b"LogOS vNext: storage proof PASS");
         } else if STORAGE_VALID_MEDIA.load(Ordering::Acquire)
+            && STORAGE_INTERRUPT_COMPLETION.swap(false, Ordering::AcqRel)
             && STORAGE_PROOF_STATE
                 .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
@@ -590,8 +681,10 @@ impl PciConfig {
                     }
                     if let Ok(parsed) = VirtioPciDevice::from_config(address, &config) {
                         return Some(PciProbe {
+                            address,
                             capabilities: parsed.capabilities,
                             bars: Self::bars(&config),
+                            msix: Self::msix(&config),
                         });
                     }
                 }
@@ -625,11 +718,54 @@ impl PciConfig {
         }
         bars
     }
+
+    fn msix(config: &[u8; logos_storage::PCI_CONFIG_BYTES]) -> Option<MsixCapability> {
+        let mut offset = config[0x34];
+        let mut seen = [false; 256];
+        while offset >= 0x40 && usize::from(offset) + 2 <= config.len() && !seen[offset as usize] {
+            seen[offset as usize] = true;
+            let id = config[offset as usize];
+            let next = config[offset as usize + 1];
+            if id == PCI_CAP_MSIX && usize::from(offset) + 12 <= config.len() {
+                let control =
+                    u16::from_le_bytes([config[offset as usize + 2], config[offset as usize + 3]]);
+                let table = u32::from_le_bytes([
+                    config[offset as usize + 4],
+                    config[offset as usize + 5],
+                    config[offset as usize + 6],
+                    config[offset as usize + 7],
+                ]);
+                let table_entries = (control & 0x07ff).saturating_add(1);
+                let table_bar = (table & 0x7) as u8;
+                if table_bar < 6 && table_entries > MSIX_VECTOR_INDEX {
+                    return Some(MsixCapability {
+                        cap_offset: offset,
+                        table_bar,
+                        table_offset: table & !0x7,
+                    });
+                }
+            }
+            if next == 0 {
+                break;
+            }
+            offset = next;
+        }
+        None
+    }
 }
 
 struct PciProbe {
+    address: logos_storage::PciAddress,
     capabilities: logos_storage::VirtioPciCapabilities,
     bars: [u64; 6],
+    msix: Option<MsixCapability>,
+}
+
+#[derive(Clone, Copy)]
+struct MsixCapability {
+    cap_offset: u8,
+    table_bar: u8,
+    table_offset: u32,
 }
 
 unsafe fn config_read(address: logos_storage::PciAddress, offset: u8) -> u32 {
@@ -641,6 +777,33 @@ unsafe fn config_read(address: logos_storage::PciAddress, offset: u8) -> u32 {
     unsafe {
         outl(PCI_CONFIG_ADDRESS, value);
         inl(PCI_CONFIG_DATA)
+    }
+}
+
+unsafe fn config_read_u16(address: logos_storage::PciAddress, offset: u8) -> u16 {
+    let value = unsafe { config_read(address, offset & 0xfc) };
+    let shift = u32::from(offset & 2) * 8;
+    ((value >> shift) & 0xffff) as u16
+}
+
+unsafe fn config_write_u16(address: logos_storage::PciAddress, offset: u8, value: u16) {
+    let aligned = offset & 0xfc;
+    let current = unsafe { config_read(address, aligned) };
+    let shift = u32::from(offset & 2) * 8;
+    let mask = 0xffffu32 << shift;
+    let updated = (current & !mask) | (u32::from(value) << shift);
+    unsafe { config_write(address, aligned, updated) };
+}
+
+unsafe fn config_write(address: logos_storage::PciAddress, offset: u8, value: u32) {
+    let address_value = 0x8000_0000u32
+        | (u32::from(address.bus()) << 16)
+        | (u32::from(address.device()) << 11)
+        | (u32::from(address.function()) << 8)
+        | u32::from(offset & 0xfc);
+    unsafe {
+        outl(PCI_CONFIG_ADDRESS, address_value);
+        outl(PCI_CONFIG_DATA, value);
     }
 }
 

@@ -26,5 +26,8 @@ requests, and timeout state are fixed at compile time.
 - Device reset invalidates all outstanding request generations.
 - Completion handling is interrupt-driven on hardware and deterministic in
   host tests.
+- The hardware path programs one Core-owned MSI-X table entry and routes its
+  queue vector to the fixed storage interrupt gate; bounded polling remains a
+  fallback for test environments.
 - Multiqueue, discard, write-zeroes, secure erase, zoned I/O, and arbitrary
   user-page DMA remain deferred.
