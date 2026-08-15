@@ -43,7 +43,7 @@ $baseArgs = @(
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
     '-drive', "format=raw,file=fat:rw:$espPath",
     '-drive', "if=none,id=storage-disk,format=raw,file=$disk",
-    '-device', 'virtio-blk-pci,drive=storage-disk',
+    '-device', 'virtio-blk-pci,drive=storage-disk,disable-legacy=on',
     '-display', 'none', '-no-reboot',
     '-debugcon', "file:$log", '-global', 'isa-debugcon.iobase=0xe9'
 )
@@ -54,7 +54,13 @@ function Invoke-StorageBoot {
     Remove-Item $log -Force -ErrorAction SilentlyContinue
     $psi = [Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $qemuPath
-    foreach ($argument in $baseArgs) { [void]$psi.ArgumentList.Add($argument) }
+    if ($psi.PSObject.Properties.Name -contains 'ArgumentList') {
+        foreach ($argument in $baseArgs) { [void]$psi.ArgumentList.Add($argument) }
+    } else {
+        $psi.Arguments = (($baseArgs | ForEach-Object {
+            '"' + $_.Replace('"', '\"') + '"'
+        }) -join ' ')
+    }
     $psi.UseShellExecute = $false
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $psi

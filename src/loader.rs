@@ -90,9 +90,17 @@ impl LoadedImage {
     }
 
     pub fn load(plan: ElfLoadPlan, pool: &mut FramePool) -> Result<Self, LoadError> {
+        Self::load_with_stack_pages(plan, pool, crate::process::USER_STACK_PAGES)
+    }
+
+    pub fn load_with_stack_pages(
+        plan: ElfLoadPlan,
+        pool: &mut FramePool,
+        stack_pages: usize,
+    ) -> Result<Self, LoadError> {
         let mut image = Self {
             entry: plan.entry(),
-            stack_top: USER_STACK_BASE + crate::process::USER_STACK_PAGES * PAGE_SIZE,
+            stack_top: USER_STACK_BASE + stack_pages * PAGE_SIZE,
             pages: [None; MAX_LOAD_PAGES],
             count: 0,
         };
@@ -124,7 +132,7 @@ impl LoadedImage {
             }
         }
 
-        for offset in 0..crate::process::USER_STACK_PAGES {
+        for offset in 0..stack_pages {
             image.push_page(pool, USER_STACK_BASE + offset * PAGE_SIZE, MappingFlags::DATA)?;
         }
         Ok(image)

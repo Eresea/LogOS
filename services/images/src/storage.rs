@@ -101,16 +101,7 @@ fn stop_on_storage_error<T>(_error: T) -> ! {
     common::idle()
 }
 
-/// The storage image owns the durable format and namespace. It discovers the
-/// whole raw volume, reopens valid media, or formats only blank media.
-#[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
-    let Some(capability) = common::capability(REQUEST_CAPABILITY) else {
-        common::idle();
-    };
-    let Some(blocks) = discover(capability) else {
-        common::idle();
-    };
+fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
     let Some(store) = new_store(capability, blocks) else {
         common::idle();
     };
@@ -139,6 +130,19 @@ pub extern "C" fn _start() -> ! {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
         common::wait(0, logos_abi::ServiceId::Storage);
     }
+}
+
+/// The storage image owns the durable format and namespace. It discovers the
+/// whole raw volume, reopens valid media, or formats only blank media.
+#[unsafe(no_mangle)]
+pub extern "C" fn _start() -> ! {
+    let Some(capability) = common::capability(REQUEST_CAPABILITY) else {
+        common::idle();
+    };
+    let Some(blocks) = discover(capability) else {
+        common::idle();
+    };
+    run_filesystem(capability, blocks)
 }
 
 #[cfg(target_os = "none")]

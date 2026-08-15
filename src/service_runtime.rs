@@ -151,8 +151,14 @@ impl ServiceRuntime {
             let service = spec.service();
             let image = unsafe { bundle.image(service) }.ok_or(ServiceRuntimeError::Image)?;
             let plan = spec.validate_image(image).map_err(|_| ServiceRuntimeError::Image)?;
+            let stack_pages = if service == ServiceId::Storage {
+                crate::process::STORAGE_STACK_PAGES
+            } else {
+                crate::process::USER_STACK_PAGES
+            };
             let mut loaded =
-                LoadedImage::load(plan, &mut self.frame_pool).map_err(ServiceRuntimeError::Load)?;
+                LoadedImage::load_with_stack_pages(plan, &mut self.frame_pool, stack_pages)
+                    .map_err(ServiceRuntimeError::Load)?;
             let mut memory = IdentityPageTableMemory;
             if let Err(error) = loaded.populate(plan, image, &mut memory) {
                 loaded.reclaim(&mut self.frame_pool);

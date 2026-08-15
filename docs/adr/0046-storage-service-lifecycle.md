@@ -13,7 +13,8 @@ heartbeats and exercises the kernel-mediated storage request endpoint.
 The storage format, journal, namespace, and IPC adapter remain owned by the
 `logos-storage-service` package. The image does not receive PCI, MMIO,
 interrupt, queue, or DMA access, and no path or namespace state is added to
-Core.
+Core. Its fixed user stack is larger than the general service stack so bounded
+journal replay scratch remains outside Core and does not require an allocator.
 
 ## Consequences
 
