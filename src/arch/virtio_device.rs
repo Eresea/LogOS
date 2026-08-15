@@ -137,6 +137,7 @@ pub enum DeviceError {
     QueueFull,
     OutOfBounds,
     ReadOnly,
+    GenerationExhausted,
     Busy,
     StaleCompletion,
     InvalidCompletion,
@@ -344,7 +345,14 @@ impl VirtioBlockDevice {
     }
 
     fn reset(&mut self) -> Result<(), DeviceError> {
-        unsafe { self.common.write_u8(COMMON_DEVICE_STATUS, 0) }
+        unsafe { self.common.write_u8(COMMON_DEVICE_STATUS, 0)? };
+        for _ in 0..1024 {
+            if unsafe { self.common.read_u8(COMMON_DEVICE_STATUS)? } == 0 {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+        Err(DeviceError::Timeout)
     }
 
     fn device_features(&self) -> Result<u64, DeviceError> {
@@ -429,11 +437,7 @@ impl VirtioBlockDevice {
             return Err(DeviceError::InvalidCompletion);
         }
         let available = unsafe { read_volatile(&self.queue.available_index) };
-        if available != 0 && available as usize % QUEUE_SIZE == 0 {
-            self.reset_device()?;
-        }
-        let used = unsafe { read_volatile(&self.queue.available_index) };
-        let slot = (used as usize) % QUEUE_SIZE;
+        let slot = (available as usize) % QUEUE_SIZE;
         if self.requests[slot].is_some() {
             return Err(DeviceError::QueueFull);
         }
@@ -465,7 +469,7 @@ impl VirtioBlockDevice {
         self.queue.available_ring[slot] = first as u16;
         self.requests[slot] = Some(chain.request_id);
         fence(Ordering::Release);
-        self.queue.available_index = used.wrapping_add(1);
+        self.queue.available_index = available.wrapping_add(1);
         let notify_offset = unsafe { self.common.read_u16(0x1e)? } as u64;
         let notify_address = self.notify.address + notify_offset * self.notify_multiplier as u64;
         unsafe { write_volatile(notify_address as *mut u16, 0) };
@@ -476,6 +480,9 @@ impl VirtioBlockDevice {
         let used = unsafe { read_volatile(&self.queue.used_index) };
         if used == self.used_index {
             return Ok(None);
+        }
+        if used.wrapping_sub(self.used_index) as usize > QUEUE_SIZE {
+            return Err(DeviceError::InvalidCompletion);
         }
         let slot = (self.used_index as usize) % QUEUE_SIZE;
         let element = unsafe { read_volatile(&self.queue.used_ring[slot]) };
@@ -523,10 +530,7 @@ impl VirtioBlockDevice {
     }
 
     fn flush(&mut self) -> Result<(), DeviceError> {
-        let generation = self.next_request_generation;
-        self.next_request_generation = self.next_request_generation.wrapping_add(1).max(1);
-        let request_id = logos_storage::BlockRequestId::from_parts(0, generation)
-            .ok_or(DeviceError::InvalidCompletion)?;
+        let request_id = self.next_request_id()?;
         self.submit(
             VirtioBlkChain {
                 request_id,
@@ -578,10 +582,7 @@ impl VirtioBlockDevice {
             .start_block
             .checked_mul(logos_storage::SECTORS_PER_LOGOS_BLOCK)
             .ok_or(DeviceError::InvalidCompletion)?;
-        let generation = self.next_request_generation;
-        self.next_request_generation = self.next_request_generation.wrapping_add(1).max(1);
-        let request_id = logos_storage::BlockRequestId::from_parts(0, generation)
-            .ok_or(DeviceError::InvalidCompletion)?;
+        let request_id = self.next_request_id()?;
         if staging_address == 0 || staging_address % logos_storage::BLOCK_BYTES != 0 {
             return Err(DeviceError::InvalidCompletion);
         }
@@ -643,6 +644,13 @@ impl VirtioBlockDevice {
 
     pub fn interrupt_status(&self) -> Result<u8, DeviceError> {
         unsafe { self.isr.read_u8(ISR_CAP_OFFSET) }
+    }
+
+    fn next_request_id(&mut self) -> Result<BlockRequestId, DeviceError> {
+        let generation = self.next_request_generation;
+        self.next_request_generation =
+            generation.checked_add(1).ok_or(DeviceError::GenerationExhausted)?;
+        BlockRequestId::from_parts(0, generation).ok_or(DeviceError::InvalidCompletion)
     }
 
     pub fn reset_device(&mut self) -> Result<(), DeviceError> {
