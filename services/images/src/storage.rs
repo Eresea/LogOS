@@ -64,8 +64,8 @@ fn new_store(capability: IpcCapability, blocks: u64) -> Option<IpcBlockStore<Sto
         StorageTransport::new(),
         capability,
         REQUEST_CAPABILITY as u16,
-        1,
-        1,
+        capability.generation,
+        capability.service_epoch,
         blocks,
     )
     .ok()
@@ -75,9 +75,9 @@ fn discover(capability: IpcCapability) -> Option<u64> {
     let request = StorageRequest::new(
         StorageOperation::Reopen,
         1,
-        1,
+        capability.generation,
         REQUEST_CAPABILITY as u16,
-        1,
+        capability.service_epoch,
         0,
         0,
         0,
@@ -98,7 +98,11 @@ fn discover(capability: IpcCapability) -> Option<u64> {
 }
 
 fn stop_on_storage_error<T>(_error: T) -> ! {
-    common::idle()
+    let mut heartbeat_ticks = 0u16;
+    loop {
+        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
+        common::wait(0, logos_abi::ServiceId::Storage);
+    }
 }
 
 fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
@@ -137,10 +141,10 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     let Some(capability) = common::capability(REQUEST_CAPABILITY) else {
-        common::idle();
+        stop_on_storage_error(())
     };
     let Some(blocks) = discover(capability) else {
-        common::idle();
+        stop_on_storage_error(())
     };
     run_filesystem(capability, blocks)
 }
