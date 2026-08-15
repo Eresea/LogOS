@@ -189,7 +189,7 @@ impl Volume {
     }
 
     pub fn recover<B: BlockStore, S: ReplaySink>(
-        &self,
+        &mut self,
         store: &mut B,
         sink: &mut S,
     ) -> Result<RecoverySummary, FormatError> {
@@ -199,8 +199,10 @@ impl Volume {
         let mut committed_transactions = 0u64;
         let mut replayed_records = 0u64;
         let mut last_transaction = 0u64;
+        let previous_head = self.info.journal_head;
+        let mut committed_head = self.info.journal_tail;
 
-        for index in self.info.journal_tail..self.info.journal_head {
+        for index in self.info.journal_tail..self.info.journal_end {
             let mut block = Block::zero();
             store.read_block(BlockIndex::new(index), &mut block)?;
             let record = match decode_record(&block) {
@@ -247,6 +249,7 @@ impl Volume {
                 }
                 committed_transactions += 1;
                 last_transaction = record.transaction_id;
+                committed_head = index + 1;
                 pending_len = 0;
                 pending_transaction = 0;
                 continue;
@@ -269,8 +272,24 @@ impl Volume {
             pending_len += 1;
         }
 
-        if self.info.root_transaction_id != 0 && last_transaction != self.info.root_transaction_id {
+        if last_transaction < self.info.root_transaction_id {
             return Err(FormatError::Corrupt);
+        }
+
+        if committed_head != previous_head || last_transaction != self.info.root_transaction_id {
+            let generation =
+                self.info.generation.checked_add(1).ok_or(FormatError::GenerationExhausted)?;
+            let next_info = VolumeInfo {
+                generation,
+                journal_head: committed_head,
+                root_transaction_id: last_transaction,
+                ..self.info
+            };
+            let next_slot = if self.active_superblock == 0 { SUPERBLOCK_B } else { SUPERBLOCK_A };
+            write_superblock(store, next_slot, next_info)?;
+            store.flush()?;
+            self.info = next_info;
+            self.active_superblock ^= 1;
         }
 
         Ok(RecoverySummary { committed_transactions, replayed_records })
@@ -626,7 +645,7 @@ mod tests {
         let records = [JournalRecord { kind: 7, payload: b"hello" }];
         let transaction_id = volume.commit(&mut store, &records).unwrap();
 
-        let reopened = Volume::open(&mut store).unwrap();
+        let mut reopened = Volume::open(&mut store).unwrap();
         let mut sink = Sink::new();
         let summary = reopened.recover(&mut store, &mut sink).unwrap();
         assert_eq!(transaction_id, 1);
@@ -645,7 +664,7 @@ mod tests {
         assert_eq!(volume.commit(&mut store, &records), Err(FormatError::Block(BlockError::Io)));
         store.power_loss();
 
-        let reopened = Volume::open(&mut store).unwrap();
+        let mut reopened = Volume::open(&mut store).unwrap();
         let mut sink = Sink::new();
         let summary = reopened.recover(&mut store, &mut sink).unwrap();
         assert_eq!(summary, RecoverySummary { committed_transactions: 0, replayed_records: 0 });
@@ -661,7 +680,7 @@ mod tests {
         write_superblock(&mut store, SUPERBLOCK_A, tampered).unwrap();
         store.flush().unwrap();
 
-        let reopened = Volume::open(&mut store).unwrap();
+        let mut reopened = Volume::open(&mut store).unwrap();
         let mut sink = Sink::new();
         assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 0);
     }
@@ -680,7 +699,7 @@ mod tests {
         write_superblock(&mut store, SUPERBLOCK_A, info).unwrap();
         store.flush().unwrap();
 
-        let reopened = Volume::open(&mut store).unwrap();
+        let mut reopened = Volume::open(&mut store).unwrap();
         let mut sink = Sink::new();
         assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 0);
     }
@@ -701,7 +720,7 @@ mod tests {
         write_superblock(&mut store, SUPERBLOCK_A, info).unwrap();
         store.flush().unwrap();
 
-        let reopened = Volume::open(&mut store).unwrap();
+        let mut reopened = Volume::open(&mut store).unwrap();
         let mut sink = Sink::new();
         assert_eq!(reopened.recover(&mut store, &mut sink), Err(FormatError::Corrupt));
     }
@@ -713,9 +732,33 @@ mod tests {
         volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"bad" }]).unwrap();
         store.corrupt(2, RECORD_CHECKSUM_OFFSET);
 
-        let reopened = Volume::open(&mut store).unwrap();
+        let mut reopened = Volume::open(&mut store).unwrap();
         let mut sink = Sink::new();
         assert_eq!(reopened.recover(&mut store, &mut sink), Err(FormatError::Corrupt));
+    }
+
+    #[test]
+    fn flushed_commit_is_recovered_when_superblock_publish_torn() {
+        let mut store = CrashStore::<BLOCKS>::new();
+        let mut volume = Volume::format(&mut store).unwrap();
+        store.fail_write_after(2);
+        assert_eq!(
+            volume.commit(&mut store, &[JournalRecord { kind: 7, payload: b"durable" }]),
+            Err(FormatError::Block(BlockError::Io))
+        );
+        store.power_loss();
+
+        let mut reopened = Volume::open(&mut store).unwrap();
+        let mut sink = Sink::new();
+        assert_eq!(
+            reopened.recover(&mut store, &mut sink).unwrap(),
+            RecoverySummary { committed_transactions: 1, replayed_records: 1 }
+        );
+        assert_eq!(reopened.info().root_transaction_id, 1);
+        assert_eq!(
+            reopened.commit(&mut store, &[JournalRecord { kind: 8, payload: b"next" }]),
+            Ok(2)
+        );
     }
 
     #[test]
@@ -740,7 +783,7 @@ mod tests {
         write_superblock(&mut store, SUPERBLOCK_B, info).unwrap();
         store.flush().unwrap();
 
-        let reopened = Volume::open(&mut store).unwrap();
+        let mut reopened = Volume::open(&mut store).unwrap();
         let mut sink = Sink::new();
         assert_eq!(reopened.recover(&mut store, &mut sink), Err(FormatError::Corrupt));
     }

@@ -208,7 +208,7 @@ mod tests {
     use logos_storage::{JournalRecord, MemoryBlockStore, ReplayError, ReplaySink, Volume};
 
     struct TestKernel {
-        store: MemoryBlockStore<4>,
+        store: MemoryBlockStore<32>,
         expected: IpcCapability,
         pending: Option<StorageRequest>,
         fault: Option<StorageStatus>,
@@ -349,7 +349,7 @@ mod tests {
 
         let kernel = store.into_transport();
         let mut reopened_store = IpcBlockStore::new(kernel, capability, 3, 9, 32).unwrap();
-        let reopened = Volume::open(&mut reopened_store).unwrap();
+        let mut reopened = Volume::open(&mut reopened_store).unwrap();
         let mut sink = Sink { records: 0 };
         let summary = reopened.recover(&mut reopened_store, &mut sink).unwrap();
         assert_eq!(summary.committed_transactions, 1);

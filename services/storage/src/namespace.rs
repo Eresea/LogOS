@@ -491,7 +491,7 @@ impl<B: BlockStore> DurableNamespace<B> {
     }
 
     pub fn open(mut store: B) -> Result<Self, NamespaceError> {
-        let volume = Volume::open(&mut store)?;
+        let mut volume = Volume::open(&mut store)?;
         let mut namespace = ObjectNamespace::new();
         volume.recover(&mut store, &mut namespace)?;
         Ok(Self { store, volume, namespace })
