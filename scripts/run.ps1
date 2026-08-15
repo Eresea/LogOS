@@ -55,7 +55,7 @@ $qemuArgs = @(
     '-machine', 'q35', '-m', '128M', '-smp', $Cpus,
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
     '-drive', "format=raw,file=fat:rw:$espPath",
-    '-drive', "if=none,id=storage-disk,format=raw,file=$disk",
+    '-drive', "if=none,id=storage-disk,format=raw,file=$disk,cache=writethrough",
     '-device', 'virtio-blk-pci,drive=storage-disk,disable-legacy=on',
     '-display', $display
 )
