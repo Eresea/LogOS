@@ -132,6 +132,12 @@ fn blend_channel(background: u8, foreground: u8, coverage: u8) -> u8 {
 }
 
 fn blend_color(background: u32, foreground: u32, coverage: u8) -> u32 {
+    if coverage == 0 {
+        return background;
+    }
+    if coverage == u8::MAX {
+        return foreground;
+    }
     let red = blend_channel(
         ((background >> 16) & 0xff) as u8,
         ((foreground >> 16) & 0xff) as u8,
