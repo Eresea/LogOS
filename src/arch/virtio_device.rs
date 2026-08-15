@@ -40,6 +40,8 @@ const ISR_CAP_OFFSET: usize = 0;
 const PCI_CAP_MSIX: u8 = 0x11;
 const MSIX_VECTOR_INDEX: u16 = 0;
 const MSIX_TABLE_ENTRY_BYTES: u32 = 16;
+const COMPLETION_TIMEOUT_TICKS: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS;
+const COMPLETION_SPIN_LIMIT: usize = 1_000_000;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -552,26 +554,17 @@ impl VirtioBlockDevice {
             },
             0,
         )?;
-        for _ in 0..1_000_000 {
-            if let Some(completion) = self.take_completion()? {
-                if completion.request_id != request_id {
-                    return Err(DeviceError::StaleCompletion);
-                }
-                return match completion.status {
-                    0 => {
-                        #[cfg(feature = "storage-proof")]
-                        self.record_flush_success();
-                        Ok(())
-                    }
-                    1 => Err(DeviceError::Io),
-                    2 => Err(DeviceError::Unsupported),
-                    _ => Err(DeviceError::InvalidCompletion),
-                };
+        let completion = self.wait_for_completion(request_id)?;
+        match completion.status {
+            0 => {
+                #[cfg(feature = "storage-proof")]
+                self.record_flush_success();
+                Ok(())
             }
-            core::hint::spin_loop();
+            1 => Err(DeviceError::Io),
+            2 => Err(DeviceError::Unsupported),
+            _ => Err(DeviceError::InvalidCompletion),
         }
-        self.reset_device()?;
-        Err(DeviceError::Timeout)
     }
 
     fn transfer(
@@ -622,31 +615,44 @@ impl VirtioBlockDevice {
             },
             dma_data_address(),
         )?;
-        for _ in 0..1_000_000 {
+        let completion = self.wait_for_completion(request_id)?;
+        let result = match completion.status {
+            0 => {
+                #[cfg(feature = "storage-proof")]
+                self.record_transfer_success(request, staging_address);
+                Ok(())
+            }
+            1 => Err(DeviceError::Io),
+            2 => Err(DeviceError::Unsupported),
+            _ => Err(DeviceError::InvalidCompletion),
+        };
+        if result.is_ok() && request.operation == logos_abi::StorageOperation::Read {
+            unsafe {
+                copy_nonoverlapping(
+                    core::ptr::addr_of!(QUEUE_MEMORY.data).cast::<u8>(),
+                    staging_address as *mut u8,
+                    logos_storage::BLOCK_BYTES,
+                );
+            }
+        }
+        result
+    }
+
+    fn wait_for_completion(
+        &mut self,
+        request_id: BlockRequestId,
+    ) -> Result<DeviceCompletion, DeviceError> {
+        let deadline = super::current_ticks().saturating_add(COMPLETION_TIMEOUT_TICKS);
+        for _ in 0..COMPLETION_SPIN_LIMIT {
             if let Some(completion) = self.take_completion()? {
                 if completion.request_id != request_id {
                     return Err(DeviceError::StaleCompletion);
                 }
-                let result = match completion.status {
-                    0 => {
-                        #[cfg(feature = "storage-proof")]
-                        self.record_transfer_success(request, staging_address);
-                        Ok(())
-                    }
-                    1 => Err(DeviceError::Io),
-                    2 => Err(DeviceError::Unsupported),
-                    _ => Err(DeviceError::InvalidCompletion),
-                };
-                if result.is_ok() && request.operation == logos_abi::StorageOperation::Read {
-                    unsafe {
-                        copy_nonoverlapping(
-                            core::ptr::addr_of!(QUEUE_MEMORY.data).cast::<u8>(),
-                            staging_address as *mut u8,
-                            logos_storage::BLOCK_BYTES,
-                        );
-                    }
-                }
-                return result;
+                return Ok(completion);
+            }
+            if super::current_ticks() >= deadline {
+                self.reset_device()?;
+                return Err(DeviceError::Timeout);
             }
             core::hint::spin_loop();
         }
