@@ -471,7 +471,9 @@ fn capture_gop() -> FramebufferInfo {
             continue;
         }
         let candidate = (width.saturating_mul(height), mode, format);
-        if selected.as_ref().is_none_or(|current| candidate.0 > current.0) {
+        // The terminal has a fixed 80x25 grid; avoid opening a needlessly
+        // large QEMU window when a smaller valid GOP mode is available.
+        if selected.as_ref().is_none_or(|current| candidate.0 < current.0) {
             selected = Some(candidate);
         }
     }
