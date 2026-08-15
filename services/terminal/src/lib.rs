@@ -6,11 +6,47 @@
 extern crate std;
 
 use logos_abi::{
-    Cell, DEFAULT_COLUMNS, DEFAULT_ROWS, InputMessage, IpcBytes, KeyCode, KeyState, MAX_COLUMNS,
-    MAX_RENDER_CELLS, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind, RenderMessage,
+    CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, DEFAULT_COLUMNS, DEFAULT_ROWS,
+    InputMessage, IpcBytes, KeyCode, KeyState, MAX_COLUMNS, MAX_RENDER_CELLS, MOD_ALT,
+    MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind, RenderMessage,
 };
 
 const MAX_PARAMS: usize = 16;
+const REPLACEMENT_SCALAR: u32 = 0xfffd;
+pub const MAX_SCROLLBACK_LINES: usize = 64;
+const DEFAULT_FOREGROUND: u32 = 0x00d7_e3f4;
+const DEFAULT_BACKGROUND: u32 = 0x000b_1020;
+const ANSI_COLORS: [u32; 8] = [
+    0x000b_1020,
+    0x00ff_6b6b,
+    0x007e_d787,
+    0x00ff_d866,
+    0x0058_a6ff,
+    0x00d2_a8ff,
+    0x0056_d4dd,
+    DEFAULT_FOREGROUND,
+];
+const ANSI_BRIGHT_COLORS: [u32; 8] = [
+    0x0030_3845,
+    0x00ff_7b72,
+    0x00a5_d6a7,
+    0x00f2_cc60,
+    0x0079_c0ff,
+    0x00d2_a8ff,
+    0x00a5_d6ff,
+    0x00ffffff,
+];
+
+const fn blank_cell() -> Cell {
+    Cell {
+        codepoint: b' ' as u32,
+        foreground: DEFAULT_FOREGROUND,
+        background: DEFAULT_BACKGROUND,
+        attributes: 0,
+        width: 1,
+        reserved: 0,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ParserState {
@@ -68,6 +104,16 @@ pub struct TerminalState<const CELL_COUNT: usize> {
     screen: [Cell; CELL_COUNT],
     dirty: [bool; CELL_COUNT],
     parser: Parser,
+    foreground: u32,
+    background: u32,
+    attributes: u16,
+    utf8_codepoint: u32,
+    utf8_remaining: u8,
+    utf8_min: u32,
+    scrollback: [Cell; DEFAULT_COLUMNS * MAX_SCROLLBACK_LINES],
+    scrollback_start: usize,
+    scrollback_len: usize,
+    view_offset: usize,
 }
 
 pub struct TerminalService {
@@ -82,7 +128,7 @@ impl TerminalService {
         Self { terminal: TerminalState::new() }
     }
 
-    pub fn input(&self, event: &InputMessage) -> Option<IpcBytes> {
+    pub fn input(&mut self, event: &InputMessage) -> Option<IpcBytes> {
         self.terminal.input(event)
     }
 
@@ -113,9 +159,19 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         Self {
             cursor_column: 0,
             cursor_row: 0,
-            screen: [Cell::EMPTY; CELL_COUNT],
+            screen: [blank_cell(); CELL_COUNT],
             dirty: [true; CELL_COUNT],
             parser: Parser::new(),
+            foreground: DEFAULT_FOREGROUND,
+            background: DEFAULT_BACKGROUND,
+            attributes: 0,
+            utf8_codepoint: 0,
+            utf8_remaining: 0,
+            utf8_min: 0,
+            scrollback: [blank_cell(); DEFAULT_COLUMNS * MAX_SCROLLBACK_LINES],
+            scrollback_start: 0,
+            scrollback_len: 0,
+            view_offset: 0,
         }
     }
 
@@ -127,11 +183,21 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         self.cursor_column = 0;
         self.cursor_row = 0;
         self.parser = Parser::new();
-        self.screen.fill(Cell::EMPTY);
+        self.foreground = DEFAULT_FOREGROUND;
+        self.background = DEFAULT_BACKGROUND;
+        self.attributes = 0;
+        self.utf8_codepoint = 0;
+        self.utf8_remaining = 0;
+        self.utf8_min = 0;
+        self.scrollback_start = 0;
+        self.scrollback_len = 0;
+        self.view_offset = 0;
+        self.screen.fill(blank_cell());
         self.mark_all_dirty();
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.show_live_view();
         for &byte in bytes {
             self.feed_byte(byte);
         }
@@ -139,18 +205,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
 
     fn feed_byte(&mut self, byte: u8) {
         match self.parser.state {
-            ParserState::Ground => match byte {
-                0x1b => self.parser.state = ParserState::Escape,
-                0x08 | 0x7f => self.cursor_column = self.cursor_column.saturating_sub(1),
-                0x09 => {
-                    self.cursor_column =
-                        ((self.cursor_column / 8) + 1).saturating_mul(8).min(DEFAULT_COLUMNS - 1)
-                }
-                0x0a..=0x0c => self.line_feed(),
-                0x0d => self.cursor_column = 0,
-                0x20..=0x7e => self.put(byte as u32),
-                _ => {}
-            },
+            ParserState::Ground => self.feed_ground_byte(byte),
             ParserState::Escape => match byte {
                 b'[' => {
                     self.parser.reset_csi();
@@ -160,6 +215,59 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
                 _ => self.parser.state = ParserState::Ground,
             },
             ParserState::Csi => self.feed_csi(byte),
+        }
+    }
+
+    fn feed_ground_byte(&mut self, byte: u8) {
+        if self.utf8_remaining != 0 {
+            if byte & 0xc0 == 0x80 {
+                self.utf8_codepoint = (self.utf8_codepoint << 6) | u32::from(byte & 0x3f);
+                self.utf8_remaining -= 1;
+                if self.utf8_remaining == 0 {
+                    let scalar = self.utf8_codepoint;
+                    let valid = scalar >= self.utf8_min
+                        && scalar <= 0x10ffff
+                        && !(0xd800..=0xdfff).contains(&scalar);
+                    self.utf8_codepoint = 0;
+                    self.utf8_min = 0;
+                    self.put(if valid { scalar } else { REPLACEMENT_SCALAR });
+                }
+                return;
+            }
+            self.utf8_codepoint = 0;
+            self.utf8_remaining = 0;
+            self.utf8_min = 0;
+            self.put(REPLACEMENT_SCALAR);
+            self.feed_ground_byte(byte);
+            return;
+        }
+        match byte {
+            0x1b => self.parser.state = ParserState::Escape,
+            0x08 | 0x7f => self.cursor_column = self.cursor_column.saturating_sub(1),
+            0x09 => {
+                self.cursor_column =
+                    ((self.cursor_column / 8) + 1).saturating_mul(8).min(DEFAULT_COLUMNS - 1)
+            }
+            0x0a..=0x0c => self.line_feed(),
+            0x0d => self.cursor_column = 0,
+            0x20..=0x7e => self.put(byte as u32),
+            0xc2..=0xdf => {
+                self.utf8_codepoint = u32::from(byte & 0x1f);
+                self.utf8_remaining = 1;
+                self.utf8_min = 0x80;
+            }
+            0xe0..=0xef => {
+                self.utf8_codepoint = u32::from(byte & 0x0f);
+                self.utf8_remaining = 2;
+                self.utf8_min = 0x800;
+            }
+            0xf0..=0xf4 => {
+                self.utf8_codepoint = u32::from(byte & 0x07);
+                self.utf8_remaining = 3;
+                self.utf8_min = 0x10000;
+            }
+            0x80..=0xbf | 0xc0..=0xc1 | 0xf5..=0xff => self.put(REPLACEMENT_SCALAR),
+            _ => {}
         }
     }
 
@@ -192,8 +300,43 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             }
             b'J' => self.erase_display(self.parser.param(0, 0)),
             b'K' => self.erase_line(self.parser.param(0, 0)),
+            b'm' => self.apply_sgr(),
             _ => {}
         }
+    }
+
+    fn apply_sgr(&mut self) {
+        if self.parser.param_count == 0 {
+            self.reset_style();
+            return;
+        }
+        for index in 0..self.parser.param_count {
+            match self.parser.params[index] {
+                0 => self.reset_style(),
+                1 => self.attributes |= CELL_ATTR_BOLD,
+                2 => self.attributes |= CELL_ATTR_DIM,
+                4 => self.attributes |= CELL_ATTR_UNDERLINE,
+                22 => self.attributes &= !(CELL_ATTR_BOLD | CELL_ATTR_DIM),
+                24 => self.attributes &= !CELL_ATTR_UNDERLINE,
+                30..=37 => self.foreground = ANSI_COLORS[(self.parser.params[index] - 30) as usize],
+                39 => self.foreground = DEFAULT_FOREGROUND,
+                40..=47 => self.background = ANSI_COLORS[(self.parser.params[index] - 40) as usize],
+                49 => self.background = DEFAULT_BACKGROUND,
+                90..=97 => {
+                    self.foreground = ANSI_BRIGHT_COLORS[(self.parser.params[index] - 90) as usize]
+                }
+                100..=107 => {
+                    self.background = ANSI_BRIGHT_COLORS[(self.parser.params[index] - 100) as usize]
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn reset_style(&mut self) {
+        self.foreground = DEFAULT_FOREGROUND;
+        self.background = DEFAULT_BACKGROUND;
+        self.attributes = 0;
     }
 
     fn index(column: usize, row: usize) -> usize {
@@ -206,7 +349,13 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             self.cursor_column = 0;
         }
         let index = Self::index(self.cursor_column, self.cursor_row);
-        self.screen[index] = Cell { codepoint, ..Cell::EMPTY };
+        self.screen[index] = Cell {
+            codepoint,
+            foreground: self.foreground,
+            background: self.background,
+            attributes: self.attributes,
+            ..blank_cell()
+        };
         self.dirty[index] = true;
         self.cursor_column += 1;
     }
@@ -220,6 +369,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     }
 
     fn scroll_up(&mut self) {
+        self.store_scrollback_line(0);
         for row in 0..DEFAULT_ROWS - 1 {
             for column in 0..DEFAULT_COLUMNS {
                 let source = Self::index(column, row + 1);
@@ -230,8 +380,57 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         }
         for column in 0..DEFAULT_COLUMNS {
             let index = Self::index(column, DEFAULT_ROWS - 1);
-            self.screen[index] = Cell::EMPTY;
+            self.screen[index] = blank_cell();
             self.dirty[index] = true;
+        }
+    }
+
+    fn store_scrollback_line(&mut self, row: usize) {
+        let slot = if self.scrollback_len < MAX_SCROLLBACK_LINES {
+            (self.scrollback_start + self.scrollback_len) % MAX_SCROLLBACK_LINES
+        } else {
+            let slot = self.scrollback_start;
+            self.scrollback_start = (self.scrollback_start + 1) % MAX_SCROLLBACK_LINES;
+            slot
+        };
+        let source = row * DEFAULT_COLUMNS;
+        let target = slot * DEFAULT_COLUMNS;
+        self.scrollback[target..target + DEFAULT_COLUMNS]
+            .copy_from_slice(&self.screen[source..source + DEFAULT_COLUMNS]);
+        self.scrollback_len = self.scrollback_len.saturating_add(1).min(MAX_SCROLLBACK_LINES);
+    }
+
+    fn show_live_view(&mut self) {
+        if self.view_offset != 0 {
+            self.view_offset = 0;
+            self.mark_all_dirty();
+        }
+    }
+
+    fn scroll_view(&mut self, lines: isize) {
+        let old_offset = self.view_offset;
+        if lines.is_positive() {
+            self.view_offset =
+                self.view_offset.saturating_add(lines as usize).min(self.scrollback_len);
+        } else {
+            self.view_offset = self.view_offset.saturating_sub(lines.unsigned_abs());
+        }
+        if old_offset != self.view_offset {
+            self.mark_all_dirty();
+        }
+    }
+
+    fn visible_cell(&self, row: usize, column: usize) -> Cell {
+        if self.view_offset == 0 {
+            return self.screen[Self::index(column, row)];
+        }
+        let top_line = self.scrollback_len.saturating_sub(self.view_offset);
+        let line = top_line + row;
+        if line < self.scrollback_len {
+            let slot = (self.scrollback_start + line) % MAX_SCROLLBACK_LINES;
+            self.scrollback[slot * DEFAULT_COLUMNS + column]
+        } else {
+            self.screen[(line - self.scrollback_len) * DEFAULT_COLUMNS + column]
         }
     }
 
@@ -261,7 +460,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     fn erase_row(&mut self, row: usize) {
         for column in 0..DEFAULT_COLUMNS {
             let index = Self::index(column, row);
-            self.screen[index] = Cell::EMPTY;
+            self.screen[index] = blank_cell();
             self.dirty[index] = true;
         }
     }
@@ -275,7 +474,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         };
         for column in start..end.min(DEFAULT_COLUMNS) {
             let index = Self::index(column, self.cursor_row);
-            self.screen[index] = Cell::EMPTY;
+            self.screen[index] = blank_cell();
             self.dirty[index] = true;
         }
     }
@@ -301,7 +500,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
                 let index = Self::index(column, row);
                 if self.dirty[index] && count < MAX_RENDER_CELLS {
                     message.positions[count] = (row * MAX_COLUMNS + column) as u16;
-                    message.cells[count] = self.screen[index];
+                    message.cells[count] = self.visible_cell(row, column);
                     self.dirty[index] = false;
                     count += 1;
                 }
@@ -315,7 +514,22 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         }
     }
 
-    pub fn input(&self, event: &InputMessage) -> Option<IpcBytes> {
+    pub fn input(&mut self, event: &InputMessage) -> Option<IpcBytes> {
+        if event.kind == MessageKind::Key
+            && matches!(event.state, KeyState::Pressed | KeyState::Repeat)
+        {
+            match KeyCode::from_raw(event.code) {
+                KeyCode::PageUp => {
+                    self.scroll_view(DEFAULT_ROWS.saturating_sub(1) as isize);
+                    return None;
+                }
+                KeyCode::PageDown => {
+                    self.scroll_view(-(DEFAULT_ROWS.saturating_sub(1) as isize));
+                    return None;
+                }
+                _ => {}
+            }
+        }
         if matches!(event.kind, MessageKind::Text | MessageKind::Paste) {
             return IpcBytes::from_bytes(MessageKind::SessionInput, event.text_bytes()?);
         }
@@ -344,8 +558,6 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             KeyCode::Home => b"\x1b[H",
             KeyCode::End => b"\x1b[F",
             KeyCode::Delete => b"\x1b[3~",
-            KeyCode::PageUp => b"\x1b[5~",
-            KeyCode::PageDown => b"\x1b[6~",
             _ => return None,
         };
         IpcBytes::from_bytes(MessageKind::SessionInput, bytes)
@@ -430,6 +642,14 @@ mod tests {
     }
 
     #[test]
+    fn utf8_text_decodes_to_one_terminal_cell() {
+        let mut terminal = Terminal::new();
+        terminal.feed(b"\xc3\xa9");
+        assert_eq!(terminal.screen[0].codepoint, 0xe9);
+        assert_eq!(terminal.cursor(), (1, 0));
+    }
+
+    #[test]
     fn cursor_and_erase_are_bounded() {
         let mut terminal = Terminal::new();
         terminal.feed(b"\x1b[2;4Hx\x1b[2K");
@@ -438,8 +658,36 @@ mod tests {
     }
 
     #[test]
+    fn ansi_sgr_applies_theme_colors_to_cells() {
+        let mut terminal = Terminal::new();
+        drain(&mut terminal);
+        terminal.feed(b"\x1b[31mred\x1b[0m");
+        assert_eq!(terminal.screen[0].foreground, ANSI_COLORS[1]);
+        assert_eq!(terminal.screen[3].foreground, DEFAULT_FOREGROUND);
+        assert_eq!(terminal.screen[0].background, DEFAULT_BACKGROUND);
+    }
+
+    #[test]
+    fn page_navigation_uses_bounded_scrollback() {
+        let mut terminal = Terminal::new();
+        for _ in 0..(DEFAULT_ROWS + 2) {
+            terminal.feed(b"x\n");
+        }
+        drain(&mut terminal);
+        let event = InputMessage::key(KeyCode::PageUp, KeyState::Pressed, 0);
+        assert!(terminal.input(&event).is_none());
+        assert!(terminal.view_offset > 0);
+        assert!(drain(&mut terminal) > 0);
+        let event = InputMessage::key(KeyCode::PageUp, KeyState::Repeat, 0);
+        assert!(terminal.input(&event).is_none());
+        let event = InputMessage::key(KeyCode::PageDown, KeyState::Pressed, 0);
+        assert!(terminal.input(&event).is_none());
+        assert_eq!(terminal.view_offset, 0);
+    }
+
+    #[test]
     fn semantic_input_is_small_and_stable() {
-        let terminal = Terminal::new();
+        let mut terminal = Terminal::new();
         let event = InputMessage::key(KeyCode::Up, KeyState::Pressed, 0);
         assert_eq!(terminal.input(&event).unwrap().as_bytes(), Some(&b"\x1b[A"[..]));
     }
