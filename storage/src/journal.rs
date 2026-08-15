@@ -118,6 +118,8 @@ impl Volume {
         let second = read_superblock(store, SUPERBLOCK_B);
 
         match (first, second) {
+            (Err(FormatError::UnsupportedVersion), _)
+            | (_, Err(FormatError::UnsupportedVersion)) => Err(FormatError::UnsupportedVersion),
             (Ok(Some(a)), Ok(Some(b))) => {
                 if b.generation > a.generation {
                     Ok(Self { info: b, active_superblock: 1 })
@@ -217,6 +219,9 @@ impl Volume {
                     continue;
                 }
                 Err(error) => {
+                    if error == FormatError::UnsupportedVersion {
+                        return Err(error);
+                    }
                     if !remaining_journal_is_blank(store, index + 1, self.info.journal_head)? {
                         return Err(error);
                     }
@@ -434,8 +439,11 @@ fn decode_record(block: &Block) -> Result<Option<DecodedRecord>, FormatError> {
     if bytes.iter().all(|byte| *byte == 0) {
         return Ok(None);
     }
-    if &bytes[..4] != RECORD_MAGIC || get_u16(bytes, 4) != FORMAT_VERSION {
+    if &bytes[..4] != RECORD_MAGIC {
         return Err(FormatError::Corrupt);
+    }
+    if get_u16(bytes, 4) != FORMAT_VERSION {
+        return Err(FormatError::UnsupportedVersion);
     }
     let stored_checksum = get_u32(bytes, RECORD_CHECKSUM_OFFSET);
     let mut checked = *block;
@@ -637,6 +645,40 @@ mod tests {
         let volume = Volume::format(&mut store).unwrap();
         let reopened = Volume::open(&mut store).unwrap();
         assert_eq!(reopened.info(), volume.info());
+    }
+
+    #[test]
+    fn unsupported_superblock_version_is_not_ignored() {
+        let mut store = CrashStore::<BLOCKS>::new();
+        Volume::format(&mut store).unwrap();
+
+        let mut block = Block::zero();
+        store.read_block(SUPERBLOCK_B, &mut block).unwrap();
+        put_u16(block.as_bytes_mut(), 8, FORMAT_VERSION + 1);
+        store.write_block(SUPERBLOCK_B, &block).unwrap();
+        store.flush().unwrap();
+
+        assert_eq!(Volume::open(&mut store), Err(FormatError::UnsupportedVersion));
+    }
+
+    #[test]
+    fn unsupported_journal_version_is_not_treated_as_a_torn_tail() {
+        let mut store = CrashStore::<BLOCKS>::new();
+        let volume = Volume::format(&mut store).unwrap();
+        let mut record = encode_record(1, 0, 7, b"future").unwrap();
+        put_u16(record.as_bytes_mut(), 4, FORMAT_VERSION + 1);
+        store.write_block(BlockIndex::new(JOURNAL_START), &record).unwrap();
+
+        let mut info = volume.info();
+        info.generation += 1;
+        info.journal_head = JOURNAL_START + 1;
+        info.root_transaction_id = 1;
+        write_superblock(&mut store, SUPERBLOCK_A, info).unwrap();
+        store.flush().unwrap();
+
+        let mut reopened = Volume::open(&mut store).unwrap();
+        let mut sink = Sink::new();
+        assert_eq!(reopened.recover(&mut store, &mut sink), Err(FormatError::UnsupportedVersion));
     }
 
     #[test]

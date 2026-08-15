@@ -80,6 +80,12 @@ the format, journal, namespace, file API, and IPC adapter. The boot image is adm
 the kernel-mediated storage endpoint is identity-checked; requests reach the bounded VirtIO adapter,
 and the fresh-disk QEMU proof covers format, flush, reopen, and torn-journal recovery.
 
+Storage compatibility is fail-closed. The current format version is v1; an unknown superblock or
+journal-record version returns `UnsupportedVersion` and is never reformatted or silently replayed by
+the v1 kernel. Within v1, checksummed committed transactions after an incomplete journal gap remain
+recoverable, while only the incomplete transaction is discarded. A future format migration must be
+explicitly implemented and proved before its version is accepted.
+
 ## Deferred next-step improvements
 
 The bounded storage milestone now proves durable file commands, reboot reopen, and torn-journal
