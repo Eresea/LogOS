@@ -22,6 +22,7 @@ page cache are deferred.
 
 - Object IDs remain safe across deletion and slot reuse through generations.
 - Namespace mutations are atomic at the journal transaction boundary.
-- The first file API is bounded and service-owned; no path syscall is added.
+- A bounded `DurableNamespace` API is service-local in this milestone; no
+  cross-process file IPC or path syscall is added yet.
 - A future extent allocator and page cache can replace journal-resident file
   data behind the same object and transaction contracts.

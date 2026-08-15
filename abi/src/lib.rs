@@ -206,8 +206,10 @@ pub enum StorageOperation {
     Read = 1,
     Write = 2,
     Flush = 3,
+    /// Reserved for the service-owned format command; Core currently rejects it.
     Format = 4,
     Reopen = 5,
+    /// Reserved for the service-owned transaction lifecycle.
     BeginTransaction = 6,
     AppendRecord = 7,
     CommitTransaction = 8,
