@@ -46,7 +46,7 @@ pub const STORAGE_MAX_BLOCKS_PER_REQUEST: u16 = 16;
 pub const IPC_SYSCALL_SEND: usize = 4;
 pub const IPC_SYSCALL_RECEIVE: usize = 5;
 
-pub const IPC_ENDPOINT_COUNT: usize = 6;
+pub const IPC_ENDPOINT_COUNT: usize = 8;
 pub const IPC_READ_EVENT_BASE: usize = 0;
 pub const IPC_WRITE_EVENT_BASE: usize = IPC_READ_EVENT_BASE + IPC_ENDPOINT_COUNT;
 pub const KEYBOARD_READ_EVENT: usize = IPC_WRITE_EVENT_BASE + IPC_ENDPOINT_COUNT;
@@ -353,6 +353,8 @@ pub enum IpcEndpointId {
     SessionToTerminal = 3,
     SessionToCommands = 4,
     CommandsToSession = 5,
+    StorageToCore = 6,
+    CoreToStorage = 7,
 }
 
 impl IpcEndpointId {
@@ -370,6 +372,8 @@ impl IpcEndpointId {
             3 => Some(Self::SessionToTerminal),
             4 => Some(Self::SessionToCommands),
             5 => Some(Self::CommandsToSession),
+            6 => Some(Self::StorageToCore),
+            7 => Some(Self::CoreToStorage),
             _ => None,
         }
     }
@@ -380,6 +384,7 @@ impl IpcEndpointId {
             Self::TerminalToDisplay | Self::TerminalToSession => ServiceId::Terminal,
             Self::SessionToTerminal | Self::SessionToCommands => ServiceId::Session,
             Self::CommandsToSession => ServiceId::Commands,
+            Self::StorageToCore | Self::CoreToStorage => ServiceId::Storage,
         }
     }
 
@@ -389,6 +394,7 @@ impl IpcEndpointId {
             Self::TerminalToDisplay => ServiceId::Display,
             Self::TerminalToSession | Self::CommandsToSession => ServiceId::Session,
             Self::SessionToCommands => ServiceId::Commands,
+            Self::StorageToCore | Self::CoreToStorage => ServiceId::Storage,
         }
     }
 
@@ -422,6 +428,8 @@ pub const fn ipc_capability_slot(
         (ServiceId::Session, IpcEndpointId::CommandsToSession, IpcRights::Receive) => Some(3),
         (ServiceId::Commands, IpcEndpointId::SessionToCommands, IpcRights::Receive) => Some(0),
         (ServiceId::Commands, IpcEndpointId::CommandsToSession, IpcRights::Send) => Some(1),
+        (ServiceId::Storage, IpcEndpointId::StorageToCore, IpcRights::Send) => Some(0),
+        (ServiceId::Storage, IpcEndpointId::CoreToStorage, IpcRights::Receive) => Some(1),
         _ => None,
     }
 }
@@ -668,6 +676,12 @@ pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
 }
 
 pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
+    if endpoint == IpcEndpointId::StorageToCore as usize {
+        return Some(core::mem::size_of::<StorageRequest>());
+    }
+    if endpoint == IpcEndpointId::CoreToStorage as usize {
+        return Some(core::mem::size_of::<StorageResponse>());
+    }
     match ipc_message_type(endpoint) {
         Some(IpcMessageType::Input) => Some(core::mem::size_of::<InputMessage>()),
         Some(IpcMessageType::Render) => Some(core::mem::size_of::<RenderMessage>()),
@@ -1083,7 +1097,7 @@ mod tests {
         let keyboard = keyboard_read_event_mask();
         assert_eq!(all & keyboard, 0);
         all |= keyboard;
-        assert_eq!(EVENT_COUNT, 13);
+        assert_eq!(EVENT_COUNT, 17);
         assert_eq!(all.count_ones(), EVENT_COUNT as u32);
     }
 
