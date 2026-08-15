@@ -41,6 +41,7 @@ pub struct VirtioPciCapability {
 pub struct VirtioPciCapabilities {
     pub common: VirtioPciCapability,
     pub notify: VirtioPciCapability,
+    pub notify_multiplier: u32,
     pub isr: VirtioPciCapability,
     pub device: VirtioPciCapability,
 }
@@ -74,6 +75,7 @@ impl VirtioPciDevice {
         let mut cursor = config[PCI_CAP_PTR] as usize;
         let mut seen = [false; PCI_CONFIG_BYTES];
         let mut capabilities = [None; 5];
+        let mut notify_multiplier = 0;
         for _ in 0..MAX_CAPABILITIES {
             if cursor == 0 {
                 break;
@@ -108,6 +110,14 @@ impl VirtioPciDevice {
                 config[cursor + 14],
                 config[cursor + 15],
             ]);
+            if cfg_type == 2 && length >= 20 {
+                notify_multiplier = u32::from_le_bytes([
+                    config[cursor + 16],
+                    config[cursor + 17],
+                    config[cursor + 18],
+                    config[cursor + 19],
+                ]);
+            }
             capabilities[cfg_type] = Some(VirtioPciCapability { bar, offset, length });
             cursor = next;
         }
@@ -120,6 +130,7 @@ impl VirtioPciDevice {
             capabilities: VirtioPciCapabilities {
                 common: capabilities[1].ok_or(PciError::MissingCapability)?,
                 notify: capabilities[2].ok_or(PciError::MissingCapability)?,
+                notify_multiplier,
                 isr: capabilities[3].ok_or(PciError::MissingCapability)?,
                 device: capabilities[4].ok_or(PciError::MissingCapability)?,
             },
@@ -136,14 +147,18 @@ mod tests {
         config[0..2].copy_from_slice(&VIRTIO_PCI_VENDOR_ID.to_le_bytes());
         config[2..4].copy_from_slice(&VIRTIO_BLOCK_MODERN_DEVICE_ID.to_le_bytes());
         config[PCI_CAP_PTR] = 0x40;
-        for (index, cfg_type) in [(0x40, 1u8), (0x50, 2), (0x60, 3), (0x70, 4)] {
+        for (index, cfg_type) in [(0x40, 1u8), (0x60, 2), (0x80, 3), (0xa0, 4)] {
             config[index] = PCI_CAP_VENDOR_SPECIFIC;
-            config[index + 1] = if index == 0x70 { 0 } else { (index + 0x10) as u8 };
+            config[index + 1] = if index == 0xa0 { 0 } else { (index + 0x20) as u8 };
             config[index + 2] = 16;
             config[index + 3] = cfg_type;
             config[index + 4] = 0;
             config[index + 8..index + 12].copy_from_slice(&(index as u32 * 0x100).to_le_bytes());
             config[index + 12..index + 16].copy_from_slice(&0x100u32.to_le_bytes());
+            if cfg_type == 2 {
+                config[index + 2] = 20;
+                config[index + 16..index + 20].copy_from_slice(&4u32.to_le_bytes());
+            }
         }
         config
     }
@@ -154,7 +169,8 @@ mod tests {
         let device = VirtioPciDevice::from_config(address, &config()).unwrap();
         assert_eq!(device.address, address);
         assert_eq!(device.capabilities.common.offset, 0x4000);
-        assert_eq!(device.capabilities.device.offset, 0x7000);
+        assert_eq!(device.capabilities.device.offset, 0xa000);
+        assert_eq!(device.capabilities.notify_multiplier, 4);
     }
 
     #[test]
@@ -165,8 +181,8 @@ mod tests {
         assert_eq!(VirtioPciDevice::from_config(address, &wrong), Err(PciError::NotVirtioBlock));
 
         let mut missing = config();
-        missing[0x70] = 0;
-        missing[0x60 + 1] = 0;
+        missing[0xa0] = 0;
+        missing[0x80 + 1] = 0;
         assert_eq!(
             VirtioPciDevice::from_config(address, &missing),
             Err(PciError::MissingCapability)
@@ -177,7 +193,7 @@ mod tests {
     fn rejects_capability_loops() {
         let address = PciAddress::new(0, 3, 0).unwrap();
         let mut looped = config();
-        looped[0x70 + 1] = 0x40;
+        looped[0xa0 + 1] = 0x40;
         assert_eq!(VirtioPciDevice::from_config(address, &looped), Err(PciError::CapabilityLoop));
     }
 }
