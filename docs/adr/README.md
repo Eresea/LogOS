@@ -45,3 +45,4 @@
 | [0041](0041-storage-boundary.md) | Accepted | Core owns block mechanics while a bounded storage format owns journal, replay, recovery, and durability |
 | [0042](0042-virtio-block-transport.md) | Accepted | Fixed VirtIO block request chains translate 4096-byte LogOS blocks to 512-byte sectors before hardware integration |
 | [0043](0043-virtio-device-ownership.md) | Accepted | Core owns VirtIO PCI, DMA, queues, interrupts, reset, and flush while storage owns logical durability |
+| [0044](0044-storage-service-ipc.md) | Accepted | Storage uses fixed kernel-mediated IPC and private staging pages without device access |
