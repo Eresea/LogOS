@@ -71,18 +71,13 @@ struct QueueMemory {
     used_available_event: u16,
     headers: [VirtioBlkHeader; QUEUE_SIZE],
     statuses: [u8; QUEUE_SIZE],
-}
-
-#[repr(C, align(4096))]
-struct DmaMemory {
-    queue: QueueMemory,
     data: [u8; logos_storage::BLOCK_BYTES],
 }
 
 // One fixed, page-aligned Core-owned DMA arena. The future frame allocator will
 // replace this singleton when multiple block devices are supported.
 #[unsafe(link_section = ".dma")]
-static mut DMA_MEMORY: DmaMemory = DmaMemory::new();
+static mut QUEUE_MEMORY: QueueMemory = QueueMemory::new();
 static mut DEVICE: MaybeUninit<VirtioBlockDevice> = MaybeUninit::uninit();
 static DEVICE_READY: AtomicBool = AtomicBool::new(false);
 static DEVICE_BUSY: AtomicBool = AtomicBool::new(false);
@@ -115,13 +110,8 @@ impl QueueMemory {
             used_available_event: 0,
             headers: [VirtioBlkHeader { request_type: 0, reserved: 0, sector: 0 }; QUEUE_SIZE],
             statuses: [0xff; QUEUE_SIZE],
+            data: [0; logos_storage::BLOCK_BYTES],
         }
-    }
-}
-
-impl DmaMemory {
-    const fn new() -> Self {
-        Self { queue: QueueMemory::new(), data: [0; logos_storage::BLOCK_BYTES] }
     }
 }
 
@@ -292,9 +282,9 @@ impl VirtioBlockDevice {
         let isr = region_for(&probe, probe.capabilities.isr)?;
         let device_config = region_for(&probe, probe.capabilities.device)?;
         let queue = unsafe {
-            let dma = &mut *core::ptr::addr_of_mut!(DMA_MEMORY);
-            *dma = DmaMemory::new();
-            &mut dma.queue
+            let queue = &mut *core::ptr::addr_of_mut!(QUEUE_MEMORY);
+            *queue = QueueMemory::new();
+            queue
         };
         let mut device = Self {
             common,
@@ -435,6 +425,13 @@ impl VirtioBlockDevice {
         }
         if chain.data.is_none() && data_address != 0 {
             return Err(DeviceError::InvalidCompletion);
+        }
+        let available = unsafe { read_volatile(&self.queue.available_index) };
+        if available != 0 && available as usize % QUEUE_SIZE == 0 {
+            if self.requests.iter().any(Option::is_some) {
+                return Err(DeviceError::QueueFull);
+            }
+            self.reset_device()?;
         }
         let available = unsafe { read_volatile(&self.queue.available_index) };
         let slot = (available as usize) % QUEUE_SIZE;
@@ -592,7 +589,7 @@ impl VirtioBlockDevice {
             unsafe {
                 copy_nonoverlapping(
                     staging_address as *const u8,
-                    core::ptr::addr_of_mut!(DMA_MEMORY.data).cast::<u8>(),
+                    core::ptr::addr_of_mut!(QUEUE_MEMORY.data).cast::<u8>(),
                     logos_storage::BLOCK_BYTES,
                 );
             }
@@ -628,7 +625,7 @@ impl VirtioBlockDevice {
                 if result.is_ok() && request.operation == logos_abi::StorageOperation::Read {
                     unsafe {
                         copy_nonoverlapping(
-                            core::ptr::addr_of!(DMA_MEMORY.data).cast::<u8>(),
+                            core::ptr::addr_of!(QUEUE_MEMORY.data).cast::<u8>(),
                             staging_address as *mut u8,
                             logos_storage::BLOCK_BYTES,
                         );
@@ -727,7 +724,7 @@ impl VirtioBlockDevice {
 }
 
 fn dma_data_address() -> u64 {
-    unsafe { core::ptr::addr_of!(DMA_MEMORY.data) as u64 }
+    unsafe { core::ptr::addr_of!(QUEUE_MEMORY.data) as u64 }
 }
 
 fn region_for(
