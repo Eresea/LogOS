@@ -148,7 +148,12 @@ function Invoke-StorageBoot {
         }
         return $false
     } finally {
-        if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+        if (-not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            [void]$process.WaitForExit(5000)
+        }
+        if (-not $process.HasExited) { throw 'QEMU did not exit before disk reuse.' }
+        Start-Sleep -Milliseconds 100
         $process.Dispose()
     }
 }
