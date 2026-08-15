@@ -18,8 +18,8 @@ const RESPONSE_CAPABILITY: usize = common::capability_slot(
 );
 
 /// The storage image is admitted as a fixed service endpoint. Block requests
-/// remain kernel-mediated; this bounded lifecycle image keeps the service
-/// alive until that endpoint is exposed to user mode.
+/// remain kernel-mediated; this bounded lifecycle image exercises the request
+/// boundary while the hardware-backed completion path is still being added.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     let mut heartbeat_ticks = 0u16;

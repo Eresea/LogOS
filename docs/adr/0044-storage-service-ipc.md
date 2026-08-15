@@ -19,13 +19,15 @@ request ID and a typed status; stale generations, wrong epochs, oversized
 ranges, and unauthorized capabilities are rejected before storage code runs.
 
 The storage service owns the format and journal state machine. Core owns the
-block transport and completes device work behind the IPC boundary. A
-host-tested adapter proves the same request validation and staging ownership
-without requiring a running service image.
+block transport and completes device work behind the IPC boundary. The sixth
+service now uses dedicated `StorageToCore` and `CoreToStorage` capabilities;
+the kernel validates the request and response identity through the same
+private staging path. The current mailbox returns `Unsupported` until the
+VirtIO completion adapter is connected.
 
 ## Consequences
 
 - No storage service can program a device or retain a physical DMA address.
 - Block data crosses the boundary through fixed private staging storage.
 - The existing six trusted terminal queues remain unchanged.
-- Service startup and a seventh boot image require a separate lifecycle proof.
+- Storage IPC is process-bound without exposing device state or DMA addresses.

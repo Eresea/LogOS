@@ -17,7 +17,7 @@ fixed service boundaries.
 | Service process admission | `service_runtime` + `process` | binds each service root, coalesced mappings, and validated user launch metadata without entering service RIPs prematurely |
 | User launch transition | `arch` + `scheduler` | selects the task root before restore and provides the fixed-selector `iretq` path for service entry |
 | Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Commands → Storage dependencies |
-| Service IPC boundary | `service_ipc` + `service_runtime` | keeps the six existing terminal queues, maps exactly one writable staging page and one read-only capability page per service, and never maps queue frames into service roots; storage requests remain a separately gated kernel endpoint |
+| Service IPC boundary | `service_ipc` + `service_runtime` | keeps the six existing terminal queues and adds dedicated process-bound StorageToCore/CoreToStorage capabilities through private staging pages; no queue, MMIO, or DMA frame is mapped into a service root |
 | Storage boundary | Core VirtIO block adapter + `logos-storage` format + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, interrupts, reset, timeouts, and flush; storage owns fixed request lifecycles, superblocks, journal, replay, recovery, durability, object IDs, namespace resolution, and bounded file operations; service requests use fixed ABI messages, process-bound capabilities, private staging pages, and kernel-owned IPC; Core stores no paths or namespace state |
 | Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE` plus one read-only `FramebufferConfig` page at `DISPLAY_CONFIG_BASE`; boot rejects modes below the fixed 80×25/8×16 profile; no other service or kernel drawing path receives it |
 | Keyboard byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring with an observable drop counter and maps it only into Input at `INPUT_KEYBOARD_RING_BASE`; PS/2 decoding remains outside the kernel |
@@ -77,7 +77,8 @@ Live supervisor restart rebuilds volatile state and abandons in-flight work. Dur
 through the bounded storage boundary in ADR-0041, with explicit ownership, journal, replay, durability,
 and idempotency proofs. The host-tested `logos-storage` and `logos-storage-service` packages provide
 the format, journal, namespace, file API, and IPC adapter. The boot image is admitted independently;
-functional kernel-mediated storage requests remain gated on the next endpoint proof.
+the kernel-mediated storage endpoint is present and identity-checked; it returns `Unsupported` until
+the VirtIO completion adapter is connected.
 
 ## Deferred next-step improvements
 
