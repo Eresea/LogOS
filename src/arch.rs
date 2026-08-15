@@ -732,6 +732,7 @@ pub(crate) fn reserve_kernel_frames(pool: &mut crate::frame_pool::FramePool) {
         core::ptr::addr_of!(CPU_TSS) as usize,
         core::mem::size_of::<[TaskStateSegment; MAX_CPUS]>(),
     );
+    virtio_device::reserve_frames(pool);
     #[cfg(feature = "qemu-proof")]
     {
         crate::user_mode::reserve_frames(pool);

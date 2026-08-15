@@ -60,6 +60,17 @@ struct UsedElement {
 }
 
 #[repr(C, align(4096))]
+struct DmaBlock {
+    bytes: [u8; logos_storage::BLOCK_BYTES],
+}
+
+impl DmaBlock {
+    const fn new() -> Self {
+        Self { bytes: [0; logos_storage::BLOCK_BYTES] }
+    }
+}
+
+#[repr(C, align(4096))]
 struct QueueMemory {
     descriptors: [Descriptor; QUEUE_SIZE * 3],
     available_flags: u16,
@@ -73,7 +84,7 @@ struct QueueMemory {
     used_available_event: u16,
     headers: [VirtioBlkHeader; QUEUE_SIZE],
     statuses: [u8; QUEUE_SIZE],
-    data: [u8; logos_storage::BLOCK_BYTES],
+    data: DmaBlock,
 }
 
 // One fixed, page-aligned Core-owned DMA arena. The future frame allocator will
@@ -112,10 +123,13 @@ impl QueueMemory {
             used_available_event: 0,
             headers: [VirtioBlkHeader { request_type: 0, reserved: 0, sector: 0 }; QUEUE_SIZE],
             statuses: [0xff; QUEUE_SIZE],
-            data: [0; logos_storage::BLOCK_BYTES],
+            data: DmaBlock::new(),
         }
     }
 }
+
+const _: () = assert!(core::mem::align_of::<DmaBlock>() == 4096);
+const _: () = assert!(core::mem::offset_of!(QueueMemory, data) % 4096 == 0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceError {
@@ -233,6 +247,14 @@ pub(crate) fn initialize_storage_device() -> bool {
     unsafe { core::ptr::addr_of_mut!(DEVICE).write(MaybeUninit::new(device)) };
     DEVICE_READY.store(true, Ordering::Release);
     true
+}
+
+pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
+    super::reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(QUEUE_MEMORY) as usize,
+        core::mem::size_of::<QueueMemory>(),
+    );
 }
 
 pub(crate) fn flush_storage_device() -> Result<(), DeviceError> {
@@ -597,7 +619,7 @@ impl VirtioBlockDevice {
             unsafe {
                 copy_nonoverlapping(
                     staging_address as *const u8,
-                    core::ptr::addr_of_mut!(QUEUE_MEMORY.data).cast::<u8>(),
+                    core::ptr::addr_of_mut!(QUEUE_MEMORY.data.bytes).cast::<u8>(),
                     logos_storage::BLOCK_BYTES,
                 );
             }
@@ -629,7 +651,7 @@ impl VirtioBlockDevice {
         if result.is_ok() && request.operation == logos_abi::StorageOperation::Read {
             unsafe {
                 copy_nonoverlapping(
-                    core::ptr::addr_of!(QUEUE_MEMORY.data).cast::<u8>(),
+                    core::ptr::addr_of!(QUEUE_MEMORY.data.bytes).cast::<u8>(),
                     staging_address as *mut u8,
                     logos_storage::BLOCK_BYTES,
                 );
@@ -745,7 +767,7 @@ impl VirtioBlockDevice {
 }
 
 fn dma_data_address() -> u64 {
-    unsafe { core::ptr::addr_of!(QUEUE_MEMORY.data) as u64 }
+    unsafe { core::ptr::addr_of!(QUEUE_MEMORY.data.bytes) as u64 }
 }
 
 fn region_for(
