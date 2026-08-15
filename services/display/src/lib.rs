@@ -369,7 +369,7 @@ impl Display {
                 if is_cursor && self.cursor_visible {
                     let bytes = pixel_bytes(foreground, format);
                     for glyph_row in 1..GLYPH_HEIGHT - 1 {
-                        for glyph_column in GLYPH_WIDTH - CURSOR_WIDTH..GLYPH_WIDTH {
+                        for glyph_column in 0..CURSOR_WIDTH {
                             let pixel = row * GLYPH_HEIGHT * stride
                                 + glyph_row * stride
                                 + (column * GLYPH_WIDTH + glyph_column) * 4;
@@ -498,11 +498,11 @@ mod tests {
 
         let mut framebuffer = std::vec![0; 8 * 16 * 4];
         display.render(&mut framebuffer, 8, 16, 8 * 4, PixelFormat::Bgr8).unwrap();
-        assert_eq!(&framebuffer[(4 * 8 + 6) * 4..(4 * 8 + 7) * 4], &[0xc0, 0xd0, 0xe0, 0]);
+        assert_eq!(&framebuffer[(4 * 8) * 4..(4 * 8 + 1) * 4], &[0xc0, 0xd0, 0xe0, 0]);
 
         assert!(display.toggle_cursor());
         display.render(&mut framebuffer, 8, 16, 8 * 4, PixelFormat::Bgr8).unwrap();
-        assert_eq!(&framebuffer[(4 * 8 + 6) * 4..(4 * 8 + 7) * 4], &[0x30, 0x20, 0x10, 0]);
+        assert_eq!(&framebuffer[(4 * 8) * 4..(4 * 8 + 1) * 4], &[0x30, 0x20, 0x10, 0]);
     }
 
     #[test]
