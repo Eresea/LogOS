@@ -57,6 +57,19 @@ pub extern "C" fn _start() -> ! {
             );
         }
         if !progressed {
+            if display.toggle_cursor() {
+                let format = match config.format {
+                    FramebufferFormat::Bgr8 => logos_display::PixelFormat::Bgr8,
+                    FramebufferFormat::Rgb8 => logos_display::PixelFormat::Rgb8,
+                };
+                let _ = display.render(
+                    framebuffer,
+                    config.width as usize,
+                    config.height as usize,
+                    config.stride as usize * 4,
+                    format,
+                );
+            }
             common::wait(
                 common::ipc_read_event(logos_abi::IpcEndpointId::TerminalToDisplay),
                 logos_abi::ServiceId::Display,

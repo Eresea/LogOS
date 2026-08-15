@@ -13,6 +13,7 @@ pub use logos_abi::FramebufferFormat as PixelFormat;
 pub const GLYPH_WIDTH: usize = 8;
 pub const GLYPH_HEIGHT: usize = 16;
 pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
+const CURSOR_WIDTH: usize = 2;
 const ASCII_FIRST: u32 = 0x20;
 const ASCII_LAST: u32 = 0x7e;
 const ASCII_GLYPH_COUNT: usize = (ASCII_LAST - ASCII_FIRST + 1) as usize;
@@ -211,6 +212,7 @@ pub struct Display {
     dirty: [bool; MAX_COLUMNS * MAX_ROWS],
     surface_initialized: bool,
     surface_background: u32,
+    cursor_visible: bool,
 }
 
 impl Display {
@@ -225,6 +227,7 @@ impl Display {
             dirty: [false; MAX_COLUMNS * MAX_ROWS],
             surface_initialized: false,
             surface_background: 0,
+            cursor_visible: true,
         }
     }
 
@@ -240,6 +243,16 @@ impl Display {
         self.dirty.fill(true);
         self.surface_initialized = false;
         self.surface_background = 0;
+        self.cursor_visible = true;
+    }
+
+    pub fn toggle_cursor(&mut self) -> bool {
+        if self.columns == 0 || self.rows == 0 {
+            return false;
+        }
+        self.cursor_visible = !self.cursor_visible;
+        self.dirty[self.cursor_row * MAX_COLUMNS + self.cursor_column] = true;
+        true
     }
 
     pub fn apply(&mut self, generation: u16, message: &RenderMessage) -> Result<(), DisplayError> {
@@ -285,6 +298,7 @@ impl Display {
         self.rows = rows;
         self.cursor_column = usize::from(message.cursor_column).min(columns - 1);
         self.cursor_row = usize::from(message.cursor_row).min(rows - 1);
+        self.cursor_visible = true;
         self.dirty[old_cursor] = true;
         self.dirty[self.cursor_row * MAX_COLUMNS + self.cursor_column] = true;
         Ok(())
@@ -327,7 +341,11 @@ impl Display {
                     continue;
                 }
                 let cell = self.cells[index];
-                if first_render && is_background_only(cell, self.surface_background) {
+                let is_cursor = row == self.cursor_row && column == self.cursor_column;
+                if first_render
+                    && is_background_only(cell, self.surface_background)
+                    && !(is_cursor && self.cursor_visible)
+                {
                     self.dirty[index] = false;
                     rendered += 1;
                     continue;
@@ -346,6 +364,17 @@ impl Display {
                             + (column * GLYPH_WIDTH + glyph_column) * 4;
                         let bytes = pixel_bytes(color, format);
                         framebuffer[pixel..pixel + 4].copy_from_slice(&bytes);
+                    }
+                }
+                if is_cursor && self.cursor_visible {
+                    let bytes = pixel_bytes(foreground, format);
+                    for glyph_row in 1..GLYPH_HEIGHT - 1 {
+                        for glyph_column in GLYPH_WIDTH - CURSOR_WIDTH..GLYPH_WIDTH {
+                            let pixel = row * GLYPH_HEIGHT * stride
+                                + glyph_row * stride
+                                + (column * GLYPH_WIDTH + glyph_column) * 4;
+                            framebuffer[pixel..pixel + 4].copy_from_slice(&bytes);
+                        }
                     }
                 }
                 self.dirty[index] = false;
@@ -454,6 +483,26 @@ mod tests {
         assert_eq!(display.render(&mut framebuffer, 16, 16, 16 * 4, PixelFormat::Bgr8), Ok(1));
         assert_eq!(&framebuffer[..4], &[0x30, 0x20, 0x10, 0]);
         assert_eq!(&framebuffer[15 * 4..16 * 4], &[0x30, 0x20, 0x10, 0]);
+    }
+
+    #[test]
+    fn cursor_caret_renders_and_blinks() {
+        let mut display = Display::new(1);
+        let mut message = RenderMessage::empty(MessageKind::RenderCells);
+        message.columns = 1;
+        message.rows = 1;
+        message.count = 1;
+        message.positions[0] = 0;
+        message.cells[0] = Cell { foreground: 0xe0d0c0, background: 0x102030, ..Cell::EMPTY };
+        display.apply(1, &message).unwrap();
+
+        let mut framebuffer = std::vec![0; 8 * 16 * 4];
+        display.render(&mut framebuffer, 8, 16, 8 * 4, PixelFormat::Bgr8).unwrap();
+        assert_eq!(&framebuffer[(4 * 8 + 6) * 4..(4 * 8 + 7) * 4], &[0xc0, 0xd0, 0xe0, 0]);
+
+        assert!(display.toggle_cursor());
+        display.render(&mut framebuffer, 8, 16, 8 * 4, PixelFormat::Bgr8).unwrap();
+        assert_eq!(&framebuffer[(4 * 8 + 6) * 4..(4 * 8 + 7) * 4], &[0x30, 0x20, 0x10, 0]);
     }
 
     #[test]
