@@ -13,6 +13,17 @@ pub const MOD_CTRL: u16 = logos_abi::MOD_CTRL;
 pub const MOD_ALT: u16 = logos_abi::MOD_ALT;
 pub const MOD_CAPS_LOCK: u16 = logos_abi::MOD_CAPS_LOCK;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum KeyboardLayout {
+    /// French AZERTY-compatible physical key mapping.
+    #[default]
+    Azerty,
+    /// US QWERTY physical key mapping.
+    Qwerty,
+}
+
+pub const DEFAULT_KEYBOARD_LAYOUT: KeyboardLayout = KeyboardLayout::Azerty;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecodedInput {
     pub key: InputMessage,
@@ -37,11 +48,24 @@ pub struct InputDecoder {
     break_code: bool,
     modifiers: u16,
     caps_lock: bool,
+    layout: KeyboardLayout,
 }
 
 impl InputDecoder {
     pub const fn new() -> Self {
-        Self { extended: false, break_code: false, modifiers: 0, caps_lock: false }
+        Self::with_layout(DEFAULT_KEYBOARD_LAYOUT)
+    }
+
+    pub const fn with_layout(layout: KeyboardLayout) -> Self {
+        Self { extended: false, break_code: false, modifiers: 0, caps_lock: false, layout }
+    }
+
+    pub const fn layout(&self) -> KeyboardLayout {
+        self.layout
+    }
+
+    pub fn set_layout(&mut self, layout: KeyboardLayout) {
+        self.layout = layout;
     }
 
     /// Feed one PS/2 Set-2 byte. Prefix bytes produce no event.
@@ -65,11 +89,11 @@ impl InputDecoder {
                 let extended = self.extended;
                 self.break_code = false;
                 self.extended = false;
-                let key_code = map_code(code, extended)?;
+                let key_code = map_code(code, extended, self.layout)?;
                 self.update_modifiers(key_code, released);
                 let state = if released { KeyState::Released } else { KeyState::Pressed };
                 let key = InputMessage::key(key_code, state, self.modifiers);
-                let text = (!released).then(|| self.committed_text(key_code));
+                let text = (!released).then(|| self.committed_text(code, key_code));
                 Some(DecodedInput { key, text: text.flatten() })
             }
         }
@@ -102,21 +126,44 @@ impl InputDecoder {
         }
     }
 
-    fn committed_text(&self, key: KeyCode) -> Option<InputMessage> {
+    fn committed_text(&self, physical_code: u8, key: KeyCode) -> Option<InputMessage> {
         if self.modifiers & (MOD_CTRL | MOD_ALT) != 0 {
             return None;
+        }
+        if let Some(bytes) = azerty_text(self.layout, physical_code, self.modifiers) {
+            return InputMessage::text(bytes);
         }
         let byte = key.character_byte()?;
         let byte = if byte.is_ascii_alphabetic() {
             let upper = (self.modifiers & MOD_SHIFT != 0) ^ (self.modifiers & MOD_CAPS_LOCK != 0);
             if upper { byte.to_ascii_uppercase() } else { byte.to_ascii_lowercase() }
         } else if self.modifiers & MOD_SHIFT != 0 {
-            shifted_ascii(byte)
+            shifted_ascii(self.layout, physical_code, byte)
         } else {
             byte
         };
         InputMessage::text(&[byte])
     }
+}
+
+fn azerty_text(layout: KeyboardLayout, physical_code: u8, modifiers: u16) -> Option<&'static [u8]> {
+    if layout != KeyboardLayout::Azerty || modifiers & MOD_SHIFT != 0 {
+        return None;
+    }
+    let uppercase = modifiers & MOD_CAPS_LOCK != 0;
+    Some(match (physical_code, uppercase) {
+        (0x1e, false) => b"\xc3\xa9",
+        (0x1e, true) => b"\xc3\x89",
+        (0x3d, false) => b"\xc3\xa8",
+        (0x3d, true) => b"\xc3\x88",
+        (0x46, false) => b"\xc3\xa7",
+        (0x46, true) => b"\xc3\x87",
+        (0x45, false) => b"\xc3\xa0",
+        (0x45, true) => b"\xc3\x80",
+        (0x52, false) => b"\xc3\xb9",
+        (0x52, true) => b"\xc3\x99",
+        _ => return None,
+    })
 }
 
 impl Default for InputDecoder {
@@ -125,7 +172,29 @@ impl Default for InputDecoder {
     }
 }
 
-const fn shifted_ascii(byte: u8) -> u8 {
+const fn shifted_ascii(layout: KeyboardLayout, physical_code: u8, byte: u8) -> u8 {
+    if let KeyboardLayout::Azerty = layout {
+        return match physical_code {
+            0x16 => b'1',
+            0x1e => b'2',
+            0x26 => b'3',
+            0x25 => b'4',
+            0x2e => b'5',
+            0x36 => b'6',
+            0x3d => b'7',
+            0x3e => b'8',
+            0x46 => b'9',
+            0x45 => b'0',
+            0x4c => b'?',
+            0x52 => b'%',
+            0x55 => b'+',
+            0x3a => b'?',
+            0x41 => b'.',
+            0x49 => b'/',
+            0x4a => b'?',
+            _ => byte,
+        };
+    }
     match byte {
         b'1' => b'!',
         b'2' => b'@',
@@ -152,7 +221,7 @@ const fn shifted_ascii(byte: u8) -> u8 {
     }
 }
 
-const fn map_code(byte: u8, extended: bool) -> Option<KeyCode> {
+const fn map_code(byte: u8, extended: bool, layout: KeyboardLayout) -> Option<KeyCode> {
     if extended {
         return Some(match byte {
             0x75 => KeyCode::UP,
@@ -179,8 +248,17 @@ const fn map_code(byte: u8, extended: bool) -> Option<KeyCode> {
         0x14 => KeyCode::CTRL,
         0x11 => KeyCode::ALT,
         0x58 => KeyCode::CAPS_LOCK,
-        0x16 => KeyCode::character(b'1'),
         0x29 => KeyCode::character(b' '),
+        code => match layout {
+            KeyboardLayout::Qwerty => qwerty_code(code),
+            KeyboardLayout::Azerty => azerty_code(code),
+        },
+    })
+}
+
+const fn qwerty_code(byte: u8) -> KeyCode {
+    match byte {
+        0x16 => KeyCode::character(b'1'),
         0x1e => KeyCode::character(b'2'),
         0x26 => KeyCode::character(b'3'),
         0x25 => KeyCode::character(b'4'),
@@ -228,7 +306,62 @@ const fn map_code(byte: u8, extended: bool) -> Option<KeyCode> {
         0x35 => KeyCode::character(b'y'),
         0x1a => KeyCode::character(b'z'),
         _ => KeyCode::UNKNOWN,
-    })
+    }
+}
+
+const fn azerty_code(byte: u8) -> KeyCode {
+    // Semantic key codes remain ASCII-compatible; committed text preserves
+    // the accented keycaps through `azerty_text` above.
+    match byte {
+        0x16 => KeyCode::character(b'&'),
+        0x1e => KeyCode::character(b'e'),
+        0x26 => KeyCode::character(b'"'),
+        0x25 => KeyCode::character(b'\''),
+        0x2e => KeyCode::character(b'('),
+        0x36 => KeyCode::character(b'-'),
+        0x3d => KeyCode::character(b'e'),
+        0x3e => KeyCode::character(b'_'),
+        0x46 => KeyCode::character(b'c'),
+        0x45 => KeyCode::character(b'a'),
+        0x4e => KeyCode::character(b')'),
+        0x55 => KeyCode::character(b'='),
+        0x54 => KeyCode::character(b'^'),
+        0x5b => KeyCode::character(b'$'),
+        0x4c => KeyCode::character(b'm'),
+        0x52 => KeyCode::character(b'u'),
+        0x41 => KeyCode::character(b';'),
+        0x49 => KeyCode::character(b':'),
+        0x4a => KeyCode::character(b'!'),
+        0x0e => KeyCode::character(b'`'),
+        0x5d => KeyCode::character(b'*'),
+        0x15 => KeyCode::character(b'a'),
+        0x1d => KeyCode::character(b'z'),
+        0x24 => KeyCode::character(b'e'),
+        0x2d => KeyCode::character(b'r'),
+        0x2c => KeyCode::character(b't'),
+        0x35 => KeyCode::character(b'y'),
+        0x3c => KeyCode::character(b'u'),
+        0x43 => KeyCode::character(b'i'),
+        0x44 => KeyCode::character(b'o'),
+        0x4d => KeyCode::character(b'p'),
+        0x1c => KeyCode::character(b'q'),
+        0x1b => KeyCode::character(b's'),
+        0x23 => KeyCode::character(b'd'),
+        0x2b => KeyCode::character(b'f'),
+        0x34 => KeyCode::character(b'g'),
+        0x33 => KeyCode::character(b'h'),
+        0x3b => KeyCode::character(b'j'),
+        0x42 => KeyCode::character(b'k'),
+        0x4b => KeyCode::character(b'l'),
+        0x3a => KeyCode::character(b','),
+        0x31 => KeyCode::character(b'n'),
+        0x32 => KeyCode::character(b'b'),
+        0x21 => KeyCode::character(b'c'),
+        0x2a => KeyCode::character(b'v'),
+        0x22 => KeyCode::character(b'x'),
+        0x1a => KeyCode::character(b'w'),
+        _ => KeyCode::UNKNOWN,
+    }
 }
 
 #[cfg(test)]
@@ -240,7 +373,7 @@ mod tests {
 
     #[test]
     fn set_two_decodes_key_and_committed_text() {
-        let mut decoder = InputDecoder::new();
+        let mut decoder = InputDecoder::with_layout(KeyboardLayout::Qwerty);
         let event = decoder.feed(0x1c).unwrap();
         assert_eq!(event.key.code, KeyCode::character(b'a').raw());
         assert_eq!(event.text.unwrap().text_bytes(), Some(&b"a"[..]));
@@ -249,8 +382,38 @@ mod tests {
     }
 
     #[test]
-    fn modifiers_and_extended_arrows_are_semantic() {
+    fn azerty_is_the_default_layout() {
         let mut decoder = InputDecoder::new();
+        assert_eq!(decoder.layout(), KeyboardLayout::Azerty);
+
+        let event = decoder.feed(0x15).unwrap();
+        assert_eq!(event.text.unwrap().text_bytes(), Some(&b"a"[..]));
+        let event = decoder.feed(0x1c).unwrap();
+        assert_eq!(event.text.unwrap().text_bytes(), Some(&b"q"[..]));
+    }
+
+    #[test]
+    fn azerty_shifted_number_row_is_ascii_compatible() {
+        let mut decoder = InputDecoder::new();
+        decoder.feed(0x12);
+        let event = decoder.feed(0x16).unwrap();
+        assert_eq!(event.text.unwrap().text_bytes(), Some(&b"1"[..]));
+    }
+
+    #[test]
+    fn azerty_accented_keycaps_commit_utf8_text() {
+        let mut decoder = InputDecoder::new();
+        let event = decoder.feed(0x1e).unwrap();
+        assert_eq!(event.text.unwrap().text_bytes(), Some(&b"\xc3\xa9"[..]));
+
+        decoder.feed(0x58);
+        let event = decoder.feed(0x46).unwrap();
+        assert_eq!(event.text.unwrap().text_bytes(), Some(&b"\xc3\x87"[..]));
+    }
+
+    #[test]
+    fn modifiers_and_extended_arrows_are_semantic() {
+        let mut decoder = InputDecoder::with_layout(KeyboardLayout::Qwerty);
         decoder.feed(0x12);
         let event = decoder.feed(0x1c).unwrap();
         assert_eq!(event.text.unwrap().text_bytes(), Some(&b"A"[..]));
@@ -262,7 +425,7 @@ mod tests {
 
     #[test]
     fn shift_and_caps_lock_cancel_for_letters() {
-        let mut decoder = InputDecoder::new();
+        let mut decoder = InputDecoder::with_layout(KeyboardLayout::Qwerty);
         decoder.feed(0x58);
         decoder.feed(0x12);
         let event = decoder.feed(0x1c).unwrap();
