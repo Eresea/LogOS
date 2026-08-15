@@ -149,9 +149,18 @@ impl LineEditor {
         command: &mut [u8; MAX_LINE_BYTES],
         output: &mut ShellOutput,
     ) -> Option<usize> {
-        for &byte in bytes {
+        let mut index = 0;
+        while index < bytes.len() {
+            let byte = bytes[index];
             if self.escape_state != 0 {
                 self.feed_escape(byte, output);
+                index += 1;
+                continue;
+            }
+            let width = if byte >= 0x80 { utf8_sequence_width(&bytes[index..]) } else { 1 };
+            if width > 1 {
+                self.insert(&bytes[index..index + width], output);
+                index += width;
                 continue;
             }
             match byte {
@@ -174,9 +183,10 @@ impl LineEditor {
                 0x17 => self.delete_word(output),
                 b'\t' => self.complete(output),
                 0x08 | 0x7f => self.backspace(output),
-                0x20..=0x7e | 0x80..=0xff => self.insert(byte, output),
+                0x20..=0x7e | 0x80..=0xff => self.insert(&[byte], output),
                 _ => {}
             }
+            index += 1;
         }
         None
     }
@@ -234,16 +244,16 @@ impl LineEditor {
         }
     }
 
-    fn insert(&mut self, byte: u8, output: &mut ShellOutput) {
-        if self.line_len >= MAX_LINE_BYTES {
+    fn insert(&mut self, bytes: &[u8], output: &mut ShellOutput) {
+        if bytes.len() > MAX_LINE_BYTES - self.line_len {
             return;
         }
-        self.line.copy_within(self.cursor..self.line_len, self.cursor + 1);
-        self.line[self.cursor] = byte;
-        self.cursor += 1;
-        self.line_len += 1;
+        self.line.copy_within(self.cursor..self.line_len, self.cursor + bytes.len());
+        self.line[self.cursor..self.cursor + bytes.len()].copy_from_slice(bytes);
+        self.cursor += bytes.len();
+        self.line_len += bytes.len();
         if self.cursor == self.line_len {
-            output.push(byte);
+            output.extend(bytes);
         } else {
             self.redraw(output);
         }
@@ -421,6 +431,17 @@ fn is_utf8_continuation(byte: u8) -> bool {
     byte & 0xc0 == 0x80
 }
 
+fn utf8_sequence_width(bytes: &[u8]) -> usize {
+    let Some(&first) = bytes.first() else { return 0 };
+    let width = match first {
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return 1,
+    };
+    if bytes.len() < width || core::str::from_utf8(&bytes[..width]).is_err() { 1 } else { width }
+}
+
 fn previous_boundary(bytes: &[u8], index: usize) -> usize {
     let mut index = index.saturating_sub(1);
     while index > 0 && is_utf8_continuation(bytes[index]) {
@@ -510,6 +531,18 @@ mod tests {
         editor.input_for_command(b"\xc3\xa9", &mut command, &mut output);
         let length = editor.input_for_command(b"\x7f\r", &mut command, &mut output).unwrap();
         assert_eq!(length, 0);
+    }
+
+    #[test]
+    fn line_editor_rejects_utf8_that_would_exceed_byte_limit() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        let prefix = [b'a'; MAX_LINE_BYTES - 1];
+        editor.input_for_command(&prefix, &mut command, &mut output);
+        let length = editor.input_for_command(b"\xc3\xa9\r", &mut command, &mut output).unwrap();
+        assert_eq!(length, MAX_LINE_BYTES - 1);
+        assert_eq!(&command[..length], &prefix);
     }
 
     #[test]
