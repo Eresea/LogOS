@@ -22,8 +22,8 @@ The storage service owns the format and journal state machine. Core owns the
 block transport and completes device work behind the IPC boundary. The sixth
 service now uses dedicated `StorageToCore` and `CoreToStorage` capabilities;
 the kernel validates the request and response identity through the same
-private staging path. The current mailbox returns `Unsupported` until the
-VirtIO completion adapter is connected.
+private staging path. Read, write, reopen, and flush requests now reach the
+bounded VirtIO adapter; format and namespace policy remain service-owned.
 
 ## Consequences
 

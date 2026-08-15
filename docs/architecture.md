@@ -77,8 +77,8 @@ Live supervisor restart rebuilds volatile state and abandons in-flight work. Dur
 through the bounded storage boundary in ADR-0041, with explicit ownership, journal, replay, durability,
 and idempotency proofs. The host-tested `logos-storage` and `logos-storage-service` packages provide
 the format, journal, namespace, file API, and IPC adapter. The boot image is admitted independently;
-the kernel-mediated storage endpoint is present and identity-checked; it returns `Unsupported` until
-the VirtIO completion adapter is connected.
+the kernel-mediated storage endpoint is present and identity-checked; requests now reach the bounded
+VirtIO adapter, with device-level format/reopen and reboot recovery gated on the QEMU proof.
 
 ## Deferred next-step improvements
 

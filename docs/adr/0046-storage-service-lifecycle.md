@@ -19,5 +19,5 @@ Core.
 
 - Service-count bounds are six everywhere in image admission and supervision.
 - Storage lifecycle can be proved independently of hardware availability.
-- The endpoint currently returns `Unsupported` until VirtIO completion handling
-  is connected; the boot image is deliberately not a fake persistence path.
+- The endpoint now drives the bounded format/journal namespace path; the
+  remaining persistence proof requires QEMU and a real VirtIO disk.
