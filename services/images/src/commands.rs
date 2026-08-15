@@ -456,6 +456,97 @@ impl StorageClient {
     }
 }
 
+#[cfg(feature = "storage-proof")]
+struct StorageProof {
+    step: u8,
+    active: bool,
+    recovery: bool,
+}
+
+#[cfg(feature = "storage-proof")]
+impl StorageProof {
+    const fn new() -> Self {
+        Self { step: 0, active: false, recovery: false }
+    }
+
+    fn active(&self) -> bool {
+        self.active
+    }
+
+    fn consume_result(&mut self, storage: &mut StorageClient) -> bool {
+        if !storage.done || !self.active {
+            return false;
+        }
+        let status = storage.discard_result();
+        if self.step == 0 && status == StorageApiStatus::AlreadyExists {
+            self.recovery = true;
+        }
+        let accepted = if self.recovery {
+            match self.step {
+                0 => status == StorageApiStatus::AlreadyExists,
+                1 | 2 | 3 | 5 => status == StorageApiStatus::Ok,
+                4 | 6 | 7 => matches!(status, StorageApiStatus::Ok | StorageApiStatus::NotFound),
+                _ => false,
+            }
+        } else {
+            match self.step {
+                0 | 1 | 2 | 3 => status == StorageApiStatus::Ok,
+                4 | 5 => status == StorageApiStatus::NotFound,
+                _ => false,
+            }
+        };
+        if accepted {
+            self.step = self.step.saturating_add(1);
+            self.active = false;
+            if (!self.recovery && self.step > 5) || (self.recovery && self.step > 7) {
+                self.step = u8::MAX;
+            }
+        } else {
+            self.step = u8::MAX;
+            self.active = false;
+        }
+        true
+    }
+
+    fn start_next(&mut self, storage: &mut StorageClient, pending: &PendingOutput) -> bool {
+        if self.active
+            || self.step == u8::MAX
+            || storage.active()
+            || storage.done
+            || pending.pending
+        {
+            return false;
+        }
+        let started = match self.step {
+            0 => storage.start(logos_commands::StorageCommand::Touch { path: b"/api-survivor" }),
+            1 => storage.start(logos_commands::StorageCommand::Write {
+                path: b"/api-survivor",
+                data: b"durable-api",
+            }),
+            2 => storage.start_proof_abort(b"/api-aborted"),
+            3 if self.recovery => {
+                storage.start(logos_commands::StorageCommand::Touch { path: b"/api-removed" })
+            }
+            3 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-survivor" }),
+            4 if self.recovery => {
+                storage.start(logos_commands::StorageCommand::Remove { path: b"/api-removed" })
+            }
+            4 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-aborted" }),
+            5 if self.recovery => {
+                storage.start(logos_commands::StorageCommand::Cat { path: b"/api-survivor" })
+            }
+            5 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-removed" }),
+            6 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-aborted" }),
+            7 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-removed" }),
+            _ => false,
+        };
+        if started {
+            self.active = true;
+        }
+        started
+    }
+}
+
 fn storage_ipc_error(status: IpcStatus) -> StorageApiStatus {
     match status {
         IpcStatus::Stale => StorageApiStatus::Stale,
@@ -487,11 +578,7 @@ pub extern "C" fn _start() -> ! {
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
     #[cfg(feature = "storage-proof")]
-    let mut proof_step = 0u8;
-    #[cfg(feature = "storage-proof")]
-    let mut proof_active = false;
-    #[cfg(feature = "storage-proof")]
-    let mut proof_recovery = false;
+    let mut proof = StorageProof::new();
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Commands);
@@ -509,7 +596,7 @@ pub extern "C" fn _start() -> ! {
             progressed |= storage.drive();
             if storage.done {
                 #[cfg(feature = "storage-proof")]
-                if !proof_active {
+                if !proof.active() {
                     storage.take_result(pending);
                 }
                 #[cfg(not(feature = "storage-proof"))]
@@ -529,76 +616,12 @@ pub extern "C" fn _start() -> ! {
             }
         }
         #[cfg(feature = "storage-proof")]
-        if storage.done && proof_active {
-            let status = storage.discard_result();
-            if proof_step == 0 && status == StorageApiStatus::AlreadyExists {
-                proof_recovery = true;
-            }
-            let accepted = if proof_recovery {
-                match proof_step {
-                    0 => status == StorageApiStatus::AlreadyExists,
-                    1 | 2 | 3 | 5 => status == StorageApiStatus::Ok,
-                    4 | 6 | 7 => {
-                        matches!(status, StorageApiStatus::Ok | StorageApiStatus::NotFound)
-                    }
-                    _ => false,
-                }
-            } else {
-                match proof_step {
-                    0 | 1 | 2 | 3 => status == StorageApiStatus::Ok,
-                    4 | 5 => status == StorageApiStatus::NotFound,
-                    _ => false,
-                }
-            };
-            if accepted {
-                proof_step = proof_step.saturating_add(1);
-                proof_active = false;
-                if (!proof_recovery && proof_step > 5) || (proof_recovery && proof_step > 7) {
-                    proof_step = u8::MAX;
-                    proof_active = false;
-                }
-            } else {
-                proof_step = u8::MAX;
-                proof_active = false;
-            }
+        if proof.consume_result(storage) {
             progressed = true;
         }
         #[cfg(feature = "storage-proof")]
-        if !proof_active
-            && proof_step != u8::MAX
-            && !storage.active()
-            && !storage.done
-            && !pending.pending
-        {
-            let started = match proof_step {
-                0 => {
-                    storage.start(logos_commands::StorageCommand::Touch { path: b"/api-survivor" })
-                }
-                1 => storage.start(logos_commands::StorageCommand::Write {
-                    path: b"/api-survivor",
-                    data: b"durable-api",
-                }),
-                2 => storage.start_proof_abort(b"/api-aborted"),
-                3 if proof_recovery => {
-                    storage.start(logos_commands::StorageCommand::Touch { path: b"/api-removed" })
-                }
-                3 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-survivor" }),
-                4 if proof_recovery => {
-                    storage.start(logos_commands::StorageCommand::Remove { path: b"/api-removed" })
-                }
-                4 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-aborted" }),
-                5 if proof_recovery => {
-                    storage.start(logos_commands::StorageCommand::Cat { path: b"/api-survivor" })
-                }
-                5 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-removed" }),
-                6 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-aborted" }),
-                7 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-removed" }),
-                _ => false,
-            };
-            if started {
-                proof_active = true;
-                progressed = true;
-            }
+        if proof.start_next(storage, pending) {
+            progressed = true;
         }
         let mut message = IpcBytes::empty(MessageKind::SessionInput);
         if common::ipc_receive(INPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
