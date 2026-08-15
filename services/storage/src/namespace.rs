@@ -695,4 +695,18 @@ mod tests {
             Err(NamespaceError::InvalidPath)
         );
     }
+
+    #[test]
+    fn file_open_and_slot_reuse_reject_stale_ids() {
+        let store = MemoryBlockStore::<16>::new();
+        let mut fs = DurableNamespace::format(store).unwrap();
+        let first = fs.create_file(fs.root(), b"first").unwrap();
+        assert_eq!(fs.open_file(b"/first"), Ok(first));
+        assert_eq!(fs.open_file(b"/"), Err(NamespaceError::IsDirectory));
+        fs.unlink(first).unwrap();
+        let replacement = fs.create_file(fs.root(), b"second").unwrap();
+        assert_eq!(replacement.slot(), first.slot());
+        assert_ne!(replacement.generation(), first.generation());
+        assert_eq!(fs.stat(first), Err(NamespaceError::Stale));
+    }
 }
