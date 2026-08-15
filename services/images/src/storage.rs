@@ -186,6 +186,7 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
         }
         Err(error) => serve_storage_error(error),
     };
+    #[cfg(feature = "storage-proof")]
     if filesystem.open_file(b"/marker").is_err() {
         let marker = filesystem
             .create_file(filesystem.root(), b"marker")
