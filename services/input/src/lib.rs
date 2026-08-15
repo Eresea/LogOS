@@ -15,7 +15,9 @@ pub const MOD_CAPS_LOCK: u16 = logos_abi::MOD_CAPS_LOCK;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum KeyboardLayout {
-    /// French AZERTY-compatible physical key mapping.
+    /// French AZERTY base and Shift layers, including committed UTF-8 keycaps.
+    /// AltGr and dead-key composition are intentionally unsupported; those
+    /// keys use bounded ASCII-compatible semantic fallbacks.
     #[default]
     Azerty,
     /// US QWERTY physical key mapping.
@@ -329,8 +331,9 @@ const fn qwerty_code(byte: u8) -> KeyCode {
 }
 
 const fn azerty_code(byte: u8) -> KeyCode {
-    // Semantic key codes remain ASCII-compatible; committed text preserves
-    // the accented keycaps through `azerty_text` above.
+    // Semantic key codes remain ASCII-compatible. The text path preserves
+    // supported accented and shifted keycaps; AltGr, ², and dead-key state
+    // are intentionally outside this bounded decoder.
     match byte {
         0x16 => KeyCode::character(b'&'),
         0x1e => KeyCode::character(b'e'),
