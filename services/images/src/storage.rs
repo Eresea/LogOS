@@ -117,7 +117,7 @@ fn discover(capability: IpcCapability) -> Option<u64> {
     (response.block_count > 2).then_some(response.block_count)
 }
 
-fn stop_on_storage_error<T>(_error: T) -> ! {
+fn serve_storage_error<T>(_error: T) -> ! {
     let mut pending_response = None;
     let mut heartbeat_ticks = 0u16;
     loop {
@@ -176,19 +176,19 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
             let Some(store) = new_store(capability, blocks) else {
                 common::idle();
             };
-            DurableNamespace::format(store).unwrap_or_else(|error| stop_on_storage_error(error))
+            DurableNamespace::format(store).unwrap_or_else(|error| serve_storage_error(error))
         }
-        Err(error) => stop_on_storage_error(error),
+        Err(error) => serve_storage_error(error),
     };
     if filesystem.open_file(b"/marker").is_err() {
         let marker = filesystem
             .create_file(filesystem.root(), b"marker")
-            .unwrap_or_else(|error| stop_on_storage_error(error));
+            .unwrap_or_else(|error| serve_storage_error(error));
         filesystem
             .write(marker, 0, b"LogOS storage marker")
-            .unwrap_or_else(|error| stop_on_storage_error(error));
+            .unwrap_or_else(|error| serve_storage_error(error));
     }
-    filesystem.flush().unwrap_or_else(|error| stop_on_storage_error(error));
+    filesystem.flush().unwrap_or_else(|error| serve_storage_error(error));
 
     let mut api = StorageApi::new(filesystem);
     let mut pending_response = None;
@@ -223,10 +223,8 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
 /// whole raw volume, reopens valid media, or formats only blank media.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    let Some(capability) = common::capability(REQUEST_CAPABILITY) else {
-        stop_on_storage_error(())
-    };
-    let Some(blocks) = discover(capability) else { stop_on_storage_error(()) };
+    let Some(capability) = common::capability(REQUEST_CAPABILITY) else { serve_storage_error(()) };
+    let Some(blocks) = discover(capability) else { serve_storage_error(()) };
     run_filesystem(capability, blocks)
 }
 
