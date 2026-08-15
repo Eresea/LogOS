@@ -81,9 +81,10 @@ impl CommandService {
         for spec in COMMAND_SPECS {
             let matches = match spec.kind {
                 CommandKind::Echo => {
-                    line.len() > spec.name.len()
-                        && line.starts_with(spec.name)
-                        && line[spec.name.len()] == b' '
+                    line == spec.name
+                        || (line.len() > spec.name.len()
+                            && line.starts_with(spec.name)
+                            && line[spec.name.len()] == b' ')
                 }
                 _ => line == spec.name,
             };
@@ -113,7 +114,9 @@ impl CommandService {
                     output.extend(b"\r\n");
                 }
                 CommandKind::Echo => {
-                    output.extend(&line[spec.name.len() + 1..]);
+                    if line.len() > spec.name.len() {
+                        output.extend(&line[spec.name.len() + 1..]);
+                    }
                     output.extend(b"\r\n");
                 }
                 CommandKind::Clear => output.clear_screen = true,
@@ -148,6 +151,7 @@ mod tests {
             commands.execute(b"help").as_bytes(),
             b"help echo clear true false version uname\r\n"
         );
+        assert_eq!(commands.execute(b"echo").as_bytes(), b"\r\n");
         assert_eq!(commands.execute(b"echo hi").as_bytes(), b"hi\r\n");
         assert!(commands.execute(b"clear").clear_screen);
         assert_eq!(commands.execute(b"true").status, 0);
@@ -161,9 +165,7 @@ mod tests {
     fn every_catalog_entry_has_dispatch_behavior() {
         let mut commands = CommandService::new();
         for spec in COMMAND_SPECS {
-            if spec.kind != CommandKind::Echo {
-                assert_ne!(commands.execute(spec.name).status, 127);
-            }
+            assert_ne!(commands.execute(spec.name).status, 127);
         }
     }
 
