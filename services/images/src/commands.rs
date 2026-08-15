@@ -303,15 +303,25 @@ impl StorageClient {
                 self.fail(StorageApiStatus::Invalid);
                 return true;
             };
-            if common::ipc_send(STORAGE_SEND_CAPABILITY, &request) != IpcStatus::Ok {
-                return false;
+            match common::ipc_send(STORAGE_SEND_CAPABILITY, &request) {
+                IpcStatus::Ok => {}
+                IpcStatus::Full => return false,
+                status => {
+                    self.fail(storage_ipc_error(status));
+                    return true;
+                }
             }
             self.sent = true;
             return true;
         }
         let mut message = IpcBytes::empty(MessageKind::StorageResponse);
-        if common::ipc_receive(STORAGE_RECEIVE_CAPABILITY, &mut message) != IpcStatus::Ok {
-            return false;
+        match common::ipc_receive(STORAGE_RECEIVE_CAPABILITY, &mut message) {
+            IpcStatus::Ok => {}
+            IpcStatus::Empty => return false,
+            status => {
+                self.fail(storage_ipc_error(status));
+                return true;
+            }
         }
         self.sent = false;
         let Ok(response) = StorageApiResponse::decode(&message) else {
@@ -437,6 +447,15 @@ impl StorageClient {
     fn discard_result(&mut self) -> StorageApiStatus {
         self.done = false;
         self.last_status
+    }
+}
+
+fn storage_ipc_error(status: IpcStatus) -> StorageApiStatus {
+    match status {
+        IpcStatus::Stale => StorageApiStatus::Stale,
+        IpcStatus::Malformed => StorageApiStatus::Invalid,
+        IpcStatus::Disconnected | IpcStatus::Unauthorized => StorageApiStatus::Io,
+        IpcStatus::Ok | IpcStatus::Full | IpcStatus::Empty => StorageApiStatus::Io,
     }
 }
 
