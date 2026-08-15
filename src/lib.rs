@@ -24,6 +24,7 @@ pub mod service_loader;
 #[cfg(target_os = "uefi")]
 mod service_runtime;
 pub mod service_startup;
+pub mod virtio;
 
 #[cfg(target_os = "uefi")]
 mod runtime_entry;

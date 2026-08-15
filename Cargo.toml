@@ -24,6 +24,7 @@ unsafe_op_in_unsafe_fn = "warn"
 [dependencies]
 uefi = { version = "0.35" }
 logos-abi = { path = "abi" }
+logos-storage = { path = "storage" }
 
 [features]
 default = []
