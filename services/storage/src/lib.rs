@@ -37,6 +37,7 @@ pub trait KernelStorageIpc {
 pub struct IpcBlockStore<T> {
     transport: T,
     capability: IpcCapability,
+    capability_slot: u16,
     generation: u16,
     service_epoch: u64,
     blocks: u64,
@@ -55,9 +56,31 @@ impl<T> IpcBlockStore<T> {
         if generation == 0 || service_epoch == 0 || blocks == 0 {
             return Err(BlockError::InvalidRequest);
         }
+        Self::new_with_slot(
+            transport,
+            capability,
+            capability.endpoint as u16,
+            generation,
+            service_epoch,
+            blocks,
+        )
+    }
+
+    pub fn new_with_slot(
+        transport: T,
+        capability: IpcCapability,
+        capability_slot: u16,
+        generation: u16,
+        service_epoch: u64,
+        blocks: u64,
+    ) -> Result<Self, BlockError> {
+        if generation == 0 || service_epoch == 0 || blocks == 0 {
+            return Err(BlockError::InvalidRequest);
+        }
         Ok(Self {
             transport,
             capability,
+            capability_slot,
             generation,
             service_epoch,
             blocks,
@@ -110,7 +133,7 @@ impl<T> IpcBlockStore<T> {
             operation,
             self.next_request(),
             self.generation,
-            self.capability.endpoint as u16,
+            self.capability_slot,
             self.service_epoch,
             0,
             blocks,

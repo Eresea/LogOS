@@ -60,6 +60,8 @@ dependencies = [
  "logos-display",
  "logos-input",
  "logos-session",
+ "logos-storage",
+ "logos-storage-service",
  "logos-terminal",
 ]
 

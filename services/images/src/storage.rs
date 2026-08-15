@@ -4,7 +4,11 @@
 
 mod common;
 
-use logos_abi::{IpcStatus, StorageOperation, StorageRequest, StorageResponse, StorageStatus};
+use logos_abi::{
+    IpcCapability, IpcStatus, StorageOperation, StorageRequest, StorageResponse, StorageStatus,
+};
+use logos_storage::Block;
+use logos_storage_service::{DurableNamespace, IpcBlockStore, KernelStorageIpc, NamespaceError};
 
 const REQUEST_CAPABILITY: usize = common::capability_slot(
     logos_abi::ServiceId::Storage,
@@ -17,63 +21,123 @@ const RESPONSE_CAPABILITY: usize = common::capability_slot(
     logos_abi::IpcRights::Receive,
 );
 
-/// The storage image is admitted as a fixed service endpoint. Block requests
-/// remain kernel-mediated; this bounded lifecycle image exercises the request
-/// boundary while the hardware-backed completion path is still being added.
+struct StorageTransport {
+    operation: Option<StorageOperation>,
+}
+
+impl StorageTransport {
+    const fn new() -> Self {
+        Self { operation: None }
+    }
+}
+
+impl KernelStorageIpc for StorageTransport {
+    fn send(
+        &mut self,
+        _capability: IpcCapability,
+        request: StorageRequest,
+        staging: &mut Block,
+    ) -> IpcStatus {
+        self.operation = Some(request.operation);
+        if request.operation == StorageOperation::Write {
+            unsafe { *(logos_abi::STORAGE_DATA_BASE as *mut Block) = *staging };
+        }
+        common::ipc_send(REQUEST_CAPABILITY, &request)
+    }
+
+    fn receive(
+        &mut self,
+        _capability: IpcCapability,
+        response: &mut StorageResponse,
+        staging: &mut Block,
+    ) -> IpcStatus {
+        let status = common::ipc_receive(RESPONSE_CAPABILITY, response);
+        if status == IpcStatus::Ok && self.operation == Some(StorageOperation::Read) {
+            *staging = unsafe { *(logos_abi::STORAGE_DATA_BASE as *const Block) };
+        }
+        status
+    }
+}
+
+fn new_store(capability: IpcCapability, blocks: u64) -> Option<IpcBlockStore<StorageTransport>> {
+    IpcBlockStore::new_with_slot(
+        StorageTransport::new(),
+        capability,
+        REQUEST_CAPABILITY as u16,
+        1,
+        1,
+        blocks,
+    )
+    .ok()
+}
+
+fn discover(capability: IpcCapability) -> Option<u64> {
+    let request = StorageRequest::new(
+        StorageOperation::Reopen,
+        1,
+        1,
+        REQUEST_CAPABILITY as u16,
+        1,
+        0,
+        0,
+        0,
+        0,
+    )?;
+    let mut transport = StorageTransport::new();
+    let mut staging = Block::zero();
+    if transport.send(capability, request, &mut staging) != IpcStatus::Ok {
+        return None;
+    }
+    let mut response = StorageResponse::new(1, StorageStatus::Invalid, 1, 0, 0, 0);
+    if transport.receive(capability, &mut response, &mut staging) != IpcStatus::Ok
+        || response.status != StorageStatus::Ok
+    {
+        return None;
+    }
+    (response.block_count > 2).then_some(response.block_count)
+}
+
+fn stop_on_storage_error<T>(_error: T) -> ! {
+    common::idle()
+}
+
+/// The storage image owns the durable format and namespace. It discovers the
+/// whole raw volume, reopens valid media, or formats only blank media.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    let mut heartbeat_ticks = 0u16;
-    let mut request_id = 1u32;
-    let mut waiting = false;
-    loop {
-        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
-        if !waiting {
-            let Some(request) = StorageRequest::new(
-                StorageOperation::Flush,
-                request_id,
-                1,
-                REQUEST_CAPABILITY as u16,
-                1,
-                0,
-                0,
-                0,
-                0,
-            ) else {
+    let Some(capability) = common::capability(REQUEST_CAPABILITY) else {
+        common::idle();
+    };
+    let Some(blocks) = discover(capability) else {
+        common::idle();
+    };
+    let Some(store) = new_store(capability, blocks) else {
+        common::idle();
+    };
+    let mut filesystem = match DurableNamespace::open(store) {
+        Ok(filesystem) => filesystem,
+        Err(NamespaceError::Format(logos_storage::FormatError::Unformatted)) => {
+            let Some(store) = new_store(capability, blocks) else {
                 common::idle();
             };
-            match common::ipc_send(REQUEST_CAPABILITY, &request) {
-                IpcStatus::Ok => waiting = true,
-                IpcStatus::Full => common::wait(
-                    common::ipc_write_event(logos_abi::IpcEndpointId::StorageToCore),
-                    logos_abi::ServiceId::Storage,
-                ),
-                IpcStatus::Stale
-                | IpcStatus::Disconnected
-                | IpcStatus::Unauthorized
-                | IpcStatus::Malformed
-                | IpcStatus::Empty => common::wait(0, logos_abi::ServiceId::Storage),
-            }
-            continue;
+            DurableNamespace::format(store).unwrap_or_else(|error| stop_on_storage_error(error))
         }
+        Err(error) => stop_on_storage_error(error),
+    };
+    if filesystem.open_file(b"/marker").is_err() {
+        let marker = filesystem
+            .create_file(filesystem.root(), b"marker")
+            .unwrap_or_else(|error| stop_on_storage_error(error));
+        filesystem
+            .write(marker, 0, b"LogOS storage marker")
+            .unwrap_or_else(|error| stop_on_storage_error(error));
+    }
+    filesystem.flush().unwrap_or_else(|error| stop_on_storage_error(error));
 
-        let mut response = StorageResponse::new(0, StorageStatus::Invalid, 0, 0, 0, 0);
-        match common::ipc_receive(RESPONSE_CAPABILITY, &mut response) {
-            IpcStatus::Ok => {
-                waiting = false;
-                request_id = request_id.wrapping_add(1).max(1);
-            }
-            IpcStatus::Empty => common::wait(
-                common::ipc_read_event(logos_abi::IpcEndpointId::CoreToStorage),
-                logos_abi::ServiceId::Storage,
-            ),
-            IpcStatus::Stale
-            | IpcStatus::Disconnected
-            | IpcStatus::Unauthorized
-            | IpcStatus::Malformed
-            | IpcStatus::Full => {
-                waiting = false;
-            }
-        }
+    let mut heartbeat_ticks = 0u16;
+    loop {
+        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
+        common::wait(0, logos_abi::ServiceId::Storage);
     }
 }
 
