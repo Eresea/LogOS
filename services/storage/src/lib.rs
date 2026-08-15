@@ -175,7 +175,7 @@ fn map_storage_status(status: StorageStatus) -> Result<(), BlockError> {
 mod tests {
     use super::*;
     use logos_abi::{IpcRights, StorageStatus};
-    use logos_storage::MemoryBlockStore;
+    use logos_storage::{JournalRecord, MemoryBlockStore, ReplayError, ReplaySink, Volume};
 
     struct TestKernel {
         store: MemoryBlockStore<4>,
@@ -288,5 +288,42 @@ mod tests {
             store.write_block(BlockIndex::new(0), &Block::zero()),
             Err(BlockError::ReadOnly)
         );
+    }
+
+    struct Sink {
+        records: u8,
+    }
+
+    impl ReplaySink for Sink {
+        fn record(
+            &mut self,
+            _transaction_id: u64,
+            _kind: u16,
+            _payload: &[u8],
+        ) -> Result<(), ReplayError> {
+            self.records = self.records.saturating_add(1);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn service_restart_reopens_and_replays_a_committed_transaction_once() {
+        let capability = capability();
+        let kernel = TestKernel::new(capability);
+        let mut store = IpcBlockStore::new(kernel, capability, 3, 9, 32).unwrap();
+        let mut volume = Volume::format(&mut store).unwrap();
+        let payload = [0x5a; 8];
+        let transaction =
+            volume.commit(&mut store, &[JournalRecord { kind: 7, payload: &payload }]).unwrap();
+        assert_eq!(transaction, 1);
+
+        let kernel = store.into_transport();
+        let mut reopened_store = IpcBlockStore::new(kernel, capability, 3, 9, 32).unwrap();
+        let reopened = Volume::open(&mut reopened_store).unwrap();
+        let mut sink = Sink { records: 0 };
+        let summary = reopened.recover(&mut reopened_store, &mut sink).unwrap();
+        assert_eq!(summary.committed_transactions, 1);
+        assert_eq!(summary.replayed_records, 1);
+        assert_eq!(sink.records, 1);
     }
 }
