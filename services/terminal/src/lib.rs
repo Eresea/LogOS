@@ -104,6 +104,7 @@ pub struct TerminalState<const CELL_COUNT: usize> {
     cursor_row: usize,
     screen: [Cell; CELL_COUNT],
     dirty: [bool; CELL_COUNT],
+    full_redraw_pending: bool,
     parser: Parser,
     foreground: u32,
     background: u32,
@@ -162,6 +163,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             cursor_row: 0,
             screen: [blank_cell(); CELL_COUNT],
             dirty: [true; CELL_COUNT],
+            full_redraw_pending: true,
             parser: Parser::new(),
             foreground: DEFAULT_FOREGROUND,
             background: DEFAULT_BACKGROUND,
@@ -183,6 +185,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     pub fn reset(&mut self) {
         self.cursor_column = 0;
         self.cursor_row = 0;
+        self.full_redraw_pending = true;
         self.parser = Parser::new();
         self.foreground = DEFAULT_FOREGROUND;
         self.background = DEFAULT_BACKGROUND;
@@ -490,7 +493,12 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
 
     /// Return at most 128 dirty cells; repeated calls drain the dirty set.
     pub fn next_render(&mut self) -> Option<RenderMessage> {
-        let mut message = RenderMessage::empty(MessageKind::RenderCells);
+        let kind = if self.full_redraw_pending {
+            MessageKind::FullRedraw
+        } else {
+            MessageKind::RenderCells
+        };
+        let mut message = RenderMessage::empty(kind);
         message.columns = DEFAULT_COLUMNS as u16;
         message.rows = DEFAULT_ROWS as u16;
         message.cursor_column = self.cursor_column as u16;
@@ -510,6 +518,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         if count == 0 {
             None
         } else {
+            self.full_redraw_pending = false;
             message.count = count as u16;
             Some(message)
         }
@@ -713,6 +722,15 @@ mod tests {
         let mut terminal = Terminal::new();
         assert!(drain(&mut terminal) > 1);
         assert!(terminal.next_render().is_none());
+    }
+
+    #[test]
+    fn first_render_after_reset_requests_a_full_redraw() {
+        let mut terminal = Terminal::new();
+        assert_eq!(terminal.next_render().unwrap().kind, MessageKind::FullRedraw);
+        drain(&mut terminal);
+        terminal.feed(b"\x1bc");
+        assert_eq!(terminal.next_render().unwrap().kind, MessageKind::FullRedraw);
     }
 
     #[test]
