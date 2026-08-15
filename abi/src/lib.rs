@@ -41,6 +41,7 @@ pub const IPC_STAGING_BASE: usize = SERVICE_IPC_BASE + 0x10_000;
 pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x11_000;
 pub const MAX_IPC_CAPABILITIES: usize = 4;
 pub const SERVICE_HEARTBEAT_INTERVAL_TICKS: u64 = 100;
+pub const STORAGE_MAX_BLOCKS_PER_REQUEST: u16 = 16;
 
 pub const IPC_SYSCALL_SEND: usize = 4;
 pub const IPC_SYSCALL_RECEIVE: usize = 5;
@@ -192,6 +193,127 @@ impl IpcStatus {
             5 => Some(Self::Unauthorized),
             6 => Some(Self::Malformed),
             _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StorageOperation {
+    Read = 1,
+    Write = 2,
+    Flush = 3,
+    Format = 4,
+    Reopen = 5,
+    BeginTransaction = 6,
+    AppendRecord = 7,
+    CommitTransaction = 8,
+    AbortTransaction = 9,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StorageStatus {
+    Ok = 0,
+    Io = 1,
+    OutOfBounds = 2,
+    ReadOnly = 3,
+    Invalid = 4,
+    Stale = 5,
+    Unauthorized = 6,
+    Full = 7,
+    Recovery = 8,
+    Unsupported = 9,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct StorageRequest {
+    pub operation: StorageOperation,
+    pub flags: u8,
+    pub request_id: u32,
+    pub generation: u16,
+    pub capability_slot: u16,
+    pub service_epoch: u64,
+    pub start_block: u64,
+    pub blocks: u16,
+    pub payload_bytes: u16,
+    pub transaction_id: u64,
+}
+
+impl StorageRequest {
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        operation: StorageOperation,
+        request_id: u32,
+        generation: u16,
+        capability_slot: u16,
+        service_epoch: u64,
+        start_block: u64,
+        blocks: u16,
+        payload_bytes: u16,
+        transaction_id: u64,
+    ) -> Option<Self> {
+        if request_id == 0
+            || generation == 0
+            || service_epoch == 0
+            || blocks > STORAGE_MAX_BLOCKS_PER_REQUEST
+            || payload_bytes as usize > IPC_PAGE_BYTES
+        {
+            return None;
+        }
+        let block_operation = matches!(operation, StorageOperation::Read | StorageOperation::Write);
+        if block_operation != (blocks != 0) {
+            return None;
+        }
+        Some(Self {
+            operation,
+            flags: 0,
+            request_id,
+            generation,
+            capability_slot,
+            service_epoch,
+            start_block,
+            blocks,
+            payload_bytes,
+            transaction_id,
+        })
+    }
+
+    pub const fn is_block_io(self) -> bool {
+        matches!(self.operation, StorageOperation::Read | StorageOperation::Write)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct StorageResponse {
+    pub request_id: u32,
+    pub status: StorageStatus,
+    pub reserved: u8,
+    pub generation: u16,
+    pub blocks_completed: u16,
+    pub payload_bytes: u16,
+    pub transaction_id: u64,
+}
+
+impl StorageResponse {
+    pub const fn new(
+        request_id: u32,
+        status: StorageStatus,
+        generation: u16,
+        blocks_completed: u16,
+        payload_bytes: u16,
+        transaction_id: u64,
+    ) -> Self {
+        Self {
+            request_id,
+            status,
+            reserved: 0,
+            generation,
+            blocks_completed,
+            payload_bytes,
+            transaction_id,
         }
     }
 }
@@ -971,5 +1093,35 @@ mod tests {
             IpcBytes::from_bytes(MessageKind::Text, b"ok").unwrap().as_bytes(),
             Some(&b"ok"[..])
         );
+    }
+
+    #[test]
+    fn storage_requests_are_bounded_and_generation_stamped() {
+        let request =
+            StorageRequest::new(StorageOperation::Read, 7, 3, 1, 9, 12, 2, 4096, 4).unwrap();
+        assert!(request.is_block_io());
+        assert!(StorageRequest::new(StorageOperation::Read, 7, 3, 1, 9, 12, 0, 0, 4).is_none());
+        assert!(
+            StorageRequest::new(
+                StorageOperation::Write,
+                7,
+                3,
+                1,
+                9,
+                12,
+                STORAGE_MAX_BLOCKS_PER_REQUEST + 1,
+                0,
+                4,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn storage_response_preserves_request_and_transaction_identity() {
+        let response = StorageResponse::new(7, StorageStatus::Ok, 3, 2, 4096, 4);
+        assert_eq!(response.request_id, 7);
+        assert_eq!(response.generation, 3);
+        assert_eq!(response.transaction_id, 4);
     }
 }

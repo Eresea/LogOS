@@ -13,6 +13,7 @@ members = [
     "services/display",
     "services/input",
     "services/session",
+    "services/storage",
     "services/terminal",
     "services/images",
 ]

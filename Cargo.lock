@@ -75,6 +75,14 @@ name = "logos-storage"
 version = "0.1.0"
 
 [[package]]
+name = "logos-storage-service"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+ "logos-storage",
+]
+
+[[package]]
 name = "logos-terminal"
 version = "0.1.0"
 dependencies = [
