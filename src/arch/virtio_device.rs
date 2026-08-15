@@ -162,7 +162,8 @@ impl MmioRegion {
         if offset.checked_add(size).is_none_or(|end| end > self.length as usize) {
             return Err(DeviceError::InvalidBar);
         }
-        Ok((self.address as usize + offset) as *mut T)
+        let address = (self.address as usize).checked_add(offset).ok_or(DeviceError::InvalidBar)?;
+        Ok(address as *mut T)
     }
 
     unsafe fn read_u8(&self, offset: usize) -> Result<u8, DeviceError> {
@@ -214,7 +215,7 @@ pub struct VirtioBlockDevice {
     next_request_generation: u64,
     negotiated_features: u64,
     pci_address: logos_storage::PciAddress,
-    bars: [u64; 6],
+    bars: [PciBar; 6],
     msix: Option<MsixCapability>,
     interrupt_completion: Option<DeviceCompletion>,
     interrupt_error: Option<DeviceError>,
@@ -277,6 +278,7 @@ fn with_device_mut<T>(
 impl VirtioBlockDevice {
     pub fn initialize(writable: bool) -> Result<Self, DeviceError> {
         let probe = PciConfig::find().ok_or(DeviceError::NotFound)?;
+        PciConfig::enable_device(probe.address);
         let common = region_for(&probe, probe.capabilities.common)?;
         let notify = region_for(&probe, probe.capabilities.notify)?;
         let isr = region_for(&probe, probe.capabilities.isr)?;
@@ -395,8 +397,17 @@ impl VirtioBlockDevice {
             return Ok(());
         };
         let table_bar = *self.bars.get(msix.table_bar as usize).ok_or(DeviceError::MissingBar)?;
-        let table_address =
-            table_bar.checked_add(u64::from(msix.table_offset)).ok_or(DeviceError::InvalidBar)?;
+        if table_bar.base == 0
+            || u64::from(msix.table_offset)
+                .checked_add(u64::from(MSIX_TABLE_ENTRY_BYTES))
+                .is_none_or(|end| end > table_bar.length)
+        {
+            return Err(DeviceError::InvalidBar);
+        }
+        let table_address = table_bar
+            .base
+            .checked_add(u64::from(msix.table_offset))
+            .ok_or(DeviceError::InvalidBar)?;
         let table = MmioRegion::new(table_address, MSIX_TABLE_ENTRY_BYTES)?;
         let apic_id = super::APIC_IDS[0].load(Ordering::Acquire);
         let message_address = 0xfee0_0000u64 | (u64::from(apic_id) << 12);
@@ -468,7 +479,11 @@ impl VirtioBlockDevice {
         fence(Ordering::Release);
         self.queue.available_index = available.wrapping_add(1);
         let notify_offset = unsafe { self.common.read_u16(0x1e)? } as u64;
-        let notify_address = self.notify.address + notify_offset * self.notify_multiplier as u64;
+        let notify_delta = notify_offset
+            .checked_mul(self.notify_multiplier as u64)
+            .ok_or(DeviceError::InvalidBar)?;
+        let notify_address =
+            self.notify.address.checked_add(notify_delta).ok_or(DeviceError::InvalidBar)?;
         unsafe { write_volatile(notify_address as *mut u16, 0) };
         Ok(())
     }
@@ -731,11 +746,15 @@ fn region_for(
     probe: &PciProbe,
     capability: logos_storage::VirtioPciCapability,
 ) -> Result<MmioRegion, DeviceError> {
-    let base = *probe.bars.get(capability.bar as usize).ok_or(DeviceError::MissingBar)?;
-    if base == 0 {
+    let bar = *probe.bars.get(capability.bar as usize).ok_or(DeviceError::MissingBar)?;
+    if bar.base == 0
+        || u64::from(capability.offset)
+            .checked_add(u64::from(capability.length))
+            .is_none_or(|end| end > bar.length)
+    {
         return Err(DeviceError::MissingBar);
     }
-    let address = base.checked_add(capability.offset as u64).ok_or(DeviceError::InvalidBar)?;
+    let address = bar.base.checked_add(capability.offset as u64).ok_or(DeviceError::InvalidBar)?;
     MmioRegion::new(address, capability.length)
 }
 
@@ -759,7 +778,7 @@ impl PciConfig {
                         return Some(PciProbe {
                             address,
                             capabilities: parsed.capabilities,
-                            bars: Self::bars(&config),
+                            bars: Self::bars(address, &config),
                             msix: Self::msix(&config),
                         });
                     }
@@ -778,21 +797,58 @@ impl PciConfig {
         config
     }
 
-    fn bars(config: &[u8; logos_storage::PCI_CONFIG_BYTES]) -> [u64; 6] {
-        let mut bars = [0; 6];
-        for (index, bar) in bars.iter_mut().enumerate() {
+    fn bars(
+        address: logos_storage::PciAddress,
+        config: &[u8; logos_storage::PCI_CONFIG_BYTES],
+    ) -> [PciBar; 6] {
+        let mut bars = [PciBar::EMPTY; 6];
+        let mut index = 0;
+        while index < bars.len() {
             let offset = 0x10 + index * 4;
             let low = u32::from_le_bytes(config[offset..offset + 4].try_into().unwrap());
             if low & 1 != 0 {
+                index += 1;
                 continue;
             }
-            *bar = (low as u64) & !0xf;
-            if low & 0x6 == 0x4 && index < 5 {
-                let high = u32::from_le_bytes(config[offset + 4..offset + 8].try_into().unwrap());
-                *bar |= (high as u64) << 32;
+            let is_64 = low & 0x6 == 0x4 && index < 5;
+            let original_high = if is_64 {
+                u32::from_le_bytes(config[offset + 4..offset + 8].try_into().unwrap())
+            } else {
+                0
+            };
+            unsafe { config_write(address, offset as u8, u32::MAX) };
+            if is_64 {
+                unsafe { config_write(address, (offset + 4) as u8, u32::MAX) };
             }
+            let mask_low = unsafe { config_read(address, offset as u8) };
+            let mask_high =
+                if is_64 { unsafe { config_read(address, (offset + 4) as u8) } } else { 0 };
+            unsafe { config_write(address, offset as u8, low) };
+            if is_64 {
+                unsafe { config_write(address, (offset + 4) as u8, original_high) };
+            }
+            let base = if is_64 {
+                (u64::from(original_high) << 32) | u64::from(low & !0xf)
+            } else {
+                u64::from(low & !0xf)
+            };
+            let mask = if is_64 {
+                (u64::from(mask_high) << 32) | u64::from(mask_low & !0xf)
+            } else {
+                u64::from(mask_low & !0xf)
+            };
+            let length = (!mask).wrapping_add(1);
+            if base != 0 && length != 0 {
+                bars[index] = PciBar { base, length };
+            }
+            index += if is_64 { 2 } else { 1 };
         }
         bars
+    }
+
+    fn enable_device(address: logos_storage::PciAddress) {
+        let command = unsafe { config_read_u16(address, 0x04) };
+        unsafe { config_write_u16(address, 0x04, command | 0x0006) };
     }
 
     fn msix(config: &[u8; logos_storage::PCI_CONFIG_BYTES]) -> Option<MsixCapability> {
@@ -833,8 +889,18 @@ impl PciConfig {
 struct PciProbe {
     address: logos_storage::PciAddress,
     capabilities: logos_storage::VirtioPciCapabilities,
-    bars: [u64; 6],
+    bars: [PciBar; 6],
     msix: Option<MsixCapability>,
+}
+
+#[derive(Clone, Copy)]
+struct PciBar {
+    base: u64,
+    length: u64,
+}
+
+impl PciBar {
+    const EMPTY: Self = Self { base: 0, length: 0 };
 }
 
 #[derive(Clone, Copy)]
