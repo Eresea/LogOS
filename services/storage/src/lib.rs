@@ -3,6 +3,13 @@
 #[cfg(test)]
 extern crate std;
 
+mod namespace;
+
+pub use namespace::{
+    DurableNamespace, MAX_COMPONENT_BYTES, MAX_FILE_BLOCKS, MAX_FILE_BYTES, MAX_OBJECTS,
+    MAX_PATH_DEPTH, NamespaceError, ObjectId, ObjectInfo, ObjectKind, ObjectList, ObjectNamespace,
+};
+
 use logos_abi::{
     IpcCapability, IpcStatus, StorageOperation, StorageRequest, StorageResponse, StorageStatus,
 };
