@@ -242,7 +242,10 @@ impl<'a> StorageApiResponse<'a> {
             return Err(StorageApiError::Malformed);
         }
         let bytes = message.as_bytes().ok_or(StorageApiError::Malformed)?;
-        if bytes.len() < RESPONSE_HEADER_BYTES || bytes[0] != STORAGE_API_VERSION {
+        if bytes.len() < RESPONSE_HEADER_BYTES {
+            return Err(StorageApiError::Malformed);
+        }
+        if bytes[0] != STORAGE_API_VERSION {
             return Err(StorageApiError::InvalidVersion);
         }
         if bytes[3] != 0 {
@@ -386,5 +389,12 @@ mod tests {
         assert_eq!(response.transaction_id, 11);
         assert_eq!(response.data, b"data");
         assert!(response.more);
+    }
+
+    #[test]
+    fn response_rejects_truncated_header_as_malformed() {
+        let mut message = IpcBytes::empty(MessageKind::StorageResponse);
+        message.len = (RESPONSE_HEADER_BYTES - 1) as u16;
+        assert!(matches!(StorageApiResponse::decode(&message), Err(StorageApiError::Malformed)));
     }
 }
