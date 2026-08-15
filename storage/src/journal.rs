@@ -199,8 +199,20 @@ impl Volume {
         for index in self.info.journal_tail..self.info.journal_head {
             let mut block = Block::zero();
             store.read_block(BlockIndex::new(index), &mut block)?;
-            let Some(record) = decode_record(&block)? else {
-                break;
+            let record = match decode_record(&block) {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    if !remaining_journal_is_blank(store, index + 1, self.info.journal_head)? {
+                        return Err(FormatError::Corrupt);
+                    }
+                    break;
+                }
+                Err(error) => {
+                    if !remaining_journal_is_blank(store, index + 1, self.info.journal_head)? {
+                        return Err(error);
+                    }
+                    break;
+                }
             };
 
             if record.transaction_id == 0 || record.transaction_id == MAX_TRANSACTION_ID {
@@ -399,6 +411,21 @@ fn decode_record(block: &Block) -> Result<Option<DecodedRecord>, FormatError> {
         payload_len: payload_len as u16,
         payload,
     }))
+}
+
+fn remaining_journal_is_blank<B: BlockStore>(
+    store: &mut B,
+    start: u64,
+    end: u64,
+) -> Result<bool, FormatError> {
+    let mut block = Block::zero();
+    for index in start..end {
+        store.read_block(BlockIndex::new(index), &mut block)?;
+        if block.as_bytes().iter().any(|byte| *byte != 0) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
@@ -630,6 +657,46 @@ mod tests {
         let reopened = Volume::open(&mut store).unwrap();
         let mut sink = Sink::new();
         assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 0);
+    }
+
+    #[test]
+    fn nonzero_torn_tail_is_ignored_when_remainder_is_blank() {
+        let mut store = CrashStore::<BLOCKS>::new();
+        let volume = Volume::format(&mut store).unwrap();
+        let mut torn = Block::zero();
+        torn.as_bytes_mut()[0] = 0x7f;
+        store.write_block(BlockIndex::new(2), &torn).unwrap();
+
+        let mut info = volume.info();
+        info.generation += 1;
+        info.journal_head += 1;
+        write_superblock(&mut store, SUPERBLOCK_A, info).unwrap();
+        store.flush().unwrap();
+
+        let reopened = Volume::open(&mut store).unwrap();
+        let mut sink = Sink::new();
+        assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 0);
+    }
+
+    #[test]
+    fn corrupt_journal_hole_with_later_data_is_rejected() {
+        let mut store = CrashStore::<BLOCKS>::new();
+        let volume = Volume::format(&mut store).unwrap();
+        let mut corrupt = Block::zero();
+        corrupt.as_bytes_mut()[0] = 0x7f;
+        store.write_block(BlockIndex::new(2), &corrupt).unwrap();
+        let later = encode_record(1, 0, 1, b"later").unwrap();
+        store.write_block(BlockIndex::new(3), &later).unwrap();
+
+        let mut info = volume.info();
+        info.generation += 1;
+        info.journal_head += 2;
+        write_superblock(&mut store, SUPERBLOCK_A, info).unwrap();
+        store.flush().unwrap();
+
+        let reopened = Volume::open(&mut store).unwrap();
+        let mut sink = Sink::new();
+        assert_eq!(reopened.recover(&mut store, &mut sink), Err(FormatError::Corrupt));
     }
 
     #[test]
