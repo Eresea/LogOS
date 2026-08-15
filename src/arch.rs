@@ -25,6 +25,17 @@ pub(crate) fn flush_storage_device() -> Result<(), ()> {
     virtio_device::flush_storage_device().map_err(|_| ())
 }
 
+pub(crate) fn storage_block_count() -> Result<u64, ()> {
+    virtio_device::storage_block_count().map_err(|_| ())
+}
+
+pub(crate) fn transfer_storage_block(
+    request: logos_abi::StorageRequest,
+    data_address: usize,
+) -> Result<(), ()> {
+    virtio_device::transfer_storage_block(request, data_address).map_err(|_| ())
+}
+
 const DEBUG_PORT: u16 = 0xe9;
 const APIC_BASE_MSR: u32 = 0x1b;
 const APIC_ID: usize = 0x20;

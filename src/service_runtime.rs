@@ -63,6 +63,7 @@ pub struct ServiceRuntime {
     ipc: Option<ServiceIpcGraph>,
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
     ipc_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
+    storage_data_frame: Option<FrameAddress>,
     framebuffer_config_frame: Option<FrameAddress>,
     keyboard_frame: Option<FrameAddress>,
     tasks: [Option<crate::TaskHandle>; SERVICE_COUNT],
@@ -95,6 +96,7 @@ impl ServiceRuntime {
             ipc: None,
             ipc_staging_frames: [None; SERVICE_COUNT],
             ipc_capability_frames: [None; SERVICE_COUNT],
+            storage_data_frame: None,
             framebuffer_config_frame: None,
             keyboard_frame: None,
             tasks: [None; SERVICE_COUNT],
@@ -243,6 +245,18 @@ impl ServiceRuntime {
                 logos_abi::IPC_STAGING_BASE,
                 MappingFlags::DATA,
             )?;
+            if service == ServiceId::Storage {
+                let data =
+                    self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+                self.storage_data_frame = Some(data);
+                memory.clear(data).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+                self.map_ipc_private_page(
+                    process,
+                    data,
+                    logos_abi::STORAGE_DATA_BASE,
+                    MappingFlags::DATA,
+                )?;
+            }
             let capabilities = if service == ServiceId::Storage {
                 let mut page = logos_abi::IpcCapabilityPage::empty();
                 page.capabilities[0] = logos_abi::IpcCapability::new(
@@ -608,22 +622,84 @@ impl ServiceRuntime {
                     };
                 }
             };
-            let response = if request.operation == logos_abi::StorageOperation::Flush {
-                let status = if crate::arch::flush_storage_device().is_ok() {
-                    logos_abi::StorageStatus::Ok
-                } else {
-                    logos_abi::StorageStatus::Io
-                };
-                logos_abi::StorageResponse::new(
-                    request.request_id,
-                    status,
-                    request.generation,
-                    0,
-                    0,
-                    request.transaction_id,
-                )
-            } else {
-                crate::storage_ipc::unsupported_response(request)
+            let response = match request.operation {
+                logos_abi::StorageOperation::Reopen => match crate::arch::storage_block_count() {
+                    Ok(block_count) => logos_abi::StorageResponse::new(
+                        request.request_id,
+                        logos_abi::StorageStatus::Ok,
+                        request.generation,
+                        0,
+                        0,
+                        request.transaction_id,
+                    )
+                    .with_block_count(block_count),
+                    Err(()) => logos_abi::StorageResponse::new(
+                        request.request_id,
+                        logos_abi::StorageStatus::Io,
+                        request.generation,
+                        0,
+                        0,
+                        request.transaction_id,
+                    ),
+                },
+                logos_abi::StorageOperation::Read | logos_abi::StorageOperation::Write => {
+                    if request.blocks != 1
+                        || request.payload_bytes as usize != logos_storage::BLOCK_BYTES
+                    {
+                        logos_abi::StorageResponse::new(
+                            request.request_id,
+                            logos_abi::StorageStatus::Invalid,
+                            request.generation,
+                            0,
+                            0,
+                            request.transaction_id,
+                        )
+                    } else if let Some(data) = self.storage_data_frame {
+                        let status =
+                            match crate::arch::transfer_storage_block(request, data.raw() as usize)
+                            {
+                                Ok(()) => logos_abi::StorageStatus::Ok,
+                                Err(()) => logos_abi::StorageStatus::Io,
+                            };
+                        logos_abi::StorageResponse::new(
+                            request.request_id,
+                            status,
+                            request.generation,
+                            if status == logos_abi::StorageStatus::Ok { 1 } else { 0 },
+                            if status == logos_abi::StorageStatus::Ok {
+                                logos_storage::BLOCK_BYTES as u16
+                            } else {
+                                0
+                            },
+                            request.transaction_id,
+                        )
+                    } else {
+                        logos_abi::StorageResponse::new(
+                            request.request_id,
+                            logos_abi::StorageStatus::Io,
+                            request.generation,
+                            0,
+                            0,
+                            request.transaction_id,
+                        )
+                    }
+                }
+                logos_abi::StorageOperation::Flush => {
+                    let status = if crate::arch::flush_storage_device().is_ok() {
+                        logos_abi::StorageStatus::Ok
+                    } else {
+                        logos_abi::StorageStatus::Io
+                    };
+                    logos_abi::StorageResponse::new(
+                        request.request_id,
+                        status,
+                        request.generation,
+                        0,
+                        0,
+                        request.transaction_id,
+                    )
+                }
+                _ => crate::storage_ipc::unsupported_response(request),
             };
             self.storage_response = Some(response);
             crate::arch::signal_events(logos_abi::ipc_write_event_mask(
@@ -889,6 +965,10 @@ impl ServiceRuntime {
         }
         self.ipc = None;
         self.storage_response = None;
+        if let Some(frame) = self.storage_data_frame {
+            self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.storage_data_frame = None;
+        }
         if let Some(frame) = self.keyboard_frame {
             self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
             self.keyboard_frame = None;

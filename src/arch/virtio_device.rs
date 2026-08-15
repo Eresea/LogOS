@@ -149,6 +149,10 @@ impl MmioRegion {
         Ok(unsafe { read_volatile(self.ptr(offset)?) })
     }
 
+    unsafe fn read_u64(&self, offset: usize) -> Result<u64, DeviceError> {
+        Ok(unsafe { read_volatile(self.ptr(offset)?) })
+    }
+
     unsafe fn write_u8(&self, offset: usize, value: u8) -> Result<(), DeviceError> {
         unsafe { write_volatile(self.ptr(offset)?, value) };
         Ok(())
@@ -174,6 +178,7 @@ pub struct VirtioBlockDevice {
     common: MmioRegion,
     notify: MmioRegion,
     isr: MmioRegion,
+    device: MmioRegion,
     notify_multiplier: u32,
     queue: &'static mut QueueMemory,
     requests: [Option<BlockRequestId>; QUEUE_SIZE],
@@ -200,12 +205,33 @@ pub(crate) fn flush_storage_device() -> Result<(), DeviceError> {
     unsafe { (&mut *core::ptr::addr_of_mut!(DEVICE).cast::<VirtioBlockDevice>()).flush() }
 }
 
+pub(crate) fn storage_block_count() -> Result<u64, DeviceError> {
+    if !DEVICE_READY.load(Ordering::Acquire) {
+        return Err(DeviceError::NotFound);
+    }
+    unsafe { (&*core::ptr::addr_of!(DEVICE).cast::<VirtioBlockDevice>()).capacity_blocks() }
+}
+
+pub(crate) fn transfer_storage_block(
+    request: logos_abi::StorageRequest,
+    data_address: usize,
+) -> Result<(), DeviceError> {
+    if !DEVICE_READY.load(Ordering::Acquire) {
+        return Err(DeviceError::NotFound);
+    }
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(DEVICE).cast::<VirtioBlockDevice>())
+            .transfer(request, data_address)
+    }
+}
+
 impl VirtioBlockDevice {
     pub fn initialize(writable: bool) -> Result<Self, DeviceError> {
         let probe = PciConfig::find().ok_or(DeviceError::NotFound)?;
         let common = region_for(&probe, probe.capabilities.common)?;
         let notify = region_for(&probe, probe.capabilities.notify)?;
         let isr = region_for(&probe, probe.capabilities.isr)?;
+        let device_config = region_for(&probe, probe.capabilities.device)?;
         let queue = unsafe {
             let queue = &mut *core::ptr::addr_of_mut!(QUEUE_MEMORY);
             *queue = QueueMemory::new();
@@ -215,6 +241,7 @@ impl VirtioBlockDevice {
             common,
             notify,
             isr,
+            device: device_config,
             notify_multiplier: probe.capabilities.notify_multiplier,
             queue,
             requests: [None; QUEUE_SIZE],
@@ -262,6 +289,12 @@ impl VirtioBlockDevice {
             let high = self.common.read_u32(COMMON_DEVICE_FEATURE)? as u64;
             Ok(low | high << 32)
         }
+    }
+
+    fn capacity_blocks(&self) -> Result<u64, DeviceError> {
+        let sectors = unsafe { self.device.read_u64(0)? };
+        let blocks = sectors / logos_storage::SECTORS_PER_LOGOS_BLOCK;
+        if blocks == 0 { Err(DeviceError::InvalidCompletion) } else { Ok(blocks) }
     }
 
     fn driver_features(&self, features: u64) -> Result<(), DeviceError> {
@@ -364,6 +397,60 @@ impl VirtioBlockDevice {
                 blocks: 0,
             },
             0,
+        )?;
+        for _ in 0..1_000_000 {
+            if let Some(completion) = self.poll_completion()? {
+                if completion.request_id != request_id {
+                    return Err(DeviceError::StaleCompletion);
+                }
+                return match completion.status {
+                    0 => Ok(()),
+                    1 => Err(DeviceError::Io),
+                    2 => Err(DeviceError::Unsupported),
+                    _ => Err(DeviceError::InvalidCompletion),
+                };
+            }
+            core::hint::spin_loop();
+        }
+        self.reset_device()?;
+        Err(DeviceError::Timeout)
+    }
+
+    fn transfer(
+        &mut self,
+        request: logos_abi::StorageRequest,
+        data_address: usize,
+    ) -> Result<(), DeviceError> {
+        if request.blocks != 1 {
+            return Err(DeviceError::InvalidCompletion);
+        }
+        let request_type = match request.operation {
+            logos_abi::StorageOperation::Read => 0,
+            logos_abi::StorageOperation::Write => 1,
+            _ => return Err(DeviceError::InvalidCompletion),
+        };
+        let sector = request
+            .start_block
+            .checked_mul(logos_storage::SECTORS_PER_LOGOS_BLOCK)
+            .ok_or(DeviceError::InvalidCompletion)?;
+        let generation = self.next_request_generation;
+        self.next_request_generation = self.next_request_generation.wrapping_add(1).max(1);
+        let request_id = logos_storage::BlockRequestId::from_parts(0, generation)
+            .ok_or(DeviceError::InvalidCompletion)?;
+        let buffer = logos_storage::BufferToken::new(data_address as u64)
+            .ok_or(DeviceError::InvalidCompletion)?;
+        self.submit(
+            VirtioBlkChain {
+                request_id,
+                header: VirtioBlkHeader { request_type, reserved: 0, sector },
+                data: Some(logos_storage::VirtioDataDescriptor {
+                    buffer,
+                    length: logos_storage::BLOCK_BYTES as u32,
+                    device_writable: request.operation == logos_abi::StorageOperation::Read,
+                }),
+                blocks: 1,
+            },
+            data_address as u64,
         )?;
         for _ in 0..1_000_000 {
             if let Some(completion) = self.poll_completion()? {
