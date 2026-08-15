@@ -538,6 +538,15 @@ impl<B: BlockStore> DurableNamespace<B> {
         Ok(Self { store, volume, namespace })
     }
 
+    fn reopen(&mut self) -> Result<(), NamespaceError> {
+        let mut volume = Volume::open(&mut self.store)?;
+        let mut namespace = ObjectNamespace::new();
+        volume.recover(&mut self.store, &mut namespace)?;
+        self.volume = volume;
+        self.namespace = namespace;
+        Ok(())
+    }
+
     pub fn root(&self) -> ObjectId {
         self.namespace.root()
     }
@@ -798,6 +807,13 @@ impl NamespaceTransaction {
         if offset.checked_add(input.len()).is_none() || offset + input.len() > MAX_FILE_BYTES {
             return Err(NamespaceError::TooLarge);
         }
+        let count = input.len().div_ceil(MAX_WRITE_BYTES);
+        let truncate_count = usize::from(replace && record.length != 0);
+        if count > MAX_WRITE_RECORDS
+            || self.count + truncate_count + count > MAX_TRANSACTION_RECORDS
+        {
+            return Err(NamespaceError::Capacity);
+        }
         if replace && record.length != 0 {
             let mut truncate = [0; 10];
             put_u16(&mut truncate, 0, id.slot);
@@ -807,10 +823,6 @@ impl NamespaceTransaction {
         }
         if input.is_empty() {
             return Ok(0);
-        }
-        let count = input.len().div_ceil(MAX_WRITE_BYTES);
-        if self.count + count > MAX_TRANSACTION_RECORDS || count > MAX_WRITE_RECORDS {
-            return Err(NamespaceError::Capacity);
         }
         let mut copied = 0;
         for _ in 0..count {
@@ -864,7 +876,13 @@ impl NamespaceTransaction {
             };
         }
         let transaction_id =
-            namespace.volume.commit(&mut namespace.store, &records[..self.count])?;
+            match namespace.volume.commit(&mut namespace.store, &records[..self.count]) {
+                Ok(transaction_id) => transaction_id,
+                Err(error) => {
+                    let _ = namespace.reopen();
+                    return Err(error.into());
+                }
+            };
         namespace.namespace = self.shadow;
         Ok(transaction_id)
     }
@@ -1023,6 +1041,25 @@ mod tests {
         let mut output = [0; 7];
         assert_eq!(reopened.read(id, 0, &mut output).unwrap(), 7);
         assert_eq!(&output, b"durable");
+    }
+
+    #[test]
+    fn replace_write_capacity_check_does_not_stage_truncate() {
+        let store = MemoryBlockStore::<32>::new();
+        let mut fs = DurableNamespace::format(store).unwrap();
+        let file = fs.create_file(fs.root(), b"file").unwrap();
+        fs.write(file, 0, b"x").unwrap();
+
+        let mut transaction = fs.begin_transaction();
+        for offset in 1..MAX_TRANSACTION_RECORDS {
+            transaction.write(b"/file", offset, b"x", false).unwrap();
+        }
+        assert_eq!(
+            transaction.write(b"/file", 0, b"replacement", true),
+            Err(NamespaceError::Capacity)
+        );
+        assert_eq!(transaction.record_count(), MAX_TRANSACTION_RECORDS - 1);
+        assert_eq!(transaction.stat(b"/file").unwrap().length, MAX_TRANSACTION_RECORDS as u32);
     }
 
     #[test]

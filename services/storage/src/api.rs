@@ -47,7 +47,10 @@ impl<B: BlockStore> StorageApi<B> {
     }
 
     pub fn handle(&mut self, message: &IpcBytes) -> Option<IpcBytes> {
-        let request = StorageApiRequest::decode(message).ok()?;
+        let request = match StorageApiRequest::decode(message) {
+            Ok(request) => request,
+            Err(_) => return malformed_response(message),
+        };
         if request.operation != StorageApiOperation::Write && request.flags != 0 {
             return Self::encode(
                 request.request_id,
@@ -291,6 +294,19 @@ impl<B: BlockStore> StorageApi<B> {
     }
 }
 
+fn malformed_response(message: &IpcBytes) -> Option<IpcBytes> {
+    if message.kind != logos_abi::MessageKind::StorageRequest {
+        return None;
+    }
+    let bytes = message.as_bytes()?;
+    let request_id_bytes = bytes.get(4..8)?;
+    let request_id = u32::from_le_bytes(request_id_bytes.try_into().ok()?);
+    if request_id == 0 {
+        return None;
+    }
+    StorageApiResponse::encode(StorageApiStatus::Invalid, request_id, 0, &[], false)
+}
+
 fn map_error(error: NamespaceError) -> StorageApiStatus {
     match error {
         NamespaceError::Capacity | NamespaceError::GenerationExhausted => {
@@ -341,6 +357,19 @@ mod tests {
 
     fn status(message: &IpcBytes) -> StorageApiResponse<'_> {
         StorageApiResponse::decode(message).unwrap()
+    }
+
+    #[test]
+    fn malformed_request_with_identity_gets_an_error_reply() {
+        let mut message = IpcBytes::empty(logos_abi::MessageKind::StorageRequest);
+        message.len = 8;
+        message.bytes[4..8].copy_from_slice(&7u32.to_le_bytes());
+        let response =
+            StorageApi::new(DurableNamespace::format(MemoryBlockStore::<64>::new()).unwrap())
+                .handle(&message)
+                .unwrap();
+        assert_eq!(status(&response).status, StorageApiStatus::Invalid);
+        assert_eq!(status(&response).request_id, 7);
     }
 
     #[test]
