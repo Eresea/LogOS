@@ -8,10 +8,11 @@
 #[cfg(test)]
 extern crate std;
 
-use logos_abi::{MAX_HISTORY_BYTES, MAX_HISTORY_ENTRIES};
+use logos_abi::{BUILTIN_COMMANDS, MAX_HISTORY_BYTES, MAX_HISTORY_ENTRIES};
 
 pub const MAX_LINE_BYTES: usize = 256;
 pub const MAX_OUTPUT_BYTES: usize = 512;
+const PROMPT: &[u8] = b"\x1b[36mlogos\x1b[0m \x1b[33m>\x1b[0m ";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShellOutput {
@@ -40,6 +41,24 @@ impl ShellOutput {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
+
+    fn push_decimal(&mut self, mut value: usize) {
+        let mut digits = [0; 3];
+        let mut count = 0;
+        if value == 0 {
+            self.push(b'0');
+            return;
+        }
+        while value != 0 && count < digits.len() {
+            digits[count] = b'0' + (value % 10) as u8;
+            value /= 10;
+            count += 1;
+        }
+        while count > 0 {
+            count -= 1;
+            self.push(digits[count]);
+        }
+    }
 }
 
 impl Default for ShellOutput {
@@ -66,6 +85,7 @@ pub struct LineEditor {
     history_len: usize,
     history_cursor: usize,
     escape_state: u8,
+    escape_param: u8,
 }
 
 /// Entry-ready Session facade over one bounded line-editing operation.
@@ -115,11 +135,12 @@ impl LineEditor {
             history_len: 0,
             history_cursor: 0,
             escape_state: 0,
+            escape_param: 0,
         }
     }
 
     pub fn prompt(&self, output: &mut ShellOutput) {
-        output.extend(b"logos> ");
+        output.extend(PROMPT);
     }
 
     pub fn input_for_command(
@@ -130,25 +151,11 @@ impl LineEditor {
     ) -> Option<usize> {
         for &byte in bytes {
             if self.escape_state != 0 {
-                match (self.escape_state, byte) {
-                    (1, b'[') => self.escape_state = 2,
-                    (2, b'A') => {
-                        self.recall_history(true, output);
-                        self.escape_state = 0;
-                    }
-                    (2, b'B') => {
-                        self.recall_history(false, output);
-                        self.escape_state = 0;
-                    }
-                    _ => self.escape_state = 0,
-                }
-                continue;
-            }
-            if byte == 0x1b {
-                self.escape_state = 1;
+                self.feed_escape(byte, output);
                 continue;
             }
             match byte {
+                0x1b => self.escape_state = 1,
                 b'\r' | b'\n' => {
                     let line = self.line;
                     let length = self.line_len;
@@ -159,27 +166,210 @@ impl LineEditor {
                     output.extend(b"\r\n");
                     return Some(length);
                 }
-                0x7f | 0x08 => {
-                    if self.cursor > 0 {
-                        self.cursor -= 1;
-                        self.line_len -= 1;
-                        self.line.copy_within(self.cursor + 1..self.line_len + 1, self.cursor);
-                        output.extend(b"\x08 \x08");
-                    }
-                }
-                0x20..=0x7e => {
-                    if self.line_len < MAX_LINE_BYTES {
-                        self.line.copy_within(self.cursor..self.line_len, self.cursor + 1);
-                        self.line[self.cursor] = byte;
-                        self.cursor += 1;
-                        self.line_len += 1;
-                        output.push(byte);
-                    }
-                }
+                0x01 => self.move_home(output),
+                0x05 => self.move_end(output),
+                0x0b => self.delete_to_end(output),
+                0x0c => self.clear_screen(output),
+                0x15 => self.clear_line(output),
+                0x17 => self.delete_word(output),
+                b'\t' => self.complete(output),
+                0x08 | 0x7f => self.backspace(output),
+                0x20..=0x7e | 0x80..=0xff => self.insert(byte, output),
                 _ => {}
             }
         }
         None
+    }
+
+    fn feed_escape(&mut self, byte: u8, output: &mut ShellOutput) {
+        match self.escape_state {
+            1 => {
+                self.escape_state = if byte == b'[' { 2 } else { 0 };
+            }
+            2 => match byte {
+                b'A' => {
+                    self.recall_history(true, output);
+                    self.escape_state = 0;
+                }
+                b'B' => {
+                    self.recall_history(false, output);
+                    self.escape_state = 0;
+                }
+                b'C' => {
+                    self.move_right(output);
+                    self.escape_state = 0;
+                }
+                b'D' => {
+                    self.move_left(output);
+                    self.escape_state = 0;
+                }
+                b'H' => {
+                    self.move_home(output);
+                    self.escape_state = 0;
+                }
+                b'F' => {
+                    self.move_end(output);
+                    self.escape_state = 0;
+                }
+                b'0'..=b'9' => {
+                    self.escape_param = byte - b'0';
+                    self.escape_state = 3;
+                }
+                _ => self.escape_state = 0,
+            },
+            3 => match byte {
+                b'0'..=b'9' => {
+                    self.escape_param =
+                        self.escape_param.saturating_mul(10).saturating_add(byte - b'0');
+                }
+                b'~' => {
+                    if self.escape_param == 3 {
+                        self.delete_forward(output);
+                    }
+                    self.escape_state = 0;
+                }
+                _ => self.escape_state = 0,
+            },
+            _ => self.escape_state = 0,
+        }
+    }
+
+    fn insert(&mut self, byte: u8, output: &mut ShellOutput) {
+        if self.line_len >= MAX_LINE_BYTES {
+            return;
+        }
+        self.line.copy_within(self.cursor..self.line_len, self.cursor + 1);
+        self.line[self.cursor] = byte;
+        self.cursor += 1;
+        self.line_len += 1;
+        if self.cursor == self.line_len {
+            output.push(byte);
+        } else {
+            self.redraw(output);
+        }
+    }
+
+    fn complete(&mut self, output: &mut ShellOutput) {
+        if self.cursor != self.line_len || self.line[..self.cursor].contains(&b' ') {
+            return;
+        }
+        let prefix = &self.line[..self.cursor];
+        let mut matches = [0; BUILTIN_COMMANDS.len()];
+        let mut count = 0;
+        for (index, candidate) in BUILTIN_COMMANDS.iter().enumerate() {
+            if candidate.starts_with(prefix) {
+                matches[count] = index;
+                count += 1;
+            }
+        }
+        match count {
+            0 => {}
+            1 => {
+                let candidate = BUILTIN_COMMANDS[matches[0]];
+                let suffix = &candidate[prefix.len()..];
+                if self.line_len + suffix.len() <= MAX_LINE_BYTES {
+                    self.line[self.line_len..self.line_len + suffix.len()].copy_from_slice(suffix);
+                    self.line_len += suffix.len();
+                    self.cursor = self.line_len;
+                    output.extend(suffix);
+                }
+            }
+            _ => {
+                output.extend(b"\r\n");
+                for index in 0..count {
+                    if index > 0 {
+                        output.extend(b"  ");
+                    }
+                    output.extend(BUILTIN_COMMANDS[matches[index]]);
+                }
+                output.extend(b"\r\n");
+                self.redraw(output);
+            }
+        }
+    }
+
+    fn backspace(&mut self, output: &mut ShellOutput) {
+        if self.cursor == 0 {
+            return;
+        }
+        let start = previous_boundary(&self.line, self.cursor);
+        self.line.copy_within(self.cursor..self.line_len, start);
+        self.line_len -= self.cursor - start;
+        self.cursor = start;
+        self.redraw(output);
+    }
+
+    fn delete_forward(&mut self, output: &mut ShellOutput) {
+        if self.cursor >= self.line_len {
+            return;
+        }
+        let end = next_boundary(&self.line, self.cursor, self.line_len);
+        self.line.copy_within(end..self.line_len, self.cursor);
+        self.line_len -= end - self.cursor;
+        self.redraw(output);
+    }
+
+    fn delete_to_end(&mut self, output: &mut ShellOutput) {
+        self.line_len = self.cursor;
+        self.redraw(output);
+    }
+
+    fn clear_line(&mut self, output: &mut ShellOutput) {
+        self.line_len = 0;
+        self.cursor = 0;
+        self.redraw(output);
+    }
+
+    fn delete_word(&mut self, output: &mut ShellOutput) {
+        let end = self.cursor;
+        while self.cursor > 0 && self.line[self.cursor - 1] == b' ' {
+            self.cursor -= 1;
+        }
+        while self.cursor > 0 && self.line[self.cursor - 1] != b' ' {
+            self.cursor = previous_boundary(&self.line, self.cursor);
+        }
+        self.line.copy_within(end..self.line_len, self.cursor);
+        self.line_len -= end - self.cursor;
+        self.redraw(output);
+    }
+
+    fn move_left(&mut self, output: &mut ShellOutput) {
+        if self.cursor > 0 {
+            self.cursor = previous_boundary(&self.line, self.cursor);
+            output.extend(b"\x1b[D");
+        }
+    }
+
+    fn move_right(&mut self, output: &mut ShellOutput) {
+        if self.cursor < self.line_len {
+            self.cursor = next_boundary(&self.line, self.cursor, self.line_len);
+            output.extend(b"\x1b[C");
+        }
+    }
+
+    fn move_home(&mut self, output: &mut ShellOutput) {
+        let distance = display_width(&self.line[..self.cursor]);
+        self.cursor = 0;
+        move_cursor(output, b'D', distance);
+    }
+
+    fn move_end(&mut self, output: &mut ShellOutput) {
+        let distance = display_width(&self.line[self.cursor..self.line_len]);
+        self.cursor = self.line_len;
+        move_cursor(output, b'C', distance);
+    }
+
+    fn clear_screen(&mut self, output: &mut ShellOutput) {
+        output.extend(b"\x1b[2J\x1b[H");
+        self.redraw(output);
+    }
+
+    fn redraw(&self, output: &mut ShellOutput) {
+        output.push(b'\r');
+        self.prompt(output);
+        output.extend(&self.line[..self.line_len]);
+        output.extend(b"\x1b[K");
+        move_cursor(output, b'D', display_width(&self.line[self.cursor..self.line_len]));
     }
 
     fn record_history(&mut self, line: &[u8]) {
@@ -214,9 +404,41 @@ impl LineEditor {
             self.line_len = entry.len;
             self.cursor = entry.len;
         }
-        output.extend(b"\r\x1b[2Klogos> ");
-        output.extend(&self.line[..self.line_len]);
+        self.redraw(output);
     }
+}
+
+fn move_cursor(output: &mut ShellOutput, direction: u8, distance: usize) {
+    if distance == 0 {
+        return;
+    }
+    output.extend(b"\x1b[");
+    output.push_decimal(distance);
+    output.push(direction);
+}
+
+fn is_utf8_continuation(byte: u8) -> bool {
+    byte & 0xc0 == 0x80
+}
+
+fn previous_boundary(bytes: &[u8], index: usize) -> usize {
+    let mut index = index.saturating_sub(1);
+    while index > 0 && is_utf8_continuation(bytes[index]) {
+        index -= 1;
+    }
+    index
+}
+
+fn next_boundary(bytes: &[u8], index: usize, len: usize) -> usize {
+    let mut index = (index + 1).min(len);
+    while index < len && is_utf8_continuation(bytes[index]) {
+        index += 1;
+    }
+    index
+}
+
+fn display_width(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|byte| !is_utf8_continuation(**byte)).count()
 }
 
 impl Default for LineEditor {
@@ -251,7 +473,7 @@ mod tests {
         assert!(output.as_bytes().windows(6).any(|window| window == b"second"));
         output = ShellOutput::new();
         editor.input_for_command(b"\x1b[B", &mut command, &mut output);
-        assert!(output.as_bytes().windows(7).any(|window| window == b"logos> "));
+        assert!(output.as_bytes().windows(5).any(|window| window == b"logos"));
     }
 
     #[test]
@@ -259,6 +481,49 @@ mod tests {
         let service = SessionService::new();
         let mut output = ShellOutput::new();
         service.command_output(b"ok\r\n", &mut output);
-        assert_eq!(output.as_bytes(), b"ok\r\nlogos> ");
+        assert_eq!(output.as_bytes(), b"ok\r\n\x1b[36mlogos\x1b[0m \x1b[33m>\x1b[0m ");
+    }
+
+    #[test]
+    fn line_editor_supports_cursor_editing_and_controls() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"ac\x1b[Db\r", &mut command, &mut output);
+        assert_eq!(&command[..3], b"abc");
+
+        output = ShellOutput::new();
+        let length =
+            editor.input_for_command(b"hello world\x17\r", &mut command, &mut output).unwrap();
+        assert_eq!(&command[..length], b"hello ");
+    }
+
+    #[test]
+    fn line_editor_preserves_utf8_and_edits_by_character() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        let length =
+            editor.input_for_command(b"echo \xc3\xa9\r", &mut command, &mut output).unwrap();
+        assert_eq!(&command[..length], b"echo \xc3\xa9");
+
+        editor.input_for_command(b"\xc3\xa9", &mut command, &mut output);
+        let length = editor.input_for_command(b"\x7f\r", &mut command, &mut output).unwrap();
+        assert_eq!(length, 0);
+    }
+
+    #[test]
+    fn tab_completes_builtins_and_lists_all_at_empty_prompt() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        let length = editor.input_for_command(b"he\t\r", &mut command, &mut output).unwrap();
+        assert_eq!(&command[..length], b"help");
+
+        let mut editor = LineEditor::new();
+        output = ShellOutput::new();
+        editor.input_for_command(b"\t", &mut command, &mut output);
+        assert!(output.as_bytes().windows(4).any(|window| window == b"help"));
+        assert!(output.as_bytes().windows(7).any(|window| window == b"version"));
     }
 }

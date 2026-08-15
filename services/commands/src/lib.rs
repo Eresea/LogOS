@@ -58,7 +58,15 @@ impl CommandService {
             return output;
         }
         match line {
-            b"help" => output.extend(b"help echo clear true false version uname\r\n"),
+            b"help" => {
+                for (index, command) in logos_abi::BUILTIN_COMMANDS.iter().enumerate() {
+                    if index > 0 {
+                        output.push(b' ');
+                    }
+                    output.extend(command);
+                }
+                output.extend(b"\r\n");
+            }
             b"clear" => output.clear_screen = true,
             b"true" => {}
             b"false" => output.status = 1,

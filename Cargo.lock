@@ -33,6 +33,9 @@ version = "0.1.0"
 [[package]]
 name = "logos-commands"
 version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
 
 [[package]]
 name = "logos-display"
