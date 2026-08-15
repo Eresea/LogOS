@@ -7,6 +7,9 @@ param(
     [int]$Cpus = 1,
     [ValidateRange(1, 300)]
     [int]$TimeoutSeconds = 60,
+    [string]$DiskImage,
+    [ValidateRange(16, 4096)]
+    [int]$DiskMiB = 64,
     [ValidateRange(1024, 65535)]
     [int]$QmpPort = 4444
 )
@@ -15,6 +18,10 @@ $ErrorActionPreference = 'Stop'
 if ($Interactive -and ($Headless -or $Proof)) { throw 'Choose exactly one of -Interactive, -Headless, or -Proof.' }
 $interactiveMode = $Interactive -or (-not $Headless -and -not $Proof)
 $repoRoot = Split-Path $PSScriptRoot -Parent
+$target = Join-Path $repoRoot 'target'
+$disk = if ($DiskImage) { [System.IO.Path]::GetFullPath($DiskImage) } else {
+    Join-Path $target 'runtime-storage.raw'
+}
 $profile = if ($Release) { 'release' } else { 'debug' }
 $efi = Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-vnext.efi"
 $esp = Join-Path $repoRoot 'target\esp'
@@ -24,6 +31,11 @@ $qemuPath = if ($qemu) { $qemu.Source } else { 'C:\Program Files\qemu\qemu-syste
 $ovmf = if ($env:OVMF_CODE) { $env:OVMF_CODE } else { 'C:\Program Files\qemu\share\edk2-x86_64-code.fd' }
 if (-not (Test-Path $qemuPath)) { throw 'Install QEMU or add qemu-system-x86_64 to PATH.' }
 if (-not (Test-Path $ovmf)) { throw 'Set OVMF_CODE to an OVMF firmware file.' }
+New-Item -ItemType Directory -Force $target | Out-Null
+if (-not (Test-Path $disk)) {
+    $stream = [System.IO.File]::Open($disk, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
+    try { $stream.SetLength([int64]$DiskMiB * 1MB) } finally { $stream.Dispose() }
+}
 
 $buildArgs = @('build', '--target', 'x86_64-unknown-uefi')
 if ($Proof) { $buildArgs += @('--features', 'qemu-proof') }
@@ -43,6 +55,8 @@ $qemuArgs = @(
     '-machine', 'q35', '-m', '128M', '-smp', $Cpus,
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
     '-drive', "format=raw,file=fat:rw:$espPath",
+    '-drive', "if=none,id=storage-disk,format=raw,file=$disk",
+    '-device', 'virtio-blk-pci,drive=storage-disk,disable-legacy=on',
     '-display', $display
 )
 if ($Proof) {
