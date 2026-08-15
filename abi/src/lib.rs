@@ -38,7 +38,8 @@ pub const MAX_IPC_BYTES: usize = 256;
 pub const IPC_FLAG_MORE: u8 = 1 << 0;
 pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
 pub const IPC_STAGING_BASE: usize = SERVICE_IPC_BASE + 0x10_000;
-pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x11_000;
+pub const STORAGE_DATA_BASE: usize = SERVICE_IPC_BASE + 0x11_000;
+pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x12_000;
 pub const MAX_IPC_CAPABILITIES: usize = 4;
 pub const SERVICE_HEARTBEAT_INTERVAL_TICKS: u64 = 100;
 pub const STORAGE_MAX_BLOCKS_PER_REQUEST: u16 = 16;
@@ -296,6 +297,7 @@ pub struct StorageResponse {
     pub blocks_completed: u16,
     pub payload_bytes: u16,
     pub transaction_id: u64,
+    pub block_count: u64,
 }
 
 impl StorageResponse {
@@ -315,7 +317,13 @@ impl StorageResponse {
             blocks_completed,
             payload_bytes,
             transaction_id,
+            block_count: 0,
         }
+    }
+
+    pub const fn with_block_count(mut self, block_count: u64) -> Self {
+        self.block_count = block_count;
+        self
     }
 }
 
