@@ -4,7 +4,7 @@ These are the commands currently built into the LogOS terminal. Type a command a
 
 | Command | Behavior |
 | --- | --- |
-| `help` | Lists the built-in commands. |
+| `help [command]` | Lists commands or shows a command manual. |
 | `echo <text>` | Prints `<text>`. |
 | `clear` | Clears the terminal display. |
 | `true` | Succeeds without output. |
@@ -22,6 +22,7 @@ Examples:
 
 ```text
 help
+help write
 echo hello, LogOS
 clear
 true

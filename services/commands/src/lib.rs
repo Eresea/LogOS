@@ -37,24 +37,117 @@ pub enum CommandAction {
 pub struct CommandSpec {
     pub name: &'static [u8],
     pub kind: CommandKind,
+    pub usage: &'static [u8],
+    pub summary: &'static [u8],
+    pub manual: &'static [u8],
 }
 
 pub const COMMAND_SPECS: [CommandSpec; 15] = [
-    CommandSpec { name: b"help", kind: CommandKind::Help },
-    CommandSpec { name: b"echo", kind: CommandKind::Echo },
-    CommandSpec { name: b"clear", kind: CommandKind::Clear },
-    CommandSpec { name: b"true", kind: CommandKind::True },
-    CommandSpec { name: b"false", kind: CommandKind::False },
-    CommandSpec { name: b"version", kind: CommandKind::Version },
-    CommandSpec { name: b"uname", kind: CommandKind::Uname },
-    CommandSpec { name: b"shutdown", kind: CommandKind::Shutdown },
-    CommandSpec { name: b"reboot", kind: CommandKind::Reboot },
-    CommandSpec { name: b"ls", kind: CommandKind::List },
-    CommandSpec { name: b"touch", kind: CommandKind::Touch },
-    CommandSpec { name: b"cat", kind: CommandKind::Cat },
-    CommandSpec { name: b"write", kind: CommandKind::Write },
-    CommandSpec { name: b"rm", kind: CommandKind::Remove },
-    CommandSpec { name: b"mv", kind: CommandKind::Move },
+    CommandSpec {
+        name: b"help",
+        kind: CommandKind::Help,
+        usage: b"help [command]",
+        summary: b"show command help",
+        manual: b"Lists commands or shows one command manual.",
+    },
+    CommandSpec {
+        name: b"echo",
+        kind: CommandKind::Echo,
+        usage: b"echo <text>",
+        summary: b"print text",
+        manual: b"Prints the supplied text.",
+    },
+    CommandSpec {
+        name: b"clear",
+        kind: CommandKind::Clear,
+        usage: b"clear",
+        summary: b"clear the screen",
+        manual: b"Clears the terminal display.",
+    },
+    CommandSpec {
+        name: b"true",
+        kind: CommandKind::True,
+        usage: b"true",
+        summary: b"succeed",
+        manual: b"Completes successfully without output.",
+    },
+    CommandSpec {
+        name: b"false",
+        kind: CommandKind::False,
+        usage: b"false",
+        summary: b"fail",
+        manual: b"Completes with a failure status.",
+    },
+    CommandSpec {
+        name: b"version",
+        kind: CommandKind::Version,
+        usage: b"version",
+        summary: b"show the version",
+        manual: b"Prints the LogOS version.",
+    },
+    CommandSpec {
+        name: b"uname",
+        kind: CommandKind::Uname,
+        usage: b"uname",
+        summary: b"show the system name",
+        manual: b"Prints the operating-system name.",
+    },
+    CommandSpec {
+        name: b"shutdown",
+        kind: CommandKind::Shutdown,
+        usage: b"shutdown",
+        summary: b"power off",
+        manual: b"Requests a system shutdown.",
+    },
+    CommandSpec {
+        name: b"reboot",
+        kind: CommandKind::Reboot,
+        usage: b"reboot",
+        summary: b"restart",
+        manual: b"Requests a system reboot.",
+    },
+    CommandSpec {
+        name: b"ls",
+        kind: CommandKind::List,
+        usage: b"ls [path]",
+        summary: b"list files",
+        manual: b"Lists files in the root or specified directory.",
+    },
+    CommandSpec {
+        name: b"touch",
+        kind: CommandKind::Touch,
+        usage: b"touch <path>",
+        summary: b"create an empty file",
+        manual: b"Creates an empty file at path.",
+    },
+    CommandSpec {
+        name: b"cat",
+        kind: CommandKind::Cat,
+        usage: b"cat <path>",
+        summary: b"print a file",
+        manual: b"Prints a file's contents.",
+    },
+    CommandSpec {
+        name: b"write",
+        kind: CommandKind::Write,
+        usage: b"write <path> <data>",
+        summary: b"replace file contents",
+        manual: b"Atomically replaces an existing file's contents. Data must be non-empty.",
+    },
+    CommandSpec {
+        name: b"rm",
+        kind: CommandKind::Remove,
+        usage: b"rm <path>",
+        summary: b"remove a file",
+        manual: b"Removes a file.",
+    },
+    CommandSpec {
+        name: b"mv",
+        kind: CommandKind::Move,
+        usage: b"mv <from> <to>",
+        summary: b"rename a file",
+        manual: b"Renames a file from one path to another.",
+    },
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +251,47 @@ impl CommandService {
         None
     }
 
+    fn help(line: &[u8]) -> CommandOutput {
+        let mut output = CommandOutput::new();
+        let line = trim_command(line);
+        let target = match line.iter().position(|byte| *byte == b' ') {
+            Some(index) => trim_command(&line[index + 1..]),
+            None => &[][..],
+        };
+        if target.is_empty() {
+            output.extend(b"Available commands:\r\n");
+            for spec in COMMAND_SPECS {
+                output.extend(spec.usage);
+                output.extend(b" - ");
+                output.extend(spec.summary);
+                output.extend(b"\r\n");
+            }
+            output.extend(b"Use help <command> for details.\r\n");
+            return output;
+        }
+        if target.contains(&b' ') {
+            output.status = 2;
+            output.extend(b"usage: help [command]\r\n");
+            return output;
+        }
+        let Some(spec) = COMMAND_SPECS.iter().find(|spec| spec.name == target) else {
+            output.status = 1;
+            output.extend(b"help: no manual entry for ");
+            output.extend(target);
+            output.extend(b"\r\n");
+            return output;
+        };
+        output.extend(spec.name);
+        output.extend(b" - ");
+        output.extend(spec.summary);
+        output.extend(b"\r\nUsage: ");
+        output.extend(spec.usage);
+        output.extend(b"\r\n");
+        output.extend(spec.manual);
+        output.extend(b"\r\n");
+        output
+    }
+
     pub fn execute(&mut self, line: &[u8]) -> CommandOutput {
         let mut output = CommandOutput::new();
         if line.len() > MAX_COMMAND_BYTES {
@@ -165,7 +299,11 @@ impl CommandService {
             output.extend(b"command too long\r\n");
             return output;
         }
-        match Self::command_spec(trim_command(line)) {
+        let line = trim_command(line);
+        if line == b"help" || line.starts_with(b"help ") {
+            return Self::help(line);
+        }
+        match Self::command_spec(line) {
             Some(spec) => match spec.kind {
                 CommandKind::Help => {
                     for (index, command) in COMMAND_SPECS.iter().enumerate() {
@@ -278,8 +416,14 @@ mod tests {
         let mut commands = CommandService::new();
         assert_eq!(
             commands.execute(b"help").as_bytes(),
-            b"help echo clear true false version uname shutdown reboot ls touch cat write rm mv\r\n"
+            b"Available commands:\r\nhelp [command] - show command help\r\necho <text> - print text\r\nclear - clear the screen\r\ntrue - succeed\r\nfalse - fail\r\nversion - show the version\r\nuname - show the system name\r\nshutdown - power off\r\nreboot - restart\r\nls [path] - list files\r\ntouch <path> - create an empty file\r\ncat <path> - print a file\r\nwrite <path> <data> - replace file contents\r\nrm <path> - remove a file\r\nmv <from> <to> - rename a file\r\nUse help <command> for details.\r\n"
         );
+        assert_eq!(
+            commands.execute(b"help write").as_bytes(),
+            b"write - replace file contents\r\nUsage: write <path> <data>\r\nAtomically replaces an existing file's contents. Data must be non-empty.\r\n"
+        );
+        assert_eq!(commands.execute(b"help missing").status, 1);
+        assert!(commands.execute(b"help missing").as_bytes().len() <= MAX_OUTPUT_BYTES);
         assert_eq!(commands.execute(b"echo").as_bytes(), b"\r\n");
         assert_eq!(commands.execute(b"echo hi").as_bytes(), b"hi\r\n");
         assert!(commands.execute(b"clear").clear_screen);
