@@ -859,14 +859,18 @@ pub(crate) fn ipc_send(
     capability_slot: usize,
     length: usize,
 ) -> crate::service_ipc::IpcOutcome {
-    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).ipc_send(process, capability_slot, length) }
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).ipc_send(process, capability_slot, length)
+    }
 }
 
 pub(crate) fn ipc_receive(
     process: crate::process::ProcessHandle,
     capability_slot: usize,
 ) -> crate::service_ipc::IpcOutcome {
-    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).ipc_receive(process, capability_slot) }
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).ipc_receive(process, capability_slot)
+    }
 }
 
 #[cfg(feature = "qemu-proof")]

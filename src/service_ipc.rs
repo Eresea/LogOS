@@ -11,7 +11,7 @@ use crate::{
     page_table::PageTableMemory,
 };
 
-const ENDPOINTS: [logos_abi::IpcEndpointId; logos_abi::IPC_ENDPOINT_COUNT] = [
+const ENDPOINTS: [logos_abi::IpcEndpointId; 6] = [
     logos_abi::IpcEndpointId::InputToTerminal,
     logos_abi::IpcEndpointId::TerminalToDisplay,
     logos_abi::IpcEndpointId::TerminalToSession,

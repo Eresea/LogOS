@@ -24,6 +24,8 @@ pub mod service_loader;
 #[cfg(target_os = "uefi")]
 mod service_runtime;
 pub mod service_startup;
+#[allow(dead_code)]
+mod storage_ipc;
 pub mod virtio;
 
 #[cfg(target_os = "uefi")]
