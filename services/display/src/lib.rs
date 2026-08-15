@@ -28,11 +28,14 @@ pub struct Glyph {
 }
 
 #[derive(Clone, Copy)]
-enum Accent {
+enum GlyphOverlay {
     None,
     Acute,
     Grave,
     Cedilla,
+    Degree,
+    Diaeresis,
+    Section,
 }
 
 fn normalize_scalar(scalar: u32) -> u32 {
@@ -44,21 +47,24 @@ fn normalize_scalar(scalar: u32) -> u32 {
 }
 
 fn embedded_glyph(scalar: u32) -> Glyph {
-    let (scalar, accent) = match scalar {
-        0x00c0 => ('A' as u32, Accent::Grave),
-        0x00c7 => ('C' as u32, Accent::Cedilla),
-        0x00c8 => ('E' as u32, Accent::Grave),
-        0x00c9 => ('E' as u32, Accent::Acute),
-        0x00d9 => ('U' as u32, Accent::Grave),
-        0x00e0 => ('a' as u32, Accent::Grave),
-        0x00e7 => ('c' as u32, Accent::Cedilla),
-        0x00e8 => ('e' as u32, Accent::Grave),
-        0x00e9 => ('e' as u32, Accent::Acute),
-        0x00f9 => ('u' as u32, Accent::Grave),
-        scalar => (scalar, Accent::None),
+    let (scalar, overlay) = match scalar {
+        0x00a7 => ('S' as u32, GlyphOverlay::Section),
+        0x00a8 => (' ' as u32, GlyphOverlay::Diaeresis),
+        0x00b0 => (' ' as u32, GlyphOverlay::Degree),
+        0x00c0 => ('A' as u32, GlyphOverlay::Grave),
+        0x00c7 => ('C' as u32, GlyphOverlay::Cedilla),
+        0x00c8 => ('E' as u32, GlyphOverlay::Grave),
+        0x00c9 => ('E' as u32, GlyphOverlay::Acute),
+        0x00d9 => ('U' as u32, GlyphOverlay::Grave),
+        0x00e0 => ('a' as u32, GlyphOverlay::Grave),
+        0x00e7 => ('c' as u32, GlyphOverlay::Cedilla),
+        0x00e8 => ('e' as u32, GlyphOverlay::Grave),
+        0x00e9 => ('e' as u32, GlyphOverlay::Acute),
+        0x00f9 => ('u' as u32, GlyphOverlay::Grave),
+        scalar => (scalar, GlyphOverlay::None),
     };
     let mut glyph = atlas_glyph(scalar);
-    add_accent(&mut glyph, scalar, accent);
+    apply_overlay(&mut glyph, scalar, overlay);
     glyph
 }
 
@@ -80,22 +86,41 @@ fn atlas_glyph(scalar: u32) -> Glyph {
     Glyph { rows }
 }
 
-fn add_accent(glyph: &mut Glyph, scalar: u32, accent: Accent) {
+fn apply_overlay(glyph: &mut Glyph, scalar: u32, overlay: GlyphOverlay) {
     let uppercase = (b'A' as u32..=b'Z' as u32).contains(&scalar);
     let row = if uppercase { 1 } else { 3 };
-    match accent {
-        Accent::None => {}
-        Accent::Acute => {
+    match overlay {
+        GlyphOverlay::None => {}
+        GlyphOverlay::Acute => {
             glyph.rows[row][4] = 255;
             glyph.rows[row + 1][3] = 255;
         }
-        Accent::Grave => {
+        GlyphOverlay::Grave => {
             glyph.rows[row][3] = 255;
             glyph.rows[row + 1][4] = 255;
         }
-        Accent::Cedilla => {
+        GlyphOverlay::Cedilla => {
             glyph.rows[GLYPH_HEIGHT - 2][4] = 255;
             glyph.rows[GLYPH_HEIGHT - 1][3] = 255;
+        }
+        GlyphOverlay::Diaeresis => {
+            glyph.rows[3][2] = 255;
+            glyph.rows[3][5] = 255;
+        }
+        GlyphOverlay::Degree => {
+            glyph.rows[3][3] = 255;
+            glyph.rows[3][4] = 255;
+            glyph.rows[4][2] = 255;
+            glyph.rows[4][5] = 255;
+            glyph.rows[5][2] = 255;
+            glyph.rows[5][5] = 255;
+            glyph.rows[6][3] = 255;
+            glyph.rows[6][4] = 255;
+        }
+        GlyphOverlay::Section => {
+            glyph.rows[7][3] = 255;
+            glyph.rows[8][3] = 255;
+            glyph.rows[9][4] = 255;
         }
     }
 }
@@ -316,6 +341,13 @@ mod tests {
     fn common_french_accents_have_deterministic_glyphs() {
         assert_ne!(embedded_glyph(0xe9), embedded_glyph('e' as u32));
         assert_ne!(embedded_glyph(0xe7), embedded_glyph('c' as u32));
+    }
+
+    #[test]
+    fn azerty_symbols_have_deterministic_glyphs() {
+        assert_ne!(embedded_glyph(0xa7), embedded_glyph(REPLACEMENT_SCALAR));
+        assert_ne!(embedded_glyph(0xa8), embedded_glyph(REPLACEMENT_SCALAR));
+        assert_ne!(embedded_glyph(0xb0), embedded_glyph(REPLACEMENT_SCALAR));
     }
 
     #[test]
