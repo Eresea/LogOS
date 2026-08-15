@@ -218,6 +218,9 @@ impl Volume {
             if record.transaction_id == 0 || record.transaction_id == MAX_TRANSACTION_ID {
                 return Err(FormatError::Corrupt);
             }
+            if record.transaction_id <= last_transaction {
+                return Err(FormatError::Corrupt);
+            }
 
             if record.kind == JOURNAL_COMMIT_KIND {
                 if record.payload_len != 0
@@ -705,6 +708,33 @@ mod tests {
         let mut volume = Volume::format(&mut store).unwrap();
         volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"bad" }]).unwrap();
         store.corrupt(2, RECORD_CHECKSUM_OFFSET);
+
+        let reopened = Volume::open(&mut store).unwrap();
+        let mut sink = Sink::new();
+        assert_eq!(reopened.recover(&mut store, &mut sink), Err(FormatError::Corrupt));
+    }
+
+    #[test]
+    fn duplicate_transactions_are_rejected_during_recovery() {
+        let mut store = CrashStore::<16>::new();
+        let mut volume = Volume::format(&mut store).unwrap();
+        volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"one" }]).unwrap();
+
+        let duplicate = encode_record(1, 0, 1, b"one-again").unwrap();
+        let duplicate_commit = encode_record(1, 1, JOURNAL_COMMIT_KIND, &[]).unwrap();
+        let second = encode_record(2, 0, 2, b"two").unwrap();
+        let second_commit = encode_record(2, 1, JOURNAL_COMMIT_KIND, &[]).unwrap();
+        store.write_block(BlockIndex::new(4), &duplicate).unwrap();
+        store.write_block(BlockIndex::new(5), &duplicate_commit).unwrap();
+        store.write_block(BlockIndex::new(6), &second).unwrap();
+        store.write_block(BlockIndex::new(7), &second_commit).unwrap();
+
+        let mut info = volume.info();
+        info.generation += 1;
+        info.journal_head = 8;
+        info.root_transaction_id = 2;
+        write_superblock(&mut store, SUPERBLOCK_B, info).unwrap();
+        store.flush().unwrap();
 
         let reopened = Volume::open(&mut store).unwrap();
         let mut sink = Sink::new();
