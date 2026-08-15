@@ -8,7 +8,8 @@
 #[cfg(test)]
 extern crate std;
 
-use logos_abi::{BUILTIN_COMMANDS, MAX_HISTORY_BYTES, MAX_HISTORY_ENTRIES};
+use logos_abi::{MAX_HISTORY_BYTES, MAX_HISTORY_ENTRIES};
+use logos_commands::COMMAND_SPECS;
 
 pub const MAX_LINE_BYTES: usize = 256;
 pub const MAX_OUTPUT_BYTES: usize = 512;
@@ -264,10 +265,10 @@ impl LineEditor {
             return;
         }
         let prefix = &self.line[..self.cursor];
-        let mut matches = [0; BUILTIN_COMMANDS.len()];
+        let mut matches = [0; COMMAND_SPECS.len()];
         let mut count = 0;
-        for (index, candidate) in BUILTIN_COMMANDS.iter().enumerate() {
-            if candidate.starts_with(prefix) {
+        for (index, candidate) in COMMAND_SPECS.iter().enumerate() {
+            if candidate.name.starts_with(prefix) {
                 matches[count] = index;
                 count += 1;
             }
@@ -275,7 +276,7 @@ impl LineEditor {
         match count {
             0 => {}
             1 => {
-                let candidate = BUILTIN_COMMANDS[matches[0]];
+                let candidate = COMMAND_SPECS[matches[0]].name;
                 let suffix = &candidate[prefix.len()..];
                 if self.line_len + suffix.len() <= MAX_LINE_BYTES {
                     self.line[self.line_len..self.line_len + suffix.len()].copy_from_slice(suffix);
@@ -290,7 +291,7 @@ impl LineEditor {
                     if index > 0 {
                         output.extend(b"  ");
                     }
-                    output.extend(BUILTIN_COMMANDS[matches[index]]);
+                    output.extend(COMMAND_SPECS[matches[index]].name);
                 }
                 output.extend(b"\r\n");
                 self.redraw(output);

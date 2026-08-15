@@ -25,8 +25,6 @@ pub const MIN_FRAMEBUFFER_HEIGHT: usize = DEFAULT_ROWS * DISPLAY_CELL_HEIGHT;
 pub const MAX_SCROLLBACK_LINES: usize = 2048;
 pub const MAX_HISTORY_ENTRIES: usize = 64;
 pub const MAX_HISTORY_BYTES: usize = 256;
-pub const BUILTIN_COMMANDS: [&[u8]; 7] =
-    [b"help", b"echo", b"clear", b"true", b"false", b"version", b"uname"];
 pub const CELL_ATTR_BOLD: u16 = 1;
 pub const CELL_ATTR_DIM: u16 = 1 << 1;
 pub const CELL_ATTR_UNDERLINE: u16 = 1 << 2;

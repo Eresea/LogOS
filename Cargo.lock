@@ -71,6 +71,7 @@ name = "logos-session"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
+ "logos-commands",
 ]
 
 [[package]]

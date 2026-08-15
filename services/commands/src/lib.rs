@@ -7,6 +7,33 @@ pub const MAX_COMMAND_BYTES: usize = 256;
 pub const MAX_OUTPUT_BYTES: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandKind {
+    Help,
+    Echo,
+    Clear,
+    True,
+    False,
+    Version,
+    Uname,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandSpec {
+    pub name: &'static [u8],
+    pub kind: CommandKind,
+}
+
+pub const COMMAND_SPECS: [CommandSpec; 7] = [
+    CommandSpec { name: b"help", kind: CommandKind::Help },
+    CommandSpec { name: b"echo", kind: CommandKind::Echo },
+    CommandSpec { name: b"clear", kind: CommandKind::Clear },
+    CommandSpec { name: b"true", kind: CommandKind::True },
+    CommandSpec { name: b"false", kind: CommandKind::False },
+    CommandSpec { name: b"version", kind: CommandKind::Version },
+    CommandSpec { name: b"uname", kind: CommandKind::Uname },
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommandOutput {
     pub bytes: [u8; MAX_OUTPUT_BYTES],
     pub len: usize,
@@ -50,6 +77,23 @@ impl CommandService {
         Self
     }
 
+    fn command_spec(line: &[u8]) -> Option<CommandSpec> {
+        for spec in COMMAND_SPECS {
+            let matches = match spec.kind {
+                CommandKind::Echo => {
+                    line.len() > spec.name.len()
+                        && line.starts_with(spec.name)
+                        && line[spec.name.len()] == b' '
+                }
+                _ => line == spec.name,
+            };
+            if matches {
+                return Some(spec);
+            }
+        }
+        None
+    }
+
     pub fn execute(&mut self, line: &[u8]) -> CommandOutput {
         let mut output = CommandOutput::new();
         if line.len() > MAX_COMMAND_BYTES {
@@ -57,26 +101,28 @@ impl CommandService {
             output.extend(b"command too long\r\n");
             return output;
         }
-        match line {
-            b"help" => {
-                for (index, command) in logos_abi::BUILTIN_COMMANDS.iter().enumerate() {
-                    if index > 0 {
-                        output.push(b' ');
+        match Self::command_spec(line) {
+            Some(spec) => match spec.kind {
+                CommandKind::Help => {
+                    for (index, command) in COMMAND_SPECS.iter().enumerate() {
+                        if index > 0 {
+                            output.push(b' ');
+                        }
+                        output.extend(command.name);
                     }
-                    output.extend(command);
+                    output.extend(b"\r\n");
                 }
-                output.extend(b"\r\n");
-            }
-            b"clear" => output.clear_screen = true,
-            b"true" => {}
-            b"false" => output.status = 1,
-            b"version" => output.extend(b"LogOS vNext 0.1.0\r\n"),
-            b"uname" => output.extend(b"LogOS\r\n"),
-            _ if line.starts_with(b"echo ") => {
-                output.extend(&line[5..]);
-                output.extend(b"\r\n");
-            }
-            _ => {
+                CommandKind::Echo => {
+                    output.extend(&line[spec.name.len() + 1..]);
+                    output.extend(b"\r\n");
+                }
+                CommandKind::Clear => output.clear_screen = true,
+                CommandKind::True => {}
+                CommandKind::False => output.status = 1,
+                CommandKind::Version => output.extend(b"LogOS vNext 0.1.0\r\n"),
+                CommandKind::Uname => output.extend(b"LogOS\r\n"),
+            },
+            None => {
                 output.status = 127;
                 output.extend(b"command not found\r\n");
             }
@@ -109,6 +155,16 @@ mod tests {
         assert_eq!(commands.execute(b"version").as_bytes(), b"LogOS vNext 0.1.0\r\n");
         assert_eq!(commands.execute(b"uname").as_bytes(), b"LogOS\r\n");
         assert_eq!(commands.execute(b"missing").status, 127);
+    }
+
+    #[test]
+    fn every_catalog_entry_has_dispatch_behavior() {
+        let mut commands = CommandService::new();
+        for spec in COMMAND_SPECS {
+            if spec.kind != CommandKind::Echo {
+                assert_ne!(commands.execute(spec.name).status, 127);
+            }
+        }
     }
 
     #[test]
