@@ -432,23 +432,90 @@ mod tests {
     }
 
     #[test]
-    fn repeated_replace_writes_survive_reopen_cycles() {
-        let mut namespace = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
-        let file = namespace.create_file(namespace.root(), b"cycle").unwrap();
-        namespace.write(file, 0, b"first").unwrap();
+    fn api_replace_writes_survive_reopen_cycles() {
+        let mut api =
+            StorageApi::new(DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap());
+        let contents =
+            [b"first".as_slice(), b"second replacement", b"third", b"final durable content"];
 
-        let store = namespace.into_store();
-        let mut namespace = DurableNamespace::open(store).unwrap();
-        let mut transaction = namespace.begin_transaction();
-        transaction.write(b"/cycle", 0, b"second", true).unwrap();
-        transaction.commit(&mut namespace).unwrap();
+        for (cycle, expected) in contents.iter().enumerate() {
+            let request_id = (cycle * 5 + 1) as u32;
+            let begin_message = api
+                .handle(&request(StorageApiOperation::Begin, 0, b"", b"", b"", 0, request_id))
+                .unwrap();
+            let begin = status(&begin_message);
+            assert_eq!(begin.status, StorageApiStatus::Ok);
+            let transaction_id = begin.transaction_id;
+            if cycle == 0 {
+                assert_eq!(
+                    status(
+                        &api.handle(&request(
+                            StorageApiOperation::CreateFile,
+                            transaction_id,
+                            b"/cycle",
+                            b"",
+                            b"",
+                            0,
+                            request_id + 1,
+                        ))
+                        .unwrap(),
+                    )
+                    .status,
+                    StorageApiStatus::Ok
+                );
+            }
+            assert_eq!(
+                status(
+                    &api.handle(&request(
+                        StorageApiOperation::Write,
+                        transaction_id,
+                        b"/cycle",
+                        b"",
+                        expected,
+                        STORAGE_API_FLAG_REPLACE,
+                        request_id + 2,
+                    ))
+                    .unwrap(),
+                )
+                .status,
+                StorageApiStatus::Ok
+            );
+            assert_eq!(
+                status(
+                    &api.handle(&request(
+                        StorageApiOperation::Commit,
+                        transaction_id,
+                        b"",
+                        b"",
+                        b"",
+                        0,
+                        request_id + 3,
+                    ))
+                    .unwrap(),
+                )
+                .status,
+                StorageApiStatus::Ok
+            );
 
-        let store = namespace.into_store();
-        let namespace = DurableNamespace::open(store).unwrap();
-        let file = namespace.resolve_path(b"/cycle").unwrap();
-        let mut output = [0; 16];
-        let count = namespace.read(file, 0, &mut output).unwrap();
-        assert_eq!(&output[..count], b"second");
+            let namespace = api.into_namespace();
+            let store = namespace.into_store();
+            let namespace = DurableNamespace::open(store).unwrap();
+            api = StorageApi::new(namespace);
+            let read_message = api
+                .handle(&request(
+                    StorageApiOperation::Read,
+                    0,
+                    b"/cycle",
+                    b"",
+                    b"",
+                    0,
+                    request_id + 4,
+                ))
+                .unwrap();
+            let read = status(&read_message);
+            assert_eq!(read.status, StorageApiStatus::Ok);
+            assert_eq!(read.data, *expected);
+        }
     }
 
     #[test]
