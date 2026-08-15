@@ -117,11 +117,7 @@ fn discover(capability: IpcCapability) -> Option<u64> {
 }
 
 fn stop_on_storage_error<T>(_error: T) -> ! {
-    let mut heartbeat_ticks = 0u16;
-    loop {
-        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
-        common::wait(0, logos_abi::ServiceId::Storage);
-    }
+    common::idle()
 }
 
 fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
