@@ -3,7 +3,8 @@ param(
     [ValidateRange(16, 4096)]
     [int]$DiskMiB = 64,
     [ValidateRange(1, 300)]
-    [int]$TimeoutSeconds = 60
+    [int]$TimeoutSeconds = 60,
+    [switch]$ResetDisk
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +23,9 @@ if (-not (Test-Path $qemuPath)) { throw 'Install QEMU or add qemu-system-x86_64 
 if (-not (Test-Path $ovmf)) { throw 'Set OVMF_CODE to an OVMF firmware file.' }
 
 New-Item -ItemType Directory -Force $target | Out-Null
+if ($ResetDisk -and (Test-Path -LiteralPath $disk)) {
+    Remove-Item -LiteralPath $disk -Force
+}
 if (-not (Test-Path $disk)) {
     $stream = [System.IO.File]::Open($disk, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
     try { $stream.SetLength([int64]$DiskMiB * 1MB) } finally { $stream.Dispose() }
