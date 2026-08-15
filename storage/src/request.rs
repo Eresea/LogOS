@@ -59,6 +59,14 @@ pub struct BlockRequestId {
 }
 
 impl BlockRequestId {
+    pub const fn from_parts(slot: u16, generation: u64) -> Option<Self> {
+        if slot >= MAX_BLOCK_REQUESTS as u16 || generation == 0 {
+            None
+        } else {
+            Some(Self { slot, generation })
+        }
+    }
+
     pub const fn slot(self) -> u16 {
         self.slot
     }

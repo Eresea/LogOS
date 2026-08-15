@@ -21,6 +21,10 @@ use crate::{
 
 mod virtio_device;
 
+pub(crate) fn flush_storage_device() -> Result<(), ()> {
+    virtio_device::flush_storage_device().map_err(|_| ())
+}
+
 const DEBUG_PORT: u16 = 0xe9;
 const APIC_BASE_MSR: u32 = 0x1b;
 const APIC_ID: usize = 0x20;

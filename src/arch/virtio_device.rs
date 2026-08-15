@@ -103,6 +103,9 @@ pub enum DeviceError {
     QueueFull,
     StaleCompletion,
     InvalidCompletion,
+    Timeout,
+    Io,
+    Unsupported,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -175,6 +178,7 @@ pub struct VirtioBlockDevice {
     queue: &'static mut QueueMemory,
     requests: [Option<BlockRequestId>; QUEUE_SIZE],
     used_index: u16,
+    next_request_generation: u64,
 }
 
 pub(crate) fn initialize_storage_device() -> bool {
@@ -187,6 +191,13 @@ pub(crate) fn initialize_storage_device() -> bool {
     unsafe { core::ptr::addr_of_mut!(DEVICE).write(MaybeUninit::new(device)) };
     DEVICE_READY.store(true, Ordering::Release);
     true
+}
+
+pub(crate) fn flush_storage_device() -> Result<(), DeviceError> {
+    if !DEVICE_READY.load(Ordering::Acquire) {
+        return Err(DeviceError::NotFound);
+    }
+    unsafe { (&mut *core::ptr::addr_of_mut!(DEVICE).cast::<VirtioBlockDevice>()).flush() }
 }
 
 impl VirtioBlockDevice {
@@ -208,6 +219,7 @@ impl VirtioBlockDevice {
             queue,
             requests: [None; QUEUE_SIZE],
             used_index: 0,
+            next_request_generation: 1,
         };
         device.reset()?;
         unsafe { device.common.write_u8(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE)? };
@@ -326,16 +338,49 @@ impl VirtioBlockDevice {
         let slot = (self.used_index as usize) % QUEUE_SIZE;
         let element = unsafe { read_volatile(&self.queue.used_ring[slot]) };
         self.used_index = self.used_index.wrapping_add(1);
-        if element.id as usize >= QUEUE_SIZE {
+        if element.id as usize >= QUEUE_SIZE * 3 || element.id as usize % 3 != 0 {
             return Err(DeviceError::InvalidCompletion);
         }
+        let queue_slot = element.id as usize / 3;
         let request_id = self
             .requests
-            .get_mut(element.id as usize)
+            .get_mut(queue_slot)
             .and_then(Option::take)
             .ok_or(DeviceError::StaleCompletion)?;
-        let status = self.queue.statuses[element.id as usize];
+        let status = self.queue.statuses[queue_slot];
         Ok(Some(DeviceCompletion { request_id, status, bytes_written: element.length }))
+    }
+
+    fn flush(&mut self) -> Result<(), DeviceError> {
+        let generation = self.next_request_generation;
+        self.next_request_generation = self.next_request_generation.wrapping_add(1).max(1);
+        let request_id = logos_storage::BlockRequestId::from_parts(0, generation)
+            .ok_or(DeviceError::InvalidCompletion)?;
+        self.submit(
+            VirtioBlkChain {
+                request_id,
+                header: VirtioBlkHeader { request_type: 4, reserved: 0, sector: 0 },
+                data: None,
+                blocks: 0,
+            },
+            0,
+        )?;
+        for _ in 0..1_000_000 {
+            if let Some(completion) = self.poll_completion()? {
+                if completion.request_id != request_id {
+                    return Err(DeviceError::StaleCompletion);
+                }
+                return match completion.status {
+                    0 => Ok(()),
+                    1 => Err(DeviceError::Io),
+                    2 => Err(DeviceError::Unsupported),
+                    _ => Err(DeviceError::InvalidCompletion),
+                };
+            }
+            core::hint::spin_loop();
+        }
+        self.reset_device()?;
+        Err(DeviceError::Timeout)
     }
 
     pub fn interrupt_status(&self) -> Result<u8, DeviceError> {

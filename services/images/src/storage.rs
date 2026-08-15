@@ -29,7 +29,7 @@ pub extern "C" fn _start() -> ! {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
         if !waiting {
             let Some(request) = StorageRequest::new(
-                StorageOperation::Reopen,
+                StorageOperation::Flush,
                 request_id,
                 1,
                 REQUEST_CAPABILITY as u16,

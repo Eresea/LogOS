@@ -608,7 +608,24 @@ impl ServiceRuntime {
                     };
                 }
             };
-            self.storage_response = Some(crate::storage_ipc::unsupported_response(request));
+            let response = if request.operation == logos_abi::StorageOperation::Flush {
+                let status = if crate::arch::flush_storage_device().is_ok() {
+                    logos_abi::StorageStatus::Ok
+                } else {
+                    logos_abi::StorageStatus::Io
+                };
+                logos_abi::StorageResponse::new(
+                    request.request_id,
+                    status,
+                    request.generation,
+                    0,
+                    0,
+                    request.transaction_id,
+                )
+            } else {
+                crate::storage_ipc::unsupported_response(request)
+            };
+            self.storage_response = Some(response);
             crate::arch::signal_events(logos_abi::ipc_write_event_mask(
                 crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT,
             ));
