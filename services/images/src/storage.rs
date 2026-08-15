@@ -43,6 +43,10 @@ impl StorageTransport {
     const fn new() -> Self {
         Self { operation: None }
     }
+
+    fn heartbeat(&self) {
+        common::heartbeat(logos_abi::ServiceId::Storage);
+    }
 }
 
 impl KernelStorageIpc for StorageTransport {
@@ -52,6 +56,7 @@ impl KernelStorageIpc for StorageTransport {
         request: StorageRequest,
         staging: &mut Block,
     ) -> IpcStatus {
+        self.heartbeat();
         if common::capability(REQUEST_CAPABILITY) != Some(capability) {
             return IpcStatus::Unauthorized;
         }
@@ -68,6 +73,7 @@ impl KernelStorageIpc for StorageTransport {
         response: &mut StorageResponse,
         staging: &mut Block,
     ) -> IpcStatus {
+        self.heartbeat();
         if common::capability(REQUEST_CAPABILITY) != Some(capability) {
             return IpcStatus::Unauthorized;
         }
