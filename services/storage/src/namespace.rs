@@ -486,6 +486,14 @@ impl<B: BlockStore> DurableNamespace<B> {
         self.namespace.resolve_path(path)
     }
 
+    pub fn open_file(&self, path: &[u8]) -> Result<ObjectId, NamespaceError> {
+        let id = self.resolve_path(path)?;
+        if self.stat(id)?.kind != ObjectKind::File {
+            return Err(NamespaceError::IsDirectory);
+        }
+        Ok(id)
+    }
+
     pub fn stat(&self, id: ObjectId) -> Result<ObjectInfo, NamespaceError> {
         self.namespace.stat(id)
     }
@@ -517,6 +525,22 @@ impl<B: BlockStore> DurableNamespace<B> {
         let (id, payload) = self.namespace.plan_create(parent, kind, name)?;
         self.commit_one(CREATE_KIND, &payload)?;
         Ok(id)
+    }
+
+    pub fn create_file(
+        &mut self,
+        parent: ObjectId,
+        name: &[u8],
+    ) -> Result<ObjectId, NamespaceError> {
+        self.create(parent, ObjectKind::File, name)
+    }
+
+    pub fn create_directory(
+        &mut self,
+        parent: ObjectId,
+        name: &[u8],
+    ) -> Result<ObjectId, NamespaceError> {
+        self.create(parent, ObjectKind::Directory, name)
     }
 
     pub fn rename(
