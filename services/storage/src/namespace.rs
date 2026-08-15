@@ -306,8 +306,10 @@ impl ObjectNamespace {
         if self.object_record(parent)?.kind != ObjectKind::Directory {
             return Err(NamespaceError::NotDirectory);
         }
-        if self.find_child(parent, &payload[14..14 + name_length])?.is_some() {
-            return Err(NamespaceError::AlreadyExists);
+        if let Some(child) = self.find_child(parent, &payload[14..14 + name_length])? {
+            if child != id {
+                return Err(NamespaceError::AlreadyExists);
+            }
         }
         if self.is_descendant(id, parent)? {
             return Err(NamespaceError::InvalidPath);
@@ -716,6 +718,18 @@ mod tests {
         let store = reopened.into_store();
         let reopened = DurableNamespace::open(store).unwrap();
         assert_eq!(reopened.resolve_path(b"/new"), Err(NamespaceError::NotFound));
+    }
+
+    #[test]
+    fn same_name_rename_is_recoverable() {
+        let store = MemoryBlockStore::<16>::new();
+        let mut fs = DurableNamespace::format(store).unwrap();
+        let file = fs.create_file(fs.root(), b"same").unwrap();
+        fs.rename(file, fs.root(), b"same").unwrap();
+
+        let store = fs.into_store();
+        let reopened = DurableNamespace::open(store).unwrap();
+        assert_eq!(reopened.resolve_path(b"/same"), Ok(file));
     }
 
     #[test]
