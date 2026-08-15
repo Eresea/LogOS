@@ -11,6 +11,16 @@ ADR_DIR = ROOT / "docs" / "adr"
 INDEX = ADR_DIR / "README.md"
 ADR = re.compile(r"^(\d{4})-[^/]+\.md$")
 ROW = re.compile(r"^\| \[(\d{4})\]\(([^)]+)\) \| ([^|]+) \|")
+STATUS_LINE = re.compile(r"^- Status: (.+)$", re.MULTILINE)
+STATUS_HEADING = re.compile(r"^## Status\s*\n+([^\n]+)$", re.MULTILINE)
+
+
+def status_for(text: str) -> str | None:
+    status = STATUS_LINE.search(text)
+    if status is not None:
+        return status.group(1).strip()
+    status = STATUS_HEADING.search(text)
+    return status.group(1).strip() if status is not None else None
 
 
 def expected() -> list[tuple[str, str, str]]:
@@ -20,10 +30,10 @@ def expected() -> list[tuple[str, str, str]]:
         if not match:
             continue
         text = path.read_text(encoding="utf-8")
-        status = re.search(r"^- Status: (.+)$", text, re.MULTILINE)
+        status = status_for(text)
         if status is None:
             raise ValueError(f"{path.relative_to(ROOT)} has no status")
-        records.append((match.group(1), path.name, status.group(1).strip()))
+        records.append((match.group(1), path.name, status))
     return records
 
 
