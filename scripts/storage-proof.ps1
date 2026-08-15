@@ -48,6 +48,76 @@ $baseArgs = @(
     '-debugcon', "file:$log", '-global', 'isa-debugcon.iobase=0xe9'
 )
 
+function Set-U64 {
+    param([byte[]]$Bytes, [int]$Offset, [UInt64]$Value)
+    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Bytes, $Offset, 8)
+}
+
+function Set-U32 {
+    param([byte[]]$Bytes, [int]$Offset, [UInt32]$Value)
+    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Bytes, $Offset, 4)
+}
+
+function Get-Crc32C {
+    param([byte[]]$Bytes)
+    [UInt32]$crc = [UInt32]::MaxValue
+    foreach ($byte in $Bytes) {
+        $crc = $crc -bxor [UInt32]$byte
+        for ($bit = 0; $bit -lt 8; $bit++) {
+            if (($crc -band 1) -ne 0) {
+                $crc = ($crc -shr 1) -bxor [UInt32]2197170120
+            } else {
+                $crc = $crc -shr 1
+            }
+        }
+    }
+    return [UInt32](-bnot $crc)
+}
+
+function Add-IncompleteJournalTail {
+    param([string]$Path)
+
+    $blockBytes = 4096
+    $blocks = @()
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite)
+    try {
+        for ($slot = 0; $slot -lt 2; $slot++) {
+            $bytes = New-Object byte[] $blockBytes
+            $stream.Position = [int64]$slot * $blockBytes
+            [void]$stream.Read($bytes, 0, $bytes.Length)
+            if ([Text.Encoding]::ASCII.GetString($bytes, 0, 8) -eq 'LOGOSFS' + [char]0) {
+                $blocks += [pscustomobject]@{
+                    Slot = $slot
+                    Bytes = $bytes
+                    Generation = [BitConverter]::ToUInt64($bytes, 16)
+                    Head = [BitConverter]::ToUInt64($bytes, 40)
+                    JournalEnd = [BitConverter]::ToUInt64($bytes, 32)
+                }
+            }
+        }
+        if ($blocks.Count -eq 0) { throw 'No storage superblock found for tail injection.' }
+        $active = $blocks | Sort-Object Generation -Descending | Select-Object -First 1
+        if ($active.Head + 1 -ge $active.JournalEnd) { throw 'Storage journal has no room for tail injection.' }
+
+        $torn = New-Object byte[] $blockBytes
+        $stream.Position = [int64]$active.Head * $blockBytes
+        $stream.Write($torn, 0, $torn.Length)
+
+        $replacement = New-Object byte[] $blockBytes
+        [Array]::Copy($active.Bytes, $replacement, $replacement.Length)
+        Set-U64 $replacement 16 ($active.Generation + 1)
+        Set-U64 $replacement 40 ($active.Head + 1)
+        Set-U32 $replacement 64 0
+        Set-U32 $replacement 64 (Get-Crc32C $replacement)
+        $replacementSlot = 1 - $active.Slot
+        $stream.Position = [int64]$replacementSlot * $blockBytes
+        $stream.Write($replacement, 0, $replacement.Length)
+        $stream.Flush()
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Invoke-StorageBoot {
     param([string]$ExpectedMarker)
 
@@ -86,6 +156,7 @@ function Invoke-StorageBoot {
 if (-not (Invoke-StorageBoot 'LogOS vNext: storage proof PASS')) {
     throw "Storage format/write/flush proof failed. Log: $log"
 }
+Add-IncompleteJournalTail $disk
 if (-not (Invoke-StorageBoot 'LogOS vNext: storage recovery PASS')) {
     throw "Storage reboot/recovery proof failed. Log: $log"
 }
