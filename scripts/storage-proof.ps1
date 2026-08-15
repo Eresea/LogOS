@@ -27,9 +27,9 @@ if (-not (Test-Path $disk)) {
     try { $stream.SetLength([int64]$DiskMiB * 1MB) } finally { $stream.Dispose() }
 }
 
-& cargo build --release --target x86_64-unknown-uefi
+& cargo build --release --features storage-proof --target x86_64-unknown-uefi
 if ($LASTEXITCODE -ne 0) { throw 'UEFI build failed.' }
-& (Join-Path $PSScriptRoot 'build-services.ps1') -Release
+& (Join-Path $PSScriptRoot 'build-services.ps1') -Release -StorageProof
 if ($LASTEXITCODE -ne 0) { throw 'Service image build failed.' }
 
 New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\BOOT') | Out-Null

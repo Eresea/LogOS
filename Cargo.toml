@@ -30,6 +30,7 @@ logos-storage = { path = "storage" }
 [features]
 default = []
 qemu-proof = []
+storage-proof = []
 
 [lib]
 name = "logos_vnext"

@@ -7,6 +7,7 @@ license = "MIT"
 
 [features]
 qemu-proof = []
+storage-proof = []
 
 [dependencies]
 logos-abi = { path = "../../abi" }

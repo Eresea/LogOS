@@ -4,8 +4,11 @@ use core::{
     arch::asm,
     mem::MaybeUninit,
     ptr::{read_volatile, write_volatile},
-    sync::atomic::{AtomicBool, AtomicU8, Ordering, fence},
+    sync::atomic::{AtomicBool, Ordering, fence},
 };
+
+#[cfg(feature = "storage-proof")]
+use core::sync::atomic::AtomicU8;
 
 use logos_storage::{
     BlockRequestId, PciError, VirtioBlkChain, VirtioBlkHeader, VirtioPciDevice, negotiate_features,
@@ -77,11 +80,16 @@ static mut QUEUE_MEMORY: QueueMemory = QueueMemory::new();
 static mut DEVICE: MaybeUninit<VirtioBlockDevice> = MaybeUninit::uninit();
 static DEVICE_READY: AtomicBool = AtomicBool::new(false);
 static DEVICE_BUSY: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "storage-proof")]
 static STORAGE_WRITE_COMPLETE: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "storage-proof")]
 static STORAGE_VALID_MEDIA: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "storage-proof")]
 static STORAGE_INTERRUPT_COMPLETION: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "storage-proof")]
 static STORAGE_PROOF_STATE: AtomicU8 = AtomicU8::new(0);
 
+#[cfg(feature = "storage-proof")]
 const SUPERBLOCK_MAGIC: &[u8; 8] = b"LOGOSFS\0";
 
 impl QueueMemory {
@@ -486,6 +494,7 @@ impl VirtioBlockDevice {
         if status & 1 == 0 {
             return;
         }
+        #[cfg(feature = "storage-proof")]
         STORAGE_INTERRUPT_COMPLETION.store(true, Ordering::Release);
         match self.poll_completion() {
             Ok(completion) => self.interrupt_completion = completion,
@@ -514,6 +523,7 @@ impl VirtioBlockDevice {
                 }
                 return match completion.status {
                     0 => {
+                        #[cfg(feature = "storage-proof")]
                         self.record_flush_success();
                         Ok(())
                     }
@@ -571,6 +581,7 @@ impl VirtioBlockDevice {
                 }
                 return match completion.status {
                     0 => {
+                        #[cfg(feature = "storage-proof")]
                         self.record_transfer_success(request, data_address);
                         Ok(())
                     }
@@ -623,6 +634,7 @@ impl VirtioBlockDevice {
         Ok(())
     }
 
+    #[cfg(feature = "storage-proof")]
     fn record_transfer_success(&self, request: logos_abi::StorageRequest, data_address: usize) {
         match request.operation {
             logos_abi::StorageOperation::Write => {
@@ -641,6 +653,7 @@ impl VirtioBlockDevice {
         }
     }
 
+    #[cfg(feature = "storage-proof")]
     fn record_flush_success(&self) {
         if STORAGE_WRITE_COMPLETE.swap(false, Ordering::AcqRel)
             && STORAGE_INTERRUPT_COMPLETION.swap(false, Ordering::AcqRel)
