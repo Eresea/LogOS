@@ -61,6 +61,7 @@ pub enum NamespaceError {
     Stale,
     TooLarge,
     InvalidRecord,
+    GenerationExhausted,
 }
 
 impl From<FormatError> for NamespaceError {
@@ -230,7 +231,8 @@ impl ObjectNamespace {
         else {
             return Err(NamespaceError::Capacity);
         };
-        let generation = record.generation.wrapping_add(1).max(1);
+        let generation =
+            record.generation.checked_add(1).ok_or(NamespaceError::GenerationExhausted)?;
         let id = ObjectId { slot: slot as u16, generation };
         let mut payload = [0; 2 + 4 + 2 + 4 + 1 + 2 + MAX_COMPONENT_BYTES];
         put_u16(&mut payload, 0, id.slot);
@@ -261,7 +263,9 @@ impl ObjectNamespace {
             return Err(NamespaceError::InvalidRecord);
         }
         Self::validate_name(&payload[15..15 + name_length])?;
-        self.object_record(parent)?;
+        if self.object_record(parent)?.kind != ObjectKind::Directory {
+            return Err(NamespaceError::NotDirectory);
+        }
         if self.find_child(parent, &payload[15..15 + name_length])?.is_some() {
             return Err(NamespaceError::AlreadyExists);
         }
@@ -289,6 +293,9 @@ impl ObjectNamespace {
         }
         let id = ObjectId::new(get_u16(payload, 0), get_u32(payload, 2))
             .ok_or(NamespaceError::InvalidRecord)?;
+        if id == ObjectId::ROOT {
+            return Err(NamespaceError::Root);
+        }
         let parent = ObjectId::new(get_u16(payload, 6), get_u32(payload, 8))
             .ok_or(NamespaceError::InvalidRecord)?;
         let name_length = get_u16(payload, 12) as usize;
@@ -296,7 +303,9 @@ impl ObjectNamespace {
             return Err(NamespaceError::InvalidRecord);
         }
         Self::validate_name(&payload[14..14 + name_length])?;
-        self.object_record(parent)?;
+        if self.object_record(parent)?.kind != ObjectKind::Directory {
+            return Err(NamespaceError::NotDirectory);
+        }
         if self.find_child(parent, &payload[14..14 + name_length])?.is_some() {
             return Err(NamespaceError::AlreadyExists);
         }
@@ -306,6 +315,20 @@ impl ObjectNamespace {
         record.name.fill(0);
         record.name[..name_length].copy_from_slice(&payload[14..14 + name_length]);
         Ok(())
+    }
+
+    fn is_descendant(&self, object: ObjectId, parent: ObjectId) -> Result<bool, NamespaceError> {
+        let mut current = parent;
+        for _ in 0..=MAX_OBJECTS {
+            if current == object {
+                return Ok(true);
+            }
+            if current == ObjectId::ROOT {
+                return Ok(false);
+            }
+            current = self.object_record(current)?.parent;
+        }
+        Err(NamespaceError::InvalidRecord)
     }
 
     fn apply_unlink(&mut self, payload: &[u8]) -> Result<(), NamespaceError> {
@@ -549,6 +572,9 @@ impl<B: BlockStore> DurableNamespace<B> {
         parent: ObjectId,
         name: &[u8],
     ) -> Result<(), NamespaceError> {
+        if id == ObjectId::ROOT {
+            return Err(NamespaceError::Root);
+        }
         self.namespace.object_record(id)?;
         if self.namespace.object_record(parent)?.kind != ObjectKind::Directory {
             return Err(NamespaceError::NotDirectory);
@@ -556,6 +582,9 @@ impl<B: BlockStore> DurableNamespace<B> {
         ObjectNamespace::validate_name(name)?;
         if self.namespace.find_child(parent, name)?.is_some_and(|child| child != id) {
             return Err(NamespaceError::AlreadyExists);
+        }
+        if self.namespace.is_descendant(id, parent)? {
+            return Err(NamespaceError::InvalidPath);
         }
         let mut payload = [0; 2 + 4 + 2 + 4 + 2 + MAX_COMPONENT_BYTES];
         put_u16(&mut payload, 0, id.slot);
@@ -708,5 +737,19 @@ mod tests {
         assert_eq!(replacement.slot(), first.slot());
         assert_ne!(replacement.generation(), first.generation());
         assert_eq!(fs.stat(first), Err(NamespaceError::Stale));
+    }
+
+    #[test]
+    fn root_and_generation_invariants_are_rejected() {
+        let store = MemoryBlockStore::<16>::new();
+        let mut fs = DurableNamespace::format(store).unwrap();
+        assert_eq!(fs.rename(fs.root(), fs.root(), b"root"), Err(NamespaceError::Root));
+
+        let mut namespace = ObjectNamespace::new();
+        namespace.records[1].generation = u32::MAX;
+        assert_eq!(
+            namespace.plan_create(ObjectId::ROOT, ObjectKind::File, b"file"),
+            Err(NamespaceError::GenerationExhausted)
+        );
     }
 }
