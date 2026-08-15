@@ -300,7 +300,8 @@ impl Scheduler {
 
     /// Register a bounded event wait. Returns `true` when the caller must
     /// block; an already pending event returns `false` so the caller can
-    /// recheck its condition without entering the scheduler.
+    /// recheck its condition without entering the scheduler. A zero mask is
+    /// allowed only with a finite deadline for a timeout-only sleep.
     #[allow(dead_code)]
     pub(crate) fn wait_for_events(
         &self,
@@ -313,7 +314,7 @@ impl Scheduler {
         } else {
             (1u64 << logos_abi::EVENT_COUNT) - 1
         };
-        if mask == 0 || mask & !valid_mask != 0 {
+        if mask & !valid_mask != 0 || (mask == 0 && deadline == NO_DEADLINE) {
             return None;
         }
         let slot = self.tasks.get(handle.slot as usize)?;
@@ -324,6 +325,9 @@ impl Scheduler {
 
         slot.wait_mask.store(0, Ordering::Release);
         slot.wake_deadline.store(deadline, Ordering::Release);
+        if mask == 0 {
+            return Some(true);
+        }
         if self.event_pending.load(Ordering::Acquire) & mask != 0 {
             self.event_pending.fetch_and(!mask, Ordering::AcqRel);
             slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
@@ -837,6 +841,25 @@ mod tests {
         assert_eq!(scheduler.signal_events(event), 1);
         assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
         assert_eq!(scheduler.wake_due(10), 0);
+    }
+
+    #[test]
+    fn timeout_only_wait_blocks_and_wakes() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert_eq!(scheduler.wait_for_events(handle, 0, 10), Some(true));
+        assert!(scheduler.save_context(handle, 0x2140));
+        assert!(scheduler.finish(handle, FinishState::TimedBlocked));
+        assert_eq!(scheduler.wake_due(9), 0);
+        assert_eq!(scheduler.wake_due(10), 1);
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+    }
+
+    #[test]
+    fn indefinite_timeout_only_wait_is_rejected() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert_eq!(scheduler.wait_for_events(handle, 0, u64::MAX), None);
     }
 
     #[test]
