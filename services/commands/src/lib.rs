@@ -102,7 +102,7 @@ impl CommandService {
             output.extend(b"command too long\r\n");
             return output;
         }
-        match Self::command_spec(line) {
+        match Self::command_spec(trim_command(line)) {
             Some(spec) => match spec.kind {
                 CommandKind::Help => {
                     for (index, command) in COMMAND_SPECS.iter().enumerate() {
@@ -134,6 +134,18 @@ impl CommandService {
     }
 }
 
+fn trim_command(line: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = line.len();
+    while start < end && line[start] == b' ' {
+        start += 1;
+    }
+    while end > start && line[end - 1] == b' ' {
+        end -= 1;
+    }
+    &line[start..end]
+}
+
 impl Default for CommandService {
     fn default() -> Self {
         Self::new()
@@ -157,6 +169,7 @@ mod tests {
         assert_eq!(commands.execute(b"true").status, 0);
         assert_eq!(commands.execute(b"false").status, 1);
         assert_eq!(commands.execute(b"version").as_bytes(), b"LogOS vNext 0.1.0\r\n");
+        assert_eq!(commands.execute(b" version ").as_bytes(), b"LogOS vNext 0.1.0\r\n");
         assert_eq!(commands.execute(b"uname").as_bytes(), b"LogOS\r\n");
         assert_eq!(commands.execute(b"missing").status, 127);
     }
