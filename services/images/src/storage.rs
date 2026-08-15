@@ -34,10 +34,13 @@ impl StorageTransport {
 impl KernelStorageIpc for StorageTransport {
     fn send(
         &mut self,
-        _capability: IpcCapability,
+        capability: IpcCapability,
         request: StorageRequest,
         staging: &mut Block,
     ) -> IpcStatus {
+        if common::capability(REQUEST_CAPABILITY) != Some(capability) {
+            return IpcStatus::Unauthorized;
+        }
         self.operation = Some(request.operation);
         if request.operation == StorageOperation::Write {
             unsafe { *(logos_abi::STORAGE_DATA_BASE as *mut Block) = *staging };
@@ -47,10 +50,13 @@ impl KernelStorageIpc for StorageTransport {
 
     fn receive(
         &mut self,
-        _capability: IpcCapability,
+        capability: IpcCapability,
         response: &mut StorageResponse,
         staging: &mut Block,
     ) -> IpcStatus {
+        if common::capability(REQUEST_CAPABILITY) != Some(capability) {
+            return IpcStatus::Unauthorized;
+        }
         let status = common::ipc_receive(RESPONSE_CAPABILITY, response);
         if status == IpcStatus::Ok && self.operation == Some(StorageOperation::Read) {
             *staging = unsafe { *(logos_abi::STORAGE_DATA_BASE as *const Block) };

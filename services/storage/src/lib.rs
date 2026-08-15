@@ -113,9 +113,17 @@ impl<T> IpcBlockStore<T> {
             request.transaction_id,
         );
         map_ipc_status(self.transport.receive(self.capability, &mut response, &mut self.staging))?;
-        if response.request_id != request.request_id
+        if response.reserved != 0
+            || response.request_id != request.request_id
             || response.generation != request.generation
             || response.transaction_id != request.transaction_id
+        {
+            return Err(BlockError::InvalidRequest);
+        }
+        if response.status == StorageStatus::Ok
+            && (response.blocks_completed != u16::from(request.is_block_io())
+                || response.payload_bytes
+                    != if request.is_block_io() { BLOCK_BYTES as u16 } else { 0 })
         {
             return Err(BlockError::InvalidRequest);
         }
@@ -212,11 +220,18 @@ mod tests {
         expected: IpcCapability,
         pending: Option<StorageRequest>,
         fault: Option<StorageStatus>,
+        malformed_response: bool,
     }
 
     impl TestKernel {
         fn new(expected: IpcCapability) -> Self {
-            Self { store: MemoryBlockStore::new(), expected, pending: None, fault: None }
+            Self {
+                store: MemoryBlockStore::new(),
+                expected,
+                pending: None,
+                fault: None,
+                malformed_response: false,
+            }
         }
 
         fn status(&self) -> StorageStatus {
@@ -269,6 +284,10 @@ mod tests {
                 request.payload_bytes,
                 request.transaction_id,
             );
+            if self.malformed_response {
+                response.blocks_completed = 0;
+                response.payload_bytes = 0;
+            }
             IpcStatus::Ok
         }
     }
@@ -317,6 +336,19 @@ mod tests {
         assert_eq!(
             store.write_block(BlockIndex::new(0), &Block::zero()),
             Err(BlockError::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn malformed_success_response_is_rejected() {
+        let mut kernel = TestKernel::new(capability());
+        kernel.malformed_response = true;
+        let mut store = IpcBlockStore::new(kernel, capability(), 3, 9, 4).unwrap();
+        let mut output = Block::zero();
+
+        assert_eq!(
+            store.read_block(BlockIndex::new(0), &mut output),
+            Err(BlockError::InvalidRequest)
         );
     }
 
