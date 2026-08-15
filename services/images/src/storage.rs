@@ -5,8 +5,9 @@
 mod common;
 
 use logos_abi::{
-    IpcBytes, IpcCapability, IpcEndpointId, IpcStatus, MessageKind, StorageOperation,
-    StorageRequest, StorageResponse, StorageStatus,
+    IpcBytes, IpcCapability, IpcEndpointId, IpcStatus, MessageKind, StorageApiRequest,
+    StorageApiResponse, StorageApiStatus, StorageOperation, StorageRequest, StorageResponse,
+    StorageStatus,
 };
 use logos_storage::Block;
 use logos_storage_service::{
@@ -117,7 +118,52 @@ fn discover(capability: IpcCapability) -> Option<u64> {
 }
 
 fn stop_on_storage_error<T>(_error: T) -> ! {
-    common::idle()
+    let mut pending_response = None;
+    let mut heartbeat_ticks = 0u16;
+    loop {
+        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
+        let mut progressed = false;
+        if let Some(response) = pending_response {
+            match common::ipc_send(COMMANDS_SEND_CAPABILITY, &response) {
+                IpcStatus::Ok => {
+                    pending_response = None;
+                    progressed = true;
+                }
+                IpcStatus::Full => {}
+                _ => {
+                    pending_response = None;
+                    progressed = true;
+                }
+            }
+        }
+        if pending_response.is_none() {
+            let mut request = IpcBytes::empty(MessageKind::StorageRequest);
+            match common::ipc_receive(COMMANDS_RECEIVE_CAPABILITY, &mut request) {
+                IpcStatus::Ok => {
+                    pending_response =
+                        StorageApiRequest::decode(&request).ok().and_then(|request| {
+                            StorageApiResponse::encode(
+                                StorageApiStatus::Io,
+                                request.request_id,
+                                request.transaction_id,
+                                &[],
+                                false,
+                            )
+                        });
+                    progressed = true;
+                }
+                IpcStatus::Empty => {}
+                _ => progressed = true,
+            }
+        }
+        if !progressed {
+            common::wait(
+                common::ipc_read_event(IpcEndpointId::CommandsToStorage)
+                    | common::ipc_write_event(IpcEndpointId::StorageToCommands),
+                logos_abi::ServiceId::Storage,
+            );
+        }
+    }
 }
 
 fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
