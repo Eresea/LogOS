@@ -432,6 +432,26 @@ mod tests {
     }
 
     #[test]
+    fn repeated_replace_writes_survive_reopen_cycles() {
+        let mut namespace = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
+        let file = namespace.create_file(namespace.root(), b"cycle").unwrap();
+        namespace.write(file, 0, b"first").unwrap();
+
+        let store = namespace.into_store();
+        let mut namespace = DurableNamespace::open(store).unwrap();
+        let mut transaction = namespace.begin_transaction();
+        transaction.write(b"/cycle", 0, b"second", true).unwrap();
+        transaction.commit(&mut namespace).unwrap();
+
+        let store = namespace.into_store();
+        let namespace = DurableNamespace::open(store).unwrap();
+        let file = namespace.resolve_path(b"/cycle").unwrap();
+        let mut output = [0; 16];
+        let count = namespace.read(file, 0, &mut output).unwrap();
+        assert_eq!(&output[..count], b"second");
+    }
+
+    #[test]
     fn api_rejects_stale_and_abort_discards_changes() {
         let namespace = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
         let mut api = StorageApi::new(namespace);

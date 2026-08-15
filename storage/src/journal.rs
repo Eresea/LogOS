@@ -209,10 +209,12 @@ impl Volume {
             let record = match decode_record(&block) {
                 Ok(Some(record)) => record,
                 Ok(None) => {
-                    // A blank block is the first torn suffix; stale bytes after
-                    // it are discarded by checkpointing to committed_head.
+                    // Abandon only the incomplete transaction at this gap. A
+                    // later checksummed transaction may still be durable.
                     truncated = true;
-                    break;
+                    pending_len = 0;
+                    pending_transaction = 0;
+                    continue;
                 }
                 Err(error) => {
                     if !remaining_journal_is_blank(store, index + 1, self.info.journal_head)? {
@@ -231,12 +233,18 @@ impl Volume {
             }
 
             if record.kind == JOURNAL_COMMIT_KIND {
-                if record.payload_len != 0
-                    || pending_len == 0 && record.sequence != 0
-                    || (pending_len > 0
-                        && (pending_transaction != record.transaction_id
-                            || record.sequence != pending_len as u32))
-                {
+                let valid = record.payload_len == 0
+                    && ((pending_len == 0 && record.sequence == 0)
+                        || (pending_len > 0
+                            && pending_transaction == record.transaction_id
+                            && record.sequence == pending_len as u32));
+                if !valid {
+                    pending_len = 0;
+                    pending_transaction = 0;
+                    truncated = true;
+                    continue;
+                }
+                if record.transaction_id <= last_transaction {
                     return Err(FormatError::Corrupt);
                 }
 
@@ -258,13 +266,23 @@ impl Volume {
             }
 
             if pending_len == 0 {
+                if record.sequence != 0 {
+                    truncated = true;
+                    continue;
+                }
                 pending_transaction = record.transaction_id;
             }
             if pending_transaction != record.transaction_id
                 || record.sequence != pending_len as u32
                 || pending_len == MAX_RECORDS_PER_TRANSACTION
             {
-                return Err(FormatError::Corrupt);
+                pending_len = 0;
+                pending_transaction = 0;
+                truncated = true;
+                if record.sequence != 0 {
+                    continue;
+                }
+                pending_transaction = record.transaction_id;
             }
             pending[pending_len] = PendingRecord {
                 kind: record.kind,
@@ -658,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn blank_journal_hole_discards_later_transactions() {
+    fn blank_journal_hole_recovers_later_transactions() {
         let mut store = CrashStore::<BLOCKS>::new();
         let mut volume = Volume::format(&mut store).unwrap();
         volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"first" }]).unwrap();
@@ -678,10 +696,10 @@ mod tests {
         let mut sink = Sink::new();
         assert_eq!(
             reopened.recover(&mut store, &mut sink).unwrap(),
-            RecoverySummary { committed_transactions: 1, replayed_records: 1 }
+            RecoverySummary { committed_transactions: 2, replayed_records: 2 }
         );
-        assert_eq!(reopened.info().journal_head, 4);
-        assert_eq!(reopened.info().root_transaction_id, 1);
+        assert_eq!(reopened.info().journal_head, 7);
+        assert_eq!(reopened.info().root_transaction_id, 2);
     }
 
     #[test]
