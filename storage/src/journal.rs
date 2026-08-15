@@ -201,6 +201,7 @@ impl Volume {
         let mut last_transaction = 0u64;
         let previous_head = self.info.journal_head;
         let mut committed_head = self.info.journal_tail;
+        let mut truncated = false;
 
         for index in self.info.journal_tail..self.info.journal_end {
             let mut block = Block::zero();
@@ -208,15 +209,16 @@ impl Volume {
             let record = match decode_record(&block) {
                 Ok(Some(record)) => record,
                 Ok(None) => {
-                    if !remaining_journal_is_blank(store, index + 1, self.info.journal_head)? {
-                        return Err(FormatError::Corrupt);
-                    }
+                    // A blank block is the first torn suffix; stale bytes after
+                    // it are discarded by checkpointing to committed_head.
+                    truncated = true;
                     break;
                 }
                 Err(error) => {
                     if !remaining_journal_is_blank(store, index + 1, self.info.journal_head)? {
                         return Err(error);
                     }
+                    truncated = true;
                     break;
                 }
             };
@@ -272,7 +274,7 @@ impl Volume {
             pending_len += 1;
         }
 
-        if last_transaction < self.info.root_transaction_id {
+        if !truncated && last_transaction < self.info.root_transaction_id {
             return Err(FormatError::Corrupt);
         }
 
@@ -653,6 +655,33 @@ mod tests {
         assert_eq!(sink.records[0].0, transaction_id);
         assert_eq!(sink.records[0].1, 7);
         assert_eq!(&sink.records[0].2[..5], b"hello");
+    }
+
+    #[test]
+    fn blank_journal_hole_discards_later_transactions() {
+        let mut store = CrashStore::<BLOCKS>::new();
+        let mut volume = Volume::format(&mut store).unwrap();
+        volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"first" }]).unwrap();
+        let later = encode_record(2, 0, 2, b"later").unwrap();
+        let later_commit = encode_record(2, 1, JOURNAL_COMMIT_KIND, &[]).unwrap();
+        store.write_block(BlockIndex::new(5), &later).unwrap();
+        store.write_block(BlockIndex::new(6), &later_commit).unwrap();
+
+        let mut info = volume.info();
+        info.generation += 1;
+        info.journal_head = 7;
+        info.root_transaction_id = 2;
+        write_superblock(&mut store, SUPERBLOCK_B, info).unwrap();
+        store.flush().unwrap();
+
+        let mut reopened = Volume::open(&mut store).unwrap();
+        let mut sink = Sink::new();
+        assert_eq!(
+            reopened.recover(&mut store, &mut sink).unwrap(),
+            RecoverySummary { committed_transactions: 1, replayed_records: 1 }
+        );
+        assert_eq!(reopened.info().journal_head, 4);
+        assert_eq!(reopened.info().root_transaction_id, 1);
     }
 
     #[test]
