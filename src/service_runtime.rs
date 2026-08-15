@@ -639,9 +639,9 @@ impl ServiceRuntime {
                         request.transaction_id,
                     )
                     .with_block_count(block_count),
-                    Err(()) => logos_abi::StorageResponse::new(
+                    Err(status) => logos_abi::StorageResponse::new(
                         request.request_id,
-                        logos_abi::StorageStatus::Io,
+                        status,
                         request.generation,
                         0,
                         0,
@@ -665,7 +665,7 @@ impl ServiceRuntime {
                             match crate::arch::transfer_storage_block(request, data.raw() as usize)
                             {
                                 Ok(()) => logos_abi::StorageStatus::Ok,
-                                Err(()) => logos_abi::StorageStatus::Io,
+                                Err(status) => status,
                             };
                         logos_abi::StorageResponse::new(
                             request.request_id,
@@ -691,11 +691,8 @@ impl ServiceRuntime {
                     }
                 }
                 logos_abi::StorageOperation::Flush => {
-                    let status = if crate::arch::flush_storage_device().is_ok() {
-                        logos_abi::StorageStatus::Ok
-                    } else {
-                        logos_abi::StorageStatus::Io
-                    };
+                    let status = crate::arch::flush_storage_device()
+                        .map_or_else(|status| status, |_| logos_abi::StorageStatus::Ok);
                     logos_abi::StorageResponse::new(
                         request.request_id,
                         status,

@@ -135,6 +135,8 @@ pub enum DeviceError {
     DeviceRejectedFeatures,
     QueueUnavailable,
     QueueFull,
+    OutOfBounds,
+    ReadOnly,
     Busy,
     StaleCompletion,
     InvalidCompletion,
@@ -563,6 +565,9 @@ impl VirtioBlockDevice {
     ) -> Result<(), DeviceError> {
         if request.blocks != 1 {
             return Err(DeviceError::InvalidCompletion);
+        }
+        if request.start_block >= self.capacity_blocks()? {
+            return Err(DeviceError::OutOfBounds);
         }
         let request_type = match request.operation {
             logos_abi::StorageOperation::Read => 0,

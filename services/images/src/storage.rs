@@ -143,9 +143,7 @@ pub extern "C" fn _start() -> ! {
     let Some(capability) = common::capability(REQUEST_CAPABILITY) else {
         stop_on_storage_error(())
     };
-    let Some(blocks) = discover(capability) else {
-        stop_on_storage_error(())
-    };
+    let Some(blocks) = discover(capability) else { stop_on_storage_error(()) };
     run_filesystem(capability, blocks)
 }
 

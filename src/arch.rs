@@ -21,19 +21,32 @@ use crate::{
 
 mod virtio_device;
 
-pub(crate) fn flush_storage_device() -> Result<(), ()> {
-    virtio_device::flush_storage_device().map_err(|_| ())
+pub(crate) fn flush_storage_device() -> Result<(), logos_abi::StorageStatus> {
+    virtio_device::flush_storage_device().map_err(storage_error_status)
 }
 
-pub(crate) fn storage_block_count() -> Result<u64, ()> {
-    virtio_device::storage_block_count().map_err(|_| ())
+pub(crate) fn storage_block_count() -> Result<u64, logos_abi::StorageStatus> {
+    virtio_device::storage_block_count().map_err(storage_error_status)
 }
 
 pub(crate) fn transfer_storage_block(
     request: logos_abi::StorageRequest,
     data_address: usize,
-) -> Result<(), ()> {
-    virtio_device::transfer_storage_block(request, data_address).map_err(|_| ())
+) -> Result<(), logos_abi::StorageStatus> {
+    virtio_device::transfer_storage_block(request, data_address).map_err(storage_error_status)
+}
+
+fn storage_error_status(error: virtio_device::DeviceError) -> logos_abi::StorageStatus {
+    match error {
+        virtio_device::DeviceError::Busy | virtio_device::DeviceError::QueueFull => {
+            logos_abi::StorageStatus::Full
+        }
+        virtio_device::DeviceError::OutOfBounds => logos_abi::StorageStatus::OutOfBounds,
+        virtio_device::DeviceError::ReadOnly => logos_abi::StorageStatus::ReadOnly,
+        virtio_device::DeviceError::StaleCompletion => logos_abi::StorageStatus::Stale,
+        virtio_device::DeviceError::Unsupported => logos_abi::StorageStatus::Unsupported,
+        _ => logos_abi::StorageStatus::Io,
+    }
 }
 
 pub(crate) fn handle_storage_interrupt() {
