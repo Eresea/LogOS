@@ -5,7 +5,7 @@ use crate::process::{AddressSpaceRoot, ElfLoadPlan, MappingFlags, UserLaunch};
 
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_LOAD_PAGES: usize =
-    crate::process::MAX_IMAGE_BYTES / PAGE_SIZE + crate::process::USER_STACK_PAGES + 2;
+    crate::process::MAX_IMAGE_BYTES / PAGE_SIZE + crate::process::STORAGE_STACK_PAGES + 2;
 pub const USER_STACK_BASE: usize = 0x0000_0100_0100_0000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,12 +98,10 @@ impl LoadedImage {
         pool: &mut FramePool,
         stack_pages: usize,
     ) -> Result<Self, LoadError> {
-        let mut image = Self {
-            entry: plan.entry(),
-            stack_top: USER_STACK_BASE + stack_pages * PAGE_SIZE,
-            pages: [None; MAX_LOAD_PAGES],
-            count: 0,
-        };
+        let stack_bytes = stack_pages.checked_mul(PAGE_SIZE).ok_or(LoadError::Capacity)?;
+        let stack_top = USER_STACK_BASE.checked_add(stack_bytes).ok_or(LoadError::Capacity)?;
+        let mut image =
+            Self { entry: plan.entry(), stack_top, pages: [None; MAX_LOAD_PAGES], count: 0 };
 
         for index in 0..plan.segment_count() {
             let Some(segment) = plan.segment(index) else {
@@ -446,6 +444,16 @@ mod tests {
         pool.initialize(&map).unwrap();
         assert_eq!(LoadedImage::load(plan, &mut pool).unwrap_err(), LoadError::Exhausted);
         assert!(matches!(pool.allocate().unwrap().raw(), 0x1000 | 0x2000));
+    }
+
+    #[test]
+    fn loader_rejects_overflowing_custom_stack_bounds() {
+        let plan = ElfLoadPlan::parse(&image()).unwrap();
+        let mut pool = FramePool::empty();
+        assert!(matches!(
+            LoadedImage::load_with_stack_pages(plan, &mut pool, usize::MAX),
+            Err(LoadError::Capacity)
+        ));
     }
 
     #[test]

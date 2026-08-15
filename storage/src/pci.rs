@@ -115,6 +115,9 @@ impl VirtioPciDevice {
                 config[cursor + 14],
                 config[cursor + 15],
             ]);
+            if bar >= 6 || length == 0 || offset.checked_add(length).is_none() {
+                return Err(PciError::MalformedCapability);
+            }
             if cfg_type == 2 && length >= 20 {
                 notify_multiplier = u32::from_le_bytes([
                     config[cursor + 16],
@@ -200,6 +203,24 @@ mod tests {
         let mut looped = config();
         looped[0xa0 + 1] = 0x40;
         assert_eq!(VirtioPciDevice::from_config(address, &looped), Err(PciError::CapabilityLoop));
+    }
+
+    #[test]
+    fn rejects_invalid_capability_bar_and_range() {
+        let address = PciAddress::new(0, 3, 0).unwrap();
+        let mut invalid_bar = config();
+        invalid_bar[0x40 + 4] = 6;
+        assert_eq!(
+            VirtioPciDevice::from_config(address, &invalid_bar),
+            Err(PciError::MalformedCapability)
+        );
+
+        let mut invalid_range = config();
+        invalid_range[0x40 + 8..0x40 + 12].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            VirtioPciDevice::from_config(address, &invalid_range),
+            Err(PciError::MalformedCapability)
+        );
     }
 
     #[test]

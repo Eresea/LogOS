@@ -664,11 +664,12 @@ fn region_for(
     probe: &PciProbe,
     capability: logos_storage::VirtioPciCapability,
 ) -> Result<MmioRegion, DeviceError> {
-    let base = probe.bars[capability.bar as usize];
+    let base = *probe.bars.get(capability.bar as usize).ok_or(DeviceError::MissingBar)?;
     if base == 0 {
         return Err(DeviceError::MissingBar);
     }
-    MmioRegion::new(base + capability.offset as u64, capability.length)
+    let address = base.checked_add(capability.offset as u64).ok_or(DeviceError::InvalidBar)?;
+    MmioRegion::new(address, capability.length)
 }
 
 struct PciConfig;
