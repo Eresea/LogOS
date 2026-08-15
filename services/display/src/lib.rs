@@ -3,7 +3,10 @@
 #[cfg(test)]
 extern crate std;
 
-use logos_abi::{Cell, MAX_COLUMNS, MAX_RENDER_CELLS, MAX_ROWS, MessageKind, RenderMessage};
+use logos_abi::{
+    CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, MAX_COLUMNS, MAX_RENDER_CELLS,
+    MAX_ROWS, MessageKind, RenderMessage,
+};
 
 pub use logos_abi::FramebufferFormat as PixelFormat;
 
@@ -24,6 +27,17 @@ pub struct Glyph {
     pub rows: [[u8; GLYPH_WIDTH]; GLYPH_HEIGHT],
 }
 
+#[derive(Clone, Copy)]
+enum GlyphOverlay {
+    None,
+    Acute,
+    Grave,
+    Cedilla,
+    Degree,
+    Diaeresis,
+    Section,
+}
+
 fn normalize_scalar(scalar: u32) -> u32 {
     if scalar <= 0x10ffff && !(0xd800..=0xdfff).contains(&scalar) {
         scalar
@@ -33,6 +47,28 @@ fn normalize_scalar(scalar: u32) -> u32 {
 }
 
 fn embedded_glyph(scalar: u32) -> Glyph {
+    let (scalar, overlay) = match scalar {
+        0x00a7 => ('S' as u32, GlyphOverlay::Section),
+        0x00a8 => (' ' as u32, GlyphOverlay::Diaeresis),
+        0x00b0 => (' ' as u32, GlyphOverlay::Degree),
+        0x00c0 => ('A' as u32, GlyphOverlay::Grave),
+        0x00c7 => ('C' as u32, GlyphOverlay::Cedilla),
+        0x00c8 => ('E' as u32, GlyphOverlay::Grave),
+        0x00c9 => ('E' as u32, GlyphOverlay::Acute),
+        0x00d9 => ('U' as u32, GlyphOverlay::Grave),
+        0x00e0 => ('a' as u32, GlyphOverlay::Grave),
+        0x00e7 => ('c' as u32, GlyphOverlay::Cedilla),
+        0x00e8 => ('e' as u32, GlyphOverlay::Grave),
+        0x00e9 => ('e' as u32, GlyphOverlay::Acute),
+        0x00f9 => ('u' as u32, GlyphOverlay::Grave),
+        scalar => (scalar, GlyphOverlay::None),
+    };
+    let mut glyph = atlas_glyph(scalar);
+    apply_overlay(&mut glyph, scalar, overlay);
+    glyph
+}
+
+fn atlas_glyph(scalar: u32) -> Glyph {
     let scalar = normalize_scalar(scalar);
     let glyph_index = if (ASCII_FIRST..=ASCII_LAST).contains(&scalar) {
         (scalar - ASCII_FIRST) as usize
@@ -48,6 +84,45 @@ fn embedded_glyph(scalar: u32) -> Glyph {
         row += 1;
     }
     Glyph { rows }
+}
+
+fn apply_overlay(glyph: &mut Glyph, scalar: u32, overlay: GlyphOverlay) {
+    let uppercase = (b'A' as u32..=b'Z' as u32).contains(&scalar);
+    let row = if uppercase { 1 } else { 3 };
+    match overlay {
+        GlyphOverlay::None => {}
+        GlyphOverlay::Acute => {
+            glyph.rows[row][4] = 255;
+            glyph.rows[row + 1][3] = 255;
+        }
+        GlyphOverlay::Grave => {
+            glyph.rows[row][3] = 255;
+            glyph.rows[row + 1][4] = 255;
+        }
+        GlyphOverlay::Cedilla => {
+            glyph.rows[GLYPH_HEIGHT - 2][4] = 255;
+            glyph.rows[GLYPH_HEIGHT - 1][3] = 255;
+        }
+        GlyphOverlay::Diaeresis => {
+            glyph.rows[3][2] = 255;
+            glyph.rows[3][5] = 255;
+        }
+        GlyphOverlay::Degree => {
+            glyph.rows[3][3] = 255;
+            glyph.rows[3][4] = 255;
+            glyph.rows[4][2] = 255;
+            glyph.rows[4][5] = 255;
+            glyph.rows[5][2] = 255;
+            glyph.rows[5][5] = 255;
+            glyph.rows[6][3] = 255;
+            glyph.rows[6][4] = 255;
+        }
+        GlyphOverlay::Section => {
+            glyph.rows[7][3] = 255;
+            glyph.rows[8][3] = 255;
+            glyph.rows[9][4] = 255;
+        }
+    }
 }
 
 fn blend_channel(background: u8, foreground: u8, coverage: u8) -> u8 {
@@ -66,6 +141,25 @@ fn blend_color(background: u32, foreground: u32, coverage: u8) -> u32 {
         blend_channel(((background >> 8) & 0xff) as u8, ((foreground >> 8) & 0xff) as u8, coverage);
     let blue = blend_channel(background as u8, foreground as u8, coverage);
     u32::from(red) << 16 | u32::from(green) << 8 | u32::from(blue)
+}
+
+fn styled_foreground(cell: Cell) -> u32 {
+    if cell.attributes & CELL_ATTR_DIM != 0 {
+        blend_color(cell.background, cell.foreground, 128)
+    } else {
+        cell.foreground
+    }
+}
+
+fn styled_coverage(glyph: &Glyph, row: usize, column: usize, attributes: u16) -> u8 {
+    let mut coverage = glyph.rows[row][column];
+    if attributes & CELL_ATTR_BOLD != 0 && column > 0 {
+        coverage = coverage.max(glyph.rows[row][column - 1]);
+    }
+    if attributes & CELL_ATTR_UNDERLINE != 0 && row == GLYPH_HEIGHT - 2 {
+        coverage = 255;
+    }
+    coverage
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -179,12 +273,13 @@ impl Display {
                 }
                 let cell = self.cells[index];
                 let glyph = embedded_glyph(cell.codepoint);
+                let foreground = styled_foreground(cell);
                 for glyph_row in 0..GLYPH_HEIGHT {
                     for glyph_column in 0..GLYPH_WIDTH {
                         let color = blend_color(
                             cell.background,
-                            cell.foreground,
-                            glyph.rows[glyph_row][glyph_column],
+                            foreground,
+                            styled_coverage(&glyph, glyph_row, glyph_column, cell.attributes),
                         );
                         let pixel = row * GLYPH_HEIGHT * stride
                             + glyph_row * stride
@@ -243,10 +338,36 @@ mod tests {
     }
 
     #[test]
+    fn common_french_accents_have_deterministic_glyphs() {
+        assert_ne!(embedded_glyph(0xe9), embedded_glyph('e' as u32));
+        assert_ne!(embedded_glyph(0xe7), embedded_glyph('c' as u32));
+    }
+
+    #[test]
+    fn azerty_symbols_have_deterministic_glyphs() {
+        assert_ne!(embedded_glyph(0xa7), embedded_glyph(REPLACEMENT_SCALAR));
+        assert_ne!(embedded_glyph(0xa8), embedded_glyph(REPLACEMENT_SCALAR));
+        assert_ne!(embedded_glyph(0xb0), embedded_glyph(REPLACEMENT_SCALAR));
+    }
+
+    #[test]
     fn coverage_blends_background_and_foreground() {
         assert_eq!(blend_color(0x102030, 0xe0d0c0, 0), 0x102030);
         assert_eq!(blend_color(0x102030, 0xe0d0c0, 255), 0xe0d0c0);
         assert_eq!(blend_color(0x000000, 0xffffff, 128), 0x808080);
+    }
+
+    #[test]
+    fn cell_attributes_change_raster_style() {
+        let cell = Cell {
+            foreground: 0xe0d0c0,
+            background: 0x102030,
+            attributes: CELL_ATTR_DIM,
+            ..Cell::EMPTY
+        };
+        assert_eq!(styled_foreground(cell), blend_color(0x102030, 0xe0d0c0, 128));
+        let glyph = embedded_glyph('e' as u32);
+        assert_eq!(styled_coverage(&glyph, GLYPH_HEIGHT - 2, 0, CELL_ATTR_UNDERLINE), 255);
     }
 
     #[test]
