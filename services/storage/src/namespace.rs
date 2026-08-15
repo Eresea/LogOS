@@ -309,6 +309,9 @@ impl ObjectNamespace {
         if self.find_child(parent, &payload[14..14 + name_length])?.is_some() {
             return Err(NamespaceError::AlreadyExists);
         }
+        if self.is_descendant(id, parent)? {
+            return Err(NamespaceError::InvalidPath);
+        }
         let record = self.object_record_mut(id)?;
         record.parent = parent;
         record.name_length = name_length as u16;
@@ -751,5 +754,26 @@ mod tests {
             namespace.plan_create(ObjectId::ROOT, ObjectKind::File, b"file"),
             Err(NamespaceError::GenerationExhausted)
         );
+    }
+
+    #[test]
+    fn replay_rejects_directory_cycles() {
+        let mut namespace = ObjectNamespace::new();
+        let (parent, create_parent) =
+            namespace.plan_create(ObjectId::ROOT, ObjectKind::Directory, b"parent").unwrap();
+        namespace.apply_record(CREATE_KIND, &create_parent).unwrap();
+        let (child, create_child) =
+            namespace.plan_create(parent, ObjectKind::Directory, b"child").unwrap();
+        namespace.apply_record(CREATE_KIND, &create_child).unwrap();
+
+        let mut rename = [0; 2 + 4 + 2 + 4 + 2 + MAX_COMPONENT_BYTES];
+        put_u16(&mut rename, 0, parent.slot);
+        put_u32(&mut rename, 2, parent.generation);
+        put_u16(&mut rename, 6, child.slot);
+        put_u32(&mut rename, 8, child.generation);
+        put_u16(&mut rename, 12, 5);
+        rename[14..19].copy_from_slice(b"moved");
+
+        assert_eq!(namespace.apply_record(RENAME_KIND, &rename), Err(NamespaceError::InvalidPath));
     }
 }
