@@ -133,6 +133,9 @@ impl InputDecoder {
         if let Some(bytes) = azerty_text(self.layout, physical_code, self.modifiers) {
             return InputMessage::text(bytes);
         }
+        if let Some(bytes) = azerty_shifted_text(self.layout, physical_code, self.modifiers) {
+            return InputMessage::text(bytes);
+        }
         let byte = key.character_byte()?;
         let byte = if byte.is_ascii_alphabetic() {
             let upper = (self.modifiers & MOD_SHIFT != 0) ^ (self.modifiers & MOD_CAPS_LOCK != 0);
@@ -166,6 +169,22 @@ fn azerty_text(layout: KeyboardLayout, physical_code: u8, modifiers: u16) -> Opt
     })
 }
 
+fn azerty_shifted_text(
+    layout: KeyboardLayout,
+    physical_code: u8,
+    modifiers: u16,
+) -> Option<&'static [u8]> {
+    if layout != KeyboardLayout::Azerty || modifiers & MOD_SHIFT == 0 {
+        return None;
+    }
+    Some(match physical_code {
+        0x4e => b"\xc2\xb0",
+        0x54 => b"\xc2\xa8",
+        0x4a => b"\xc2\xa7",
+        _ => return None,
+    })
+}
+
 impl Default for InputDecoder {
     fn default() -> Self {
         Self::new()
@@ -191,7 +210,7 @@ const fn shifted_ascii(layout: KeyboardLayout, physical_code: u8, byte: u8) -> u
             0x3a => b'?',
             0x41 => b'.',
             0x49 => b'/',
-            0x4a => b'?',
+            0x5b => b'*',
             _ => byte,
         };
     }
@@ -409,6 +428,21 @@ mod tests {
         decoder.feed(0x58);
         let event = decoder.feed(0x46).unwrap();
         assert_eq!(event.text.unwrap().text_bytes(), Some(&b"\xc3\x87"[..]));
+    }
+
+    #[test]
+    fn azerty_shifted_symbols_commit_their_keycap_text() {
+        let mut decoder = InputDecoder::new();
+        decoder.feed(0x12);
+
+        let event = decoder.feed(0x5b).unwrap();
+        assert_eq!(event.text.unwrap().text_bytes(), Some(&b"*"[..]));
+        let event = decoder.feed(0x4e).unwrap();
+        assert_eq!(event.text.unwrap().text_bytes(), Some(&b"\xc2\xb0"[..]));
+        let event = decoder.feed(0x54).unwrap();
+        assert_eq!(event.text.unwrap().text_bytes(), Some(&b"\xc2\xa8"[..]));
+        let event = decoder.feed(0x4a).unwrap();
+        assert_eq!(event.text.unwrap().text_bytes(), Some(&b"\xc2\xa7"[..]));
     }
 
     #[test]
