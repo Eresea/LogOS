@@ -3,6 +3,7 @@ pub const VIRTIO_BLOCK_MODERN_DEVICE_ID: u16 = 0x1042;
 pub const PCI_CONFIG_BYTES: usize = 256;
 const PCI_CAP_PTR: usize = 0x34;
 const PCI_CAP_VENDOR_SPECIFIC: u8 = 0x09;
+const VIRTIO_PCI_CAP_PCI_CFG: usize = 5;
 const MAX_CAPABILITIES: usize = 48;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,6 +95,10 @@ impl VirtioPciDevice {
                 return Err(PciError::MalformedCapability);
             }
             let cfg_type = config[cursor + 3] as usize;
+            if cfg_type == VIRTIO_PCI_CAP_PCI_CFG {
+                cursor = next;
+                continue;
+            }
             if cfg_type >= capabilities.len() {
                 return Err(PciError::MalformedCapability);
             }
@@ -195,5 +200,16 @@ mod tests {
         let mut looped = config();
         looped[0xa0 + 1] = 0x40;
         assert_eq!(VirtioPciDevice::from_config(address, &looped), Err(PciError::CapabilityLoop));
+    }
+
+    #[test]
+    fn accepts_optional_pci_cfg_capability() {
+        let address = PciAddress::new(0, 3, 0).unwrap();
+        let mut config = config();
+        config[0xa0 + 1] = 0xc0;
+        config[0xc0] = PCI_CAP_VENDOR_SPECIFIC;
+        config[0xc0 + 2] = 16;
+        config[0xc0 + 3] = VIRTIO_PCI_CAP_PCI_CFG as u8;
+        assert!(VirtioPciDevice::from_config(address, &config).is_ok());
     }
 }

@@ -4,7 +4,7 @@ use core::{
     arch::asm,
     mem::MaybeUninit,
     ptr::{read_volatile, write_volatile},
-    sync::atomic::{AtomicBool, Ordering, fence},
+    sync::atomic::{AtomicBool, AtomicU8, Ordering, fence},
 };
 
 use logos_storage::{
@@ -56,6 +56,7 @@ struct QueueMemory {
     available_index: u16,
     available_ring: [u16; QUEUE_SIZE],
     available_used_event: u16,
+    available_padding: u16,
     used_flags: u16,
     used_index: u16,
     used_ring: [UsedElement; QUEUE_SIZE],
@@ -70,6 +71,11 @@ struct QueueMemory {
 static mut QUEUE_MEMORY: QueueMemory = QueueMemory::new();
 static mut DEVICE: MaybeUninit<VirtioBlockDevice> = MaybeUninit::uninit();
 static DEVICE_READY: AtomicBool = AtomicBool::new(false);
+static STORAGE_WRITE_COMPLETE: AtomicBool = AtomicBool::new(false);
+static STORAGE_VALID_MEDIA: AtomicBool = AtomicBool::new(false);
+static STORAGE_PROOF_STATE: AtomicU8 = AtomicU8::new(0);
+
+const SUPERBLOCK_MAGIC: &[u8; 8] = b"LOGOSFS\0";
 
 impl QueueMemory {
     const EMPTY_DESCRIPTOR: Descriptor = Descriptor { address: 0, length: 0, flags: 0, next: 0 };
@@ -81,6 +87,7 @@ impl QueueMemory {
             available_index: 0,
             available_ring: [0; QUEUE_SIZE],
             available_used_event: 0,
+            available_padding: 0,
             used_flags: 0,
             used_index: 0,
             used_ring: [Self::EMPTY_USED; QUEUE_SIZE],
@@ -184,6 +191,7 @@ pub struct VirtioBlockDevice {
     requests: [Option<BlockRequestId>; QUEUE_SIZE],
     used_index: u16,
     next_request_generation: u64,
+    negotiated_features: u64,
 }
 
 pub(crate) fn initialize_storage_device() -> bool {
@@ -247,6 +255,7 @@ impl VirtioBlockDevice {
             requests: [None; QUEUE_SIZE],
             used_index: 0,
             next_request_generation: 1,
+            negotiated_features: 0,
         };
         device.reset()?;
         unsafe { device.common.write_u8(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE)? };
@@ -256,6 +265,7 @@ impl VirtioBlockDevice {
         let features = device.device_features()?;
         let negotiated =
             negotiate_features(features, writable).map_err(|_| DeviceError::FeatureNegotiation)?;
+        device.negotiated_features = negotiated.raw();
         device.driver_features(negotiated.raw())?;
         unsafe {
             device.common.write_u8(
@@ -323,6 +333,10 @@ impl VirtioBlockDevice {
     }
 
     pub fn submit(&mut self, chain: VirtioBlkChain, data_address: u64) -> Result<(), DeviceError> {
+        let available = unsafe { read_volatile(&self.queue.available_index) };
+        if available != 0 && available as usize % QUEUE_SIZE == 0 {
+            self.reset_device()?;
+        }
         let used = unsafe { read_volatile(&self.queue.available_index) };
         let slot = (used as usize) % QUEUE_SIZE;
         if self.requests[slot].is_some() {
@@ -371,7 +385,10 @@ impl VirtioBlockDevice {
         let slot = (self.used_index as usize) % QUEUE_SIZE;
         let element = unsafe { read_volatile(&self.queue.used_ring[slot]) };
         self.used_index = self.used_index.wrapping_add(1);
-        if element.id as usize >= QUEUE_SIZE * 3 || element.id as usize % 3 != 0 {
+        if element.id as usize >= QUEUE_SIZE * 3 {
+            return Err(DeviceError::InvalidCompletion);
+        }
+        if element.id as usize % 3 != 0 {
             return Err(DeviceError::InvalidCompletion);
         }
         let queue_slot = element.id as usize / 3;
@@ -404,7 +421,10 @@ impl VirtioBlockDevice {
                     return Err(DeviceError::StaleCompletion);
                 }
                 return match completion.status {
-                    0 => Ok(()),
+                    0 => {
+                        self.record_flush_success();
+                        Ok(())
+                    }
                     1 => Err(DeviceError::Io),
                     2 => Err(DeviceError::Unsupported),
                     _ => Err(DeviceError::InvalidCompletion),
@@ -458,7 +478,10 @@ impl VirtioBlockDevice {
                     return Err(DeviceError::StaleCompletion);
                 }
                 return match completion.status {
-                    0 => Ok(()),
+                    0 => {
+                        self.record_transfer_success(request, data_address);
+                        Ok(())
+                    }
                     1 => Err(DeviceError::Io),
                     2 => Err(DeviceError::Unsupported),
                     _ => Err(DeviceError::InvalidCompletion),
@@ -479,7 +502,62 @@ impl VirtioBlockDevice {
         *self.queue = QueueMemory::new();
         self.requests.fill(None);
         self.used_index = 0;
+        unsafe {
+            self.common.write_u8(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE)?;
+            self.common.write_u8(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER)?;
+        }
+        self.driver_features(self.negotiated_features)?;
+        unsafe {
+            self.common.write_u8(
+                COMMON_DEVICE_STATUS,
+                STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
+            )?;
+            if self.common.read_u8(COMMON_DEVICE_STATUS)? & STATUS_FEATURES_OK == 0 {
+                return Err(DeviceError::DeviceRejectedFeatures);
+            }
+        }
+        self.configure_queue()?;
+        unsafe {
+            self.common.write_u8(
+                COMMON_DEVICE_STATUS,
+                STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
+            )?;
+        }
         Ok(())
+    }
+
+    fn record_transfer_success(&self, request: logos_abi::StorageRequest, data_address: usize) {
+        match request.operation {
+            logos_abi::StorageOperation::Write => {
+                STORAGE_WRITE_COMPLETE.store(true, Ordering::Release);
+            }
+            logos_abi::StorageOperation::Read if request.start_block < 2 => {
+                let bytes = data_address as *const u8;
+                let valid = (0..SUPERBLOCK_MAGIC.len()).all(
+                    |index| unsafe { read_volatile(bytes.add(index)) } == SUPERBLOCK_MAGIC[index],
+                );
+                if valid {
+                    STORAGE_VALID_MEDIA.store(true, Ordering::Release);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn record_flush_success(&self) {
+        if STORAGE_WRITE_COMPLETE.swap(false, Ordering::AcqRel)
+            && STORAGE_PROOF_STATE
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            super::proof_line(b"LogOS vNext: storage proof PASS");
+        } else if STORAGE_VALID_MEDIA.load(Ordering::Acquire)
+            && STORAGE_PROOF_STATE
+                .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            super::proof_line(b"LogOS vNext: storage recovery PASS");
+        }
     }
 }
 
@@ -506,7 +584,8 @@ impl PciConfig {
                         continue;
                     };
                     let config = Self::read_config(address);
-                    if u16::from_le_bytes([config[0], config[1]]) == 0xffff {
+                    let vendor = u16::from_le_bytes([config[0], config[1]]);
+                    if vendor == 0xffff {
                         continue;
                     }
                     if let Ok(parsed) = VirtioPciDevice::from_config(address, &config) {
