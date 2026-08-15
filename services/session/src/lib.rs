@@ -87,6 +87,7 @@ pub struct LineEditor {
     history_cursor: usize,
     escape_state: u8,
     escape_param: u8,
+    escape_modifier: u8,
 }
 
 /// Entry-ready Session facade over one bounded line-editing operation.
@@ -137,6 +138,7 @@ impl LineEditor {
             history_cursor: 0,
             escape_state: 0,
             escape_param: 0,
+            escape_modifier: 0,
         }
     }
 
@@ -233,10 +235,29 @@ impl LineEditor {
                     self.escape_param =
                         self.escape_param.saturating_mul(10).saturating_add(byte - b'0');
                 }
+                b';' => {
+                    self.escape_modifier = 0;
+                    self.escape_state = 4;
+                }
                 b'~' => {
                     if self.escape_param == 3 {
                         self.delete_forward(output);
                     }
+                    self.escape_state = 0;
+                }
+                _ => self.escape_state = 0,
+            },
+            4 => match byte {
+                b'0'..=b'9' => {
+                    self.escape_modifier =
+                        self.escape_modifier.saturating_mul(10).saturating_add(byte - b'0');
+                }
+                b'C' if self.escape_param == 1 && self.escape_modifier == 5 => {
+                    self.move_word_right(output);
+                    self.escape_state = 0;
+                }
+                b'D' if self.escape_param == 1 && self.escape_modifier == 5 => {
+                    self.move_word_left(output);
                     self.escape_state = 0;
                 }
                 _ => self.escape_state = 0,
@@ -365,6 +386,28 @@ impl LineEditor {
             self.cursor = next_boundary(&self.line, self.cursor, self.line_len);
             output.extend(b"\x1b[C");
         }
+    }
+
+    fn move_word_left(&mut self, output: &mut ShellOutput) {
+        let old_cursor = self.cursor;
+        while self.cursor > 0 && self.line[self.cursor - 1] == b' ' {
+            self.cursor -= 1;
+        }
+        while self.cursor > 0 && self.line[self.cursor - 1] != b' ' {
+            self.cursor = previous_boundary(&self.line, self.cursor);
+        }
+        move_cursor(output, b'D', display_width(&self.line[self.cursor..old_cursor]));
+    }
+
+    fn move_word_right(&mut self, output: &mut ShellOutput) {
+        let old_cursor = self.cursor;
+        while self.cursor < self.line_len && self.line[self.cursor] == b' ' {
+            self.cursor += 1;
+        }
+        while self.cursor < self.line_len && self.line[self.cursor] != b' ' {
+            self.cursor = next_boundary(&self.line, self.cursor, self.line_len);
+        }
+        move_cursor(output, b'C', display_width(&self.line[old_cursor..self.cursor]));
     }
 
     fn move_home(&mut self, output: &mut ShellOutput) {
@@ -527,6 +570,27 @@ mod tests {
         let length =
             editor.input_for_command(b"hello world\x17\r", &mut command, &mut output).unwrap();
         assert_eq!(&command[..length], b"hello ");
+    }
+
+    #[test]
+    fn word_navigation_and_home_end_are_bounded() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"one two three", &mut command, &mut output);
+        assert_eq!(editor.cursor, 13);
+
+        editor.input_for_command(b"\x1b[1;5D", &mut command, &mut output);
+        assert_eq!(editor.cursor, 8);
+        editor.input_for_command(b"\x1b[1;5D", &mut command, &mut output);
+        assert_eq!(editor.cursor, 4);
+        editor.input_for_command(b"\x1b[1;5C", &mut command, &mut output);
+        assert_eq!(editor.cursor, 7);
+
+        editor.input_for_command(b"\x1b[H", &mut command, &mut output);
+        assert_eq!(editor.cursor, 0);
+        editor.input_for_command(b"\x1b[F", &mut command, &mut output);
+        assert_eq!(editor.cursor, 13);
     }
 
     #[test]

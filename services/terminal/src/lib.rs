@@ -554,6 +554,8 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             KeyCode::Tab => b"\t",
             KeyCode::Up => b"\x1b[A",
             KeyCode::Down => b"\x1b[B",
+            KeyCode::Left if event.modifiers & MOD_CTRL != 0 => b"\x1b[1;5D",
+            KeyCode::Right if event.modifiers & MOD_CTRL != 0 => b"\x1b[1;5C",
             KeyCode::Left => b"\x1b[D",
             KeyCode::Right => b"\x1b[C",
             KeyCode::Home => b"\x1b[H",
@@ -691,6 +693,19 @@ mod tests {
         let mut terminal = Terminal::new();
         let event = InputMessage::key(KeyCode::Up, KeyState::Pressed, 0);
         assert_eq!(terminal.input(&event).unwrap().as_bytes(), Some(&b"\x1b[A"[..]));
+    }
+
+    #[test]
+    fn ctrl_arrows_use_word_navigation_sequences() {
+        let mut terminal = Terminal::new();
+        let left = InputMessage::key(KeyCode::Left, KeyState::Pressed, MOD_CTRL);
+        assert_eq!(terminal.input(&left).unwrap().as_bytes(), Some(&b"\x1b[1;5D"[..]));
+        let right = InputMessage::key(KeyCode::Right, KeyState::Pressed, MOD_CTRL);
+        assert_eq!(terminal.input(&right).unwrap().as_bytes(), Some(&b"\x1b[1;5C"[..]));
+        let home = InputMessage::key(KeyCode::Home, KeyState::Pressed, 0);
+        assert_eq!(terminal.input(&home).unwrap().as_bytes(), Some(&b"\x1b[H"[..]));
+        let end = InputMessage::key(KeyCode::End, KeyState::Pressed, 0);
+        assert_eq!(terminal.input(&end).unwrap().as_bytes(), Some(&b"\x1b[F"[..]));
     }
 
     #[test]
