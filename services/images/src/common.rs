@@ -26,6 +26,7 @@ pub const fn keyboard_read_event() -> u64 {
     logos_abi::keyboard_read_event_mask()
 }
 
+#[allow(dead_code)]
 pub const fn capability_slot(
     service: ServiceId,
     endpoint: logos_abi::IpcEndpointId,

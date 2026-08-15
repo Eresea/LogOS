@@ -45,3 +45,9 @@ name = "logos-commands"
 path = "src/commands.rs"
 test = false
 bench = false
+
+[[bin]]
+name = "logos-storage"
+path = "src/storage.rs"
+test = false
+bench = false

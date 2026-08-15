@@ -84,6 +84,7 @@ impl ServiceRuntime {
                 LoadedImage::empty(),
                 LoadedImage::empty(),
                 LoadedImage::empty(),
+                LoadedImage::empty(),
             ],
             tables: [const { MaybeUninit::uninit() }; SERVICE_COUNT],
             table_ready: [false; SERVICE_COUNT],

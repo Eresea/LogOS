@@ -101,6 +101,7 @@ pub enum ServiceId {
     Terminal = 3,
     Session = 4,
     Commands = 5,
+    Storage = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -326,6 +327,7 @@ impl ServiceId {
             Self::Terminal => 2,
             Self::Session => 3,
             Self::Commands => 4,
+            Self::Storage => 5,
         }
     }
 
@@ -336,6 +338,7 @@ impl ServiceId {
             2 => Some(Self::Terminal),
             3 => Some(Self::Session),
             4 => Some(Self::Commands),
+            5 => Some(Self::Storage),
             _ => None,
         }
     }
