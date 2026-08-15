@@ -88,6 +88,7 @@ pub struct BlockCompletion {
 pub enum BlockRequestError {
     Full,
     InvalidRequest,
+    GenerationExhausted,
     Stale,
     NotInFlight,
     NotCompleted,
@@ -142,7 +143,8 @@ impl<const CAPACITY: usize> BlockRequestTable<CAPACITY> {
             return Err(BlockRequestError::Full);
         };
 
-        state.generation = state.generation.wrapping_add(1).max(1);
+        state.generation =
+            state.generation.checked_add(1).ok_or(BlockRequestError::GenerationExhausted)?;
         state.state = RequestState::Ready;
         state.request = Some(request);
         state.completion = None;
@@ -366,5 +368,17 @@ mod tests {
         table
             .complete(id, BlockCompletion { status: BlockStatus::Io, blocks_completed: 1 })
             .unwrap();
+    }
+
+    #[test]
+    fn request_generation_exhaustion_is_explicit() {
+        let mut table = BlockRequestTable::<1>::new();
+        table.slots[0].generation = u64::MAX;
+
+        assert_eq!(
+            table.submit(BlockRequest::flush()),
+            Err(BlockRequestError::GenerationExhausted)
+        );
+        assert_eq!(table.slots[0].state, RequestState::Free);
     }
 }
