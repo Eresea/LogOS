@@ -13,6 +13,7 @@ members = [
     "services/display",
     "services/input",
     "services/session",
+    "services/storage",
     "services/terminal",
     "services/images",
 ]
@@ -24,10 +25,12 @@ unsafe_op_in_unsafe_fn = "warn"
 [dependencies]
 uefi = { version = "0.35" }
 logos-abi = { path = "abi" }
+logos-storage = { path = "storage" }
 
 [features]
 default = []
 qemu-proof = []
+storage-proof = []
 
 [lib]
 name = "logos_vnext"

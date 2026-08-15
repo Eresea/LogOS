@@ -1,6 +1,7 @@
 param(
     [switch]$Release,
-    [switch]$Proof
+    [switch]$Proof,
+    [switch]$StorageProof
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,6 +16,7 @@ $buildArgs = @(
     '-p', 'logos-service-images', '--bins'
 )
 if ($Proof) { $buildArgs += @('--features', 'qemu-proof') }
+if ($StorageProof) { $buildArgs += @('--features', 'storage-proof') }
 if ($Release) { $buildArgs += '--release' }
 
 $env:CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS = '-C relocation-model=static -C code-model=large -C link-arg=--image-base=0x10000000000 -C link-arg=--no-pie'
@@ -24,7 +26,7 @@ $profile = if ($Release) { 'release' } else { 'debug' }
 $output = Join-Path $PSScriptRoot '..\build\esp\EFI\LOGOS'
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 
-$names = @('INPUT', 'DISPLAY', 'TERMINAL', 'SESSION', 'COMMANDS')
+$names = @('INPUT', 'DISPLAY', 'TERMINAL', 'SESSION', 'COMMANDS', 'STORAGE')
 foreach ($name in $names) {
     $source = Join-Path $PSScriptRoot "..\target\x86_64-unknown-none\$profile\logos-$($name.ToLower())"
     $destination = Join-Path $output "$name.ELF"

@@ -4,6 +4,8 @@ pub const MAX_USER_PROCESSES: usize = 16;
 pub const MAX_ADDRESS_SPACES: usize = MAX_USER_PROCESSES;
 pub const MAX_MAPPINGS_PER_ADDRESS_SPACE: usize = 16;
 pub const USER_STACK_PAGES: usize = 8;
+/// Storage recovery uses bounded journal and namespace scratch state.
+pub const STORAGE_STACK_PAGES: usize = 64;
 pub const MAX_IMAGE_BYTES: usize = 512 * 1024;
 pub const MAX_PROGRAM_HEADERS: usize = 16;
 

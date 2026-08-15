@@ -63,6 +63,7 @@ pub struct ServiceRuntime {
     ipc: Option<ServiceIpcGraph>,
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
     ipc_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
+    storage_data_frame: Option<FrameAddress>,
     framebuffer_config_frame: Option<FrameAddress>,
     keyboard_frame: Option<FrameAddress>,
     tasks: [Option<crate::TaskHandle>; SERVICE_COUNT],
@@ -70,6 +71,7 @@ pub struct ServiceRuntime {
     supervisor: LiveSupervisor,
     ipc_generation: u16,
     service_epoch: u64,
+    storage_response: Option<logos_abi::StorageResponse>,
     suppressed_heartbeats: [AtomicBool; SERVICE_COUNT],
     frame_pool_ready: bool,
 }
@@ -84,6 +86,7 @@ impl ServiceRuntime {
                 LoadedImage::empty(),
                 LoadedImage::empty(),
                 LoadedImage::empty(),
+                LoadedImage::empty(),
             ],
             tables: [const { MaybeUninit::uninit() }; SERVICE_COUNT],
             table_ready: [false; SERVICE_COUNT],
@@ -93,6 +96,7 @@ impl ServiceRuntime {
             ipc: None,
             ipc_staging_frames: [None; SERVICE_COUNT],
             ipc_capability_frames: [None; SERVICE_COUNT],
+            storage_data_frame: None,
             framebuffer_config_frame: None,
             keyboard_frame: None,
             tasks: [None; SERVICE_COUNT],
@@ -100,6 +104,7 @@ impl ServiceRuntime {
             supervisor: LiveSupervisor::new(),
             ipc_generation: 1,
             service_epoch: 1,
+            storage_response: None,
             suppressed_heartbeats: [const { AtomicBool::new(false) }; SERVICE_COUNT],
             frame_pool_ready: false,
         }
@@ -146,8 +151,14 @@ impl ServiceRuntime {
             let service = spec.service();
             let image = unsafe { bundle.image(service) }.ok_or(ServiceRuntimeError::Image)?;
             let plan = spec.validate_image(image).map_err(|_| ServiceRuntimeError::Image)?;
+            let stack_pages = if service == ServiceId::Storage {
+                crate::process::STORAGE_STACK_PAGES
+            } else {
+                crate::process::USER_STACK_PAGES
+            };
             let mut loaded =
-                LoadedImage::load(plan, &mut self.frame_pool).map_err(ServiceRuntimeError::Load)?;
+                LoadedImage::load_with_stack_pages(plan, &mut self.frame_pool, stack_pages)
+                    .map_err(ServiceRuntimeError::Load)?;
             let mut memory = IdentityPageTableMemory;
             if let Err(error) = loaded.populate(plan, image, &mut memory) {
                 loaded.reclaim(&mut self.frame_pool);
@@ -240,12 +251,42 @@ impl ServiceRuntime {
                 logos_abi::IPC_STAGING_BASE,
                 MappingFlags::DATA,
             )?;
-            let capabilities = self
-                .ipc
-                .as_ref()
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?
-                .capabilities(service)
-                .map_err(ServiceRuntimeError::Ipc)?;
+            if service == ServiceId::Storage {
+                let data =
+                    self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+                self.storage_data_frame = Some(data);
+                memory.clear(data).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+                self.map_ipc_private_page(
+                    process,
+                    data,
+                    logos_abi::STORAGE_DATA_BASE,
+                    MappingFlags::DATA,
+                )?;
+            }
+            let capabilities = if service == ServiceId::Storage {
+                let mut page = logos_abi::IpcCapabilityPage::empty();
+                page.capabilities[0] = logos_abi::IpcCapability::new(
+                    crate::storage_ipc::STORAGE_REQUEST_ENDPOINT,
+                    logos_abi::IpcRights::Send,
+                    self.ipc_generation,
+                    self.service_epoch,
+                )
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+                page.capabilities[1] = logos_abi::IpcCapability::new(
+                    crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT,
+                    logos_abi::IpcRights::Receive,
+                    self.ipc_generation,
+                    self.service_epoch,
+                )
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+                page
+            } else {
+                self.ipc
+                    .as_ref()
+                    .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?
+                    .capabilities(service)
+                    .map_err(ServiceRuntimeError::Ipc)?
+            };
             let capability_frame =
                 self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
             self.ipc_capability_frames[index] = Some(capability_frame);
@@ -484,7 +525,7 @@ impl ServiceRuntime {
     }
 
     pub(crate) fn ipc_send(
-        &self,
+        &mut self,
         process: ProcessHandle,
         capability_slot: usize,
         length: usize,
@@ -528,6 +569,150 @@ impl ServiceRuntime {
                 notified: false,
             };
         };
+        if service == ServiceId::Storage
+            && capability.endpoint_index() == Some(crate::storage_ipc::STORAGE_REQUEST_ENDPOINT)
+        {
+            if capability.rights != logos_abi::IpcRights::Send
+                || capability.generation != self.ipc_generation
+                || capability.service_epoch != self.service_epoch
+            {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Unauthorized,
+                    notified: false,
+                };
+            }
+            if length != core::mem::size_of::<logos_abi::StorageRequest>() {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
+            if self.storage_response.is_some() {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Full,
+                    notified: false,
+                };
+            }
+            let bytes = staging_frame.raw() as usize as *const u8;
+            let operation = unsafe { *bytes };
+            if !(1..=9).contains(&operation) {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
+            let request = unsafe { core::ptr::read_unaligned(bytes.cast()) };
+            let request = match crate::storage_ipc::validate_request(
+                request,
+                capability_slot,
+                self.ipc_generation,
+                self.service_epoch,
+            ) {
+                Ok(()) => request,
+                Err(logos_abi::StorageStatus::Unauthorized) => {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Unauthorized,
+                        notified: false,
+                    };
+                }
+                Err(logos_abi::StorageStatus::Stale) => {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Stale,
+                        notified: false,
+                    };
+                }
+                Err(_) => {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Malformed,
+                        notified: false,
+                    };
+                }
+            };
+            let response = match request.operation {
+                logos_abi::StorageOperation::Reopen => match crate::arch::storage_block_count() {
+                    Ok(block_count) => logos_abi::StorageResponse::new(
+                        request.request_id,
+                        logos_abi::StorageStatus::Ok,
+                        request.generation,
+                        0,
+                        0,
+                        request.transaction_id,
+                    )
+                    .with_block_count(block_count),
+                    Err(status) => logos_abi::StorageResponse::new(
+                        request.request_id,
+                        status,
+                        request.generation,
+                        0,
+                        0,
+                        request.transaction_id,
+                    ),
+                },
+                logos_abi::StorageOperation::Read | logos_abi::StorageOperation::Write => {
+                    if request.blocks != 1
+                        || request.payload_bytes as usize != logos_storage::BLOCK_BYTES
+                    {
+                        logos_abi::StorageResponse::new(
+                            request.request_id,
+                            logos_abi::StorageStatus::Invalid,
+                            request.generation,
+                            0,
+                            0,
+                            request.transaction_id,
+                        )
+                    } else if let Some(data) = self.storage_data_frame {
+                        let status =
+                            match crate::arch::transfer_storage_block(request, data.raw() as usize)
+                            {
+                                Ok(()) => logos_abi::StorageStatus::Ok,
+                                Err(status) => status,
+                            };
+                        logos_abi::StorageResponse::new(
+                            request.request_id,
+                            status,
+                            request.generation,
+                            if status == logos_abi::StorageStatus::Ok { 1 } else { 0 },
+                            if status == logos_abi::StorageStatus::Ok {
+                                logos_storage::BLOCK_BYTES as u16
+                            } else {
+                                0
+                            },
+                            request.transaction_id,
+                        )
+                    } else {
+                        logos_abi::StorageResponse::new(
+                            request.request_id,
+                            logos_abi::StorageStatus::Io,
+                            request.generation,
+                            0,
+                            0,
+                            request.transaction_id,
+                        )
+                    }
+                }
+                logos_abi::StorageOperation::Flush => {
+                    let status = crate::arch::flush_storage_device()
+                        .map_or_else(|status| status, |_| logos_abi::StorageStatus::Ok);
+                    logos_abi::StorageResponse::new(
+                        request.request_id,
+                        status,
+                        request.generation,
+                        0,
+                        0,
+                        request.transaction_id,
+                    )
+                }
+                _ => crate::storage_ipc::unsupported_response(request),
+            };
+            self.storage_response = Some(response);
+            crate::arch::signal_events(logos_abi::ipc_write_event_mask(
+                crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT,
+            ));
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Ok,
+                notified: true,
+            };
+        }
         let bytes = unsafe {
             core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
         };
@@ -541,7 +726,7 @@ impl ServiceRuntime {
     }
 
     pub(crate) fn ipc_receive(
-        &self,
+        &mut self,
         process: ProcessHandle,
         capability_slot: usize,
     ) -> crate::service_ipc::IpcOutcome {
@@ -578,6 +763,39 @@ impl ServiceRuntime {
                 notified: false,
             };
         };
+        if service == ServiceId::Storage && index == crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT {
+            if capability.rights != logos_abi::IpcRights::Receive
+                || capability.generation != self.ipc_generation
+                || capability.service_epoch != self.service_epoch
+            {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Unauthorized,
+                    notified: false,
+                };
+            }
+            let Some(response) = self.storage_response.take() else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Empty,
+                    notified: false,
+                };
+            };
+            if let Some(staging_frame) = self.ipc_staging_frames[service.index()] {
+                unsafe {
+                    core::ptr::write_unaligned(
+                        staging_frame.raw() as usize as *mut logos_abi::StorageResponse,
+                        response,
+                    );
+                }
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Ok,
+                    notified: false,
+                };
+            }
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        }
         let length = crate::service_ipc::ServiceIpcGraph::message_size(index);
         let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
             return crate::service_ipc::IpcOutcome {
@@ -749,6 +967,11 @@ impl ServiceRuntime {
             graph.reclaim(&mut self.frame_pool).map_err(ServiceRuntimeError::Ipc)?;
         }
         self.ipc = None;
+        self.storage_response = None;
+        if let Some(frame) = self.storage_data_frame {
+            self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.storage_data_frame = None;
+        }
         if let Some(frame) = self.keyboard_frame {
             self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
             self.keyboard_frame = None;

@@ -19,6 +19,40 @@ use crate::{
     service_loader::ServiceImageBundle,
 };
 
+mod virtio_device;
+
+pub(crate) fn flush_storage_device() -> Result<(), logos_abi::StorageStatus> {
+    virtio_device::flush_storage_device().map_err(storage_error_status)
+}
+
+pub(crate) fn storage_block_count() -> Result<u64, logos_abi::StorageStatus> {
+    virtio_device::storage_block_count().map_err(storage_error_status)
+}
+
+pub(crate) fn transfer_storage_block(
+    request: logos_abi::StorageRequest,
+    data_address: usize,
+) -> Result<(), logos_abi::StorageStatus> {
+    virtio_device::transfer_storage_block(request, data_address).map_err(storage_error_status)
+}
+
+fn storage_error_status(error: virtio_device::DeviceError) -> logos_abi::StorageStatus {
+    match error {
+        virtio_device::DeviceError::Busy | virtio_device::DeviceError::QueueFull => {
+            logos_abi::StorageStatus::Full
+        }
+        virtio_device::DeviceError::OutOfBounds => logos_abi::StorageStatus::OutOfBounds,
+        virtio_device::DeviceError::ReadOnly => logos_abi::StorageStatus::ReadOnly,
+        virtio_device::DeviceError::StaleCompletion => logos_abi::StorageStatus::Stale,
+        virtio_device::DeviceError::Unsupported => logos_abi::StorageStatus::Unsupported,
+        _ => logos_abi::StorageStatus::Io,
+    }
+}
+
+pub(crate) fn handle_storage_interrupt() {
+    virtio_device::handle_storage_interrupt();
+}
+
 const DEBUG_PORT: u16 = 0xe9;
 const APIC_BASE_MSR: u32 = 0x1b;
 const APIC_ID: usize = 0x20;
@@ -46,6 +80,7 @@ const TIMER_VECTOR: u8 = 32;
 const KEYBOARD_VECTOR: u8 = 33;
 const SWITCH_VECTOR: u8 = 49;
 const RESCHEDULE_VECTOR: u8 = 50;
+pub(crate) const STORAGE_VECTOR: u8 = 0x52;
 const ACTION_YIELD: u64 = 1;
 const ACTION_BLOCK: u64 = 2;
 const ACTION_COMPLETE: u64 = 3;
@@ -399,6 +434,11 @@ pub fn boot() -> Status {
     }
     proof_line(b"LogOS vNext: service address spaces ready");
     initialize_post_uefi(cpu_count);
+    if virtio_device::initialize_storage_device() {
+        proof_line(b"LogOS vNext: VirtIO block ready");
+    } else {
+        debug_line(b"LogOS vNext: VirtIO block unavailable");
+    }
     handoff_to_runtime();
     debug_line(b"LogOS vNext: core ready");
     enter_scheduler(0)
@@ -692,6 +732,7 @@ pub(crate) fn reserve_kernel_frames(pool: &mut crate::frame_pool::FramePool) {
         core::ptr::addr_of!(CPU_TSS) as usize,
         core::mem::size_of::<[TaskStateSegment; MAX_CPUS]>(),
     );
+    virtio_device::reserve_frames(pool);
     #[cfg(feature = "qemu-proof")]
     {
         crate::user_mode::reserve_frames(pool);
@@ -852,14 +893,18 @@ pub(crate) fn ipc_send(
     capability_slot: usize,
     length: usize,
 ) -> crate::service_ipc::IpcOutcome {
-    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).ipc_send(process, capability_slot, length) }
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).ipc_send(process, capability_slot, length)
+    }
 }
 
 pub(crate) fn ipc_receive(
     process: crate::process::ProcessHandle,
     capability_slot: usize,
 ) -> crate::service_ipc::IpcOutcome {
-    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).ipc_receive(process, capability_slot) }
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).ipc_receive(process, capability_slot)
+    }
 }
 
 #[cfg(feature = "qemu-proof")]
@@ -1055,6 +1100,8 @@ fn install_idt(cpu: usize) {
         );
         idt[KEYBOARD_VECTOR as usize] =
             IdtEntry::new(keyboard_interrupt as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
+        idt[STORAGE_VECTOR as usize] =
+            IdtEntry::new(storage_interrupt as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
         idt[SWITCH_VECTOR as usize] = IdtEntry::new(
             context_switch_interrupt as *const () as usize,
             KERNEL_CODE_SELECTOR,
@@ -1296,6 +1343,7 @@ unsafe extern "C" {
     fn default_interrupt();
     fn context_timer_interrupt();
     fn keyboard_interrupt();
+    fn storage_interrupt();
     fn context_switch_interrupt();
     fn context_reschedule_interrupt();
     fn user_fault_no_error();

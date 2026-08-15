@@ -36,12 +36,13 @@ pub enum ServiceImageError {
     InvalidElf(ProcessError),
 }
 
-pub const SERVICE_IMAGES: [ServiceImageSpec; 5] = [
+pub const SERVICE_IMAGES: [ServiceImageSpec; 6] = [
     ServiceImageSpec::new(ServiceId::Input, b"\\EFI\\LOGOS\\INPUT.ELF"),
     ServiceImageSpec::new(ServiceId::Display, b"\\EFI\\LOGOS\\DISPLAY.ELF"),
     ServiceImageSpec::new(ServiceId::Terminal, b"\\EFI\\LOGOS\\TERMINAL.ELF"),
     ServiceImageSpec::new(ServiceId::Session, b"\\EFI\\LOGOS\\SESSION.ELF"),
     ServiceImageSpec::new(ServiceId::Commands, b"\\EFI\\LOGOS\\COMMANDS.ELF"),
+    ServiceImageSpec::new(ServiceId::Storage, b"\\EFI\\LOGOS\\STORAGE.ELF"),
 ];
 
 pub const fn service_image(service: ServiceId) -> ServiceImageSpec {
@@ -51,6 +52,7 @@ pub const fn service_image(service: ServiceId) -> ServiceImageSpec {
         ServiceId::Terminal => SERVICE_IMAGES[2],
         ServiceId::Session => SERVICE_IMAGES[3],
         ServiceId::Commands => SERVICE_IMAGES[4],
+        ServiceId::Storage => SERVICE_IMAGES[5],
     }
 }
 
@@ -89,12 +91,13 @@ mod tests {
 
     #[test]
     fn manifest_is_fixed_and_dependency_ordered() {
-        assert_eq!(SERVICE_IMAGES.len(), 5);
+        assert_eq!(SERVICE_IMAGES.len(), 6);
         assert_eq!(SERVICE_IMAGES[0].service(), ServiceId::Input);
         assert_eq!(SERVICE_IMAGES[1].service(), ServiceId::Display);
         assert_eq!(SERVICE_IMAGES[2].service(), ServiceId::Terminal);
         assert_eq!(SERVICE_IMAGES[3].service(), ServiceId::Session);
         assert_eq!(SERVICE_IMAGES[4].service(), ServiceId::Commands);
+        assert_eq!(SERVICE_IMAGES[5].service(), ServiceId::Storage);
         assert_eq!(service_image(ServiceId::Display).path(), b"\\EFI\\LOGOS\\DISPLAY.ELF");
     }
 

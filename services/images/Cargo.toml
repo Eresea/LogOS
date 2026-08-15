@@ -7,6 +7,7 @@ license = "MIT"
 
 [features]
 qemu-proof = []
+storage-proof = []
 
 [dependencies]
 logos-abi = { path = "../../abi" }
@@ -14,6 +15,8 @@ logos-commands = { path = "../commands" }
 logos-display = { path = "../display" }
 logos-input = { path = "../input" }
 logos-session = { path = "../session" }
+logos-storage = { path = "../../storage" }
+logos-storage-service = { path = "../storage" }
 logos-terminal = { path = "../terminal" }
 
 [[bin]]
@@ -43,5 +46,11 @@ bench = false
 [[bin]]
 name = "logos-commands"
 path = "src/commands.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "logos-storage"
+path = "src/storage.rs"
 test = false
 bench = false

@@ -54,6 +54,7 @@ fn dependencies_started(service: ServiceId, started: u8) -> bool {
         }
         ServiceId::Session => started & (1 << ServiceId::Terminal.index()) != 0,
         ServiceId::Commands => started & (1 << ServiceId::Session.index()) != 0,
+        ServiceId::Storage => started & (1 << ServiceId::Commands.index()) != 0,
     }
 }
 
@@ -81,6 +82,7 @@ mod tests {
         startup.start(ServiceId::Terminal).unwrap();
         startup.start(ServiceId::Session).unwrap();
         startup.start(ServiceId::Commands).unwrap();
+        startup.start(ServiceId::Storage).unwrap();
         assert_eq!(startup.started, all_services);
     }
 }

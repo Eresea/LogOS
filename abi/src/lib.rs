@@ -38,14 +38,17 @@ pub const MAX_IPC_BYTES: usize = 256;
 pub const IPC_FLAG_MORE: u8 = 1 << 0;
 pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
 pub const IPC_STAGING_BASE: usize = SERVICE_IPC_BASE + 0x10_000;
-pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x11_000;
+pub const STORAGE_DATA_BASE: usize = SERVICE_IPC_BASE + 0x11_000;
+pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x12_000;
 pub const MAX_IPC_CAPABILITIES: usize = 4;
 pub const SERVICE_HEARTBEAT_INTERVAL_TICKS: u64 = 100;
+pub const STORAGE_BLOCK_BYTES: u16 = 4096;
+pub const STORAGE_MAX_BLOCKS_PER_REQUEST: u16 = 1;
 
 pub const IPC_SYSCALL_SEND: usize = 4;
 pub const IPC_SYSCALL_RECEIVE: usize = 5;
 
-pub const IPC_ENDPOINT_COUNT: usize = 6;
+pub const IPC_ENDPOINT_COUNT: usize = 8;
 pub const IPC_READ_EVENT_BASE: usize = 0;
 pub const IPC_WRITE_EVENT_BASE: usize = IPC_READ_EVENT_BASE + IPC_ENDPOINT_COUNT;
 pub const KEYBOARD_READ_EVENT: usize = IPC_WRITE_EVENT_BASE + IPC_ENDPOINT_COUNT;
@@ -100,6 +103,7 @@ pub enum ServiceId {
     Terminal = 3,
     Session = 4,
     Commands = 5,
+    Storage = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -196,6 +200,143 @@ impl IpcStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StorageOperation {
+    Read = 1,
+    Write = 2,
+    Flush = 3,
+    /// Reserved for the service-owned format command; Core currently rejects it.
+    Format = 4,
+    Reopen = 5,
+    /// Reserved for the service-owned transaction lifecycle.
+    BeginTransaction = 6,
+    AppendRecord = 7,
+    CommitTransaction = 8,
+    AbortTransaction = 9,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StorageStatus {
+    Ok = 0,
+    Io = 1,
+    OutOfBounds = 2,
+    ReadOnly = 3,
+    Invalid = 4,
+    Stale = 5,
+    Unauthorized = 6,
+    Full = 7,
+    Recovery = 8,
+    Unsupported = 9,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct StorageRequest {
+    pub operation: StorageOperation,
+    pub flags: u8,
+    pub request_id: u32,
+    pub generation: u16,
+    pub capability_slot: u16,
+    pub service_epoch: u64,
+    pub start_block: u64,
+    pub blocks: u16,
+    pub payload_bytes: u16,
+    pub transaction_id: u64,
+}
+
+impl StorageRequest {
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        operation: StorageOperation,
+        request_id: u32,
+        generation: u16,
+        capability_slot: u16,
+        service_epoch: u64,
+        start_block: u64,
+        blocks: u16,
+        payload_bytes: u16,
+        transaction_id: u64,
+    ) -> Option<Self> {
+        if request_id == 0
+            || generation == 0
+            || service_epoch == 0
+            || blocks > STORAGE_MAX_BLOCKS_PER_REQUEST
+            || payload_bytes as usize > IPC_PAGE_BYTES
+        {
+            return None;
+        }
+        if matches!(operation, StorageOperation::Read | StorageOperation::Write) {
+            if blocks != 1 || payload_bytes != STORAGE_BLOCK_BYTES {
+                return None;
+            }
+        } else if matches!(operation, StorageOperation::AppendRecord) {
+            if blocks != 0 || payload_bytes == 0 {
+                return None;
+            }
+        } else if blocks != 0 || payload_bytes != 0 {
+            return None;
+        }
+        Some(Self {
+            operation,
+            flags: 0,
+            request_id,
+            generation,
+            capability_slot,
+            service_epoch,
+            start_block,
+            blocks,
+            payload_bytes,
+            transaction_id,
+        })
+    }
+
+    pub const fn is_block_io(self) -> bool {
+        matches!(self.operation, StorageOperation::Read | StorageOperation::Write)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct StorageResponse {
+    pub request_id: u32,
+    pub status: StorageStatus,
+    pub reserved: u8,
+    pub generation: u16,
+    pub blocks_completed: u16,
+    pub payload_bytes: u16,
+    pub transaction_id: u64,
+    pub block_count: u64,
+}
+
+impl StorageResponse {
+    pub const fn new(
+        request_id: u32,
+        status: StorageStatus,
+        generation: u16,
+        blocks_completed: u16,
+        payload_bytes: u16,
+        transaction_id: u64,
+    ) -> Self {
+        Self {
+            request_id,
+            status,
+            reserved: 0,
+            generation,
+            blocks_completed,
+            payload_bytes,
+            transaction_id,
+            block_count: 0,
+        }
+    }
+
+    pub const fn with_block_count(mut self, block_count: u64) -> Self {
+        self.block_count = block_count;
+        self
+    }
+}
+
 impl ServiceId {
     pub const fn index(self) -> usize {
         match self {
@@ -204,6 +345,7 @@ impl ServiceId {
             Self::Terminal => 2,
             Self::Session => 3,
             Self::Commands => 4,
+            Self::Storage => 5,
         }
     }
 
@@ -214,6 +356,7 @@ impl ServiceId {
             2 => Some(Self::Terminal),
             3 => Some(Self::Session),
             4 => Some(Self::Commands),
+            5 => Some(Self::Storage),
             _ => None,
         }
     }
@@ -228,6 +371,8 @@ pub enum IpcEndpointId {
     SessionToTerminal = 3,
     SessionToCommands = 4,
     CommandsToSession = 5,
+    StorageToCore = 6,
+    CoreToStorage = 7,
 }
 
 impl IpcEndpointId {
@@ -245,6 +390,8 @@ impl IpcEndpointId {
             3 => Some(Self::SessionToTerminal),
             4 => Some(Self::SessionToCommands),
             5 => Some(Self::CommandsToSession),
+            6 => Some(Self::StorageToCore),
+            7 => Some(Self::CoreToStorage),
             _ => None,
         }
     }
@@ -255,6 +402,7 @@ impl IpcEndpointId {
             Self::TerminalToDisplay | Self::TerminalToSession => ServiceId::Terminal,
             Self::SessionToTerminal | Self::SessionToCommands => ServiceId::Session,
             Self::CommandsToSession => ServiceId::Commands,
+            Self::StorageToCore | Self::CoreToStorage => ServiceId::Storage,
         }
     }
 
@@ -264,6 +412,7 @@ impl IpcEndpointId {
             Self::TerminalToDisplay => ServiceId::Display,
             Self::TerminalToSession | Self::CommandsToSession => ServiceId::Session,
             Self::SessionToCommands => ServiceId::Commands,
+            Self::StorageToCore | Self::CoreToStorage => ServiceId::Storage,
         }
     }
 
@@ -297,6 +446,8 @@ pub const fn ipc_capability_slot(
         (ServiceId::Session, IpcEndpointId::CommandsToSession, IpcRights::Receive) => Some(3),
         (ServiceId::Commands, IpcEndpointId::SessionToCommands, IpcRights::Receive) => Some(0),
         (ServiceId::Commands, IpcEndpointId::CommandsToSession, IpcRights::Send) => Some(1),
+        (ServiceId::Storage, IpcEndpointId::StorageToCore, IpcRights::Send) => Some(0),
+        (ServiceId::Storage, IpcEndpointId::CoreToStorage, IpcRights::Receive) => Some(1),
         _ => None,
     }
 }
@@ -543,6 +694,12 @@ pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
 }
 
 pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
+    if endpoint == IpcEndpointId::StorageToCore as usize {
+        return Some(core::mem::size_of::<StorageRequest>());
+    }
+    if endpoint == IpcEndpointId::CoreToStorage as usize {
+        return Some(core::mem::size_of::<StorageResponse>());
+    }
     match ipc_message_type(endpoint) {
         Some(IpcMessageType::Input) => Some(core::mem::size_of::<InputMessage>()),
         Some(IpcMessageType::Render) => Some(core::mem::size_of::<RenderMessage>()),
@@ -958,7 +1115,7 @@ mod tests {
         let keyboard = keyboard_read_event_mask();
         assert_eq!(all & keyboard, 0);
         all |= keyboard;
-        assert_eq!(EVENT_COUNT, 13);
+        assert_eq!(EVENT_COUNT, 17);
         assert_eq!(all.count_ones(), EVENT_COUNT as u32);
     }
 
@@ -971,5 +1128,36 @@ mod tests {
             IpcBytes::from_bytes(MessageKind::Text, b"ok").unwrap().as_bytes(),
             Some(&b"ok"[..])
         );
+    }
+
+    #[test]
+    fn storage_requests_are_bounded_and_generation_stamped() {
+        let request =
+            StorageRequest::new(StorageOperation::Read, 7, 3, 1, 9, 12, 1, 4096, 4).unwrap();
+        assert!(request.is_block_io());
+        assert!(StorageRequest::new(StorageOperation::Read, 7, 3, 1, 9, 12, 2, 4096, 4).is_none());
+        assert!(StorageRequest::new(StorageOperation::Read, 7, 3, 1, 9, 12, 0, 0, 4).is_none());
+        assert!(
+            StorageRequest::new(
+                StorageOperation::Write,
+                7,
+                3,
+                1,
+                9,
+                12,
+                STORAGE_MAX_BLOCKS_PER_REQUEST + 1,
+                0,
+                4,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn storage_response_preserves_request_and_transaction_identity() {
+        let response = StorageResponse::new(7, StorageStatus::Ok, 3, 2, 4096, 4);
+        assert_eq!(response.request_id, 7);
+        assert_eq!(response.generation, 3);
+        assert_eq!(response.transaction_id, 4);
     }
 }
