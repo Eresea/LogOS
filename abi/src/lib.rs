@@ -11,6 +11,13 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
 };
 
+mod storage_api;
+
+pub use storage_api::{
+    STORAGE_API_FLAG_REPLACE, STORAGE_API_RESPONSE_DATA_BYTES, STORAGE_API_VERSION,
+    StorageApiError, StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus,
+};
+
 pub const ABI_VERSION: u16 = 2;
 pub const MAX_TEXT_BYTES: usize = 64;
 pub const MAX_RENDER_CELLS: usize = 128;

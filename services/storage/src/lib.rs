@@ -3,11 +3,14 @@
 #[cfg(test)]
 extern crate std;
 
+mod api;
 mod namespace;
 
+pub use api::StorageApi;
 pub use namespace::{
     DurableNamespace, MAX_COMPONENT_BYTES, MAX_FILE_BLOCKS, MAX_FILE_BYTES, MAX_OBJECTS,
-    MAX_PATH_DEPTH, NamespaceError, ObjectId, ObjectInfo, ObjectKind, ObjectList, ObjectNamespace,
+    MAX_PATH_DEPTH, NamespaceError, NamespaceTransaction, ObjectId, ObjectInfo, ObjectKind,
+    ObjectList, ObjectNamespace,
 };
 
 use logos_abi::{
