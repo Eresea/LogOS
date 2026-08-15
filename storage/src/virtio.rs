@@ -144,6 +144,20 @@ impl<const DEPTH: usize> VirtioBlkQueue<DEPTH> {
         slot.take();
         Ok((chain, BlockCompletion { status, blocks_completed }))
     }
+
+    pub fn cancel(
+        &mut self,
+        request_id: BlockRequestId,
+    ) -> Result<VirtioBlkChain, VirtioQueueError> {
+        let Some(slot) = self
+            .chains
+            .iter_mut()
+            .find(|slot| slot.is_some_and(|chain| chain.request_id == request_id))
+        else {
+            return Err(VirtioQueueError::Stale);
+        };
+        slot.take().ok_or(VirtioQueueError::Stale)
+    }
 }
 
 impl<const DEPTH: usize> Default for VirtioBlkQueue<DEPTH> {

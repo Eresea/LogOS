@@ -4,16 +4,27 @@
 extern crate std;
 
 mod journal;
+mod pci;
 mod request;
+mod transport;
 mod virtio;
 
 pub use journal::{
     FORMAT_VERSION, FormatError, JOURNAL_COMMIT_KIND, JournalRecord, MAX_RECORD_PAYLOAD_BYTES,
     MAX_RECORDS_PER_TRANSACTION, RecoverySummary, ReplayError, ReplaySink, Volume, VolumeInfo,
 };
+pub use pci::{
+    PCI_CONFIG_BYTES, PciAddress, PciError, VIRTIO_BLOCK_MODERN_DEVICE_ID, VIRTIO_PCI_VENDOR_ID,
+    VirtioPciCapabilities, VirtioPciCapability, VirtioPciDevice,
+};
 pub use request::{
     BlockCompletion, BlockOperation, BlockRequest, BlockRequestError, BlockRequestId,
     BlockRequestTable, BlockStatus, BufferToken, MAX_BLOCK_REQUESTS, MAX_BLOCKS_PER_REQUEST,
+};
+pub use transport::{
+    DEFAULT_REQUEST_TIMEOUT, DMA_PAGE_BYTES, DmaAddress, DmaArena, DmaError, DmaLease, Expired,
+    FeatureError, NegotiatedFeatures, TransportError, TransportRequestId, VIRTIO_BLK_F_FLUSH,
+    VIRTIO_F_VERSION_1, VirtioTransport, negotiate_features,
 };
 pub use virtio::{
     MAX_VIRTIO_QUEUE_DEPTH, SECTORS_PER_LOGOS_BLOCK, VIRTIO_BLK_STATUS_IOERR, VIRTIO_BLK_STATUS_OK,

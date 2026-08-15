@@ -1,0 +1,183 @@
+pub const VIRTIO_PCI_VENDOR_ID: u16 = 0x1af4;
+pub const VIRTIO_BLOCK_MODERN_DEVICE_ID: u16 = 0x1042;
+pub const PCI_CONFIG_BYTES: usize = 256;
+const PCI_CAP_PTR: usize = 0x34;
+const PCI_CAP_VENDOR_SPECIFIC: u8 = 0x09;
+const MAX_CAPABILITIES: usize = 48;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PciAddress {
+    bus: u8,
+    device: u8,
+    function: u8,
+}
+
+impl PciAddress {
+    pub const fn new(bus: u8, device: u8, function: u8) -> Option<Self> {
+        if device >= 32 || function >= 8 { None } else { Some(Self { bus, device, function }) }
+    }
+
+    pub const fn bus(self) -> u8 {
+        self.bus
+    }
+
+    pub const fn device(self) -> u8 {
+        self.device
+    }
+
+    pub const fn function(self) -> u8 {
+        self.function
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VirtioPciCapability {
+    pub bar: u8,
+    pub offset: u32,
+    pub length: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VirtioPciCapabilities {
+    pub common: VirtioPciCapability,
+    pub notify: VirtioPciCapability,
+    pub isr: VirtioPciCapability,
+    pub device: VirtioPciCapability,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PciError {
+    NotVirtioBlock,
+    MissingCapability,
+    MalformedCapability,
+    CapabilityLoop,
+    InvalidAddress,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VirtioPciDevice {
+    pub address: PciAddress,
+    pub capabilities: VirtioPciCapabilities,
+}
+
+impl VirtioPciDevice {
+    pub fn from_config(
+        address: PciAddress,
+        config: &[u8; PCI_CONFIG_BYTES],
+    ) -> Result<Self, PciError> {
+        let vendor = u16::from_le_bytes([config[0], config[1]]);
+        let device = u16::from_le_bytes([config[2], config[3]]);
+        if vendor != VIRTIO_PCI_VENDOR_ID || device != VIRTIO_BLOCK_MODERN_DEVICE_ID {
+            return Err(PciError::NotVirtioBlock);
+        }
+
+        let mut cursor = config[PCI_CAP_PTR] as usize;
+        let mut seen = [false; PCI_CONFIG_BYTES];
+        let mut capabilities = [None; 5];
+        for _ in 0..MAX_CAPABILITIES {
+            if cursor == 0 {
+                break;
+            }
+            if cursor + 3 >= PCI_CONFIG_BYTES || seen[cursor] {
+                return Err(PciError::CapabilityLoop);
+            }
+            seen[cursor] = true;
+            if config[cursor] != PCI_CAP_VENDOR_SPECIFIC {
+                cursor = config[cursor + 1] as usize;
+                continue;
+            }
+            let next = config[cursor + 1] as usize;
+            let length = config[cursor + 2] as usize;
+            if length < 16 || cursor + length > PCI_CONFIG_BYTES {
+                return Err(PciError::MalformedCapability);
+            }
+            let cfg_type = config[cursor + 3] as usize;
+            if cfg_type >= capabilities.len() {
+                return Err(PciError::MalformedCapability);
+            }
+            let bar = config[cursor + 4];
+            let offset = u32::from_le_bytes([
+                config[cursor + 8],
+                config[cursor + 9],
+                config[cursor + 10],
+                config[cursor + 11],
+            ]);
+            let length = u32::from_le_bytes([
+                config[cursor + 12],
+                config[cursor + 13],
+                config[cursor + 14],
+                config[cursor + 15],
+            ]);
+            capabilities[cfg_type] = Some(VirtioPciCapability { bar, offset, length });
+            cursor = next;
+        }
+
+        if cursor != 0 {
+            return Err(PciError::CapabilityLoop);
+        }
+        Ok(Self {
+            address,
+            capabilities: VirtioPciCapabilities {
+                common: capabilities[1].ok_or(PciError::MissingCapability)?,
+                notify: capabilities[2].ok_or(PciError::MissingCapability)?,
+                isr: capabilities[3].ok_or(PciError::MissingCapability)?,
+                device: capabilities[4].ok_or(PciError::MissingCapability)?,
+            },
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> [u8; PCI_CONFIG_BYTES] {
+        let mut config = [0; PCI_CONFIG_BYTES];
+        config[0..2].copy_from_slice(&VIRTIO_PCI_VENDOR_ID.to_le_bytes());
+        config[2..4].copy_from_slice(&VIRTIO_BLOCK_MODERN_DEVICE_ID.to_le_bytes());
+        config[PCI_CAP_PTR] = 0x40;
+        for (index, cfg_type) in [(0x40, 1u8), (0x50, 2), (0x60, 3), (0x70, 4)] {
+            config[index] = PCI_CAP_VENDOR_SPECIFIC;
+            config[index + 1] = if index == 0x70 { 0 } else { (index + 0x10) as u8 };
+            config[index + 2] = 16;
+            config[index + 3] = cfg_type;
+            config[index + 4] = 0;
+            config[index + 8..index + 12].copy_from_slice(&(index as u32 * 0x100).to_le_bytes());
+            config[index + 12..index + 16].copy_from_slice(&0x100u32.to_le_bytes());
+        }
+        config
+    }
+
+    #[test]
+    fn parses_modern_virtio_block_capabilities() {
+        let address = PciAddress::new(0, 3, 0).unwrap();
+        let device = VirtioPciDevice::from_config(address, &config()).unwrap();
+        assert_eq!(device.address, address);
+        assert_eq!(device.capabilities.common.offset, 0x4000);
+        assert_eq!(device.capabilities.device.offset, 0x7000);
+    }
+
+    #[test]
+    fn rejects_non_virtio_devices_and_missing_capabilities() {
+        let address = PciAddress::new(0, 3, 0).unwrap();
+        let mut wrong = config();
+        wrong[0] = 0;
+        assert_eq!(VirtioPciDevice::from_config(address, &wrong), Err(PciError::NotVirtioBlock));
+
+        let mut missing = config();
+        missing[0x70] = 0;
+        missing[0x60 + 1] = 0;
+        assert_eq!(
+            VirtioPciDevice::from_config(address, &missing),
+            Err(PciError::MissingCapability)
+        );
+    }
+
+    #[test]
+    fn rejects_capability_loops() {
+        let address = PciAddress::new(0, 3, 0).unwrap();
+        let mut looped = config();
+        looped[0x70 + 1] = 0x40;
+        assert_eq!(VirtioPciDevice::from_config(address, &looped), Err(PciError::CapabilityLoop));
+    }
+}
