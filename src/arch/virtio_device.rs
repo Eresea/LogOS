@@ -76,6 +76,7 @@ struct QueueMemory {
 static mut QUEUE_MEMORY: QueueMemory = QueueMemory::new();
 static mut DEVICE: MaybeUninit<VirtioBlockDevice> = MaybeUninit::uninit();
 static DEVICE_READY: AtomicBool = AtomicBool::new(false);
+static DEVICE_BUSY: AtomicBool = AtomicBool::new(false);
 static STORAGE_WRITE_COMPLETE: AtomicBool = AtomicBool::new(false);
 static STORAGE_VALID_MEDIA: AtomicBool = AtomicBool::new(false);
 static STORAGE_INTERRUPT_COMPLETION: AtomicBool = AtomicBool::new(false);
@@ -114,6 +115,7 @@ pub enum DeviceError {
     DeviceRejectedFeatures,
     QueueUnavailable,
     QueueFull,
+    Busy,
     StaleCompletion,
     InvalidCompletion,
     Timeout,
@@ -218,39 +220,45 @@ pub(crate) fn initialize_storage_device() -> bool {
 }
 
 pub(crate) fn flush_storage_device() -> Result<(), DeviceError> {
-    if !DEVICE_READY.load(Ordering::Acquire) {
-        return Err(DeviceError::NotFound);
-    }
-    unsafe { (&mut *core::ptr::addr_of_mut!(DEVICE).cast::<VirtioBlockDevice>()).flush() }
+    with_device_mut(VirtioBlockDevice::flush)
 }
 
 pub(crate) fn storage_block_count() -> Result<u64, DeviceError> {
-    if !DEVICE_READY.load(Ordering::Acquire) {
-        return Err(DeviceError::NotFound);
-    }
-    unsafe { (&*core::ptr::addr_of!(DEVICE).cast::<VirtioBlockDevice>()).capacity_blocks() }
+    with_device_mut(|device| device.capacity_blocks())
 }
 
 pub(crate) fn transfer_storage_block(
     request: logos_abi::StorageRequest,
     data_address: usize,
 ) -> Result<(), DeviceError> {
-    if !DEVICE_READY.load(Ordering::Acquire) {
-        return Err(DeviceError::NotFound);
-    }
-    unsafe {
-        (&mut *core::ptr::addr_of_mut!(DEVICE).cast::<VirtioBlockDevice>())
-            .transfer(request, data_address)
-    }
+    with_device_mut(|device| device.transfer(request, data_address))
 }
 
 pub(crate) fn handle_storage_interrupt() {
-    if !DEVICE_READY.load(Ordering::Acquire) {
+    if !DEVICE_READY.load(Ordering::Acquire)
+        || DEVICE_BUSY.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err()
+    {
         return;
     }
     unsafe {
         (&mut *core::ptr::addr_of_mut!(DEVICE).cast::<VirtioBlockDevice>()).handle_interrupt();
     }
+    DEVICE_BUSY.store(false, Ordering::Release);
+}
+
+fn with_device_mut<T>(
+    operation: impl FnOnce(&mut VirtioBlockDevice) -> Result<T, DeviceError>,
+) -> Result<T, DeviceError> {
+    if !DEVICE_READY.load(Ordering::Acquire) {
+        return Err(DeviceError::NotFound);
+    }
+    if DEVICE_BUSY.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return Err(DeviceError::Busy);
+    }
+    let result =
+        unsafe { operation(&mut *core::ptr::addr_of_mut!(DEVICE).cast::<VirtioBlockDevice>()) };
+    DEVICE_BUSY.store(false, Ordering::Release);
+    result
 }
 
 impl VirtioBlockDevice {
