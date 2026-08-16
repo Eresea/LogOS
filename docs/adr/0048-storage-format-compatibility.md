@@ -19,7 +19,9 @@ or mistaken for an incomplete tail. Those behaviors can make committed files app
   journal tail. The current kernel never reformats nonblank media.
 - Version 2 volumes reserve two fixed checkpoint slots. Compaction publishes a prepared superblock,
   clears only the bounded journal prefix, then publishes the clean checkpoint state; recovery
-  completes the prepared state after a power loss.
+  completes the prepared state after a power loss. The storage service requests a checkpoint when
+  the retained journal plus one maximum transaction reaches 64 blocks, bounding normal replay
+  independently of the device size.
 - For version 1, a blank or incomplete journal gap abandons only its incomplete transaction. Later
   checksummed, sequence-valid committed transactions are replayed and preserved.
 - Future format versions require an explicit migration or reader implementation and their own
