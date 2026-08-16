@@ -1,6 +1,6 @@
 //! Fixed manifest for the ring-3 service images.
 
-use logos_abi::{MAX_SERVICE_IMAGE_BYTES, ServiceId};
+use logos_abi::{MAX_SERVICE_IMAGE_BYTES, MAX_SERVICE_NAME_BYTES, ServiceId};
 
 use crate::process::{ElfLoadPlan, ProcessError};
 
@@ -83,6 +83,24 @@ pub const SERVICE_IMAGES: [ServiceImageSpec; 6] = [
 pub const fn service_image(service: ServiceId) -> ServiceImageSpec {
     SERVICE_IMAGES[service.index()]
 }
+
+const fn manifest_is_indexed() -> bool {
+    let mut index = 0;
+    while index < SERVICE_IMAGES.len() {
+        let spec = SERVICE_IMAGES[index];
+        if spec.service().index() != index
+            || spec.name().is_empty()
+            || spec.name().len() > MAX_SERVICE_NAME_BYTES
+            || spec.dependencies() & !((1 << SERVICE_IMAGES.len()) - 1) != 0
+        {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const _: () = assert!(manifest_is_indexed());
 
 fn validate_image_bytes(bytes: usize) -> Result<(), ServiceImageError> {
     if bytes == 0 {
