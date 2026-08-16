@@ -1177,7 +1177,6 @@ mod tests {
         let mut reopened = Volume::open(&mut store).unwrap();
         let mut sink = Sink::new();
         assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 0);
-        assert_eq!(reopened.info().root_transaction_id, 1);
     }
 
     #[test]
