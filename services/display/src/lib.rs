@@ -5,7 +5,7 @@ extern crate std;
 
 use logos_abi::{
     CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, MAX_COLUMNS, MAX_RENDER_CELLS,
-    MAX_ROWS, MessageKind, RenderMessage,
+    MAX_ROWS, MessageKind, RENDER_FLAG_MORE, RenderMessage,
 };
 
 pub use logos_abi::FramebufferFormat as PixelFormat;
@@ -269,6 +269,7 @@ impl Display {
             || rows == 0
             || rows > MAX_ROWS
             || message.count as usize > MAX_RENDER_CELLS
+            || message.flags & !RENDER_FLAG_MORE != 0
         {
             return Err(DisplayError::InvalidMessage);
         }
@@ -327,8 +328,8 @@ impl Display {
         if first_render {
             self.surface_background = self.cells[0].background;
             let pixel = pixel_bytes(self.surface_background, format);
-            let row_bytes = self.columns * GLYPH_WIDTH * 4;
-            for row in 0..self.rows * GLYPH_HEIGHT {
+            let row_bytes = width * 4;
+            for row in 0..height {
                 let start = row * stride;
                 fill_row(&mut framebuffer[start..start + row_bytes], pixel);
             }
@@ -479,10 +480,11 @@ mod tests {
         message.cells[0] = Cell { background: 0x102030, ..Cell::EMPTY };
         display.apply(1, &message).unwrap();
 
-        let mut framebuffer = std::vec![0; 16 * 16 * 4];
-        assert_eq!(display.render(&mut framebuffer, 16, 16, 16 * 4, PixelFormat::Bgr8), Ok(1));
+        let mut framebuffer = std::vec![0; 24 * 32 * 4];
+        assert_eq!(display.render(&mut framebuffer, 24, 32, 24 * 4, PixelFormat::Bgr8), Ok(1));
         assert_eq!(&framebuffer[..4], &[0x30, 0x20, 0x10, 0]);
-        assert_eq!(&framebuffer[15 * 4..16 * 4], &[0x30, 0x20, 0x10, 0]);
+        let last_pixel = (24 * 32 - 1) * 4;
+        assert_eq!(&framebuffer[last_pixel..last_pixel + 4], &[0x30, 0x20, 0x10, 0]);
     }
 
     #[test]
