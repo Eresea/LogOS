@@ -12,6 +12,7 @@ pub const MOD_SHIFT: u16 = logos_abi::MOD_SHIFT;
 pub const MOD_CTRL: u16 = logos_abi::MOD_CTRL;
 pub const MOD_ALT: u16 = logos_abi::MOD_ALT;
 pub const MOD_CAPS_LOCK: u16 = logos_abi::MOD_CAPS_LOCK;
+pub const MOD_NUM_LOCK: u16 = logos_abi::MOD_NUM_LOCK;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum KeyboardLayout {
@@ -50,6 +51,7 @@ pub struct InputDecoder {
     break_code: bool,
     modifiers: u16,
     caps_lock: bool,
+    num_lock: bool,
     layout: KeyboardLayout,
 }
 
@@ -59,7 +61,14 @@ impl InputDecoder {
     }
 
     pub const fn with_layout(layout: KeyboardLayout) -> Self {
-        Self { extended: false, break_code: false, modifiers: 0, caps_lock: false, layout }
+        Self {
+            extended: false,
+            break_code: false,
+            modifiers: 0,
+            caps_lock: false,
+            num_lock: false,
+            layout,
+        }
     }
 
     pub const fn layout(&self) -> KeyboardLayout {
@@ -91,7 +100,7 @@ impl InputDecoder {
                 let extended = self.extended;
                 self.break_code = false;
                 self.extended = false;
-                let key_code = map_code(code, extended, self.layout)?;
+                let key_code = map_code(code, extended, self.layout, self.num_lock)?;
                 self.update_modifiers(key_code, released);
                 let state = if released { KeyState::Released } else { KeyState::Pressed };
                 let key = InputMessage::key(key_code, state, self.modifiers);
@@ -112,6 +121,12 @@ impl InputDecoder {
                 }
                 None
             }
+            KeyCode::NUM_LOCK => {
+                if !released {
+                    self.num_lock = !self.num_lock;
+                }
+                None
+            }
             _ => None,
         };
         if let Some(flag) = flag {
@@ -125,6 +140,11 @@ impl InputDecoder {
             self.modifiers |= MOD_CAPS_LOCK;
         } else {
             self.modifiers &= !MOD_CAPS_LOCK;
+        }
+        if self.num_lock {
+            self.modifiers |= MOD_NUM_LOCK;
+        } else {
+            self.modifiers &= !MOD_NUM_LOCK;
         }
     }
 
@@ -180,6 +200,17 @@ fn azerty_shifted_text(
         return None;
     }
     Some(match physical_code {
+        // French AZERTY number row: &é"'(-è_çà become 1 through 0.
+        0x16 => b"1",
+        0x1e => b"2",
+        0x26 => b"3",
+        0x25 => b"4",
+        0x2e => b"5",
+        0x36 => b"6",
+        0x3d => b"7",
+        0x3e => b"8",
+        0x46 => b"9",
+        0x45 => b"0",
         0x4e => b"\xc2\xb0",
         0x54 => b"\xc2\xa8",
         0x4a => b"\xc2\xa7",
@@ -196,16 +227,6 @@ impl Default for InputDecoder {
 const fn shifted_ascii(layout: KeyboardLayout, physical_code: u8, byte: u8) -> u8 {
     if let KeyboardLayout::Azerty = layout {
         return match physical_code {
-            0x16 => b'1',
-            0x1e => b'2',
-            0x26 => b'3',
-            0x25 => b'4',
-            0x2e => b'5',
-            0x36 => b'6',
-            0x3d => b'7',
-            0x3e => b'8',
-            0x46 => b'9',
-            0x45 => b'0',
             0x4c => b'?',
             0x52 => b'%',
             0x55 => b'+',
@@ -242,9 +263,16 @@ const fn shifted_ascii(layout: KeyboardLayout, physical_code: u8, byte: u8) -> u
     }
 }
 
-const fn map_code(byte: u8, extended: bool, layout: KeyboardLayout) -> Option<KeyCode> {
+const fn map_code(
+    byte: u8,
+    extended: bool,
+    layout: KeyboardLayout,
+    num_lock: bool,
+) -> Option<KeyCode> {
     if extended {
         return Some(match byte {
+            0x4a => KeyCode::character(b'/'),
+            0x5a => KeyCode::ENTER,
             0x75 => KeyCode::UP,
             0x72 => KeyCode::DOWN,
             0x6b => KeyCode::LEFT,
@@ -254,6 +282,7 @@ const fn map_code(byte: u8, extended: bool, layout: KeyboardLayout) -> Option<Ke
             0x7d => KeyCode::PAGE_UP,
             0x7a => KeyCode::PAGE_DOWN,
             0x71 => KeyCode::DELETE,
+            0x70 => KeyCode::INSERT,
             0x14 => KeyCode::CTRL,
             0x11 => KeyCode::ALT,
             _ => KeyCode::UNKNOWN,
@@ -269,6 +298,21 @@ const fn map_code(byte: u8, extended: bool, layout: KeyboardLayout) -> Option<Ke
         0x14 => KeyCode::CTRL,
         0x11 => KeyCode::ALT,
         0x58 => KeyCode::CAPS_LOCK,
+        0x77 => KeyCode::NUM_LOCK,
+        0x70 if num_lock => KeyCode::character(b'0'),
+        0x69 if num_lock => KeyCode::character(b'1'),
+        0x72 if num_lock => KeyCode::character(b'2'),
+        0x7a if num_lock => KeyCode::character(b'3'),
+        0x6b if num_lock => KeyCode::character(b'4'),
+        0x73 if num_lock => KeyCode::character(b'5'),
+        0x74 if num_lock => KeyCode::character(b'6'),
+        0x6c if num_lock => KeyCode::character(b'7'),
+        0x75 if num_lock => KeyCode::character(b'8'),
+        0x7d if num_lock => KeyCode::character(b'9'),
+        0x71 if num_lock => KeyCode::character(b'.'),
+        0x7c => KeyCode::character(b'*'),
+        0x7b => KeyCode::character(b'-'),
+        0x79 => KeyCode::character(b'+'),
         0x29 => KeyCode::character(b' '),
         code => match layout {
             KeyboardLayout::Qwerty => qwerty_code(code),
@@ -418,8 +462,68 @@ mod tests {
     fn azerty_shifted_number_row_is_ascii_compatible() {
         let mut decoder = InputDecoder::new();
         decoder.feed(0x12);
-        let event = decoder.feed(0x16).unwrap();
-        assert_eq!(event.text.unwrap().text_bytes(), Some(&b"1"[..]));
+        for (scancode, expected) in [
+            (0x16, b"1"),
+            (0x1e, b"2"),
+            (0x26, b"3"),
+            (0x25, b"4"),
+            (0x2e, b"5"),
+            (0x36, b"6"),
+            (0x3d, b"7"),
+            (0x3e, b"8"),
+            (0x46, b"9"),
+            (0x45, b"0"),
+        ] {
+            let event = decoder.feed(scancode).unwrap();
+            assert_eq!(event.text.unwrap().text_bytes(), Some(&expected[..]));
+        }
+    }
+
+    #[test]
+    fn numpad_keys_follow_num_lock_and_keep_navigation() {
+        let mut decoder = InputDecoder::new();
+
+        decoder.feed(0xe0);
+        let home = decoder.feed(0x6c).unwrap();
+        assert_eq!(KeyCode::from_raw(home.key.code), KeyCode::HOME);
+
+        let num_lock = decoder.feed(0x77).unwrap();
+        assert_eq!(KeyCode::from_raw(num_lock.key.code), KeyCode::NUM_LOCK);
+        assert_eq!(num_lock.key.modifiers & MOD_NUM_LOCK, MOD_NUM_LOCK);
+
+        for (scancode, expected) in [
+            (0x70, b"0"),
+            (0x69, b"1"),
+            (0x72, b"2"),
+            (0x7a, b"3"),
+            (0x6b, b"4"),
+            (0x73, b"5"),
+            (0x74, b"6"),
+            (0x6c, b"7"),
+            (0x75, b"8"),
+            (0x7d, b"9"),
+            (0x71, b"."),
+            (0x7c, b"*"),
+            (0x7b, b"-"),
+            (0x79, b"+"),
+        ] {
+            let event = decoder.feed(scancode).unwrap();
+            assert_eq!(event.text.unwrap().text_bytes(), Some(&expected[..]));
+        }
+
+        decoder.feed(0xe0);
+        let slash = decoder.feed(0x4a).unwrap();
+        assert_eq!(slash.text.unwrap().text_bytes(), Some(&b"/"[..]));
+        decoder.feed(0xe0);
+        let enter = decoder.feed(0x5a).unwrap();
+        assert_eq!(KeyCode::from_raw(enter.key.code), KeyCode::ENTER);
+
+        decoder.feed(0xf0);
+        let released = decoder.feed(0x77).unwrap();
+        assert_eq!(released.key.modifiers & MOD_NUM_LOCK, MOD_NUM_LOCK);
+        decoder.feed(0xe0);
+        let page_up = decoder.feed(0x7d).unwrap();
+        assert_eq!(KeyCode::from_raw(page_up.key.code), KeyCode::PAGE_UP);
     }
 
     #[test]
