@@ -14,6 +14,9 @@ use logos_commands::COMMAND_SPECS;
 pub const MAX_LINE_BYTES: usize = 256;
 pub const MAX_OUTPUT_BYTES: usize = 512;
 const PROMPT: &[u8] = b"\x1b[36mlogos\x1b[0m \x1b[33m>\x1b[0m ";
+const COMMAND_COLOR: &[u8] = b"\x1b[36m";
+const STRING_COLOR: &[u8] = b"\x1b[32m";
+const RESET_COLOR: &[u8] = b"\x1b[0m";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShellOutput {
@@ -114,7 +117,14 @@ impl SessionService {
     }
 
     pub fn command_output(&self, bytes: &[u8], output: &mut ShellOutput) {
-        output.extend(bytes);
+        let reserve = PROMPT.len() + 2;
+        let available = output.bytes.len().saturating_sub(output.len + reserve);
+        output.extend(&bytes[..bytes.len().min(available)]);
+        match output.as_bytes().last() {
+            Some(b'\n') => {}
+            Some(b'\r') => output.push(b'\n'),
+            _ => output.extend(b"\r\n"),
+        }
         self.prompt(output);
     }
 }
@@ -260,6 +270,10 @@ impl LineEditor {
                     self.move_word_left(output);
                     self.escape_state = 0;
                 }
+                b'~' if self.escape_param == 3 && self.escape_modifier == 5 => {
+                    self.delete_word_forward(output);
+                    self.escape_state = 0;
+                }
                 _ => self.escape_state = 0,
             },
             _ => self.escape_state = 0,
@@ -274,11 +288,7 @@ impl LineEditor {
         self.line[self.cursor..self.cursor + bytes.len()].copy_from_slice(bytes);
         self.cursor += bytes.len();
         self.line_len += bytes.len();
-        if self.cursor == self.line_len {
-            output.extend(bytes);
-        } else {
-            self.redraw(output);
-        }
+        self.redraw(output);
     }
 
     fn complete(&mut self, output: &mut ShellOutput) {
@@ -379,6 +389,20 @@ impl LineEditor {
         self.redraw(output);
     }
 
+    fn delete_word_forward(&mut self, output: &mut ShellOutput) {
+        let start = self.cursor;
+        while self.cursor < self.line_len && self.line[self.cursor] == b' ' {
+            self.cursor += 1;
+        }
+        while self.cursor < self.line_len && self.line[self.cursor] != b' ' {
+            self.cursor = next_boundary(&self.line, self.cursor, self.line_len);
+        }
+        self.line.copy_within(self.cursor..self.line_len, start);
+        self.line_len -= self.cursor - start;
+        self.cursor = start;
+        self.redraw(output);
+    }
+
     fn move_left(&mut self, output: &mut ShellOutput) {
         if self.cursor > 0 {
             self.cursor = previous_boundary(&self.line, self.cursor);
@@ -435,9 +459,48 @@ impl LineEditor {
     fn redraw(&self, output: &mut ShellOutput) {
         output.push(b'\r');
         self.prompt(output);
-        output.extend(&self.line[..self.line_len]);
+        self.highlight_line(output);
+        output.extend(RESET_COLOR);
         output.extend(b"\x1b[K");
         move_cursor(output, b'D', display_width(&self.line[self.cursor..self.line_len]));
+    }
+
+    fn highlight_line(&self, output: &mut ShellOutput) {
+        let command_len = command_name_len(&self.line[..self.line_len]);
+        let extra = syntax_extra_bytes(&self.line[..self.line_len], command_len);
+        let reserve = RESET_COLOR.len() + 3 + 8;
+        let available = output.bytes.len().saturating_sub(output.len + reserve);
+        if self.line_len + extra > available {
+            output.extend(&self.line[..self.line_len]);
+            return;
+        }
+
+        let mut index = 0;
+        if command_len != 0 {
+            output.extend(COMMAND_COLOR);
+            output.extend(&self.line[..command_len]);
+            output.extend(RESET_COLOR);
+            index = command_len;
+        }
+        while index < self.line_len {
+            if self.line[index] == b'"' {
+                let start = index;
+                index += 1;
+                while index < self.line_len {
+                    let end = self.line[index] == b'"';
+                    index += 1;
+                    if end {
+                        break;
+                    }
+                }
+                output.extend(STRING_COLOR);
+                output.extend(&self.line[start..index]);
+                output.extend(RESET_COLOR);
+            } else {
+                output.push(self.line[index]);
+                index += 1;
+            }
+        }
     }
 
     fn record_history(&mut self, line: &[u8]) {
@@ -520,6 +583,37 @@ fn display_width(bytes: &[u8]) -> usize {
     bytes.iter().filter(|byte| !is_utf8_continuation(**byte)).count()
 }
 
+fn command_name_len(bytes: &[u8]) -> usize {
+    if !bytes.first().is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_') {
+        return 0;
+    }
+    bytes
+        .iter()
+        .position(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_'))
+        .unwrap_or(bytes.len())
+}
+
+fn syntax_extra_bytes(bytes: &[u8], command_len: usize) -> usize {
+    let mut extra = if command_len == 0 { 0 } else { COMMAND_COLOR.len() + RESET_COLOR.len() };
+    let mut index = command_len;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            extra += STRING_COLOR.len() + RESET_COLOR.len();
+            index += 1;
+            while index < bytes.len() {
+                let end = bytes[index] == b'"';
+                index += 1;
+                if end {
+                    break;
+                }
+            }
+        } else {
+            index += 1;
+        }
+    }
+    extra
+}
+
 impl Default for LineEditor {
     fn default() -> Self {
         Self::new()
@@ -564,6 +658,27 @@ mod tests {
     }
 
     #[test]
+    fn command_output_reserves_newline_and_prompt() {
+        let service = SessionService::new();
+        let mut output = ShellOutput::new();
+        service.command_output(&[b'x'; MAX_OUTPUT_BYTES], &mut output);
+        assert!(output.as_bytes().ends_with(PROMPT));
+        assert!(output.as_bytes().windows(2).any(|window| window == b"\r\n"));
+    }
+
+    #[test]
+    fn line_editor_highlights_command_names_and_strings() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"echo(\"hi\")", &mut command, &mut output);
+        assert!(
+            output.as_bytes().windows(COMMAND_COLOR.len()).any(|window| window == COMMAND_COLOR)
+        );
+        assert!(output.as_bytes().windows(STRING_COLOR.len()).any(|window| window == STRING_COLOR));
+    }
+
+    #[test]
     fn line_editor_supports_cursor_editing_and_controls() {
         let mut editor = LineEditor::new();
         let mut command = [0; MAX_LINE_BYTES];
@@ -596,6 +711,15 @@ mod tests {
         assert_eq!(editor.cursor, 0);
         editor.input_for_command(b"\x1b[F", &mut command, &mut output);
         assert_eq!(editor.cursor, 13);
+    }
+
+    #[test]
+    fn ctrl_delete_removes_the_forward_word() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"one two three\x1b[H\x1b[3;5~\r", &mut command, &mut output);
+        assert_eq!(&command[..10], b" two three");
     }
 
     #[test]
