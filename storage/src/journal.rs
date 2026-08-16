@@ -103,7 +103,10 @@ impl Volume {
         }
         let mut marker = Block::zero();
         store.read_block(SUPERBLOCK_A, &mut marker)?;
-        if &marker.as_bytes()[..PROVISIONED_BLANK_MAGIC.len()] != PROVISIONED_BLANK_MAGIC {
+        let marker_bytes = marker.as_bytes();
+        if &marker_bytes[..PROVISIONED_BLANK_MAGIC.len()] != PROVISIONED_BLANK_MAGIC
+            || marker_bytes[PROVISIONED_BLANK_MAGIC.len()..].iter().any(|byte| *byte != 0)
+        {
             return Err(FormatError::NotBlank);
         }
         Self::format_metadata(store)
@@ -696,6 +699,12 @@ mod tests {
         let mut marker = Block::zero();
         marker.as_bytes_mut()[..PROVISIONED_BLANK_MAGIC.len()]
             .copy_from_slice(PROVISIONED_BLANK_MAGIC);
+        marker.as_bytes_mut()[PROVISIONED_BLANK_MAGIC.len()] = 1;
+        store.write_block(SUPERBLOCK_A, &marker).unwrap();
+        store.flush().unwrap();
+        assert_eq!(Volume::format_provisioned(&mut store), Err(FormatError::NotBlank));
+
+        marker.as_bytes_mut()[PROVISIONED_BLANK_MAGIC.len()] = 0;
         store.write_block(SUPERBLOCK_A, &marker).unwrap();
         store.flush().unwrap();
         assert_eq!(Volume::open(&mut store), Err(FormatError::ProvisionedBlank));
