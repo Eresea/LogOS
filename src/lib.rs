@@ -7,6 +7,7 @@ pub mod boot_resources;
 pub mod frame_pool;
 pub mod loader;
 pub mod memory;
+pub mod network_config;
 pub mod page_table;
 pub mod process;
 mod scheduler;
@@ -30,6 +31,7 @@ mod storage_ipc;
 #[cfg(all(feature = "storage-proof", target_os = "uefi"))]
 mod storage_proof;
 pub mod virtio;
+pub mod virtio_net;
 
 #[cfg(target_os = "uefi")]
 mod runtime_entry;

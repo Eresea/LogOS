@@ -11,7 +11,7 @@ if ($Stage -in @('all', 'host')) {
     cargo fmt --check
 
     Write-Host '== clippy =='
-    cargo clippy --lib -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
 
     Write-Host '== host tests =='
     cargo test --lib

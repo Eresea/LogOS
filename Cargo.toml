@@ -8,6 +8,7 @@ license = "MIT"
 [workspace]
 members = [
     "abi",
+    "network",
     "storage",
     "services/commands",
     "services/display",

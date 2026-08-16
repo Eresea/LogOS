@@ -24,7 +24,7 @@ pub use storage_api::{
     StorageApiError, StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus,
 };
 
-pub const ABI_VERSION: u16 = 2;
+pub const ABI_VERSION: u16 = 3;
 pub const MAX_TEXT_BYTES: usize = 64;
 pub const MAX_RENDER_CELLS: usize = 128;
 pub const MAX_COLUMNS: usize = 160;
@@ -58,12 +58,29 @@ pub const STORAGE_DATA_BASE: usize = SERVICE_IPC_BASE + 0x11_000;
 pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x12_000;
 pub const MANAGER_CAPABILITY_BASE: usize = IPC_CAPABILITY_BASE + IPC_PAGE_BYTES;
 pub const MANAGER_CAPABILITY_SLOT: usize = 0;
-pub const MAX_IPC_CAPABILITIES: usize = 4;
+pub const NETWORK_CONFIG_BASE: usize = SERVICE_IPC_BASE + 0x16_000;
+pub const MAX_IPC_CAPABILITIES: usize = 6;
 pub const MAX_MANAGER_SERVICES: usize = 8;
 pub const MAX_SERVICE_NAME_BYTES: usize = 16;
 pub const SERVICE_HEARTBEAT_INTERVAL_TICKS: u64 = 100;
 pub const STORAGE_BLOCK_BYTES: u16 = 4096;
 pub const STORAGE_MAX_BLOCKS_PER_REQUEST: u16 = 1;
+pub const NETWORK_ABI_VERSION: u16 = 1;
+pub const NETWORK_MAX_SOCKET_SLOTS: usize = 8;
+pub const NETWORK_MAX_LISTENER_SLOTS: usize = 2;
+pub const NETWORK_MAX_FRAME_BYTES: usize = 1536;
+pub const NETWORK_DMA_BUFFER_BYTES: usize = 2048;
+pub const NETWORK_QUEUE_DESCRIPTORS: usize = 64;
+pub const NETWORK_PACKET_PAGE_COUNT: usize = 32;
+pub const NETWORK_PACKET_PAGE_BYTES: usize = NETWORK_DMA_BUFFER_BYTES;
+pub const NETWORK_RX_PACKET_PAGES: usize = 16;
+pub const NETWORK_TX_PACKET_PAGES: usize = 16;
+pub const NETWORK_PACKET_BASE: usize = SERVICE_IPC_BASE + 0x17_000;
+pub const NETWORK_GATEWAY_ARP_DEADLINE_TICKS: u32 = 5_000;
+pub const NETWORK_DHCP_DEADLINE_TICKS: u32 = 10_000;
+// Keep a ping deadline below the bounded Commands receive budget.
+pub const NETWORK_PING_TIMEOUT_TICKS: u32 = 128;
+pub const NETWORK_REQUEST_FLAG_LISTENER: u8 = 1 << 0;
 
 pub const IPC_SYSCALL_SEND: usize = 4;
 pub const IPC_SYSCALL_RECEIVE: usize = 5;
@@ -72,7 +89,7 @@ pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
 
-pub const IPC_ENDPOINT_COUNT: usize = 10;
+pub const IPC_ENDPOINT_COUNT: usize = 14;
 pub const IPC_READ_EVENT_BASE: usize = 0;
 pub const IPC_WRITE_EVENT_BASE: usize = IPC_READ_EVENT_BASE + IPC_ENDPOINT_COUNT;
 pub const KEYBOARD_READ_EVENT: usize = IPC_WRITE_EVENT_BASE + IPC_ENDPOINT_COUNT;
@@ -128,6 +145,7 @@ pub enum ServiceId {
     Session = 4,
     Commands = 5,
     Storage = 6,
+    Network = 7,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -334,6 +352,296 @@ pub struct StorageResponse {
     pub block_count: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetworkProfile {
+    Disabled = 0,
+    StaticThenDhcp = 1,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetworkConfig {
+    pub abi_version: u16,
+    pub profile: NetworkProfile,
+    pub reserved: u8,
+    pub address: [u8; 4],
+    pub netmask: [u8; 4],
+    pub gateway: [u8; 4],
+    pub gateway_deadline_ticks: u32,
+    pub dhcp_deadline_ticks: u32,
+    pub service_epoch: u64,
+}
+
+impl NetworkConfig {
+    pub const fn disabled() -> Self {
+        Self {
+            abi_version: NETWORK_ABI_VERSION,
+            profile: NetworkProfile::Disabled,
+            reserved: 0,
+            address: [0; 4],
+            netmask: [0; 4],
+            gateway: [0; 4],
+            gateway_deadline_ticks: NETWORK_GATEWAY_ARP_DEADLINE_TICKS,
+            dhcp_deadline_ticks: NETWORK_DHCP_DEADLINE_TICKS,
+            service_epoch: 1,
+        }
+    }
+
+    pub const fn is_enabled(self) -> bool {
+        matches!(self.profile, NetworkProfile::StaticThenDhcp)
+    }
+
+    pub fn is_valid(self) -> bool {
+        self.abi_version == NETWORK_ABI_VERSION
+            && self.reserved == 0
+            && self.gateway_deadline_ticks != 0
+            && self.dhcp_deadline_ticks != 0
+            && self.service_epoch != 0
+            && match self.profile {
+                NetworkProfile::Disabled => true,
+                NetworkProfile::StaticThenDhcp => {
+                    self.address != [0; 4]
+                        && self.gateway != [0; 4]
+                        && valid_ipv4_netmask(self.netmask)
+                }
+            }
+    }
+}
+
+fn valid_ipv4_netmask(mask: [u8; 4]) -> bool {
+    let bits = u32::from_be_bytes(mask);
+    bits != 0 && (!bits & (!bits).wrapping_add(1)) == 0
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetworkOperation {
+    Status = 1,
+    IcmpPing = 2,
+    UdpBind = 3,
+    UdpSend = 4,
+    UdpReceive = 5,
+    TcpConnect = 6,
+    TcpListen = 7,
+    TcpAccept = 8,
+    TcpRead = 9,
+    TcpWrite = 10,
+    Close = 11,
+}
+
+impl NetworkOperation {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Status),
+            2 => Some(Self::IcmpPing),
+            3 => Some(Self::UdpBind),
+            4 => Some(Self::UdpSend),
+            5 => Some(Self::UdpReceive),
+            6 => Some(Self::TcpConnect),
+            7 => Some(Self::TcpListen),
+            8 => Some(Self::TcpAccept),
+            9 => Some(Self::TcpRead),
+            10 => Some(Self::TcpWrite),
+            11 => Some(Self::Close),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetworkState {
+    Disabled = 0,
+    Unavailable = 1,
+    Configuring = 2,
+    Ready = 3,
+    Restarting = 4,
+    Faulted = 5,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetworkResult {
+    Ok = 0,
+    Full = 1,
+    WouldBlock = 2,
+    Invalid = 3,
+    Stale = 4,
+    Timeout = 5,
+    Disabled = 6,
+    Unavailable = 7,
+    NotFound = 8,
+    Refused = 9,
+    Checksum = 10,
+    Unsupported = 11,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetworkRequest {
+    pub abi_version: u16,
+    pub operation: NetworkOperation,
+    pub flags: u8,
+    pub request_id: u32,
+    pub handle: u32,
+    pub generation: u16,
+    pub reserved: u16,
+    pub service_epoch: u64,
+    pub address: [u8; 4],
+    pub port: u16,
+    pub payload_page: u16,
+    pub payload_len: u16,
+    pub timeout_ticks: u32,
+    pub reserved_tail: [u8; 16],
+}
+
+impl NetworkRequest {
+    pub const fn new(operation: NetworkOperation, request_id: u32) -> Self {
+        Self {
+            abi_version: NETWORK_ABI_VERSION,
+            operation,
+            flags: 0,
+            request_id,
+            handle: 0,
+            generation: 0,
+            reserved: 0,
+            service_epoch: 0,
+            address: [0; 4],
+            port: 0,
+            payload_page: 0,
+            payload_len: 0,
+            timeout_ticks: 0,
+            reserved_tail: [0; 16],
+        }
+    }
+
+    pub fn is_valid(self) -> bool {
+        self.abi_version == NETWORK_ABI_VERSION
+            && NetworkOperation::from_raw(self.operation as u8).is_some()
+            && self.request_id != 0
+            && self.flags & !NETWORK_REQUEST_FLAG_LISTENER == 0
+            && self.reserved == 0
+            && self.reserved_tail.iter().all(|byte| *byte == 0)
+            && self.payload_page < NETWORK_PACKET_PAGE_COUNT as u16
+            && self.payload_len as usize <= NETWORK_PACKET_PAGE_BYTES
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetworkResponse {
+    pub abi_version: u16,
+    pub operation: NetworkOperation,
+    pub result: NetworkResult,
+    pub state: NetworkState,
+    pub request_id: u32,
+    pub handle: u32,
+    pub generation: u16,
+    pub reserved: u16,
+    pub service_epoch: u64,
+    pub payload_page: u16,
+    pub payload_len: u16,
+    pub detail: [u8; 16],
+}
+
+impl NetworkResponse {
+    pub const fn new(
+        operation: NetworkOperation,
+        result: NetworkResult,
+        state: NetworkState,
+        request_id: u32,
+    ) -> Self {
+        Self {
+            abi_version: NETWORK_ABI_VERSION,
+            operation,
+            result,
+            state,
+            request_id,
+            handle: 0,
+            generation: 0,
+            reserved: 0,
+            service_epoch: 0,
+            payload_page: 0,
+            payload_len: 0,
+            detail: [0; 16],
+        }
+    }
+
+    pub fn is_valid_for(self, request: NetworkRequest) -> bool {
+        self.abi_version == NETWORK_ABI_VERSION
+            && self.operation as u8 == request.operation as u8
+            && self.request_id == request.request_id
+            && self.reserved == 0
+            && self.payload_page < NETWORK_PACKET_PAGE_COUNT as u16
+            && self.payload_len as usize <= NETWORK_PACKET_PAGE_BYTES
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetworkPacketOperation {
+    SubmitTx = 1,
+    RecycleRx = 2,
+    LinkState = 3,
+    Reset = 4,
+}
+
+impl NetworkPacketOperation {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::SubmitTx),
+            2 => Some(Self::RecycleRx),
+            3 => Some(Self::LinkState),
+            4 => Some(Self::Reset),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetworkPacketDescriptor {
+    pub abi_version: u16,
+    pub operation: NetworkPacketOperation,
+    pub result: NetworkResult,
+    pub page: u16,
+    pub length: u16,
+    pub generation: u16,
+    pub reserved: u16,
+    pub service_epoch: u64,
+    pub sequence: u32,
+    pub mac: [u8; 6],
+    pub reserved_tail: [u8; 8],
+}
+
+impl NetworkPacketDescriptor {
+    pub const fn new(operation: NetworkPacketOperation, page: u16, sequence: u32) -> Self {
+        Self {
+            abi_version: NETWORK_ABI_VERSION,
+            operation,
+            result: NetworkResult::Ok,
+            page,
+            length: 0,
+            generation: 0,
+            reserved: 0,
+            service_epoch: 0,
+            sequence,
+            mac: [0; 6],
+            reserved_tail: [0; 8],
+        }
+    }
+
+    pub fn is_valid(self) -> bool {
+        self.abi_version == NETWORK_ABI_VERSION
+            && NetworkPacketOperation::from_raw(self.operation as u8).is_some()
+            && self.page < NETWORK_PACKET_PAGE_COUNT as u16
+            && self.length as usize <= NETWORK_PACKET_PAGE_BYTES
+            && self.reserved == 0
+            && self.reserved_tail.iter().all(|byte| *byte == 0)
+    }
+}
+
 impl StorageResponse {
     pub const fn new(
         request_id: u32,
@@ -370,6 +678,7 @@ impl ServiceId {
             Self::Session => 3,
             Self::Commands => 4,
             Self::Storage => 5,
+            Self::Network => 6,
         }
     }
 
@@ -381,6 +690,7 @@ impl ServiceId {
             3 => Some(Self::Session),
             4 => Some(Self::Commands),
             5 => Some(Self::Storage),
+            6 => Some(Self::Network),
             _ => None,
         }
     }
@@ -399,6 +709,10 @@ pub enum IpcEndpointId {
     CoreToStorage = 7,
     CommandsToStorage = 8,
     StorageToCommands = 9,
+    NetworkToCore = 10,
+    CoreToNetwork = 11,
+    CommandsToNetwork = 12,
+    NetworkToCommands = 13,
 }
 
 impl IpcEndpointId {
@@ -420,6 +734,10 @@ impl IpcEndpointId {
             7 => Some(Self::CoreToStorage),
             8 => Some(Self::CommandsToStorage),
             9 => Some(Self::StorageToCommands),
+            10 => Some(Self::NetworkToCore),
+            11 => Some(Self::CoreToNetwork),
+            12 => Some(Self::CommandsToNetwork),
+            13 => Some(Self::NetworkToCommands),
             _ => None,
         }
     }
@@ -434,6 +752,10 @@ impl IpcEndpointId {
                 ServiceId::Storage
             }
             Self::CommandsToStorage => ServiceId::Commands,
+            Self::NetworkToCore | Self::NetworkToCommands | Self::CoreToNetwork => {
+                ServiceId::Network
+            }
+            Self::CommandsToNetwork => ServiceId::Commands,
         }
     }
 
@@ -447,6 +769,10 @@ impl IpcEndpointId {
                 ServiceId::Storage
             }
             Self::StorageToCommands => ServiceId::Commands,
+            Self::NetworkToCore | Self::CoreToNetwork | Self::CommandsToNetwork => {
+                ServiceId::Network
+            }
+            Self::NetworkToCommands => ServiceId::Commands,
         }
     }
 
@@ -486,6 +812,12 @@ pub const fn ipc_capability_slot(
         (ServiceId::Storage, IpcEndpointId::StorageToCommands, IpcRights::Send) => Some(1),
         (ServiceId::Storage, IpcEndpointId::StorageToCore, IpcRights::Send) => Some(2),
         (ServiceId::Storage, IpcEndpointId::CoreToStorage, IpcRights::Receive) => Some(3),
+        (ServiceId::Network, IpcEndpointId::NetworkToCore, IpcRights::Send) => Some(0),
+        (ServiceId::Network, IpcEndpointId::CoreToNetwork, IpcRights::Receive) => Some(1),
+        (ServiceId::Network, IpcEndpointId::CommandsToNetwork, IpcRights::Receive) => Some(2),
+        (ServiceId::Network, IpcEndpointId::NetworkToCommands, IpcRights::Send) => Some(3),
+        (ServiceId::Commands, IpcEndpointId::CommandsToNetwork, IpcRights::Send) => Some(4),
+        (ServiceId::Commands, IpcEndpointId::NetworkToCommands, IpcRights::Receive) => Some(5),
         _ => None,
     }
 }
@@ -502,6 +834,8 @@ pub enum MessageKind {
     FullRedraw = 7,
     StorageRequest = 8,
     StorageResponse = 9,
+    NetworkRequest = 10,
+    NetworkResponse = 11,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -539,6 +873,7 @@ impl KeyCode {
     pub const ENTER: Self = Self::Enter;
     pub const BACKSPACE: Self = Self::Backspace;
     pub const TAB: Self = Self::Tab;
+    pub const INSERT: Self = Self::Insert;
     pub const UP: Self = Self::Up;
     pub const DOWN: Self = Self::Down;
     pub const LEFT: Self = Self::Left;
@@ -553,6 +888,7 @@ impl KeyCode {
     pub const CAPS_LOCK: Self = Self(0x302);
     pub const SHIFT_LEFT: Self = Self(0x303);
     pub const SHIFT_RIGHT: Self = Self(0x304);
+    pub const NUM_LOCK: Self = Self(0x305);
 
     pub const fn function(number: u8) -> Self {
         Self(0x100 + number as u16)
@@ -722,13 +1058,15 @@ pub enum IpcMessageType {
     Input,
     Render,
     Bytes,
+    Packet,
 }
 
 pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
     match endpoint {
         0 => Some(IpcMessageType::Input),
         1 => Some(IpcMessageType::Render),
-        2..=5 | 8..=9 => Some(IpcMessageType::Bytes),
+        2..=5 | 8..=9 | 12..=13 => Some(IpcMessageType::Bytes),
+        10..=11 => Some(IpcMessageType::Packet),
         _ => None,
     }
 }
@@ -744,6 +1082,7 @@ pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
         Some(IpcMessageType::Input) => Some(core::mem::size_of::<InputMessage>()),
         Some(IpcMessageType::Render) => Some(core::mem::size_of::<RenderMessage>()),
         Some(IpcMessageType::Bytes) => Some(core::mem::size_of::<IpcBytes>()),
+        Some(IpcMessageType::Packet) => Some(core::mem::size_of::<NetworkPacketDescriptor>()),
         None => None,
     }
 }
@@ -1120,6 +1459,14 @@ mod tests {
     }
 
     #[test]
+    fn network_ping_timeout_is_explicit_and_bounded() {
+        let mut request = NetworkRequest::new(NetworkOperation::IcmpPing, 7);
+        request.timeout_ticks = NETWORK_PING_TIMEOUT_TICKS;
+        assert!(request.is_valid());
+        assert_eq!(request.timeout_ticks, 128);
+    }
+
+    #[test]
     fn capability_page_rejects_empty_and_out_of_range_slots() {
         let mut page = IpcCapabilityPage::empty();
         assert_eq!(page.get(0), None);
@@ -1192,7 +1539,7 @@ mod tests {
         let keyboard = keyboard_read_event_mask();
         assert_eq!(all & keyboard, 0);
         all |= keyboard;
-        assert_eq!(EVENT_COUNT, 21);
+        assert_eq!(EVENT_COUNT, 29);
         assert_eq!(all.count_ones(), EVENT_COUNT as u32);
     }
 

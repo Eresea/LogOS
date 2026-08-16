@@ -131,7 +131,16 @@ impl ServiceManager {
 
     pub fn initialize_running(&mut self) {
         for slot in &mut self.slots[..SERVICE_IMAGES.len()] {
-            slot.state = ManagerState::Running;
+            if slot.state != ManagerState::Disabled {
+                slot.state = ManagerState::Running;
+            }
+        }
+    }
+
+    pub fn set_network_enabled(&mut self, enabled: bool) {
+        let slot = &mut self.slots[logos_abi::ServiceId::Network.index()];
+        if slot.service.is_some() {
+            slot.state = if enabled { ManagerState::Stopped } else { ManagerState::Disabled };
         }
     }
 
@@ -236,8 +245,10 @@ impl ServiceManager {
 
     pub fn prepare_graph_restart(&mut self) {
         for slot in &mut self.slots[..SERVICE_IMAGES.len()] {
-            slot.state = ManagerState::Stopped;
-            slot.generation = slot.generation.wrapping_add(1).max(1);
+            if slot.state != ManagerState::Disabled {
+                slot.state = ManagerState::Stopped;
+                slot.generation = slot.generation.wrapping_add(1).max(1);
+            }
         }
     }
 
@@ -523,6 +534,23 @@ mod tests {
     }
 
     #[test]
+    fn disabled_network_remains_visible_but_cannot_start() {
+        let mut manager = ServiceManager::new();
+        manager.set_network_enabled(false);
+        manager.initialize_running();
+        let record = manager.record(ServiceId::Network.index()).unwrap();
+        assert_eq!(record.state, ManagerState::Disabled);
+        let handle = manager.handle(ServiceId::Network.index()).unwrap();
+        let response = manager
+            .request(
+                request(ManagerOperation::Start, handle.slot(), handle.generation()),
+                ManagerRights::ALL,
+            )
+            .response;
+        assert_eq!(response.status, ManagerStatus::InvalidState);
+    }
+
+    #[test]
     fn stop_rejects_running_dependents() {
         let mut manager = manager();
         let handle = manager.handle(ServiceId::Session.index()).unwrap();
@@ -610,7 +638,7 @@ mod tests {
         );
         assert_eq!(
             manager
-                .request(request(ManagerOperation::Start, 6, 1), ManagerRights::ALL)
+                .request(request(ManagerOperation::Start, 7, 1), ManagerRights::ALL)
                 .response
                 .status,
             ManagerStatus::Unsupported

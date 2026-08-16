@@ -64,6 +64,9 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
     if vector == usize::from(STORAGE_VECTOR) {
         handle_storage_interrupt();
     }
+    if vector == usize::from(NETWORK_VECTOR) {
+        handle_network_interrupt();
+    }
     let local = unsafe { &*core::ptr::addr_of_mut!(CPU_LOCALS).cast::<CpuLocal>().add(cpu) };
     unsafe { write_apic(APIC_EOI, 0) };
     if let Some(current) = current {
@@ -344,6 +347,10 @@ global_asm!(
     ".global storage_interrupt",
     "storage_interrupt:",
     "push 0x52",
+    "jmp context_common",
+    ".global network_interrupt",
+    "network_interrupt:",
+    "push 0x53",
     "jmp context_common",
     ".global context_switch_interrupt",
     "context_switch_interrupt:",

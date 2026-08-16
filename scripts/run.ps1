@@ -3,6 +3,7 @@ param(
     [switch]$Headless,
     [switch]$Interactive,
     [switch]$Proof,
+    [switch]$Network,
     [ValidateRange(1, 8)]
     [int]$Cpus = 1,
     [ValidateRange(1, 300)]
@@ -10,8 +11,8 @@ param(
     [string]$DiskImage,
     [ValidateRange(16, 4096)]
     [int]$DiskMiB = 64,
-    [ValidateRange(1024, 65535)]
-    [int]$QmpPort = 4444
+[ValidateRange(1024, 65535)]
+[int]$QmpPort = 4444
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,6 +53,17 @@ New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\BOOT') | Out-Null
 Copy-Item $efi (Join-Path $esp 'EFI\BOOT\BOOTX64.EFI') -Force
 New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\LOGOS') | Out-Null
 Copy-Item (Join-Path $repoRoot 'build\esp\EFI\LOGOS\*.ELF') (Join-Path $esp 'EFI\LOGOS') -Force
+$networkConfig = Join-Path $esp 'EFI\LOGOS\NETWORK.CFG'
+if ($Network) {
+    @(
+        'profile=static_then_dhcp'
+        'address=10.0.2.15'
+        'netmask=255.255.255.0'
+        'gateway=10.0.2.2'
+    ) | Set-Content -LiteralPath $networkConfig -Encoding ascii
+} else {
+    Remove-Item -LiteralPath $networkConfig -Force -ErrorAction SilentlyContinue
+}
 
 $espPath = ((Resolve-Path $esp).Path).Replace('\', '/')
 $display = if ($interactiveMode) { 'gtk' } else { 'none' }
@@ -63,9 +75,23 @@ $qemuArgs = @(
     '-device', 'virtio-blk-pci,drive=storage-disk,disable-legacy=on',
     '-display', $display
 )
+if ($Network) {
+    if ($Proof) {
+        $networkPeerPort = $QmpPort + 1
+        $qemuArgs += @(
+            '-netdev', "socket,id=network0,listen=127.0.0.1:$networkPeerPort",
+            '-device', 'virtio-net-pci,netdev=network0,disable-legacy=on'
+        )
+    } else {
+        $qemuArgs += @(
+            '-netdev', 'user,id=network0,net=10.0.2.0/24,dhcpstart=10.0.2.15,restrict=off',
+            '-device', 'virtio-net-pci,netdev=network0,disable-legacy=on'
+        )
+    }
+}
 if ($Proof) {
     Remove-Item $log -Force -ErrorAction SilentlyContinue
-    $qemuArgs += @('-debugcon', "file:$log", '-global', 'isa-debugcon.iobase=0xe9', '-qmp', "tcp:127.0.0.1:$QmpPort,server=on,wait=off")
+    $qemuArgs += @('-no-reboot', '-debugcon', "file:$log", '-global', 'isa-debugcon.iobase=0xe9', '-qmp', "tcp:127.0.0.1:$QmpPort,server=on,wait=off")
 } else {
     $qemuArgs += @('-debugcon', 'stdio', '-global', 'isa-debugcon.iobase=0xe9')
 }
@@ -83,6 +109,24 @@ $psi.Arguments = ($qemuArgs | ForEach-Object {
 $psi.UseShellExecute = $false
 $process = [Diagnostics.Process]::new()
 $process.StartInfo = $psi
+[Diagnostics.Process]$networkPeerProcess = $null
+if ($Network -and $Proof) {
+    $peerPsi = [Diagnostics.ProcessStartInfo]::new()
+    $peerPsi.FileName = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $peerPsi.UseShellExecute = $false
+    $peerPsi.RedirectStandardOutput = $true
+    $peerPsi.RedirectStandardError = $true
+    foreach ($argument in @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            (Join-Path $PSScriptRoot 'network-peer.ps1'), '-Port', [string]$networkPeerPort
+        )) {
+        [void]$peerPsi.ArgumentList.Add($argument)
+    }
+    $networkPeerProcess = [Diagnostics.Process]::new()
+    $networkPeerProcess.StartInfo = $peerPsi
+    [void]$networkPeerProcess.Start()
+    Start-Sleep -Milliseconds 100
+}
 [void]$process.Start()
 
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -106,6 +150,9 @@ $result = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
 if (-not $passed) {
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($networkPeerProcess -and -not $networkPeerProcess.HasExited) {
+        Stop-Process -Id $networkPeerProcess.Id -Force -ErrorAction SilentlyContinue
     }
     $process.Dispose()
     if ($result) { Write-Host $result }

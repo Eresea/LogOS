@@ -18,6 +18,7 @@ logos-session = { path = "../session" }
 logos-storage = { path = "../../storage" }
 logos-storage-service = { path = "../storage" }
 logos-terminal = { path = "../terminal" }
+logos-network = { path = "../../network" }
 
 [[bin]]
 name = "logos-input"
@@ -52,5 +53,11 @@ bench = false
 [[bin]]
 name = "logos-storage"
 path = "src/storage.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "logos-network"
+path = "src/network.rs"
 test = false
 bench = false

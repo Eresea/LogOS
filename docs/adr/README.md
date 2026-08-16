@@ -51,3 +51,4 @@
 | [0047](0047-storage-command-api.md) | Accepted | Commands uses a bounded versioned Storage API; Storage owns one active transaction, shadow state, and durable publication |
 | [0048](0048-storage-format-compatibility.md) | Accepted | Storage versions fail closed; v1 recovers valid commits after torn gaps and never silently downgrades or reformats unknown media |
 | [0049](0049-service-manager-control-plane.md) | Accepted | Core-owned bounded service lifecycle API uses a process-bound manager capability and fixed control syscall |
+| [0050](0050-network-service-boundary.md) | Accepted | Optional Network service owns protocol state while Core owns VirtIO-net transport and targeted recovery |

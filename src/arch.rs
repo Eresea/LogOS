@@ -21,6 +21,7 @@ use crate::{
 };
 
 mod virtio_device;
+mod virtio_net;
 
 pub(crate) fn flush_storage_device() -> Result<(), logos_abi::StorageStatus> {
     virtio_device::flush_storage_device().map_err(storage_error_status)
@@ -54,6 +55,27 @@ pub(crate) fn handle_storage_interrupt() {
     virtio_device::handle_storage_interrupt();
 }
 
+pub(crate) fn reset_network_device() {
+    virtio_net::reset();
+}
+
+pub(crate) fn handle_network_interrupt() {
+    virtio_net::handle_interrupt();
+    signal_events(logos_abi::ipc_read_event_mask(logos_abi::IpcEndpointId::CoreToNetwork.index()));
+}
+
+pub(crate) fn submit_network_frame(source: usize, length: usize) -> bool {
+    virtio_net::submit_frame(source, length)
+}
+
+pub(crate) fn take_network_frame(destination: usize) -> Option<usize> {
+    virtio_net::take_frame(destination)
+}
+
+pub(crate) fn network_mac() -> Option<[u8; 6]> {
+    virtio_net::mac()
+}
+
 const DEBUG_PORT: u16 = 0xe9;
 const APIC_BASE_MSR: u32 = 0x1b;
 const APIC_ID: usize = 0x20;
@@ -84,6 +106,7 @@ const KEYBOARD_VECTOR: u8 = 33;
 const SWITCH_VECTOR: u8 = 49;
 const RESCHEDULE_VECTOR: u8 = 50;
 pub(crate) const STORAGE_VECTOR: u8 = 0x52;
+pub(crate) const NETWORK_VECTOR: u8 = 0x53;
 const ACTION_YIELD: u64 = 1;
 const ACTION_BLOCK: u64 = 2;
 const ACTION_COMPLETE: u64 = 3;
@@ -366,6 +389,12 @@ pub fn boot() -> Status {
     stage_trampoline();
     install_cpu(0);
     let framebuffer = capture_gop();
+    let network_config = crate::network_config::load_from_esp();
+    if network_config.is_enabled() && !virtio_net::prepare_dma() {
+        debug_line(b"LogOS vNext: network DMA unavailable");
+    }
+    #[cfg(feature = "qemu-proof")]
+    crate::proof::configure_network(network_config.is_enabled());
     let service_images = match crate::service_loader::load_from_esp() {
         Ok(images) => images,
         Err(crate::service_loader::UefiImageError::Firmware(_)) => {
@@ -395,6 +424,7 @@ pub fn boot() -> Status {
     unsafe {
         let _runtime_guard = ServiceRuntimeGuard::acquire();
         SERVICE_IMAGES = Some(service_images);
+        (*core::ptr::addr_of_mut!(SERVICE_RUNTIME)).configure_network(network_config);
         let images = (*core::ptr::addr_of!(SERVICE_IMAGES))
             .as_ref()
             .unwrap_or_else(|| fatal(b"LogOS vNext: service image state"));
@@ -511,6 +541,13 @@ pub fn boot() -> Status {
         proof_line(b"LogOS vNext: VirtIO block ready");
     } else {
         debug_line(b"LogOS vNext: VirtIO block unavailable");
+    }
+    if virtio_net::initialize(network_config) {
+        proof_line(b"LogOS vNext: VirtIO net ready");
+    } else if network_config.is_enabled() {
+        debug_line(b"LogOS vNext: VirtIO net unavailable");
+    } else {
+        proof_line(b"LogOS vNext: network disabled");
     }
     handoff_to_runtime();
     debug_line(b"LogOS vNext: core ready");
@@ -808,6 +845,7 @@ pub(crate) fn reserve_kernel_frames(pool: &mut crate::frame_pool::FramePool) {
         core::mem::size_of::<[TaskStateSegment; MAX_CPUS]>(),
     );
     virtio_device::reserve_frames(pool);
+    virtio_net::reserve_frames(pool);
     #[cfg(feature = "qemu-proof")]
     {
         crate::user_mode::reserve_frames(pool);
@@ -1302,6 +1340,8 @@ fn install_idt(cpu: usize) {
             IdtEntry::new(keyboard_interrupt as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
         idt[STORAGE_VECTOR as usize] =
             IdtEntry::new(storage_interrupt as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
+        idt[NETWORK_VECTOR as usize] =
+            IdtEntry::new(network_interrupt as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
         idt[SWITCH_VECTOR as usize] = IdtEntry::new(
             context_switch_interrupt as *const () as usize,
             KERNEL_CODE_SELECTOR,
@@ -1550,6 +1590,7 @@ unsafe extern "C" {
     fn context_timer_interrupt();
     fn keyboard_interrupt();
     fn storage_interrupt();
+    fn network_interrupt();
     fn context_switch_interrupt();
     fn context_reschedule_interrupt();
     fn user_fault_no_error();
