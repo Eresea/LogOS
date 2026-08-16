@@ -11,11 +11,15 @@ or mistaken for an incomplete tail. Those behaviors can make committed files app
 
 ## Decision
 
-- Format version 1 is the only version accepted by the current storage implementation.
+- Format version 2 is written by the current storage implementation; legacy format version 1 is
+  still readable without checkpointing.
 - An unknown version in either superblock is reported as `UnsupportedVersion`; the other superblock
   is not selected as a silent fallback.
 - An unknown journal-record version is reported as `UnsupportedVersion`, even when it is at the
   journal tail. The current kernel never reformats nonblank media.
+- Version 2 volumes reserve two fixed checkpoint slots. Compaction publishes a prepared superblock,
+  clears only the bounded journal prefix, then publishes the clean checkpoint state; recovery
+  completes the prepared state after a power loss.
 - For version 1, a blank or incomplete journal gap abandons only its incomplete transaction. Later
   checksummed, sequence-valid committed transactions are replayed and preserved.
 - Future format versions require an explicit migration or reader implementation and their own
@@ -23,7 +27,7 @@ or mistaken for an incomplete tail. Those behaviors can make committed files app
 
 ## Consequences
 
-Known v1 files survive repeated reopen and torn-tail recovery without silent rollback. Unsupported
-media fails visibly and preserves its bytes for an explicit migration tool or newer kernel. The
-system does not promise to read arbitrary future formats automatically; compatibility is deliberate,
-versioned, and proof-backed.
+Known v1 and v2 files survive repeated reopen and torn-tail recovery without silent rollback.
+Unsupported media fails visibly and preserves its bytes for an explicit migration tool or newer
+kernel. The system does not promise to read arbitrary future formats automatically; compatibility is
+deliberate, versioned, and proof-backed.

@@ -24,7 +24,7 @@ Status: active preemptive SMP Core milestone.
 - The fresh-disk storage proof reaches `Storage persistent-disk proof PASS` after proving durable
   command API writes, reboot reopen, aborted and removed files, and torn-journal recovery. Host tests
   cover the versioned API, malformed requests, transaction ownership, bounded namespace operations,
-  command parsing, and committed/staged visibility.
+  command parsing, committed/staged visibility, and prepared checkpoint recovery.
 - The local-APIC period is measured against the calibrated TSC on the BSP and each AP before its
   timer is enabled.
 - Non-proof UEFI boot reaches `LogOS vNext: core ready` and remains in the scheduler for 1, 2, and

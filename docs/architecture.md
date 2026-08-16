@@ -18,7 +18,7 @@ fixed service boundaries.
 | User launch transition | `arch` + `scheduler` | selects the task root before restore and provides the fixed-selector `iretq` path for service entry |
 | Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Commands → Storage dependencies |
 | Service IPC boundary | `service_ipc` + `service_runtime` | keeps the six existing terminal queues and adds dedicated process-bound StorageToCore/CoreToStorage capabilities through private staging pages; no queue, MMIO, or DMA frame is mapped into a service root |
-| Storage boundary | Core VirtIO block adapter + `logos-storage` format + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, MSI-X interrupt delivery, reset, timeouts, and flush; Storage owns fixed request lifecycles, superblocks, journal, replay, recovery, durability, object IDs, namespace resolution, and bounded file operations; Commands reaches Storage through versioned `CommandsToStorage`/`StorageToCommands` messages over private staging pages; one active transaction uses fixed shadow state and at most `MAX_RECORDS_PER_TRANSACTION` records; Core stores no paths or namespace state; split-ring generations reset the bounded queue before descriptor reuse |
+| Storage boundary | Core VirtIO block adapter + `logos-storage` format + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, MSI-X interrupt delivery, reset, timeouts, and flush; Storage owns fixed request lifecycles, superblocks, journal, checkpoints, replay, recovery, durability, object IDs, namespace resolution, and bounded file operations; Commands reaches Storage through versioned `CommandsToStorage`/`StorageToCommands` messages over private staging pages; one active transaction uses fixed shadow state and at most `MAX_RECORDS_PER_TRANSACTION` records; Core stores no paths or namespace state; split-ring generations reset the bounded queue before descriptor reuse |
 | Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE` plus one read-only `FramebufferConfig` page at `DISPLAY_CONFIG_BASE`; boot rejects modes below the fixed 80×25/8×16 profile; no other service or kernel drawing path receives it |
 | Keyboard byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring with an observable drop counter and maps it only into Input at `INPUT_KEYBOARD_RING_BASE`; PS/2 decoding remains outside the kernel |
 | PS/2 interrupt adapter | `arch` | remaps the legacy PIC, unmasks only IRQ1 after the Input ring is published, and copies port `0x60` bytes into that ring; no key decoding occurs in Core |
@@ -80,11 +80,11 @@ the format, journal, namespace, file API, and IPC adapter. The boot image is adm
 the kernel-mediated storage endpoint is identity-checked; requests reach the bounded VirtIO adapter,
 and the fresh-disk QEMU proof covers format, flush, reopen, and torn-journal recovery.
 
-Storage compatibility is fail-closed. The current format version is v1; an unknown superblock or
-journal-record version returns `UnsupportedVersion` and is never reformatted or silently replayed by
-the v1 kernel. Within v1, checksummed committed transactions after an incomplete journal gap remain
-recoverable, while only the incomplete transaction is discarded. A future format migration must be
-explicitly implemented and proved before its version is accepted.
+Storage compatibility is fail-closed. The current format version is v2; legacy v1 media remains
+readable without checkpointing. An unknown superblock or journal-record version returns
+`UnsupportedVersion` and is never reformatted or silently replayed. Version 2 checkpoints compact
+the fixed namespace into two durable slots before reusing the bounded journal prefix. A future
+format migration must be explicitly implemented and proved before its version is accepted.
 
 ## Deferred next-step improvements
 
