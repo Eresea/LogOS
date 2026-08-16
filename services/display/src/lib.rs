@@ -175,6 +175,10 @@ fn is_background_only(cell: Cell, background: u32) -> bool {
         && cell.background == background
 }
 
+fn is_uninitialized(cell: Cell) -> bool {
+    cell == Cell::EMPTY
+}
+
 fn pixel_bytes(color: u32, format: PixelFormat) -> [u8; 4] {
     let red = ((color >> 16) & 0xff) as u8;
     let green = ((color >> 8) & 0xff) as u8;
@@ -344,7 +348,7 @@ impl Display {
                 let cell = self.cells[index];
                 let is_cursor = row == self.cursor_row && column == self.cursor_column;
                 if first_render
-                    && is_background_only(cell, self.surface_background)
+                    && (is_uninitialized(cell) || is_background_only(cell, self.surface_background))
                     && !(is_cursor && self.cursor_visible)
                 {
                     self.dirty[index] = false;
@@ -483,6 +487,7 @@ mod tests {
         let mut framebuffer = std::vec![0; 24 * 32 * 4];
         assert_eq!(display.render(&mut framebuffer, 24, 32, 24 * 4, PixelFormat::Bgr8), Ok(1));
         assert_eq!(&framebuffer[..4], &[0x30, 0x20, 0x10, 0]);
+        assert_eq!(&framebuffer[8 * 4..9 * 4], &[0x30, 0x20, 0x10, 0]);
         let last_pixel = (24 * 32 - 1) * 4;
         assert_eq!(&framebuffer[last_pixel..last_pixel + 4], &[0x30, 0x20, 0x10, 0]);
     }
