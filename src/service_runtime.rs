@@ -594,10 +594,16 @@ impl ServiceRuntime {
         let Some(task) = self.tasks[index] else {
             return Err(ServiceRuntimeError::TaskStop);
         };
-        if !crate::SCHEDULER.request_stop(task) {
-            return Err(ServiceRuntimeError::TaskStop);
+        if crate::SCHEDULER.request_stop(task) {
+            return Ok(());
         }
-        Ok(())
+        if crate::SCHEDULER.state(task).is_none() {
+            self.tasks[index] = None;
+            self.supervisor.unregister(service);
+            self.manager.mark_stopped(service);
+            return Ok(());
+        }
+        Err(ServiceRuntimeError::TaskStop)
     }
 
     pub(crate) fn record_heartbeat(
@@ -1003,7 +1009,6 @@ impl ServiceRuntime {
                             decision.response.status = logos_abi::ManagerStatus::Busy;
                             if admitted != 0 {
                                 self.manager.mark_restart_stopping(&services[..admitted]);
-                                self.pending_restart = Some((services, admitted));
                             }
                             break;
                         }
