@@ -5,13 +5,12 @@
 mod common;
 
 use logos_abi::{
-    IpcBytes, IpcCapability, IpcEndpointId, IpcStatus, MessageKind, StorageApiRequest,
-    StorageApiResponse, StorageApiStatus, StorageOperation, StorageRequest, StorageResponse,
-    StorageStatus,
+    IpcBytes, IpcCapability, IpcEndpointId, IpcStatus, MessageKind, StorageApiStatus,
+    StorageOperation, StorageRequest, StorageResponse, StorageStatus,
 };
 use logos_storage::Block;
 use logos_storage_service::{
-    DurableNamespace, IpcBlockStore, KernelStorageIpc, NamespaceError, StorageApi,
+    DurableNamespace, IpcBlockStore, KernelStorageIpc, NamespaceError, StorageApi, error_response,
 };
 
 const REQUEST_CAPABILITY: usize = common::capability_slot(
@@ -154,16 +153,7 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
             let mut request = IpcBytes::empty(MessageKind::StorageRequest);
             match common::ipc_receive(COMMANDS_RECEIVE_CAPABILITY, &mut request) {
                 IpcStatus::Ok => {
-                    pending_response =
-                        StorageApiRequest::decode(&request).ok().and_then(|request| {
-                            StorageApiResponse::encode(
-                                status,
-                                request.request_id,
-                                request.transaction_id,
-                                &[],
-                                false,
-                            )
-                        });
+                    pending_response = error_response(&request, status);
                     progressed = true;
                 }
                 IpcStatus::Empty => {}

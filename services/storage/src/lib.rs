@@ -6,7 +6,7 @@ extern crate std;
 mod api;
 mod namespace;
 
-pub use api::StorageApi;
+pub use api::{StorageApi, error_response};
 pub use namespace::{
     DurableNamespace, MAX_COMPONENT_BYTES, MAX_FILE_BLOCKS, MAX_FILE_BYTES, MAX_OBJECTS,
     MAX_PATH_DEPTH, NamespaceError, NamespaceTransaction, ObjectId, ObjectInfo, ObjectKind,

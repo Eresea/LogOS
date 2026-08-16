@@ -6,6 +6,14 @@ use logos_storage::BlockStore;
 
 use crate::{DurableNamespace, NamespaceError, NamespaceTransaction};
 
+pub fn error_response(message: &IpcBytes, status: StorageApiStatus) -> Option<IpcBytes> {
+    let request = match StorageApiRequest::decode(message) {
+        Ok(request) => request,
+        Err(_) => return malformed_response(message),
+    };
+    StorageApiResponse::encode(status, request.request_id, request.transaction_id, &[], false)
+}
+
 struct ResponsePayload {
     status: StorageApiStatus,
     transaction_id: u64,
@@ -423,6 +431,16 @@ mod tests {
             StorageApi::new(DurableNamespace::format(MemoryBlockStore::<64>::new()).unwrap())
                 .handle(&message)
                 .unwrap();
+        assert_eq!(status(&response).status, StorageApiStatus::Invalid);
+        assert_eq!(status(&response).request_id, 7);
+    }
+
+    #[test]
+    fn error_response_preserves_identity_for_malformed_requests() {
+        let mut message = IpcBytes::empty(logos_abi::MessageKind::StorageRequest);
+        message.len = 8;
+        message.bytes[4..8].copy_from_slice(&7u32.to_le_bytes());
+        let response = error_response(&message, StorageApiStatus::Io).unwrap();
         assert_eq!(status(&response).status, StorageApiStatus::Invalid);
         assert_eq!(status(&response).request_id, 7);
     }
