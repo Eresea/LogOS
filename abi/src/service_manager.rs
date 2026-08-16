@@ -192,6 +192,16 @@ impl ManagerResponse {
 }
 
 const _: () = assert!(MAX_MANAGER_SERVICES <= u8::MAX as usize);
+const _: () = assert!(core::mem::size_of::<ManagerCapability>() == 16);
+const _: () = assert!(core::mem::align_of::<ManagerCapability>() == 8);
+const _: () = assert!(core::mem::size_of::<ManagerCapabilityPage>() == 16);
+const _: () = assert!(core::mem::align_of::<ManagerCapabilityPage>() == 16);
+const _: () = assert!(core::mem::size_of::<ManagerRequest>() == 16);
+const _: () = assert!(core::mem::align_of::<ManagerRequest>() == 4);
+const _: () = assert!(core::mem::size_of::<ServiceManagerRecord>() == 28);
+const _: () = assert!(core::mem::align_of::<ServiceManagerRecord>() == 4);
+const _: () = assert!(core::mem::size_of::<ManagerResponse>() == 40);
+const _: () = assert!(core::mem::align_of::<ManagerResponse>() == 4);
 const _: () = assert!(core::mem::size_of::<ManagerCapabilityPage>() <= crate::IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::size_of::<ManagerRequest>() <= crate::IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::size_of::<ManagerResponse>() <= crate::IPC_PAGE_BYTES);

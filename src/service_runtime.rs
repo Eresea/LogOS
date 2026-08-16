@@ -963,7 +963,8 @@ impl ServiceRuntime {
             return logos_abi::IpcStatus::Unauthorized;
         };
         let bytes = staging_frame.raw() as usize as *const u8;
-        let operation = unsafe { *bytes.add(2) };
+        let operation =
+            unsafe { *bytes.add(core::mem::offset_of!(logos_abi::ManagerRequest, operation)) };
         if logos_abi::ManagerOperation::from_raw(operation).is_none() {
             return logos_abi::IpcStatus::Malformed;
         }
