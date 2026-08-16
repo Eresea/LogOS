@@ -34,7 +34,7 @@ Status: active preemptive SMP Core milestone.
 - The enabled real-peer Network proof reaches VirtIO discovery, static ARP/ICMP readiness, a TCP
   client response, Network-only restart, listener creation/accept, and bounded write handling. The
   final peer-to-guest TCP data/read step is still failing, so the enabled proof does not yet reach
-  `QEMU proof PASS`.
+  `QEMU proof PASS`; this is a post-merge TCP follow-up.
 - The local-APIC period is measured against the calibrated TSC on the BSP and each AP before its
   timer is enabled.
 - Non-proof UEFI boot reaches `LogOS vNext: core ready` and remains in the scheduler for 1, 2, and
@@ -47,8 +47,9 @@ Runtime orchestration beyond the first bounded operation table, multi-client sto
 permissions, directories, or real-peer Network packet/TCP behavior. AP startup
 is limited to healthy xAPIC IDs, eight CPUs, fixed low-memory trampoline staging, and current CR3.
 
-The enabled-profile Network QEMU proof still needs the peer-to-guest TCP data/read completion and a
-separate DHCP-fallback run before Network v1 is considered complete. No v1 massive-traffic claim is
-made; smoltcp 0.12 TCP congestion-control/high-throughput work remains Network v2.
+The enabled-profile Network QEMU proof still needs peer-to-guest TCP data/read completion. DHCP
+fallback QEMU proof is also deferred post-merge. Neither is a PR gate for this branch. No v1
+massive-traffic claim is made; smoltcp 0.12 TCP congestion-control/high-throughput work remains
+Network v2.
 
 `v1_docs/` and reviewed v1 status records are historical reference only.

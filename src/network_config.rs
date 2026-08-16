@@ -151,7 +151,7 @@ pub fn load_from_esp() -> NetworkConfig {
     let Some(mut file) = file.into_regular_file() else {
         return NetworkConfig::disabled();
     };
-    let mut bytes = [0; MAX_CONFIG_BYTES];
+    let mut bytes = [0; MAX_CONFIG_BYTES + 1];
     let Ok(length) = file.read(&mut bytes) else {
         return NetworkConfig::disabled();
     };
@@ -193,6 +193,13 @@ mod tests {
             parse(b"profile=disabled\ngateway_deadline_ticks=1\ngateway_deadline_ticks=2\n"),
             None
         );
+    }
+
+    #[test]
+    fn oversized_profiles_fail_closed() {
+        let mut bytes = [b' '; MAX_CONFIG_BYTES + 1];
+        bytes[..b"profile=disabled".len()].copy_from_slice(b"profile=disabled");
+        assert_eq!(parse(&bytes), None);
     }
 
     #[test]

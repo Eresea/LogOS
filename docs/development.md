@@ -15,20 +15,23 @@ The complete host gate is:
 ```
 
 UEFI checks use `scripts/check.ps1`; the target is `x86_64-unknown-uefi` and the package has no
-allocator. The bounded proof runner accepts `-Cpus 1`, `-Cpus 2`, or `-Cpus 8`:
+allocator. The bounded regression proof runner accepts `-Cpus 1`, `-Cpus 2`, or `-Cpus 8`:
 
 ```text
 .\scripts\run.ps1 -Proof -Cpus 1 -TimeoutSeconds 60
 ```
 
-Networking is enabled by default. The runner stages a bounded static-then-DHCP configuration and a
-QEMU user-mode VirtIO-net device. Use `-NoNetwork` for an offline boot; it removes the profile and
-keeps Network Disabled. Missing or malformed `NETWORK.CFG` also fails closed to Disabled:
+Networking is enabled by default for normal boots. Regression proof runs are offline unless
+`-NetworkProof` is explicitly supplied. The enabled Network proof currently remains a post-merge
+TCP follow-up; DHCP fallback proof is also deferred. Use `-NoNetwork` for any offline boot; it
+removes the profile and keeps Network Disabled. Missing, malformed, or oversized `NETWORK.CFG`
+files also fail closed to Disabled:
 
 ```powershell
 .\scripts\run.ps1 -Interactive -Cpus 1
 .\scripts\run.ps1 -NoNetwork -Interactive -Cpus 1
-.\scripts\run.ps1 -NoNetwork -Proof -Cpus 1
+.\scripts\run.ps1 -Proof -Cpus 1
+.\scripts\run.ps1 -Proof -NetworkProof -Cpus 1
 ```
 
 Network v1 host tests cover the fixed ABI, configuration fallback, socket generations, packet-page

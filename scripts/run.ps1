@@ -4,6 +4,7 @@ param(
     [switch]$Interactive,
     [switch]$Proof,
     [switch]$NoNetwork,
+    [switch]$NetworkProof,
     # Retained as a compatibility alias; networking is enabled by default.
     [switch]$Network,
     [ValidateRange(1, 8)]
@@ -20,7 +21,9 @@ param(
 $ErrorActionPreference = 'Stop'
 if ($Interactive -and ($Headless -or $Proof)) { throw 'Choose exactly one of -Interactive, -Headless, or -Proof.' }
 if ($Network -and $NoNetwork) { throw 'Choose either -Network or -NoNetwork, not both.' }
-$networkEnabled = -not $NoNetwork
+if ($NoNetwork -and $NetworkProof) { throw 'Choose either -NoNetwork or -NetworkProof, not both.' }
+$networkProofEnabled = $Network -or $NetworkProof
+$networkEnabled = -not $NoNetwork -and (-not $Proof -or $networkProofEnabled)
 $interactiveMode = $Interactive -or (-not $Headless -and -not $Proof)
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $target = Join-Path $repoRoot 'target'
