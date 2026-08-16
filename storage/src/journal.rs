@@ -518,7 +518,7 @@ impl Volume {
         let checkpointed = self.info.checkpoint_start != 0
             && self.info.journal_head == self.info.journal_start
             && self.info.journal_tail == self.info.journal_start;
-        if checkpointed {
+        if checkpointed && committed_transactions == 0 {
             last_transaction = self.info.root_transaction_id;
         }
         if !truncated && last_transaction < self.info.root_transaction_id && !checkpointed {
@@ -1294,6 +1294,27 @@ mod tests {
             volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"x" }]).unwrap();
         }
         assert!(volume.should_checkpoint());
+    }
+
+    #[test]
+    fn checkpoint_recovery_keeps_a_durable_post_checkpoint_commit() {
+        let mut store = CrashStore::<32>::new();
+        let mut volume = Volume::format(&mut store).unwrap();
+        volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"old" }]).unwrap();
+        volume.checkpoint(&mut store, b"snapshot").unwrap();
+
+        store.fail_write_after(2);
+        assert_eq!(
+            volume.commit(&mut store, &[JournalRecord { kind: 2, payload: b"new" }]),
+            Err(FormatError::Block(BlockError::Io))
+        );
+        store.power_loss();
+
+        let mut reopened = Volume::open(&mut store).unwrap();
+        let mut sink = Sink::new();
+        assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 1);
+        assert_eq!(sink.records[0].0, 2);
+        assert_eq!(reopened.info().root_transaction_id, 2);
     }
 
     #[test]
