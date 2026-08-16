@@ -83,6 +83,21 @@ pub struct ServiceRuntime {
     storage_proof: crate::storage_proof::StorageProofObserver,
 }
 
+struct ServiceRestartGate;
+
+impl ServiceRestartGate {
+    fn acquire() -> Self {
+        crate::arch::begin_service_restart();
+        Self
+    }
+}
+
+impl Drop for ServiceRestartGate {
+    fn drop(&mut self) {
+        crate::arch::end_service_restart();
+    }
+}
+
 impl ServiceRuntime {
     pub const fn new() -> Self {
         Self {
@@ -1143,6 +1158,7 @@ impl ServiceRuntime {
     /// Stop every service task at a scheduler boundary before reclaiming any
     /// process frames or page-table roots.
     pub fn restart(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
+        let _restart_gate = ServiceRestartGate::acquire();
         crate::arch_proof_line(b"LogOS vNext: service restart begin");
         self.ipc_generation = self.ipc_generation.wrapping_add(1).max(1);
         self.service_epoch = self.service_epoch.wrapping_add(1).max(1);
@@ -1277,7 +1293,9 @@ impl ServiceRuntime {
                 if waited == 1024 {
                     return Err(ServiceRuntimeError::TaskStop);
                 }
+                crate::arch::release_service_runtime_lock();
                 crate::sleep_current_for(1);
+                crate::arch::reacquire_service_runtime_lock();
                 waited += 1;
             }
             if !crate::SCHEDULER.reclaim_completed(task) {
