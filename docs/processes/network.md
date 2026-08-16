@@ -21,7 +21,7 @@ Commands <-> versioned Network ABI
 
 For `StaticThenDhcp`, Network applies the static IPv4 address first and waits for the fixed
 gateway-ARP deadline. If ARP does not resolve, it clears the static path and starts bounded DHCPv4
-configuration. `net status` remains usable throughout and reports `configuring` until the interface
+configuration. `net.status` remains usable throughout and reports `configuring` until the interface
 is ready.
 
 Network recovery is targeted: Core resets the Network queues and device state, Network resets its

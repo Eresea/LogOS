@@ -31,8 +31,8 @@ state is owned by Storage: mutating commands use one Begin → operation → Com
 reads use committed state unless an API caller supplies the active transaction ID. A reboot starts
 from the fixed boot image, reopens the durable namespace, and discards any uncommitted transaction.
 
-Commands exposes `service.list()`, `service.status(name)`, `service.start(name)`, `service.stop(name)`,
-and `service.restart(name)` as a text adapter over the versioned Core manager ABI. The manager
+Commands exposes `service["name"].status`, `service["name"].start()`, `service["name"].stop()`, and
+`service["name"].restart()` as a typed text adapter over the versioned Core manager ABI. The manager
 validates a private, process-bound capability before changing lifecycle state; a future GUI shell can
 use the same request/response values without parsing terminal output.
 

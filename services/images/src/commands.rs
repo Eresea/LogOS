@@ -750,20 +750,55 @@ fn manager_record(name: &[u8]) -> Result<Option<logos_abi::ServiceManagerRecord>
 }
 
 fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut PendingOutput) {
-    let (operation, name, list) = match command {
-        logos_commands::ServiceCommand::List => (logos_abi::ManagerOperation::List, &[][..], true),
-        logos_commands::ServiceCommand::Status { name } => {
-            (logos_abi::ManagerOperation::Status, name, false)
-        }
-        logos_commands::ServiceCommand::Start { name } => {
-            (logos_abi::ManagerOperation::Start, name, false)
-        }
-        logos_commands::ServiceCommand::Stop { name } => {
-            (logos_abi::ManagerOperation::Stop, name, false)
-        }
-        logos_commands::ServiceCommand::Restart { name } => {
-            (logos_abi::ManagerOperation::Restart, name, false)
-        }
+    let (operation, name, list, property) = match command {
+        logos_commands::ServiceCommand::List => (
+            logos_abi::ManagerOperation::List,
+            &[][..],
+            true,
+            logos_commands::ServiceProperty::Record,
+        ),
+        logos_commands::ServiceCommand::Lookup { name } => (
+            logos_abi::ManagerOperation::Status,
+            name,
+            false,
+            logos_commands::ServiceProperty::Record,
+        ),
+        logos_commands::ServiceCommand::Status { name } => (
+            logos_abi::ManagerOperation::Status,
+            name,
+            false,
+            logos_commands::ServiceProperty::Status,
+        ),
+        logos_commands::ServiceCommand::Name { name } => (
+            logos_abi::ManagerOperation::Status,
+            name,
+            false,
+            logos_commands::ServiceProperty::Name,
+        ),
+        logos_commands::ServiceCommand::Version { name } => (
+            logos_abi::ManagerOperation::Status,
+            name,
+            false,
+            logos_commands::ServiceProperty::Version,
+        ),
+        logos_commands::ServiceCommand::Start { name } => (
+            logos_abi::ManagerOperation::Start,
+            name,
+            false,
+            logos_commands::ServiceProperty::Record,
+        ),
+        logos_commands::ServiceCommand::Stop { name } => (
+            logos_abi::ManagerOperation::Stop,
+            name,
+            false,
+            logos_commands::ServiceProperty::Record,
+        ),
+        logos_commands::ServiceCommand::Restart { name } => (
+            logos_abi::ManagerOperation::Restart,
+            name,
+            false,
+            logos_commands::ServiceProperty::Record,
+        ),
     };
     let target = if list {
         None
@@ -809,7 +844,11 @@ fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut Pe
         }
         if !list || response.cursor != u8::MAX {
             let record = response.record;
-            output_len += logos_commands::format_service_record(&record, &mut output[output_len..]);
+            output_len += logos_commands::format_service_property(
+                &record,
+                if list { logos_commands::ServiceProperty::Record } else { property },
+                &mut output[output_len..],
+            );
         }
         if !list || response.cursor == u8::MAX {
             break;
@@ -847,13 +886,22 @@ fn network_state_text(state: NetworkState) -> &'static [u8] {
 }
 
 fn network_command(
-    command: logos_commands::NetworkCommand,
+    command: logos_commands::NetworkCommand<'_>,
     client: &mut NetworkClient,
     pending: &mut PendingOutput,
 ) {
+    if let logos_commands::NetworkCommand::InterfaceStatus { name } = command {
+        if name != b"eth0" {
+            pending.stage(b"network interface not found\r\n");
+            return;
+        }
+    }
     let (operation, address, port, success): (NetworkOperation, [u8; 4], u16, &[u8]) = match command
     {
         logos_commands::NetworkCommand::Status => (NetworkOperation::Status, [0; 4], 0, b""),
+        logos_commands::NetworkCommand::InterfaceStatus { .. } => {
+            (NetworkOperation::Status, [0; 4], 0, b"")
+        }
         logos_commands::NetworkCommand::Ping { address } => {
             (NetworkOperation::IcmpPing, address, 0, b"ping ok\r\n")
         }
@@ -1148,14 +1196,14 @@ pub extern "C" fn _start() -> ! {
                         Ok(Some(command)) => service_command(command, pending),
                         Err(logos_commands::ServiceCommandError::Usage) => {
                             pending.stage(
-                                    b"usage: service.list() | service.status(name) | service.start(name) | service.stop(name) | service.restart(name)\r\n",
+                                    b"usage: service[\"name\"].status | service[\"name\"].start() | service[\"name\"].stop() | service[\"name\"].restart()\r\n",
                                 );
                         }
                         Ok(None) => match logos_commands::parse_network_command(bytes) {
                             Ok(Some(command)) => network_command(command, network, pending),
                             Err(logos_commands::NetworkCommandError::Usage) => {
                                 pending.stage(
-                                    b"usage: net.status() | net.ping(address) | net.tcp-probe(address, port)\r\n",
+                                    b"usage: net.status | net.ping(\"address\") | net.interface[\"name\"].status\r\n",
                                 );
                             }
                             Ok(None) => match logos_commands::parse_storage_command(bytes) {

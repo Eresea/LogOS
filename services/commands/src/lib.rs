@@ -48,14 +48,14 @@ pub const COMMAND_SPECS: [CommandSpec; 17] = [
     CommandSpec {
         name: b"help",
         kind: CommandKind::Help,
-        usage: b"help() / help(command)",
+        usage: b"help() / help(\"command\")",
         summary: b"show command help",
         manual: b"Lists commands or shows one command manual.",
     },
     CommandSpec {
         name: b"echo",
         kind: CommandKind::Echo,
-        usage: b"echo(text)",
+        usage: b"echo(\"text\")",
         summary: b"print text",
         manual: b"Prints the supplied text.",
     },
@@ -111,56 +111,56 @@ pub const COMMAND_SPECS: [CommandSpec; 17] = [
     CommandSpec {
         name: b"ls",
         kind: CommandKind::List,
-        usage: b"ls([path])",
+        usage: b"ls() / ls(\"path\")",
         summary: b"list files",
         manual: b"Lists files in the root or specified directory.",
     },
     CommandSpec {
         name: b"touch",
         kind: CommandKind::Touch,
-        usage: b"touch(path)",
+        usage: b"touch(\"path\")",
         summary: b"create an empty file",
         manual: b"Creates an empty file at path.",
     },
     CommandSpec {
         name: b"cat",
         kind: CommandKind::Cat,
-        usage: b"cat(path)",
+        usage: b"cat(\"path\")",
         summary: b"print a file",
         manual: b"Prints a file's contents.",
     },
     CommandSpec {
         name: b"write",
         kind: CommandKind::Write,
-        usage: b"write(path, data)",
+        usage: b"write(\"path\", \"data\")",
         summary: b"replace file contents",
         manual: b"Atomically replaces an existing file's contents. Data must be non-empty.",
     },
     CommandSpec {
         name: b"rm",
         kind: CommandKind::Remove,
-        usage: b"rm(path)",
+        usage: b"rm(\"path\")",
         summary: b"remove a file",
         manual: b"Removes a file.",
     },
     CommandSpec {
         name: b"mv",
         kind: CommandKind::Move,
-        usage: b"mv(from, to)",
+        usage: b"mv(\"from\", \"to\")",
         summary: b"rename a file",
         manual: b"Renames a file from one path to another.",
     },
     CommandSpec {
         name: b"service",
         kind: CommandKind::Service,
-        usage: b"service.<command>([name])",
+        usage: b"service[\"name\"].status / service[\"name\"].restart()",
         summary: b"manage services",
         manual: b"Lists, inspects, starts, stops, or restarts a service.",
     },
     CommandSpec {
         name: b"net",
         kind: CommandKind::Network,
-        usage: b"net.<command>([args])",
+        usage: b"net.status / net.ping(\"address\")",
         summary: b"inspect and probe networking",
         manual: b"Shows network status or performs bounded ICMP and TCP probes.",
     },
@@ -184,7 +184,10 @@ pub enum StorageCommandError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceCommand<'a> {
     List,
+    Lookup { name: &'a [u8] },
     Status { name: &'a [u8] },
+    Name { name: &'a [u8] },
+    Version { name: &'a [u8] },
     Start { name: &'a [u8] },
     Stop { name: &'a [u8] },
     Restart { name: &'a [u8] },
@@ -196,8 +199,17 @@ pub enum ServiceCommandError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NetworkCommand {
+pub enum ServiceProperty {
+    Record,
     Status,
+    Name,
+    Version,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkCommand<'a> {
+    Status,
+    InterfaceStatus { name: &'a [u8] },
     Ping { address: [u8; 4] },
     TcpProbe { address: [u8; 4], port: u16 },
 }
@@ -208,13 +220,32 @@ pub enum NetworkCommandError {
 }
 
 const MAX_CALL_ARGS: usize = 3;
+const MAX_EXPRESSION_PARTS: usize = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ParsedValue<'a> {
+    bytes: &'a [u8],
+    quoted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpressionPart<'a> {
+    Member(&'a [u8]),
+    Lookup(ParsedValue<'a>),
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ParsedCall<'a> {
-    namespace: &'a [u8],
-    name: &'a [u8],
-    args: [&'a [u8]; MAX_CALL_ARGS],
+    args: [ParsedValue<'a>; MAX_CALL_ARGS],
     arg_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ParsedExpression<'a> {
+    root: &'a [u8],
+    parts: [ExpressionPart<'a>; MAX_EXPRESSION_PARTS],
+    part_count: usize,
+    call: Option<ParsedCall<'a>>,
 }
 
 /// Resolve shell paths against the fixed root because the shell has no cwd.
@@ -289,11 +320,16 @@ impl CommandService {
         COMMAND_SPECS.iter().find(|spec| spec.name == name).copied()
     }
 
-    fn help(call: ParsedCall<'_>) -> CommandOutput {
+    fn help(expression: ParsedExpression<'_>) -> CommandOutput {
         let mut output = CommandOutput::new();
+        let Some(call) = expression.call else {
+            output.status = 2;
+            output.extend(b"usage: help() / help(\"command\")\r\n");
+            return output;
+        };
         if call.arg_count > 1 {
             output.status = 2;
-            output.extend(b"usage: help() / help(command)\r\n");
+            output.extend(b"usage: help() / help(\"command\")\r\n");
             return output;
         }
         if call.arg_count == 0 {
@@ -304,14 +340,19 @@ impl CommandService {
                 output.extend(spec.summary);
                 output.extend(b"\r\n");
             }
-            output.extend(b"Use help(command) for details.\r\n");
+            output.extend(b"Use help(\"command\") for details.\r\n");
             return output;
         }
         let target = call.args[0];
-        let Some(spec) = COMMAND_SPECS.iter().find(|spec| spec.name == target) else {
+        if !target.quoted {
+            output.status = 2;
+            output.extend(b"usage: help() / help(\"command\")\r\n");
+            return output;
+        }
+        let Some(spec) = COMMAND_SPECS.iter().find(|spec| spec.name == target.bytes) else {
             output.status = 1;
             output.extend(b"help: no manual entry for ");
-            output.extend(target);
+            output.extend(target.bytes);
             output.extend(b"\r\n");
             return output;
         };
@@ -334,31 +375,34 @@ impl CommandService {
             return output;
         }
         let line = trim_command(line);
-        let call = match parse_call(line) {
-            Ok(call) => call,
+        let expression = match parse_expression(line) {
+            Ok(expression) => expression,
             Err(()) => {
                 output.status = 2;
                 output.extend(b"command syntax error\r\n");
                 return output;
             }
         };
-        if !call.namespace.is_empty() {
+        let Some(call) = expression.call else {
+            output.status = 2;
+            output.extend(b"command syntax error\r\n");
+            return output;
+        };
+        if expression.part_count != 0 {
             output.status = 127;
             output.extend(b"command not found\r\n");
             return output;
         }
-        match Self::command_spec(call.name) {
+        match Self::command_spec(expression.root) {
             Some(spec) => match spec.kind {
-                CommandKind::Help => return Self::help(call),
+                CommandKind::Help => return Self::help(expression),
                 CommandKind::Echo => {
-                    if call.arg_count > 1 {
+                    if call.arg_count > 1 || (call.arg_count == 1 && !call.args[0].quoted) {
                         output.status = 2;
-                        output.extend(b"usage: echo(text)\r\n");
+                        output.extend(b"usage: echo(\"text\")\r\n");
                         return output;
                     }
-                    if call.arg_count == 1 {
-                        output.extend(call.args[0]);
-                    }
+                    output.extend(call.args[0].bytes);
                     output.extend(b"\r\n");
                 }
                 CommandKind::Clear => {
@@ -468,121 +512,262 @@ pub fn format_service_record(record: &logos_abi::ServiceManagerRecord, output: &
     length
 }
 
-fn parse_call(line: &[u8]) -> Result<ParsedCall<'_>, ()> {
-    let line = trim_command(line);
-    let Some(open) = line.iter().position(|byte| *byte == b'(') else { return Err(()) };
-    if open == 0 || line.last().copied() != Some(b')') {
-        return Err(());
-    }
-    let head = trim_command(&line[..open]);
-    if head.is_empty() || head.iter().any(|byte| byte.is_ascii_whitespace()) {
-        return Err(());
-    }
-    let (namespace, name) = match head.iter().position(|byte| *byte == b'.') {
-        Some(dot) if dot > 0 && dot + 1 < head.len() && !head[dot + 1..].contains(&b'.') => {
-            (&head[..dot], &head[dot + 1..])
+pub fn format_service_property(
+    record: &logos_abi::ServiceManagerRecord,
+    property: ServiceProperty,
+    output: &mut [u8],
+) -> usize {
+    match property {
+        ServiceProperty::Record => format_service_record(record, output),
+        ServiceProperty::Status => copy_line(service_state(record.state), output),
+        ServiceProperty::Name => {
+            let name_len = usize::from(record.name_len).min(record.name.len());
+            copy_line(&record.name[..name_len], output)
         }
-        Some(_) => return Err(()),
-        None => (&head[..0], head),
-    };
-    let arguments = &line[open + 1..line.len() - 1];
-    let mut args = [&[][..]; MAX_CALL_ARGS];
-    let mut arg_count = 0;
-    let mut index = 0;
-    while index < arguments.len() {
-        while index < arguments.len() && arguments[index].is_ascii_whitespace() {
-            index += 1;
-        }
-        if index == arguments.len() {
+        ServiceProperty::Version => copy_line(b"0.1.0", output),
+    }
+}
+
+fn service_state(state: logos_abi::ManagerState) -> &'static [u8] {
+    match state {
+        logos_abi::ManagerState::Vacant => b"vacant",
+        logos_abi::ManagerState::Disabled => b"disabled",
+        logos_abi::ManagerState::Stopped => b"stopped",
+        logos_abi::ManagerState::Starting => b"starting",
+        logos_abi::ManagerState::Running => b"running",
+        logos_abi::ManagerState::Stopping => b"stopping",
+        logos_abi::ManagerState::Failed => b"failed",
+    }
+}
+
+fn copy_bounded(bytes: &[u8], output: &mut [u8]) -> usize {
+    let length = bytes.len().min(output.len());
+    output[..length].copy_from_slice(&bytes[..length]);
+    length
+}
+
+fn copy_line(bytes: &[u8], output: &mut [u8]) -> usize {
+    let mut length = copy_bounded(bytes, output);
+    for byte in b"\r\n" {
+        if length == output.len() {
             break;
+        }
+        output[length] = *byte;
+        length += 1;
+    }
+    length
+}
+
+fn parse_expression(line: &[u8]) -> Result<ParsedExpression<'_>, ()> {
+    let line = trim_command(line);
+    let (root, mut index) = parse_identifier(line, 0)?;
+    let mut parts = [ExpressionPart::Member(&[][..]); MAX_EXPRESSION_PARTS];
+    let mut part_count = 0;
+    let mut call = None;
+    loop {
+        skip_spaces(line, &mut index);
+        if index == line.len() {
+            break;
+        }
+        if call.is_some() {
+            return Err(());
+        }
+        match line[index] {
+            b'.' => {
+                index += 1;
+                skip_spaces(line, &mut index);
+                let (member, next) = parse_identifier(line, index)?;
+                index = next;
+                push_part(&mut parts, &mut part_count, ExpressionPart::Member(member))?;
+            }
+            b'[' => {
+                index += 1;
+                let value = parse_value(line, &mut index)?;
+                skip_spaces(line, &mut index);
+                if line.get(index) != Some(&b']') {
+                    return Err(());
+                }
+                index += 1;
+                push_part(&mut parts, &mut part_count, ExpressionPart::Lookup(value))?;
+            }
+            b'(' => {
+                if matches!(parts.get(part_count.wrapping_sub(1)), Some(ExpressionPart::Lookup(_)))
+                {
+                    return Err(());
+                }
+                call = Some(parse_arguments(line, &mut index)?);
+            }
+            _ => return Err(()),
+        }
+    }
+    Ok(ParsedExpression { root, parts, part_count, call })
+}
+
+fn parse_identifier(bytes: &[u8], mut index: usize) -> Result<(&[u8], usize), ()> {
+    let start = index;
+    while let Some(byte) = bytes.get(index) {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') {
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    if start == index { Err(()) } else { Ok((&bytes[start..index], index)) }
+}
+
+fn parse_value<'a>(bytes: &'a [u8], index: &mut usize) -> Result<ParsedValue<'a>, ()> {
+    skip_spaces(bytes, index);
+    if bytes.get(*index) == Some(&b'"') {
+        let start = *index + 1;
+        *index = start;
+        while *index < bytes.len() && bytes[*index] != b'"' {
+            *index += 1;
+        }
+        if *index == bytes.len() {
+            return Err(());
+        }
+        let value = ParsedValue { bytes: &bytes[start..*index], quoted: true };
+        *index += 1;
+        return Ok(value);
+    }
+    let start = *index;
+    while let Some(byte) = bytes.get(*index) {
+        if byte.is_ascii_digit() {
+            *index += 1;
+        } else {
+            break;
+        }
+    }
+    if start == *index {
+        return Err(());
+    }
+    Ok(ParsedValue { bytes: &bytes[start..*index], quoted: false })
+}
+
+fn parse_arguments<'a>(bytes: &'a [u8], index: &mut usize) -> Result<ParsedCall<'a>, ()> {
+    if bytes.get(*index) != Some(&b'(') {
+        return Err(());
+    }
+    *index += 1;
+    let mut args = [ParsedValue { bytes: &[][..], quoted: false }; MAX_CALL_ARGS];
+    let mut arg_count = 0;
+    loop {
+        skip_spaces(bytes, index);
+        if bytes.get(*index) == Some(&b')') {
+            *index += 1;
+            return Ok(ParsedCall { args, arg_count });
         }
         if arg_count == MAX_CALL_ARGS {
             return Err(());
         }
-        let argument = if arguments[index] == b'"' {
-            let start = index + 1;
-            index = start;
-            while index < arguments.len() && arguments[index] != b'"' {
-                index += 1;
-            }
-            if index == arguments.len() {
-                return Err(());
-            }
-            let argument = &arguments[start..index];
-            index += 1;
-            argument
-        } else {
-            let start = index;
-            while index < arguments.len()
-                && arguments[index] != b','
-                && arguments[index] != b'"'
-                && arguments[index] != b'('
-                && arguments[index] != b')'
-                && !arguments[index].is_ascii_whitespace()
-            {
-                index += 1;
-            }
-            if start == index {
-                return Err(());
-            }
-            &arguments[start..index]
-        };
-        while index < arguments.len() && arguments[index].is_ascii_whitespace() {
-            index += 1;
-        }
-        args[arg_count] = argument;
+        args[arg_count] = parse_value(bytes, index)?;
         arg_count += 1;
-        if index == arguments.len() {
-            break;
-        }
-        if arguments[index] != b',' {
-            return Err(());
-        }
-        index += 1;
-        if index == arguments.len() {
-            return Err(());
+        skip_spaces(bytes, index);
+        match bytes.get(*index) {
+            Some(b',') => {
+                *index += 1;
+                skip_spaces(bytes, index);
+                if bytes.get(*index) == Some(&b')') {
+                    return Err(());
+                }
+            }
+            Some(b')') => {
+                *index += 1;
+                return Ok(ParsedCall { args, arg_count });
+            }
+            _ => return Err(()),
         }
     }
-    Ok(ParsedCall { namespace, name, args, arg_count })
 }
 
-fn call_head(line: &[u8]) -> Option<&[u8]> {
+fn push_part<'a>(
+    parts: &mut [ExpressionPart<'a>; MAX_EXPRESSION_PARTS],
+    count: &mut usize,
+    part: ExpressionPart<'a>,
+) -> Result<(), ()> {
+    if *count == parts.len() {
+        return Err(());
+    }
+    parts[*count] = part;
+    *count += 1;
+    Ok(())
+}
+
+fn skip_spaces(bytes: &[u8], index: &mut usize) {
+    while *index < bytes.len() && bytes[*index].is_ascii_whitespace() {
+        *index += 1;
+    }
+}
+
+fn expression_root(line: &[u8]) -> Option<&[u8]> {
     let line = trim_command(line);
-    let open = line.iter().position(|byte| *byte == b'(')?;
-    Some(trim_command(&line[..open]))
+    parse_identifier(line, 0).ok().map(|(root, _)| root)
 }
 
-fn scoped_call<'a>(line: &'a [u8], namespace: &[u8]) -> Result<Option<ParsedCall<'a>>, ()> {
-    let Some(head) = call_head(line) else { return Ok(None) };
-    let Some(dot) = head.iter().position(|byte| *byte == b'.') else { return Ok(None) };
-    if &head[..dot] != namespace {
+fn scoped_expression<'a>(line: &'a [u8], root: &[u8]) -> Result<Option<ParsedExpression<'a>>, ()> {
+    if expression_root(line) != Some(root) {
         return Ok(None);
     }
-    let call = parse_call(line)?;
-    if call.namespace == namespace { Ok(Some(call)) } else { Ok(None) }
+    Ok(Some(parse_expression(line)?))
 }
 
-fn unqualified_call<'a>(line: &'a [u8], names: &[&[u8]]) -> Result<Option<ParsedCall<'a>>, ()> {
-    let Some(head) = call_head(line) else { return Ok(None) };
-    if head.contains(&b'.') || !names.contains(&head) {
+fn unqualified_expression<'a>(
+    line: &'a [u8],
+    roots: &[&[u8]],
+) -> Result<Option<ParsedExpression<'a>>, ()> {
+    let Some(root) = expression_root(line) else { return Ok(None) };
+    if !roots.contains(&root) {
         return Ok(None);
     }
-    let call = parse_call(line)?;
-    if call.namespace.is_empty() { Ok(Some(call)) } else { Ok(None) }
+    Ok(Some(parse_expression(line)?))
 }
 
 pub fn parse_service_command(
     line: &[u8],
 ) -> Result<Option<ServiceCommand<'_>>, ServiceCommandError> {
-    let Some(call) = scoped_call(line, b"service").map_err(|_| ServiceCommandError::Usage)? else {
+    let Some(expression) =
+        scoped_expression(line, b"service").map_err(|_| ServiceCommandError::Usage)?
+    else {
         return Ok(None);
     };
-    match (call.name, call.arg_count) {
-        (b"list", 0) => Ok(Some(ServiceCommand::List)),
-        (b"status", 1) => Ok(Some(ServiceCommand::Status { name: call.args[0] })),
-        (b"start", 1) => Ok(Some(ServiceCommand::Start { name: call.args[0] })),
-        (b"stop", 1) => Ok(Some(ServiceCommand::Stop { name: call.args[0] })),
-        (b"restart", 1) => Ok(Some(ServiceCommand::Restart { name: call.args[0] })),
+    if expression.part_count == 1 {
+        let ExpressionPart::Lookup(name) = expression.parts[0] else {
+            return Err(ServiceCommandError::Usage);
+        };
+        if !name.quoted || name.bytes.is_empty() || expression.call.is_some() {
+            return Err(ServiceCommandError::Usage);
+        }
+        return Ok(Some(ServiceCommand::Lookup { name: name.bytes }));
+    }
+    if expression.part_count != 2 {
+        return Err(ServiceCommandError::Usage);
+    }
+    let ExpressionPart::Lookup(name) = expression.parts[0] else {
+        return Err(ServiceCommandError::Usage);
+    };
+    let ExpressionPart::Member(member) = expression.parts[1] else {
+        return Err(ServiceCommandError::Usage);
+    };
+    if !name.quoted || name.bytes.is_empty() {
+        return Err(ServiceCommandError::Usage);
+    }
+    match member {
+        b"status" if expression.call.is_none() => {
+            Ok(Some(ServiceCommand::Status { name: name.bytes }))
+        }
+        b"name" if expression.call.is_none() => Ok(Some(ServiceCommand::Name { name: name.bytes })),
+        b"version" if expression.call.is_none() => {
+            Ok(Some(ServiceCommand::Version { name: name.bytes }))
+        }
+        b"start" if expression.call.is_some_and(|call| call.arg_count == 0) => {
+            Ok(Some(ServiceCommand::Start { name: name.bytes }))
+        }
+        b"stop" if expression.call.is_some_and(|call| call.arg_count == 0) => {
+            Ok(Some(ServiceCommand::Stop { name: name.bytes }))
+        }
+        b"restart" if expression.call.is_some_and(|call| call.arg_count == 0) => {
+            Ok(Some(ServiceCommand::Restart { name: name.bytes }))
+        }
         _ => Err(ServiceCommandError::Usage),
     }
 }
@@ -590,46 +775,83 @@ pub fn parse_service_command(
 pub fn parse_storage_command(
     line: &[u8],
 ) -> Result<Option<StorageCommand<'_>>, StorageCommandError> {
-    let Some(call) = unqualified_call(line, &[b"ls", b"touch", b"cat", b"write", b"rm", b"mv"])
-        .map_err(|_| StorageCommandError::Usage)?
+    let Some(expression) =
+        unqualified_expression(line, &[b"ls", b"touch", b"cat", b"write", b"rm", b"mv"])
+            .map_err(|_| StorageCommandError::Usage)?
     else {
         return Ok(None);
     };
-    match (call.name, call.arg_count) {
+    let Some(call) = expression.call else { return Err(StorageCommandError::Usage) };
+    let args = &call.args[..call.arg_count];
+    match (expression.root, call.arg_count) {
         (b"ls", 0) => Ok(Some(StorageCommand::List { path: b"/" })),
-        (b"ls", 1) => Ok(Some(StorageCommand::List { path: path_arg(call.args[0])? })),
-        (b"touch", 1) => Ok(Some(StorageCommand::Touch { path: path_arg(call.args[0])? })),
-        (b"cat", 1) => Ok(Some(StorageCommand::Cat { path: path_arg(call.args[0])? })),
-        (b"rm", 1) => Ok(Some(StorageCommand::Remove { path: path_arg(call.args[0])? })),
+        (b"ls", 1) => Ok(Some(StorageCommand::List { path: path_arg(args[0])? })),
+        (b"touch", 1) => Ok(Some(StorageCommand::Touch { path: path_arg(args[0])? })),
+        (b"cat", 1) => Ok(Some(StorageCommand::Cat { path: path_arg(args[0])? })),
+        (b"rm", 1) => Ok(Some(StorageCommand::Remove { path: path_arg(args[0])? })),
         (b"write", 2) => {
-            let path = path_arg(call.args[0])?;
-            let data = call.args[1];
+            let path = path_arg(args[0])?;
+            let data = string_arg(args[1]).map_err(|_| StorageCommandError::Usage)?;
             if data.is_empty() {
                 return Err(StorageCommandError::Usage);
             }
             Ok(Some(StorageCommand::Write { path, data }))
         }
-        (b"mv", 2) => Ok(Some(StorageCommand::Move {
-            from: path_arg(call.args[0])?,
-            to: path_arg(call.args[1])?,
-        })),
+        (b"mv", 2) => {
+            Ok(Some(StorageCommand::Move { from: path_arg(args[0])?, to: path_arg(args[1])? }))
+        }
         _ => Err(StorageCommandError::Usage),
     }
 }
 
-pub fn parse_network_command(line: &[u8]) -> Result<Option<NetworkCommand>, NetworkCommandError> {
-    let Some(call) = scoped_call(line, b"net").map_err(|_| NetworkCommandError::Usage)? else {
+pub fn parse_network_command(
+    line: &[u8],
+) -> Result<Option<NetworkCommand<'_>>, NetworkCommandError> {
+    let Some(expression) =
+        scoped_expression(line, b"net").map_err(|_| NetworkCommandError::Usage)?
+    else {
         return Ok(None);
     };
-    match (call.name, call.arg_count) {
-        (b"status", 0) => Ok(Some(NetworkCommand::Status)),
-        (b"ping", 1) => Ok(Some(NetworkCommand::Ping { address: parse_ipv4(call.args[0])? })),
-        (b"tcp-probe", 2) => Ok(Some(NetworkCommand::TcpProbe {
-            address: parse_ipv4(call.args[0])?,
-            port: parse_port(call.args[1])?,
-        })),
-        _ => Err(NetworkCommandError::Usage),
+    if expression.part_count == 1 {
+        let ExpressionPart::Member(member) = expression.parts[0] else {
+            return Err(NetworkCommandError::Usage);
+        };
+        return match (member, expression.call) {
+            (b"status", None) => Ok(Some(NetworkCommand::Status)),
+            (b"ping", Some(call)) if call.arg_count == 1 => Ok(Some(NetworkCommand::Ping {
+                address: parse_ipv4(
+                    string_arg(call.args[0]).map_err(|_| NetworkCommandError::Usage)?,
+                )?,
+            })),
+            (b"tcp-probe", Some(call)) if call.arg_count == 2 => {
+                Ok(Some(NetworkCommand::TcpProbe {
+                    address: parse_ipv4(
+                        string_arg(call.args[0]).map_err(|_| NetworkCommandError::Usage)?,
+                    )?,
+                    port: if call.args[1].quoted {
+                        return Err(NetworkCommandError::Usage);
+                    } else {
+                        parse_port(call.args[1].bytes)?
+                    },
+                }))
+            }
+            _ => Err(NetworkCommandError::Usage),
+        };
     }
+    if expression.part_count == 3
+        && expression.call.is_none()
+        && expression.parts[0] == ExpressionPart::Member(b"interface")
+        && expression.parts[2] == ExpressionPart::Member(b"status")
+    {
+        let ExpressionPart::Lookup(name) = expression.parts[1] else {
+            return Err(NetworkCommandError::Usage);
+        };
+        if !name.quoted || name.bytes.is_empty() {
+            return Err(NetworkCommandError::Usage);
+        }
+        return Ok(Some(NetworkCommand::InterfaceStatus { name: name.bytes }));
+    }
+    Err(NetworkCommandError::Usage)
 }
 
 fn parse_ipv4(bytes: &[u8]) -> Result<[u8; 4], NetworkCommandError> {
@@ -677,11 +899,19 @@ fn parse_port(bytes: &[u8]) -> Result<u16, NetworkCommandError> {
     if port == 0 { Err(NetworkCommandError::Usage) } else { Ok(port) }
 }
 
-fn path_arg(args: &[u8]) -> Result<&[u8], StorageCommandError> {
-    if args.is_empty() {
+fn string_arg(value: ParsedValue<'_>) -> Result<&[u8], ()> {
+    if !value.quoted {
+        return Err(());
+    }
+    Ok(value.bytes)
+}
+
+fn path_arg(value: ParsedValue<'_>) -> Result<&[u8], StorageCommandError> {
+    let path = string_arg(value).map_err(|_| StorageCommandError::Usage)?;
+    if path.is_empty() {
         return Err(StorageCommandError::Usage);
     }
-    Ok(args)
+    Ok(path)
 }
 
 fn trim_command(line: &[u8]) -> &[u8] {
@@ -714,13 +944,14 @@ mod tests {
         assert!(help.as_bytes().windows(b"service".len()).any(|window| window == b"service"));
         assert_eq!(
             commands.execute(b"help(\"write\")").as_bytes(),
-            b"write - replace file contents\r\nUsage: write(path, data)\r\nAtomically replaces an existing file's contents. Data must be non-empty.\r\n"
+            b"write - replace file contents\r\nUsage: write(\"path\", \"data\")\r\nAtomically replaces an existing file's contents. Data must be non-empty.\r\n"
         );
-        assert_eq!(commands.execute(b"help(missing)").status, 1);
-        assert!(commands.execute(b"help(missing)").as_bytes().len() <= MAX_OUTPUT_BYTES);
+        assert_eq!(commands.execute(b"help(\"missing\")").status, 1);
+        assert!(commands.execute(b"help(\"missing\")").as_bytes().len() <= MAX_OUTPUT_BYTES);
         assert_eq!(commands.execute(b"echo()").as_bytes(), b"\r\n");
         assert_eq!(commands.execute(b"echo(\"hi\")").as_bytes(), b"hi\r\n");
-        assert_eq!(commands.execute(b"echo(hello)").as_bytes(), b"hello\r\n");
+        assert_eq!(commands.execute(b"echo(\"hello\")").as_bytes(), b"hello\r\n");
+        assert_eq!(commands.execute(b"echo(hello)").status, 2);
         assert!(commands.execute(b"clear()").clear_screen);
         assert_eq!(commands.execute(b"true()").status, 0);
         assert_eq!(commands.execute(b"false()").status, 1);
@@ -773,44 +1004,70 @@ mod tests {
             Some(StorageCommand::Write { path: b"/file", data: b"durable data" })
         );
         assert_eq!(
-            parse_storage_command(b"mv(/old, /new)").unwrap(),
+            parse_storage_command(b"mv(\"/old\", \"/new\")").unwrap(),
             Some(StorageCommand::Move { from: b"/old", to: b"/new" })
         );
-        assert_eq!(parse_storage_command(b"write(/file)").unwrap_err(), StorageCommandError::Usage);
+        assert_eq!(
+            parse_storage_command(b"write(\"/file\")").unwrap_err(),
+            StorageCommandError::Usage
+        );
         assert!(parse_storage_command(b"not-storage()").unwrap().is_none());
     }
 
     #[test]
     fn service_commands_parse_with_bounded_arguments() {
-        assert_eq!(parse_service_command(b"service.list()").unwrap(), Some(ServiceCommand::List));
         assert_eq!(
-            parse_service_command(b"service.restart(\"storage\")").unwrap(),
+            parse_service_command(b"service[\"storage\"]").unwrap(),
+            Some(ServiceCommand::Lookup { name: b"storage" })
+        );
+        assert_eq!(
+            parse_service_command(b"service[\"storage\"].status").unwrap(),
+            Some(ServiceCommand::Status { name: b"storage" })
+        );
+        assert_eq!(
+            parse_service_command(b"service[\"storage\"].restart()").unwrap(),
             Some(ServiceCommand::Restart { name: b"storage" })
         );
         assert_eq!(
-            parse_service_command(b"service.start()").unwrap_err(),
+            parse_service_command(b"service[\"storage\"].start()").unwrap(),
+            Some(ServiceCommand::Start { name: b"storage" })
+        );
+        assert_eq!(
+            parse_service_command(b"service[\"storage\"].name").unwrap(),
+            Some(ServiceCommand::Name { name: b"storage" })
+        );
+        assert_eq!(
+            parse_service_command(b"service[\"storage\"].version").unwrap(),
+            Some(ServiceCommand::Version { name: b"storage" })
+        );
+        assert_eq!(
+            parse_service_command(b"service[\"storage\"].status()").unwrap_err(),
             ServiceCommandError::Usage
         );
-        assert!(parse_service_command(b"echo(hi)").unwrap().is_none());
+        assert!(parse_service_command(b"echo(\"hi\")").unwrap().is_none());
     }
 
     #[test]
     fn network_commands_parse_ipv4_and_port_bounds() {
-        assert_eq!(parse_network_command(b"net.status()").unwrap(), Some(NetworkCommand::Status));
-        assert_eq!(
-            parse_network_command(b"net.ping(10.0.2.2)").unwrap(),
-            Some(NetworkCommand::Ping { address: [10, 0, 2, 2] })
-        );
+        assert_eq!(parse_network_command(b"net.status").unwrap(), Some(NetworkCommand::Status));
         assert_eq!(
             parse_network_command(b"net.ping(\"10.0.2.2\")").unwrap(),
             Some(NetworkCommand::Ping { address: [10, 0, 2, 2] })
+        );
+        assert_eq!(
+            parse_network_command(b"net.interface[\"eth0\"].status").unwrap(),
+            Some(NetworkCommand::InterfaceStatus { name: b"eth0" })
         );
         assert_eq!(
             parse_network_command(b"net.tcp-probe(\"10.0.2.2\", 8080)").unwrap(),
             Some(NetworkCommand::TcpProbe { address: [10, 0, 2, 2], port: 8080 })
         );
         assert_eq!(
-            parse_network_command(b"net.ping(10.0.2.999)").unwrap_err(),
+            parse_network_command(b"net.ping(\"10.0.2.999\")").unwrap_err(),
+            NetworkCommandError::Usage
+        );
+        assert_eq!(
+            parse_network_command(b"net.ping(10.0.2.2)").unwrap_err(),
             NetworkCommandError::Usage
         );
         assert_eq!(
@@ -832,6 +1089,13 @@ mod tests {
         let mut short = [0; 5];
         assert_eq!(format_service_record(&record, &mut short), 5);
         assert_eq!(&short, b"stora");
+
+        let length = format_service_property(&record, ServiceProperty::Status, &mut output);
+        assert_eq!(&output[..length], b"running\r\n");
+        let length = format_service_property(&record, ServiceProperty::Name, &mut output);
+        assert_eq!(&output[..length], b"storage\r\n");
+        let length = format_service_property(&record, ServiceProperty::Version, &mut output);
+        assert_eq!(&output[..length], b"0.1.0\r\n");
     }
 
     #[test]

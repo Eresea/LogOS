@@ -17,8 +17,7 @@ pub const MOD_NUM_LOCK: u16 = logos_abi::MOD_NUM_LOCK;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum KeyboardLayout {
     /// French AZERTY base and Shift layers, including committed UTF-8 keycaps.
-    /// AltGr and dead-key composition are intentionally unsupported; those
-    /// keys use bounded ASCII-compatible semantic fallbacks.
+    /// The bracket pair is also supported through AltGr/Ctrl+Alt.
     #[default]
     Azerty,
     /// US QWERTY physical key mapping.
@@ -149,6 +148,9 @@ impl InputDecoder {
     }
 
     fn committed_text(&self, physical_code: u8, key: KeyCode) -> Option<InputMessage> {
+        if let Some(bytes) = azerty_altgr_text(self.layout, physical_code, self.modifiers) {
+            return InputMessage::text(bytes);
+        }
         if self.modifiers & (MOD_CTRL | MOD_ALT) != 0 {
             return None;
         }
@@ -169,6 +171,21 @@ impl InputDecoder {
         };
         InputMessage::text(&[byte])
     }
+}
+
+fn azerty_altgr_text(
+    layout: KeyboardLayout,
+    physical_code: u8,
+    modifiers: u16,
+) -> Option<&'static [u8]> {
+    if layout != KeyboardLayout::Azerty || modifiers & MOD_ALT == 0 {
+        return None;
+    }
+    Some(match physical_code {
+        0x2e => b"[",
+        0x4e => b"]",
+        _ => return None,
+    })
 }
 
 fn azerty_text(layout: KeyboardLayout, physical_code: u8, modifiers: u16) -> Option<&'static [u8]> {
@@ -376,8 +393,7 @@ const fn qwerty_code(byte: u8) -> KeyCode {
 
 const fn azerty_code(byte: u8) -> KeyCode {
     // Semantic key codes remain ASCII-compatible. The text path preserves
-    // supported accented and shifted keycaps; AltGr, ², and dead-key state
-    // are intentionally outside this bounded decoder.
+    // supported accented, shifted, and bracket AltGr keycaps.
     match byte {
         0x16 => KeyCode::character(b'&'),
         0x1e => KeyCode::character(b'e'),
@@ -553,6 +569,28 @@ mod tests {
     }
 
     #[test]
+    fn azerty_altgr_brackets_commit_for_altgr_and_ctrl_alt() {
+        let mut decoder = InputDecoder::new();
+
+        decoder.feed(0x14);
+        decoder.feed(0xe0);
+        decoder.feed(0x11);
+        let event = decoder.feed(0x2e).unwrap();
+        assert_eq!(event.text.unwrap().text_bytes(), Some(&b"["[..]));
+
+        decoder.feed(0xe0);
+        decoder.feed(0xf0);
+        decoder.feed(0x11);
+        decoder.feed(0xf0);
+        decoder.feed(0x14);
+
+        decoder.feed(0xe0);
+        decoder.feed(0x11);
+        let event = decoder.feed(0x4e).unwrap();
+        assert_eq!(event.text.unwrap().text_bytes(), Some(&b"]"[..]));
+    }
+
+    #[test]
     fn modifiers_and_extended_arrows_are_semantic() {
         let mut decoder = InputDecoder::with_layout(KeyboardLayout::Qwerty);
         decoder.feed(0x12);
@@ -590,8 +628,8 @@ mod tests {
         let mut committed = None;
 
         for scancode in [
-            0x24, 0x21, 0x33, 0x44, 0x12, 0x46, 0xf0, 0x12, 0x4d, 0x2d, 0x44, 0x44, 0x2b, 0x12,
-            0x45, 0xf0, 0x12, 0x5a,
+            0x2a, 0x24, 0x2d, 0x1b, 0x43, 0x44, 0x31, 0x12, 0x46, 0xf0, 0x12, 0x12, 0x45, 0xf0,
+            0x12, 0x5a,
         ] {
             let Some(message) = decoder.feed(scancode).map(|event| event.terminal_message()) else {
                 continue;
@@ -606,9 +644,9 @@ mod tests {
         }
 
         let length = committed.expect("enter commits the command");
-        assert_eq!(&command[..length], b"echo(proof)");
+        assert_eq!(&command[..length], b"version()");
         let result = commands.execute(&command[..length]);
-        assert_eq!(result.as_bytes(), b"proof\r\n");
+        assert_eq!(result.as_bytes(), b"LogOS vNext 0.1.0\r\n");
         let mut output = ShellOutput::new();
         session.command_output(result.as_bytes(), &mut output);
         terminal.session_output_bytes(output.as_bytes());

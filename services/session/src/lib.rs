@@ -285,6 +285,7 @@ impl LineEditor {
         if self.cursor != self.line_len
             || self.line[..self.cursor].contains(&b' ')
             || self.line[..self.cursor].contains(&b'(')
+            || self.line[..self.cursor].contains(&b'[')
         {
             return;
         }
@@ -304,9 +305,8 @@ impl LineEditor {
                 let candidate = spec.name;
                 let suffix = &candidate[prefix.len()..];
                 let punctuation: &[u8] = match spec.kind {
-                    logos_commands::CommandKind::Service | logos_commands::CommandKind::Network => {
-                        b"."
-                    }
+                    logos_commands::CommandKind::Service => b"[\"",
+                    logos_commands::CommandKind::Network => b".",
                     _ => b"()",
                 };
                 let inserted_len = suffix.len() + punctuation.len();
@@ -635,7 +635,7 @@ mod tests {
         let mut editor = LineEditor::new();
         output = ShellOutput::new();
         let length = editor.input_for_command(b"serv\t\r", &mut command, &mut output).unwrap();
-        assert_eq!(&command[..length], b"service.");
+        assert_eq!(&command[..length], b"service[\"");
 
         let mut editor = LineEditor::new();
         output = ShellOutput::new();
