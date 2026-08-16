@@ -145,12 +145,16 @@ impl ServiceManager {
         if slot >= self.slots.len() { None } else { self.slots[slot].service }
     }
 
-    pub const fn image_source(&self, service: logos_abi::ServiceId) -> ServiceImageSource {
-        let _ = self;
-        let _ = service;
-        ServiceImageSource::Predeclared
+    pub const fn image_source(&self, service: logos_abi::ServiceId) -> Option<ServiceImageSource> {
+        if service.index() < SERVICE_IMAGES.len() && self.slots[service.index()].service.is_some() {
+            Some(ServiceImageSource::Predeclared)
+        } else {
+            None
+        }
     }
 
+    /// Filesystem package loading remains a deliberate future seam until the
+    /// bounded package object format is available.
     pub fn load_filesystem_package(
         &mut self,
         _service: logos_abi::ServiceId,
@@ -217,6 +221,13 @@ impl ServiceManager {
                 self.slots[index].state = ManagerState::Running;
                 self.slots[index].restarts = self.slots[index].restarts.saturating_add(1);
             }
+        }
+    }
+
+    pub fn prepare_graph_restart(&mut self) {
+        for slot in &mut self.slots[..SERVICE_IMAGES.len()] {
+            slot.state = ManagerState::Stopped;
+            slot.generation = slot.generation.wrapping_add(1).max(1);
         }
     }
 
@@ -415,11 +426,29 @@ impl ServiceManager {
                 }
             }
         }
-        for service in SERVICE_IMAGES.iter().rev().map(|spec| spec.service()) {
-            if included & (1 << service.index()) != 0 {
-                output[count] = service;
-                count += 1;
+        let mut order = [logos_abi::ServiceId::Input; MAX_SERVICE_SLOTS];
+        let mut order_count = 0;
+        let mut remaining = included;
+        while remaining != 0 {
+            let mut advanced = false;
+            for service in SERVICE_IMAGES.iter().map(|spec| spec.service()) {
+                let bit = 1 << service.index();
+                if remaining & bit != 0 && dependencies(service) & remaining == 0 {
+                    order[order_count] = service;
+                    order_count += 1;
+                    remaining &= !bit;
+                    advanced = true;
+                    break;
+                }
             }
+            if !advanced {
+                break;
+            }
+        }
+        while order_count != 0 {
+            order_count -= 1;
+            output[count] = order[order_count];
+            count += 1;
         }
         count
     }
@@ -551,7 +580,21 @@ mod tests {
             manager.load_filesystem_package(ServiceId::Input, &[0; 1]),
             Err(ServiceImageError::Unsupported)
         );
-        assert_eq!(manager.image_source(ServiceId::Input), ServiceImageSource::Predeclared);
+        assert_eq!(manager.image_source(ServiceId::Input), Some(ServiceImageSource::Predeclared));
+    }
+
+    #[test]
+    fn graph_restart_invalidates_existing_handles() {
+        let mut manager = manager();
+        let handle = manager.handle(ServiceId::Input.index()).unwrap();
+        manager.prepare_graph_restart();
+        let response = manager
+            .request(
+                request(ManagerOperation::Status, handle.slot(), handle.generation()),
+                ManagerRights::INSPECT,
+            )
+            .response;
+        assert_eq!(response.status, ManagerStatus::Stale);
     }
 
     #[test]

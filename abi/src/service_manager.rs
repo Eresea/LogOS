@@ -85,7 +85,11 @@ impl ManagerCapability {
         Self { generation: 0, rights: ManagerRights::NONE, reserved: [0; 3], service_epoch: 0 };
 
     pub const fn new(generation: u32, rights: ManagerRights, service_epoch: u64) -> Option<Self> {
-        if generation == 0 || rights.0 == 0 || service_epoch == 0 {
+        if generation == 0
+            || rights.0 == 0
+            || rights.0 & !ManagerRights::ALL.0 != 0
+            || service_epoch == 0
+        {
             return None;
         }
         Some(Self { generation, rights, reserved: [0; 3], service_epoch })

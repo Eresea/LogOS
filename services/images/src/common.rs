@@ -163,8 +163,11 @@ pub fn manager_call(
             *request,
         );
     }
-    let status =
-        manager_syscall(logos_abi::MANAGER_SYSCALL, 0, mem::size_of::<logos_abi::ManagerRequest>());
+    let status = manager_syscall(
+        logos_abi::MANAGER_SYSCALL,
+        logos_abi::MANAGER_CAPABILITY_SLOT,
+        mem::size_of::<logos_abi::ManagerRequest>(),
+    );
     if status == logos_abi::IpcStatus::Ok {
         *response = unsafe {
             ptr::read_unaligned(logos_abi::IPC_STAGING_BASE as *const logos_abi::ManagerResponse)

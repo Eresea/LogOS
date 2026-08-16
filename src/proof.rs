@@ -278,8 +278,11 @@ pub(crate) fn verify_service_manager_boundary() {
     {
         crate::arch_fatal(b"LogOS vNext: manager status result");
     }
-    if crate::arch::manager_call(crate::process::ProcessHandle::from_raw(0), 0, 0)
-        != logos_abi::IpcStatus::Unauthorized
+    if crate::arch::manager_call(
+        crate::process::ProcessHandle::from_raw(0),
+        logos_abi::MANAGER_CAPABILITY_SLOT,
+        0,
+    ) != logos_abi::IpcStatus::Unauthorized
     {
         crate::arch_fatal(b"LogOS vNext: manager authorization");
     }

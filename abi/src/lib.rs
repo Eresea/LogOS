@@ -57,6 +57,7 @@ pub const IPC_STAGING_BASE: usize = SERVICE_IPC_BASE + 0x10_000;
 pub const STORAGE_DATA_BASE: usize = SERVICE_IPC_BASE + 0x11_000;
 pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x12_000;
 pub const MANAGER_CAPABILITY_BASE: usize = IPC_CAPABILITY_BASE + IPC_PAGE_BYTES;
+pub const MANAGER_CAPABILITY_SLOT: usize = 0;
 pub const MAX_IPC_CAPABILITIES: usize = 4;
 pub const MAX_MANAGER_SERVICES: usize = 8;
 pub const MAX_SERVICE_NAME_BYTES: usize = 16;
@@ -1089,6 +1090,7 @@ mod tests {
         assert!(capability.rights.contains(ManagerRights::LIFECYCLE));
         assert!(ManagerCapability::new(0, ManagerRights::ALL, 9).is_none());
         assert!(ManagerCapability::new(3, ManagerRights::NONE, 9).is_none());
+        assert!(ManagerCapability::new(3, ManagerRights(0x80), 9).is_none());
         assert!(core::mem::size_of::<ManagerRequest>() <= IPC_PAGE_BYTES);
         assert!(core::mem::size_of::<ManagerResponse>() <= IPC_PAGE_BYTES);
         assert_eq!(MANAGER_CAPABILITY_BASE, IPC_CAPABILITY_BASE + IPC_PAGE_BYTES);

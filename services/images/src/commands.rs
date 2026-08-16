@@ -582,18 +582,6 @@ fn status_text(status: StorageApiStatus) -> &'static [u8] {
     }
 }
 
-fn service_slot(name: &[u8]) -> Option<u8> {
-    match name {
-        b"input" => Some(0),
-        b"display" => Some(1),
-        b"terminal" => Some(2),
-        b"session" => Some(3),
-        b"commands" => Some(4),
-        b"storage" => Some(5),
-        _ => None,
-    }
-}
-
 fn manager_error(status: logos_abi::ManagerStatus) -> &'static [u8] {
     match status {
         logos_abi::ManagerStatus::Unauthorized => b"service manager unauthorized\r\n",
@@ -622,7 +610,7 @@ fn manager_state(state: logos_abi::ManagerState) -> &'static [u8] {
     }
 }
 
-fn manager_record(slot: u8) -> Option<logos_abi::ServiceManagerRecord> {
+fn manager_record(name: &[u8]) -> Result<Option<logos_abi::ServiceManagerRecord>, IpcStatus> {
     let mut cursor = 0u8;
     for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
         let mut request = logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, 1);
@@ -635,17 +623,18 @@ fn manager_record(slot: u8) -> Option<logos_abi::ServiceManagerRecord> {
         if common::manager_call(&request, &mut response) != IpcStatus::Ok
             || response.status != logos_abi::ManagerStatus::Ok
         {
-            return None;
+            return Err(IpcStatus::Malformed);
         }
-        if response.record.slot == slot {
-            return Some(response.record);
+        let name_len = usize::from(response.record.name_len).min(response.record.name.len());
+        if &response.record.name[..name_len] == name {
+            return Ok(Some(response.record));
         }
         if response.cursor == u8::MAX {
-            return None;
+            return Ok(None);
         }
         cursor = response.cursor;
     }
-    None
+    Ok(None)
 }
 
 fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut PendingOutput) {
@@ -664,22 +653,20 @@ fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut Pe
             (logos_abi::ManagerOperation::Restart, name, false)
         }
     };
-    if !list && service_slot(name).is_none() {
-        pending.stage(b"service not found\r\n");
-        return;
-    }
     let target = if list {
         None
     } else {
-        let Some(slot) = service_slot(name) else {
-            pending.stage(b"service not found\r\n");
-            return;
-        };
-        let Some(record) = manager_record(slot) else {
-            pending.stage(b"service manager unavailable\r\n");
-            return;
-        };
-        Some(record)
+        match manager_record(name) {
+            Ok(Some(record)) => Some(record),
+            Ok(None) => {
+                pending.stage(b"service not found\r\n");
+                return;
+            }
+            Err(_) => {
+                pending.stage(b"service manager unavailable\r\n");
+                return;
+            }
+        }
     };
     let mut output = [0; logos_commands::MAX_OUTPUT_BYTES];
     let mut output_len = 0;

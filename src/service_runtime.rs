@@ -71,7 +71,7 @@ pub struct ServiceRuntime {
     heartbeat_ticks: [AtomicU64; SERVICE_COUNT],
     supervisor: LiveSupervisor,
     manager: ServiceManager,
-    manager_capability_frame: Option<FrameAddress>,
+    manager_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
     manager_generation: u32,
     pending_restart: Option<([ServiceId; crate::service_manager::MAX_SERVICE_SLOTS], usize)>,
     ipc_generation: u16,
@@ -110,7 +110,7 @@ impl ServiceRuntime {
             heartbeat_ticks: [const { AtomicU64::new(0) }; SERVICE_COUNT],
             supervisor: LiveSupervisor::new(),
             manager: ServiceManager::new(),
-            manager_capability_frame: None,
+            manager_capability_frames: [None; SERVICE_COUNT],
             manager_generation: 1,
             pending_restart: None,
             ipc_generation: 1,
@@ -322,7 +322,7 @@ impl ServiceRuntime {
             if service == ServiceId::Commands {
                 let manager_frame =
                     self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
-                self.manager_capability_frame = Some(manager_frame);
+                self.manager_capability_frames[service.index()] = Some(manager_frame);
                 memory.clear(manager_frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
                 let capability = logos_abi::ManagerCapability::new(
                     self.manager_generation,
@@ -930,13 +930,16 @@ impl ServiceRuntime {
         capability_slot: usize,
         length: usize,
     ) -> logos_abi::IpcStatus {
-        if self.service_for_process(process) != Some(ServiceId::Commands) || capability_slot != 0 {
+        let Some(service) = self.service_for_process(process) else {
+            return logos_abi::IpcStatus::Unauthorized;
+        };
+        if capability_slot != logos_abi::MANAGER_CAPABILITY_SLOT {
             return logos_abi::IpcStatus::Unauthorized;
         }
         if length != core::mem::size_of::<logos_abi::ManagerRequest>() {
             return logos_abi::IpcStatus::Malformed;
         }
-        let Some(capability_frame) = self.manager_capability_frame else {
+        let Some(capability_frame) = self.manager_capability_frames[service.index()] else {
             return logos_abi::IpcStatus::Unauthorized;
         };
         let capability = unsafe {
@@ -1018,8 +1021,11 @@ impl ServiceRuntime {
                 request,
             );
         }
-        if self.manager_call(process, 0, core::mem::size_of::<logos_abi::ManagerRequest>())
-            != logos_abi::IpcStatus::Ok
+        if self.manager_call(
+            process,
+            logos_abi::MANAGER_CAPABILITY_SLOT,
+            core::mem::size_of::<logos_abi::ManagerRequest>(),
+        ) != logos_abi::IpcStatus::Ok
         {
             return None;
         }
@@ -1104,6 +1110,7 @@ impl ServiceRuntime {
         if !self.supervisor.prepare_restart() {
             return Err(ServiceRuntimeError::RestartLimit);
         }
+        self.manager.prepare_graph_restart();
         self.stop_tasks()?;
         crate::arch::prepare_task_address_space(0);
         let result = crate::arch::restart_critical_section(|| {
@@ -1249,9 +1256,10 @@ impl ServiceRuntime {
                 self.ipc_capability_frames[index] = None;
             }
         }
-        if let Some(frame) = self.manager_capability_frame {
-            self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.manager_capability_frame = None;
+        for frame in &mut self.manager_capability_frames {
+            if let Some(frame) = frame.take() {
+                self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+            }
         }
         for index in 0..SERVICE_COUNT {
             if let Some((process, _)) = self.launches[index].take() {
@@ -1269,7 +1277,6 @@ impl ServiceRuntime {
             self.images[index].reclaim(&mut self.frame_pool);
         }
         self.startup = ServiceStartup::new();
-        self.manager = ServiceManager::new();
         Ok(())
     }
 }
