@@ -646,6 +646,10 @@ impl<B: BlockStore> DurableNamespace<B> {
     fn reopen(&mut self) -> Result<(), NamespaceError> {
         let mut volume = Volume::open(&mut self.store)?;
         let mut namespace = ObjectNamespace::new();
+        let mut snapshot = [0; SNAPSHOT_BYTES];
+        if volume.load_checkpoint(&mut self.store, &mut snapshot)?.is_some() {
+            namespace.restore_snapshot(&snapshot)?;
+        }
         volume.recover(&mut self.store, &mut namespace)?;
         self.volume = volume;
         self.namespace = namespace;
@@ -1173,6 +1177,20 @@ mod tests {
         let id = reopened.resolve_path(b"/committed").unwrap();
         let mut output = [0; 7];
         assert_eq!(reopened.read(id, 0, &mut output).unwrap(), 7);
+        assert_eq!(&output, b"durable");
+    }
+
+    #[test]
+    fn checkpointed_namespace_reopens_without_losing_files() {
+        let store = MemoryBlockStore::<32>::new();
+        let mut fs = DurableNamespace::format(store).unwrap();
+        let file = fs.create_file(fs.root(), b"proof").unwrap();
+        fs.write(file, 0, b"durable").unwrap();
+
+        fs.reopen().unwrap();
+        let file = fs.resolve_path(b"/proof").unwrap();
+        let mut output = [0; 7];
+        assert_eq!(fs.read(file, 0, &mut output).unwrap(), 7);
         assert_eq!(&output, b"durable");
     }
 
