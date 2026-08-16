@@ -12,6 +12,7 @@ flowchart LR
     S -->|completed command| C[Commands]
     C -->|output bytes| S
     C <-->|versioned file API| V[Storage]
+    C -->|manager syscall| M[Core service manager]
     S -->|output bytes| T
     T -->|cell diffs| D[Display state]
     T -. restart epoch .-> D
@@ -29,6 +30,11 @@ The restart path is deliberately volatile for terminal/session state and in-flig
 state is owned by Storage: mutating commands use one Begin → operation → Commit transaction, while
 reads use committed state unless an API caller supplies the active transaction ID. A reboot starts
 from the fixed boot image, reopens the durable namespace, and discards any uncommitted transaction.
+
+Commands exposes `service list`, `service status`, `service start`, `service stop`, and `service
+restart` as a text adapter over the versioned Core manager ABI. The manager validates a private,
+process-bound capability before changing lifecycle state; a future GUI shell can use the same
+request/response values without parsing terminal output.
 
 This document describes the terminal contract path. The current QEMU proof validates service image
 loading, isolated roots, framebuffer and keyboard mappings, ring-3 entry, rendering, semantic input,

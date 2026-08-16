@@ -28,6 +28,7 @@ static PASSED: AtomicBool = AtomicBool::new(false);
 static REPORTED: AtomicBool = AtomicBool::new(false);
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
 static LIVE_SERVICE_RESTARTED: AtomicBool = AtomicBool::new(false);
+static MANAGER_RESTART_COMPLETED: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_HANDLE: AtomicU64 = AtomicU64::new(0);
 static BACKPRESSURE_FULL: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_BLOCKED: AtomicBool = AtomicBool::new(false);
@@ -142,6 +143,10 @@ pub fn live_service_restarted() {
     LIVE_SERVICE_RESTARTED.store(true, Ordering::Release);
 }
 
+pub fn manager_restart_completed() {
+    MANAGER_RESTART_COMPLETED.store(true, Ordering::Release);
+}
+
 pub fn observe_ring3_cpu(cpu: usize, expected_root: usize, actual_root: usize) {
     if cpu < MAX_CPUS {
         let previous = RING3_CPU_MASK.fetch_or(1usize << cpu, Ordering::AcqRel);
@@ -208,6 +213,7 @@ pub fn observe(cpu: usize) {
         && HEALTH_RESTARTED.load(Ordering::Acquire)
         && HEALTH_LATE_COMPLETION_REJECTED.load(Ordering::Acquire)
         && HEALTH_RETRY_COMPLETED.load(Ordering::Acquire)
+        && MANAGER_RESTART_COMPLETED.load(Ordering::Acquire)
         && LIVE_SERVICE_RESTARTED.load(Ordering::Acquire)
         && crate::user_mode::syscalls() > 0
         && crate::user_mode::blocked_waits() > 0
@@ -248,6 +254,44 @@ fn verify_hostile_ipc_boundary() {
         crate::arch_fatal(b"LogOS vNext: hostile IPC rejection");
     }
     HOSTILE_IPC_PROCESS_REJECTED.store(true, Ordering::Release);
+}
+
+pub(crate) fn verify_service_manager_boundary() {
+    let list = crate::arch::manager_proof(logos_abi::ManagerRequest::new(
+        logos_abi::ManagerOperation::List,
+        1,
+    ))
+    .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: manager list"));
+    if list.status != logos_abi::ManagerStatus::Ok
+        || list.record.slot != 0
+        || &list.record.name[..usize::from(list.record.name_len)] != b"input"
+    {
+        crate::arch_fatal(b"LogOS vNext: manager list result");
+    }
+    let mut status = logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::Status, 2);
+    status.slot = 0;
+    status.generation = 1;
+    let status = crate::arch::manager_proof(status)
+        .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: manager status"));
+    if status.status != logos_abi::ManagerStatus::Ok
+        || status.record.state != logos_abi::ManagerState::Running
+    {
+        crate::arch_fatal(b"LogOS vNext: manager status result");
+    }
+    if crate::arch::manager_call(crate::process::ProcessHandle::from_raw(0), 0, 0)
+        != logos_abi::IpcStatus::Unauthorized
+    {
+        crate::arch_fatal(b"LogOS vNext: manager authorization");
+    }
+    let mut restart = logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::Restart, 3);
+    restart.slot = 0;
+    restart.generation = 1;
+    let restart = crate::arch::manager_proof(restart)
+        .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: manager restart"));
+    if restart.status != logos_abi::ManagerStatus::Accepted {
+        crate::arch_fatal(b"LogOS vNext: manager restart result");
+    }
+    crate::arch_proof_line(b"LogOS vNext: service manager ready");
 }
 
 pub fn hostile_ipc_syscall_rejected() {

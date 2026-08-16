@@ -50,3 +50,4 @@
 | [0046](0046-storage-service-lifecycle.md) | Accepted | Storage is admitted as the sixth fixed service while its kernel-mediated request endpoint remains separately gated |
 | [0047](0047-storage-command-api.md) | Accepted | Commands uses a bounded versioned Storage API; Storage owns one active transaction, shadow state, and durable publication |
 | [0048](0048-storage-format-compatibility.md) | Accepted | Storage versions fail closed; v1 recovers valid commits after torn gaps and never silently downgrades or reformats unknown media |
+| [0049](0049-service-manager-control-plane.md) | Accepted | Core-owned bounded service lifecycle API uses a process-bound manager capability and fixed control syscall |

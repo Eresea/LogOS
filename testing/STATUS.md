@@ -19,8 +19,10 @@ Status: active preemptive SMP Core milestone.
   in-process Health Ping command/response and restart/retry path, the loaded ring-3 service graph,
   framebuffer/keyboard mappings, semantic input, rendering, and supervisor restart, plus
   blocked/wake (cross-CPU for SMP runs), post-CR3 ring-3 execution on an AP, and bounded reschedule
-  IPI delivery. Hostile-peer coverage rejects forged process access, wrong-direction capabilities,
-  stale and oversized operations, disconnected queues, and legacy endpoint mappings.
+  IPI delivery. The service-manager boundary proof confirms Commands-only manager capability
+  mapping, list/status, unauthorized caller rejection, and manager-driven restart completion.
+  Hostile-peer coverage rejects forged process access, wrong-direction capabilities, stale and
+  oversized operations, disconnected queues, and legacy endpoint mappings.
 - The fresh-disk storage proof reaches `Storage persistent-disk proof PASS` after proving durable
   command API writes, reboot reopen, aborted and removed files, and torn-journal recovery. Host tests
   cover the versioned API, malformed requests, transaction ownership, bounded namespace operations,

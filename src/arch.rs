@@ -912,6 +912,27 @@ pub(crate) fn ipc_receive(
     }
 }
 
+pub(crate) fn manager_call(
+    process: crate::process::ProcessHandle,
+    capability_slot: usize,
+    length: usize,
+) -> logos_abi::IpcStatus {
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).manager_call(
+            process,
+            capability_slot,
+            length,
+        )
+    }
+}
+
+#[cfg(feature = "qemu-proof")]
+pub(crate) fn manager_proof(
+    request: logos_abi::ManagerRequest,
+) -> Option<logos_abi::ManagerResponse> {
+    unsafe { (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).manager_proof(request) }
+}
+
 #[cfg(feature = "qemu-proof")]
 pub(crate) fn hostile_ipc_layout_valid() -> bool {
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).hostile_ipc_layout_valid() }

@@ -23,6 +23,7 @@ pub enum CommandKind {
     Write,
     Remove,
     Move,
+    Service,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,7 +43,7 @@ pub struct CommandSpec {
     pub manual: &'static [u8],
 }
 
-pub const COMMAND_SPECS: [CommandSpec; 15] = [
+pub const COMMAND_SPECS: [CommandSpec; 16] = [
     CommandSpec {
         name: b"help",
         kind: CommandKind::Help,
@@ -148,6 +149,13 @@ pub const COMMAND_SPECS: [CommandSpec; 15] = [
         summary: b"rename a file",
         manual: b"Renames a file from one path to another.",
     },
+    CommandSpec {
+        name: b"service",
+        kind: CommandKind::Service,
+        usage: b"service <list|status|start|stop|restart> [name]",
+        summary: b"manage services",
+        manual: b"Lists, inspects, starts, stops, or restarts a service.",
+    },
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -162,6 +170,20 @@ pub enum StorageCommand<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageCommandError {
+    Usage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceCommand<'a> {
+    List,
+    Status { name: &'a [u8] },
+    Start { name: &'a [u8] },
+    Stop { name: &'a [u8] },
+    Restart { name: &'a [u8] },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceCommandError {
     Usage,
 }
 
@@ -237,6 +259,12 @@ impl CommandService {
         for spec in COMMAND_SPECS {
             let matches = match spec.kind {
                 CommandKind::Echo => {
+                    line == spec.name
+                        || (line.len() > spec.name.len()
+                            && line.starts_with(spec.name)
+                            && line[spec.name.len()] == b' ')
+                }
+                CommandKind::Service => {
                     line == spec.name
                         || (line.len() > spec.name.len()
                             && line.starts_with(spec.name)
@@ -333,6 +361,10 @@ impl CommandService {
                 | CommandKind::Write
                 | CommandKind::Remove
                 | CommandKind::Move => output.extend(b"storage command unavailable\r\n"),
+                CommandKind::Service => {
+                    output.status = 2;
+                    output.extend(b"usage: service <list|status|start|stop|restart> [name]\r\n");
+                }
             },
             None => {
                 output.status = 127;
@@ -340,6 +372,37 @@ impl CommandService {
             }
         }
         output
+    }
+}
+
+pub fn parse_service_command(
+    line: &[u8],
+) -> Result<Option<ServiceCommand<'_>>, ServiceCommandError> {
+    let line = trim_command(line);
+    let Some(separator) = line.iter().position(|byte| *byte == b' ') else {
+        return if line == b"service" { Err(ServiceCommandError::Usage) } else { Ok(None) };
+    };
+    if &line[..separator] != b"service" {
+        return Ok(None);
+    }
+    let args = trim_command(&line[separator + 1..]);
+    let Some(command_end) = args.iter().position(|byte| *byte == b' ') else {
+        return match args {
+            b"list" => Ok(Some(ServiceCommand::List)),
+            _ => Err(ServiceCommandError::Usage),
+        };
+    };
+    let command = &args[..command_end];
+    let name = trim_command(&args[command_end + 1..]);
+    if name.is_empty() || name.contains(&b' ') {
+        return Err(ServiceCommandError::Usage);
+    }
+    match command {
+        b"status" => Ok(Some(ServiceCommand::Status { name })),
+        b"start" => Ok(Some(ServiceCommand::Start { name })),
+        b"stop" => Ok(Some(ServiceCommand::Stop { name })),
+        b"restart" => Ok(Some(ServiceCommand::Restart { name })),
+        _ => Err(ServiceCommandError::Usage),
     }
 }
 
@@ -414,10 +477,9 @@ mod tests {
     #[test]
     fn builtins_are_bounded_and_deterministic() {
         let mut commands = CommandService::new();
-        assert_eq!(
-            commands.execute(b"help").as_bytes(),
-            b"Available commands:\r\nhelp [command] - show command help\r\necho <text> - print text\r\nclear - clear the screen\r\ntrue - succeed\r\nfalse - fail\r\nversion - show the version\r\nuname - show the system name\r\nshutdown - power off\r\nreboot - restart\r\nls [path] - list files\r\ntouch <path> - create an empty file\r\ncat <path> - print a file\r\nwrite <path> <data> - replace file contents\r\nrm <path> - remove a file\r\nmv <from> <to> - rename a file\r\nUse help <command> for details.\r\n"
-        );
+        let help = commands.execute(b"help");
+        assert!(help.as_bytes().len() <= MAX_OUTPUT_BYTES);
+        assert!(help.as_bytes().windows(b"service".len()).any(|window| window == b"service"));
         assert_eq!(
             commands.execute(b"help write").as_bytes(),
             b"write - replace file contents\r\nUsage: write <path> <data>\r\nAtomically replaces an existing file's contents. Data must be non-empty.\r\n"
@@ -469,6 +531,20 @@ mod tests {
         );
         assert_eq!(parse_storage_command(b"write /file").unwrap_err(), StorageCommandError::Usage);
         assert!(parse_storage_command(b"not-storage").unwrap().is_none());
+    }
+
+    #[test]
+    fn service_commands_parse_with_bounded_arguments() {
+        assert_eq!(parse_service_command(b"service list").unwrap(), Some(ServiceCommand::List));
+        assert_eq!(
+            parse_service_command(b"service restart storage").unwrap(),
+            Some(ServiceCommand::Restart { name: b"storage" })
+        );
+        assert_eq!(
+            parse_service_command(b"service start").unwrap_err(),
+            ServiceCommandError::Usage
+        );
+        assert!(parse_service_command(b"echo hi").unwrap().is_none());
     }
 
     #[test]

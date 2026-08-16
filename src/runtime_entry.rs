@@ -11,6 +11,8 @@ use crate::proof;
 pub(crate) fn run() {
     crate::start_services();
     #[cfg(feature = "qemu-proof")]
+    proof::verify_service_manager_boundary();
+    #[cfg(feature = "qemu-proof")]
     proof::handoff_started();
     #[cfg(feature = "qemu-proof")]
     crate::suppress_service_heartbeat(logos_abi::ServiceId::Terminal);

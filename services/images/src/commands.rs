@@ -582,6 +582,106 @@ fn status_text(status: StorageApiStatus) -> &'static [u8] {
     }
 }
 
+fn service_slot(name: &[u8]) -> Option<u8> {
+    match name {
+        b"input" => Some(0),
+        b"display" => Some(1),
+        b"terminal" => Some(2),
+        b"session" => Some(3),
+        b"commands" => Some(4),
+        b"storage" => Some(5),
+        _ => None,
+    }
+}
+
+fn manager_error(status: logos_abi::ManagerStatus) -> &'static [u8] {
+    match status {
+        logos_abi::ManagerStatus::Unauthorized => b"service manager unauthorized\r\n",
+        logos_abi::ManagerStatus::NotFound => b"service not found\r\n",
+        logos_abi::ManagerStatus::Stale => b"stale service handle\r\n",
+        logos_abi::ManagerStatus::InvalidState => b"invalid service state\r\n",
+        logos_abi::ManagerStatus::Dependency => b"service dependency violation\r\n",
+        logos_abi::ManagerStatus::Busy => b"service manager busy\r\n",
+        logos_abi::ManagerStatus::Capacity => b"service manager capacity\r\n",
+        logos_abi::ManagerStatus::Malformed => b"malformed service request\r\n",
+        logos_abi::ManagerStatus::Unsupported => b"service operation unsupported\r\n",
+        logos_abi::ManagerStatus::Ok | logos_abi::ManagerStatus::Accepted => {
+            b"service manager error\r\n"
+        }
+    }
+}
+
+fn manager_state(state: logos_abi::ManagerState) -> &'static [u8] {
+    match state {
+        logos_abi::ManagerState::Vacant => b"vacant",
+        logos_abi::ManagerState::Stopped => b"stopped",
+        logos_abi::ManagerState::Starting => b"starting",
+        logos_abi::ManagerState::Running => b"running",
+        logos_abi::ManagerState::Stopping => b"stopping",
+        logos_abi::ManagerState::Failed => b"failed",
+    }
+}
+
+fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut PendingOutput) {
+    let (operation, name, list) = match command {
+        logos_commands::ServiceCommand::List => (logos_abi::ManagerOperation::List, &[][..], true),
+        logos_commands::ServiceCommand::Status { name } => {
+            (logos_abi::ManagerOperation::Status, name, false)
+        }
+        logos_commands::ServiceCommand::Start { name } => {
+            (logos_abi::ManagerOperation::Start, name, false)
+        }
+        logos_commands::ServiceCommand::Stop { name } => {
+            (logos_abi::ManagerOperation::Stop, name, false)
+        }
+        logos_commands::ServiceCommand::Restart { name } => {
+            (logos_abi::ManagerOperation::Restart, name, false)
+        }
+    };
+    if !list && service_slot(name).is_none() {
+        pending.stage(b"service not found\r\n");
+        return;
+    }
+    let mut output = [0; logos_commands::MAX_OUTPUT_BYTES];
+    let mut output_len = 0;
+    let mut cursor = 0u8;
+    for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
+        let mut request = logos_abi::ManagerRequest::new(operation, 1);
+        request.cursor = cursor;
+        if let Some(slot) = service_slot(name) {
+            request.slot = slot;
+            request.generation = 1;
+        }
+        let mut response =
+            logos_abi::ManagerResponse::new(operation, logos_abi::ManagerStatus::Malformed, 1);
+        if common::manager_call(&request, &mut response) != IpcStatus::Ok {
+            pending.stage(b"service manager unavailable\r\n");
+            return;
+        }
+        if !matches!(
+            response.status,
+            logos_abi::ManagerStatus::Ok | logos_abi::ManagerStatus::Accepted
+        ) {
+            pending.stage(manager_error(response.status));
+            return;
+        }
+        let record = response.record;
+        let name_len = usize::from(record.name_len).min(record.name.len());
+        let parts: [&[u8]; 4] =
+            [&record.name[..name_len], b" ", manager_state(record.state), b"\r\n"];
+        for part in parts {
+            let count = part.len().min(output.len() - output_len);
+            output[output_len..output_len + count].copy_from_slice(&part[..count]);
+            output_len += count;
+        }
+        if !list || response.cursor == u8::MAX {
+            break;
+        }
+        cursor = response.cursor;
+    }
+    pending.stage(&output[..output_len]);
+}
+
 static mut COMMANDS: logos_commands::CommandService = logos_commands::CommandService::new();
 static mut PENDING: PendingOutput = PendingOutput::new();
 static mut STORAGE: StorageClient = StorageClient::new();
@@ -642,28 +742,36 @@ pub extern "C" fn _start() -> ! {
             progressed = true;
             if message.kind == MessageKind::SessionInput {
                 if let Some(bytes) = message.as_bytes() {
-                    match logos_commands::parse_storage_command(bytes) {
-                        Ok(Some(command)) => {
-                            if !storage.start(command) {
-                                pending.stage(b"storage request too large\r\n");
-                            }
+                    match logos_commands::parse_service_command(bytes) {
+                        Ok(Some(command)) => service_command(command, pending),
+                        Err(logos_commands::ServiceCommandError::Usage) => {
+                            pending.stage(
+                                b"usage: service <list|status|start|stop|restart> [name]\r\n",
+                            );
                         }
-                        Err(logos_commands::StorageCommandError::Usage) => {
-                            pending.stage(b"usage error\r\n");
-                        }
-                        Ok(None) => {
-                            let result = commands.execute(bytes);
-                            if result.action != logos_commands::CommandAction::None {
-                                let status = common::power(result.action as usize);
-                                if status != 0 {
-                                    pending.stage(b"power action denied\r\n");
+                        Ok(None) => match logos_commands::parse_storage_command(bytes) {
+                            Ok(Some(command)) => {
+                                if !storage.start(command) {
+                                    pending.stage(b"storage request too large\r\n");
                                 }
-                            } else if result.clear_screen {
-                                pending.stage(b"\x1b[2J\x1b[H");
-                            } else {
-                                pending.stage(result.as_bytes());
                             }
-                        }
+                            Err(logos_commands::StorageCommandError::Usage) => {
+                                pending.stage(b"usage error\r\n");
+                            }
+                            Ok(None) => {
+                                let result = commands.execute(bytes);
+                                if result.action != logos_commands::CommandAction::None {
+                                    let status = common::power(result.action as usize);
+                                    if status != 0 {
+                                        pending.stage(b"power action denied\r\n");
+                                    }
+                                } else if result.clear_screen {
+                                    pending.stage(b"\x1b[2J\x1b[H");
+                                } else {
+                                    pending.stage(result.as_bytes());
+                                }
+                            }
+                        },
                     }
                 }
             }

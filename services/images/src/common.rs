@@ -151,6 +151,28 @@ pub fn power(action: usize) -> usize {
     raw
 }
 
+#[inline(always)]
+#[allow(dead_code)]
+pub fn manager_call(
+    request: &logos_abi::ManagerRequest,
+    response: &mut logos_abi::ManagerResponse,
+) -> logos_abi::IpcStatus {
+    unsafe {
+        ptr::write_unaligned(
+            logos_abi::IPC_STAGING_BASE as *mut logos_abi::ManagerRequest,
+            *request,
+        );
+    }
+    let status =
+        manager_syscall(logos_abi::MANAGER_SYSCALL, 0, mem::size_of::<logos_abi::ManagerRequest>());
+    if status == logos_abi::IpcStatus::Ok {
+        *response = unsafe {
+            ptr::read_unaligned(logos_abi::IPC_STAGING_BASE as *const logos_abi::ManagerResponse)
+        };
+    }
+    status
+}
+
 fn endpoint_message_size(endpoint: Option<usize>) -> Option<usize> {
     endpoint.and_then(logos_abi::ipc_message_size)
 }
@@ -174,6 +196,21 @@ pub fn capability(slot: usize) -> Option<logos_abi::IpcCapability> {
 
 #[inline(always)]
 fn ipc_syscall(number: usize, capability_slot: usize, length: usize) -> IpcStatus {
+    let mut raw = number;
+    unsafe {
+        asm!(
+            "int 49",
+            inout("rax") raw,
+            in("rdi") capability_slot,
+            in("rsi") length,
+            options(preserves_flags),
+        );
+    }
+    IpcStatus::from_raw(raw).unwrap_or(IpcStatus::Malformed)
+}
+
+#[inline(always)]
+fn manager_syscall(number: usize, capability_slot: usize, length: usize) -> IpcStatus {
     let mut raw = number;
     unsafe {
         asm!(

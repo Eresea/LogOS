@@ -17,6 +17,11 @@ These are the commands currently built into the LogOS terminal. Type a command a
 | `write <path> <data>` | Atomically replaces a file's contents. |
 | `rm <path>` | Removes a file. |
 | `mv <from> <to>` | Renames a file. |
+| `service list` | Lists managed services and their states. |
+| `service status <name>` | Shows one managed service state. |
+| `service start <name>` | Starts a stopped managed service when dependencies are running. |
+| `service stop <name>` | Stops a managed service without active dependents. |
+| `service restart <name>` | Restarts a service and its running dependents. |
 
 Examples:
 
@@ -35,6 +40,9 @@ write /notes durable data
 cat /notes
 mv /notes /archive
 rm /archive
+service list
+service status storage
+service restart storage
 ```
 
 The command line is bounded to 256 bytes and command output to 512 bytes. Pipelines, redirection,

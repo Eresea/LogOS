@@ -11,8 +11,14 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
 };
 
+mod service_manager;
 mod storage_api;
 
+pub use service_manager::{
+    MANAGER_ABI_VERSION, ManagerCapability, ManagerCapabilityPage, ManagerOperation,
+    ManagerRequest, ManagerResponse, ManagerRights, ManagerState, ManagerStatus,
+    ServiceManagerRecord,
+};
 pub use storage_api::{
     STORAGE_API_FLAG_REPLACE, STORAGE_API_RESPONSE_DATA_BYTES, STORAGE_API_VERSION,
     StorageApiError, StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus,
@@ -50,13 +56,17 @@ pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
 pub const IPC_STAGING_BASE: usize = SERVICE_IPC_BASE + 0x10_000;
 pub const STORAGE_DATA_BASE: usize = SERVICE_IPC_BASE + 0x11_000;
 pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x12_000;
+pub const MANAGER_CAPABILITY_BASE: usize = IPC_CAPABILITY_BASE + IPC_PAGE_BYTES;
 pub const MAX_IPC_CAPABILITIES: usize = 4;
+pub const MAX_MANAGER_SERVICES: usize = 8;
+pub const MAX_SERVICE_NAME_BYTES: usize = 16;
 pub const SERVICE_HEARTBEAT_INTERVAL_TICKS: u64 = 100;
 pub const STORAGE_BLOCK_BYTES: u16 = 4096;
 pub const STORAGE_MAX_BLOCKS_PER_REQUEST: u16 = 1;
 
 pub const IPC_SYSCALL_SEND: usize = 4;
 pub const IPC_SYSCALL_RECEIVE: usize = 5;
+pub const MANAGER_SYSCALL: usize = 12;
 pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
@@ -1070,6 +1080,18 @@ mod tests {
         assert_eq!(capability.rights, IpcRights::Send);
         assert!(IpcCapability::new(IPC_ENDPOINT_COUNT, IpcRights::Receive, 1, 1).is_none());
         assert!(IpcCapability::new(0, IpcRights::Receive, 0, 1).is_none());
+    }
+
+    #[test]
+    fn manager_capability_and_requests_are_bounded() {
+        let capability = ManagerCapability::new(3, ManagerRights::ALL, 9).unwrap();
+        assert!(capability.rights.contains(ManagerRights::INSPECT));
+        assert!(capability.rights.contains(ManagerRights::LIFECYCLE));
+        assert!(ManagerCapability::new(0, ManagerRights::ALL, 9).is_none());
+        assert!(ManagerCapability::new(3, ManagerRights::NONE, 9).is_none());
+        assert!(core::mem::size_of::<ManagerRequest>() <= IPC_PAGE_BYTES);
+        assert!(core::mem::size_of::<ManagerResponse>() <= IPC_PAGE_BYTES);
+        assert_eq!(MANAGER_CAPABILITY_BASE, IPC_CAPABILITY_BASE + IPC_PAGE_BYTES);
     }
 
     #[test]
