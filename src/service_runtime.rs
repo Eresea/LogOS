@@ -1103,6 +1103,15 @@ impl ServiceRuntime {
             crate::arch::signal_events(logos_abi::ipc_read_event_mask(
                 capability.endpoint as usize,
             ));
+        } else if outcome.status == logos_abi::IpcStatus::Ok
+            && (capability.endpoint_index()
+                == Some(logos_abi::IpcEndpointId::CommandsToNetwork.index())
+                || capability.endpoint_index()
+                    == Some(logos_abi::IpcEndpointId::NetworkToCommands.index()))
+        {
+            crate::arch::signal_events(logos_abi::ipc_read_event_mask(
+                capability.endpoint as usize,
+            ));
         }
         outcome
     }
