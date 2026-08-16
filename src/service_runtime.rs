@@ -582,8 +582,11 @@ impl ServiceRuntime {
             }
         }
         let mode = self.storage_api_proof_mode.load(Ordering::Acquire);
+        let expected_data: &[u8] = if mode == 1 { b"durable-api" } else { b"recovered-api" };
         if operation == logos_abi::StorageApiOperation::Read as u8
             && response.status == logos_abi::StorageApiStatus::Ok
+            && !response.more
+            && response.data == expected_data
             && mode != 0
         {
             let marker: &[u8] = if mode == 1 {

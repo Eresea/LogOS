@@ -454,6 +454,11 @@ impl StorageClient {
         self.done = false;
         self.last_status
     }
+
+    #[cfg(feature = "storage-proof")]
+    fn result_equals(&self, expected: &[u8]) -> bool {
+        self.result[..self.result_len] == *expected
+    }
 }
 
 #[cfg(feature = "storage-proof")]
@@ -477,6 +482,13 @@ impl StorageProof {
         if !storage.done || !self.active {
             return false;
         }
+        let expected_content = match (self.recovery, self.step) {
+            (false, 3) => Some(&b"durable-api\r\n"[..]),
+            (true, 5) => Some(&b"recovered-api\r\n"[..]),
+            _ => None,
+        };
+        let content_valid =
+            expected_content.map_or(true, |expected| storage.result_equals(expected));
         let status = storage.discard_result();
         if self.step == 0 && status == StorageApiStatus::AlreadyExists {
             self.recovery = true;
@@ -484,13 +496,15 @@ impl StorageProof {
         let accepted = if self.recovery {
             match self.step {
                 0 => status == StorageApiStatus::AlreadyExists,
-                1 | 2 | 3 | 5 => status == StorageApiStatus::Ok,
+                1 | 2 | 3 => status == StorageApiStatus::Ok,
+                5 => status == StorageApiStatus::Ok && content_valid,
                 4 | 6 | 7 => matches!(status, StorageApiStatus::Ok | StorageApiStatus::NotFound),
                 _ => false,
             }
         } else {
             match self.step {
-                0 | 1 | 2 | 3 => status == StorageApiStatus::Ok,
+                0 | 1 | 2 => status == StorageApiStatus::Ok,
+                3 => status == StorageApiStatus::Ok && content_valid,
                 4 | 5 => status == StorageApiStatus::NotFound,
                 _ => false,
             }
@@ -521,7 +535,7 @@ impl StorageProof {
             0 => storage.start(logos_commands::StorageCommand::Touch { path: b"/api-survivor" }),
             1 => storage.start(logos_commands::StorageCommand::Write {
                 path: b"/api-survivor",
-                data: b"durable-api",
+                data: if self.recovery { b"recovered-api" } else { b"durable-api" },
             }),
             2 => storage.start_proof_abort(b"/api-aborted"),
             3 if self.recovery => {
