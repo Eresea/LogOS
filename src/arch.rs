@@ -1038,6 +1038,12 @@ pub(crate) fn power_control(process: ProcessHandle, action: usize) -> bool {
         if !authorized {
             return false;
         }
+        if matches!(action, logos_abi::POWER_SHUTDOWN | logos_abi::POWER_REBOOT)
+            && flush_storage_device().is_err()
+        {
+            debug_line(b"LogOS vNext: power flush failed");
+            return false;
+        }
         match action {
             logos_abi::POWER_SHUTDOWN => shutdown_qemu(),
             logos_abi::POWER_REBOOT => reboot_qemu(),

@@ -337,17 +337,19 @@ mod tests {
     use crate::boot_resources::{MemoryDescriptor, MemoryMap};
     use crate::process::ProcessError;
 
+    const TEST_SINK_PAGES: usize = 16;
+
     struct TestSink {
-        frames: [Option<FrameAddress>; MAX_LOAD_PAGES],
-        bytes: [[u8; PAGE_SIZE]; MAX_LOAD_PAGES],
+        frames: [Option<FrameAddress>; TEST_SINK_PAGES],
+        bytes: [[u8; PAGE_SIZE]; TEST_SINK_PAGES],
         count: usize,
     }
 
     impl TestSink {
         fn new() -> Self {
             Self {
-                frames: [None; MAX_LOAD_PAGES],
-                bytes: [[0; PAGE_SIZE]; MAX_LOAD_PAGES],
+                frames: [None; TEST_SINK_PAGES],
+                bytes: [[0; PAGE_SIZE]; TEST_SINK_PAGES],
                 count: 0,
             }
         }
@@ -358,7 +360,7 @@ mod tests {
             {
                 return Ok(index);
             }
-            if self.count == MAX_LOAD_PAGES {
+            if self.count == TEST_SINK_PAGES {
                 return Err(LoadError::Write);
             }
             let index = self.count;

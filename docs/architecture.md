@@ -11,14 +11,14 @@ fixed service boundaries.
 | Physical frames | `frame_pool` + `memory` | copied UEFI descriptors normalize into sorted disjoint runs; indexed bitmap words, generation-safe leases, bounded batches, reservations, zeroed/dirty state, per-CPU caches, sharded pools, and remote frees stay capped at 65,536 frames |
 | Memory subsystem contracts | `memory` | fixed async wait nodes, cancellation/deadlines, address-space generations, 4 KiB VM map operations, batched TLB queues, page-table caches, slab/page heap handles, pressure/reclaim callbacks, ownership quotas, and atomic observability are present before architecture-specific expansion |
 | Control plane | `process` + `user_mode` | admission-time fixed service mappings plus bounded Wait/Notify, IpcSend, and IpcReceive syscalls with process-bound capability checks |
-| ELF page admission | `loader` | maps validated segments and fixed user stacks to owned frames, then populates them through a page-local sink with bounded reclamation; Storage receives a fixed 64-page stack for journal replay scratch |
+| ELF page admission | `loader` | maps validated segments and fixed user stacks to owned frames, then populates them through a page-local sink with bounded reclamation; Storage receives a fixed 128-page stack for journal replay and transaction shadow state |
 | User page tables | `page_table` | builds four-level user mappings with fixed root/intermediate-frame bounds, W^X/NX flags, conflict rejection, and grouped reclamation |
 | Service address spaces | `service_runtime` | loads six retained ELFs into owned frames and retains one isolated root per service before scheduler admission |
 | Service process admission | `service_runtime` + `process` | binds each service root, coalesced mappings, and validated user launch metadata without entering service RIPs prematurely |
 | User launch transition | `arch` + `scheduler` | selects the task root before restore and provides the fixed-selector `iretq` path for service entry |
 | Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Commands → Storage dependencies |
 | Service IPC boundary | `service_ipc` + `service_runtime` | keeps the six existing terminal queues and adds dedicated process-bound StorageToCore/CoreToStorage capabilities through private staging pages; no queue, MMIO, or DMA frame is mapped into a service root |
-| Storage boundary | Core VirtIO block adapter + `logos-storage` format + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, MSI-X interrupt delivery, reset, timeouts, and flush; storage owns fixed request lifecycles, superblocks, journal, replay, recovery, durability, object IDs, namespace resolution, and bounded file operations; service requests use fixed ABI messages, process-bound capabilities, private staging pages, and kernel-owned IPC; Core stores no paths or namespace state; split-ring generations reset the bounded queue before descriptor reuse |
+| Storage boundary | Core VirtIO block adapter + `logos-storage` format + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, MSI-X interrupt delivery, reset, timeouts, and flush; Storage owns fixed request lifecycles, superblocks, journal, checkpoints, replay, recovery, durability, object IDs, namespace resolution, and bounded file operations; Commands reaches Storage through versioned `CommandsToStorage`/`StorageToCommands` messages over private staging pages; one active transaction uses fixed shadow state and at most `MAX_RECORDS_PER_TRANSACTION` records; Core stores no paths or namespace state; split-ring generations reset the bounded queue before descriptor reuse |
 | Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE` plus one read-only `FramebufferConfig` page at `DISPLAY_CONFIG_BASE`; boot rejects modes below the fixed 80×25/8×16 profile; no other service or kernel drawing path receives it |
 | Keyboard byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring with an observable drop counter and maps it only into Input at `INPUT_KEYBOARD_RING_BASE`; PS/2 decoding remains outside the kernel |
 | PS/2 interrupt adapter | `arch` | remaps the legacy PIC, unmasks only IRQ1 after the Input ring is published, and copies port `0x60` bytes into that ring; no key decoding occurs in Core |
@@ -38,7 +38,7 @@ fixed service boundaries.
 | Terminal service | `services/images/src/terminal` + `logos-terminal::TerminalState` | ring-3 owns a bounded fixed 80×25 live surface, consumes Input and Session rings, and emits compact Session input and dirty-cell Display messages |
 | Display service | `services/images/src/display` + `logos-display` | ring-3 validates cell diffs and endpoint generations, then rasterizes dirty cells through embedded glyphs into its mapped GOP framebuffer |
 | Session service | `services/images/src/session` + `logos-session::SessionService` | ring-3 owns bounded line editing and forwards completed commands/results; command execution remains in Commands and no state survives restart or reboot |
-| Commands service | `services/images/src/commands` + `logos-commands::CommandService` | receives bounded Session requests, executes built-ins, and returns backpressured output over its reverse IPC ring |
+| Commands service | `services/images/src/commands` + `logos-commands::CommandService` | receives bounded Session requests, executes built-ins, and performs `ls`, `touch`, `cat`, `write`, `rm`, and `mv` through Storage transactions; returns backpressured output over its reverse IPC rings |
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 16 validated mappings per process, and exit/fault/reclaim outcomes |
 | User launch contract | `process::UserLaunch` + `Scheduler::spawn_user` | a running process with a bound root publishes entry RIP, aligned stack top, root, and process generation before its task becomes runnable |
 | Ring-3 CPU migration | `scheduler::claim_next` + `arch::context` | published ring-3 tasks may migrate after a context boundary; the target loads CR3 and its TSS `RSP0` before restore, while live mappings remain immutable |
@@ -77,12 +77,17 @@ Live supervisor restart rebuilds volatile state and abandons in-flight work. Dur
 through the bounded storage boundary in ADR-0041, with explicit ownership, journal, replay, durability,
 and idempotency proofs. The host-tested `logos-storage` and `logos-storage-service` packages provide
 the format, journal, namespace, file API, and IPC adapter. The boot image is admitted independently;
-the kernel-mediated storage endpoint is present and identity-checked; requests now reach the bounded
-VirtIO adapter, with device-level format/reopen and reboot recovery gated on the QEMU proof.
+the kernel-mediated storage endpoint is identity-checked; requests reach the bounded VirtIO adapter,
+and the fresh-disk QEMU proof covers format, flush, reopen, and torn-journal recovery.
+
+Storage compatibility is fail-closed. The current format version is v2; legacy v1 media remains
+readable without checkpointing. An unknown superblock or journal-record version returns
+`UnsupportedVersion` and is never reformatted or silently replayed. Version 2 checkpoints compact
+the fixed namespace into two durable slots before reusing the bounded journal prefix. A future
+format migration must be explicitly implemented and proved before its version is accepted.
 
 ## Deferred next-step improvements
 
-The terminal milestone deliberately leaves two broader improvements for later proofs:
-
-- persistence and reboot recovery, which belong behind the storage/journal boundary above; and
-- a generalized service topology, after the fixed six-service graph has stable lifecycle evidence.
+The bounded storage milestone now proves durable file commands, reboot reopen, and torn-journal
+recovery. A generalized service topology remains deferred until the fixed six-service graph has
+stable lifecycle evidence.

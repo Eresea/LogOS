@@ -10,8 +10,9 @@ mod transport;
 mod virtio;
 
 pub use journal::{
-    FORMAT_VERSION, FormatError, JOURNAL_COMMIT_KIND, JournalRecord, MAX_RECORD_PAYLOAD_BYTES,
-    MAX_RECORDS_PER_TRANSACTION, RecoverySummary, ReplayError, ReplaySink, Volume, VolumeInfo,
+    CHECKPOINT_PAYLOAD_BYTES, FORMAT_VERSION, FormatError, JOURNAL_COMMIT_KIND, JournalRecord,
+    LEGACY_FORMAT_VERSION, MAX_RECORD_PAYLOAD_BYTES, MAX_RECORDS_PER_TRANSACTION,
+    PROVISIONED_BLANK_MAGIC, RecoverySummary, ReplayError, ReplaySink, Volume, VolumeInfo,
 };
 pub use pci::{
     PCI_CONFIG_BYTES, PciAddress, PciError, VIRTIO_BLOCK_MODERN_DEVICE_ID, VIRTIO_PCI_VENDOR_ID,

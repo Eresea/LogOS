@@ -11,6 +11,13 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
 };
 
+mod storage_api;
+
+pub use storage_api::{
+    STORAGE_API_FLAG_REPLACE, STORAGE_API_RESPONSE_DATA_BYTES, STORAGE_API_VERSION,
+    StorageApiError, StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus,
+};
+
 pub const ABI_VERSION: u16 = 2;
 pub const MAX_TEXT_BYTES: usize = 64;
 pub const MAX_RENDER_CELLS: usize = 128;
@@ -54,7 +61,7 @@ pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
 
-pub const IPC_ENDPOINT_COUNT: usize = 8;
+pub const IPC_ENDPOINT_COUNT: usize = 10;
 pub const IPC_READ_EVENT_BASE: usize = 0;
 pub const IPC_WRITE_EVENT_BASE: usize = IPC_READ_EVENT_BASE + IPC_ENDPOINT_COUNT;
 pub const KEYBOARD_READ_EVENT: usize = IPC_WRITE_EVENT_BASE + IPC_ENDPOINT_COUNT;
@@ -379,6 +386,8 @@ pub enum IpcEndpointId {
     CommandsToSession = 5,
     StorageToCore = 6,
     CoreToStorage = 7,
+    CommandsToStorage = 8,
+    StorageToCommands = 9,
 }
 
 impl IpcEndpointId {
@@ -398,6 +407,8 @@ impl IpcEndpointId {
             5 => Some(Self::CommandsToSession),
             6 => Some(Self::StorageToCore),
             7 => Some(Self::CoreToStorage),
+            8 => Some(Self::CommandsToStorage),
+            9 => Some(Self::StorageToCommands),
             _ => None,
         }
     }
@@ -408,7 +419,10 @@ impl IpcEndpointId {
             Self::TerminalToDisplay | Self::TerminalToSession => ServiceId::Terminal,
             Self::SessionToTerminal | Self::SessionToCommands => ServiceId::Session,
             Self::CommandsToSession => ServiceId::Commands,
-            Self::StorageToCore | Self::CoreToStorage => ServiceId::Storage,
+            Self::StorageToCore | Self::CoreToStorage | Self::StorageToCommands => {
+                ServiceId::Storage
+            }
+            Self::CommandsToStorage => ServiceId::Commands,
         }
     }
 
@@ -418,7 +432,10 @@ impl IpcEndpointId {
             Self::TerminalToDisplay => ServiceId::Display,
             Self::TerminalToSession | Self::CommandsToSession => ServiceId::Session,
             Self::SessionToCommands => ServiceId::Commands,
-            Self::StorageToCore | Self::CoreToStorage => ServiceId::Storage,
+            Self::StorageToCore | Self::CoreToStorage | Self::CommandsToStorage => {
+                ServiceId::Storage
+            }
+            Self::StorageToCommands => ServiceId::Commands,
         }
     }
 
@@ -452,8 +469,12 @@ pub const fn ipc_capability_slot(
         (ServiceId::Session, IpcEndpointId::CommandsToSession, IpcRights::Receive) => Some(3),
         (ServiceId::Commands, IpcEndpointId::SessionToCommands, IpcRights::Receive) => Some(0),
         (ServiceId::Commands, IpcEndpointId::CommandsToSession, IpcRights::Send) => Some(1),
-        (ServiceId::Storage, IpcEndpointId::StorageToCore, IpcRights::Send) => Some(0),
-        (ServiceId::Storage, IpcEndpointId::CoreToStorage, IpcRights::Receive) => Some(1),
+        (ServiceId::Commands, IpcEndpointId::CommandsToStorage, IpcRights::Send) => Some(2),
+        (ServiceId::Commands, IpcEndpointId::StorageToCommands, IpcRights::Receive) => Some(3),
+        (ServiceId::Storage, IpcEndpointId::CommandsToStorage, IpcRights::Receive) => Some(0),
+        (ServiceId::Storage, IpcEndpointId::StorageToCommands, IpcRights::Send) => Some(1),
+        (ServiceId::Storage, IpcEndpointId::StorageToCore, IpcRights::Send) => Some(2),
+        (ServiceId::Storage, IpcEndpointId::CoreToStorage, IpcRights::Receive) => Some(3),
         _ => None,
     }
 }
@@ -468,6 +489,8 @@ pub enum MessageKind {
     SessionOutput = 5,
     RenderCells = 6,
     FullRedraw = 7,
+    StorageRequest = 8,
+    StorageResponse = 9,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -694,7 +717,7 @@ pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
     match endpoint {
         0 => Some(IpcMessageType::Input),
         1 => Some(IpcMessageType::Render),
-        2..=5 => Some(IpcMessageType::Bytes),
+        2..=5 | 8..=9 => Some(IpcMessageType::Bytes),
         _ => None,
     }
 }
@@ -1010,6 +1033,7 @@ mod tests {
         assert_eq!(ipc_message_type(1), Some(IpcMessageType::Render));
         assert_eq!(ipc_message_type(5), Some(IpcMessageType::Bytes));
         assert_eq!(ipc_message_type(6), None);
+        assert_eq!(ipc_message_type(8), Some(IpcMessageType::Bytes));
         assert_eq!(ipc_message_size(0), Some(core::mem::size_of::<InputMessage>()));
         assert_eq!(ipc_message_size(1), Some(core::mem::size_of::<RenderMessage>()));
         assert_eq!(ipc_message_size(5), Some(core::mem::size_of::<IpcBytes>()));
@@ -1121,7 +1145,7 @@ mod tests {
         let keyboard = keyboard_read_event_mask();
         assert_eq!(all & keyboard, 0);
         all |= keyboard;
-        assert_eq!(EVENT_COUNT, 17);
+        assert_eq!(EVENT_COUNT, 21);
         assert_eq!(all.count_ones(), EVENT_COUNT as u32);
     }
 

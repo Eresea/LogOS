@@ -3,7 +3,8 @@ param(
     [ValidateRange(16, 4096)]
     [int]$DiskMiB = 64,
     [ValidateRange(1, 300)]
-    [int]$TimeoutSeconds = 60
+    [int]$TimeoutSeconds = 60,
+    [switch]$ResetDisk
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,9 +23,16 @@ if (-not (Test-Path $qemuPath)) { throw 'Install QEMU or add qemu-system-x86_64 
 if (-not (Test-Path $ovmf)) { throw 'Set OVMF_CODE to an OVMF firmware file.' }
 
 New-Item -ItemType Directory -Force $target | Out-Null
+if ($ResetDisk -and (Test-Path -LiteralPath $disk)) {
+    Remove-Item -LiteralPath $disk -Force
+}
 if (-not (Test-Path $disk)) {
     $stream = [System.IO.File]::Open($disk, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
     try { $stream.SetLength([int64]$DiskMiB * 1MB) } finally { $stream.Dispose() }
+    $marker = New-Object byte[] 4096
+    [Text.Encoding]::ASCII.GetBytes('LOGOSBLK').CopyTo($marker, 0)
+    $stream = [System.IO.File]::Open($disk, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write)
+    try { $stream.Write($marker, 0, $marker.Length) } finally { $stream.Dispose() }
 }
 
 & cargo build --release --features storage-proof --target x86_64-unknown-uefi
@@ -42,7 +50,7 @@ $baseArgs = @(
     '-machine', 'q35', '-m', '128M', '-smp', '1',
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
     '-drive', "format=raw,file=fat:rw:$espPath",
-    '-drive', "if=none,id=storage-disk,format=raw,file=$disk",
+    '-drive', "if=none,id=storage-disk,format=raw,file=$disk,cache=writethrough",
     '-device', 'virtio-blk-pci,drive=storage-disk,disable-legacy=on',
     '-display', 'none', '-no-reboot',
     '-debugcon', "file:$log", '-global', 'isa-debugcon.iobase=0xe9'
@@ -119,7 +127,7 @@ function Add-IncompleteJournalTail {
 }
 
 function Invoke-StorageBoot {
-    param([string]$ExpectedMarker)
+    param([string[]]$ExpectedMarkers)
 
     Remove-Item $log -Force -ErrorAction SilentlyContinue
     $psi = [Diagnostics.ProcessStartInfo]::new()
@@ -140,7 +148,17 @@ function Invoke-StorageBoot {
         while ([DateTime]::UtcNow -lt $deadline) {
             if (Test-Path $log) {
                 $text = Get-Content $log -Raw
-                if ($text -match [regex]::Escape($ExpectedMarker)) { return $true }
+                $allMarkersFound = $true
+                foreach ($marker in $ExpectedMarkers) {
+                    if ([string]::IsNullOrEmpty($text) -or -not ($text -match [regex]::Escape($marker))) {
+                        $allMarkersFound = $false
+                        break
+                    }
+                }
+                if ($allMarkersFound) {
+                    Start-Sleep -Milliseconds 500
+                    return $true
+                }
                 if ($text -match '(?i)(?:FATAL|QEMU proof FAIL|panic)') { return $false }
             }
             if ($process.HasExited) { return $false }
@@ -158,11 +176,23 @@ function Invoke-StorageBoot {
     }
 }
 
-if (-not (Invoke-StorageBoot 'LogOS vNext: storage proof PASS')) {
+if (-not (Invoke-StorageBoot -ExpectedMarkers @(
+        'LogOS vNext: storage proof PASS',
+        'LogOS vNext: storage command API PASS',
+        'LogOS vNext: storage command API cleanup PASS'
+    ))) {
     throw "Storage format/write/flush proof failed. Log: $log"
 }
+if (Test-Path -LiteralPath $disk) {
+    $diskStream = [System.IO.File]::Open($disk, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite)
+    try { $diskStream.Flush($true) } finally { $diskStream.Dispose() }
+}
 Add-IncompleteJournalTail $disk
-if (-not (Invoke-StorageBoot 'LogOS vNext: storage recovery PASS')) {
+if (-not (Invoke-StorageBoot -ExpectedMarkers @(
+        'LogOS vNext: storage recovery PASS',
+        'LogOS vNext: storage command API recovery PASS',
+        'LogOS vNext: storage command API cleanup PASS'
+    ))) {
     throw "Storage reboot/recovery proof failed. Log: $log"
 }
 Write-Host 'Storage persistent-disk proof PASS'

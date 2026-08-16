@@ -1,6 +1,6 @@
 use logos_storage::{
-    BLOCK_BYTES, BlockError, BlockStore, FormatError, JournalRecord, MAX_RECORD_PAYLOAD_BYTES,
-    ReplayError, ReplaySink, Volume,
+    BLOCK_BYTES, BlockError, BlockStore, CHECKPOINT_PAYLOAD_BYTES, FormatError, JournalRecord,
+    MAX_RECORD_PAYLOAD_BYTES, ReplayError, ReplaySink, Volume,
 };
 
 pub const MAX_OBJECTS: usize = 4;
@@ -15,6 +15,12 @@ const CREATE_KIND: u16 = 1;
 const RENAME_KIND: u16 = 2;
 const UNLINK_KIND: u16 = 3;
 const WRITE_KIND: u16 = 4;
+const TRUNCATE_KIND: u16 = 5;
+const SNAPSHOT_RECORD_BYTES: usize =
+    4 + 2 + 4 + 1 + 1 + 2 + MAX_COMPONENT_BYTES + 4 + MAX_FILE_BYTES;
+const SNAPSHOT_BYTES: usize = MAX_OBJECTS * SNAPSHOT_RECORD_BYTES;
+
+const _: () = assert!(SNAPSHOT_BYTES <= CHECKPOINT_PAYLOAD_BYTES);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectId {
@@ -62,6 +68,7 @@ pub enum NamespaceError {
     TooLarge,
     InvalidRecord,
     GenerationExhausted,
+    Recovery,
 }
 
 impl From<FormatError> for NamespaceError {
@@ -141,6 +148,7 @@ impl ObjectRecord {
     };
 }
 
+#[derive(Clone, Copy)]
 pub struct ObjectNamespace {
     records: [ObjectRecord; MAX_OBJECTS],
 }
@@ -163,6 +171,96 @@ impl ObjectNamespace {
 
     pub const fn root(&self) -> ObjectId {
         ObjectId::ROOT
+    }
+
+    fn encode_snapshot(&self, output: &mut [u8]) -> Result<usize, NamespaceError> {
+        if output.len() < SNAPSHOT_BYTES {
+            return Err(NamespaceError::TooLarge);
+        }
+        output[..SNAPSHOT_BYTES].fill(0);
+        for (index, record) in self.records.iter().enumerate() {
+            let start = index * SNAPSHOT_RECORD_BYTES;
+            put_u32(output, start, record.generation);
+            put_u16(output, start + 4, record.parent.slot);
+            put_u32(output, start + 6, record.parent.generation);
+            output[start + 10] = record.kind as u8;
+            output[start + 11] = u8::from(record.alive);
+            put_u16(output, start + 12, record.name_length);
+            output[start + 14..start + 14 + MAX_COMPONENT_BYTES].copy_from_slice(&record.name);
+            put_u32(output, start + 269, record.length);
+            output[start + 273..start + SNAPSHOT_RECORD_BYTES].copy_from_slice(&record.data);
+        }
+        Ok(SNAPSHOT_BYTES)
+    }
+
+    fn restore_snapshot(&mut self, input: &[u8]) -> Result<(), NamespaceError> {
+        if input.len() != SNAPSHOT_BYTES {
+            return Err(NamespaceError::InvalidRecord);
+        }
+        let mut records = [ObjectRecord::EMPTY; MAX_OBJECTS];
+        for (index, record) in records.iter_mut().enumerate() {
+            let start = index * SNAPSHOT_RECORD_BYTES;
+            let kind = match input[start + 10] {
+                1 => ObjectKind::File,
+                2 => ObjectKind::Directory,
+                _ => return Err(NamespaceError::InvalidRecord),
+            };
+            let name_length = get_u16(input, start + 12) as usize;
+            let length = get_u32(input, start + 269) as usize;
+            if name_length > MAX_COMPONENT_BYTES || length > MAX_FILE_BYTES {
+                return Err(NamespaceError::InvalidRecord);
+            }
+            record.generation = get_u32(input, start);
+            record.parent = ObjectId::new(get_u16(input, start + 4), get_u32(input, start + 6))
+                .ok_or(NamespaceError::InvalidRecord)?;
+            record.kind = kind;
+            if input[start + 11] > 1 {
+                return Err(NamespaceError::InvalidRecord);
+            }
+            record.alive = input[start + 11] != 0;
+            record.name_length = name_length as u16;
+            record.name.copy_from_slice(&input[start + 14..start + 269]);
+            record.length = length as u32;
+            record.data.copy_from_slice(&input[start + 273..start + SNAPSHOT_RECORD_BYTES]);
+            if record.alive && index != 0 {
+                Self::validate_name(&record.name[..name_length])?;
+            }
+        }
+
+        if records[0].generation != ObjectId::ROOT.generation
+            || !records[0].alive
+            || records[0].kind != ObjectKind::Directory
+        {
+            return Err(NamespaceError::InvalidRecord);
+        }
+        let restored = Self { records };
+        for (index, record) in restored.records.iter().enumerate().skip(1) {
+            if !record.alive {
+                continue;
+            }
+            let parent = restored.object_record(record.parent)?;
+            if parent.kind != ObjectKind::Directory
+                || restored
+                    .find_child(record.parent, &record.name[..record.name_length as usize])?
+                    != Some(ObjectId { slot: index as u16, generation: record.generation })
+            {
+                return Err(NamespaceError::InvalidRecord);
+            }
+            let mut current = ObjectId { slot: index as u16, generation: record.generation };
+            let mut reaches_root = false;
+            for _ in 0..=MAX_OBJECTS {
+                if current == ObjectId::ROOT {
+                    reaches_root = true;
+                    break;
+                }
+                current = restored.object_record(current)?.parent;
+            }
+            if !reaches_root {
+                return Err(NamespaceError::InvalidRecord);
+            }
+        }
+        *self = restored;
+        Ok(())
     }
 
     fn object_record(&self, id: ObjectId) -> Result<&ObjectRecord, NamespaceError> {
@@ -378,14 +476,48 @@ impl ObjectNamespace {
         Ok(())
     }
 
+    fn apply_truncate(&mut self, payload: &[u8]) -> Result<(), NamespaceError> {
+        if payload.len() != 10 {
+            return Err(NamespaceError::InvalidRecord);
+        }
+        let id = ObjectId::new(get_u16(payload, 0), get_u32(payload, 2))
+            .ok_or(NamespaceError::InvalidRecord)?;
+        let length = get_u32(payload, 6) as usize;
+        if length > MAX_FILE_BYTES {
+            return Err(NamespaceError::InvalidRecord);
+        }
+        let record = self.object_record_mut(id)?;
+        if record.kind != ObjectKind::File {
+            return Err(NamespaceError::IsDirectory);
+        }
+        record.data[length..].fill(0);
+        record.length = length as u32;
+        Ok(())
+    }
+
     fn apply_record(&mut self, kind: u16, payload: &[u8]) -> Result<(), NamespaceError> {
         match kind {
             CREATE_KIND => self.apply_create(payload),
             RENAME_KIND => self.apply_rename(payload),
             UNLINK_KIND => self.apply_unlink(payload),
             WRITE_KIND => self.apply_write(payload),
+            TRUNCATE_KIND => self.apply_truncate(payload),
             _ => Err(NamespaceError::InvalidRecord),
         }
+    }
+
+    fn parent_and_name<'a>(&self, path: &'a [u8]) -> Result<(ObjectId, &'a [u8]), NamespaceError> {
+        if path.is_empty() || path[0] != b'/' || path == b"/" {
+            return Err(NamespaceError::InvalidPath);
+        }
+        let slash = path.iter().rposition(|byte| *byte == b'/').unwrap_or(0);
+        let name = &path[slash + 1..];
+        if name.is_empty() {
+            return Err(NamespaceError::InvalidPath);
+        }
+        let parent_path = if slash == 0 { b"/" } else { &path[..slash] };
+        let parent = self.resolve_path(parent_path)?;
+        Ok((parent, name))
     }
 
     pub fn stat(&self, id: ObjectId) -> Result<ObjectInfo, NamespaceError> {
@@ -495,11 +627,33 @@ impl<B: BlockStore> DurableNamespace<B> {
         Ok(Self { store, volume, namespace: ObjectNamespace::new() })
     }
 
+    pub fn format_provisioned(mut store: B) -> Result<Self, NamespaceError> {
+        let volume = Volume::format_provisioned(&mut store)?;
+        Ok(Self { store, volume, namespace: ObjectNamespace::new() })
+    }
+
     pub fn open(mut store: B) -> Result<Self, NamespaceError> {
         let mut volume = Volume::open(&mut store)?;
         let mut namespace = ObjectNamespace::new();
+        let mut snapshot = [0; SNAPSHOT_BYTES];
+        if volume.load_checkpoint(&mut store, &mut snapshot)?.is_some() {
+            namespace.restore_snapshot(&snapshot)?;
+        }
         volume.recover(&mut store, &mut namespace)?;
         Ok(Self { store, volume, namespace })
+    }
+
+    fn reopen(&mut self) -> Result<(), NamespaceError> {
+        let mut volume = Volume::open(&mut self.store)?;
+        let mut namespace = ObjectNamespace::new();
+        let mut snapshot = [0; SNAPSHOT_BYTES];
+        if volume.load_checkpoint(&mut self.store, &mut snapshot)?.is_some() {
+            namespace.restore_snapshot(&snapshot)?;
+        }
+        volume.recover(&mut self.store, &mut namespace)?;
+        self.volume = volume;
+        self.namespace = namespace;
+        Ok(())
     }
 
     pub fn root(&self) -> ObjectId {
@@ -508,6 +662,11 @@ impl<B: BlockStore> DurableNamespace<B> {
 
     pub fn into_store(self) -> B {
         self.store
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_store_mut(&mut self) -> &mut B {
+        &mut self.store
     }
 
     pub fn resolve_path(&self, path: &[u8]) -> Result<ObjectId, NamespaceError> {
@@ -539,9 +698,30 @@ impl<B: BlockStore> DurableNamespace<B> {
         self.namespace.read(id, offset, output)
     }
 
+    pub fn begin_transaction(&self) -> NamespaceTransaction {
+        NamespaceTransaction::new(self.namespace)
+    }
+
+    fn checkpoint_current(&mut self) -> Result<(), NamespaceError> {
+        if !self.volume.should_checkpoint() {
+            return Ok(());
+        }
+        let mut snapshot = [0; SNAPSHOT_BYTES];
+        let length = self.namespace.encode_snapshot(&mut snapshot)?;
+        match self.volume.checkpoint(&mut self.store, &snapshot[..length]) {
+            Ok(()) => Ok(()),
+            Err(error) => match self.reopen() {
+                Ok(()) => Err(error.into()),
+                Err(_) => Err(NamespaceError::Recovery),
+            },
+        }
+    }
+
     fn commit_one(&mut self, kind: u16, payload: &[u8]) -> Result<(), NamespaceError> {
+        self.checkpoint_current()?;
         self.volume.commit(&mut self.store, &[JournalRecord { kind, payload }])?;
-        self.namespace.apply_record(kind, payload)
+        self.namespace.apply_record(kind, payload)?;
+        self.checkpoint_current()
     }
 
     pub fn create(
@@ -648,16 +828,203 @@ impl<B: BlockStore> DurableNamespace<B> {
             records[index] =
                 JournalRecord { kind: WRITE_KIND, payload: &payloads[index][..lengths[index]] };
         }
+        self.checkpoint_current()?;
         self.volume.commit(&mut self.store, &records[..count])?;
         for record in records.iter().take(count) {
             self.namespace.apply_record(WRITE_KIND, record.payload)?;
         }
+        self.checkpoint_current()?;
         Ok(input.len())
     }
 
     pub fn flush(&mut self) -> Result<(), NamespaceError> {
         self.store.flush().map_err(NamespaceError::Block)
     }
+}
+
+const MAX_TRANSACTION_RECORDS: usize = logos_storage::MAX_RECORDS_PER_TRANSACTION;
+
+#[derive(Clone, Copy)]
+struct PendingRecord {
+    kind: u16,
+    len: u16,
+    payload: [u8; MAX_RECORD_PAYLOAD_BYTES],
+}
+
+impl PendingRecord {
+    const EMPTY: Self = Self { kind: 0, len: 0, payload: [0; MAX_RECORD_PAYLOAD_BYTES] };
+}
+
+pub struct NamespaceTransaction {
+    shadow: ObjectNamespace,
+    records: [PendingRecord; MAX_TRANSACTION_RECORDS],
+    count: usize,
+}
+
+impl NamespaceTransaction {
+    fn new(namespace: ObjectNamespace) -> Self {
+        Self {
+            shadow: namespace,
+            records: [PendingRecord::EMPTY; MAX_TRANSACTION_RECORDS],
+            count: 0,
+        }
+    }
+
+    pub const fn record_count(&self) -> usize {
+        self.count
+    }
+
+    fn push_record(&mut self, kind: u16, payload: &[u8]) -> Result<(), NamespaceError> {
+        if self.count == MAX_TRANSACTION_RECORDS {
+            return Err(NamespaceError::Capacity);
+        }
+        if payload.len() > MAX_RECORD_PAYLOAD_BYTES {
+            return Err(NamespaceError::TooLarge);
+        }
+        let mut record = PendingRecord::EMPTY;
+        record.kind = kind;
+        record.len = payload.len() as u16;
+        record.payload[..payload.len()].copy_from_slice(payload);
+        self.shadow.apply_record(kind, &record.payload[..payload.len()])?;
+        self.records[self.count] = record;
+        self.count += 1;
+        Ok(())
+    }
+
+    pub fn create_file(&mut self, path: &[u8]) -> Result<ObjectId, NamespaceError> {
+        let (parent, name) = self.shadow.parent_and_name(path)?;
+        let (id, payload) = self.shadow.plan_create(parent, ObjectKind::File, name)?;
+        self.push_record(CREATE_KIND, &payload)?;
+        Ok(id)
+    }
+
+    pub fn list(&self, path: &[u8]) -> Result<ObjectList, NamespaceError> {
+        let parent = self.shadow.resolve_path(path)?;
+        self.shadow.list(parent)
+    }
+
+    pub fn stat(&self, path: &[u8]) -> Result<ObjectInfo, NamespaceError> {
+        let id = self.shadow.resolve_path(path)?;
+        self.shadow.stat(id)
+    }
+
+    pub fn stat_id(&self, id: ObjectId) -> Result<ObjectInfo, NamespaceError> {
+        self.shadow.stat(id)
+    }
+
+    pub fn read(
+        &self,
+        path: &[u8],
+        offset: usize,
+        output: &mut [u8],
+    ) -> Result<usize, NamespaceError> {
+        let id = self.shadow.resolve_path(path)?;
+        self.shadow.read(id, offset, output)
+    }
+
+    pub fn write(
+        &mut self,
+        path: &[u8],
+        offset: usize,
+        input: &[u8],
+        replace: bool,
+    ) -> Result<usize, NamespaceError> {
+        let id = self.shadow.resolve_path(path)?;
+        let record = self.shadow.object_record(id)?;
+        if record.kind != ObjectKind::File {
+            return Err(NamespaceError::IsDirectory);
+        }
+        if input.is_empty() && !replace {
+            return Err(NamespaceError::TooLarge);
+        }
+        if offset.checked_add(input.len()).is_none() || offset + input.len() > MAX_FILE_BYTES {
+            return Err(NamespaceError::TooLarge);
+        }
+        let count = input.len().div_ceil(MAX_WRITE_BYTES);
+        let truncate_count = usize::from(replace && record.length != 0);
+        if count > MAX_WRITE_RECORDS
+            || self.count + truncate_count + count > MAX_TRANSACTION_RECORDS
+        {
+            return Err(NamespaceError::Capacity);
+        }
+        if replace && record.length != 0 {
+            let mut truncate = [0; 10];
+            put_u16(&mut truncate, 0, id.slot);
+            put_u32(&mut truncate, 2, id.generation);
+            put_u32(&mut truncate, 6, 0);
+            self.push_record(TRUNCATE_KIND, &truncate)?;
+        }
+        if input.is_empty() {
+            return Ok(0);
+        }
+        let mut copied = 0;
+        for _ in 0..count {
+            let length = (input.len() - copied).min(MAX_WRITE_BYTES);
+            let mut payload = [0; MAX_RECORD_PAYLOAD_BYTES];
+            put_u16(&mut payload, 0, id.slot);
+            put_u32(&mut payload, 2, id.generation);
+            put_u32(&mut payload, 6, (offset + copied) as u32);
+            put_u16(&mut payload, 10, length as u16);
+            payload[WRITE_HEADER_BYTES..WRITE_HEADER_BYTES + length]
+                .copy_from_slice(&input[copied..copied + length]);
+            self.push_record(WRITE_KIND, &payload[..WRITE_HEADER_BYTES + length])?;
+            copied += length;
+        }
+        Ok(input.len())
+    }
+
+    pub fn remove(&mut self, path: &[u8]) -> Result<(), NamespaceError> {
+        let id = self.shadow.resolve_path(path)?;
+        let mut payload = [0; 6];
+        put_u16(&mut payload, 0, id.slot);
+        put_u32(&mut payload, 2, id.generation);
+        self.push_record(UNLINK_KIND, &payload)
+    }
+
+    pub fn rename(&mut self, from: &[u8], to: &[u8]) -> Result<(), NamespaceError> {
+        let id = self.shadow.resolve_path(from)?;
+        let (parent, name) = self.shadow.parent_and_name(to)?;
+        if id == ObjectId::ROOT {
+            return Err(NamespaceError::Root);
+        }
+        let mut payload = [0; 2 + 4 + 2 + 4 + 2 + MAX_COMPONENT_BYTES];
+        put_u16(&mut payload, 0, id.slot);
+        put_u32(&mut payload, 2, id.generation);
+        put_u16(&mut payload, 6, parent.slot);
+        put_u32(&mut payload, 8, parent.generation);
+        put_u16(&mut payload, 12, name.len() as u16);
+        payload[14..14 + name.len()].copy_from_slice(name);
+        self.push_record(RENAME_KIND, &payload)
+    }
+
+    pub fn commit<B: BlockStore>(
+        self,
+        namespace: &mut DurableNamespace<B>,
+    ) -> Result<u64, NamespaceError> {
+        let mut records = [JournalRecord { kind: 0, payload: &[] }; MAX_TRANSACTION_RECORDS];
+        for (index, record) in self.records[..self.count].iter().enumerate() {
+            records[index] = JournalRecord {
+                kind: record.kind,
+                payload: &record.payload[..record.len as usize],
+            };
+        }
+        namespace.checkpoint_current()?;
+        let transaction_id =
+            match namespace.volume.commit(&mut namespace.store, &records[..self.count]) {
+                Ok(transaction_id) => transaction_id,
+                Err(error) => {
+                    return match namespace.reopen() {
+                        Ok(()) => Err(error.into()),
+                        Err(_) => Err(NamespaceError::Recovery),
+                    };
+                }
+            };
+        namespace.namespace = self.shadow;
+        namespace.checkpoint_current()?;
+        Ok(transaction_id)
+    }
+
+    pub fn abort(self) {}
 }
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
@@ -789,5 +1156,70 @@ mod tests {
         rename[14..19].copy_from_slice(b"moved");
 
         assert_eq!(namespace.apply_record(RENAME_KIND, &rename), Err(NamespaceError::InvalidPath));
+    }
+
+    #[test]
+    fn transaction_supports_read_your_writes_and_atomic_reopen() {
+        let store = MemoryBlockStore::<32>::new();
+        let mut fs = DurableNamespace::format(store).unwrap();
+        let mut transaction = fs.begin_transaction();
+        transaction.create_file(b"/proof").unwrap();
+        transaction.write(b"/proof", 0, b"durable", true).unwrap();
+        let mut output = [0; 7];
+        assert_eq!(transaction.read(b"/proof", 0, &mut output).unwrap(), 7);
+        assert_eq!(&output, b"durable");
+        transaction.rename(b"/proof", b"/committed").unwrap();
+        let transaction_id = transaction.commit(&mut fs).unwrap();
+        assert_eq!(transaction_id, 1);
+
+        let store = fs.into_store();
+        let reopened = DurableNamespace::open(store).unwrap();
+        let id = reopened.resolve_path(b"/committed").unwrap();
+        let mut output = [0; 7];
+        assert_eq!(reopened.read(id, 0, &mut output).unwrap(), 7);
+        assert_eq!(&output, b"durable");
+    }
+
+    #[test]
+    fn checkpointed_namespace_reopens_without_losing_files() {
+        let store = MemoryBlockStore::<32>::new();
+        let mut fs = DurableNamespace::format(store).unwrap();
+        let file = fs.create_file(fs.root(), b"proof").unwrap();
+        fs.write(file, 0, b"durable").unwrap();
+
+        fs.reopen().unwrap();
+        let file = fs.resolve_path(b"/proof").unwrap();
+        let mut output = [0; 7];
+        assert_eq!(fs.read(file, 0, &mut output).unwrap(), 7);
+        assert_eq!(&output, b"durable");
+    }
+
+    #[test]
+    fn replace_write_capacity_check_does_not_stage_truncate() {
+        let store = MemoryBlockStore::<32>::new();
+        let mut fs = DurableNamespace::format(store).unwrap();
+        let file = fs.create_file(fs.root(), b"file").unwrap();
+        fs.write(file, 0, b"x").unwrap();
+
+        let mut transaction = fs.begin_transaction();
+        for offset in 1..MAX_TRANSACTION_RECORDS {
+            transaction.write(b"/file", offset, b"x", false).unwrap();
+        }
+        assert_eq!(
+            transaction.write(b"/file", 0, b"replacement", true),
+            Err(NamespaceError::Capacity)
+        );
+        assert_eq!(transaction.record_count(), MAX_TRANSACTION_RECORDS - 1);
+        assert_eq!(transaction.stat(b"/file").unwrap().length, MAX_TRANSACTION_RECORDS as u32);
+    }
+
+    #[test]
+    fn aborted_transaction_does_not_change_namespace() {
+        let store = MemoryBlockStore::<16>::new();
+        let fs = DurableNamespace::format(store).unwrap();
+        let mut transaction = fs.begin_transaction();
+        transaction.create_file(b"/discarded").unwrap();
+        transaction.abort();
+        assert_eq!(fs.resolve_path(b"/discarded"), Err(NamespaceError::NotFound));
     }
 }

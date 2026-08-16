@@ -5,10 +5,13 @@
 mod common;
 
 use logos_abi::{
-    IpcCapability, IpcStatus, StorageOperation, StorageRequest, StorageResponse, StorageStatus,
+    IpcBytes, IpcCapability, IpcEndpointId, IpcStatus, MessageKind, StorageApiStatus,
+    StorageOperation, StorageRequest, StorageResponse, StorageStatus,
 };
 use logos_storage::Block;
-use logos_storage_service::{DurableNamespace, IpcBlockStore, KernelStorageIpc, NamespaceError};
+use logos_storage_service::{
+    DurableNamespace, IpcBlockStore, KernelStorageIpc, NamespaceError, StorageApi, error_response,
+};
 
 const REQUEST_CAPABILITY: usize = common::capability_slot(
     logos_abi::ServiceId::Storage,
@@ -20,6 +23,16 @@ const RESPONSE_CAPABILITY: usize = common::capability_slot(
     logos_abi::IpcEndpointId::CoreToStorage,
     logos_abi::IpcRights::Receive,
 );
+const COMMANDS_RECEIVE_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Storage,
+    IpcEndpointId::CommandsToStorage,
+    logos_abi::IpcRights::Receive,
+);
+const COMMANDS_SEND_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Storage,
+    IpcEndpointId::StorageToCommands,
+    logos_abi::IpcRights::Send,
+);
 
 struct StorageTransport {
     operation: Option<StorageOperation>,
@@ -28,6 +41,10 @@ struct StorageTransport {
 impl StorageTransport {
     const fn new() -> Self {
         Self { operation: None }
+    }
+
+    fn heartbeat(&self) {
+        common::heartbeat(logos_abi::ServiceId::Storage);
     }
 }
 
@@ -38,6 +55,7 @@ impl KernelStorageIpc for StorageTransport {
         request: StorageRequest,
         staging: &mut Block,
     ) -> IpcStatus {
+        self.heartbeat();
         if common::capability(REQUEST_CAPABILITY) != Some(capability) {
             return IpcStatus::Unauthorized;
         }
@@ -54,6 +72,7 @@ impl KernelStorageIpc for StorageTransport {
         response: &mut StorageResponse,
         staging: &mut Block,
     ) -> IpcStatus {
+        self.heartbeat();
         if common::capability(REQUEST_CAPABILITY) != Some(capability) {
             return IpcStatus::Unauthorized;
         }
@@ -103,42 +122,104 @@ fn discover(capability: IpcCapability) -> Option<u64> {
     (response.block_count > 2).then_some(response.block_count)
 }
 
-fn stop_on_storage_error<T>(_error: T) -> ! {
+fn storage_error_status(error: NamespaceError) -> StorageApiStatus {
+    if matches!(error, NamespaceError::Format(logos_storage::FormatError::UnsupportedVersion)) {
+        StorageApiStatus::Unsupported
+    } else {
+        StorageApiStatus::Io
+    }
+}
+
+fn serve_storage_error(status: StorageApiStatus) -> ! {
+    let mut pending_response = None;
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
-        common::wait(0, logos_abi::ServiceId::Storage);
+        let mut progressed = false;
+        if let Some(response) = pending_response {
+            match common::ipc_send(COMMANDS_SEND_CAPABILITY, &response) {
+                IpcStatus::Ok => {
+                    pending_response = None;
+                    progressed = true;
+                }
+                IpcStatus::Full => {}
+                _ => {
+                    pending_response = None;
+                    progressed = true;
+                }
+            }
+        }
+        if pending_response.is_none() {
+            let mut request = IpcBytes::empty(MessageKind::StorageRequest);
+            match common::ipc_receive(COMMANDS_RECEIVE_CAPABILITY, &mut request) {
+                IpcStatus::Ok => {
+                    pending_response = error_response(&request, status);
+                    progressed = true;
+                }
+                IpcStatus::Empty => {}
+                _ => progressed = true,
+            }
+        }
+        if !progressed {
+            common::wait(
+                common::ipc_read_event(IpcEndpointId::CommandsToStorage)
+                    | common::ipc_write_event(IpcEndpointId::StorageToCommands),
+                logos_abi::ServiceId::Storage,
+            );
+        }
     }
 }
 
 fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
     let Some(store) = new_store(capability, blocks) else {
-        common::idle();
+        serve_storage_error(StorageApiStatus::Io);
     };
     let mut filesystem = match DurableNamespace::open(store) {
         Ok(filesystem) => filesystem,
         Err(NamespaceError::Format(logos_storage::FormatError::Unformatted)) => {
             let Some(store) = new_store(capability, blocks) else {
-                common::idle();
+                serve_storage_error(StorageApiStatus::Io);
             };
-            DurableNamespace::format(store).unwrap_or_else(|error| stop_on_storage_error(error))
+            DurableNamespace::format(store)
+                .unwrap_or_else(|error| serve_storage_error(storage_error_status(error)))
         }
-        Err(error) => stop_on_storage_error(error),
+        Err(NamespaceError::Format(logos_storage::FormatError::ProvisionedBlank)) => {
+            let Some(store) = new_store(capability, blocks) else {
+                serve_storage_error(StorageApiStatus::Io);
+            };
+            DurableNamespace::format_provisioned(store)
+                .unwrap_or_else(|error| serve_storage_error(storage_error_status(error)))
+        }
+        Err(error) => serve_storage_error(storage_error_status(error)),
     };
-    if filesystem.open_file(b"/marker").is_err() {
-        let marker = filesystem
-            .create_file(filesystem.root(), b"marker")
-            .unwrap_or_else(|error| stop_on_storage_error(error));
-        filesystem
-            .write(marker, 0, b"LogOS storage marker")
-            .unwrap_or_else(|error| stop_on_storage_error(error));
-    }
-    filesystem.flush().unwrap_or_else(|error| stop_on_storage_error(error));
+    filesystem.flush().unwrap_or_else(|error| serve_storage_error(storage_error_status(error)));
 
+    let mut api = StorageApi::new(filesystem);
+    let mut pending_response = None;
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
-        common::wait(0, logos_abi::ServiceId::Storage);
+        let mut progressed = false;
+        if let Some(response) = pending_response {
+            if common::ipc_send(COMMANDS_SEND_CAPABILITY, &response) == IpcStatus::Ok {
+                pending_response = None;
+                progressed = true;
+            }
+        }
+        if pending_response.is_none() {
+            let mut request = IpcBytes::empty(MessageKind::StorageRequest);
+            if common::ipc_receive(COMMANDS_RECEIVE_CAPABILITY, &mut request) == IpcStatus::Ok {
+                pending_response = api.handle(&request);
+                progressed = true;
+            }
+        }
+        if !progressed {
+            common::wait(
+                common::ipc_read_event(IpcEndpointId::CommandsToStorage)
+                    | common::ipc_write_event(IpcEndpointId::StorageToCommands),
+                logos_abi::ServiceId::Storage,
+            );
+        }
     }
 }
 
@@ -147,9 +228,9 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     let Some(capability) = common::capability(REQUEST_CAPABILITY) else {
-        stop_on_storage_error(())
+        serve_storage_error(StorageApiStatus::Io)
     };
-    let Some(blocks) = discover(capability) else { stop_on_storage_error(()) };
+    let Some(blocks) = discover(capability) else { serve_storage_error(StorageApiStatus::Io) };
     run_filesystem(capability, blocks)
 }
 

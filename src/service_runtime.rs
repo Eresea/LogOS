@@ -74,6 +74,8 @@ pub struct ServiceRuntime {
     storage_response: Option<logos_abi::StorageResponse>,
     suppressed_heartbeats: [AtomicBool; SERVICE_COUNT],
     frame_pool_ready: bool,
+    #[cfg(feature = "storage-proof")]
+    storage_proof: crate::storage_proof::StorageProofObserver,
 }
 
 impl ServiceRuntime {
@@ -107,6 +109,8 @@ impl ServiceRuntime {
             storage_response: None,
             suppressed_heartbeats: [const { AtomicBool::new(false) }; SERVICE_COUNT],
             frame_pool_ready: false,
+            #[cfg(feature = "storage-proof")]
+            storage_proof: crate::storage_proof::StorageProofObserver::new(),
         }
     }
 
@@ -233,7 +237,7 @@ impl ServiceRuntime {
             let endpoint = graph
                 .endpoint(endpoint_index)
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?;
-            initialize_ipc_page(endpoint, endpoint_index);
+            initialize_ipc_page(endpoint);
         }
         self.ipc = Some(graph);
         for spec in SERVICE_IMAGES {
@@ -264,15 +268,20 @@ impl ServiceRuntime {
                 )?;
             }
             let capabilities = if service == ServiceId::Storage {
-                let mut page = logos_abi::IpcCapabilityPage::empty();
-                page.capabilities[0] = logos_abi::IpcCapability::new(
+                let mut page = self
+                    .ipc
+                    .as_ref()
+                    .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?
+                    .capabilities(service)
+                    .map_err(ServiceRuntimeError::Ipc)?;
+                page.capabilities[2] = logos_abi::IpcCapability::new(
                     crate::storage_ipc::STORAGE_REQUEST_ENDPOINT,
                     logos_abi::IpcRights::Send,
                     self.ipc_generation,
                     self.service_epoch,
                 )
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-                page.capabilities[1] = logos_abi::IpcCapability::new(
+                page.capabilities[3] = logos_abi::IpcCapability::new(
                     crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT,
                     logos_abi::IpcRights::Receive,
                     self.ipc_generation,
@@ -716,6 +725,13 @@ impl ServiceRuntime {
         let bytes = unsafe {
             core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
         };
+        #[cfg(feature = "storage-proof")]
+        if service == ServiceId::Commands
+            && capability.endpoint_index()
+                == Some(logos_abi::IpcEndpointId::CommandsToStorage as usize)
+        {
+            self.storage_proof.observe_request(bytes);
+        }
         let outcome = graph.send(service, capability, bytes);
         if outcome.notified {
             crate::arch::signal_events(logos_abi::ipc_read_event_mask(
@@ -807,6 +823,13 @@ impl ServiceRuntime {
             core::slice::from_raw_parts_mut(staging_frame.raw() as usize as *mut u8, length)
         };
         let outcome = graph.receive(service, capability, bytes);
+        #[cfg(feature = "storage-proof")]
+        if outcome.status == logos_abi::IpcStatus::Ok
+            && service == ServiceId::Commands
+            && index == logos_abi::IpcEndpointId::StorageToCommands as usize
+        {
+            self.storage_proof.observe_response(bytes);
+        }
         if outcome.notified {
             crate::arch::signal_events(logos_abi::ipc_write_event_mask(
                 capability.endpoint as usize,
@@ -1022,17 +1045,22 @@ impl Default for ServiceRuntime {
     }
 }
 
-fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint, index: usize) {
+fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint) {
     let frame = endpoint.frame().raw() as usize;
     // The frame pool is identity-mapped in the kernel root. Endpoint pages stay
     // kernel-owned; services use private staging pages and syscalls instead.
     unsafe {
-        match index {
-            0 => (frame as *mut logos_abi::InputIpc)
+        match endpoint.id() {
+            logos_abi::IpcEndpointId::InputToTerminal => (frame as *mut logos_abi::InputIpc)
                 .write(logos_abi::InputIpc::new(endpoint.header())),
-            1 => (frame as *mut logos_abi::RenderIpc)
+            logos_abi::IpcEndpointId::TerminalToDisplay => (frame as *mut logos_abi::RenderIpc)
                 .write(logos_abi::RenderIpc::new(endpoint.header())),
-            2..=5 => (frame as *mut logos_abi::StreamIpc)
+            logos_abi::IpcEndpointId::TerminalToSession
+            | logos_abi::IpcEndpointId::SessionToTerminal
+            | logos_abi::IpcEndpointId::SessionToCommands
+            | logos_abi::IpcEndpointId::CommandsToSession
+            | logos_abi::IpcEndpointId::CommandsToStorage
+            | logos_abi::IpcEndpointId::StorageToCommands => (frame as *mut logos_abi::StreamIpc)
                 .write(logos_abi::StreamIpc::new(endpoint.header())),
             _ => {}
         }

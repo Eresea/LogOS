@@ -11,19 +11,22 @@ use crate::{
     page_table::PageTableMemory,
 };
 
-const ENDPOINTS: [logos_abi::IpcEndpointId; 6] = [
+const ENDPOINTS: [logos_abi::IpcEndpointId; 8] = [
     logos_abi::IpcEndpointId::InputToTerminal,
     logos_abi::IpcEndpointId::TerminalToDisplay,
     logos_abi::IpcEndpointId::TerminalToSession,
     logos_abi::IpcEndpointId::SessionToTerminal,
     logos_abi::IpcEndpointId::SessionToCommands,
     logos_abi::IpcEndpointId::CommandsToSession,
+    logos_abi::IpcEndpointId::CommandsToStorage,
+    logos_abi::IpcEndpointId::StorageToCommands,
 ];
 pub const MAX_ENDPOINTS: usize = ENDPOINTS.len();
 pub const SERVICE_EPOCH: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IpcEndpoint {
+    endpoint_id: logos_abi::IpcEndpointId,
     producer: ServiceId,
     consumer: ServiceId,
     generation: u16,
@@ -32,6 +35,10 @@ pub struct IpcEndpoint {
 }
 
 impl IpcEndpoint {
+    pub const fn id(self) -> logos_abi::IpcEndpointId {
+        self.endpoint_id
+    }
+
     pub const fn producer(self) -> ServiceId {
         self.producer
     }
@@ -107,8 +114,14 @@ impl ServiceIpcGraph {
                     return Err(IpcError::Memory);
                 }
             };
-            graph.endpoints[index] =
-                Some(IpcEndpoint { producer, consumer, generation, service_epoch, frame });
+            graph.endpoints[index] = Some(IpcEndpoint {
+                endpoint_id,
+                producer,
+                consumer,
+                generation,
+                service_epoch,
+                frame,
+            });
             graph.count += 1;
             if memory.clear(frame).is_err() {
                 graph.reclaim(pool).map_err(|_| IpcError::Memory)?;
@@ -120,8 +133,8 @@ impl ServiceIpcGraph {
 
     /// Disconnect every initialized endpoint queue.
     pub fn disconnect(&self) {
-        for (index, endpoint) in self.endpoints[..self.count].iter().flatten().enumerate() {
-            disconnect_ipc_page(*endpoint, index);
+        for endpoint in self.endpoints[..self.count].iter().flatten() {
+            disconnect_ipc_page(*endpoint);
         }
     }
 
@@ -164,14 +177,12 @@ impl ServiceIpcGraph {
             if slot == page.capabilities.len() {
                 return Err(IpcError::Capacity);
             }
-            let Some(endpoint_id) = logos_abi::IpcEndpointId::from_index(index) else {
-                return Err(IpcError::InvalidIdentity);
-            };
+            let endpoint_id = endpoint.id();
             if logos_abi::ipc_capability_slot(service, endpoint_id, rights) != Some(slot) {
                 return Err(IpcError::InvalidIdentity);
             }
             page.capabilities[slot] = logos_abi::IpcCapability::new(
-                index,
+                endpoint_id.index(),
                 rights,
                 endpoint.generation(),
                 endpoint.header().service_epoch,
@@ -187,7 +198,7 @@ impl ServiceIpcGraph {
             Ok(index) => index,
             Err(status) => return IpcOutcome::new(status, false),
         };
-        if bytes.len() != Self::message_size(index) {
+        if bytes.len() != Self::message_size(self.endpoint(index).unwrap().id().index()) {
             return IpcOutcome::new(IpcStatus::Malformed, false);
         }
         let Some(frame) = self.endpoint(index).map(|endpoint| endpoint.frame().raw() as usize)
@@ -195,7 +206,8 @@ impl ServiceIpcGraph {
             return IpcOutcome::new(IpcStatus::Unauthorized, false);
         };
         let identity = capability_identity(capability);
-        let result = unsafe { send_bytes(frame, index, identity, bytes) };
+        let endpoint_id = self.endpoint(index).unwrap().id().index();
+        let result = unsafe { send_bytes(frame, endpoint_id, identity, bytes) };
         match result {
             Ok(notify) => IpcOutcome::new(IpcStatus::Ok, notify == Notify::Notified),
             Err(IpcStatus::Full) => IpcOutcome::new(IpcStatus::Full, false),
@@ -213,7 +225,7 @@ impl ServiceIpcGraph {
             Ok(index) => index,
             Err(status) => return IpcOutcome::new(status, false),
         };
-        if bytes.len() != Self::message_size(index) {
+        if bytes.len() != Self::message_size(self.endpoint(index).unwrap().id().index()) {
             return IpcOutcome::new(IpcStatus::Malformed, false);
         }
         let Some(frame) = self.endpoint(index).map(|endpoint| endpoint.frame().raw() as usize)
@@ -221,7 +233,8 @@ impl ServiceIpcGraph {
             return IpcOutcome::new(IpcStatus::Unauthorized, false);
         };
         let identity = capability_identity(capability);
-        let result = unsafe { receive_bytes(frame, index, identity, bytes) };
+        let endpoint_id = self.endpoint(index).unwrap().id().index();
+        let result = unsafe { receive_bytes(frame, endpoint_id, identity, bytes) };
         match result {
             Ok(notify) => IpcOutcome::new(IpcStatus::Ok, notify == Notify::Notified),
             Err(IpcStatus::Empty) => IpcOutcome::new(IpcStatus::Empty, false),
@@ -238,7 +251,13 @@ impl ServiceIpcGraph {
         let Some(index) = capability.endpoint_index() else {
             return Err(IpcStatus::Unauthorized);
         };
-        let Some(endpoint) = self.endpoint(index) else {
+        let Some((graph_index, endpoint)) =
+            self.endpoints[..self.count].iter().enumerate().find_map(|(graph_index, endpoint)| {
+                endpoint
+                    .filter(|endpoint| endpoint.id().index() == index)
+                    .map(|endpoint| (graph_index, endpoint))
+            })
+        else {
             return Err(IpcStatus::Unauthorized);
         };
         let owns_endpoint = match rights {
@@ -253,7 +272,7 @@ impl ServiceIpcGraph {
         {
             return Err(IpcStatus::Stale);
         }
-        Ok(index)
+        Ok(graph_index)
     }
 
     pub fn message_size(index: usize) -> usize {
@@ -340,15 +359,28 @@ unsafe fn receive_typed<T: Copy, const N: usize>(
     Ok(notify)
 }
 
-fn disconnect_ipc_page(endpoint: IpcEndpoint, index: usize) {
+fn disconnect_ipc_page(endpoint: IpcEndpoint) {
     let frame = endpoint.frame.raw() as usize;
     // All service tasks are quiesced before this is called, so replacing the
     // page object cannot race with an old producer or consumer.
     unsafe {
-        match index {
-            0 => (*(frame as *const logos_abi::InputIpc)).disconnect(),
-            1 => (*(frame as *const logos_abi::RenderIpc)).disconnect(),
-            2..=5 => (*(frame as *const logos_abi::StreamIpc)).disconnect(),
+        match endpoint.id() {
+            logos_abi::IpcEndpointId::InputToTerminal => {
+                (*(frame as *const logos_abi::InputIpc)).disconnect()
+            }
+            logos_abi::IpcEndpointId::TerminalToDisplay => {
+                (*(frame as *const logos_abi::RenderIpc)).disconnect()
+            }
+            logos_abi::IpcEndpointId::TerminalToSession
+            | logos_abi::IpcEndpointId::SessionToTerminal
+            | logos_abi::IpcEndpointId::SessionToCommands
+            | logos_abi::IpcEndpointId::CommandsToSession => {
+                (*(frame as *const logos_abi::StreamIpc)).disconnect()
+            }
+            logos_abi::IpcEndpointId::CommandsToStorage
+            | logos_abi::IpcEndpointId::StorageToCommands => {
+                (*(frame as *const logos_abi::StreamIpc)).disconnect()
+            }
             _ => {}
         }
     }
@@ -388,17 +420,26 @@ mod tests {
         let graph =
             ServiceIpcGraph::allocate_with_identity(&mut pool, &mut memory, 1, SERVICE_EPOCH)
                 .unwrap();
-        assert_eq!(graph.count(), 6);
+        assert_eq!(graph.count(), 8);
         assert_eq!(graph.endpoint(0).unwrap().producer(), ServiceId::Input);
         assert_eq!(graph.endpoint(0).unwrap().consumer(), ServiceId::Terminal);
         assert_eq!(graph.endpoint(5).unwrap().producer(), ServiceId::Commands);
         assert_eq!(graph.endpoint(5).unwrap().consumer(), ServiceId::Session);
+        assert_eq!(graph.endpoint(6).unwrap().id(), logos_abi::IpcEndpointId::CommandsToStorage);
+        assert_eq!(graph.endpoint(7).unwrap().id(), logos_abi::IpcEndpointId::StorageToCommands);
         assert_eq!(graph.endpoint(5).unwrap().generation(), 1);
         let terminal = graph.capabilities(ServiceId::Terminal).unwrap();
         assert_eq!(terminal.get(0).unwrap().rights, IpcRights::Receive);
         assert_eq!(terminal.get(1).unwrap().rights, IpcRights::Send);
         assert_eq!(terminal.get(3).unwrap().rights, IpcRights::Receive);
         assert_eq!(terminal.get(4), None);
+        let commands = graph.capabilities(ServiceId::Commands).unwrap();
+        assert_eq!(commands.get(2).unwrap().endpoint_index(), Some(8));
+        assert_eq!(commands.get(3).unwrap().endpoint_index(), Some(9));
+        let storage = graph.capabilities(ServiceId::Storage).unwrap();
+        assert_eq!(storage.get(0).unwrap().endpoint_index(), Some(8));
+        assert_eq!(storage.get(1).unwrap().endpoint_index(), Some(9));
+        assert_eq!(storage.get(2), None);
     }
 
     #[test]

@@ -48,3 +48,5 @@
 | [0044](0044-storage-service-ipc.md) | Accepted | Storage uses fixed kernel-mediated IPC and private staging pages without device access |
 | [0045](0045-bounded-object-namespace.md) | Accepted | A fixed storage-service object table provides generation-safe durable namespace operations |
 | [0046](0046-storage-service-lifecycle.md) | Accepted | Storage is admitted as the sixth fixed service while its kernel-mediated request endpoint remains separately gated |
+| [0047](0047-storage-command-api.md) | Accepted | Commands uses a bounded versioned Storage API; Storage owns one active transaction, shadow state, and durable publication |
+| [0048](0048-storage-format-compatibility.md) | Accepted | Storage versions fail closed; v1 recovers valid commits after torn gaps and never silently downgrades or reformats unknown media |

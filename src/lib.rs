@@ -26,6 +26,8 @@ mod service_runtime;
 pub mod service_startup;
 #[allow(dead_code)]
 mod storage_ipc;
+#[cfg(all(feature = "storage-proof", target_os = "uefi"))]
+mod storage_proof;
 pub mod virtio;
 
 #[cfg(target_os = "uefi")]

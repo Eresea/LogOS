@@ -1,6 +1,9 @@
 use crate::{BLOCK_BYTES, Block, BlockError, BlockIndex, BlockStore};
 
-pub const FORMAT_VERSION: u16 = 1;
+pub const LEGACY_FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = 2;
+pub const PROVISIONED_BLANK_MAGIC: &[u8; 8] = b"LOGOSBLK";
+pub const CHECKPOINT_PAYLOAD_BYTES: usize = (CHECKPOINT_BLOCKS - 1) * BLOCK_BYTES;
 /// Reserved record kind used only for internal transaction commit markers.
 pub const JOURNAL_COMMIT_KIND: u16 = u16::MAX;
 pub const MAX_RECORDS_PER_TRANSACTION: usize = 8;
@@ -9,13 +12,35 @@ const SUPERBLOCK_A: BlockIndex = BlockIndex::new(0);
 const SUPERBLOCK_B: BlockIndex = BlockIndex::new(1);
 const JOURNAL_START: u64 = 2;
 const SUPERBLOCK_MAGIC: &[u8; 8] = b"LOGOSFS\0";
+const CHECKPOINT_MAGIC: &[u8; 8] = b"LOGOSCP\0";
 const RECORD_MAGIC: &[u8; 4] = b"LOGR";
 const SUPERBLOCK_CHECKSUM_OFFSET: usize = 64;
 const RECORD_CHECKSUM_OFFSET: usize = 28;
 const RECORD_HEADER_BYTES: usize = 32;
 const MAX_TRANSACTION_ID: u64 = u64::MAX;
+const CHECKPOINT_BLOCKS: usize = 10;
+const CHECKPOINT_SLOTS: usize = 2;
+const CHECKPOINT_TOTAL_BLOCKS: u64 = (CHECKPOINT_BLOCKS * CHECKPOINT_SLOTS) as u64;
+const CHECKPOINT_VERSION: u16 = 1;
+const COMPACTION_CLEAN: u8 = 0;
+const COMPACTION_PREPARED: u8 = 1;
+const MIN_JOURNAL_BLOCKS: u64 = MAX_RECORDS_PER_TRANSACTION as u64 + 1;
+const MAX_REPLAY_BLOCKS: u64 = 64;
 
 pub const MAX_RECORD_PAYLOAD_BYTES: usize = BLOCK_BYTES - RECORD_HEADER_BYTES;
+
+const fn checkpoint_start_for(block_count: u64) -> u64 {
+    if block_count >= JOURNAL_START + CHECKPOINT_TOTAL_BLOCKS + MIN_JOURNAL_BLOCKS {
+        block_count - CHECKPOINT_TOTAL_BLOCKS
+    } else {
+        0
+    }
+}
+
+const fn journal_end_for(block_count: u64) -> u64 {
+    let checkpoint_start = checkpoint_start_for(block_count);
+    if checkpoint_start == 0 { block_count } else { checkpoint_start }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FormatError {
@@ -31,6 +56,7 @@ pub enum FormatError {
     JournalFull,
     GenerationExhausted,
     ReplayRejected,
+    ProvisionedBlank,
 }
 
 impl From<BlockError> for FormatError {
@@ -69,12 +95,22 @@ pub struct VolumeInfo {
     pub journal_head: u64,
     pub journal_tail: u64,
     pub root_transaction_id: u64,
+    pub checkpoint_start: u64,
+    pub checkpoint_slot: u8,
+    pub compaction_state: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Volume {
     info: VolumeInfo,
     active_superblock: u8,
+    format_version: u16,
+}
+
+#[derive(Clone, Copy)]
+struct Superblock {
+    info: VolumeInfo,
+    version: u16,
 }
 
 impl Volume {
@@ -92,21 +128,50 @@ impl Volume {
             }
         }
 
+        Self::format_metadata(store)
+    }
+
+    pub fn format_provisioned<B: BlockStore>(store: &mut B) -> Result<Self, FormatError> {
+        if store.block_count() <= JOURNAL_START {
+            return Err(FormatError::TooSmall);
+        }
+        let mut marker = Block::zero();
+        store.read_block(SUPERBLOCK_A, &mut marker)?;
+        let marker_bytes = marker.as_bytes();
+        if &marker_bytes[..PROVISIONED_BLANK_MAGIC.len()] != PROVISIONED_BLANK_MAGIC
+            || marker_bytes[PROVISIONED_BLANK_MAGIC.len()..].iter().any(|byte| *byte != 0)
+        {
+            return Err(FormatError::NotBlank);
+        }
+        Self::format_metadata(store)
+    }
+
+    fn format_metadata<B: BlockStore>(store: &mut B) -> Result<Self, FormatError> {
+        let block_count = store.block_count();
+        if block_count <= JOURNAL_START {
+            return Err(FormatError::TooSmall);
+        }
         let info = VolumeInfo {
             generation: 1,
             journal_start: JOURNAL_START,
-            journal_end: block_count,
+            journal_end: journal_end_for(block_count),
             journal_head: JOURNAL_START,
             journal_tail: JOURNAL_START,
             root_transaction_id: 0,
+            checkpoint_start: checkpoint_start_for(block_count),
+            checkpoint_slot: 0,
+            compaction_state: COMPACTION_CLEAN,
         };
 
+        let empty = Block::zero();
+        store.write_block(BlockIndex::new(JOURNAL_START), &empty)?;
+        store.flush()?;
         write_superblock(store, SUPERBLOCK_A, info)?;
         store.flush()?;
         write_superblock(store, SUPERBLOCK_B, info)?;
         store.flush()?;
 
-        Ok(Self { info, active_superblock: 1 })
+        Ok(Self { info, active_superblock: 1, format_version: FORMAT_VERSION })
     }
 
     pub fn open<B: BlockStore>(store: &mut B) -> Result<Self, FormatError> {
@@ -117,24 +182,157 @@ impl Volume {
         let first = read_superblock(store, SUPERBLOCK_A);
         let second = read_superblock(store, SUPERBLOCK_B);
 
-        match (first, second) {
+        let mut volume = match (first, second) {
+            (Err(FormatError::UnsupportedVersion), _)
+            | (_, Err(FormatError::UnsupportedVersion)) => Err(FormatError::UnsupportedVersion),
             (Ok(Some(a)), Ok(Some(b))) => {
-                if b.generation > a.generation {
-                    Ok(Self { info: b, active_superblock: 1 })
+                if b.info.generation > a.info.generation {
+                    Ok(Self { info: b.info, active_superblock: 1, format_version: b.version })
                 } else {
-                    Ok(Self { info: a, active_superblock: 0 })
+                    Ok(Self { info: a.info, active_superblock: 0, format_version: a.version })
                 }
             }
-            (Ok(Some(info)), _) => Ok(Self { info, active_superblock: 0 }),
-            (_, Ok(Some(info))) => Ok(Self { info, active_superblock: 1 }),
+            (Ok(Some(superblock)), _) => Ok(Self {
+                info: superblock.info,
+                active_superblock: 0,
+                format_version: superblock.version,
+            }),
+            (_, Ok(Some(superblock))) => Ok(Self {
+                info: superblock.info,
+                active_superblock: 1,
+                format_version: superblock.version,
+            }),
             (Ok(None), Ok(None)) => Err(FormatError::Unformatted),
             (Err(error), Ok(None)) | (Ok(None), Err(error)) => Err(error),
             (Err(error), Err(_)) => Err(error),
+        }?;
+        if volume.info.compaction_state == COMPACTION_PREPARED {
+            volume.complete_compaction(store)?;
         }
+        Ok(volume)
     }
 
     pub const fn info(self) -> VolumeInfo {
         self.info
+    }
+
+    pub const fn should_checkpoint(self) -> bool {
+        let retained_blocks = self.info.journal_head.saturating_sub(self.info.journal_tail);
+        self.info.root_transaction_id != 0
+            && self.info.checkpoint_start != 0
+            && self.info.compaction_state == COMPACTION_CLEAN
+            && (retained_blocks.saturating_add(MIN_JOURNAL_BLOCKS) >= MAX_REPLAY_BLOCKS
+                || self.info.journal_head.saturating_add(MIN_JOURNAL_BLOCKS)
+                    >= self.info.journal_end)
+    }
+
+    pub fn checkpoint<B: BlockStore>(
+        &mut self,
+        store: &mut B,
+        payload: &[u8],
+    ) -> Result<(), FormatError> {
+        if self.info.checkpoint_start == 0 || payload.len() > CHECKPOINT_PAYLOAD_BYTES {
+            return Err(FormatError::PayloadTooLarge);
+        }
+        if self.info.compaction_state != COMPACTION_CLEAN || self.info.root_transaction_id == 0 {
+            return Err(FormatError::InvalidRequest);
+        }
+
+        let next_slot = 1u8.saturating_sub(self.info.checkpoint_slot);
+        write_checkpoint(
+            store,
+            self.info.checkpoint_start,
+            next_slot,
+            self.info.root_transaction_id,
+            payload,
+        )?;
+        store.flush()?;
+
+        let prepared = VolumeInfo {
+            generation: self
+                .info
+                .generation
+                .checked_add(1)
+                .ok_or(FormatError::GenerationExhausted)?,
+            checkpoint_slot: next_slot,
+            compaction_state: COMPACTION_PREPARED,
+            ..self.info
+        };
+        let next_superblock = if self.active_superblock == 0 { SUPERBLOCK_B } else { SUPERBLOCK_A };
+        write_superblock_version(store, next_superblock, prepared, self.format_version)?;
+        store.flush()?;
+        self.info = prepared;
+        self.active_superblock ^= 1;
+        self.complete_compaction(store)
+    }
+
+    pub fn load_checkpoint<B: BlockStore>(
+        &self,
+        store: &mut B,
+        output: &mut [u8],
+    ) -> Result<Option<u64>, FormatError> {
+        if self.info.checkpoint_start == 0
+            || self.info.compaction_state != COMPACTION_CLEAN
+            || self.info.journal_head != self.info.journal_start
+            || self.info.journal_tail != self.info.journal_start
+        {
+            return Ok(None);
+        }
+        let (root_transaction_id, payload_len) =
+            read_checkpoint_header(store, self.info.checkpoint_start, self.info.checkpoint_slot)?
+                .ok_or(FormatError::Corrupt)?;
+        if root_transaction_id != self.info.root_transaction_id || payload_len > output.len() {
+            return Err(FormatError::Corrupt);
+        }
+        read_checkpoint_payload(
+            store,
+            self.info.checkpoint_start,
+            self.info.checkpoint_slot,
+            payload_len,
+            output,
+        )?;
+        Ok(Some(root_transaction_id))
+    }
+
+    fn complete_compaction<B: BlockStore>(&mut self, store: &mut B) -> Result<(), FormatError> {
+        let (root_transaction_id, payload_len) =
+            read_checkpoint_header(store, self.info.checkpoint_start, self.info.checkpoint_slot)?
+                .ok_or(FormatError::Corrupt)?;
+        if root_transaction_id != self.info.root_transaction_id {
+            return Err(FormatError::Corrupt);
+        }
+        let mut snapshot = [0; CHECKPOINT_PAYLOAD_BYTES];
+        read_checkpoint_payload(
+            store,
+            self.info.checkpoint_start,
+            self.info.checkpoint_slot,
+            payload_len,
+            &mut snapshot,
+        )?;
+        let empty = Block::zero();
+        let clear_end = (self.info.journal_start + MIN_JOURNAL_BLOCKS).min(self.info.journal_end);
+        for index in self.info.journal_start..clear_end {
+            store.write_block(BlockIndex::new(index), &empty)?;
+        }
+        store.flush()?;
+
+        let final_info = VolumeInfo {
+            generation: self
+                .info
+                .generation
+                .checked_add(1)
+                .ok_or(FormatError::GenerationExhausted)?,
+            journal_head: self.info.journal_start,
+            journal_tail: self.info.journal_start,
+            compaction_state: COMPACTION_CLEAN,
+            ..self.info
+        };
+        let next_superblock = if self.active_superblock == 0 { SUPERBLOCK_B } else { SUPERBLOCK_A };
+        write_superblock_version(store, next_superblock, final_info, self.format_version)?;
+        store.flush()?;
+        self.info = final_info;
+        self.active_superblock ^= 1;
+        Ok(())
     }
 
     pub fn commit<B: BlockStore>(
@@ -142,6 +340,9 @@ impl Volume {
         store: &mut B,
         records: &[JournalRecord<'_>],
     ) -> Result<u64, FormatError> {
+        if self.info.compaction_state != COMPACTION_CLEAN {
+            return Err(FormatError::InvalidRequest);
+        }
         if records.len() > MAX_RECORDS_PER_TRANSACTION {
             return Err(FormatError::TransactionTooLarge);
         }
@@ -161,12 +362,23 @@ impl Volume {
             self.info.root_transaction_id.checked_add(1).ok_or(FormatError::GenerationExhausted)?;
 
         for (sequence, record) in records.iter().enumerate() {
-            let block =
-                encode_record(transaction_id, sequence as u32, record.kind, record.payload)?;
+            let block = encode_record_version(
+                transaction_id,
+                sequence as u32,
+                record.kind,
+                record.payload,
+                self.format_version,
+            )?;
             store.write_block(BlockIndex::new(self.info.journal_head + sequence as u64), &block)?;
         }
 
-        let commit = encode_record(transaction_id, records.len() as u32, JOURNAL_COMMIT_KIND, &[])?;
+        let commit = encode_record_version(
+            transaction_id,
+            records.len() as u32,
+            JOURNAL_COMMIT_KIND,
+            &[],
+            self.format_version,
+        )?;
         store
             .write_block(BlockIndex::new(self.info.journal_head + records.len() as u64), &commit)?;
         store.flush()?;
@@ -180,7 +392,7 @@ impl Volume {
             ..self.info
         };
         let next_slot = if self.active_superblock == 0 { SUPERBLOCK_B } else { SUPERBLOCK_A };
-        write_superblock(store, next_slot, next_info)?;
+        write_superblock_version(store, next_slot, next_info, self.format_version)?;
         store.flush()?;
 
         self.info = next_info;
@@ -198,25 +410,43 @@ impl Volume {
         let mut pending_transaction = 0u64;
         let mut committed_transactions = 0u64;
         let mut replayed_records = 0u64;
-        let mut last_transaction = 0u64;
+        let checkpointed = self.info.checkpoint_start != 0
+            && self.info.journal_head == self.info.journal_start
+            && self.info.journal_tail == self.info.journal_start;
+        let mut last_transaction = if checkpointed { self.info.root_transaction_id } else { 0 };
         let previous_head = self.info.journal_head;
         let mut committed_head = self.info.journal_tail;
+        let mut truncated = false;
+        let recovery_end = self
+            .info
+            .journal_head
+            .saturating_add(MAX_RECORDS_PER_TRANSACTION as u64 + 1)
+            .min(self.info.journal_end);
 
-        for index in self.info.journal_tail..self.info.journal_end {
+        for index in self.info.journal_tail..recovery_end {
             let mut block = Block::zero();
             store.read_block(BlockIndex::new(index), &mut block)?;
-            let record = match decode_record(&block) {
+            let record = match decode_record_version(&block, self.format_version) {
                 Ok(Some(record)) => record,
                 Ok(None) => {
-                    if !remaining_journal_is_blank(store, index + 1, self.info.journal_head)? {
-                        return Err(FormatError::Corrupt);
+                    if index >= previous_head {
+                        break;
                     }
-                    break;
+                    // Abandon only the incomplete transaction at this gap. A
+                    // later checksummed transaction may still be durable.
+                    truncated = true;
+                    pending_len = 0;
+                    pending_transaction = 0;
+                    continue;
                 }
                 Err(error) => {
+                    if error == FormatError::UnsupportedVersion {
+                        return Err(error);
+                    }
                     if !remaining_journal_is_blank(store, index + 1, self.info.journal_head)? {
                         return Err(error);
                     }
+                    truncated = true;
                     break;
                 }
             };
@@ -229,12 +459,18 @@ impl Volume {
             }
 
             if record.kind == JOURNAL_COMMIT_KIND {
-                if record.payload_len != 0
-                    || pending_len == 0 && record.sequence != 0
-                    || (pending_len > 0
-                        && (pending_transaction != record.transaction_id
-                            || record.sequence != pending_len as u32))
-                {
+                let valid = record.payload_len == 0
+                    && ((pending_len == 0 && record.sequence == 0)
+                        || (pending_len > 0
+                            && pending_transaction == record.transaction_id
+                            && record.sequence == pending_len as u32));
+                if !valid {
+                    pending_len = 0;
+                    pending_transaction = 0;
+                    truncated = true;
+                    continue;
+                }
+                if record.transaction_id <= last_transaction {
                     return Err(FormatError::Corrupt);
                 }
 
@@ -256,13 +492,23 @@ impl Volume {
             }
 
             if pending_len == 0 {
+                if record.sequence != 0 {
+                    truncated = true;
+                    continue;
+                }
                 pending_transaction = record.transaction_id;
             }
             if pending_transaction != record.transaction_id
                 || record.sequence != pending_len as u32
                 || pending_len == MAX_RECORDS_PER_TRANSACTION
             {
-                return Err(FormatError::Corrupt);
+                pending_len = 0;
+                pending_transaction = 0;
+                truncated = true;
+                if record.sequence != 0 {
+                    continue;
+                }
+                pending_transaction = record.transaction_id;
             }
             pending[pending_len] = PendingRecord {
                 kind: record.kind,
@@ -272,7 +518,7 @@ impl Volume {
             pending_len += 1;
         }
 
-        if last_transaction < self.info.root_transaction_id {
+        if !truncated && last_transaction < self.info.root_transaction_id && !checkpointed {
             return Err(FormatError::Corrupt);
         }
 
@@ -286,7 +532,7 @@ impl Volume {
                 ..self.info
             };
             let next_slot = if self.active_superblock == 0 { SUPERBLOCK_B } else { SUPERBLOCK_A };
-            write_superblock(store, next_slot, next_info)?;
+            write_superblock_version(store, next_slot, next_info, self.format_version)?;
             store.flush()?;
             self.info = next_info;
             self.active_superblock ^= 1;
@@ -321,10 +567,19 @@ fn write_superblock<B: BlockStore>(
     index: BlockIndex,
     info: VolumeInfo,
 ) -> Result<(), FormatError> {
+    write_superblock_version(store, index, info, FORMAT_VERSION)
+}
+
+fn write_superblock_version<B: BlockStore>(
+    store: &mut B,
+    index: BlockIndex,
+    info: VolumeInfo,
+    version: u16,
+) -> Result<(), FormatError> {
     let mut block = Block::zero();
     let bytes = block.as_bytes_mut();
     bytes[..8].copy_from_slice(SUPERBLOCK_MAGIC);
-    put_u16(bytes, 8, FORMAT_VERSION);
+    put_u16(bytes, 8, version);
     put_u16(bytes, 10, 0);
     put_u64(bytes, 16, info.generation);
     put_u64(bytes, 24, info.journal_start);
@@ -332,16 +587,106 @@ fn write_superblock<B: BlockStore>(
     put_u64(bytes, 40, info.journal_head);
     put_u64(bytes, 48, info.journal_tail);
     put_u64(bytes, 56, info.root_transaction_id);
+    put_u64(bytes, 68, info.checkpoint_start);
+    bytes[76] = info.checkpoint_slot;
+    bytes[77] = info.compaction_state;
     let checksum = crc32c(&*bytes);
     put_u32(bytes, SUPERBLOCK_CHECKSUM_OFFSET, checksum);
     store.write_block(index, &block)?;
     Ok(())
 }
 
+fn checkpoint_slot_start(checkpoint_start: u64, slot: u8) -> Option<u64> {
+    (slot as usize)
+        .checked_mul(CHECKPOINT_BLOCKS)
+        .and_then(|offset| checkpoint_start.checked_add(offset as u64 + 1))
+}
+
+fn write_checkpoint<B: BlockStore>(
+    store: &mut B,
+    checkpoint_start: u64,
+    slot: u8,
+    root_transaction_id: u64,
+    payload: &[u8],
+) -> Result<(), FormatError> {
+    let data_start = checkpoint_slot_start(checkpoint_start, slot).ok_or(FormatError::Corrupt)?;
+    let checksum = crc32c(payload);
+    let empty = Block::zero();
+    for index in 0..CHECKPOINT_BLOCKS - 1 {
+        store.write_block(BlockIndex::new(data_start + index as u64), &empty)?;
+    }
+    for (index, chunk) in payload.chunks(BLOCK_BYTES).enumerate() {
+        let mut block = Block::zero();
+        block.as_bytes_mut()[..chunk.len()].copy_from_slice(chunk);
+        store.write_block(BlockIndex::new(data_start + index as u64), &block)?;
+    }
+
+    let mut header = Block::zero();
+    let bytes = header.as_bytes_mut();
+    bytes[..8].copy_from_slice(CHECKPOINT_MAGIC);
+    put_u16(bytes, 8, CHECKPOINT_VERSION);
+    put_u64(bytes, 16, root_transaction_id);
+    put_u32(bytes, 24, payload.len() as u32);
+    put_u32(bytes, 28, checksum);
+    let header_index = data_start - 1;
+    store.write_block(BlockIndex::new(header_index), &header)?;
+    Ok(())
+}
+
+fn read_checkpoint_header<B: BlockStore>(
+    store: &mut B,
+    checkpoint_start: u64,
+    slot: u8,
+) -> Result<Option<(u64, usize)>, FormatError> {
+    let data_start = checkpoint_slot_start(checkpoint_start, slot).ok_or(FormatError::Corrupt)?;
+    let mut header = Block::zero();
+    store.read_block(BlockIndex::new(data_start - 1), &mut header)?;
+    let bytes = header.as_bytes();
+    if bytes.iter().all(|byte| *byte == 0) {
+        return Ok(None);
+    }
+    if &bytes[..8] != CHECKPOINT_MAGIC || get_u16(bytes, 8) != CHECKPOINT_VERSION {
+        return Err(FormatError::Corrupt);
+    }
+    let root_transaction_id = get_u64(bytes, 16);
+    let payload_len = get_u32(bytes, 24) as usize;
+    if root_transaction_id == 0 || payload_len > CHECKPOINT_PAYLOAD_BYTES {
+        return Err(FormatError::Corrupt);
+    }
+    Ok(Some((root_transaction_id, payload_len)))
+}
+
+fn read_checkpoint_payload<B: BlockStore>(
+    store: &mut B,
+    checkpoint_start: u64,
+    slot: u8,
+    payload_len: usize,
+    output: &mut [u8],
+) -> Result<(), FormatError> {
+    let data_start = checkpoint_slot_start(checkpoint_start, slot).ok_or(FormatError::Corrupt)?;
+    let mut copied = 0;
+    for index in 0..payload_len.div_ceil(BLOCK_BYTES) {
+        let mut block = Block::zero();
+        store.read_block(BlockIndex::new(data_start + index as u64), &mut block)?;
+        let length = (payload_len - copied).min(BLOCK_BYTES);
+        output[copied..copied + length].copy_from_slice(&block.as_bytes()[..length]);
+        copied += length;
+    }
+    let expected = {
+        let mut header = Block::zero();
+        store.read_block(BlockIndex::new(data_start - 1), &mut header)?;
+        get_u32(header.as_bytes(), 28)
+    };
+    if crc32c(&output[..payload_len]) != expected {
+        return Err(FormatError::Corrupt);
+    }
+    Ok(())
+}
+
 fn read_superblock<B: BlockStore>(
     store: &mut B,
     index: BlockIndex,
-) -> Result<Option<VolumeInfo>, FormatError> {
+) -> Result<Option<Superblock>, FormatError> {
     let mut block = Block::zero();
     store.read_block(index, &mut block)?;
     let bytes = block.as_bytes();
@@ -349,9 +694,13 @@ fn read_superblock<B: BlockStore>(
         return Ok(None);
     }
     if &bytes[..8] != SUPERBLOCK_MAGIC {
+        if &bytes[..PROVISIONED_BLANK_MAGIC.len()] == PROVISIONED_BLANK_MAGIC {
+            return Err(FormatError::ProvisionedBlank);
+        }
         return Err(FormatError::Corrupt);
     }
-    if get_u16(bytes, 8) != FORMAT_VERSION {
+    let version = get_u16(bytes, 8);
+    if version != FORMAT_VERSION && version != LEGACY_FORMAT_VERSION {
         return Err(FormatError::UnsupportedVersion);
     }
     let stored_checksum = get_u32(bytes, SUPERBLOCK_CHECKSUM_OFFSET);
@@ -368,7 +717,22 @@ fn read_superblock<B: BlockStore>(
         journal_head: get_u64(bytes, 40),
         journal_tail: get_u64(bytes, 48),
         root_transaction_id: get_u64(bytes, 56),
+        checkpoint_start: get_u64(bytes, 68),
+        checkpoint_slot: bytes[76],
+        compaction_state: bytes[77],
     };
+    if version == LEGACY_FORMAT_VERSION
+        && (info.checkpoint_start != 0
+            || info.checkpoint_slot != 0
+            || info.compaction_state != COMPACTION_CLEAN)
+    {
+        return Err(FormatError::Corrupt);
+    }
+    let checkpoint_range_invalid = info.checkpoint_start != 0
+        && match info.journal_end.checked_add(CHECKPOINT_TOTAL_BLOCKS) {
+            Some(end) => end > store.block_count(),
+            None => true,
+        };
     if info.generation == 0
         || info.journal_start != JOURNAL_START
         || info.journal_end > store.block_count()
@@ -376,17 +740,35 @@ fn read_superblock<B: BlockStore>(
         || info.journal_tail < info.journal_start
         || info.journal_tail > info.journal_head
         || info.journal_head > info.journal_end
+        || (info.checkpoint_start != 0
+            && (info.checkpoint_start != info.journal_end
+                || info.checkpoint_slot as usize >= CHECKPOINT_SLOTS
+                || info.compaction_state > COMPACTION_PREPARED
+                || checkpoint_range_invalid))
+        || (info.checkpoint_start == 0
+            && (info.checkpoint_slot != 0 || info.compaction_state != COMPACTION_CLEAN))
     {
         return Err(FormatError::Corrupt);
     }
-    Ok(Some(info))
+    Ok(Some(Superblock { info, version }))
 }
 
+#[cfg(test)]
 fn encode_record(
     transaction_id: u64,
     sequence: u32,
     kind: u16,
     payload: &[u8],
+) -> Result<Block, FormatError> {
+    encode_record_version(transaction_id, sequence, kind, payload, FORMAT_VERSION)
+}
+
+fn encode_record_version(
+    transaction_id: u64,
+    sequence: u32,
+    kind: u16,
+    payload: &[u8],
+    version: u16,
 ) -> Result<Block, FormatError> {
     if payload.len() > MAX_RECORD_PAYLOAD_BYTES {
         return Err(FormatError::PayloadTooLarge);
@@ -398,7 +780,7 @@ fn encode_record(
     let mut block = Block::zero();
     let bytes = block.as_bytes_mut();
     bytes[..4].copy_from_slice(RECORD_MAGIC);
-    put_u16(bytes, 4, FORMAT_VERSION);
+    put_u16(bytes, 4, version);
     put_u16(bytes, 6, kind);
     put_u64(bytes, 8, transaction_id);
     put_u32(bytes, 16, sequence);
@@ -409,13 +791,19 @@ fn encode_record(
     Ok(block)
 }
 
-fn decode_record(block: &Block) -> Result<Option<DecodedRecord>, FormatError> {
+fn decode_record_version(
+    block: &Block,
+    version: u16,
+) -> Result<Option<DecodedRecord>, FormatError> {
     let bytes = block.as_bytes();
     if bytes.iter().all(|byte| *byte == 0) {
         return Ok(None);
     }
-    if &bytes[..4] != RECORD_MAGIC || get_u16(bytes, 4) != FORMAT_VERSION {
+    if &bytes[..4] != RECORD_MAGIC {
         return Err(FormatError::Corrupt);
+    }
+    if get_u16(bytes, 4) != version {
+        return Err(FormatError::UnsupportedVersion);
     }
     let stored_checksum = get_u32(bytes, RECORD_CHECKSUM_OFFSET);
     let mut checked = *block;
@@ -512,6 +900,7 @@ mod tests {
         durable: [Block; N],
         fail_writes_after: Option<usize>,
         fail_flush: bool,
+        reads: usize,
     }
 
     impl<const N: usize> CrashStore<N> {
@@ -521,6 +910,7 @@ mod tests {
                 durable: [Block::ZERO; N],
                 fail_writes_after: None,
                 fail_flush: false,
+                reads: 0,
             }
         }
 
@@ -536,6 +926,10 @@ mod tests {
             self.fail_flush = true;
         }
 
+        fn reset_reads(&mut self) {
+            self.reads = 0;
+        }
+
         fn corrupt(&mut self, index: u64, offset: usize) {
             self.working[index as usize].as_bytes_mut()[offset] ^= 0xff;
             self.durable[index as usize] = self.working[index as usize];
@@ -548,6 +942,7 @@ mod tests {
         }
 
         fn read_block(&mut self, index: BlockIndex, output: &mut Block) -> Result<(), BlockError> {
+            self.reads += 1;
             let Some(block) = self.working.get(index.get() as usize) else {
                 return Err(BlockError::OutOfBounds);
             };
@@ -620,6 +1015,80 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v1_media_remains_readable_without_checkpointing() {
+        let mut store = CrashStore::<BLOCKS>::new();
+        let formatted = Volume::format(&mut store).unwrap();
+        write_superblock_version(&mut store, SUPERBLOCK_A, formatted.info(), LEGACY_FORMAT_VERSION)
+            .unwrap();
+        write_superblock_version(&mut store, SUPERBLOCK_B, formatted.info(), LEGACY_FORMAT_VERSION)
+            .unwrap();
+        store.flush().unwrap();
+
+        let mut legacy = Volume::open(&mut store).unwrap();
+        legacy.commit(&mut store, &[JournalRecord { kind: 1, payload: b"legacy" }]).unwrap();
+        let mut reopened = Volume::open(&mut store).unwrap();
+        let mut sink = Sink::new();
+        assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 1);
+        assert_eq!(&sink.records[0].2[..6], b"legacy");
+    }
+
+    #[test]
+    fn provisioned_blank_media_formats_without_scanning_the_volume() {
+        let mut store = CrashStore::<32>::new();
+        let mut marker = Block::zero();
+        marker.as_bytes_mut()[..PROVISIONED_BLANK_MAGIC.len()]
+            .copy_from_slice(PROVISIONED_BLANK_MAGIC);
+        marker.as_bytes_mut()[PROVISIONED_BLANK_MAGIC.len()] = 1;
+        store.write_block(SUPERBLOCK_A, &marker).unwrap();
+        store.flush().unwrap();
+        assert_eq!(Volume::format_provisioned(&mut store), Err(FormatError::NotBlank));
+
+        marker.as_bytes_mut()[PROVISIONED_BLANK_MAGIC.len()] = 0;
+        store.write_block(SUPERBLOCK_A, &marker).unwrap();
+        store.flush().unwrap();
+        assert_eq!(Volume::open(&mut store), Err(FormatError::ProvisionedBlank));
+
+        store.reset_reads();
+        let volume = Volume::format_provisioned(&mut store).unwrap();
+        assert_eq!(volume.info().journal_head, JOURNAL_START);
+        assert_eq!(store.reads, 1);
+    }
+
+    #[test]
+    fn unsupported_superblock_version_is_not_ignored() {
+        let mut store = CrashStore::<BLOCKS>::new();
+        Volume::format(&mut store).unwrap();
+
+        let mut block = Block::zero();
+        store.read_block(SUPERBLOCK_B, &mut block).unwrap();
+        put_u16(block.as_bytes_mut(), 8, FORMAT_VERSION + 1);
+        store.write_block(SUPERBLOCK_B, &block).unwrap();
+        store.flush().unwrap();
+
+        assert_eq!(Volume::open(&mut store), Err(FormatError::UnsupportedVersion));
+    }
+
+    #[test]
+    fn unsupported_journal_version_is_not_treated_as_a_torn_tail() {
+        let mut store = CrashStore::<BLOCKS>::new();
+        let volume = Volume::format(&mut store).unwrap();
+        let mut record = encode_record(1, 0, 7, b"future").unwrap();
+        put_u16(record.as_bytes_mut(), 4, FORMAT_VERSION + 1);
+        store.write_block(BlockIndex::new(JOURNAL_START), &record).unwrap();
+
+        let mut info = volume.info();
+        info.generation += 1;
+        info.journal_head = JOURNAL_START + 1;
+        info.root_transaction_id = 1;
+        write_superblock(&mut store, SUPERBLOCK_A, info).unwrap();
+        store.flush().unwrap();
+
+        let mut reopened = Volume::open(&mut store).unwrap();
+        let mut sink = Sink::new();
+        assert_eq!(reopened.recover(&mut store, &mut sink), Err(FormatError::UnsupportedVersion));
+    }
+
+    #[test]
     fn rejects_nonblank_media_instead_of_formatting() {
         let mut store = MemoryBlockStore::<BLOCKS>::new();
         let mut block = Block::zero();
@@ -653,6 +1122,33 @@ mod tests {
         assert_eq!(sink.records[0].0, transaction_id);
         assert_eq!(sink.records[0].1, 7);
         assert_eq!(&sink.records[0].2[..5], b"hello");
+    }
+
+    #[test]
+    fn blank_journal_hole_recovers_later_transactions() {
+        let mut store = CrashStore::<BLOCKS>::new();
+        let mut volume = Volume::format(&mut store).unwrap();
+        volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"first" }]).unwrap();
+        let later = encode_record(2, 0, 2, b"later").unwrap();
+        let later_commit = encode_record(2, 1, JOURNAL_COMMIT_KIND, &[]).unwrap();
+        store.write_block(BlockIndex::new(5), &later).unwrap();
+        store.write_block(BlockIndex::new(6), &later_commit).unwrap();
+
+        let mut info = volume.info();
+        info.generation += 1;
+        info.journal_head = 7;
+        info.root_transaction_id = 2;
+        write_superblock(&mut store, SUPERBLOCK_B, info).unwrap();
+        store.flush().unwrap();
+
+        let mut reopened = Volume::open(&mut store).unwrap();
+        let mut sink = Sink::new();
+        assert_eq!(
+            reopened.recover(&mut store, &mut sink).unwrap(),
+            RecoverySummary { committed_transactions: 2, replayed_records: 2 }
+        );
+        assert_eq!(reopened.info().journal_head, 7);
+        assert_eq!(reopened.info().root_transaction_id, 2);
     }
 
     #[test]
@@ -759,6 +1255,105 @@ mod tests {
             reopened.commit(&mut store, &[JournalRecord { kind: 8, payload: b"next" }]),
             Ok(2)
         );
+    }
+
+    #[test]
+    fn recovery_does_not_scan_the_physical_tail() {
+        let mut store = CrashStore::<32>::new();
+        let volume = Volume::format(&mut store).unwrap();
+        store.reset_reads();
+        let mut reopened = Volume::open(&mut store).unwrap();
+        store.reset_reads();
+        let mut sink = Sink::new();
+        assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 0);
+        assert_eq!(store.reads, 1);
+        assert_eq!(reopened.info(), volume.info());
+    }
+
+    #[test]
+    fn checkpoint_reclaims_journal_and_restores_snapshot() {
+        let mut store = CrashStore::<32>::new();
+        let mut volume = Volume::format(&mut store).unwrap();
+        volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"old" }]).unwrap();
+        volume.checkpoint(&mut store, b"snapshot").unwrap();
+        assert_eq!(volume.info().journal_head, JOURNAL_START);
+        assert_eq!(volume.info().journal_tail, JOURNAL_START);
+
+        let mut reopened = Volume::open(&mut store).unwrap();
+        let mut snapshot = [0; 16];
+        assert_eq!(reopened.load_checkpoint(&mut store, &mut snapshot).unwrap(), Some(1));
+        assert_eq!(&snapshot[..8], b"snapshot");
+        let mut sink = Sink::new();
+        assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 0);
+        assert_eq!(reopened.info().root_transaction_id, 1);
+    }
+
+    #[test]
+    fn checkpoint_cadence_is_bounded_independent_of_disk_size() {
+        let mut store = CrashStore::<96>::new();
+        let mut volume = Volume::format(&mut store).unwrap();
+        for _ in 0..32 {
+            volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"x" }]).unwrap();
+        }
+        assert!(volume.should_checkpoint());
+    }
+
+    #[test]
+    fn checkpoint_recovery_keeps_a_durable_post_checkpoint_commit() {
+        let mut store = CrashStore::<32>::new();
+        let mut volume = Volume::format(&mut store).unwrap();
+        volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"old" }]).unwrap();
+        volume.checkpoint(&mut store, b"snapshot").unwrap();
+
+        store.fail_write_after(2);
+        assert_eq!(
+            volume.commit(&mut store, &[JournalRecord { kind: 2, payload: b"new" }]),
+            Err(FormatError::Block(BlockError::Io))
+        );
+        store.power_loss();
+
+        let mut reopened = Volume::open(&mut store).unwrap();
+        let mut sink = Sink::new();
+        assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 1);
+        assert_eq!(sink.records[0].0, 2);
+        assert_eq!(reopened.info().root_transaction_id, 2);
+    }
+
+    #[test]
+    fn checkpoint_recovery_rejects_stale_records() {
+        let mut store = CrashStore::<32>::new();
+        let mut volume = Volume::format(&mut store).unwrap();
+        volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"old" }]).unwrap();
+        volume.checkpoint(&mut store, b"snapshot").unwrap();
+
+        let stale = encode_record(1, 0, 2, b"stale").unwrap();
+        let stale_commit = encode_record(1, 1, JOURNAL_COMMIT_KIND, &[]).unwrap();
+        store.write_block(BlockIndex::new(JOURNAL_START), &stale).unwrap();
+        store.write_block(BlockIndex::new(JOURNAL_START + 1), &stale_commit).unwrap();
+        store.flush().unwrap();
+
+        let mut reopened = Volume::open(&mut store).unwrap();
+        let mut sink = Sink::new();
+        assert_eq!(reopened.recover(&mut store, &mut sink), Err(FormatError::Corrupt));
+    }
+
+    #[test]
+    fn prepared_checkpoint_completes_after_power_loss() {
+        let mut store = CrashStore::<32>::new();
+        let mut volume = Volume::format(&mut store).unwrap();
+        volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"old" }]).unwrap();
+        store.fail_write_after(12);
+        assert_eq!(
+            volume.checkpoint(&mut store, b"snapshot"),
+            Err(FormatError::Block(BlockError::Io))
+        );
+        store.power_loss();
+
+        let reopened = Volume::open(&mut store).unwrap();
+        assert_eq!(reopened.info().journal_head, JOURNAL_START);
+        let mut snapshot = [0; 16];
+        assert_eq!(reopened.load_checkpoint(&mut store, &mut snapshot).unwrap(), Some(1));
+        assert_eq!(&snapshot[..8], b"snapshot");
     }
 
     #[test]
