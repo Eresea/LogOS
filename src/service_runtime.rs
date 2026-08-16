@@ -552,6 +552,36 @@ impl ServiceRuntime {
         Ok(())
     }
 
+    /// Reset the bounded image-owned memory and private staging before a
+    /// stopped service is started again. The process identity is reused, but
+    /// its code, data, BSS, and stack pages are restored to the retained ELF.
+    fn reset_service_image(&mut self, service: ServiceId) -> Result<(), ServiceRuntimeError> {
+        let Some(bundle) = crate::arch::service_images() else {
+            return Err(ServiceRuntimeError::Resources);
+        };
+        let Some(spec) = SERVICE_IMAGES.iter().find(|spec| spec.service() == service) else {
+            return Err(ServiceRuntimeError::Image);
+        };
+        let Some(image) = (unsafe { bundle.image(service) }) else {
+            return Err(ServiceRuntimeError::Image);
+        };
+        let plan = spec.validate_image(image).map_err(|_| ServiceRuntimeError::Image)?;
+        let mut memory = IdentityPageTableMemory;
+        self.images[service.index()]
+            .populate(plan, image, &mut memory)
+            .map_err(ServiceRuntimeError::Populate)?;
+        if let Some(frame) = self.ipc_staging_frames[service.index()] {
+            memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+        }
+        if service == ServiceId::Storage {
+            self.storage_response = None;
+            if let Some(frame) = self.storage_data_frame {
+                memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+            }
+        }
+        Ok(())
+    }
+
     fn request_stop_service(&mut self, service: ServiceId) -> Result<(), ServiceRuntimeError> {
         let index = service.index();
         let Some(task) = self.tasks[index] else {
@@ -934,7 +964,9 @@ impl ServiceRuntime {
         match decision.action {
             ManagerAction::None => {}
             ManagerAction::Start(service) => {
-                if self.start_service_task(service).is_err() {
+                if self.reset_service_image(service).is_err()
+                    || self.start_service_task(service).is_err()
+                {
                     self.manager.mark_failed(service);
                     decision.response.status = logos_abi::ManagerStatus::Capacity;
                 }
@@ -1137,6 +1169,7 @@ impl ServiceRuntime {
                 return Ok(false);
             }
             for service in services[..count].iter().rev() {
+                self.reset_service_image(*service)?;
                 self.start_service_task(*service)?;
             }
             self.manager.restart_complete(&services[..count]);

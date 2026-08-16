@@ -300,7 +300,7 @@ impl ServiceManager {
                     response.status = ManagerStatus::Stale;
                     return ManagerDecision { response, action: ManagerAction::None };
                 };
-                if self.has_running_dependents(index) {
+                if self.has_active_dependents(index) {
                     response.status = ManagerStatus::Dependency;
                 } else if self.slots[index].state != ManagerState::Running {
                     response.status = ManagerStatus::InvalidState;
@@ -321,6 +321,8 @@ impl ServiceManager {
                 };
                 if self.slots[index].state != ManagerState::Running {
                     response.status = ManagerStatus::InvalidState;
+                } else if self.has_transitional_dependents(index) {
+                    response.status = ManagerStatus::Busy;
                 } else {
                     let mut services = [logos_abi::ServiceId::Input; MAX_SERVICE_SLOTS];
                     let count = self.restart_closure(index, &mut services);
@@ -371,11 +373,22 @@ impl ServiceManager {
         })
     }
 
-    fn has_running_dependents(&self, index: usize) -> bool {
+    fn has_active_dependents(&self, index: usize) -> bool {
         self.slots.iter().any(|slot| {
             slot.service.is_some()
                 && slot.dependencies & (1 << index) != 0
-                && slot.state == ManagerState::Running
+                && matches!(
+                    slot.state,
+                    ManagerState::Starting | ManagerState::Running | ManagerState::Stopping
+                )
+        })
+    }
+
+    fn has_transitional_dependents(&self, index: usize) -> bool {
+        self.slots.iter().any(|slot| {
+            slot.service.is_some()
+                && slot.dependencies & (1 << index) != 0
+                && matches!(slot.state, ManagerState::Starting | ManagerState::Stopping)
         })
     }
 
@@ -475,6 +488,20 @@ mod tests {
     #[test]
     fn stop_rejects_running_dependents() {
         let mut manager = manager();
+        let handle = manager.handle(ServiceId::Session.index()).unwrap();
+        let response = manager
+            .request(
+                request(ManagerOperation::Stop, handle.slot(), handle.generation()),
+                ManagerRights::ALL,
+            )
+            .response;
+        assert_eq!(response.status, ManagerStatus::Dependency);
+    }
+
+    #[test]
+    fn stop_rejects_transitional_dependents() {
+        let mut manager = manager();
+        manager.mark_starting(ServiceId::Commands);
         let handle = manager.handle(ServiceId::Session.index()).unwrap();
         let response = manager
             .request(
