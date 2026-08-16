@@ -514,6 +514,9 @@ impl Volume {
         let checkpointed = self.info.checkpoint_start != 0
             && self.info.journal_head == self.info.journal_start
             && self.info.journal_tail == self.info.journal_start;
+        if checkpointed {
+            last_transaction = self.info.root_transaction_id;
+        }
         if !truncated && last_transaction < self.info.root_transaction_id && !checkpointed {
             return Err(FormatError::Corrupt);
         }
@@ -1170,6 +1173,7 @@ mod tests {
         let mut reopened = Volume::open(&mut store).unwrap();
         let mut sink = Sink::new();
         assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 0);
+        assert_eq!(reopened.info().root_transaction_id, 1);
     }
 
     #[test]
