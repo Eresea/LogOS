@@ -1197,9 +1197,18 @@ impl ServiceRuntime {
                 self.pending_restart = Some((services, count));
                 return Ok(false);
             }
+            let mut restart_failed = false;
             for service in services[..count].iter().rev() {
-                self.reset_service_image(*service)?;
-                self.start_service_task(*service)?;
+                if self.reset_service_image(*service).is_err()
+                    || self.start_service_task(*service).is_err()
+                {
+                    restart_failed = true;
+                    break;
+                }
+            }
+            if restart_failed {
+                self.restart(bundle)?;
+                return Ok(true);
             }
             self.manager.restart_complete(&services[..count]);
             #[cfg(feature = "qemu-proof")]
