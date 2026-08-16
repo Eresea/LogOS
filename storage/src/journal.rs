@@ -410,7 +410,10 @@ impl Volume {
         let mut pending_transaction = 0u64;
         let mut committed_transactions = 0u64;
         let mut replayed_records = 0u64;
-        let mut last_transaction = 0u64;
+        let checkpointed = self.info.checkpoint_start != 0
+            && self.info.journal_head == self.info.journal_start
+            && self.info.journal_tail == self.info.journal_start;
+        let mut last_transaction = if checkpointed { self.info.root_transaction_id } else { 0 };
         let previous_head = self.info.journal_head;
         let mut committed_head = self.info.journal_tail;
         let mut truncated = false;
@@ -515,12 +518,6 @@ impl Volume {
             pending_len += 1;
         }
 
-        let checkpointed = self.info.checkpoint_start != 0
-            && self.info.journal_head == self.info.journal_start
-            && self.info.journal_tail == self.info.journal_start;
-        if checkpointed && committed_transactions == 0 {
-            last_transaction = self.info.root_transaction_id;
-        }
         if !truncated && last_transaction < self.info.root_transaction_id && !checkpointed {
             return Err(FormatError::Corrupt);
         }
@@ -731,6 +728,11 @@ fn read_superblock<B: BlockStore>(
     {
         return Err(FormatError::Corrupt);
     }
+    let checkpoint_range_invalid = info.checkpoint_start != 0
+        && match info.journal_end.checked_add(CHECKPOINT_TOTAL_BLOCKS) {
+            Some(end) => end > store.block_count(),
+            None => true,
+        };
     if info.generation == 0
         || info.journal_start != JOURNAL_START
         || info.journal_end > store.block_count()
@@ -742,7 +744,7 @@ fn read_superblock<B: BlockStore>(
             && (info.checkpoint_start != info.journal_end
                 || info.checkpoint_slot as usize >= CHECKPOINT_SLOTS
                 || info.compaction_state > COMPACTION_PREPARED
-                || info.journal_end + CHECKPOINT_TOTAL_BLOCKS > store.block_count()))
+                || checkpoint_range_invalid))
         || (info.checkpoint_start == 0
             && (info.checkpoint_slot != 0 || info.compaction_state != COMPACTION_CLEAN))
     {
@@ -1315,6 +1317,24 @@ mod tests {
         assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 1);
         assert_eq!(sink.records[0].0, 2);
         assert_eq!(reopened.info().root_transaction_id, 2);
+    }
+
+    #[test]
+    fn checkpoint_recovery_rejects_stale_records() {
+        let mut store = CrashStore::<32>::new();
+        let mut volume = Volume::format(&mut store).unwrap();
+        volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"old" }]).unwrap();
+        volume.checkpoint(&mut store, b"snapshot").unwrap();
+
+        let stale = encode_record(1, 0, 2, b"stale").unwrap();
+        let stale_commit = encode_record(1, 1, JOURNAL_COMMIT_KIND, &[]).unwrap();
+        store.write_block(BlockIndex::new(JOURNAL_START), &stale).unwrap();
+        store.write_block(BlockIndex::new(JOURNAL_START + 1), &stale_commit).unwrap();
+        store.flush().unwrap();
+
+        let mut reopened = Volume::open(&mut store).unwrap();
+        let mut sink = Sink::new();
+        assert_eq!(reopened.recover(&mut store, &mut sink), Err(FormatError::Corrupt));
     }
 
     #[test]
