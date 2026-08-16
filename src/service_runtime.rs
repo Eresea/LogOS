@@ -583,25 +583,27 @@ impl ServiceRuntime {
         Ok(())
     }
 
-    fn request_stop_service(&mut self, service: ServiceId) -> Result<(), ServiceRuntimeError> {
-        self.request_stop_task(service)?;
-        self.manager.mark_stopping(service);
-        Ok(())
+    fn request_stop_service(&mut self, service: ServiceId) -> Result<bool, ServiceRuntimeError> {
+        let stop_requested = self.request_stop_task(service)?;
+        if stop_requested {
+            self.manager.mark_stopping(service);
+        }
+        Ok(stop_requested)
     }
 
-    fn request_stop_task(&mut self, service: ServiceId) -> Result<(), ServiceRuntimeError> {
+    fn request_stop_task(&mut self, service: ServiceId) -> Result<bool, ServiceRuntimeError> {
         let index = service.index();
         let Some(task) = self.tasks[index] else {
             return Err(ServiceRuntimeError::TaskStop);
         };
         if crate::SCHEDULER.request_stop(task) {
-            return Ok(());
+            return Ok(true);
         }
         if crate::SCHEDULER.state(task).is_none() {
             self.tasks[index] = None;
             self.supervisor.unregister(service);
             self.manager.mark_stopped(service);
-            return Ok(());
+            return Ok(false);
         }
         Err(ServiceRuntimeError::TaskStop)
     }
@@ -987,12 +989,19 @@ impl ServiceRuntime {
                     decision.response.status = logos_abi::ManagerStatus::Capacity;
                 }
             }
-            ManagerAction::Stop(service) => {
-                if self.request_stop_service(service).is_err() {
+            ManagerAction::Stop(service) => match self.request_stop_service(service) {
+                Ok(true) => {}
+                Ok(false) => {
+                    decision.response.status = logos_abi::ManagerStatus::Ok;
+                    if let Some(record) = self.manager.record(service.index()) {
+                        decision.response.record = record;
+                    }
+                }
+                Err(_) => {
                     self.manager.mark_failed(service);
                     decision.response.status = logos_abi::ManagerStatus::Busy;
                 }
-            }
+            },
             ManagerAction::Restart(services, count) => {
                 if self.pending_restart.is_some()
                     || services[..count].iter().any(|service| {
@@ -1213,6 +1222,12 @@ impl ServiceRuntime {
             self.manager.restart_complete(&services[..count]);
             #[cfg(feature = "qemu-proof")]
             crate::proof::manager_restart_completed();
+            return Ok(true);
+        }
+        if SERVICE_IMAGES.iter().any(|spec| {
+            self.manager.state(spec.service().index()) == Some(logos_abi::ManagerState::Failed)
+        }) {
+            self.restart(bundle)?;
             return Ok(true);
         }
         let mut heartbeats = [0; SERVICE_COUNT];

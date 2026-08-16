@@ -1106,6 +1106,10 @@ mod tests {
         wrong_operation.operation = ManagerOperation::Status;
         assert!(!wrong_operation.is_valid_for(request));
 
+        let mut wrong_request_id = response;
+        wrong_request_id.request_id = 8;
+        assert!(!wrong_request_id.is_valid_for(request));
+
         let mut wrong_cursor = response;
         wrong_cursor.cursor = (MAX_MANAGER_SERVICES + 1) as u8;
         assert!(!wrong_cursor.is_valid_for(request));

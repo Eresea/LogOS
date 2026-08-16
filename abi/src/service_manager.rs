@@ -202,6 +202,8 @@ impl ManagerResponse {
         };
         self.abi_version == MANAGER_ABI_VERSION
             && self.operation == request.operation
+            && request.request_id != 0
+            && self.request_id == request.request_id
             && self.reserved == [0; 3]
             && self.record.reserved == [0; 3]
             && usize::from(self.record.name_len) <= self.record.name.len()

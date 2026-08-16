@@ -724,8 +724,10 @@ fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut Pe
             pending.stage(manager_error(response.status));
             return;
         }
-        let record = response.record;
-        output_len += logos_commands::format_service_record(&record, &mut output[output_len..]);
+        if !list || response.cursor != u8::MAX {
+            let record = response.record;
+            output_len += logos_commands::format_service_record(&record, &mut output[output_len..]);
+        }
         if !list || response.cursor == u8::MAX {
             break;
         }
@@ -736,6 +738,17 @@ fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut Pe
 
 #[cfg(feature = "qemu-proof")]
 fn manager_command_probe(pending: &mut PendingOutput) -> bool {
+    service_command(logos_commands::ServiceCommand::List, pending);
+    let list = &pending.bytes[..pending.len];
+    let list_valid = pending.pending
+        && list.ends_with(b"storage running\r\n")
+        && !list.windows(b"vacant".len()).any(|window| window == b"vacant");
+    pending.len = 0;
+    pending.offset = 0;
+    pending.pending = false;
+    if !list_valid {
+        return false;
+    }
     service_command(logos_commands::ServiceCommand::Stop { name: b"input" }, pending);
     let expected = b"service dependency violation\r\n";
     let valid = pending.pending

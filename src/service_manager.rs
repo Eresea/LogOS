@@ -257,7 +257,11 @@ impl ServiceManager {
             return ManagerDecision { response, action: ManagerAction::None };
         }
         let shape_valid = match request.operation {
-            ManagerOperation::List => request.slot == u8::MAX && request.generation == 0,
+            ManagerOperation::List => {
+                request.slot == u8::MAX
+                    && request.generation == 0
+                    && usize::from(request.cursor) <= MAX_MANAGER_SERVICES
+            }
             ManagerOperation::Status
             | ManagerOperation::Start
             | ManagerOperation::Stop
@@ -409,11 +413,25 @@ impl ServiceManager {
     }
 
     fn has_transitional_dependents(&self, index: usize) -> bool {
-        self.slots.iter().any(|slot| {
-            slot.service.is_some()
-                && slot.dependencies & (1 << index) != 0
-                && matches!(slot.state, ManagerState::Starting | ManagerState::Stopping)
-        })
+        let mut included = 1u8 << index;
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for slot in &self.slots[..SERVICE_IMAGES.len()] {
+                let Some(service) = slot.service else {
+                    continue;
+                };
+                let bit = 1 << service.index();
+                if included & bit == 0 && slot.dependencies & included != 0 {
+                    if matches!(slot.state, ManagerState::Starting | ManagerState::Stopping) {
+                        return true;
+                    }
+                    included |= bit;
+                    changed = true;
+                }
+            }
+        }
+        false
     }
 
     fn restart_closure(
@@ -559,6 +577,12 @@ mod tests {
             manager.request(malformed, ManagerRights::INSPECT).response.status,
             ManagerStatus::Malformed
         );
+        malformed = ManagerRequest::new(ManagerOperation::List, 2);
+        malformed.cursor = u8::MAX;
+        assert_eq!(
+            manager.request(malformed, ManagerRights::INSPECT).response.status,
+            ManagerStatus::Malformed
+        );
         let zero_id = ManagerRequest::new(ManagerOperation::List, 0);
         assert_eq!(
             manager.request(zero_id, ManagerRights::INSPECT).response.status,
@@ -624,5 +648,19 @@ mod tests {
                 3,
             )
         );
+    }
+
+    #[test]
+    fn restart_rejects_transitional_transitive_dependents() {
+        let mut manager = manager();
+        manager.mark_starting(ServiceId::Session);
+        let handle = manager.handle(ServiceId::Input.index()).unwrap();
+        let response = manager
+            .request(
+                request(ManagerOperation::Restart, handle.slot(), handle.generation()),
+                ManagerRights::ALL,
+            )
+            .response;
+        assert_eq!(response.status, ManagerStatus::Busy);
     }
 }
