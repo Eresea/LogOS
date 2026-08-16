@@ -264,6 +264,7 @@ fn service_id(raw: usize) -> Option<logos_abi::ServiceId> {
         4 => Some(logos_abi::ServiceId::Session),
         5 => Some(logos_abi::ServiceId::Commands),
         6 => Some(logos_abi::ServiceId::Storage),
+        7 => Some(logos_abi::ServiceId::Network),
         _ => None,
     }
 }

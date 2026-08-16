@@ -65,6 +65,9 @@ pub struct ServiceRuntime {
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
     ipc_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
     storage_data_frame: Option<FrameAddress>,
+    network_config: logos_abi::NetworkConfig,
+    network_config_frame: Option<FrameAddress>,
+    network_packet_frames: [Option<FrameAddress>; logos_abi::NETWORK_PACKET_PAGE_COUNT],
     framebuffer_config_frame: Option<FrameAddress>,
     keyboard_frame: Option<FrameAddress>,
     tasks: [Option<crate::TaskHandle>; SERVICE_COUNT],
@@ -77,6 +80,8 @@ pub struct ServiceRuntime {
     ipc_generation: u16,
     service_epoch: u64,
     storage_response: Option<logos_abi::StorageResponse>,
+    network_packet_response: Option<logos_abi::NetworkPacketDescriptor>,
+    network_packet_sequence: u32,
     suppressed_heartbeats: [AtomicBool; SERVICE_COUNT],
     frame_pool_ready: bool,
     #[cfg(feature = "storage-proof")]
@@ -109,6 +114,7 @@ impl ServiceRuntime {
                 LoadedImage::empty(),
                 LoadedImage::empty(),
                 LoadedImage::empty(),
+                LoadedImage::empty(),
             ],
             tables: [const { MaybeUninit::uninit() }; SERVICE_COUNT],
             table_ready: [false; SERVICE_COUNT],
@@ -119,6 +125,9 @@ impl ServiceRuntime {
             ipc_staging_frames: [None; SERVICE_COUNT],
             ipc_capability_frames: [None; SERVICE_COUNT],
             storage_data_frame: None,
+            network_config: logos_abi::NetworkConfig::disabled(),
+            network_config_frame: None,
+            network_packet_frames: [None; logos_abi::NETWORK_PACKET_PAGE_COUNT],
             framebuffer_config_frame: None,
             keyboard_frame: None,
             tasks: [None; SERVICE_COUNT],
@@ -131,6 +140,8 @@ impl ServiceRuntime {
             ipc_generation: 1,
             service_epoch: 1,
             storage_response: None,
+            network_packet_response: None,
+            network_packet_sequence: 1,
             suppressed_heartbeats: [const { AtomicBool::new(false) }; SERVICE_COUNT],
             frame_pool_ready: false,
             #[cfg(feature = "storage-proof")]
@@ -147,7 +158,13 @@ impl ServiceRuntime {
         Ok(())
     }
 
+    pub fn configure_network(&mut self, config: logos_abi::NetworkConfig) {
+        self.network_config = config;
+        self.manager.set_network_enabled(config.is_enabled());
+    }
+
     fn start_inner(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
+        self.manager.set_network_enabled(self.network_config.is_enabled());
         let resources = crate::arch::boot_resources().ok_or(ServiceRuntimeError::Resources)?;
         if !self.frame_pool_ready {
             if let Some(framebuffer) = resources.framebuffer() {
@@ -179,10 +196,10 @@ impl ServiceRuntime {
             let service = spec.service();
             let image = unsafe { bundle.image(service) }.ok_or(ServiceRuntimeError::Image)?;
             let plan = spec.validate_image(image).map_err(|_| ServiceRuntimeError::Image)?;
-            let stack_pages = if service == ServiceId::Storage {
-                crate::process::STORAGE_STACK_PAGES
-            } else {
-                crate::process::USER_STACK_PAGES
+            let stack_pages = match service {
+                ServiceId::Storage => crate::process::STORAGE_STACK_PAGES,
+                ServiceId::Network => crate::process::NETWORK_STACK_PAGES,
+                _ => crate::process::USER_STACK_PAGES,
             };
             let mut loaded =
                 LoadedImage::load_with_stack_pages(plan, &mut self.frame_pool, stack_pages)
@@ -291,6 +308,34 @@ impl ServiceRuntime {
                     MappingFlags::DATA,
                 )?;
             }
+            if service == ServiceId::Network && self.network_config.is_enabled() {
+                let config =
+                    self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+                self.network_config_frame = Some(config);
+                memory.clear(config).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+                unsafe {
+                    (config.raw() as usize as *mut logos_abi::NetworkConfig)
+                        .write(self.network_config);
+                }
+                self.map_ipc_private_page(
+                    process,
+                    config,
+                    logos_abi::NETWORK_CONFIG_BASE,
+                    MappingFlags::READ_ONLY_DATA,
+                )?;
+                for page in 0..logos_abi::NETWORK_PACKET_PAGE_COUNT {
+                    let packet =
+                        self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+                    self.network_packet_frames[page] = Some(packet);
+                    memory.clear(packet).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+                    let address = logos_abi::NETWORK_PACKET_BASE
+                        .checked_add(page * crate::loader::PAGE_SIZE)
+                        .ok_or(ServiceRuntimeError::IpcPrivateMapping(
+                            PageTableError::InvalidVirtualAddress,
+                        ))?;
+                    self.map_ipc_private_page(process, packet, address, MappingFlags::DATA)?;
+                }
+            }
             let capabilities = if service == ServiceId::Storage {
                 let mut page = self
                     .ipc
@@ -307,6 +352,28 @@ impl ServiceRuntime {
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
                 page.capabilities[3] = logos_abi::IpcCapability::new(
                     crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT,
+                    logos_abi::IpcRights::Receive,
+                    self.ipc_generation,
+                    self.service_epoch,
+                )
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+                page
+            } else if service == ServiceId::Network {
+                let mut page = self
+                    .ipc
+                    .as_ref()
+                    .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?
+                    .capabilities(service)
+                    .map_err(ServiceRuntimeError::Ipc)?;
+                page.capabilities[0] = logos_abi::IpcCapability::new(
+                    logos_abi::IpcEndpointId::NetworkToCore.index(),
+                    logos_abi::IpcRights::Send,
+                    self.ipc_generation,
+                    self.service_epoch,
+                )
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+                page.capabilities[1] = logos_abi::IpcCapability::new(
+                    logos_abi::IpcEndpointId::CoreToNetwork.index(),
                     logos_abi::IpcRights::Receive,
                     self.ipc_generation,
                     self.service_epoch,
@@ -535,12 +602,38 @@ impl ServiceRuntime {
     }
 
     pub fn start_tasks(&mut self) -> Result<(), ServiceRuntimeError> {
+        if self.manager.state(ServiceId::Network.index()) == Some(logos_abi::ManagerState::Stopped)
+        {
+            self.queue_network_link();
+        }
         for service in crate::service_images::SERVICE_START_ORDER {
+            if service == ServiceId::Network
+                && self.manager.state(service.index()) == Some(logos_abi::ManagerState::Disabled)
+            {
+                continue;
+            }
             self.start_service_task(service)?;
             self.startup.start(service).map_err(ServiceRuntimeError::Startup)?;
         }
         self.manager.initialize_running();
         Ok(())
+    }
+
+    fn queue_network_link(&mut self) {
+        let mut link = logos_abi::NetworkPacketDescriptor::new(
+            logos_abi::NetworkPacketOperation::LinkState,
+            0,
+            self.network_packet_sequence,
+        );
+        link.generation = self.ipc_generation;
+        link.service_epoch = self.service_epoch;
+        if let Some(mac) = crate::arch::network_mac() {
+            link.mac = mac;
+        } else {
+            link.result = logos_abi::NetworkResult::NotFound;
+        }
+        self.network_packet_sequence = self.network_packet_sequence.wrapping_add(1).max(1);
+        self.network_packet_response = Some(link);
     }
 
     fn start_service_task(&mut self, service: ServiceId) -> Result<(), ServiceRuntimeError> {
@@ -592,6 +685,20 @@ impl ServiceRuntime {
             self.storage_response = None;
             if let Some(frame) = self.storage_data_frame {
                 memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+            }
+        }
+        if service == ServiceId::Network {
+            if let Some(frame) = self.network_config_frame {
+                memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+                unsafe {
+                    (frame.raw() as usize as *mut logos_abi::NetworkConfig)
+                        .write(self.network_config);
+                }
+            }
+            for frame in &self.network_packet_frames {
+                if let Some(frame) = *frame {
+                    memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+                }
             }
         }
         Ok(())
@@ -696,6 +803,147 @@ impl ServiceRuntime {
                 notified: false,
             };
         };
+        if service == ServiceId::Network
+            && capability.endpoint_index() == Some(logos_abi::IpcEndpointId::NetworkToCore.index())
+        {
+            if length != core::mem::size_of::<logos_abi::NetworkPacketDescriptor>()
+                || capability.rights != logos_abi::IpcRights::Send
+                || capability.generation != self.ipc_generation
+                || capability.service_epoch != self.service_epoch
+            {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Unauthorized,
+                    notified: false,
+                };
+            }
+            let descriptor: logos_abi::NetworkPacketDescriptor =
+                unsafe { core::ptr::read_unaligned(staging_frame.raw() as usize as *const _) };
+            if !descriptor.is_valid() {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
+            if descriptor.generation != 0 && descriptor.generation != self.ipc_generation {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Stale,
+                    notified: false,
+                };
+            }
+            if descriptor.service_epoch != 0 && descriptor.service_epoch != self.service_epoch {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Stale,
+                    notified: false,
+                };
+            }
+            let status = match descriptor.operation {
+                logos_abi::NetworkPacketOperation::SubmitTx => {
+                    if descriptor.page < logos_abi::NETWORK_RX_PACKET_PAGES as u16 {
+                        logos_abi::IpcStatus::Malformed
+                    } else {
+                        let Some(frame) = self.network_packet_frames[descriptor.page as usize]
+                        else {
+                            return crate::service_ipc::IpcOutcome {
+                                status: logos_abi::IpcStatus::Unauthorized,
+                                notified: false,
+                            };
+                        };
+                        if crate::arch::submit_network_frame(
+                            frame.raw() as usize,
+                            descriptor.length as usize,
+                        ) {
+                            #[cfg(feature = "qemu-proof")]
+                            crate::arch_proof_line(b"LogOS vNext: network tx submitted");
+                            logos_abi::IpcStatus::Ok
+                        } else {
+                            logos_abi::IpcStatus::Full
+                        }
+                    }
+                }
+                logos_abi::NetworkPacketOperation::Reset => {
+                    crate::arch::reset_network_device();
+                    logos_abi::IpcStatus::Ok
+                }
+                logos_abi::NetworkPacketOperation::RecycleRx
+                | logos_abi::NetworkPacketOperation::LinkState => logos_abi::IpcStatus::Ok,
+            };
+            return crate::service_ipc::IpcOutcome { status, notified: false };
+        }
+        if service == ServiceId::Commands
+            && capability.endpoint_index()
+                == Some(logos_abi::IpcEndpointId::CommandsToNetwork.index())
+            && self.manager.state(ServiceId::Network.index())
+                == Some(logos_abi::ManagerState::Disabled)
+        {
+            if length != core::mem::size_of::<logos_abi::IpcBytes>() {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
+            let request_message = unsafe {
+                core::ptr::read_unaligned(staging_frame.raw() as usize as *const logos_abi::IpcBytes)
+            };
+            if request_message.kind != logos_abi::MessageKind::NetworkRequest
+                || request_message.len as usize != core::mem::size_of::<logos_abi::NetworkRequest>()
+            {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
+            let request: logos_abi::NetworkRequest =
+                unsafe { core::ptr::read_unaligned(request_message.bytes.as_ptr().cast()) };
+            let response = logos_abi::NetworkResponse::new(
+                request.operation,
+                logos_abi::NetworkResult::Disabled,
+                logos_abi::NetworkState::Disabled,
+                request.request_id,
+            );
+            let response_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    (&response as *const logos_abi::NetworkResponse).cast::<u8>(),
+                    core::mem::size_of::<logos_abi::NetworkResponse>(),
+                )
+            };
+            let response_message = logos_abi::IpcBytes::from_bytes(
+                logos_abi::MessageKind::NetworkResponse,
+                response_bytes,
+            )
+            .ok_or(crate::service_ipc::IpcError::Capacity)
+            .map_err(ServiceRuntimeError::Ipc)
+            .unwrap_or_else(|_| {
+                logos_abi::IpcBytes::empty(logos_abi::MessageKind::NetworkResponse)
+            });
+            unsafe {
+                core::ptr::write_unaligned(
+                    staging_frame.raw() as usize as *mut logos_abi::IpcBytes,
+                    response_message,
+                );
+            }
+            let response_capability = logos_abi::IpcCapability::new(
+                logos_abi::IpcEndpointId::NetworkToCommands.index(),
+                logos_abi::IpcRights::Send,
+                self.ipc_generation,
+                self.service_epoch,
+            )
+            .ok_or(crate::service_ipc::IpcError::InvalidIdentity)
+            .map_err(ServiceRuntimeError::Ipc)
+            .unwrap_or(logos_abi::IpcCapability::EMPTY);
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    staging_frame.raw() as usize as *const u8,
+                    core::mem::size_of::<logos_abi::IpcBytes>(),
+                )
+            };
+            let outcome = graph.send(ServiceId::Network, response_capability, bytes);
+            if outcome.notified {
+                crate::arch::signal_events(logos_abi::ipc_read_event_mask(
+                    logos_abi::IpcEndpointId::NetworkToCommands.index(),
+                ));
+            }
+            return outcome;
+        }
         if service == ServiceId::Storage
             && capability.endpoint_index() == Some(crate::storage_ipc::STORAGE_REQUEST_ENDPOINT)
         {
@@ -855,6 +1103,15 @@ impl ServiceRuntime {
             crate::arch::signal_events(logos_abi::ipc_read_event_mask(
                 capability.endpoint as usize,
             ));
+        } else if outcome.status == logos_abi::IpcStatus::Ok
+            && (capability.endpoint_index()
+                == Some(logos_abi::IpcEndpointId::CommandsToNetwork.index())
+                || capability.endpoint_index()
+                    == Some(logos_abi::IpcEndpointId::NetworkToCommands.index()))
+        {
+            crate::arch::signal_events(logos_abi::ipc_read_event_mask(
+                capability.endpoint as usize,
+            ));
         }
         outcome
     }
@@ -930,6 +1187,63 @@ impl ServiceRuntime {
                 notified: false,
             };
         }
+        if service == ServiceId::Network && index == logos_abi::IpcEndpointId::CoreToNetwork.index()
+        {
+            if capability.rights != logos_abi::IpcRights::Receive
+                || capability.generation != self.ipc_generation
+                || capability.service_epoch != self.service_epoch
+            {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Unauthorized,
+                    notified: false,
+                };
+            }
+            let response = if let Some(response) = self.network_packet_response.take() {
+                #[cfg(feature = "qemu-proof")]
+                crate::arch_proof_line(b"LogOS vNext: network link delivered");
+                response
+            } else {
+                let Some(frame) = self.network_packet_frames.first().and_then(|frame| *frame)
+                else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Unauthorized,
+                        notified: false,
+                    };
+                };
+                let Some(length) = crate::arch::take_network_frame(frame.raw() as usize) else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Empty,
+                        notified: false,
+                    };
+                };
+                let mut response = logos_abi::NetworkPacketDescriptor::new(
+                    logos_abi::NetworkPacketOperation::RecycleRx,
+                    0,
+                    self.network_packet_sequence,
+                );
+                response.length = length as u16;
+                response.generation = self.ipc_generation;
+                response.service_epoch = self.service_epoch;
+                self.network_packet_sequence = self.network_packet_sequence.wrapping_add(1).max(1);
+                response
+            };
+            if let Some(staging_frame) = self.ipc_staging_frames[service.index()] {
+                unsafe {
+                    core::ptr::write_unaligned(
+                        staging_frame.raw() as usize as *mut logos_abi::NetworkPacketDescriptor,
+                        response,
+                    );
+                }
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Ok,
+                    notified: false,
+                };
+            }
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        }
         let length = crate::service_ipc::ServiceIpcGraph::message_size(index);
         let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
             return crate::service_ipc::IpcOutcome {
@@ -941,6 +1255,33 @@ impl ServiceRuntime {
             core::slice::from_raw_parts_mut(staging_frame.raw() as usize as *mut u8, length)
         };
         let outcome = graph.receive(service, capability, bytes);
+        #[cfg(feature = "qemu-proof")]
+        if outcome.status == logos_abi::IpcStatus::Ok
+            && service == ServiceId::Commands
+            && index == logos_abi::IpcEndpointId::NetworkToCommands.index()
+        {
+            let message =
+                unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<logos_abi::IpcBytes>()) };
+            if message.kind == logos_abi::MessageKind::NetworkResponse
+                && message.len as usize == core::mem::size_of::<logos_abi::NetworkResponse>()
+            {
+                let response = unsafe {
+                    core::ptr::read_unaligned(
+                        message.bytes.as_ptr().cast::<logos_abi::NetworkResponse>(),
+                    )
+                };
+                if response.operation == logos_abi::NetworkOperation::TcpConnect
+                    && response.result == logos_abi::NetworkResult::Ok
+                {
+                    crate::proof::network_tcp_completed();
+                }
+                if response.operation == logos_abi::NetworkOperation::Close
+                    && response.result == logos_abi::NetworkResult::Stale
+                {
+                    crate::proof::network_stale_rejected();
+                }
+            }
+        }
         #[cfg(feature = "storage-proof")]
         if outcome.status == logos_abi::IpcStatus::Ok
             && service == ServiceId::Commands
@@ -1168,24 +1509,22 @@ impl ServiceRuntime {
     ) -> Result<(), ServiceRuntimeError> {
         let _restart_gate = ServiceRestartGate::acquire();
         crate::arch::begin_service_runtime_transition();
-        crate::arch_proof_line(b"LogOS vNext: service restart begin");
         self.ipc_generation = self.ipc_generation.wrapping_add(1).max(1);
         self.service_epoch = self.service_epoch.wrapping_add(1).max(1);
         self.manager_generation = self.manager_generation.wrapping_add(1).max(1);
+        self.network_config.service_epoch =
+            self.network_config.service_epoch.wrapping_add(1).max(1);
         if !self.supervisor.prepare_restart() {
             return Err(ServiceRuntimeError::RestartLimit);
         }
         self.manager.prepare_graph_restart();
         self.stop_tasks(runtime_guard)?;
         crate::arch::prepare_task_address_space(0);
-        let result = crate::arch::restart_critical_section(|| {
-            crate::arch_proof_line(b"LogOS vNext: service tasks quiesced");
+        crate::arch::restart_critical_section(|| {
             crate::arch::disable_keyboard_irq();
             crate::arch::reset_events();
             self.reclaim_resources()?;
-            crate::arch_proof_line(b"LogOS vNext: service resources reclaimed");
             self.start(bundle)?;
-            crate::arch_proof_line(b"LogOS vNext: service graph rebuilt");
             for suppressed in &self.suppressed_heartbeats {
                 suppressed.store(false, Ordering::Release);
             }
@@ -1209,11 +1548,53 @@ impl ServiceRuntime {
                 crate::arch::finish_service_runtime_transition();
             }
             result
-        });
-        if result.is_ok() {
-            crate::arch_proof_line(b"LogOS vNext: service restart complete");
+        })
+    }
+
+    fn restart_network(
+        &mut self,
+        runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
+    ) -> Result<(), ServiceRuntimeError> {
+        let _restart_gate = ServiceRestartGate::acquire();
+        if !self.supervisor.prepare_targeted_restart(ServiceId::Network) {
+            return Err(ServiceRuntimeError::RestartLimit);
         }
-        result
+        crate::arch::begin_service_runtime_transition();
+        crate::arch::reset_network_device();
+        self.manager.mark_stopping(ServiceId::Network);
+        self.network_config.service_epoch =
+            self.network_config.service_epoch.wrapping_add(1).max(1);
+        let index = ServiceId::Network.index();
+        if let Some(task) = self.tasks[index] {
+            if crate::SCHEDULER.state(task) != Some(crate::TaskState::Completed)
+                && !crate::SCHEDULER.request_stop(task)
+            {
+                return Err(ServiceRuntimeError::TaskStop);
+            }
+            let mut waited = 0;
+            while crate::SCHEDULER.state(task) != Some(crate::TaskState::Completed) {
+                if waited == 1024 {
+                    return Err(ServiceRuntimeError::TaskStop);
+                }
+                runtime_guard.pause();
+                crate::sleep_current_for(1);
+                runtime_guard.resume();
+                waited += 1;
+            }
+            if !crate::SCHEDULER.reclaim_completed(task) {
+                return Err(ServiceRuntimeError::TaskStop);
+            }
+            self.tasks[index] = None;
+            self.supervisor.unregister(ServiceId::Network);
+        }
+        self.reset_service_image(ServiceId::Network)?;
+        self.queue_network_link();
+        self.start_service_task(ServiceId::Network)?;
+        self.manager.restart_complete(&[ServiceId::Network]);
+        crate::arch::finish_service_runtime_transition();
+        #[cfg(feature = "qemu-proof")]
+        crate::proof::network_restart_completed();
+        Ok(())
     }
 
     pub fn supervise(
@@ -1250,6 +1631,10 @@ impl ServiceRuntime {
                 self.pending_restart = Some((services, count));
                 return Ok(false);
             }
+            if count == 1 && services[0] == ServiceId::Network {
+                self.restart_network(runtime_guard)?;
+                return Ok(true);
+            }
             let mut restart_failed = false;
             for service in services[..count].iter().rev() {
                 if self.reset_service_image(*service).is_err()
@@ -1268,10 +1653,15 @@ impl ServiceRuntime {
             crate::proof::manager_restart_completed();
             return Ok(true);
         }
-        if SERVICE_IMAGES.iter().any(|spec| {
-            self.manager.state(spec.service().index()) == Some(logos_abi::ManagerState::Failed)
+        if let Some(failed) = SERVICE_IMAGES.iter().find_map(|spec| {
+            (self.manager.state(spec.service().index()) == Some(logos_abi::ManagerState::Failed))
+                .then_some(spec.service())
         }) {
-            self.restart(bundle, runtime_guard)?;
+            if failed == ServiceId::Network {
+                self.restart_network(runtime_guard)?;
+            } else {
+                self.restart(bundle, runtime_guard)?;
+            }
             return Ok(true);
         }
         let mut heartbeats = [0; SERVICE_COUNT];
@@ -1285,8 +1675,12 @@ impl ServiceRuntime {
                 None
             };
         }
-        if self.supervisor.poll(now, heartbeats, process_states).is_some() {
-            self.restart(bundle, runtime_guard)?;
+        if let Some(failed) = self.supervisor.poll(now, heartbeats, process_states) {
+            if failed == ServiceId::Network {
+                self.restart_network(runtime_guard)?;
+            } else {
+                self.restart(bundle, runtime_guard)?;
+            }
             return Ok(true);
         }
         Ok(false)
@@ -1327,9 +1721,20 @@ impl ServiceRuntime {
         }
         self.ipc = None;
         self.storage_response = None;
+        self.network_packet_response = None;
+        self.network_packet_sequence = self.network_packet_sequence.wrapping_add(1).max(1);
         if let Some(frame) = self.storage_data_frame {
             self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
             self.storage_data_frame = None;
+        }
+        if let Some(frame) = self.network_config_frame {
+            self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.network_config_frame = None;
+        }
+        for frame in &mut self.network_packet_frames {
+            if let Some(frame) = frame.take() {
+                self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+            }
         }
         if let Some(frame) = self.keyboard_frame {
             self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
@@ -1408,7 +1813,9 @@ fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint) {
             | logos_abi::IpcEndpointId::SessionToCommands
             | logos_abi::IpcEndpointId::CommandsToSession
             | logos_abi::IpcEndpointId::CommandsToStorage
-            | logos_abi::IpcEndpointId::StorageToCommands => (frame as *mut logos_abi::StreamIpc)
+            | logos_abi::IpcEndpointId::StorageToCommands
+            | logos_abi::IpcEndpointId::CommandsToNetwork
+            | logos_abi::IpcEndpointId::NetworkToCommands => (frame as *mut logos_abi::StreamIpc)
                 .write(logos_abi::StreamIpc::new(endpoint.header())),
             _ => {}
         }

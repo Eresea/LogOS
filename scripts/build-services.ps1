@@ -26,7 +26,7 @@ $profile = if ($Release) { 'release' } else { 'debug' }
 $output = Join-Path $PSScriptRoot '..\build\esp\EFI\LOGOS'
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 
-$names = @('INPUT', 'DISPLAY', 'TERMINAL', 'SESSION', 'COMMANDS', 'STORAGE')
+$names = @('INPUT', 'DISPLAY', 'TERMINAL', 'SESSION', 'COMMANDS', 'STORAGE', 'NETWORK')
 foreach ($name in $names) {
     $source = Join-Path $PSScriptRoot "..\target\x86_64-unknown-none\$profile\logos-$($name.ToLower())"
     $destination = Join-Path $output "$name.ELF"

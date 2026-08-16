@@ -24,6 +24,7 @@ pub enum CommandKind {
     Remove,
     Move,
     Service,
+    Network,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,7 +44,7 @@ pub struct CommandSpec {
     pub manual: &'static [u8],
 }
 
-pub const COMMAND_SPECS: [CommandSpec; 16] = [
+pub const COMMAND_SPECS: [CommandSpec; 17] = [
     CommandSpec {
         name: b"help",
         kind: CommandKind::Help,
@@ -156,6 +157,13 @@ pub const COMMAND_SPECS: [CommandSpec; 16] = [
         summary: b"manage services",
         manual: b"Lists, inspects, starts, stops, or restarts a service.",
     },
+    CommandSpec {
+        name: b"net",
+        kind: CommandKind::Network,
+        usage: b"net <status|ping|tcp-probe> [args]",
+        summary: b"inspect and probe networking",
+        manual: b"Shows network status or performs bounded ICMP and TCP probes.",
+    },
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -184,6 +192,18 @@ pub enum ServiceCommand<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceCommandError {
+    Usage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkCommand {
+    Status,
+    Ping { address: [u8; 4] },
+    TcpProbe { address: [u8; 4], port: u16 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkCommandError {
     Usage,
 }
 
@@ -365,6 +385,10 @@ impl CommandService {
                     output.status = 2;
                     output.extend(b"usage: service <list|status|start|stop|restart> [name]\r\n");
                 }
+                CommandKind::Network => {
+                    output.status = 2;
+                    output.extend(b"usage: net <status|ping|tcp-probe> [args]\r\n");
+                }
             },
             None => {
                 output.status = 127;
@@ -378,6 +402,7 @@ impl CommandService {
 pub fn format_service_record(record: &logos_abi::ServiceManagerRecord, output: &mut [u8]) -> usize {
     let state = match record.state {
         logos_abi::ManagerState::Vacant => b"vacant" as &[u8],
+        logos_abi::ManagerState::Disabled => b"disabled",
         logos_abi::ManagerState::Stopped => b"stopped",
         logos_abi::ManagerState::Starting => b"starting",
         logos_abi::ManagerState::Running => b"running",
@@ -462,6 +487,82 @@ pub fn parse_storage_command(
         }
         _ => Ok(None),
     }
+}
+
+pub fn parse_network_command(line: &[u8]) -> Result<Option<NetworkCommand>, NetworkCommandError> {
+    let line = trim_command(line);
+    let mut parts = [&[][..]; 4];
+    let mut count = 0;
+    for part in line.split(|byte| *byte == b' ') {
+        if part.is_empty() {
+            continue;
+        }
+        if count == parts.len() {
+            return Err(NetworkCommandError::Usage);
+        }
+        parts[count] = part;
+        count += 1;
+    }
+    if count == 0 || parts[0] != b"net" {
+        return Ok(None);
+    }
+    if count < 2 {
+        return Err(NetworkCommandError::Usage);
+    }
+    match (count, parts[1]) {
+        (2, b"status") => Ok(Some(NetworkCommand::Status)),
+        (3, b"ping") => Ok(Some(NetworkCommand::Ping { address: parse_ipv4(parts[2])? })),
+        (4, b"tcp-probe") => Ok(Some(NetworkCommand::TcpProbe {
+            address: parse_ipv4(parts[2])?,
+            port: parse_port(parts[3])?,
+        })),
+        _ => Err(NetworkCommandError::Usage),
+    }
+}
+
+fn parse_ipv4(bytes: &[u8]) -> Result<[u8; 4], NetworkCommandError> {
+    let mut address = [0; 4];
+    let mut part = 0;
+    let mut value = 0u16;
+    let mut digits = 0;
+    for byte in bytes.iter().copied().chain(core::iter::once(b'.')) {
+        if byte.is_ascii_digit() {
+            value = value
+                .checked_mul(10)
+                .and_then(|value| value.checked_add(u16::from(byte - b'0')))
+                .ok_or(NetworkCommandError::Usage)?;
+            if value > 255 {
+                return Err(NetworkCommandError::Usage);
+            }
+            digits += 1;
+        } else if byte == b'.' && digits != 0 && part < 4 {
+            address[part] = value as u8;
+            part += 1;
+            value = 0;
+            digits = 0;
+        } else {
+            return Err(NetworkCommandError::Usage);
+        }
+    }
+    if part == 4 { Ok(address) } else { Err(NetworkCommandError::Usage) }
+}
+
+fn parse_port(bytes: &[u8]) -> Result<u16, NetworkCommandError> {
+    if bytes.is_empty() {
+        return Err(NetworkCommandError::Usage);
+    }
+    let mut value = 0u32;
+    for byte in bytes {
+        if !byte.is_ascii_digit() {
+            return Err(NetworkCommandError::Usage);
+        }
+        value = value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(u32::from(byte - b'0')))
+            .ok_or(NetworkCommandError::Usage)?;
+    }
+    let port = u16::try_from(value).map_err(|_| NetworkCommandError::Usage)?;
+    if port == 0 { Err(NetworkCommandError::Usage) } else { Ok(port) }
 }
 
 fn path_arg(args: &[u8]) -> Result<&[u8], StorageCommandError> {
@@ -564,6 +665,27 @@ mod tests {
             ServiceCommandError::Usage
         );
         assert!(parse_service_command(b"echo hi").unwrap().is_none());
+    }
+
+    #[test]
+    fn network_commands_parse_ipv4_and_port_bounds() {
+        assert_eq!(parse_network_command(b"net status").unwrap(), Some(NetworkCommand::Status));
+        assert_eq!(
+            parse_network_command(b"net ping 10.0.2.2").unwrap(),
+            Some(NetworkCommand::Ping { address: [10, 0, 2, 2] })
+        );
+        assert_eq!(
+            parse_network_command(b"net tcp-probe 10.0.2.2 8080").unwrap(),
+            Some(NetworkCommand::TcpProbe { address: [10, 0, 2, 2], port: 8080 })
+        );
+        assert_eq!(
+            parse_network_command(b"net ping 10.0.2.999").unwrap_err(),
+            NetworkCommandError::Usage
+        );
+        assert_eq!(
+            parse_network_command(b"net tcp-probe 10.0.2.2 0").unwrap_err(),
+            NetworkCommandError::Usage
+        );
     }
 
     #[test]

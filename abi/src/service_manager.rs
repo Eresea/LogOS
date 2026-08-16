@@ -1,6 +1,6 @@
 use crate::{MAX_MANAGER_SERVICES, MAX_SERVICE_NAME_BYTES};
 
-pub const MANAGER_ABI_VERSION: u16 = 1;
+pub const MANAGER_ABI_VERSION: u16 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -49,11 +49,12 @@ pub enum ManagerStatus {
 #[repr(u8)]
 pub enum ManagerState {
     Vacant = 0,
-    Stopped = 1,
-    Starting = 2,
-    Running = 3,
-    Stopping = 4,
-    Failed = 5,
+    Disabled = 1,
+    Stopped = 2,
+    Starting = 3,
+    Running = 4,
+    Stopping = 5,
+    Failed = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

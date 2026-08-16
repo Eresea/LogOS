@@ -43,6 +43,12 @@ static HOSTILE_IPC_SYSCALL_REJECTED: AtomicBool = AtomicBool::new(false);
 static RESCHEDULE_IPIS: AtomicU64 = AtomicU64::new(0);
 static EVENT_WAKE_IPI_SENT: AtomicBool = AtomicBool::new(false);
 static EVENT_WAKE_IPI_RECEIVED: AtomicBool = AtomicBool::new(false);
+static NETWORK_REQUIRED: AtomicBool = AtomicBool::new(false);
+static NETWORK_TX_SEEN: AtomicBool = AtomicBool::new(false);
+static NETWORK_RX_SEEN: AtomicBool = AtomicBool::new(false);
+static NETWORK_TCP_COMPLETED: AtomicBool = AtomicBool::new(false);
+static NETWORK_RESTART_COMPLETED: AtomicBool = AtomicBool::new(false);
+static NETWORK_STALE_REJECTED: AtomicBool = AtomicBool::new(false);
 static PROBE_RING: logos_abi::RenderIpc =
     logos_abi::RenderIpc::new(logos_abi::EndpointHeader::new(1, 1));
 
@@ -66,6 +72,30 @@ pub fn initialize(cpu_count: usize) {
     let completion = SCHEDULER.spawn(completion_task).expect("proof task capacity");
     COMPLETION_HANDLE.store(completion.raw(), Ordering::Release);
     SCHEDULER.spawn(reclaimer_task).expect("proof task capacity");
+}
+
+pub fn configure_network(enabled: bool) {
+    NETWORK_REQUIRED.store(enabled, Ordering::Release);
+}
+
+pub fn network_tx() {
+    NETWORK_TX_SEEN.store(true, Ordering::Release);
+}
+
+pub fn network_rx() {
+    NETWORK_RX_SEEN.store(true, Ordering::Release);
+}
+
+pub fn network_tcp_completed() {
+    NETWORK_TCP_COMPLETED.store(true, Ordering::Release);
+}
+
+pub fn network_restart_completed() {
+    NETWORK_RESTART_COMPLETED.store(true, Ordering::Release);
+}
+
+pub fn network_stale_rejected() {
+    NETWORK_STALE_REJECTED.store(true, Ordering::Release);
 }
 
 pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
@@ -98,6 +128,15 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
         (core::ptr::addr_of!(RESCHEDULE_IPIS) as usize, core::mem::size_of::<AtomicU64>()),
         (core::ptr::addr_of!(EVENT_WAKE_IPI_SENT) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(EVENT_WAKE_IPI_RECEIVED) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(NETWORK_REQUIRED) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(NETWORK_TX_SEEN) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(NETWORK_RX_SEEN) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(NETWORK_TCP_COMPLETED) as usize, core::mem::size_of::<AtomicBool>()),
+        (
+            core::ptr::addr_of!(NETWORK_RESTART_COMPLETED) as usize,
+            core::mem::size_of::<AtomicBool>(),
+        ),
+        (core::ptr::addr_of!(NETWORK_STALE_REJECTED) as usize, core::mem::size_of::<AtomicBool>()),
         (
             core::ptr::addr_of!(MANAGER_SYSCALL_SUCCEEDED) as usize,
             core::mem::size_of::<AtomicBool>(),
@@ -240,6 +279,12 @@ pub fn observe(cpu: usize) {
         && ring3_migrated
         && reschedule_ipi
         && event_wake_ipi
+        && (!NETWORK_REQUIRED.load(Ordering::Acquire)
+            || (NETWORK_TX_SEEN.load(Ordering::Acquire)
+                && NETWORK_RX_SEEN.load(Ordering::Acquire)
+                && NETWORK_TCP_COMPLETED.load(Ordering::Acquire)
+                && NETWORK_RESTART_COMPLETED.load(Ordering::Acquire)
+                && NETWORK_STALE_REJECTED.load(Ordering::Acquire)))
         && BLOCK_RESUMED.load(Ordering::Acquire)
         && WAKE_DONE.load(Ordering::Acquire)
         && wake_cpus_differ;

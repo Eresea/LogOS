@@ -11,7 +11,7 @@ use crate::{
     page_table::PageTableMemory,
 };
 
-const ENDPOINTS: [logos_abi::IpcEndpointId; 8] = [
+const ENDPOINTS: [logos_abi::IpcEndpointId; 10] = [
     logos_abi::IpcEndpointId::InputToTerminal,
     logos_abi::IpcEndpointId::TerminalToDisplay,
     logos_abi::IpcEndpointId::TerminalToSession,
@@ -20,6 +20,8 @@ const ENDPOINTS: [logos_abi::IpcEndpointId; 8] = [
     logos_abi::IpcEndpointId::CommandsToSession,
     logos_abi::IpcEndpointId::CommandsToStorage,
     logos_abi::IpcEndpointId::StorageToCommands,
+    logos_abi::IpcEndpointId::CommandsToNetwork,
+    logos_abi::IpcEndpointId::NetworkToCommands,
 ];
 pub const MAX_ENDPOINTS: usize = ENDPOINTS.len();
 pub const SERVICE_EPOCH: u64 = 1;
@@ -163,7 +165,6 @@ impl ServiceIpcGraph {
 
     pub fn capabilities(&self, service: ServiceId) -> Result<IpcCapabilityPage, IpcError> {
         let mut page = IpcCapabilityPage::empty();
-        let mut slot = 0;
         for index in 0..self.count {
             let Some(endpoint) = self.endpoints[index] else { continue };
             let rights = if endpoint.producer() == service {
@@ -174,13 +175,13 @@ impl ServiceIpcGraph {
                 None
             };
             let Some(rights) = rights else { continue };
-            if slot == page.capabilities.len() {
+            let Some(slot) = logos_abi::ipc_capability_slot(service, endpoint.id(), rights) else {
+                return Err(IpcError::InvalidIdentity);
+            };
+            if slot >= page.capabilities.len() || !page.capabilities[slot].is_empty() {
                 return Err(IpcError::Capacity);
             }
             let endpoint_id = endpoint.id();
-            if logos_abi::ipc_capability_slot(service, endpoint_id, rights) != Some(slot) {
-                return Err(IpcError::InvalidIdentity);
-            }
             page.capabilities[slot] = logos_abi::IpcCapability::new(
                 endpoint_id.index(),
                 rights,
@@ -188,7 +189,6 @@ impl ServiceIpcGraph {
                 endpoint.header().service_epoch,
             )
             .ok_or(IpcError::InvalidIdentity)?;
-            slot += 1;
         }
         Ok(page)
     }
@@ -300,6 +300,7 @@ unsafe fn send_bytes(
         Some(logos_abi::IpcMessageType::Bytes) => unsafe {
             send_typed::<logos_abi::IpcBytes, 8>(frame, identity, bytes)
         },
+        Some(logos_abi::IpcMessageType::Packet) => Err(IpcStatus::Unauthorized),
         _ => Err(IpcStatus::Unauthorized),
     }
 }
@@ -320,6 +321,7 @@ unsafe fn receive_bytes(
         Some(logos_abi::IpcMessageType::Bytes) => unsafe {
             receive_typed::<logos_abi::IpcBytes, 8>(frame, identity, bytes)
         },
+        Some(logos_abi::IpcMessageType::Packet) => Err(IpcStatus::Unauthorized),
         _ => Err(IpcStatus::Unauthorized),
     }
 }
@@ -378,7 +380,9 @@ fn disconnect_ipc_page(endpoint: IpcEndpoint) {
                 (*(frame as *const logos_abi::StreamIpc)).disconnect()
             }
             logos_abi::IpcEndpointId::CommandsToStorage
-            | logos_abi::IpcEndpointId::StorageToCommands => {
+            | logos_abi::IpcEndpointId::StorageToCommands
+            | logos_abi::IpcEndpointId::CommandsToNetwork
+            | logos_abi::IpcEndpointId::NetworkToCommands => {
                 (*(frame as *const logos_abi::StreamIpc)).disconnect()
             }
             _ => {}
@@ -413,20 +417,22 @@ mod tests {
     #[test]
     fn graph_allocates_fixed_generation_stamped_endpoint_pages() {
         let mut map = crate::boot_resources::MemoryMap::new();
-        map.push(MemoryDescriptor::new(0x1000, 8, true).unwrap()).unwrap();
+        map.push(MemoryDescriptor::new(0x1000, 12, true).unwrap()).unwrap();
         let mut pool = FramePool::empty();
         pool.initialize(&map).unwrap();
         let mut memory = Memory;
         let graph =
             ServiceIpcGraph::allocate_with_identity(&mut pool, &mut memory, 1, SERVICE_EPOCH)
                 .unwrap();
-        assert_eq!(graph.count(), 8);
+        assert_eq!(graph.count(), 10);
         assert_eq!(graph.endpoint(0).unwrap().producer(), ServiceId::Input);
         assert_eq!(graph.endpoint(0).unwrap().consumer(), ServiceId::Terminal);
         assert_eq!(graph.endpoint(5).unwrap().producer(), ServiceId::Commands);
         assert_eq!(graph.endpoint(5).unwrap().consumer(), ServiceId::Session);
         assert_eq!(graph.endpoint(6).unwrap().id(), logos_abi::IpcEndpointId::CommandsToStorage);
         assert_eq!(graph.endpoint(7).unwrap().id(), logos_abi::IpcEndpointId::StorageToCommands);
+        assert_eq!(graph.endpoint(8).unwrap().id(), logos_abi::IpcEndpointId::CommandsToNetwork);
+        assert_eq!(graph.endpoint(9).unwrap().id(), logos_abi::IpcEndpointId::NetworkToCommands);
         assert_eq!(graph.endpoint(5).unwrap().generation(), 1);
         let terminal = graph.capabilities(ServiceId::Terminal).unwrap();
         assert_eq!(terminal.get(0).unwrap().rights, IpcRights::Receive);
@@ -436,16 +442,21 @@ mod tests {
         let commands = graph.capabilities(ServiceId::Commands).unwrap();
         assert_eq!(commands.get(2).unwrap().endpoint_index(), Some(8));
         assert_eq!(commands.get(3).unwrap().endpoint_index(), Some(9));
+        assert_eq!(commands.get(4).unwrap().endpoint_index(), Some(12));
+        assert_eq!(commands.get(5).unwrap().endpoint_index(), Some(13));
         let storage = graph.capabilities(ServiceId::Storage).unwrap();
         assert_eq!(storage.get(0).unwrap().endpoint_index(), Some(8));
         assert_eq!(storage.get(1).unwrap().endpoint_index(), Some(9));
         assert_eq!(storage.get(2), None);
+        let network = graph.capabilities(ServiceId::Network).unwrap();
+        assert_eq!(network.get(2).unwrap().endpoint_index(), Some(12));
+        assert_eq!(network.get(3).unwrap().endpoint_index(), Some(13));
     }
 
     #[test]
     fn graph_rejects_wrong_direction_stale_and_malformed_operations() {
         let mut map = crate::boot_resources::MemoryMap::new();
-        map.push(MemoryDescriptor::new(0x1000, 8, true).unwrap()).unwrap();
+        map.push(MemoryDescriptor::new(0x1000, 12, true).unwrap()).unwrap();
         let mut pool = FramePool::empty();
         pool.initialize(&map).unwrap();
         let mut memory = Memory;
@@ -481,7 +492,7 @@ mod tests {
     #[test]
     fn graph_rejects_invalid_identity_before_allocating() {
         let mut map = crate::boot_resources::MemoryMap::new();
-        map.push(MemoryDescriptor::new(0x1000, 8, true).unwrap()).unwrap();
+        map.push(MemoryDescriptor::new(0x1000, 12, true).unwrap()).unwrap();
         let mut pool = FramePool::empty();
         pool.initialize(&map).unwrap();
         let mut memory = Memory;

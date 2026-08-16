@@ -3,7 +3,7 @@
 use crate::process::ProcessState;
 use logos_abi::ServiceId;
 
-pub const MAX_SERVICES: usize = 6;
+pub const MAX_SERVICES: usize = 7;
 pub const HEARTBEAT_INTERVAL: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS;
 pub const MISSED_HEARTBEATS: u8 = 3;
 pub const MAX_RESTARTS: u8 = 3;
@@ -108,6 +108,19 @@ impl LiveSupervisor {
             record.missed_heartbeats = 0;
             record.restarts += 1;
         }
+        true
+    }
+
+    pub fn prepare_targeted_restart(&mut self, service: ServiceId) -> bool {
+        let record = &mut self.records[service.index()];
+        if record.restarts >= MAX_RESTARTS {
+            self.recovery = true;
+            return false;
+        }
+        record.state = ServiceState::Stopped;
+        record.last_heartbeat = 0;
+        record.missed_heartbeats = 0;
+        record.restarts += 1;
         true
     }
 

@@ -2,12 +2,16 @@
 #![cfg_attr(target_os = "none", no_main)]
 #![cfg_attr(not(target_os = "none"), allow(dead_code, unused_imports, unused_variables))]
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::{
+    mem, ptr,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 mod common;
 
 use logos_abi::{
-    IPC_FLAG_MORE, IpcBytes, IpcStatus, MessageKind, STORAGE_API_FLAG_REPLACE, StorageApiOperation,
+    IPC_FLAG_MORE, IpcBytes, IpcStatus, MessageKind, NetworkOperation, NetworkRequest,
+    NetworkResponse, NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE, StorageApiOperation,
     StorageApiRequest, StorageApiResponse, StorageApiStatus,
 };
 
@@ -31,8 +35,19 @@ const STORAGE_RECEIVE_CAPABILITY: usize = common::capability_slot(
     logos_abi::IpcEndpointId::StorageToCommands,
     logos_abi::IpcRights::Receive,
 );
+const NETWORK_SEND_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Commands,
+    logos_abi::IpcEndpointId::CommandsToNetwork,
+    logos_abi::IpcRights::Send,
+);
+const NETWORK_RECEIVE_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Commands,
+    logos_abi::IpcEndpointId::NetworkToCommands,
+    logos_abi::IpcRights::Receive,
+);
 
 static NEXT_MANAGER_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
+static NEXT_NETWORK_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 
 fn next_manager_request_id() -> u32 {
     loop {
@@ -44,6 +59,74 @@ fn next_manager_request_id() -> u32 {
         {
             return current;
         }
+    }
+}
+
+fn next_network_request_id() -> u32 {
+    loop {
+        let current = NEXT_NETWORK_REQUEST_ID.load(Ordering::Relaxed);
+        let next = current.wrapping_add(1).max(1);
+        if NEXT_NETWORK_REQUEST_ID
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return current;
+        }
+    }
+}
+
+struct NetworkClient;
+
+impl NetworkClient {
+    fn request(
+        &mut self,
+        operation: NetworkOperation,
+        address: [u8; 4],
+        port: u16,
+    ) -> Result<NetworkResponse, IpcStatus> {
+        let mut request = NetworkRequest::new(operation, next_network_request_id());
+        request.address = address;
+        request.port = port;
+        if operation == NetworkOperation::IcmpPing {
+            request.timeout_ticks = logos_abi::NETWORK_PING_TIMEOUT_TICKS;
+        }
+        self.request_message(request)
+    }
+
+    fn request_message(&mut self, request: NetworkRequest) -> Result<NetworkResponse, IpcStatus> {
+        let request_bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&request as *const NetworkRequest).cast::<u8>(),
+                mem::size_of::<NetworkRequest>(),
+            )
+        };
+        let message = IpcBytes::from_bytes(MessageKind::NetworkRequest, request_bytes)
+            .ok_or(IpcStatus::Malformed)?;
+        match common::ipc_send(NETWORK_SEND_CAPABILITY, &message) {
+            IpcStatus::Ok => {}
+            status => return Err(status),
+        }
+        for _ in 0..256 {
+            let mut response = IpcBytes::empty(MessageKind::NetworkResponse);
+            match common::ipc_receive(NETWORK_RECEIVE_CAPABILITY, &mut response) {
+                IpcStatus::Ok => {
+                    if response.kind != MessageKind::NetworkResponse
+                        || response.len as usize != mem::size_of::<NetworkResponse>()
+                    {
+                        return Err(IpcStatus::Malformed);
+                    }
+                    let value: NetworkResponse =
+                        unsafe { ptr::read_unaligned(response.bytes.as_ptr().cast()) };
+                    return value.is_valid_for(request).then_some(value).ok_or(IpcStatus::Stale);
+                }
+                IpcStatus::Empty => common::wait(
+                    common::ipc_read_event(logos_abi::IpcEndpointId::NetworkToCommands),
+                    logos_abi::ServiceId::Commands,
+                ),
+                status => return Err(status),
+            }
+        }
+        Err(IpcStatus::Empty)
     }
 }
 
@@ -736,6 +819,63 @@ fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut Pe
     pending.stage(&output[..output_len]);
 }
 
+fn network_result_text(result: NetworkResult) -> &'static [u8] {
+    match result {
+        NetworkResult::Full => b"network queue full\r\n",
+        NetworkResult::WouldBlock => b"network configuring\r\n",
+        NetworkResult::Disabled => b"network disabled\r\n",
+        NetworkResult::Unavailable => b"network unavailable\r\n",
+        NetworkResult::Timeout => b"network timeout\r\n",
+        NetworkResult::Stale => b"network restarting\r\n",
+        NetworkResult::Refused => b"network refused\r\n",
+        NetworkResult::Checksum => b"network checksum failure\r\n",
+        NetworkResult::NotFound => b"network socket not found\r\n",
+        NetworkResult::Invalid | NetworkResult::Unsupported => b"network request invalid\r\n",
+        NetworkResult::Ok => b"ok\r\n",
+    }
+}
+
+fn network_state_text(state: NetworkState) -> &'static [u8] {
+    match state {
+        NetworkState::Disabled => b"network disabled\r\n",
+        NetworkState::Unavailable => b"network unavailable\r\n",
+        NetworkState::Configuring => b"network configuring\r\n",
+        NetworkState::Ready => b"network ready\r\n",
+        NetworkState::Restarting => b"network restarting\r\n",
+        NetworkState::Faulted => b"network unavailable\r\n",
+    }
+}
+
+fn network_command(
+    command: logos_commands::NetworkCommand,
+    client: &mut NetworkClient,
+    pending: &mut PendingOutput,
+) {
+    let (operation, address, port, success): (NetworkOperation, [u8; 4], u16, &[u8]) = match command
+    {
+        logos_commands::NetworkCommand::Status => (NetworkOperation::Status, [0; 4], 0, b""),
+        logos_commands::NetworkCommand::Ping { address } => {
+            (NetworkOperation::IcmpPing, address, 0, b"ping ok\r\n")
+        }
+        logos_commands::NetworkCommand::TcpProbe { address, port } => {
+            (NetworkOperation::TcpConnect, address, port, b"tcp probe ok\r\n")
+        }
+    };
+    match client.request(operation, address, port) {
+        Ok(response) if operation == NetworkOperation::Status => {
+            pending.stage(network_state_text(response.state))
+        }
+        Ok(response) if response.result == NetworkResult::Ok => pending.stage(success),
+        Ok(response) => pending.stage(network_result_text(response.result)),
+        Err(IpcStatus::Stale | IpcStatus::Disconnected) => pending.stage(b"network restarting\r\n"),
+        Err(IpcStatus::Unauthorized | IpcStatus::Empty) => {
+            pending.stage(b"network unavailable\r\n")
+        }
+        Err(IpcStatus::Full) => pending.stage(b"network queue full\r\n"),
+        Err(IpcStatus::Malformed | IpcStatus::Ok) => pending.stage(b"network request invalid\r\n"),
+    }
+}
+
 #[cfg(feature = "qemu-proof")]
 fn manager_restart_probe() -> bool {
     let Some(record) = manager_record(b"storage").ok().flatten() else {
@@ -757,17 +897,162 @@ fn manager_restart_probe() -> bool {
 }
 
 #[cfg(feature = "qemu-proof")]
-fn manager_command_probe(pending: &mut PendingOutput) -> bool {
+fn network_proof_probe(network: &mut NetworkClient) -> bool {
+    for _ in 0..256 {
+        let Ok(status) = network.request(NetworkOperation::Status, [0; 4], 0) else {
+            return false;
+        };
+        if status.state == NetworkState::Disabled {
+            return true;
+        }
+        if status.state == NetworkState::Ready {
+            let Ok(tcp) = network.request(NetworkOperation::TcpConnect, [10, 0, 2, 2], 8080) else {
+                return false;
+            };
+            if tcp.result != NetworkResult::Ok || !manager_restart_network() {
+                return false;
+            }
+            for _ in 0..256 {
+                let Ok(status) = network.request(NetworkOperation::Status, [0; 4], 0) else {
+                    return false;
+                };
+                if status.state == NetworkState::Ready {
+                    let mut listen =
+                        NetworkRequest::new(NetworkOperation::TcpListen, next_network_request_id());
+                    listen.port = 8081;
+                    let Ok(listener) = network.request_message(listen) else {
+                        return false;
+                    };
+                    if listener.result != NetworkResult::Ok {
+                        return false;
+                    }
+                    let Ok(_) = network.request(NetworkOperation::IcmpPing, [10, 0, 2, 2], 0)
+                    else {
+                        return false;
+                    };
+                    let accepted = 'accept: {
+                        for _ in 0..256 {
+                            let mut accept = NetworkRequest::new(
+                                NetworkOperation::TcpAccept,
+                                next_network_request_id(),
+                            );
+                            accept.handle = listener.handle;
+                            accept.generation = listener.generation;
+                            accept.service_epoch = listener.service_epoch;
+                            let Ok(response) = network.request_message(accept) else {
+                                return false;
+                            };
+                            if response.result == NetworkResult::Ok {
+                                break 'accept response;
+                            }
+                            if response.result != NetworkResult::WouldBlock {
+                                return false;
+                            }
+                        }
+                        return false;
+                    };
+                    let mut write =
+                        NetworkRequest::new(NetworkOperation::TcpWrite, next_network_request_id());
+                    write.handle = accepted.handle;
+                    write.generation = accepted.generation;
+                    write.service_epoch = accepted.service_epoch;
+                    write.payload_page = 0;
+                    write.payload_len = 1;
+                    let mut write_completed = false;
+                    for _ in 0..256 {
+                        write.request_id = next_network_request_id();
+                        let Ok(write_response) = network.request_message(write) else {
+                            return false;
+                        };
+                        if write_response.result == NetworkResult::Ok {
+                            write_completed = true;
+                            break;
+                        }
+                        if write_response.result != NetworkResult::WouldBlock {
+                            return false;
+                        }
+                    }
+                    if !write_completed {
+                        return false;
+                    }
+                    let mut read_completed = false;
+                    for _ in 0..256 {
+                        let mut read = NetworkRequest::new(
+                            NetworkOperation::TcpRead,
+                            next_network_request_id(),
+                        );
+                        read.handle = accepted.handle;
+                        read.generation = accepted.generation;
+                        read.service_epoch = accepted.service_epoch;
+                        read.payload_page = 0;
+                        read.payload_len = 128;
+                        let Ok(read_response) = network.request_message(read) else {
+                            return false;
+                        };
+                        if read_response.result == NetworkResult::Ok
+                            && read_response.payload_len != 0
+                        {
+                            read_completed = true;
+                            break;
+                        }
+                        if read_response.result != NetworkResult::WouldBlock {
+                            return false;
+                        }
+                    }
+                    if !read_completed {
+                        return false;
+                    }
+                    let mut close =
+                        NetworkRequest::new(NetworkOperation::Close, next_network_request_id());
+                    close.handle = tcp.handle;
+                    close.generation = tcp.generation;
+                    close.service_epoch = tcp.service_epoch;
+                    return network
+                        .request_message(close)
+                        .is_ok_and(|response| response.result == NetworkResult::Stale);
+                }
+                common::wait(0, logos_abi::ServiceId::Commands);
+            }
+            return false;
+        }
+        common::wait(0, logos_abi::ServiceId::Commands);
+    }
+    false
+}
+
+#[cfg(feature = "qemu-proof")]
+fn manager_restart_network() -> bool {
+    let Some(record) = manager_record(b"network").ok().flatten() else {
+        return false;
+    };
+    let request_id = next_manager_request_id();
+    let mut request =
+        logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::Restart, request_id);
+    request.slot = record.slot;
+    request.generation = record.generation;
+    let mut response = logos_abi::ManagerResponse::new(
+        logos_abi::ManagerOperation::Restart,
+        logos_abi::ManagerStatus::Malformed,
+        request_id,
+    );
+    common::manager_call(&request, &mut response) == IpcStatus::Ok
+        && response.status == logos_abi::ManagerStatus::Accepted
+}
+
+#[cfg(feature = "qemu-proof")]
+fn manager_command_probe(pending: &mut PendingOutput, network: &mut NetworkClient) -> bool {
     let Some(initial_storage) = manager_record(b"storage").ok().flatten() else {
         return false;
     };
     if initial_storage.generation != 1 {
-        return true;
+        return network_proof_probe(network);
     }
     service_command(logos_commands::ServiceCommand::List, pending);
     let list = &pending.bytes[..pending.len];
     let list_valid = pending.pending
-        && list.ends_with(b"storage running\r\n")
+        && list
+            .windows(b"storage running\r\n".len())
+            .any(|window| window == b"storage running\r\n")
         && !list.windows(b"vacant".len()).any(|window| window == b"vacant");
     pending.len = 0;
     pending.offset = 0;
@@ -786,24 +1071,26 @@ fn manager_command_probe(pending: &mut PendingOutput) -> bool {
     if !dependency_valid {
         return false;
     }
-    manager_restart_probe()
+    network_proof_probe(network) && manager_restart_probe()
 }
 
 static mut COMMANDS: logos_commands::CommandService = logos_commands::CommandService::new();
 static mut PENDING: PendingOutput = PendingOutput::new();
 static mut STORAGE: StorageClient = StorageClient::new();
+static mut NETWORK: NetworkClient = NetworkClient;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     let commands = unsafe { &mut *core::ptr::addr_of_mut!(COMMANDS) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
+    let network = unsafe { &mut *core::ptr::addr_of_mut!(NETWORK) };
     #[cfg(feature = "qemu-proof")]
     while !manager_boot_probe() {
         common::wait(0, logos_abi::ServiceId::Commands);
     }
     #[cfg(feature = "qemu-proof")]
-    if !manager_command_probe(pending) {
+    if !manager_command_probe(pending, network) {
         common::idle();
     }
     #[cfg(feature = "storage-proof")]
@@ -864,28 +1151,34 @@ pub extern "C" fn _start() -> ! {
                                 b"usage: service <list|status|start|stop|restart> [name]\r\n",
                             );
                         }
-                        Ok(None) => match logos_commands::parse_storage_command(bytes) {
-                            Ok(Some(command)) => {
-                                if !storage.start(command) {
-                                    pending.stage(b"storage request too large\r\n");
-                                }
+                        Ok(None) => match logos_commands::parse_network_command(bytes) {
+                            Ok(Some(command)) => network_command(command, network, pending),
+                            Err(logos_commands::NetworkCommandError::Usage) => {
+                                pending.stage(b"usage: net <status|ping|tcp-probe> [args]\r\n");
                             }
-                            Err(logos_commands::StorageCommandError::Usage) => {
-                                pending.stage(b"usage error\r\n");
-                            }
-                            Ok(None) => {
-                                let result = commands.execute(bytes);
-                                if result.action != logos_commands::CommandAction::None {
-                                    let status = common::power(result.action as usize);
-                                    if status != 0 {
-                                        pending.stage(b"power action denied\r\n");
+                            Ok(None) => match logos_commands::parse_storage_command(bytes) {
+                                Ok(Some(command)) => {
+                                    if !storage.start(command) {
+                                        pending.stage(b"storage request too large\r\n");
                                     }
-                                } else if result.clear_screen {
-                                    pending.stage(b"\x1b[2J\x1b[H");
-                                } else {
-                                    pending.stage(result.as_bytes());
                                 }
-                            }
+                                Err(logos_commands::StorageCommandError::Usage) => {
+                                    pending.stage(b"usage error\r\n");
+                                }
+                                Ok(None) => {
+                                    let result = commands.execute(bytes);
+                                    if result.action != logos_commands::CommandAction::None {
+                                        let status = common::power(result.action as usize);
+                                        if status != 0 {
+                                            pending.stage(b"power action denied\r\n");
+                                        }
+                                    } else if result.clear_screen {
+                                        pending.stage(b"\x1b[2J\x1b[H");
+                                    } else {
+                                        pending.stage(result.as_bytes());
+                                    }
+                                }
+                            },
                         },
                     }
                 }
