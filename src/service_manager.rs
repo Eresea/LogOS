@@ -232,6 +232,16 @@ impl ServiceManager {
         if request.reserved != 0 || request.reserved_tail != [0; 2] {
             return ManagerDecision { response, action: ManagerAction::None };
         }
+        let shape_valid = match request.operation {
+            ManagerOperation::List => request.slot == u8::MAX && request.generation == 0,
+            ManagerOperation::Status
+            | ManagerOperation::Start
+            | ManagerOperation::Stop
+            | ManagerOperation::Restart => request.slot != u8::MAX && request.cursor == 0,
+        };
+        if !shape_valid {
+            return ManagerDecision { response, action: ManagerAction::None };
+        }
         let required = if request.operation.requires_lifecycle() {
             ManagerRights::LIFECYCLE
         } else {
@@ -505,7 +515,7 @@ mod tests {
         );
         assert_eq!(
             manager
-                .request(ManagerRequest::new(ManagerOperation::Start, 2), ManagerRights::INSPECT)
+                .request(request(ManagerOperation::Start, 0, 1), ManagerRights::INSPECT,)
                 .response
                 .status,
             ManagerStatus::Unauthorized

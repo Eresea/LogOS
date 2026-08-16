@@ -622,6 +622,32 @@ fn manager_state(state: logos_abi::ManagerState) -> &'static [u8] {
     }
 }
 
+fn manager_record(slot: u8) -> Option<logos_abi::ServiceManagerRecord> {
+    let mut cursor = 0u8;
+    for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
+        let mut request = logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, 1);
+        request.cursor = cursor;
+        let mut response = logos_abi::ManagerResponse::new(
+            logos_abi::ManagerOperation::List,
+            logos_abi::ManagerStatus::Malformed,
+            1,
+        );
+        if common::manager_call(&request, &mut response) != IpcStatus::Ok
+            || response.status != logos_abi::ManagerStatus::Ok
+        {
+            return None;
+        }
+        if response.record.slot == slot {
+            return Some(response.record);
+        }
+        if response.cursor == u8::MAX {
+            return None;
+        }
+        cursor = response.cursor;
+    }
+    None
+}
+
 fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut PendingOutput) {
     let (operation, name, list) = match command {
         logos_commands::ServiceCommand::List => (logos_abi::ManagerOperation::List, &[][..], true),
@@ -642,15 +668,28 @@ fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut Pe
         pending.stage(b"service not found\r\n");
         return;
     }
+    let target = if list {
+        None
+    } else {
+        let Some(slot) = service_slot(name) else {
+            pending.stage(b"service not found\r\n");
+            return;
+        };
+        let Some(record) = manager_record(slot) else {
+            pending.stage(b"service manager unavailable\r\n");
+            return;
+        };
+        Some(record)
+    };
     let mut output = [0; logos_commands::MAX_OUTPUT_BYTES];
     let mut output_len = 0;
     let mut cursor = 0u8;
     for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
         let mut request = logos_abi::ManagerRequest::new(operation, 1);
         request.cursor = cursor;
-        if let Some(slot) = service_slot(name) {
-            request.slot = slot;
-            request.generation = 1;
+        if let Some(record) = target {
+            request.slot = record.slot;
+            request.generation = record.generation;
         }
         let mut response =
             logos_abi::ManagerResponse::new(operation, logos_abi::ManagerStatus::Malformed, 1);
