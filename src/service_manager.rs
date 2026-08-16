@@ -345,7 +345,10 @@ impl ServiceManager {
                     response.status = ManagerStatus::Busy;
                 } else {
                     let mut services = [logos_abi::ServiceId::Input; MAX_SERVICE_SLOTS];
-                    let count = self.restart_closure(index, &mut services);
+                    let Some(count) = self.restart_closure(index, &mut services) else {
+                        response.status = ManagerStatus::Dependency;
+                        return ManagerDecision { response, action: ManagerAction::None };
+                    };
                     response.status = ManagerStatus::Accepted;
                     response.record = self.slots[index].record(index);
                     return ManagerDecision {
@@ -413,7 +416,7 @@ impl ServiceManager {
         &self,
         index: usize,
         output: &mut [logos_abi::ServiceId; MAX_SERVICE_SLOTS],
-    ) -> usize {
+    ) -> Option<usize> {
         let mut included = 0u8;
         let mut count = 0;
         let mut changed = true;
@@ -448,7 +451,7 @@ impl ServiceManager {
                 }
             }
             if !advanced {
-                break;
+                return None;
             }
         }
         while order_count != 0 {
@@ -456,7 +459,7 @@ impl ServiceManager {
             output[count] = order[order_count];
             count += 1;
         }
-        count
+        Some(count)
     }
 }
 
