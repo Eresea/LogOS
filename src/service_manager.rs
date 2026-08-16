@@ -283,23 +283,23 @@ impl ServiceManager {
                 response.record = record;
             }
             ManagerOperation::Status => {
-                let Some(record) = self.valid_record(&request) else {
-                    response.status = if request.slot as usize >= self.slots.len()
-                        || self.slots[request.slot as usize].service.is_none()
-                    {
-                        ManagerStatus::NotFound
-                    } else {
-                        ManagerStatus::Stale
-                    };
-                    return ManagerDecision { response, action: ManagerAction::None };
+                let index = match self.valid_index(&request) {
+                    Ok(index) => index,
+                    Err(status) => {
+                        response.status = status;
+                        return ManagerDecision { response, action: ManagerAction::None };
+                    }
                 };
                 response.status = ManagerStatus::Ok;
-                response.record = record;
+                response.record = self.slots[index].record(index);
             }
             ManagerOperation::Start => {
-                let Some(index) = self.valid_index(&request) else {
-                    response.status = ManagerStatus::Stale;
-                    return ManagerDecision { response, action: ManagerAction::None };
+                let index = match self.valid_index(&request) {
+                    Ok(index) => index,
+                    Err(status) => {
+                        response.status = status;
+                        return ManagerDecision { response, action: ManagerAction::None };
+                    }
                 };
                 if self.slots[index].state != ManagerState::Stopped {
                     response.status = ManagerStatus::InvalidState;
@@ -316,9 +316,12 @@ impl ServiceManager {
                 }
             }
             ManagerOperation::Stop => {
-                let Some(index) = self.valid_index(&request) else {
-                    response.status = ManagerStatus::Stale;
-                    return ManagerDecision { response, action: ManagerAction::None };
+                let index = match self.valid_index(&request) {
+                    Ok(index) => index,
+                    Err(status) => {
+                        response.status = status;
+                        return ManagerDecision { response, action: ManagerAction::None };
+                    }
                 };
                 if self.has_active_dependents(index) {
                     response.status = ManagerStatus::Dependency;
@@ -335,9 +338,12 @@ impl ServiceManager {
                 }
             }
             ManagerOperation::Restart => {
-                let Some(index) = self.valid_index(&request) else {
-                    response.status = ManagerStatus::Stale;
-                    return ManagerDecision { response, action: ManagerAction::None };
+                let index = match self.valid_index(&request) {
+                    Ok(index) => index,
+                    Err(status) => {
+                        response.status = status;
+                        return ManagerDecision { response, action: ManagerAction::None };
+                    }
                 };
                 if self.slots[index].state != ManagerState::Running {
                     response.status = ManagerStatus::InvalidState;
@@ -364,21 +370,15 @@ impl ServiceManager {
         ManagerDecision { response, action: ManagerAction::None }
     }
 
-    fn valid_index(&self, request: &ManagerRequest) -> Option<usize> {
+    fn valid_index(&self, request: &ManagerRequest) -> Result<usize, ManagerStatus> {
         let index = request.slot as usize;
-        if index >= self.slots.len()
-            || self.slots[index].service.is_none()
-            || self.slots[index].generation != request.generation
-        {
-            None
+        if index >= self.slots.len() || self.slots[index].service.is_none() {
+            Err(ManagerStatus::Unsupported)
+        } else if self.slots[index].generation != request.generation {
+            Err(ManagerStatus::Stale)
         } else {
-            Some(index)
+            Ok(index)
         }
-    }
-
-    fn valid_record(&self, request: &ManagerRequest) -> Option<ServiceManagerRecord> {
-        let index = self.valid_index(request)?;
-        Some(self.slots[index].record(index))
     }
 
     fn next_record(&self, cursor: usize) -> Option<(usize, ServiceManagerRecord)> {
@@ -584,6 +584,13 @@ mod tests {
                 .response
                 .status,
             ManagerStatus::Unauthorized
+        );
+        assert_eq!(
+            manager
+                .request(request(ManagerOperation::Start, 6, 1), ManagerRights::ALL)
+                .response
+                .status,
+            ManagerStatus::Unsupported
         );
         assert_eq!(
             manager.load_filesystem_package(ServiceId::Input, &[0; 1]),
