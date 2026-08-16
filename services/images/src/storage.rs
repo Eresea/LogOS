@@ -123,7 +123,15 @@ fn discover(capability: IpcCapability) -> Option<u64> {
     (response.block_count > 2).then_some(response.block_count)
 }
 
-fn serve_storage_error<T>(_error: T) -> ! {
+fn storage_error_status(error: NamespaceError) -> StorageApiStatus {
+    if matches!(error, NamespaceError::Format(logos_storage::FormatError::UnsupportedVersion)) {
+        StorageApiStatus::Unsupported
+    } else {
+        StorageApiStatus::Io
+    }
+}
+
+fn serve_storage_error(status: StorageApiStatus) -> ! {
     let mut pending_response = None;
     let mut heartbeat_ticks = 0u16;
     loop {
@@ -149,7 +157,7 @@ fn serve_storage_error<T>(_error: T) -> ! {
                     pending_response =
                         StorageApiRequest::decode(&request).ok().and_then(|request| {
                             StorageApiResponse::encode(
-                                StorageApiStatus::Io,
+                                status,
                                 request.request_id,
                                 request.transaction_id,
                                 &[],
@@ -174,28 +182,29 @@ fn serve_storage_error<T>(_error: T) -> ! {
 
 fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
     let Some(store) = new_store(capability, blocks) else {
-        common::idle();
+        serve_storage_error(StorageApiStatus::Io);
     };
     let mut filesystem = match DurableNamespace::open(store) {
         Ok(filesystem) => filesystem,
         Err(NamespaceError::Format(logos_storage::FormatError::Unformatted)) => {
             let Some(store) = new_store(capability, blocks) else {
-                common::idle();
+                serve_storage_error(StorageApiStatus::Io);
             };
-            DurableNamespace::format(store).unwrap_or_else(|error| serve_storage_error(error))
+            DurableNamespace::format(store)
+                .unwrap_or_else(|error| serve_storage_error(storage_error_status(error)))
         }
-        Err(error) => serve_storage_error(error),
+        Err(error) => serve_storage_error(storage_error_status(error)),
     };
     #[cfg(feature = "storage-proof")]
     if filesystem.open_file(b"/marker").is_err() {
         let marker = filesystem
             .create_file(filesystem.root(), b"marker")
-            .unwrap_or_else(|error| serve_storage_error(error));
+            .unwrap_or_else(|error| serve_storage_error(storage_error_status(error)));
         filesystem
             .write(marker, 0, b"LogOS storage marker")
-            .unwrap_or_else(|error| serve_storage_error(error));
+            .unwrap_or_else(|error| serve_storage_error(storage_error_status(error)));
     }
-    filesystem.flush().unwrap_or_else(|error| serve_storage_error(error));
+    filesystem.flush().unwrap_or_else(|error| serve_storage_error(storage_error_status(error)));
 
     let mut api = StorageApi::new(filesystem);
     let mut pending_response = None;
@@ -230,8 +239,10 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
 /// whole raw volume, reopens valid media, or formats only blank media.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    let Some(capability) = common::capability(REQUEST_CAPABILITY) else { serve_storage_error(()) };
-    let Some(blocks) = discover(capability) else { serve_storage_error(()) };
+    let Some(capability) = common::capability(REQUEST_CAPABILITY) else {
+        serve_storage_error(StorageApiStatus::Io)
+    };
+    let Some(blocks) = discover(capability) else { serve_storage_error(StorageApiStatus::Io) };
     run_filesystem(capability, blocks)
 }
 
