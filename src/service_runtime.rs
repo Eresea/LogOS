@@ -959,7 +959,7 @@ impl ServiceRuntime {
         {
             return logos_abi::IpcStatus::Stale;
         }
-        let Some(staging_frame) = self.ipc_staging_frames[ServiceId::Commands.index()] else {
+        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
             return logos_abi::IpcStatus::Unauthorized;
         };
         let bytes = staging_frame.raw() as usize as *const u8;
