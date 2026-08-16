@@ -47,6 +47,27 @@ fn next_manager_request_id() -> u32 {
     }
 }
 
+#[cfg(feature = "qemu-proof")]
+fn manager_boot_probe() -> bool {
+    let request_id = next_manager_request_id();
+    let request = logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, request_id);
+    let mut response = logos_abi::ManagerResponse::new(
+        logos_abi::ManagerOperation::List,
+        logos_abi::ManagerStatus::Malformed,
+        request_id,
+    );
+    if common::manager_call(&request, &mut response) != IpcStatus::Ok
+        || response.status != logos_abi::ManagerStatus::Ok
+        || response.record.slot != 0
+        || &response.record.name[..usize::from(response.record.name_len)] != b"input"
+    {
+        return false;
+    }
+    let mut output = [0; logos_commands::MAX_OUTPUT_BYTES];
+    let length = logos_commands::format_service_record(&response.record, &mut output);
+    output[..length].starts_with(b"input ") && output[..length].ends_with(b"\r\n")
+}
+
 struct PendingOutput {
     bytes: [u8; logos_commands::MAX_OUTPUT_BYTES],
     len: usize,
@@ -616,17 +637,6 @@ fn manager_error(status: logos_abi::ManagerStatus) -> &'static [u8] {
     }
 }
 
-fn manager_state(state: logos_abi::ManagerState) -> &'static [u8] {
-    match state {
-        logos_abi::ManagerState::Vacant => b"vacant",
-        logos_abi::ManagerState::Stopped => b"stopped",
-        logos_abi::ManagerState::Starting => b"starting",
-        logos_abi::ManagerState::Running => b"running",
-        logos_abi::ManagerState::Stopping => b"stopping",
-        logos_abi::ManagerState::Failed => b"failed",
-    }
-}
-
 fn manager_record(name: &[u8]) -> Result<Option<logos_abi::ServiceManagerRecord>, IpcStatus> {
     let mut cursor = 0u8;
     for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
@@ -715,14 +725,7 @@ fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut Pe
             return;
         }
         let record = response.record;
-        let name_len = usize::from(record.name_len).min(record.name.len());
-        let parts: [&[u8]; 4] =
-            [&record.name[..name_len], b" ", manager_state(record.state), b"\r\n"];
-        for part in parts {
-            let count = part.len().min(output.len() - output_len);
-            output[output_len..output_len + count].copy_from_slice(&part[..count]);
-            output_len += count;
-        }
+        output_len += logos_commands::format_service_record(&record, &mut output[output_len..]);
         if !list || response.cursor == u8::MAX {
             break;
         }
@@ -740,6 +743,10 @@ pub extern "C" fn _start() -> ! {
     let commands = unsafe { &mut *core::ptr::addr_of_mut!(COMMANDS) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
+    #[cfg(feature = "qemu-proof")]
+    if !manager_boot_probe() {
+        common::idle();
+    }
     #[cfg(feature = "storage-proof")]
     let mut proof = StorageProof::new();
     let mut heartbeat_ticks = 0u16;

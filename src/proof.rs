@@ -29,6 +29,7 @@ static REPORTED: AtomicBool = AtomicBool::new(false);
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
 static LIVE_SERVICE_RESTARTED: AtomicBool = AtomicBool::new(false);
 static MANAGER_RESTART_COMPLETED: AtomicBool = AtomicBool::new(false);
+static MANAGER_SYSCALL_SUCCEEDED: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_HANDLE: AtomicU64 = AtomicU64::new(0);
 static BACKPRESSURE_FULL: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_BLOCKED: AtomicBool = AtomicBool::new(false);
@@ -97,6 +98,10 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
         (core::ptr::addr_of!(RESCHEDULE_IPIS) as usize, core::mem::size_of::<AtomicU64>()),
         (core::ptr::addr_of!(EVENT_WAKE_IPI_SENT) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(EVENT_WAKE_IPI_RECEIVED) as usize, core::mem::size_of::<AtomicBool>()),
+        (
+            core::ptr::addr_of!(MANAGER_SYSCALL_SUCCEEDED) as usize,
+            core::mem::size_of::<AtomicBool>(),
+        ),
         (core::ptr::addr_of!(PROBE_RING) as usize, core::mem::size_of::<logos_abi::RenderIpc>()),
     ] {
         crate::arch::reserve_storage_frames(pool, address, bytes);
@@ -145,6 +150,10 @@ pub fn live_service_restarted() {
 
 pub fn manager_restart_completed() {
     MANAGER_RESTART_COMPLETED.store(true, Ordering::Release);
+}
+
+pub fn manager_syscall_succeeded() {
+    MANAGER_SYSCALL_SUCCEEDED.store(true, Ordering::Release);
 }
 
 pub fn observe_ring3_cpu(cpu: usize, expected_root: usize, actual_root: usize) {
@@ -214,6 +223,7 @@ pub fn observe(cpu: usize) {
         && HEALTH_LATE_COMPLETION_REJECTED.load(Ordering::Acquire)
         && HEALTH_RETRY_COMPLETED.load(Ordering::Acquire)
         && MANAGER_RESTART_COMPLETED.load(Ordering::Acquire)
+        && MANAGER_SYSCALL_SUCCEEDED.load(Ordering::Acquire)
         && LIVE_SERVICE_RESTARTED.load(Ordering::Acquire)
         && crate::user_mode::syscalls() > 0
         && crate::user_mode::blocked_waits() > 0

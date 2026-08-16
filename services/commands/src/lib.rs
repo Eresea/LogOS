@@ -375,6 +375,25 @@ impl CommandService {
     }
 }
 
+pub fn format_service_record(record: &logos_abi::ServiceManagerRecord, output: &mut [u8]) -> usize {
+    let state = match record.state {
+        logos_abi::ManagerState::Vacant => b"vacant" as &[u8],
+        logos_abi::ManagerState::Stopped => b"stopped",
+        logos_abi::ManagerState::Starting => b"starting",
+        logos_abi::ManagerState::Running => b"running",
+        logos_abi::ManagerState::Stopping => b"stopping",
+        logos_abi::ManagerState::Failed => b"failed",
+    };
+    let name_len = usize::from(record.name_len).min(record.name.len());
+    let mut length = 0;
+    for part in [&record.name[..name_len], b" ", state, b"\r\n"] {
+        let count = part.len().min(output.len().saturating_sub(length));
+        output[length..length + count].copy_from_slice(&part[..count]);
+        length += count;
+    }
+    length
+}
+
 pub fn parse_service_command(
     line: &[u8],
 ) -> Result<Option<ServiceCommand<'_>>, ServiceCommandError> {
@@ -545,6 +564,21 @@ mod tests {
             ServiceCommandError::Usage
         );
         assert!(parse_service_command(b"echo hi").unwrap().is_none());
+    }
+
+    #[test]
+    fn service_records_format_with_bounded_output() {
+        let mut record = logos_abi::ServiceManagerRecord::EMPTY;
+        record.state = logos_abi::ManagerState::Running;
+        record.name[..7].copy_from_slice(b"storage");
+        record.name_len = 7;
+        let mut output = [0; MAX_OUTPUT_BYTES];
+        let length = format_service_record(&record, &mut output);
+        assert_eq!(&output[..length], b"storage running\r\n");
+
+        let mut short = [0; 5];
+        assert_eq!(format_service_record(&record, &mut short), 5);
+        assert_eq!(&short, b"stora");
     }
 
     #[test]

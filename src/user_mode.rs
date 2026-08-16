@@ -217,6 +217,10 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
         prepare_kernel();
         let status = crate::arch::manager_call(launch.process(), capability_slot, length);
         unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status as usize) };
+        #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
+        if status == logos_abi::IpcStatus::Ok {
+            crate::proof::manager_syscall_succeeded();
+        }
         USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
         prepare_address_space(launch.address_space_root());
         return true;
