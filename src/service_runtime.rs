@@ -987,6 +987,7 @@ impl ServiceRuntime {
                 {
                     self.manager.mark_failed(service);
                     decision.response.status = logos_abi::ManagerStatus::Capacity;
+                    self.refresh_manager_response_record(&mut decision.response);
                 }
             }
             ManagerAction::Stop(service) => match self.request_stop_service(service) {
@@ -1000,6 +1001,7 @@ impl ServiceRuntime {
                 Err(_) => {
                     self.manager.mark_failed(service);
                     decision.response.status = logos_abi::ManagerStatus::Busy;
+                    self.refresh_manager_response_record(&mut decision.response);
                 }
             },
             ManagerAction::Restart(services, count) => {
@@ -1016,6 +1018,7 @@ impl ServiceRuntime {
                         if self.request_stop_task(*service).is_err() {
                             self.manager.mark_failed(*service);
                             decision.response.status = logos_abi::ManagerStatus::Busy;
+                            self.refresh_manager_response_record(&mut decision.response);
                             if admitted != 0 {
                                 self.manager.mark_restart_stopping(&services[..admitted]);
                             }
@@ -1037,6 +1040,12 @@ impl ServiceRuntime {
             );
         }
         logos_abi::IpcStatus::Ok
+    }
+
+    fn refresh_manager_response_record(&self, response: &mut logos_abi::ManagerResponse) {
+        if let Some(record) = self.manager.record(usize::from(response.record.slot)) {
+            response.record = record;
+        }
     }
 
     #[cfg(feature = "qemu-proof")]
@@ -1193,12 +1202,20 @@ impl ServiceRuntime {
                 continue;
             };
             if crate::SCHEDULER.state(task) == Some(crate::TaskState::Completed) {
+                let process_failed = self
+                    .launch(service)
+                    .and_then(|(process, _)| self.processes.state(process))
+                    .is_none_or(|state| !matches!(state, crate::process::ProcessState::Running));
                 if !crate::SCHEDULER.reclaim_completed(task) {
                     return Err(ServiceRuntimeError::TaskStop);
                 }
                 self.tasks[index] = None;
                 self.supervisor.unregister(service);
-                self.manager.mark_stopped(service);
+                if process_failed {
+                    self.manager.mark_failed(service);
+                } else {
+                    self.manager.mark_stopped(service);
+                }
             }
         }
         if let Some((services, count)) = self.pending_restart.take() {
