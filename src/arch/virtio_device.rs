@@ -748,20 +748,20 @@ impl VirtioBlockDevice {
 
     #[cfg(feature = "storage-proof")]
     fn record_flush_success(&self) {
-        if STORAGE_WRITE_COMPLETE.swap(false, Ordering::AcqRel)
-            && STORAGE_INTERRUPT_COMPLETION.swap(false, Ordering::AcqRel)
-            && STORAGE_PROOF_STATE
-                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        {
-            super::proof_line(b"LogOS vNext: storage proof PASS");
-        } else if STORAGE_VALID_MEDIA.load(Ordering::Acquire)
+        if STORAGE_VALID_MEDIA.load(Ordering::Acquire)
             && STORAGE_INTERRUPT_COMPLETION.swap(false, Ordering::AcqRel)
             && STORAGE_PROOF_STATE
                 .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
             super::proof_line(b"LogOS vNext: storage recovery PASS");
+        } else if STORAGE_WRITE_COMPLETE.swap(false, Ordering::AcqRel)
+            && STORAGE_INTERRUPT_COMPLETION.swap(false, Ordering::AcqRel)
+            && STORAGE_PROOF_STATE
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            super::proof_line(b"LogOS vNext: storage proof PASS");
         }
     }
 }
