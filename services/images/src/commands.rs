@@ -734,6 +734,19 @@ fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut Pe
     pending.stage(&output[..output_len]);
 }
 
+#[cfg(feature = "qemu-proof")]
+fn manager_command_probe(pending: &mut PendingOutput) -> bool {
+    service_command(logos_commands::ServiceCommand::Stop { name: b"input" }, pending);
+    let expected = b"service dependency violation\r\n";
+    let valid = pending.pending
+        && pending.len == expected.len()
+        && pending.bytes[..pending.len] == *expected;
+    pending.len = 0;
+    pending.offset = 0;
+    pending.pending = false;
+    valid
+}
+
 static mut COMMANDS: logos_commands::CommandService = logos_commands::CommandService::new();
 static mut PENDING: PendingOutput = PendingOutput::new();
 static mut STORAGE: StorageClient = StorageClient::new();
@@ -745,6 +758,10 @@ pub extern "C" fn _start() -> ! {
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
     #[cfg(feature = "qemu-proof")]
     if !manager_boot_probe() {
+        common::idle();
+    }
+    #[cfg(feature = "qemu-proof")]
+    if !manager_command_probe(pending) {
         common::idle();
     }
     #[cfg(feature = "storage-proof")]
