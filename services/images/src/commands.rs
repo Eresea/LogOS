@@ -1148,13 +1148,15 @@ pub extern "C" fn _start() -> ! {
                         Ok(Some(command)) => service_command(command, pending),
                         Err(logos_commands::ServiceCommandError::Usage) => {
                             pending.stage(
-                                b"usage: service <list|status|start|stop|restart> [name]\r\n",
-                            );
+                                    b"usage: service.list() | service.status(name) | service.start(name) | service.stop(name) | service.restart(name)\r\n",
+                                );
                         }
                         Ok(None) => match logos_commands::parse_network_command(bytes) {
                             Ok(Some(command)) => network_command(command, network, pending),
                             Err(logos_commands::NetworkCommandError::Usage) => {
-                                pending.stage(b"usage: net <status|ping|tcp-probe> [args]\r\n");
+                                pending.stage(
+                                    b"usage: net.status() | net.ping(address) | net.tcp-probe(address, port)\r\n",
+                                );
                             }
                             Ok(None) => match logos_commands::parse_storage_command(bytes) {
                                 Ok(Some(command)) => {

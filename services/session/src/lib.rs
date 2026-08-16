@@ -282,7 +282,10 @@ impl LineEditor {
     }
 
     fn complete(&mut self, output: &mut ShellOutput) {
-        if self.cursor != self.line_len || self.line[..self.cursor].contains(&b' ') {
+        if self.cursor != self.line_len
+            || self.line[..self.cursor].contains(&b' ')
+            || self.line[..self.cursor].contains(&b'(')
+        {
             return;
         }
         let prefix = &self.line[..self.cursor];
@@ -297,22 +300,24 @@ impl LineEditor {
         match count {
             0 => {}
             1 => {
-                let candidate = COMMAND_SPECS[matches[0]].name;
+                let spec = COMMAND_SPECS[matches[0]];
+                let candidate = spec.name;
                 let suffix = &candidate[prefix.len()..];
-                let trailing_space = usize::from(self.line_len + suffix.len() < MAX_LINE_BYTES);
-                let inserted_len = suffix.len() + trailing_space;
+                let punctuation: &[u8] = match spec.kind {
+                    logos_commands::CommandKind::Service | logos_commands::CommandKind::Network => {
+                        b"."
+                    }
+                    _ => b"()",
+                };
+                let inserted_len = suffix.len() + punctuation.len();
                 if self.line_len + inserted_len <= MAX_LINE_BYTES {
                     let end = self.line_len + suffix.len();
                     self.line[self.line_len..end].copy_from_slice(suffix);
-                    if trailing_space != 0 {
-                        self.line[end] = b' ';
-                    }
+                    self.line[end..end + punctuation.len()].copy_from_slice(punctuation);
                     self.line_len += inserted_len;
                     self.cursor = self.line_len;
                     output.extend(suffix);
-                    if trailing_space != 0 {
-                        output.push(b' ');
-                    }
+                    output.extend(punctuation);
                 }
             }
             _ => {
@@ -625,7 +630,12 @@ mod tests {
         let mut command = [0; MAX_LINE_BYTES];
         let mut output = ShellOutput::new();
         let length = editor.input_for_command(b"he\t\r", &mut command, &mut output).unwrap();
-        assert_eq!(&command[..length], b"help ");
+        assert_eq!(&command[..length], b"help()");
+
+        let mut editor = LineEditor::new();
+        output = ShellOutput::new();
+        let length = editor.input_for_command(b"serv\t\r", &mut command, &mut output).unwrap();
+        assert_eq!(&command[..length], b"service.");
 
         let mut editor = LineEditor::new();
         output = ShellOutput::new();

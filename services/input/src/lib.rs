@@ -582,15 +582,20 @@ mod tests {
 
     #[test]
     fn terminal_graph_forwards_one_command_and_renders_output() {
-        let mut decoder = InputDecoder::new();
+        let mut decoder = InputDecoder::with_layout(KeyboardLayout::Qwerty);
         let mut terminal = TerminalService::new();
         let mut session = SessionService::new();
         let mut commands = CommandService::new();
         let mut command = [0; MAX_LINE_BYTES];
         let mut committed = None;
 
-        for scancode in [0x24, 0x21, 0x33, 0x44, 0x29, 0x4d, 0x2d, 0x44, 0x44, 0x2b, 0x5a] {
-            let message = decoder.feed(scancode).unwrap().terminal_message();
+        for scancode in [
+            0x24, 0x21, 0x33, 0x44, 0x12, 0x46, 0xf0, 0x12, 0x4d, 0x2d, 0x44, 0x44, 0x2b, 0x12,
+            0x45, 0xf0, 0x12, 0x5a,
+        ] {
+            let Some(message) = decoder.feed(scancode).map(|event| event.terminal_message()) else {
+                continue;
+            };
             let Some(stream) = terminal.input(&message) else { continue };
             let Some(bytes) = stream.as_bytes() else { continue };
             let mut edit_output = ShellOutput::new();
@@ -601,7 +606,7 @@ mod tests {
         }
 
         let length = committed.expect("enter commits the command");
-        assert_eq!(&command[..length], b"echo proof");
+        assert_eq!(&command[..length], b"echo(proof)");
         let result = commands.execute(&command[..length]);
         assert_eq!(result.as_bytes(), b"proof\r\n");
         let mut output = ShellOutput::new();
