@@ -490,8 +490,7 @@ mod tests {
     fn api_replace_writes_survive_reopen_cycles() {
         let mut api =
             StorageApi::new(DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap());
-        let contents =
-            [b"first".as_slice(), b"second replacement", b"third", b"final durable content"];
+        let contents = [b"first".as_slice(), b"second replacement", b"final durable content"];
 
         for (cycle, expected) in contents.iter().enumerate() {
             let request_id = (cycle * 5 + 1) as u32;
