@@ -25,6 +25,7 @@ const CHECKPOINT_VERSION: u16 = 1;
 const COMPACTION_CLEAN: u8 = 0;
 const COMPACTION_PREPARED: u8 = 1;
 const MIN_JOURNAL_BLOCKS: u64 = MAX_RECORDS_PER_TRANSACTION as u64 + 1;
+const MAX_REPLAY_BLOCKS: u64 = 64;
 
 pub const MAX_RECORD_PAYLOAD_BYTES: usize = BLOCK_BYTES - RECORD_HEADER_BYTES;
 
@@ -216,10 +217,13 @@ impl Volume {
     }
 
     pub const fn should_checkpoint(self) -> bool {
+        let retained_blocks = self.info.journal_head.saturating_sub(self.info.journal_tail);
         self.info.root_transaction_id != 0
             && self.info.checkpoint_start != 0
             && self.info.compaction_state == COMPACTION_CLEAN
-            && self.info.journal_head.saturating_add(MIN_JOURNAL_BLOCKS) >= self.info.journal_end
+            && (retained_blocks.saturating_add(MIN_JOURNAL_BLOCKS) >= MAX_REPLAY_BLOCKS
+                || self.info.journal_head.saturating_add(MIN_JOURNAL_BLOCKS)
+                    >= self.info.journal_end)
     }
 
     pub fn checkpoint<B: BlockStore>(
@@ -1280,6 +1284,17 @@ mod tests {
         assert_eq!(&snapshot[..8], b"snapshot");
         let mut sink = Sink::new();
         assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 0);
+        assert_eq!(reopened.info().root_transaction_id, 1);
+    }
+
+    #[test]
+    fn checkpoint_cadence_is_bounded_independent_of_disk_size() {
+        let mut store = CrashStore::<96>::new();
+        let mut volume = Volume::format(&mut store).unwrap();
+        for _ in 0..32 {
+            volume.commit(&mut store, &[JournalRecord { kind: 1, payload: b"x" }]).unwrap();
+        }
+        assert!(volume.should_checkpoint());
     }
 
     #[test]
