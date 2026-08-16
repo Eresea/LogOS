@@ -996,14 +996,20 @@ impl ServiceRuntime {
                 {
                     decision.response.status = logos_abi::ManagerStatus::Busy;
                 } else {
+                    let mut admitted = 0;
                     for service in &services[..count] {
                         if self.request_stop_task(*service).is_err() {
                             self.manager.mark_failed(*service);
                             decision.response.status = logos_abi::ManagerStatus::Busy;
+                            if admitted != 0 {
+                                self.manager.mark_restart_stopping(&services[..admitted]);
+                                self.pending_restart = Some((services, admitted));
+                            }
                             break;
                         }
+                        admitted += 1;
                     }
-                    if decision.response.status != logos_abi::ManagerStatus::Busy {
+                    if admitted == count {
                         self.manager.mark_restart_stopping(&services[..count]);
                         self.pending_restart = Some((services, count));
                     }
