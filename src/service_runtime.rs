@@ -535,8 +535,7 @@ impl ServiceRuntime {
     }
 
     pub fn start_tasks(&mut self) -> Result<(), ServiceRuntimeError> {
-        for spec in SERVICE_IMAGES {
-            let service = spec.service();
+        for service in crate::service_images::SERVICE_START_ORDER {
             self.start_service_task(service)?;
             self.startup.start(service).map_err(ServiceRuntimeError::Startup)?;
         }

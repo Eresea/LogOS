@@ -70,14 +70,18 @@ pub const SERVICE_IMAGES: [ServiceImageSpec; 6] = [
         ServiceId::Commands,
         b"commands",
         b"\\EFI\\LOGOS\\COMMANDS.ELF",
-        1 << ServiceId::Session.index(),
+        (1 << ServiceId::Session.index()) | (1 << ServiceId::Storage.index()),
     ),
-    ServiceImageSpec::new(
-        ServiceId::Storage,
-        b"storage",
-        b"\\EFI\\LOGOS\\STORAGE.ELF",
-        1 << ServiceId::Commands.index(),
-    ),
+    ServiceImageSpec::new(ServiceId::Storage, b"storage", b"\\EFI\\LOGOS\\STORAGE.ELF", 0),
+];
+
+pub const SERVICE_START_ORDER: [ServiceId; 6] = [
+    ServiceId::Input,
+    ServiceId::Display,
+    ServiceId::Terminal,
+    ServiceId::Session,
+    ServiceId::Storage,
+    ServiceId::Commands,
 ];
 
 pub const fn service_image(service: ServiceId) -> ServiceImageSpec {
@@ -136,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_is_fixed_and_dependency_ordered() {
+    fn manifest_is_fixed_and_dependencies_are_valid() {
         assert_eq!(SERVICE_IMAGES.len(), 6);
         assert_eq!(SERVICE_IMAGES[0].service(), ServiceId::Input);
         assert_eq!(SERVICE_IMAGES[1].service(), ServiceId::Display);
@@ -145,6 +149,8 @@ mod tests {
         assert_eq!(SERVICE_IMAGES[4].service(), ServiceId::Commands);
         assert_eq!(SERVICE_IMAGES[5].service(), ServiceId::Storage);
         assert_eq!(SERVICE_IMAGES[2].dependencies(), 0b0000_0011);
+        assert_eq!(SERVICE_IMAGES[4].dependencies(), 0b0010_1000);
+        assert_eq!(SERVICE_IMAGES[5].dependencies(), 0);
         assert_eq!(SERVICE_IMAGES[5].name(), b"storage");
         assert_eq!(service_image(ServiceId::Display).path(), b"\\EFI\\LOGOS\\DISPLAY.ELF");
     }

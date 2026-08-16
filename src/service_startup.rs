@@ -73,8 +73,8 @@ mod tests {
         startup.start(ServiceId::Display).unwrap();
         startup.start(ServiceId::Terminal).unwrap();
         startup.start(ServiceId::Session).unwrap();
-        startup.start(ServiceId::Commands).unwrap();
         startup.start(ServiceId::Storage).unwrap();
+        startup.start(ServiceId::Commands).unwrap();
         assert_eq!(startup.started, all_services);
     }
 }

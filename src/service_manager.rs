@@ -536,6 +536,19 @@ mod tests {
     }
 
     #[test]
+    fn stop_rejects_running_storage_dependents() {
+        let mut manager = manager();
+        let handle = manager.handle(ServiceId::Storage.index()).unwrap();
+        let response = manager
+            .request(
+                request(ManagerOperation::Stop, handle.slot(), handle.generation()),
+                ManagerRights::ALL,
+            )
+            .response;
+        assert_eq!(response.status, ManagerStatus::Dependency);
+    }
+
+    #[test]
     fn stop_rejects_transitional_dependents() {
         let mut manager = manager();
         manager.mark_starting(ServiceId::Commands);
@@ -636,7 +649,6 @@ mod tests {
             decision.action,
             ManagerAction::Restart(
                 [
-                    ServiceId::Storage,
                     ServiceId::Commands,
                     ServiceId::Session,
                     ServiceId::Input,
@@ -644,8 +656,9 @@ mod tests {
                     ServiceId::Input,
                     ServiceId::Input,
                     ServiceId::Input,
+                    ServiceId::Input,
                 ],
-                3,
+                2,
             )
         );
     }

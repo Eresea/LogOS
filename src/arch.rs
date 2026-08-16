@@ -968,7 +968,7 @@ pub(crate) fn record_service_heartbeat(
     process: crate::process::ProcessHandle,
     now: u64,
 ) -> bool {
-    if !service_runtime_ready() {
+    if !service_runtime_ready() && !service_runtime_restarting() {
         return true;
     }
     let _runtime_guard = ServiceRuntimeGuard::acquire();
@@ -1069,13 +1069,7 @@ pub(crate) fn suppress_service_heartbeat(service: logos_abi::ServiceId) {
 }
 
 pub(crate) fn fault_service_process(process: crate::process::ProcessHandle, vector: u8) -> bool {
-    if !service_runtime_ready() {
-        return true;
-    }
     let _runtime_guard = ServiceRuntimeGuard::acquire();
-    if service_runtime_restarting() {
-        return true;
-    }
     unsafe {
         (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).fault_process(process, vector).is_ok()
     }
