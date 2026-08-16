@@ -224,6 +224,15 @@ impl ServiceManager {
         }
     }
 
+    pub fn mark_restart_stopping(&mut self, services: &[logos_abi::ServiceId]) {
+        for service in services {
+            let index = service.index();
+            if index < self.slots.len() {
+                self.slots[index].state = ManagerState::Stopping;
+            }
+        }
+    }
+
     pub fn prepare_graph_restart(&mut self) {
         for slot in &mut self.slots[..SERVICE_IMAGES.len()] {
             slot.state = ManagerState::Stopped;
@@ -337,9 +346,6 @@ impl ServiceManager {
                 } else {
                     let mut services = [logos_abi::ServiceId::Input; MAX_SERVICE_SLOTS];
                     let count = self.restart_closure(index, &mut services);
-                    for service in &services[..count] {
-                        self.slots[service.index()].state = ManagerState::Stopping;
-                    }
                     response.status = ManagerStatus::Accepted;
                     response.record = self.slots[index].record(index);
                     return ManagerDecision {

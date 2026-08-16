@@ -583,6 +583,12 @@ impl ServiceRuntime {
     }
 
     fn request_stop_service(&mut self, service: ServiceId) -> Result<(), ServiceRuntimeError> {
+        self.request_stop_task(service)?;
+        self.manager.mark_stopping(service);
+        Ok(())
+    }
+
+    fn request_stop_task(&mut self, service: ServiceId) -> Result<(), ServiceRuntimeError> {
         let index = service.index();
         let Some(task) = self.tasks[index] else {
             return Err(ServiceRuntimeError::TaskStop);
@@ -590,7 +596,6 @@ impl ServiceRuntime {
         if !crate::SCHEDULER.request_stop(task) {
             return Err(ServiceRuntimeError::TaskStop);
         }
-        self.manager.mark_stopping(service);
         Ok(())
     }
 
@@ -982,18 +987,22 @@ impl ServiceRuntime {
             }
             ManagerAction::Restart(services, count) => {
                 if self.pending_restart.is_some()
-                    || services[..count].iter().any(|service| self.tasks[service.index()].is_none())
+                    || services[..count].iter().any(|service| {
+                        self.tasks[service.index()]
+                            .is_none_or(|task| crate::SCHEDULER.state(task).is_none())
+                    })
                 {
                     decision.response.status = logos_abi::ManagerStatus::Busy;
                 } else {
                     for service in &services[..count] {
-                        if self.request_stop_service(*service).is_err() {
+                        if self.request_stop_task(*service).is_err() {
                             self.manager.mark_failed(*service);
                             decision.response.status = logos_abi::ManagerStatus::Busy;
                             break;
                         }
                     }
                     if decision.response.status != logos_abi::ManagerStatus::Busy {
+                        self.manager.mark_restart_stopping(&services[..count]);
                         self.pending_restart = Some((services, count));
                     }
                 }
