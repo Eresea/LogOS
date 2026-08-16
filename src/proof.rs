@@ -296,14 +296,6 @@ pub(crate) fn verify_service_manager_boundary() {
     {
         crate::arch_fatal(b"LogOS vNext: manager authorization");
     }
-    let mut restart = logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::Restart, 3);
-    restart.slot = 0;
-    restart.generation = 1;
-    let restart = crate::arch::manager_proof(restart)
-        .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: manager restart"));
-    if restart.status != logos_abi::ManagerStatus::Accepted {
-        crate::arch_fatal(b"LogOS vNext: manager restart result");
-    }
     crate::arch_proof_line(b"LogOS vNext: service manager ready");
 }
 

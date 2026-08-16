@@ -639,6 +639,10 @@ impl ServiceRuntime {
         true
     }
 
+    pub(crate) fn owns_service_process(&self, service: ServiceId, process: ProcessHandle) -> bool {
+        self.launch(service).is_some_and(|(current, _)| current == process)
+    }
+
     #[cfg(feature = "qemu-proof")]
     pub(crate) fn suppress_heartbeat(&self, service: ServiceId) {
         self.suppressed_heartbeats[service.index()].store(true, Ordering::Release);
@@ -1043,6 +1047,7 @@ impl ServiceRuntime {
                     }
                     if admitted == count {
                         self.manager.mark_restart_stopping(&services[..count]);
+                        self.refresh_manager_response_record(&mut decision.response);
                         self.pending_restart = Some((services, count));
                     }
                 }
@@ -1157,8 +1162,13 @@ impl ServiceRuntime {
 
     /// Stop every service task at a scheduler boundary before reclaiming any
     /// process frames or page-table roots.
-    pub fn restart(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
+    fn restart(
+        &mut self,
+        bundle: &ServiceImageBundle,
+        runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
+    ) -> Result<(), ServiceRuntimeError> {
         let _restart_gate = ServiceRestartGate::acquire();
+        crate::arch::begin_service_runtime_transition();
         crate::arch_proof_line(b"LogOS vNext: service restart begin");
         self.ipc_generation = self.ipc_generation.wrapping_add(1).max(1);
         self.service_epoch = self.service_epoch.wrapping_add(1).max(1);
@@ -1167,7 +1177,7 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::RestartLimit);
         }
         self.manager.prepare_graph_restart();
-        self.stop_tasks()?;
+        self.stop_tasks(runtime_guard)?;
         crate::arch::prepare_task_address_space(0);
         let result = crate::arch::restart_critical_section(|| {
             crate::arch_proof_line(b"LogOS vNext: service tasks quiesced");
@@ -1197,6 +1207,7 @@ impl ServiceRuntime {
             let result = self.start_tasks();
             if result.is_ok() {
                 crate::arch::enable_keyboard_irq();
+                crate::arch::finish_service_runtime_transition();
             }
             result
         });
@@ -1210,6 +1221,7 @@ impl ServiceRuntime {
         &mut self,
         bundle: &ServiceImageBundle,
         now: u64,
+        runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
     ) -> Result<bool, ServiceRuntimeError> {
         for spec in SERVICE_IMAGES {
             let service = spec.service();
@@ -1249,7 +1261,7 @@ impl ServiceRuntime {
                 }
             }
             if restart_failed {
-                self.restart(bundle)?;
+                self.restart(bundle, runtime_guard)?;
                 return Ok(true);
             }
             self.manager.restart_complete(&services[..count]);
@@ -1260,7 +1272,7 @@ impl ServiceRuntime {
         if SERVICE_IMAGES.iter().any(|spec| {
             self.manager.state(spec.service().index()) == Some(logos_abi::ManagerState::Failed)
         }) {
-            self.restart(bundle)?;
+            self.restart(bundle, runtime_guard)?;
             return Ok(true);
         }
         let mut heartbeats = [0; SERVICE_COUNT];
@@ -1275,13 +1287,16 @@ impl ServiceRuntime {
             };
         }
         if self.supervisor.poll(now, heartbeats, process_states).is_some() {
-            self.restart(bundle)?;
+            self.restart(bundle, runtime_guard)?;
             return Ok(true);
         }
         Ok(false)
     }
 
-    fn stop_tasks(&mut self) -> Result<(), ServiceRuntimeError> {
+    fn stop_tasks(
+        &mut self,
+        runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
+    ) -> Result<(), ServiceRuntimeError> {
         for task in self.tasks.iter().flatten().copied() {
             if !crate::SCHEDULER.request_stop(task) {
                 return Err(ServiceRuntimeError::TaskStop);
@@ -1293,9 +1308,9 @@ impl ServiceRuntime {
                 if waited == 1024 {
                     return Err(ServiceRuntimeError::TaskStop);
                 }
-                crate::arch::release_service_runtime_lock();
+                runtime_guard.pause();
                 crate::sleep_current_for(1);
-                crate::arch::reacquire_service_runtime_lock();
+                runtime_guard.resume();
                 waited += 1;
             }
             if !crate::SCHEDULER.reclaim_completed(task) {

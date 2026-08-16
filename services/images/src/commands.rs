@@ -737,7 +737,33 @@ fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut Pe
 }
 
 #[cfg(feature = "qemu-proof")]
+fn manager_restart_probe() -> bool {
+    let Some(record) = manager_record(b"storage").ok().flatten() else {
+        return false;
+    };
+    let request_id = next_manager_request_id();
+    let mut request =
+        logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::Restart, request_id);
+    request.slot = record.slot;
+    request.generation = record.generation;
+    let mut response = logos_abi::ManagerResponse::new(
+        logos_abi::ManagerOperation::Restart,
+        logos_abi::ManagerStatus::Malformed,
+        request_id,
+    );
+    common::manager_call(&request, &mut response) == IpcStatus::Ok
+        && response.status == logos_abi::ManagerStatus::Accepted
+        && response.record.state == logos_abi::ManagerState::Stopping
+}
+
+#[cfg(feature = "qemu-proof")]
 fn manager_command_probe(pending: &mut PendingOutput) -> bool {
+    let Some(initial_storage) = manager_record(b"storage").ok().flatten() else {
+        return false;
+    };
+    if initial_storage.generation != 1 {
+        return true;
+    }
     service_command(logos_commands::ServiceCommand::List, pending);
     let list = &pending.bytes[..pending.len];
     let list_valid = pending.pending
@@ -751,13 +777,16 @@ fn manager_command_probe(pending: &mut PendingOutput) -> bool {
     }
     service_command(logos_commands::ServiceCommand::Stop { name: b"input" }, pending);
     let expected = b"service dependency violation\r\n";
-    let valid = pending.pending
+    let dependency_valid = pending.pending
         && pending.len == expected.len()
         && pending.bytes[..pending.len] == *expected;
     pending.len = 0;
     pending.offset = 0;
     pending.pending = false;
-    valid
+    if !dependency_valid {
+        return false;
+    }
+    manager_restart_probe()
 }
 
 static mut COMMANDS: logos_commands::CommandService = logos_commands::CommandService::new();
@@ -770,8 +799,8 @@ pub extern "C" fn _start() -> ! {
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
     #[cfg(feature = "qemu-proof")]
-    if !manager_boot_probe() {
-        common::idle();
+    while !manager_boot_probe() {
+        common::wait(0, logos_abi::ServiceId::Commands);
     }
     #[cfg(feature = "qemu-proof")]
     if !manager_command_probe(pending) {
