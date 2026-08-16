@@ -21,13 +21,14 @@ allocator. The bounded proof runner accepts `-Cpus 1`, `-Cpus 2`, or `-Cpus 8`:
 .\scripts\run.ps1 -Proof -Cpus 1 -TimeoutSeconds 60
 ```
 
-Networking is opt-in. The enabled profile stages a bounded static-then-DHCP configuration and a
-QEMU user-mode VirtIO-net device; omitting `-Network` removes the profile and keeps Network
-Disabled:
+Networking is enabled by default. The runner stages a bounded static-then-DHCP configuration and a
+QEMU user-mode VirtIO-net device. Use `-NoNetwork` for an offline boot; it removes the profile and
+keeps Network Disabled. Missing or malformed `NETWORK.CFG` also fails closed to Disabled:
 
-```text
-.\scripts\run.ps1 -Network -Interactive -Cpus 1
-.\scripts\run.ps1 -Cpus 1
+```powershell
+.\scripts\run.ps1 -Interactive -Cpus 1
+.\scripts\run.ps1 -NoNetwork -Interactive -Cpus 1
+.\scripts\run.ps1 -NoNetwork -Proof -Cpus 1
 ```
 
 Network v1 host tests cover the fixed ABI, configuration fallback, socket generations, packet-page

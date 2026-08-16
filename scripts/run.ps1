@@ -3,6 +3,8 @@ param(
     [switch]$Headless,
     [switch]$Interactive,
     [switch]$Proof,
+    [switch]$NoNetwork,
+    # Retained as a compatibility alias; networking is enabled by default.
     [switch]$Network,
     [ValidateRange(1, 8)]
     [int]$Cpus = 1,
@@ -17,6 +19,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if ($Interactive -and ($Headless -or $Proof)) { throw 'Choose exactly one of -Interactive, -Headless, or -Proof.' }
+if ($Network -and $NoNetwork) { throw 'Choose either -Network or -NoNetwork, not both.' }
+$networkEnabled = -not $NoNetwork
 $interactiveMode = $Interactive -or (-not $Headless -and -not $Proof)
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $target = Join-Path $repoRoot 'target'
@@ -54,7 +58,7 @@ Copy-Item $efi (Join-Path $esp 'EFI\BOOT\BOOTX64.EFI') -Force
 New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\LOGOS') | Out-Null
 Copy-Item (Join-Path $repoRoot 'build\esp\EFI\LOGOS\*.ELF') (Join-Path $esp 'EFI\LOGOS') -Force
 $networkConfig = Join-Path $esp 'EFI\LOGOS\NETWORK.CFG'
-if ($Network) {
+if ($networkEnabled) {
     @(
         'profile=static_then_dhcp'
         'address=10.0.2.15'
@@ -75,7 +79,7 @@ $qemuArgs = @(
     '-device', 'virtio-blk-pci,drive=storage-disk,disable-legacy=on',
     '-display', $display
 )
-if ($Network) {
+if ($networkEnabled) {
     if ($Proof) {
         $networkPeerPort = $QmpPort + 1
         $qemuArgs += @(
@@ -110,7 +114,7 @@ $psi.UseShellExecute = $false
 $process = [Diagnostics.Process]::new()
 $process.StartInfo = $psi
 [Diagnostics.Process]$networkPeerProcess = $null
-if ($Network -and $Proof) {
+if ($networkEnabled -and $Proof) {
     $peerPsi = [Diagnostics.ProcessStartInfo]::new()
     $peerPsi.FileName = (Get-Command powershell.exe -ErrorAction Stop).Source
     $peerPsi.UseShellExecute = $false
