@@ -2,6 +2,8 @@
 #![cfg_attr(target_os = "none", no_main)]
 #![cfg_attr(not(target_os = "none"), allow(dead_code, unused_imports, unused_variables))]
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 mod common;
 
 use logos_abi::{
@@ -29,6 +31,21 @@ const STORAGE_RECEIVE_CAPABILITY: usize = common::capability_slot(
     logos_abi::IpcEndpointId::StorageToCommands,
     logos_abi::IpcRights::Receive,
 );
+
+static NEXT_MANAGER_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
+
+fn next_manager_request_id() -> u32 {
+    loop {
+        let current = NEXT_MANAGER_REQUEST_ID.load(Ordering::Relaxed);
+        let next = current.wrapping_add(1).max(1);
+        if NEXT_MANAGER_REQUEST_ID
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return current;
+        }
+    }
+}
 
 struct PendingOutput {
     bytes: [u8; logos_commands::MAX_OUTPUT_BYTES],
@@ -613,12 +630,14 @@ fn manager_state(state: logos_abi::ManagerState) -> &'static [u8] {
 fn manager_record(name: &[u8]) -> Result<Option<logos_abi::ServiceManagerRecord>, IpcStatus> {
     let mut cursor = 0u8;
     for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
-        let mut request = logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, 1);
+        let request_id = next_manager_request_id();
+        let mut request =
+            logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, request_id);
         request.cursor = cursor;
         let mut response = logos_abi::ManagerResponse::new(
             logos_abi::ManagerOperation::List,
             logos_abi::ManagerStatus::Malformed,
-            1,
+            request_id,
         );
         if common::manager_call(&request, &mut response) != IpcStatus::Ok
             || response.status != logos_abi::ManagerStatus::Ok
@@ -672,14 +691,18 @@ fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut Pe
     let mut output_len = 0;
     let mut cursor = 0u8;
     for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
-        let mut request = logos_abi::ManagerRequest::new(operation, 1);
+        let request_id = next_manager_request_id();
+        let mut request = logos_abi::ManagerRequest::new(operation, request_id);
         request.cursor = cursor;
         if let Some(record) = target {
             request.slot = record.slot;
             request.generation = record.generation;
         }
-        let mut response =
-            logos_abi::ManagerResponse::new(operation, logos_abi::ManagerStatus::Malformed, 1);
+        let mut response = logos_abi::ManagerResponse::new(
+            operation,
+            logos_abi::ManagerStatus::Malformed,
+            request_id,
+        );
         if common::manager_call(&request, &mut response) != IpcStatus::Ok {
             pending.stage(b"service manager unavailable\r\n");
             return;

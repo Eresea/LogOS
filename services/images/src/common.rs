@@ -169,9 +169,13 @@ pub fn manager_call(
         mem::size_of::<logos_abi::ManagerRequest>(),
     );
     if status == logos_abi::IpcStatus::Ok {
-        *response = unsafe {
+        let received = unsafe {
             ptr::read_unaligned(logos_abi::IPC_STAGING_BASE as *const logos_abi::ManagerResponse)
         };
+        if received.request_id != request.request_id {
+            return logos_abi::IpcStatus::Stale;
+        }
+        *response = received;
     }
     status
 }

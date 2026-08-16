@@ -253,6 +253,9 @@ impl ServiceManager {
         if request.reserved != 0 || request.reserved_tail != [0; 2] {
             return ManagerDecision { response, action: ManagerAction::None };
         }
+        if request.request_id == 0 {
+            return ManagerDecision { response, action: ManagerAction::None };
+        }
         let shape_valid = match request.operation {
             ManagerOperation::List => request.slot == u8::MAX && request.generation == 0,
             ManagerOperation::Status
@@ -554,6 +557,11 @@ mod tests {
         malformed.reserved = 1;
         assert_eq!(
             manager.request(malformed, ManagerRights::INSPECT).response.status,
+            ManagerStatus::Malformed
+        );
+        let zero_id = ManagerRequest::new(ManagerOperation::List, 0);
+        assert_eq!(
+            manager.request(zero_id, ManagerRights::INSPECT).response.status,
             ManagerStatus::Malformed
         );
         assert_eq!(
