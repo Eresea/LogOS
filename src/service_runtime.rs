@@ -319,14 +319,15 @@ impl ServiceRuntime {
                 logos_abi::IPC_CAPABILITY_BASE,
                 MappingFlags::READ_ONLY_DATA,
             )?;
-            if service == ServiceId::Commands {
+            let manager_rights = manager_rights(service);
+            if manager_rights != logos_abi::ManagerRights::NONE {
                 let manager_frame =
                     self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
                 self.manager_capability_frames[service.index()] = Some(manager_frame);
                 memory.clear(manager_frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
                 let capability = logos_abi::ManagerCapability::new(
                     self.manager_generation,
-                    logos_abi::ManagerRights::ALL,
+                    manager_rights,
                     self.service_epoch,
                 )
                 .ok_or(ServiceRuntimeError::StaleGeneration)?;
@@ -1292,6 +1293,13 @@ impl ServiceRuntime {
 
 fn old_identity_matches(identity: EndpointIdentity, header: logos_abi::EndpointHeader) -> bool {
     logos_abi::MessageIdentity::new(identity.generation, identity.service_epoch).accepts(header)
+}
+
+const fn manager_rights(service: ServiceId) -> logos_abi::ManagerRights {
+    match service {
+        ServiceId::Commands => logos_abi::ManagerRights::ALL,
+        _ => logos_abi::ManagerRights::NONE,
+    }
 }
 
 impl Default for ServiceRuntime {
