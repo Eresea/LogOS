@@ -8,7 +8,7 @@ extern crate std;
 use logos_abi::{
     CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, DEFAULT_COLUMNS, DEFAULT_ROWS,
     InputMessage, IpcBytes, KeyCode, KeyState, MAX_COLUMNS, MAX_RENDER_CELLS, MOD_ALT,
-    MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind, RenderMessage,
+    MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind, RENDER_FLAG_MORE, RenderMessage,
 };
 
 const MAX_PARAMS: usize = 16;
@@ -102,6 +102,7 @@ impl Parser {
 pub struct TerminalState<const CELL_COUNT: usize> {
     cursor_column: usize,
     cursor_row: usize,
+    cursor_dirty: bool,
     screen: [Cell; CELL_COUNT],
     dirty: [bool; CELL_COUNT],
     full_redraw_pending: bool,
@@ -161,6 +162,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         Self {
             cursor_column: 0,
             cursor_row: 0,
+            cursor_dirty: false,
             screen: [blank_cell(); CELL_COUNT],
             dirty: [true; CELL_COUNT],
             full_redraw_pending: true,
@@ -185,6 +187,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     pub fn reset(&mut self) {
         self.cursor_column = 0;
         self.cursor_row = 0;
+        self.cursor_dirty = true;
         self.full_redraw_pending = true;
         self.parser = Parser::new();
         self.foreground = DEFAULT_FOREGROUND;
@@ -201,10 +204,12 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        let cursor = (self.cursor_column, self.cursor_row);
         self.show_live_view();
         for &byte in bytes {
             self.feed_byte(byte);
         }
+        self.cursor_dirty |= cursor != (self.cursor_column, self.cursor_row);
     }
 
     fn feed_byte(&mut self, byte: u8) {
@@ -296,6 +301,16 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
 
     fn dispatch_csi(&mut self, final_byte: u8) {
         match final_byte {
+            b'C' => {
+                self.cursor_column = self
+                    .cursor_column
+                    .saturating_add(self.parser.param(0, 1) as usize)
+                    .min(DEFAULT_COLUMNS - 1);
+            }
+            b'D' => {
+                self.cursor_column =
+                    self.cursor_column.saturating_sub(self.parser.param(0, 1) as usize);
+            }
             b'H' | b'f' => {
                 self.cursor_row = self.parser.param(0, 1).saturating_sub(1) as usize;
                 self.cursor_column = self.parser.param(1, 1).saturating_sub(1) as usize;
@@ -373,6 +388,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     }
 
     fn scroll_up(&mut self) {
+        self.full_redraw_pending = true;
         self.store_scrollback_line(0);
         for row in 0..DEFAULT_ROWS - 1 {
             for column in 0..DEFAULT_COLUMNS {
@@ -453,6 +469,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
                 self.erase_line(1);
             }
             2 | 3 => {
+                self.full_redraw_pending = true;
                 for row in 0..DEFAULT_ROWS {
                     self.erase_row(row);
                 }
@@ -504,20 +521,36 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         message.cursor_column = self.cursor_column as u16;
         message.cursor_row = self.cursor_row as u16;
         let mut count = 0;
+        let mut more = false;
         for row in 0..DEFAULT_ROWS {
             for column in 0..DEFAULT_COLUMNS {
                 let index = Self::index(column, row);
-                if self.dirty[index] && count < MAX_RENDER_CELLS {
+                if !self.dirty[index] {
+                    continue;
+                }
+                if count < MAX_RENDER_CELLS {
                     message.positions[count] = (row * MAX_COLUMNS + column) as u16;
                     message.cells[count] = self.visible_cell(row, column);
                     self.dirty[index] = false;
                     count += 1;
+                } else {
+                    more = true;
                 }
             }
         }
+        if more {
+            message.flags = RENDER_FLAG_MORE;
+        }
         if count == 0 {
-            None
+            if !self.cursor_dirty {
+                None
+            } else {
+                self.cursor_dirty = false;
+                message.count = 0;
+                Some(message)
+            }
         } else {
+            self.cursor_dirty = false;
             self.full_redraw_pending = false;
             message.count = count as u16;
             Some(message)
@@ -558,7 +591,9 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         }
         let bytes: &[u8] = match code {
             KeyCode::Escape => b"\x1b",
+            KeyCode::Enter if event.modifiers & MOD_CTRL != 0 => b"\x17",
             KeyCode::Enter => b"\r",
+            KeyCode::Backspace if event.modifiers & MOD_CTRL != 0 => b"\x17",
             KeyCode::Backspace => b"\x7f",
             KeyCode::Tab => b"\t",
             KeyCode::Up => b"\x1b[A",
@@ -569,6 +604,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             KeyCode::Right => b"\x1b[C",
             KeyCode::Home => b"\x1b[H",
             KeyCode::End => b"\x1b[F",
+            KeyCode::Delete if event.modifiers & MOD_CTRL != 0 => b"\x1b[3;5~",
             KeyCode::Delete => b"\x1b[3~",
             _ => return None,
         };
@@ -718,9 +754,41 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_word_keys_use_delete_sequences() {
+        let mut terminal = Terminal::new();
+        let backspace = InputMessage::key(KeyCode::Backspace, KeyState::Pressed, MOD_CTRL);
+        assert_eq!(terminal.input(&backspace).unwrap().as_bytes(), Some(&b"\x17"[..]));
+        let enter = InputMessage::key(KeyCode::Enter, KeyState::Pressed, MOD_CTRL);
+        assert_eq!(terminal.input(&enter).unwrap().as_bytes(), Some(&b"\x17"[..]));
+        let delete = InputMessage::key(KeyCode::Delete, KeyState::Pressed, MOD_CTRL);
+        assert_eq!(terminal.input(&delete).unwrap().as_bytes(), Some(&b"\x1b[3;5~"[..]));
+    }
+
+    #[test]
+    fn cursor_motion_emits_cursor_only_render_updates() {
+        let mut terminal = Terminal::new();
+        terminal.feed(b"hello");
+        drain(&mut terminal);
+        terminal.feed(b"\x1b[2D");
+        let message = terminal.next_render().unwrap();
+        assert_eq!(message.count, 0);
+        assert_eq!((message.cursor_column, message.cursor_row), (3, 0));
+    }
+
+    #[test]
     fn render_is_chunked() {
         let mut terminal = Terminal::new();
-        assert!(drain(&mut terminal) > 1);
+        let mut messages = 0;
+        let mut saw_more = false;
+        while let Some(message) = terminal.next_render() {
+            messages += 1;
+            saw_more |= message.flags & RENDER_FLAG_MORE != 0;
+            if message.flags & RENDER_FLAG_MORE == 0 {
+                assert_eq!(message.flags, 0);
+            }
+        }
+        assert!(messages > 1);
+        assert!(saw_more);
         assert!(terminal.next_render().is_none());
     }
 
@@ -730,6 +798,14 @@ mod tests {
         assert_eq!(terminal.next_render().unwrap().kind, MessageKind::FullRedraw);
         drain(&mut terminal);
         terminal.feed(b"\x1bc");
+        assert_eq!(terminal.next_render().unwrap().kind, MessageKind::FullRedraw);
+    }
+
+    #[test]
+    fn full_screen_erase_requests_a_full_redraw() {
+        let mut terminal = Terminal::new();
+        drain(&mut terminal);
+        terminal.feed(b"x\x1b[2J");
         assert_eq!(terminal.next_render().unwrap().kind, MessageKind::FullRedraw);
     }
 

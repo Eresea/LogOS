@@ -52,6 +52,7 @@ pub const KEYBOARD_RING_CAPACITY: usize = 256;
 pub const IPC_PAGE_BYTES: usize = 4096;
 pub const MAX_IPC_BYTES: usize = 256;
 pub const IPC_FLAG_MORE: u8 = 1 << 0;
+pub const RENDER_FLAG_MORE: u8 = IPC_FLAG_MORE;
 pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
 pub const IPC_STAGING_BASE: usize = SERVICE_IPC_BASE + 0x10_000;
 pub const STORAGE_DATA_BASE: usize = SERVICE_IPC_BASE + 0x11_000;
@@ -1019,6 +1020,7 @@ impl Cell {
 #[repr(C)]
 pub struct RenderMessage {
     pub kind: MessageKind,
+    pub flags: u8,
     pub columns: u16,
     pub rows: u16,
     pub cursor_column: u16,
@@ -1032,6 +1034,7 @@ impl RenderMessage {
     pub const fn empty(kind: MessageKind) -> Self {
         Self {
             kind,
+            flags: 0,
             columns: 0,
             rows: 0,
             cursor_column: 0,
