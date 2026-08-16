@@ -189,6 +189,24 @@ impl ManagerResponse {
             record: ServiceManagerRecord::EMPTY,
         }
     }
+
+    pub fn is_valid_for(self, request: ManagerRequest) -> bool {
+        let cursor_valid = match request.operation {
+            ManagerOperation::List => {
+                self.cursor == u8::MAX || usize::from(self.cursor) <= MAX_MANAGER_SERVICES
+            }
+            ManagerOperation::Status
+            | ManagerOperation::Start
+            | ManagerOperation::Stop
+            | ManagerOperation::Restart => self.cursor == 0,
+        };
+        self.abi_version == MANAGER_ABI_VERSION
+            && self.operation == request.operation
+            && self.reserved == [0; 3]
+            && self.record.reserved == [0; 3]
+            && usize::from(self.record.name_len) <= self.record.name.len()
+            && cursor_valid
+    }
 }
 
 const _: () = assert!(MAX_MANAGER_SERVICES <= u8::MAX as usize);

@@ -1097,6 +1097,25 @@ mod tests {
     }
 
     #[test]
+    fn manager_responses_validate_the_fixed_envelope() {
+        let request = ManagerRequest::new(ManagerOperation::List, 7);
+        let response = ManagerResponse::new(ManagerOperation::List, ManagerStatus::Ok, 7);
+        assert!(response.is_valid_for(request));
+
+        let mut wrong_operation = response;
+        wrong_operation.operation = ManagerOperation::Status;
+        assert!(!wrong_operation.is_valid_for(request));
+
+        let mut wrong_cursor = response;
+        wrong_cursor.cursor = (MAX_MANAGER_SERVICES + 1) as u8;
+        assert!(!wrong_cursor.is_valid_for(request));
+
+        let mut wrong_reserved = response;
+        wrong_reserved.reserved[0] = 1;
+        assert!(!wrong_reserved.is_valid_for(request));
+    }
+
+    #[test]
     fn capability_page_rejects_empty_and_out_of_range_slots() {
         let mut page = IpcCapabilityPage::empty();
         assert_eq!(page.get(0), None);

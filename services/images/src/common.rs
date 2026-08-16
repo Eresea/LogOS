@@ -175,6 +175,9 @@ pub fn manager_call(
         if received.request_id != request.request_id {
             return logos_abi::IpcStatus::Stale;
         }
+        if !received.is_valid_for(*request) {
+            return logos_abi::IpcStatus::Malformed;
+        }
         *response = received;
     }
     status
