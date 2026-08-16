@@ -2,6 +2,8 @@
 #![cfg_attr(target_os = "none", no_main)]
 #![cfg_attr(not(target_os = "none"), allow(dead_code, unused_imports, unused_variables))]
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 mod common;
 
 use logos_abi::{
@@ -29,6 +31,42 @@ const STORAGE_RECEIVE_CAPABILITY: usize = common::capability_slot(
     logos_abi::IpcEndpointId::StorageToCommands,
     logos_abi::IpcRights::Receive,
 );
+
+static NEXT_MANAGER_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
+
+fn next_manager_request_id() -> u32 {
+    loop {
+        let current = NEXT_MANAGER_REQUEST_ID.load(Ordering::Relaxed);
+        let next = current.wrapping_add(1).max(1);
+        if NEXT_MANAGER_REQUEST_ID
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return current;
+        }
+    }
+}
+
+#[cfg(feature = "qemu-proof")]
+fn manager_boot_probe() -> bool {
+    let request_id = next_manager_request_id();
+    let request = logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, request_id);
+    let mut response = logos_abi::ManagerResponse::new(
+        logos_abi::ManagerOperation::List,
+        logos_abi::ManagerStatus::Malformed,
+        request_id,
+    );
+    if common::manager_call(&request, &mut response) != IpcStatus::Ok
+        || response.status != logos_abi::ManagerStatus::Ok
+        || response.record.slot != 0
+        || &response.record.name[..usize::from(response.record.name_len)] != b"input"
+    {
+        return false;
+    }
+    let mut output = [0; logos_commands::MAX_OUTPUT_BYTES];
+    let length = logos_commands::format_service_record(&response.record, &mut output);
+    output[..length].starts_with(b"input ") && output[..length].ends_with(b"\r\n")
+}
 
 struct PendingOutput {
     bytes: [u8; logos_commands::MAX_OUTPUT_BYTES],
@@ -582,6 +620,175 @@ fn status_text(status: StorageApiStatus) -> &'static [u8] {
     }
 }
 
+fn manager_error(status: logos_abi::ManagerStatus) -> &'static [u8] {
+    match status {
+        logos_abi::ManagerStatus::Unauthorized => b"service manager unauthorized\r\n",
+        logos_abi::ManagerStatus::NotFound => b"service not found\r\n",
+        logos_abi::ManagerStatus::Stale => b"stale service handle\r\n",
+        logos_abi::ManagerStatus::InvalidState => b"invalid service state\r\n",
+        logos_abi::ManagerStatus::Dependency => b"service dependency violation\r\n",
+        logos_abi::ManagerStatus::Busy => b"service manager busy\r\n",
+        logos_abi::ManagerStatus::Capacity => b"service manager capacity\r\n",
+        logos_abi::ManagerStatus::Malformed => b"malformed service request\r\n",
+        logos_abi::ManagerStatus::Unsupported => b"service operation unsupported\r\n",
+        logos_abi::ManagerStatus::Ok | logos_abi::ManagerStatus::Accepted => {
+            b"service manager error\r\n"
+        }
+    }
+}
+
+fn manager_record(name: &[u8]) -> Result<Option<logos_abi::ServiceManagerRecord>, IpcStatus> {
+    let mut cursor = 0u8;
+    for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
+        let request_id = next_manager_request_id();
+        let mut request =
+            logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, request_id);
+        request.cursor = cursor;
+        let mut response = logos_abi::ManagerResponse::new(
+            logos_abi::ManagerOperation::List,
+            logos_abi::ManagerStatus::Malformed,
+            request_id,
+        );
+        if common::manager_call(&request, &mut response) != IpcStatus::Ok
+            || response.status != logos_abi::ManagerStatus::Ok
+        {
+            return Err(IpcStatus::Malformed);
+        }
+        let name_len = usize::from(response.record.name_len).min(response.record.name.len());
+        if &response.record.name[..name_len] == name {
+            return Ok(Some(response.record));
+        }
+        if response.cursor == u8::MAX {
+            return Ok(None);
+        }
+        cursor = response.cursor;
+    }
+    Ok(None)
+}
+
+fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut PendingOutput) {
+    let (operation, name, list) = match command {
+        logos_commands::ServiceCommand::List => (logos_abi::ManagerOperation::List, &[][..], true),
+        logos_commands::ServiceCommand::Status { name } => {
+            (logos_abi::ManagerOperation::Status, name, false)
+        }
+        logos_commands::ServiceCommand::Start { name } => {
+            (logos_abi::ManagerOperation::Start, name, false)
+        }
+        logos_commands::ServiceCommand::Stop { name } => {
+            (logos_abi::ManagerOperation::Stop, name, false)
+        }
+        logos_commands::ServiceCommand::Restart { name } => {
+            (logos_abi::ManagerOperation::Restart, name, false)
+        }
+    };
+    let target = if list {
+        None
+    } else {
+        match manager_record(name) {
+            Ok(Some(record)) => Some(record),
+            Ok(None) => {
+                pending.stage(b"service not found\r\n");
+                return;
+            }
+            Err(_) => {
+                pending.stage(b"service manager unavailable\r\n");
+                return;
+            }
+        }
+    };
+    let mut output = [0; logos_commands::MAX_OUTPUT_BYTES];
+    let mut output_len = 0;
+    let mut cursor = 0u8;
+    for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
+        let request_id = next_manager_request_id();
+        let mut request = logos_abi::ManagerRequest::new(operation, request_id);
+        request.cursor = cursor;
+        if let Some(record) = target {
+            request.slot = record.slot;
+            request.generation = record.generation;
+        }
+        let mut response = logos_abi::ManagerResponse::new(
+            operation,
+            logos_abi::ManagerStatus::Malformed,
+            request_id,
+        );
+        if common::manager_call(&request, &mut response) != IpcStatus::Ok {
+            pending.stage(b"service manager unavailable\r\n");
+            return;
+        }
+        if !matches!(
+            response.status,
+            logos_abi::ManagerStatus::Ok | logos_abi::ManagerStatus::Accepted
+        ) {
+            pending.stage(manager_error(response.status));
+            return;
+        }
+        if !list || response.cursor != u8::MAX {
+            let record = response.record;
+            output_len += logos_commands::format_service_record(&record, &mut output[output_len..]);
+        }
+        if !list || response.cursor == u8::MAX {
+            break;
+        }
+        cursor = response.cursor;
+    }
+    pending.stage(&output[..output_len]);
+}
+
+#[cfg(feature = "qemu-proof")]
+fn manager_restart_probe() -> bool {
+    let Some(record) = manager_record(b"storage").ok().flatten() else {
+        return false;
+    };
+    let request_id = next_manager_request_id();
+    let mut request =
+        logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::Restart, request_id);
+    request.slot = record.slot;
+    request.generation = record.generation;
+    let mut response = logos_abi::ManagerResponse::new(
+        logos_abi::ManagerOperation::Restart,
+        logos_abi::ManagerStatus::Malformed,
+        request_id,
+    );
+    common::manager_call(&request, &mut response) == IpcStatus::Ok
+        && response.status == logos_abi::ManagerStatus::Accepted
+        && response.record.state == logos_abi::ManagerState::Stopping
+}
+
+#[cfg(feature = "qemu-proof")]
+fn manager_command_probe(pending: &mut PendingOutput) -> bool {
+    let Some(initial_storage) = manager_record(b"storage").ok().flatten() else {
+        return false;
+    };
+    if initial_storage.generation != 1 {
+        return true;
+    }
+    service_command(logos_commands::ServiceCommand::List, pending);
+    let list = &pending.bytes[..pending.len];
+    let list_valid = pending.pending
+        && list.ends_with(b"storage running\r\n")
+        && !list.windows(b"vacant".len()).any(|window| window == b"vacant");
+    pending.len = 0;
+    pending.offset = 0;
+    pending.pending = false;
+    if !list_valid {
+        return false;
+    }
+    service_command(logos_commands::ServiceCommand::Stop { name: b"input" }, pending);
+    let expected = b"service dependency violation\r\n";
+    let dependency_valid = pending.pending
+        && pending.len == expected.len()
+        && pending.bytes[..pending.len] == *expected;
+    pending.len = 0;
+    pending.offset = 0;
+    pending.pending = false;
+    if !dependency_valid {
+        return false;
+    }
+    manager_restart_probe()
+}
+
 static mut COMMANDS: logos_commands::CommandService = logos_commands::CommandService::new();
 static mut PENDING: PendingOutput = PendingOutput::new();
 static mut STORAGE: StorageClient = StorageClient::new();
@@ -591,6 +798,14 @@ pub extern "C" fn _start() -> ! {
     let commands = unsafe { &mut *core::ptr::addr_of_mut!(COMMANDS) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
+    #[cfg(feature = "qemu-proof")]
+    while !manager_boot_probe() {
+        common::wait(0, logos_abi::ServiceId::Commands);
+    }
+    #[cfg(feature = "qemu-proof")]
+    if !manager_command_probe(pending) {
+        common::idle();
+    }
     #[cfg(feature = "storage-proof")]
     let mut proof = StorageProof::new();
     let mut heartbeat_ticks = 0u16;
@@ -642,28 +857,36 @@ pub extern "C" fn _start() -> ! {
             progressed = true;
             if message.kind == MessageKind::SessionInput {
                 if let Some(bytes) = message.as_bytes() {
-                    match logos_commands::parse_storage_command(bytes) {
-                        Ok(Some(command)) => {
-                            if !storage.start(command) {
-                                pending.stage(b"storage request too large\r\n");
-                            }
+                    match logos_commands::parse_service_command(bytes) {
+                        Ok(Some(command)) => service_command(command, pending),
+                        Err(logos_commands::ServiceCommandError::Usage) => {
+                            pending.stage(
+                                b"usage: service <list|status|start|stop|restart> [name]\r\n",
+                            );
                         }
-                        Err(logos_commands::StorageCommandError::Usage) => {
-                            pending.stage(b"usage error\r\n");
-                        }
-                        Ok(None) => {
-                            let result = commands.execute(bytes);
-                            if result.action != logos_commands::CommandAction::None {
-                                let status = common::power(result.action as usize);
-                                if status != 0 {
-                                    pending.stage(b"power action denied\r\n");
+                        Ok(None) => match logos_commands::parse_storage_command(bytes) {
+                            Ok(Some(command)) => {
+                                if !storage.start(command) {
+                                    pending.stage(b"storage request too large\r\n");
                                 }
-                            } else if result.clear_screen {
-                                pending.stage(b"\x1b[2J\x1b[H");
-                            } else {
-                                pending.stage(result.as_bytes());
                             }
-                        }
+                            Err(logos_commands::StorageCommandError::Usage) => {
+                                pending.stage(b"usage error\r\n");
+                            }
+                            Ok(None) => {
+                                let result = commands.execute(bytes);
+                                if result.action != logos_commands::CommandAction::None {
+                                    let status = common::power(result.action as usize);
+                                    if status != 0 {
+                                        pending.stage(b"power action denied\r\n");
+                                    }
+                                } else if result.clear_screen {
+                                    pending.stage(b"\x1b[2J\x1b[H");
+                                } else {
+                                    pending.stage(result.as_bytes());
+                                }
+                            }
+                        },
                     }
                 }
             }

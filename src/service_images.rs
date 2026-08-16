@@ -1,26 +1,41 @@
 //! Fixed manifest for the ring-3 service images.
 
-use logos_abi::{MAX_SERVICE_IMAGE_BYTES, ServiceId};
+use logos_abi::{MAX_SERVICE_IMAGE_BYTES, MAX_SERVICE_NAME_BYTES, ServiceId};
 
 use crate::process::{ElfLoadPlan, ProcessError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServiceImageSpec {
     service: ServiceId,
+    name: &'static [u8],
     path: &'static [u8],
+    dependencies: u8,
 }
 
 impl ServiceImageSpec {
-    const fn new(service: ServiceId, path: &'static [u8]) -> Self {
-        Self { service, path }
+    const fn new(
+        service: ServiceId,
+        name: &'static [u8],
+        path: &'static [u8],
+        dependencies: u8,
+    ) -> Self {
+        Self { service, name, path, dependencies }
     }
 
     pub const fn service(self) -> ServiceId {
         self.service
     }
 
+    pub const fn name(self) -> &'static [u8] {
+        self.name
+    }
+
     pub const fn path(self) -> &'static [u8] {
         self.path
+    }
+
+    pub const fn dependencies(self) -> u8 {
+        self.dependencies
     }
 
     pub fn validate_image(self, image: &[u8]) -> Result<ElfLoadPlan, ServiceImageError> {
@@ -37,24 +52,59 @@ pub enum ServiceImageError {
 }
 
 pub const SERVICE_IMAGES: [ServiceImageSpec; 6] = [
-    ServiceImageSpec::new(ServiceId::Input, b"\\EFI\\LOGOS\\INPUT.ELF"),
-    ServiceImageSpec::new(ServiceId::Display, b"\\EFI\\LOGOS\\DISPLAY.ELF"),
-    ServiceImageSpec::new(ServiceId::Terminal, b"\\EFI\\LOGOS\\TERMINAL.ELF"),
-    ServiceImageSpec::new(ServiceId::Session, b"\\EFI\\LOGOS\\SESSION.ELF"),
-    ServiceImageSpec::new(ServiceId::Commands, b"\\EFI\\LOGOS\\COMMANDS.ELF"),
-    ServiceImageSpec::new(ServiceId::Storage, b"\\EFI\\LOGOS\\STORAGE.ELF"),
+    ServiceImageSpec::new(ServiceId::Input, b"input", b"\\EFI\\LOGOS\\INPUT.ELF", 0),
+    ServiceImageSpec::new(ServiceId::Display, b"display", b"\\EFI\\LOGOS\\DISPLAY.ELF", 0),
+    ServiceImageSpec::new(
+        ServiceId::Terminal,
+        b"terminal",
+        b"\\EFI\\LOGOS\\TERMINAL.ELF",
+        (1 << ServiceId::Input.index()) | (1 << ServiceId::Display.index()),
+    ),
+    ServiceImageSpec::new(
+        ServiceId::Session,
+        b"session",
+        b"\\EFI\\LOGOS\\SESSION.ELF",
+        1 << ServiceId::Terminal.index(),
+    ),
+    ServiceImageSpec::new(
+        ServiceId::Commands,
+        b"commands",
+        b"\\EFI\\LOGOS\\COMMANDS.ELF",
+        (1 << ServiceId::Session.index()) | (1 << ServiceId::Storage.index()),
+    ),
+    ServiceImageSpec::new(ServiceId::Storage, b"storage", b"\\EFI\\LOGOS\\STORAGE.ELF", 0),
+];
+
+pub const SERVICE_START_ORDER: [ServiceId; 6] = [
+    ServiceId::Input,
+    ServiceId::Display,
+    ServiceId::Terminal,
+    ServiceId::Session,
+    ServiceId::Storage,
+    ServiceId::Commands,
 ];
 
 pub const fn service_image(service: ServiceId) -> ServiceImageSpec {
-    match service {
-        ServiceId::Input => SERVICE_IMAGES[0],
-        ServiceId::Display => SERVICE_IMAGES[1],
-        ServiceId::Terminal => SERVICE_IMAGES[2],
-        ServiceId::Session => SERVICE_IMAGES[3],
-        ServiceId::Commands => SERVICE_IMAGES[4],
-        ServiceId::Storage => SERVICE_IMAGES[5],
-    }
+    SERVICE_IMAGES[service.index()]
 }
+
+const fn manifest_is_indexed() -> bool {
+    let mut index = 0;
+    while index < SERVICE_IMAGES.len() {
+        let spec = SERVICE_IMAGES[index];
+        if spec.service().index() != index
+            || spec.name().is_empty()
+            || spec.name().len() > MAX_SERVICE_NAME_BYTES
+            || spec.dependencies() & !((1 << SERVICE_IMAGES.len()) - 1) != 0
+        {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const _: () = assert!(manifest_is_indexed());
 
 fn validate_image_bytes(bytes: usize) -> Result<(), ServiceImageError> {
     if bytes == 0 {
@@ -90,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_is_fixed_and_dependency_ordered() {
+    fn manifest_is_fixed_and_dependencies_are_valid() {
         assert_eq!(SERVICE_IMAGES.len(), 6);
         assert_eq!(SERVICE_IMAGES[0].service(), ServiceId::Input);
         assert_eq!(SERVICE_IMAGES[1].service(), ServiceId::Display);
@@ -98,6 +148,10 @@ mod tests {
         assert_eq!(SERVICE_IMAGES[3].service(), ServiceId::Session);
         assert_eq!(SERVICE_IMAGES[4].service(), ServiceId::Commands);
         assert_eq!(SERVICE_IMAGES[5].service(), ServiceId::Storage);
+        assert_eq!(SERVICE_IMAGES[2].dependencies(), 0b0000_0011);
+        assert_eq!(SERVICE_IMAGES[4].dependencies(), 0b0010_1000);
+        assert_eq!(SERVICE_IMAGES[5].dependencies(), 0);
+        assert_eq!(SERVICE_IMAGES[5].name(), b"storage");
         assert_eq!(service_image(ServiceId::Display).path(), b"\\EFI\\LOGOS\\DISPLAY.ELF");
     }
 

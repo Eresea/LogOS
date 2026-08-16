@@ -59,6 +59,10 @@ impl LiveSupervisor {
         record.missed_heartbeats = 0;
     }
 
+    pub fn unregister(&mut self, service: ServiceId) {
+        self.records[service.index()] = ServiceRecord::EMPTY;
+    }
+
     pub fn poll(
         &mut self,
         now: u64,

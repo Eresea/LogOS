@@ -117,10 +117,79 @@ static mut SERVICE_IMAGES: Option<ServiceImageBundle> = None;
 #[cfg(target_os = "uefi")]
 static mut SERVICE_RUNTIME: crate::service_runtime::ServiceRuntime =
     crate::service_runtime::ServiceRuntime::new();
+static SERVICE_RUNTIME_LOCK: AtomicBool = AtomicBool::new(false);
+static SERVICE_RUNTIME_RESTARTING: AtomicBool = AtomicBool::new(false);
+static SERVICE_RUNTIME_READY: AtomicBool = AtomicBool::new(false);
 static KERNEL_CR3: AtomicUsize = AtomicUsize::new(0);
 static KEYBOARD_RING: AtomicUsize = AtomicUsize::new(0);
 static KEYBOARD_IRQ_ENABLED: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_IRQ_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) struct ServiceRuntimeGuard {
+    held: bool,
+}
+
+impl ServiceRuntimeGuard {
+    fn acquire() -> Self {
+        acquire_service_runtime_lock();
+        Self { held: true }
+    }
+
+    pub(crate) fn pause(&mut self) {
+        if self.held {
+            SERVICE_RUNTIME_LOCK.store(false, Ordering::Release);
+            self.held = false;
+        }
+    }
+
+    pub(crate) fn resume(&mut self) {
+        if !self.held {
+            acquire_service_runtime_lock();
+            self.held = true;
+        }
+    }
+}
+
+impl Drop for ServiceRuntimeGuard {
+    fn drop(&mut self) {
+        if self.held {
+            SERVICE_RUNTIME_LOCK.store(false, Ordering::Release);
+        }
+    }
+}
+
+fn acquire_service_runtime_lock() {
+    while SERVICE_RUNTIME_LOCK
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+
+pub(crate) fn service_runtime_restarting() -> bool {
+    SERVICE_RUNTIME_RESTARTING.load(Ordering::Acquire)
+}
+
+pub(crate) fn service_runtime_ready() -> bool {
+    SERVICE_RUNTIME_READY.load(Ordering::Acquire)
+}
+
+pub(crate) fn begin_service_runtime_transition() {
+    SERVICE_RUNTIME_READY.store(false, Ordering::Release);
+}
+
+pub(crate) fn finish_service_runtime_transition() {
+    SERVICE_RUNTIME_READY.store(true, Ordering::Release);
+}
+
+pub(crate) fn begin_service_restart() {
+    SERVICE_RUNTIME_RESTARTING.store(true, Ordering::Release);
+}
+
+pub(crate) fn end_service_restart() {
+    SERVICE_RUNTIME_RESTARTING.store(false, Ordering::Release);
+}
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -324,6 +393,7 @@ pub fn boot() -> Status {
     let memory_map = unsafe { boot::exit_boot_services(None) };
     publish_boot_resources(memory_map, framebuffer);
     unsafe {
+        let _runtime_guard = ServiceRuntimeGuard::acquire();
         SERVICE_IMAGES = Some(service_images);
         let images = (*core::ptr::addr_of!(SERVICE_IMAGES))
             .as_ref()
@@ -832,6 +902,9 @@ pub(crate) fn restart_critical_section<R>(operation: impl FnOnce() -> R) -> R {
 }
 
 pub(crate) fn start_services() {
+    // Tasks are published before this function returns. Runtime entry points
+    // remain closed behind READY until all startup-owned state is complete, so
+    // the post-boot runtime lock does not need to span task publication.
     unsafe {
         reset_events();
         let runtime = &mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME);
@@ -854,6 +927,7 @@ pub(crate) fn start_services() {
             runtime.keyboard_ring_address().unwrap_or_else(|| fatal(b"LogOS vNext: keyboard ring"));
         publish_keyboard_ring(ring);
         enable_keyboard_irq();
+        finish_service_runtime_transition();
     }
     proof_line(b"LogOS vNext: service tasks started");
 }
@@ -875,12 +949,16 @@ pub(crate) fn disable_keyboard_irq() {
 }
 
 pub(crate) fn supervise_services() -> bool {
+    if !service_runtime_ready() {
+        return false;
+    }
+    let mut runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe {
         let Some(images) = (*core::ptr::addr_of!(SERVICE_IMAGES)).as_ref() else {
             fatal(b"LogOS vNext: service image state");
         };
         (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME))
-            .supervise(images, current_ticks())
+            .supervise(images, current_ticks(), &mut runtime_guard)
             .unwrap_or_else(|_| fatal(b"LogOS vNext: service restart"))
     }
 }
@@ -890,7 +968,18 @@ pub(crate) fn record_service_heartbeat(
     process: crate::process::ProcessHandle,
     now: u64,
 ) -> bool {
-    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).record_heartbeat(service, process, now) }
+    if !service_runtime_ready() && !service_runtime_restarting() {
+        return true;
+    }
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe {
+        let runtime = &*core::ptr::addr_of!(SERVICE_RUNTIME);
+        if service_runtime_restarting() {
+            runtime.owns_service_process(service, process)
+        } else {
+            runtime.record_heartbeat(service, process, now)
+        }
+    }
 }
 
 pub(crate) fn ipc_send(
@@ -898,6 +987,19 @@ pub(crate) fn ipc_send(
     capability_slot: usize,
     length: usize,
 ) -> crate::service_ipc::IpcOutcome {
+    if !service_runtime_ready() {
+        return crate::service_ipc::IpcOutcome {
+            status: logos_abi::IpcStatus::Unauthorized,
+            notified: false,
+        };
+    }
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    if service_runtime_restarting() {
+        return crate::service_ipc::IpcOutcome {
+            status: logos_abi::IpcStatus::Disconnected,
+            notified: false,
+        };
+    }
     unsafe {
         (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).ipc_send(process, capability_slot, length)
     }
@@ -907,22 +1009,67 @@ pub(crate) fn ipc_receive(
     process: crate::process::ProcessHandle,
     capability_slot: usize,
 ) -> crate::service_ipc::IpcOutcome {
+    if !service_runtime_ready() {
+        return crate::service_ipc::IpcOutcome {
+            status: logos_abi::IpcStatus::Unauthorized,
+            notified: false,
+        };
+    }
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    if service_runtime_restarting() {
+        return crate::service_ipc::IpcOutcome {
+            status: logos_abi::IpcStatus::Disconnected,
+            notified: false,
+        };
+    }
     unsafe {
         (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).ipc_receive(process, capability_slot)
     }
 }
 
+pub(crate) fn manager_call(
+    process: crate::process::ProcessHandle,
+    capability_slot: usize,
+    length: usize,
+) -> logos_abi::IpcStatus {
+    if !service_runtime_ready() {
+        return logos_abi::IpcStatus::Unauthorized;
+    }
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    if service_runtime_restarting() {
+        return logos_abi::IpcStatus::Disconnected;
+    }
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).manager_call(
+            process,
+            capability_slot,
+            length,
+        )
+    }
+}
+
+#[cfg(feature = "qemu-proof")]
+pub(crate) fn manager_proof(
+    request: logos_abi::ManagerRequest,
+) -> Option<logos_abi::ManagerResponse> {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe { (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).manager_proof(request) }
+}
+
 #[cfg(feature = "qemu-proof")]
 pub(crate) fn hostile_ipc_layout_valid() -> bool {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).hostile_ipc_layout_valid() }
 }
 
 #[cfg(feature = "qemu-proof")]
 pub(crate) fn suppress_service_heartbeat(service: logos_abi::ServiceId) {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).suppress_heartbeat(service) }
 }
 
 pub(crate) fn fault_service_process(process: crate::process::ProcessHandle, vector: u8) -> bool {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe {
         (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).fault_process(process, vector).is_ok()
     }
@@ -1030,6 +1177,10 @@ pub fn fatal(message: &[u8]) -> ! {
 pub(crate) fn power_control(process: ProcessHandle, action: usize) -> bool {
     #[cfg(target_os = "uefi")]
     {
+        if !service_runtime_ready() {
+            return false;
+        }
+        let _runtime_guard = ServiceRuntimeGuard::acquire();
         let authorized = unsafe {
             (&*core::ptr::addr_of!(SERVICE_RUNTIME))
                 .launch(logos_abi::ServiceId::Commands)

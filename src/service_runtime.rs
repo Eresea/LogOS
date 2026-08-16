@@ -18,6 +18,7 @@ use crate::{
     service_images::SERVICE_IMAGES,
     service_ipc::{IpcError, ServiceIpcGraph},
     service_loader::ServiceImageBundle,
+    service_manager::{ManagerAction, ServiceManager},
     service_startup::ServiceStartup,
     supervisor::{EndpointIdentity, LiveSupervisor},
 };
@@ -69,6 +70,10 @@ pub struct ServiceRuntime {
     tasks: [Option<crate::TaskHandle>; SERVICE_COUNT],
     heartbeat_ticks: [AtomicU64; SERVICE_COUNT],
     supervisor: LiveSupervisor,
+    manager: ServiceManager,
+    manager_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
+    manager_generation: u32,
+    pending_restart: Option<([ServiceId; crate::service_manager::MAX_SERVICE_SLOTS], usize)>,
     ipc_generation: u16,
     service_epoch: u64,
     storage_response: Option<logos_abi::StorageResponse>,
@@ -76,6 +81,21 @@ pub struct ServiceRuntime {
     frame_pool_ready: bool,
     #[cfg(feature = "storage-proof")]
     storage_proof: crate::storage_proof::StorageProofObserver,
+}
+
+struct ServiceRestartGate;
+
+impl ServiceRestartGate {
+    fn acquire() -> Self {
+        crate::arch::begin_service_restart();
+        Self
+    }
+}
+
+impl Drop for ServiceRestartGate {
+    fn drop(&mut self) {
+        crate::arch::end_service_restart();
+    }
 }
 
 impl ServiceRuntime {
@@ -104,6 +124,10 @@ impl ServiceRuntime {
             tasks: [None; SERVICE_COUNT],
             heartbeat_ticks: [const { AtomicU64::new(0) }; SERVICE_COUNT],
             supervisor: LiveSupervisor::new(),
+            manager: ServiceManager::new(),
+            manager_capability_frames: [None; SERVICE_COUNT],
+            manager_generation: 1,
+            pending_restart: None,
             ipc_generation: 1,
             service_epoch: 1,
             storage_response: None,
@@ -310,6 +334,29 @@ impl ServiceRuntime {
                 logos_abi::IPC_CAPABILITY_BASE,
                 MappingFlags::READ_ONLY_DATA,
             )?;
+            let manager_rights = manager_rights(service);
+            if manager_rights != logos_abi::ManagerRights::NONE {
+                let manager_frame =
+                    self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+                self.manager_capability_frames[service.index()] = Some(manager_frame);
+                memory.clear(manager_frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+                let capability = logos_abi::ManagerCapability::new(
+                    self.manager_generation,
+                    manager_rights,
+                    self.service_epoch,
+                )
+                .ok_or(ServiceRuntimeError::StaleGeneration)?;
+                unsafe {
+                    (manager_frame.raw() as usize as *mut logos_abi::ManagerCapabilityPage)
+                        .write(logos_abi::ManagerCapabilityPage { capability });
+                }
+                self.map_ipc_private_page(
+                    process,
+                    manager_frame,
+                    logos_abi::MANAGER_CAPABILITY_BASE,
+                    MappingFlags::READ_ONLY_DATA,
+                )?;
+            }
         }
         let framebuffer = resources.framebuffer().ok_or(ServiceRuntimeError::Resources)?;
         self.map_framebuffer(framebuffer)?;
@@ -488,24 +535,91 @@ impl ServiceRuntime {
     }
 
     pub fn start_tasks(&mut self) -> Result<(), ServiceRuntimeError> {
-        for spec in SERVICE_IMAGES {
-            let service = spec.service();
-            let Some((process, launch)) = self.launch(service) else {
-                return Err(ServiceRuntimeError::TaskLaunch);
-            };
-            let task = crate::SCHEDULER.spawn_user(service_task_entry, process, launch).map_err(
-                |error| match error {
+        for service in crate::service_images::SERVICE_START_ORDER {
+            self.start_service_task(service)?;
+            self.startup.start(service).map_err(ServiceRuntimeError::Startup)?;
+        }
+        self.manager.initialize_running();
+        Ok(())
+    }
+
+    fn start_service_task(&mut self, service: ServiceId) -> Result<(), ServiceRuntimeError> {
+        let index = service.index();
+        if self.tasks[index].is_some() {
+            return Ok(());
+        }
+        let Some((process, launch)) = self.launch(service) else {
+            return Err(ServiceRuntimeError::TaskLaunch);
+        };
+        let task =
+            crate::SCHEDULER.spawn_user(service_task_entry, process, launch).map_err(|error| {
+                match error {
                     crate::SpawnError::Capacity => ServiceRuntimeError::TaskCapacity,
                     crate::SpawnError::AddressSpace => ServiceRuntimeError::TaskAddressSpace,
                     crate::SpawnError::UserLaunch => ServiceRuntimeError::TaskLaunch,
-                },
-            )?;
-            self.tasks[service.index()] = Some(task);
-            self.heartbeat_ticks[service.index()].store(crate::current_ticks(), Ordering::Release);
-            self.supervisor.register(service, crate::current_ticks());
-            self.startup.start(service).map_err(ServiceRuntimeError::Startup)?;
+                }
+            })?;
+        self.tasks[index] = Some(task);
+        let now = crate::current_ticks();
+        self.heartbeat_ticks[index].store(now, Ordering::Release);
+        self.supervisor.register(service, now);
+        self.manager.mark_running(service);
+        Ok(())
+    }
+
+    /// Reset the bounded image-owned memory and private staging before a
+    /// stopped service is started again. The process identity is reused, but
+    /// its code, data, BSS, and stack pages are restored to the retained ELF.
+    fn reset_service_image(&mut self, service: ServiceId) -> Result<(), ServiceRuntimeError> {
+        let Some(bundle) = crate::arch::service_images() else {
+            return Err(ServiceRuntimeError::Resources);
+        };
+        let Some(spec) = SERVICE_IMAGES.iter().find(|spec| spec.service() == service) else {
+            return Err(ServiceRuntimeError::Image);
+        };
+        let Some(image) = (unsafe { bundle.image(service) }) else {
+            return Err(ServiceRuntimeError::Image);
+        };
+        let plan = spec.validate_image(image).map_err(|_| ServiceRuntimeError::Image)?;
+        let mut memory = IdentityPageTableMemory;
+        self.images[service.index()]
+            .populate(plan, image, &mut memory)
+            .map_err(ServiceRuntimeError::Populate)?;
+        if let Some(frame) = self.ipc_staging_frames[service.index()] {
+            memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+        }
+        if service == ServiceId::Storage {
+            self.storage_response = None;
+            if let Some(frame) = self.storage_data_frame {
+                memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+            }
         }
         Ok(())
+    }
+
+    fn request_stop_service(&mut self, service: ServiceId) -> Result<bool, ServiceRuntimeError> {
+        let stop_requested = self.request_stop_task(service)?;
+        if stop_requested {
+            self.manager.mark_stopping(service);
+        }
+        Ok(stop_requested)
+    }
+
+    fn request_stop_task(&mut self, service: ServiceId) -> Result<bool, ServiceRuntimeError> {
+        let index = service.index();
+        let Some(task) = self.tasks[index] else {
+            return Err(ServiceRuntimeError::TaskStop);
+        };
+        if crate::SCHEDULER.request_stop(task) {
+            return Ok(true);
+        }
+        if crate::SCHEDULER.state(task).is_none() {
+            self.tasks[index] = None;
+            self.supervisor.unregister(service);
+            self.manager.mark_stopped(service);
+            return Ok(false);
+        }
+        Err(ServiceRuntimeError::TaskStop)
     }
 
     pub(crate) fn record_heartbeat(
@@ -522,6 +636,10 @@ impl ServiceRuntime {
             self.heartbeat_ticks[index].store(now, Ordering::Release);
         }
         true
+    }
+
+    pub(crate) fn owns_service_process(&self, service: ServiceId, process: ProcessHandle) -> bool {
+        self.launch(service).is_some_and(|(current, _)| current == process)
     }
 
     #[cfg(feature = "qemu-proof")]
@@ -838,6 +956,143 @@ impl ServiceRuntime {
         outcome
     }
 
+    pub(crate) fn manager_call(
+        &mut self,
+        process: ProcessHandle,
+        capability_slot: usize,
+        length: usize,
+    ) -> logos_abi::IpcStatus {
+        let Some(service) = self.service_for_process(process) else {
+            return logos_abi::IpcStatus::Unauthorized;
+        };
+        if capability_slot != logos_abi::MANAGER_CAPABILITY_SLOT {
+            return logos_abi::IpcStatus::Unauthorized;
+        }
+        if length != core::mem::size_of::<logos_abi::ManagerRequest>() {
+            return logos_abi::IpcStatus::Malformed;
+        }
+        let Some(capability_frame) = self.manager_capability_frames[service.index()] else {
+            return logos_abi::IpcStatus::Unauthorized;
+        };
+        let capability = unsafe {
+            (capability_frame.raw() as usize as *const logos_abi::ManagerCapabilityPage)
+                .read()
+                .capability
+        };
+        if capability.is_empty()
+            || capability.generation != self.manager_generation
+            || capability.service_epoch != self.service_epoch
+        {
+            return logos_abi::IpcStatus::Stale;
+        }
+        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+            return logos_abi::IpcStatus::Unauthorized;
+        };
+        let bytes = staging_frame.raw() as usize as *const u8;
+        let operation =
+            unsafe { *bytes.add(core::mem::offset_of!(logos_abi::ManagerRequest, operation)) };
+        if logos_abi::ManagerOperation::from_raw(operation).is_none() {
+            return logos_abi::IpcStatus::Malformed;
+        }
+        let request =
+            unsafe { core::ptr::read_unaligned(bytes.cast::<logos_abi::ManagerRequest>()) };
+        let mut decision = self.manager.request(request, capability.rights);
+        match decision.action {
+            ManagerAction::None => {}
+            ManagerAction::Start(service) => {
+                if self.reset_service_image(service).is_err()
+                    || self.start_service_task(service).is_err()
+                {
+                    self.manager.mark_failed(service);
+                    decision.response.status = logos_abi::ManagerStatus::Capacity;
+                    self.refresh_manager_response_record(&mut decision.response);
+                }
+            }
+            ManagerAction::Stop(service) => match self.request_stop_service(service) {
+                Ok(true) => {}
+                Ok(false) => {
+                    decision.response.status = logos_abi::ManagerStatus::Ok;
+                    if let Some(record) = self.manager.record(service.index()) {
+                        decision.response.record = record;
+                    }
+                }
+                Err(_) => {
+                    self.manager.mark_failed(service);
+                    decision.response.status = logos_abi::ManagerStatus::Busy;
+                    self.refresh_manager_response_record(&mut decision.response);
+                }
+            },
+            ManagerAction::Restart(services, count) => {
+                if self.pending_restart.is_some()
+                    || services[..count].iter().any(|service| {
+                        self.tasks[service.index()]
+                            .is_none_or(|task| crate::SCHEDULER.state(task).is_none())
+                    })
+                {
+                    decision.response.status = logos_abi::ManagerStatus::Busy;
+                } else {
+                    let mut admitted = 0;
+                    for service in &services[..count] {
+                        if self.request_stop_task(*service).is_err() {
+                            self.manager.mark_failed(*service);
+                            decision.response.status = logos_abi::ManagerStatus::Busy;
+                            self.refresh_manager_response_record(&mut decision.response);
+                            if admitted != 0 {
+                                self.manager.mark_restart_stopping(&services[..admitted]);
+                            }
+                            break;
+                        }
+                        admitted += 1;
+                    }
+                    if admitted == count {
+                        self.manager.mark_restart_stopping(&services[..count]);
+                        self.refresh_manager_response_record(&mut decision.response);
+                        self.pending_restart = Some((services, count));
+                    }
+                }
+            }
+        }
+        unsafe {
+            core::ptr::write_unaligned(
+                staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
+                decision.response,
+            );
+        }
+        logos_abi::IpcStatus::Ok
+    }
+
+    fn refresh_manager_response_record(&self, response: &mut logos_abi::ManagerResponse) {
+        if let Some(record) = self.manager.record(usize::from(response.record.slot)) {
+            response.record = record;
+        }
+    }
+
+    #[cfg(feature = "qemu-proof")]
+    pub(crate) fn manager_proof(
+        &mut self,
+        request: logos_abi::ManagerRequest,
+    ) -> Option<logos_abi::ManagerResponse> {
+        let process = self.launch(ServiceId::Commands)?.0;
+        let frame = self.ipc_staging_frames[ServiceId::Commands.index()]?;
+        unsafe {
+            core::ptr::write_unaligned(
+                frame.raw() as usize as *mut logos_abi::ManagerRequest,
+                request,
+            );
+        }
+        if self.manager_call(
+            process,
+            logos_abi::MANAGER_CAPABILITY_SLOT,
+            core::mem::size_of::<logos_abi::ManagerRequest>(),
+        ) != logos_abi::IpcStatus::Ok
+        {
+            return None;
+        }
+        Some(unsafe {
+            core::ptr::read_unaligned(frame.raw() as usize as *const logos_abi::ManagerResponse)
+        })
+    }
+
     fn service_for_process(&self, process: ProcessHandle) -> Option<ServiceId> {
         SERVICE_IMAGES.iter().find_map(|spec| {
             self.launch(spec.service())
@@ -851,11 +1106,13 @@ impl ServiceRuntime {
         let legacy_end =
             logos_abi::SERVICE_IPC_BASE + logos_abi::IPC_ENDPOINT_COUNT * crate::loader::PAGE_SIZE;
         for spec in SERVICE_IMAGES {
-            let Some((process, _)) = self.launch(spec.service()) else {
+            let service = spec.service();
+            let Some((process, _)) = self.launch(service) else {
                 return false;
             };
             let mut staging = false;
             let mut capabilities = false;
+            let mut manager_capability = false;
             for mapping_index in 0..crate::process::MAX_MAPPINGS_PER_ADDRESS_SPACE {
                 let Some(mapping) = self.processes.mapping(process, mapping_index) else {
                     continue;
@@ -877,8 +1134,17 @@ impl ServiceRuntime {
                 if address == logos_abi::IPC_CAPABILITY_BASE {
                     capabilities = mapping.flags() == MappingFlags::READ_ONLY_DATA;
                 }
+                if address == logos_abi::MANAGER_CAPABILITY_BASE {
+                    manager_capability = mapping.flags() == MappingFlags::READ_ONLY_DATA;
+                }
             }
             if !staging || !capabilities {
+                return false;
+            }
+            if service == ServiceId::Commands && !manager_capability {
+                return false;
+            }
+            if service != ServiceId::Commands && manager_capability {
                 return false;
             }
         }
@@ -895,14 +1161,22 @@ impl ServiceRuntime {
 
     /// Stop every service task at a scheduler boundary before reclaiming any
     /// process frames or page-table roots.
-    pub fn restart(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
+    fn restart(
+        &mut self,
+        bundle: &ServiceImageBundle,
+        runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
+    ) -> Result<(), ServiceRuntimeError> {
+        let _restart_gate = ServiceRestartGate::acquire();
+        crate::arch::begin_service_runtime_transition();
         crate::arch_proof_line(b"LogOS vNext: service restart begin");
         self.ipc_generation = self.ipc_generation.wrapping_add(1).max(1);
         self.service_epoch = self.service_epoch.wrapping_add(1).max(1);
+        self.manager_generation = self.manager_generation.wrapping_add(1).max(1);
         if !self.supervisor.prepare_restart() {
             return Err(ServiceRuntimeError::RestartLimit);
         }
-        self.stop_tasks()?;
+        self.manager.prepare_graph_restart();
+        self.stop_tasks(runtime_guard)?;
         crate::arch::prepare_task_address_space(0);
         let result = crate::arch::restart_critical_section(|| {
             crate::arch_proof_line(b"LogOS vNext: service tasks quiesced");
@@ -932,6 +1206,7 @@ impl ServiceRuntime {
             let result = self.start_tasks();
             if result.is_ok() {
                 crate::arch::enable_keyboard_irq();
+                crate::arch::finish_service_runtime_transition();
             }
             result
         });
@@ -945,23 +1220,82 @@ impl ServiceRuntime {
         &mut self,
         bundle: &ServiceImageBundle,
         now: u64,
+        runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
     ) -> Result<bool, ServiceRuntimeError> {
+        for spec in SERVICE_IMAGES {
+            let service = spec.service();
+            let index = service.index();
+            let Some(task) = self.tasks[index] else {
+                continue;
+            };
+            if crate::SCHEDULER.state(task) == Some(crate::TaskState::Completed) {
+                let process_failed = self
+                    .launch(service)
+                    .and_then(|(process, _)| self.processes.state(process))
+                    .is_none_or(|state| !matches!(state, crate::process::ProcessState::Running));
+                if !crate::SCHEDULER.reclaim_completed(task) {
+                    return Err(ServiceRuntimeError::TaskStop);
+                }
+                self.tasks[index] = None;
+                self.supervisor.unregister(service);
+                if process_failed {
+                    self.manager.mark_failed(service);
+                } else {
+                    self.manager.mark_stopped(service);
+                }
+            }
+        }
+        if let Some((services, count)) = self.pending_restart.take() {
+            if services[..count].iter().any(|service| self.tasks[service.index()].is_some()) {
+                self.pending_restart = Some((services, count));
+                return Ok(false);
+            }
+            let mut restart_failed = false;
+            for service in services[..count].iter().rev() {
+                if self.reset_service_image(*service).is_err()
+                    || self.start_service_task(*service).is_err()
+                {
+                    restart_failed = true;
+                    break;
+                }
+            }
+            if restart_failed {
+                self.restart(bundle, runtime_guard)?;
+                return Ok(true);
+            }
+            self.manager.restart_complete(&services[..count]);
+            #[cfg(feature = "qemu-proof")]
+            crate::proof::manager_restart_completed();
+            return Ok(true);
+        }
+        if SERVICE_IMAGES.iter().any(|spec| {
+            self.manager.state(spec.service().index()) == Some(logos_abi::ManagerState::Failed)
+        }) {
+            self.restart(bundle, runtime_guard)?;
+            return Ok(true);
+        }
         let mut heartbeats = [0; SERVICE_COUNT];
         let mut process_states = [None; SERVICE_COUNT];
         for spec in SERVICE_IMAGES {
             let index = spec.service().index();
             heartbeats[index] = self.heartbeat_tick(spec.service());
-            process_states[index] =
-                self.launch(spec.service()).and_then(|(process, _)| self.processes.state(process));
+            process_states[index] = if self.tasks[index].is_some() {
+                self.launch(spec.service()).and_then(|(process, _)| self.processes.state(process))
+            } else {
+                None
+            };
         }
         if self.supervisor.poll(now, heartbeats, process_states).is_some() {
-            self.restart(bundle)?;
+            self.restart(bundle, runtime_guard)?;
             return Ok(true);
         }
         Ok(false)
     }
 
-    fn stop_tasks(&mut self) -> Result<(), ServiceRuntimeError> {
+    fn stop_tasks(
+        &mut self,
+        runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
+    ) -> Result<(), ServiceRuntimeError> {
         for task in self.tasks.iter().flatten().copied() {
             if !crate::SCHEDULER.request_stop(task) {
                 return Err(ServiceRuntimeError::TaskStop);
@@ -973,7 +1307,9 @@ impl ServiceRuntime {
                 if waited == 1024 {
                     return Err(ServiceRuntimeError::TaskStop);
                 }
+                runtime_guard.pause();
                 crate::sleep_current_for(1);
+                runtime_guard.resume();
                 waited += 1;
             }
             if !crate::SCHEDULER.reclaim_completed(task) {
@@ -1015,6 +1351,11 @@ impl ServiceRuntime {
                 self.ipc_capability_frames[index] = None;
             }
         }
+        for frame in &mut self.manager_capability_frames {
+            if let Some(frame) = frame.take() {
+                self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+            }
+        }
         for index in 0..SERVICE_COUNT {
             if let Some((process, _)) = self.launches[index].take() {
                 if self.processes.state(process) == Some(crate::process::ProcessState::Running) {
@@ -1037,6 +1378,13 @@ impl ServiceRuntime {
 
 fn old_identity_matches(identity: EndpointIdentity, header: logos_abi::EndpointHeader) -> bool {
     logos_abi::MessageIdentity::new(identity.generation, identity.service_epoch).accepts(header)
+}
+
+const fn manager_rights(service: ServiceId) -> logos_abi::ManagerRights {
+    match service {
+        ServiceId::Commands => logos_abi::ManagerRights::ALL,
+        _ => logos_abi::ManagerRights::NONE,
+    }
 }
 
 impl Default for ServiceRuntime {

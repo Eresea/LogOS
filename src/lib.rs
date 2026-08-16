@@ -21,6 +21,7 @@ pub mod service_images;
 pub mod service_ipc;
 pub mod service_lifecycle;
 pub mod service_loader;
+pub mod service_manager;
 #[cfg(target_os = "uefi")]
 mod service_runtime;
 pub mod service_startup;

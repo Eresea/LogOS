@@ -7,8 +7,8 @@ allocator-free scheduler state machine; QEMU is required for the assembly bounda
 
 `cargo test --lib` covers bounded capacity, generation-safe stale handles, runnable/running/
 blocked/completed transitions, wake-pending races, completion reuse, context-publication ordering,
-simultaneous CPU claims, and the host-only service restart contract. `cargo clippy --lib -- -D warnings`
-is required.
+simultaneous CPU claims, the fixed-capacity service manager lifecycle/ABI contract, and the
+host-only service restart contract. `cargo clippy --lib -- -D warnings` is required.
 
 ## QEMU proof
 
@@ -26,7 +26,9 @@ with preserved GPR/flags/XMM canaries and sustained progress, timer ticks on eve
 repeated preemptive switches, a completed task reclaimed and replaced in the same slot with stale
 handle rejection, the typed in-process Runtime command/response lifecycle and mailbox backpressure,
 the typed in-process Health Ping command/response and restart/retry path, and a blocked task woken
-by another CPU for SMP (same CPU for `-smp 1`). The runner captures debugcon output and fails on
-timeout or fatal output.
+by another CPU for SMP (same CPU for `-smp 1`). The manager boundary proof also verifies that only
+Commands receives the manager capability, list/status succeed, unauthorized callers are rejected,
+and a manager restart completes at a scheduler-safe boundary. The runner captures debugcon output
+and fails on timeout or fatal output.
 
 `v1_docs/` and old v1 evidence are historical; they are not active proof criteria.
