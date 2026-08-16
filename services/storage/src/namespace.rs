@@ -63,6 +63,7 @@ pub enum NamespaceError {
     TooLarge,
     InvalidRecord,
     GenerationExhausted,
+    Recovery,
 }
 
 impl From<FormatError> for NamespaceError {
@@ -555,6 +556,11 @@ impl<B: BlockStore> DurableNamespace<B> {
         self.store
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_store_mut(&mut self) -> &mut B {
+        &mut self.store
+    }
+
     pub fn resolve_path(&self, path: &[u8]) -> Result<ObjectId, NamespaceError> {
         self.namespace.resolve_path(path)
     }
@@ -879,8 +885,10 @@ impl NamespaceTransaction {
             match namespace.volume.commit(&mut namespace.store, &records[..self.count]) {
                 Ok(transaction_id) => transaction_id,
                 Err(error) => {
-                    let _ = namespace.reopen();
-                    return Err(error.into());
+                    return match namespace.reopen() {
+                        Ok(()) => Err(error.into()),
+                        Err(_) => Err(NamespaceError::Recovery),
+                    };
                 }
             };
         namespace.namespace = self.shadow;

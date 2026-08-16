@@ -35,11 +35,12 @@ pub struct StorageApi<B> {
     namespace: DurableNamespace<B>,
     active: Option<ActiveTransaction>,
     next_transaction: u64,
+    failed: bool,
 }
 
 impl<B: BlockStore> StorageApi<B> {
     pub fn new(namespace: DurableNamespace<B>) -> Self {
-        Self { namespace, active: None, next_transaction: 1 }
+        Self { namespace, active: None, next_transaction: 1, failed: false }
     }
 
     pub fn into_namespace(self) -> DurableNamespace<B> {
@@ -51,6 +52,12 @@ impl<B: BlockStore> StorageApi<B> {
             Ok(request) => request,
             Err(_) => return malformed_response(message),
         };
+        if self.failed {
+            return Self::encode(
+                request.request_id,
+                ResponsePayload::empty(StorageApiStatus::Io, request.transaction_id),
+            );
+        }
         if request.operation != StorageApiOperation::Write && request.flags != 0 {
             return Self::encode(
                 request.request_id,
@@ -114,7 +121,12 @@ impl<B: BlockStore> StorageApi<B> {
         let id = active.id;
         match active.transaction.commit(&mut self.namespace) {
             Ok(_) => ResponsePayload::empty(StorageApiStatus::Ok, id),
-            Err(error) => ResponsePayload::empty(map_error(error), id),
+            Err(error) => {
+                if error == NamespaceError::Recovery {
+                    self.failed = true;
+                }
+                ResponsePayload::empty(map_error(error), id)
+            }
         }
     }
 
@@ -323,6 +335,7 @@ fn map_error(error: NamespaceError) -> StorageApiStatus {
         NamespaceError::NotEmpty => StorageApiStatus::NotEmpty,
         NamespaceError::Stale => StorageApiStatus::Stale,
         NamespaceError::TooLarge => StorageApiStatus::TooLarge,
+        NamespaceError::Recovery => StorageApiStatus::Io,
         NamespaceError::Format(_) | NamespaceError::Block(_) => StorageApiStatus::Io,
     }
 }
@@ -331,7 +344,49 @@ fn map_error(error: NamespaceError) -> StorageApiStatus {
 mod tests {
     use super::*;
     use logos_abi::{STORAGE_API_FLAG_REPLACE, StorageApiOperation, StorageApiResponse};
-    use logos_storage::MemoryBlockStore;
+    use logos_storage::{Block, BlockError, BlockIndex, BlockStore, MemoryBlockStore};
+
+    struct RecoveryFailStore {
+        inner: MemoryBlockStore<16>,
+        failed: bool,
+    }
+
+    impl RecoveryFailStore {
+        fn new() -> Self {
+            Self { inner: MemoryBlockStore::new(), failed: false }
+        }
+
+        fn fail(&mut self) {
+            self.failed = true;
+        }
+    }
+
+    impl BlockStore for RecoveryFailStore {
+        fn block_count(&self) -> u64 {
+            self.inner.block_count()
+        }
+
+        fn read_block(&mut self, index: BlockIndex, output: &mut Block) -> Result<(), BlockError> {
+            if self.failed {
+                return Err(BlockError::Io);
+            }
+            self.inner.read_block(index, output)
+        }
+
+        fn write_block(&mut self, index: BlockIndex, input: &Block) -> Result<(), BlockError> {
+            if self.failed {
+                return Err(BlockError::Io);
+            }
+            self.inner.write_block(index, input)
+        }
+
+        fn flush(&mut self) -> Result<(), BlockError> {
+            if self.failed {
+                return Err(BlockError::Io);
+            }
+            self.inner.flush()
+        }
+    }
 
     fn request(
         operation: StorageApiOperation,
@@ -564,6 +619,57 @@ mod tests {
             )
             .status,
             StorageApiStatus::NotFound
+        );
+    }
+
+    #[test]
+    fn recovery_failure_latches_storage_api_closed() {
+        let namespace = DurableNamespace::format(RecoveryFailStore::new()).unwrap();
+        let mut api = StorageApi::new(namespace);
+        let begin_message =
+            api.handle(&request(StorageApiOperation::Begin, 0, b"", b"", b"", 0, 1)).unwrap();
+        let begin = status(&begin_message);
+        let transaction_id = begin.transaction_id;
+        assert_eq!(begin.status, StorageApiStatus::Ok);
+        assert_eq!(
+            status(
+                &api.handle(&request(
+                    StorageApiOperation::CreateFile,
+                    transaction_id,
+                    b"/failed",
+                    b"",
+                    b"",
+                    0,
+                    2,
+                ))
+                .unwrap(),
+            )
+            .status,
+            StorageApiStatus::Ok
+        );
+        api.namespace.test_store_mut().fail();
+        assert_eq!(
+            status(
+                &api.handle(&request(
+                    StorageApiOperation::Commit,
+                    transaction_id,
+                    b"",
+                    b"",
+                    b"",
+                    0,
+                    3,
+                ))
+                .unwrap(),
+            )
+            .status,
+            StorageApiStatus::Io
+        );
+        assert_eq!(
+            status(
+                &api.handle(&request(StorageApiOperation::Begin, 0, b"", b"", b"", 0, 4)).unwrap(),
+            )
+            .status,
+            StorageApiStatus::Io
         );
     }
 }
