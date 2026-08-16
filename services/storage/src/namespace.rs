@@ -532,6 +532,11 @@ impl<B: BlockStore> DurableNamespace<B> {
         Ok(Self { store, volume, namespace: ObjectNamespace::new() })
     }
 
+    pub fn format_provisioned(mut store: B) -> Result<Self, NamespaceError> {
+        let volume = Volume::format_provisioned(&mut store)?;
+        Ok(Self { store, volume, namespace: ObjectNamespace::new() })
+    }
+
     pub fn open(mut store: B) -> Result<Self, NamespaceError> {
         let mut volume = Volume::open(&mut store)?;
         let mut namespace = ObjectNamespace::new();

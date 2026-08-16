@@ -193,17 +193,15 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
             DurableNamespace::format(store)
                 .unwrap_or_else(|error| serve_storage_error(storage_error_status(error)))
         }
+        Err(NamespaceError::Format(logos_storage::FormatError::ProvisionedBlank)) => {
+            let Some(store) = new_store(capability, blocks) else {
+                serve_storage_error(StorageApiStatus::Io);
+            };
+            DurableNamespace::format_provisioned(store)
+                .unwrap_or_else(|error| serve_storage_error(storage_error_status(error)))
+        }
         Err(error) => serve_storage_error(storage_error_status(error)),
     };
-    #[cfg(feature = "storage-proof")]
-    if filesystem.open_file(b"/marker").is_err() {
-        let marker = filesystem
-            .create_file(filesystem.root(), b"marker")
-            .unwrap_or_else(|error| serve_storage_error(storage_error_status(error)));
-        filesystem
-            .write(marker, 0, b"LogOS storage marker")
-            .unwrap_or_else(|error| serve_storage_error(storage_error_status(error)));
-    }
     filesystem.flush().unwrap_or_else(|error| serve_storage_error(storage_error_status(error)));
 
     let mut api = StorageApi::new(filesystem);

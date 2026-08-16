@@ -1,6 +1,7 @@
 use crate::{BLOCK_BYTES, Block, BlockError, BlockIndex, BlockStore};
 
 pub const FORMAT_VERSION: u16 = 1;
+pub const PROVISIONED_BLANK_MAGIC: &[u8; 8] = b"LOGOSBLK";
 /// Reserved record kind used only for internal transaction commit markers.
 pub const JOURNAL_COMMIT_KIND: u16 = u16::MAX;
 pub const MAX_RECORDS_PER_TRANSACTION: usize = 8;
@@ -31,6 +32,7 @@ pub enum FormatError {
     JournalFull,
     GenerationExhausted,
     ReplayRejected,
+    ProvisionedBlank,
 }
 
 impl From<BlockError> for FormatError {
@@ -92,6 +94,26 @@ impl Volume {
             }
         }
 
+        Self::format_metadata(store)
+    }
+
+    pub fn format_provisioned<B: BlockStore>(store: &mut B) -> Result<Self, FormatError> {
+        if store.block_count() <= JOURNAL_START {
+            return Err(FormatError::TooSmall);
+        }
+        let mut marker = Block::zero();
+        store.read_block(SUPERBLOCK_A, &mut marker)?;
+        if &marker.as_bytes()[..PROVISIONED_BLANK_MAGIC.len()] != PROVISIONED_BLANK_MAGIC {
+            return Err(FormatError::NotBlank);
+        }
+        Self::format_metadata(store)
+    }
+
+    fn format_metadata<B: BlockStore>(store: &mut B) -> Result<Self, FormatError> {
+        let block_count = store.block_count();
+        if block_count <= JOURNAL_START {
+            return Err(FormatError::TooSmall);
+        }
         let info = VolumeInfo {
             generation: 1,
             journal_start: JOURNAL_START,
@@ -101,6 +123,9 @@ impl Volume {
             root_transaction_id: 0,
         };
 
+        let empty = Block::zero();
+        store.write_block(BlockIndex::new(JOURNAL_START), &empty)?;
+        store.flush()?;
         write_superblock(store, SUPERBLOCK_A, info)?;
         store.flush()?;
         write_superblock(store, SUPERBLOCK_B, info)?;
@@ -204,13 +229,21 @@ impl Volume {
         let previous_head = self.info.journal_head;
         let mut committed_head = self.info.journal_tail;
         let mut truncated = false;
+        let recovery_end = self
+            .info
+            .journal_head
+            .saturating_add(MAX_RECORDS_PER_TRANSACTION as u64 + 1)
+            .min(self.info.journal_end);
 
-        for index in self.info.journal_tail..self.info.journal_end {
+        for index in self.info.journal_tail..recovery_end {
             let mut block = Block::zero();
             store.read_block(BlockIndex::new(index), &mut block)?;
             let record = match decode_record(&block) {
                 Ok(Some(record)) => record,
                 Ok(None) => {
+                    if index >= previous_head {
+                        break;
+                    }
                     // Abandon only the incomplete transaction at this gap. A
                     // later checksummed transaction may still be durable.
                     truncated = true;
@@ -374,6 +407,9 @@ fn read_superblock<B: BlockStore>(
         return Ok(None);
     }
     if &bytes[..8] != SUPERBLOCK_MAGIC {
+        if &bytes[..PROVISIONED_BLANK_MAGIC.len()] == PROVISIONED_BLANK_MAGIC {
+            return Err(FormatError::ProvisionedBlank);
+        }
         return Err(FormatError::Corrupt);
     }
     if get_u16(bytes, 8) != FORMAT_VERSION {
@@ -540,6 +576,7 @@ mod tests {
         durable: [Block; N],
         fail_writes_after: Option<usize>,
         fail_flush: bool,
+        reads: usize,
     }
 
     impl<const N: usize> CrashStore<N> {
@@ -549,6 +586,7 @@ mod tests {
                 durable: [Block::ZERO; N],
                 fail_writes_after: None,
                 fail_flush: false,
+                reads: 0,
             }
         }
 
@@ -564,6 +602,10 @@ mod tests {
             self.fail_flush = true;
         }
 
+        fn reset_reads(&mut self) {
+            self.reads = 0;
+        }
+
         fn corrupt(&mut self, index: u64, offset: usize) {
             self.working[index as usize].as_bytes_mut()[offset] ^= 0xff;
             self.durable[index as usize] = self.working[index as usize];
@@ -576,6 +618,7 @@ mod tests {
         }
 
         fn read_block(&mut self, index: BlockIndex, output: &mut Block) -> Result<(), BlockError> {
+            self.reads += 1;
             let Some(block) = self.working.get(index.get() as usize) else {
                 return Err(BlockError::OutOfBounds);
             };
@@ -645,6 +688,22 @@ mod tests {
         let volume = Volume::format(&mut store).unwrap();
         let reopened = Volume::open(&mut store).unwrap();
         assert_eq!(reopened.info(), volume.info());
+    }
+
+    #[test]
+    fn provisioned_blank_media_formats_without_scanning_the_volume() {
+        let mut store = CrashStore::<32>::new();
+        let mut marker = Block::zero();
+        marker.as_bytes_mut()[..PROVISIONED_BLANK_MAGIC.len()]
+            .copy_from_slice(PROVISIONED_BLANK_MAGIC);
+        store.write_block(SUPERBLOCK_A, &marker).unwrap();
+        store.flush().unwrap();
+        assert_eq!(Volume::open(&mut store), Err(FormatError::ProvisionedBlank));
+
+        store.reset_reads();
+        let volume = Volume::format_provisioned(&mut store).unwrap();
+        assert_eq!(volume.info().journal_head, JOURNAL_START);
+        assert_eq!(store.reads, 1);
     }
 
     #[test]
@@ -848,6 +907,19 @@ mod tests {
             reopened.commit(&mut store, &[JournalRecord { kind: 8, payload: b"next" }]),
             Ok(2)
         );
+    }
+
+    #[test]
+    fn recovery_does_not_scan_the_physical_tail() {
+        let mut store = CrashStore::<32>::new();
+        let volume = Volume::format(&mut store).unwrap();
+        store.reset_reads();
+        let mut reopened = Volume::open(&mut store).unwrap();
+        store.reset_reads();
+        let mut sink = Sink::new();
+        assert_eq!(reopened.recover(&mut store, &mut sink).unwrap().replayed_records, 0);
+        assert_eq!(store.reads, 1);
+        assert_eq!(reopened.info(), volume.info());
     }
 
     #[test]

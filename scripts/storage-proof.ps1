@@ -29,6 +29,10 @@ if ($ResetDisk -and (Test-Path -LiteralPath $disk)) {
 if (-not (Test-Path $disk)) {
     $stream = [System.IO.File]::Open($disk, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
     try { $stream.SetLength([int64]$DiskMiB * 1MB) } finally { $stream.Dispose() }
+    $marker = New-Object byte[] 4096
+    [Text.Encoding]::ASCII.GetBytes('LOGOSBLK').CopyTo($marker, 0)
+    $stream = [System.IO.File]::Open($disk, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write)
+    try { $stream.Write($marker, 0, $marker.Length) } finally { $stream.Dispose() }
 }
 
 & cargo build --release --features storage-proof --target x86_64-unknown-uefi

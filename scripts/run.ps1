@@ -35,6 +35,10 @@ New-Item -ItemType Directory -Force $target | Out-Null
 if (-not (Test-Path $disk)) {
     $stream = [System.IO.File]::Open($disk, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
     try { $stream.SetLength([int64]$DiskMiB * 1MB) } finally { $stream.Dispose() }
+    $marker = New-Object byte[] 4096
+    [Text.Encoding]::ASCII.GetBytes('LOGOSBLK').CopyTo($marker, 0)
+    $stream = [System.IO.File]::Open($disk, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write)
+    try { $stream.Write($marker, 0, $marker.Length) } finally { $stream.Dispose() }
 }
 
 $buildArgs = @('build', '--target', 'x86_64-unknown-uefi')
