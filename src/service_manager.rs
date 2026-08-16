@@ -107,8 +107,9 @@ impl ServiceManager {
     const fn install_profiles(&mut self) {
         let mut index = 0;
         while index < SERVICE_IMAGES.len() {
-            let service = SERVICE_IMAGES[index].service();
-            let name = service_name(service);
+            let spec = SERVICE_IMAGES[index];
+            let service = spec.service();
+            let name = spec.name();
             let mut bytes = [0; MAX_SERVICE_NAME_BYTES];
             let mut name_index = 0;
             while name_index < name.len() {
@@ -119,7 +120,7 @@ impl ServiceManager {
                 service: Some(service),
                 name: bytes,
                 name_len: name.len() as u8,
-                dependencies: dependencies(service),
+                dependencies: spec.dependencies(),
                 generation: 1,
                 state: ManagerState::Stopped,
                 restarts: 0,
@@ -440,9 +441,10 @@ impl ServiceManager {
         let mut remaining = included;
         while remaining != 0 {
             let mut advanced = false;
-            for service in SERVICE_IMAGES.iter().map(|spec| spec.service()) {
+            for spec in SERVICE_IMAGES {
+                let service = spec.service();
                 let bit = 1 << service.index();
-                if remaining & bit != 0 && dependencies(service) & remaining == 0 {
+                if remaining & bit != 0 && spec.dependencies() & remaining == 0 {
                     order[order_count] = service;
                     order_count += 1;
                     remaining &= !bit;
@@ -466,30 +468,6 @@ impl ServiceManager {
 impl Default for ServiceManager {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-const fn dependencies(service: logos_abi::ServiceId) -> u8 {
-    match service {
-        logos_abi::ServiceId::Input | logos_abi::ServiceId::Display => 0,
-        logos_abi::ServiceId::Terminal => {
-            (1 << logos_abi::ServiceId::Input.index())
-                | (1 << logos_abi::ServiceId::Display.index())
-        }
-        logos_abi::ServiceId::Session => 1 << logos_abi::ServiceId::Terminal.index(),
-        logos_abi::ServiceId::Commands => 1 << logos_abi::ServiceId::Session.index(),
-        logos_abi::ServiceId::Storage => 1 << logos_abi::ServiceId::Commands.index(),
-    }
-}
-
-const fn service_name(service: logos_abi::ServiceId) -> &'static [u8] {
-    match service {
-        logos_abi::ServiceId::Input => b"input",
-        logos_abi::ServiceId::Display => b"display",
-        logos_abi::ServiceId::Terminal => b"terminal",
-        logos_abi::ServiceId::Session => b"session",
-        logos_abi::ServiceId::Commands => b"commands",
-        logos_abi::ServiceId::Storage => b"storage",
     }
 }
 

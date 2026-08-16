@@ -46,16 +46,8 @@ impl Default for ServiceStartup {
 }
 
 fn dependencies_started(service: ServiceId, started: u8) -> bool {
-    match service {
-        ServiceId::Input | ServiceId::Display => true,
-        ServiceId::Terminal => {
-            started & ((1 << ServiceId::Input.index()) | (1 << ServiceId::Display.index()))
-                == ((1 << ServiceId::Input.index()) | (1 << ServiceId::Display.index()))
-        }
-        ServiceId::Session => started & (1 << ServiceId::Terminal.index()) != 0,
-        ServiceId::Commands => started & (1 << ServiceId::Session.index()) != 0,
-        ServiceId::Storage => started & (1 << ServiceId::Commands.index()) != 0,
-    }
+    let dependencies = crate::service_images::service_image(service).dependencies();
+    started & dependencies == dependencies
 }
 
 #[cfg(test)]
