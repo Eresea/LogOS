@@ -8,8 +8,10 @@
 #[cfg(test)]
 extern crate std;
 
-use logos_abi::{MAX_HISTORY_BYTES, MAX_HISTORY_ENTRIES};
-use logos_commands::COMMAND_SPECS;
+use logos_abi::{
+    CompletionRequest, CompletionResponse, CompletionStatus, MAX_COMPLETION_CANDIDATES,
+    MAX_COMPLETION_ITEM_BYTES, MAX_HISTORY_BYTES, MAX_HISTORY_ENTRIES,
+};
 
 pub const MAX_LINE_BYTES: usize = 256;
 pub const MAX_OUTPUT_BYTES: usize = 512;
@@ -17,6 +19,10 @@ const PROMPT: &[u8] = b"\x1b[36mlogos\x1b[0m \x1b[33m>\x1b[0m ";
 const COMMAND_COLOR: &[u8] = b"\x1b[36m";
 const STRING_COLOR: &[u8] = b"\x1b[32m";
 const RESET_COLOR: &[u8] = b"\x1b[0m";
+const DIM_COLOR: &[u8] = b"\x1b[2m";
+const COMPLETION_ERROR: &[u8] = b"\r\ncompletion unavailable\r\n";
+const PROMPT_WIDTH: usize = 8;
+const COMPLETION_TIMEOUT_TICKS: u8 = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShellOutput {
@@ -91,6 +97,20 @@ pub struct LineEditor {
     escape_state: u8,
     escape_param: u8,
     escape_modifier: u8,
+    completion_enabled: bool,
+    completion_requested: bool,
+    completion_next_id: u16,
+    completion_pending_id: Option<u16>,
+    completion_pending_request: Option<CompletionRequest>,
+    completion_wait: u8,
+    completion_active: bool,
+    completion_replace_start: usize,
+    completion_replace_end: usize,
+    completion_count: usize,
+    completion_lengths: [u8; MAX_COMPLETION_CANDIDATES],
+    completion_candidates: [[u8; MAX_COMPLETION_ITEM_BYTES]; MAX_COMPLETION_CANDIDATES],
+    completion_selected: usize,
+    completion_rendered_rows: usize,
 }
 
 /// Entry-ready Session facade over one bounded line-editing operation.
@@ -101,6 +121,10 @@ pub struct SessionService {
 impl SessionService {
     pub const fn new() -> Self {
         Self { session: LineEditor::new() }
+    }
+
+    pub const fn new_with_completion(enabled: bool) -> Self {
+        Self { session: LineEditor::new_with_completion(enabled) }
     }
 
     pub fn prompt(&self, output: &mut ShellOutput) {
@@ -127,6 +151,30 @@ impl SessionService {
         }
         self.prompt(output);
     }
+
+    pub fn take_completion_request(&mut self) -> Option<CompletionRequest> {
+        self.session.take_completion_request()
+    }
+
+    pub fn apply_completion_response(
+        &mut self,
+        response: CompletionResponse,
+        output: &mut ShellOutput,
+    ) {
+        self.session.apply_completion_response(response, output);
+    }
+
+    pub fn completion_pending(&self) -> bool {
+        self.session.completion_pending()
+    }
+
+    pub fn completion_tick(&mut self, output: &mut ShellOutput) {
+        self.session.completion_tick(output);
+    }
+
+    pub fn completion_failed(&mut self, output: &mut ShellOutput) {
+        self.session.completion_failed(output);
+    }
 }
 
 impl Default for SessionService {
@@ -139,6 +187,10 @@ const _: () = assert!(core::mem::size_of::<SessionService>() <= logos_abi::MAX_S
 
 impl LineEditor {
     pub const fn new() -> Self {
+        Self::new_with_completion(true)
+    }
+
+    pub const fn new_with_completion(completion_enabled: bool) -> Self {
         Self {
             line: [0; MAX_LINE_BYTES],
             line_len: 0,
@@ -149,11 +201,177 @@ impl LineEditor {
             escape_state: 0,
             escape_param: 0,
             escape_modifier: 0,
+            completion_enabled,
+            completion_requested: false,
+            completion_next_id: 1,
+            completion_pending_id: None,
+            completion_pending_request: None,
+            completion_wait: 0,
+            completion_active: false,
+            completion_replace_start: 0,
+            completion_replace_end: 0,
+            completion_count: 0,
+            completion_lengths: [0; MAX_COMPLETION_CANDIDATES],
+            completion_candidates: [[0; MAX_COMPLETION_ITEM_BYTES]; MAX_COMPLETION_CANDIDATES],
+            completion_selected: 0,
+            completion_rendered_rows: 0,
         }
     }
 
     pub fn prompt(&self, output: &mut ShellOutput) {
         output.extend(PROMPT);
+    }
+
+    pub fn take_completion_request(&mut self) -> Option<CompletionRequest> {
+        if !self.completion_requested || !self.completion_enabled {
+            self.completion_requested = false;
+            return None;
+        }
+        self.completion_requested = false;
+        let request_id = self.completion_next_id;
+        self.completion_next_id = self.completion_next_id.wrapping_add(1).max(1);
+        let request = CompletionRequest::new(request_id, &self.line[..self.line_len], self.cursor)?;
+        self.completion_pending_id = Some(request_id);
+        self.completion_pending_request = Some(request);
+        self.completion_wait = 0;
+        Some(request)
+    }
+
+    pub fn completion_pending(&self) -> bool {
+        self.completion_pending_id.is_some()
+    }
+
+    pub fn completion_tick(&mut self, output: &mut ShellOutput) {
+        if self.completion_pending_id.is_none() {
+            return;
+        }
+        self.completion_wait = self.completion_wait.saturating_add(1);
+        if self.completion_wait >= COMPLETION_TIMEOUT_TICKS {
+            self.completion_failed(output);
+        }
+    }
+
+    pub fn completion_failed(&mut self, output: &mut ShellOutput) {
+        self.completion_enabled = false;
+        let had_menu = self.completion_active || self.completion_rendered_rows != 0;
+        self.clear_completion_state();
+        if had_menu {
+            self.redraw(output);
+        }
+        output.extend(COMPLETION_ERROR);
+        self.redraw(output);
+    }
+
+    pub fn apply_completion_response(
+        &mut self,
+        response: CompletionResponse,
+        output: &mut ShellOutput,
+    ) {
+        let Some(request) = self.completion_pending_request else { return };
+        if self.completion_pending_id != Some(response.request_id) {
+            return;
+        }
+        if !response.is_valid_for(request) {
+            self.completion_failed(output);
+            return;
+        }
+        self.completion_pending_id = None;
+        self.completion_pending_request = None;
+        self.completion_wait = 0;
+        match response.status {
+            CompletionStatus::Ok if response.candidate_count != 0 => {
+                self.completion_replace_start = usize::from(response.replace_start);
+                self.completion_replace_end = usize::from(response.replace_end);
+                self.completion_count = usize::from(response.candidate_count);
+                self.completion_lengths = response.lengths;
+                self.completion_candidates = response.candidates;
+                self.completion_selected = 0;
+                self.completion_active = true;
+                self.redraw(output);
+            }
+            CompletionStatus::NoMatch => {
+                self.dismiss_completion(output);
+            }
+            CompletionStatus::Unavailable | CompletionStatus::Malformed => {
+                self.completion_enabled = false;
+                self.completion_failed(output);
+            }
+            CompletionStatus::Ok => {}
+        }
+    }
+
+    fn request_completion(&mut self) {
+        if self.completion_enabled && self.completion_pending_id.is_none() {
+            self.completion_requested = true;
+        }
+    }
+
+    fn clear_completion_state(&mut self) {
+        self.completion_requested = false;
+        self.completion_pending_id = None;
+        self.completion_pending_request = None;
+        self.completion_wait = 0;
+        self.completion_active = false;
+        self.completion_count = 0;
+        self.completion_selected = 0;
+    }
+
+    fn dismiss_completion(&mut self, output: &mut ShellOutput) {
+        let had_menu = self.completion_active || self.completion_rendered_rows != 0;
+        self.clear_completion_state();
+        if had_menu {
+            self.redraw(output);
+        }
+    }
+
+    fn select_completion(&mut self, direction: isize, output: &mut ShellOutput) {
+        if self.completion_count == 0 {
+            return;
+        }
+        self.completion_selected = if direction < 0 {
+            if self.completion_selected == 0 {
+                self.completion_count - 1
+            } else {
+                self.completion_selected - 1
+            }
+        } else {
+            (self.completion_selected + 1) % self.completion_count
+        };
+        self.redraw(output);
+    }
+
+    fn accept_completion(&mut self, output: &mut ShellOutput) {
+        let Some(candidate) = self.completion_candidate(self.completion_selected) else {
+            return;
+        };
+        let mut replacement = [0; MAX_COMPLETION_ITEM_BYTES];
+        replacement[..candidate.len()].copy_from_slice(candidate);
+        let replacement_len = candidate.len();
+        let start = self.completion_replace_start.min(self.line_len);
+        let end = self.completion_replace_end.min(self.line_len).max(start);
+        let Some(new_len) = start
+            .checked_add(replacement_len)
+            .and_then(|length| length.checked_add(self.line_len - end))
+        else {
+            return;
+        };
+        if new_len > MAX_LINE_BYTES {
+            return;
+        }
+        self.line.copy_within(end..self.line_len, start + replacement_len);
+        self.line[start..start + replacement_len].copy_from_slice(&replacement[..replacement_len]);
+        self.line_len = new_len;
+        self.cursor = start + replacement_len;
+        self.clear_completion_state();
+        self.redraw(output);
+    }
+
+    fn completion_candidate(&self, index: usize) -> Option<&[u8]> {
+        if index >= self.completion_count || index >= MAX_COMPLETION_CANDIDATES {
+            return None;
+        }
+        let length = usize::from(self.completion_lengths[index]);
+        (length <= MAX_COMPLETION_ITEM_BYTES).then(|| &self.completion_candidates[index][..length])
     }
 
     pub fn input_for_command(
@@ -165,6 +383,31 @@ impl LineEditor {
         let mut index = 0;
         while index < bytes.len() {
             let byte = bytes[index];
+            if self.completion_active {
+                if bytes[index..].starts_with(b"\x1b[A") {
+                    self.select_completion(-1, output);
+                    index += 3;
+                    continue;
+                }
+                if bytes[index..].starts_with(b"\x1b[B") {
+                    self.select_completion(1, output);
+                    index += 3;
+                    continue;
+                }
+                if byte == b'\t' {
+                    self.accept_completion(output);
+                    index += 1;
+                    continue;
+                }
+                if byte == 0x1b {
+                    self.dismiss_completion(output);
+                    index += 1;
+                    continue;
+                }
+                self.dismiss_completion(output);
+            } else if self.completion_pending_id.is_some() && byte != b'\t' {
+                self.clear_completion_state();
+            }
             if self.escape_state != 0 {
                 self.feed_escape(byte, output);
                 index += 1;
@@ -194,7 +437,7 @@ impl LineEditor {
                 0x0c => self.clear_screen(output),
                 0x15 => self.clear_line(output),
                 0x17 => self.delete_word(output),
-                b'\t' => self.complete(output),
+                b'\t' => self.request_completion(),
                 0x08 | 0x7f => self.backspace(output),
                 0x20..=0x7e | 0x80..=0xff => self.insert(&[byte], output),
                 _ => {}
@@ -289,59 +532,6 @@ impl LineEditor {
         self.cursor += bytes.len();
         self.line_len += bytes.len();
         self.redraw(output);
-    }
-
-    fn complete(&mut self, output: &mut ShellOutput) {
-        if self.cursor != self.line_len
-            || self.line[..self.cursor].contains(&b' ')
-            || self.line[..self.cursor].contains(&b'(')
-            || self.line[..self.cursor].contains(&b'[')
-        {
-            return;
-        }
-        let prefix = &self.line[..self.cursor];
-        let mut matches = [0; COMMAND_SPECS.len()];
-        let mut count = 0;
-        for (index, candidate) in COMMAND_SPECS.iter().enumerate() {
-            if candidate.name.starts_with(prefix) {
-                matches[count] = index;
-                count += 1;
-            }
-        }
-        match count {
-            0 => {}
-            1 => {
-                let spec = COMMAND_SPECS[matches[0]];
-                let candidate = spec.name;
-                let suffix = &candidate[prefix.len()..];
-                let punctuation: &[u8] = match spec.kind {
-                    logos_commands::CommandKind::Service => b"[\"",
-                    logos_commands::CommandKind::Network => b".",
-                    _ => b"()",
-                };
-                let inserted_len = suffix.len() + punctuation.len();
-                if self.line_len + inserted_len <= MAX_LINE_BYTES {
-                    let end = self.line_len + suffix.len();
-                    self.line[self.line_len..end].copy_from_slice(suffix);
-                    self.line[end..end + punctuation.len()].copy_from_slice(punctuation);
-                    self.line_len += inserted_len;
-                    self.cursor = self.line_len;
-                    output.extend(suffix);
-                    output.extend(punctuation);
-                }
-            }
-            _ => {
-                output.extend(b"\r\n");
-                for index in 0..count {
-                    if index > 0 {
-                        output.extend(b"  ");
-                    }
-                    output.extend(COMMAND_SPECS[matches[index]].name);
-                }
-                output.extend(b"\r\n");
-                self.redraw(output);
-            }
-        }
     }
 
     fn backspace(&mut self, output: &mut ShellOutput) {
@@ -456,13 +646,80 @@ impl LineEditor {
         self.redraw(output);
     }
 
-    fn redraw(&self, output: &mut ShellOutput) {
+    fn redraw(&mut self, output: &mut ShellOutput) {
+        self.clear_completion_rows(output);
         output.push(b'\r');
         self.prompt(output);
         self.highlight_line(output);
+        let ghost_width = self.append_completion_ghost(output);
         output.extend(RESET_COLOR);
         output.extend(b"\x1b[K");
-        move_cursor(output, b'D', display_width(&self.line[self.cursor..self.line_len]));
+        move_cursor(
+            output,
+            b'D',
+            display_width(&self.line[self.cursor..self.line_len]) + ghost_width,
+        );
+        if self.completion_active && self.completion_count != 0 {
+            move_cursor(output, b'B', 1);
+            for index in 0..self.completion_count {
+                output.push(b'\r');
+                if index == self.completion_selected {
+                    output.extend(COMMAND_COLOR);
+                    output.extend(b"> ");
+                    output.extend(RESET_COLOR);
+                } else {
+                    output.extend(b"  ");
+                }
+                self.append_completion_display(index, output);
+                output.extend(b"\x1b[K");
+                if index + 1 < self.completion_count {
+                    move_cursor(output, b'B', 1);
+                }
+            }
+            move_cursor(output, b'A', self.completion_count);
+            output.push(b'\r');
+            move_cursor(output, b'C', PROMPT_WIDTH + display_width(&self.line[..self.cursor]));
+            self.completion_rendered_rows = self.completion_count;
+        }
+    }
+
+    fn clear_completion_rows(&mut self, output: &mut ShellOutput) {
+        if self.completion_rendered_rows == 0 {
+            return;
+        }
+        output.push(b'\r');
+        move_cursor(output, b'B', self.completion_rendered_rows);
+        for _ in 0..self.completion_rendered_rows {
+            output.extend(b"\r\x1b[K");
+            move_cursor(output, b'A', 1);
+        }
+        self.completion_rendered_rows = 0;
+    }
+
+    fn append_completion_ghost(&self, output: &mut ShellOutput) -> usize {
+        let Some(candidate) = self.completion_candidate(self.completion_selected) else {
+            return 0;
+        };
+        let start = self.completion_replace_start.min(self.line_len);
+        let end = self.completion_replace_end.min(self.line_len).max(start);
+        let prefix = &self.line[start..end];
+        if !candidate.starts_with(prefix) {
+            return 0;
+        }
+        let ghost = &candidate[prefix.len()..];
+        output.extend(DIM_COLOR);
+        output.extend(ghost);
+        output.extend(RESET_COLOR);
+        display_width(ghost)
+    }
+
+    fn append_completion_display(&self, index: usize, output: &mut ShellOutput) {
+        let Some(candidate) = self.completion_candidate(index) else { return };
+        let start = self.completion_replace_start.min(self.line_len);
+        let end = self.completion_replace_end.min(self.line_len).max(start);
+        output.extend(&self.line[..start]);
+        output.extend(candidate);
+        output.extend(&self.line[end..self.line_len]);
     }
 
     fn highlight_line(&self, output: &mut ShellOutput) {
@@ -749,22 +1006,70 @@ mod tests {
     }
 
     #[test]
-    fn tab_completes_builtins_and_lists_all_at_empty_prompt() {
+    fn targeted_completion_renders_ghost_and_accepts_with_tab() {
         let mut editor = LineEditor::new();
         let mut command = [0; MAX_LINE_BYTES];
         let mut output = ShellOutput::new();
-        let length = editor.input_for_command(b"he\t\r", &mut command, &mut output).unwrap();
-        assert_eq!(&command[..length], b"help()");
+        editor.input_for_command(b"he\t", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.replace_end = 2;
+        assert!(response.push_candidate(b"help()"));
+        editor.apply_completion_response(response, &mut output);
+        assert!(output.as_bytes().windows(DIM_COLOR.len()).any(|window| window == DIM_COLOR));
 
-        let mut editor = LineEditor::new();
         output = ShellOutput::new();
-        let length = editor.input_for_command(b"serv\t\r", &mut command, &mut output).unwrap();
-        assert_eq!(&command[..length], b"service[\"");
+        editor.input_for_command(b"\t\r", &mut command, &mut output);
+        assert_eq!(&command[..6], b"help()");
+    }
 
+    #[test]
+    fn targeted_completion_navigates_and_dismisses() {
         let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"net.", &mut command, &mut output);
+        editor.input_for_command(b"\t", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.replace_start = 4;
+        response.replace_end = 4;
+        assert!(response.push_candidate(b"status"));
+        assert!(response.push_candidate(b"ping()"));
+        editor.apply_completion_response(response, &mut output);
+        editor.input_for_command(b"\x1b[B\t", &mut command, &mut output);
+        assert_eq!(&editor.line[..editor.line_len], b"net.ping()");
+
+        editor.input_for_command(b"\t", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.replace_start = 10;
+        response.replace_end = 10;
+        assert!(response.push_candidate(b"status"));
+        editor.apply_completion_response(response, &mut output);
+        editor.input_for_command(b"\x1b", &mut command, &mut output);
+        assert_eq!(&editor.line[..editor.line_len], b"net.ping()");
+    }
+
+    #[test]
+    fn completion_failure_disables_provider_after_one_diagnostic() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"he\t", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        editor.apply_completion_response(
+            CompletionResponse::empty(request.request_id, CompletionStatus::Unavailable),
+            &mut output,
+        );
+        assert!(
+            output
+                .as_bytes()
+                .windows(b"completion unavailable".len())
+                .any(|window| { window == b"completion unavailable" })
+        );
         output = ShellOutput::new();
         editor.input_for_command(b"\t", &mut command, &mut output);
-        assert!(output.as_bytes().windows(4).any(|window| window == b"help"));
-        assert!(output.as_bytes().windows(7).any(|window| window == b"version"));
+        assert!(editor.take_completion_request().is_none());
     }
 }
