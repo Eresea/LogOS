@@ -514,8 +514,16 @@ impl CompletionService {
                 }
             }
             logos_commands::CompletionTarget::FilesystemMember => {
-                for candidate in logos_commands::FILESYSTEM_COMPLETION_MEMBERS {
-                    if candidate.starts_with(context.prefix) && !response.push_candidate(candidate)
+                for (index, candidate) in
+                    logos_commands::FILESYSTEM_COMPLETION_MEMBERS.iter().enumerate()
+                {
+                    if candidate.starts_with(context.prefix)
+                        && !response.push_candidate_with_cursor(
+                            candidate,
+                            usize::from(
+                                logos_commands::FILESYSTEM_COMPLETION_CURSOR_OFFSETS[index],
+                            ),
+                        )
                     {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
                         break;
@@ -1876,7 +1884,12 @@ mod tests {
         assert_eq!(echo.cursor_offsets[0], 6);
 
         let fs = provider.complete(CompletionRequest::new(5, b"fs.r", 4).unwrap());
-        assert_eq!(fs.candidate(0), Some(&b"read()"[..]));
+        assert_eq!(fs.candidate(0), Some(&b"read(\"\")"[..]));
+        assert_eq!(fs.cursor_offsets[0], 6);
+
+        let fs_write = provider.complete(CompletionRequest::new(7, b"fs.w", 4).unwrap());
+        assert_eq!(fs_write.candidate(0), Some(&b"write(\"\", \"\")"[..]));
+        assert_eq!(fs_write.cursor_offsets[0], 7);
 
         let sys = provider.complete(CompletionRequest::new(6, b"sys.v", 5).unwrap());
         assert_eq!(sys.candidate(0), Some(&b"version()"[..]));

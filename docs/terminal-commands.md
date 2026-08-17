@@ -80,7 +80,7 @@ Late responses are ignored when their request ID or line revision is stale.
 The current targets are root expressions (`he` → `help()`, `serv` → `service["`), live service
 registry names, service members (`status`, `name`, `version`, `start()`, `stop()`, `restart()`),
 system members (`version()`, `uname()`, `shutdown()`, `reboot()`), filesystem members
-(`list()`, `create()`, `read()`, `write()`, `remove()`, `move()`), network members (`status`,
+(`list()`, `create("")`, `read("")`, `write("", "")`, `remove("")`, `move("", "")`), network members (`status`,
 `ping()`, `tcp-probe()`, `interface["`), and the fixed `eth0` interface entry. Filesystem paths
 and arbitrary method arguments remain deferred. Candidate payloads are fixed-size and bounded. A
 provider error or timeout prints `completion unavailable` once and disables completion for that
