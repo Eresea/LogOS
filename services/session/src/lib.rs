@@ -387,6 +387,7 @@ impl LineEditor {
     ) -> Option<usize> {
         let mut index = 0;
         while index < bytes.len() {
+            let line_revision = self.line_revision;
             let byte = bytes[index];
             if self.completion_active {
                 if bytes[index..].starts_with(b"\x1b[A") {
@@ -401,6 +402,7 @@ impl LineEditor {
                 }
                 if byte == b'\t' {
                     self.accept_completion(output);
+                    self.request_completion();
                     index += 1;
                     continue;
                 }
@@ -415,12 +417,16 @@ impl LineEditor {
             }
             if self.escape_state != 0 {
                 self.feed_escape(byte, output);
+                if self.line_revision != line_revision {
+                    self.request_completion();
+                }
                 index += 1;
                 continue;
             }
             let width = if byte >= 0x80 { utf8_sequence_width(&bytes[index..]) } else { 1 };
             if width > 1 {
                 self.insert(&bytes[index..index + width], output);
+                self.request_completion();
                 index += width;
                 continue;
             }
@@ -433,6 +439,7 @@ impl LineEditor {
                     command[..length].copy_from_slice(&line[..length]);
                     self.line_len = 0;
                     self.cursor = 0;
+                    self.clear_completion_state();
                     self.bump_line_revision();
                     output.extend(b"\r\n");
                     return Some(length);
@@ -447,6 +454,9 @@ impl LineEditor {
                 0x08 | 0x7f => self.backspace(output),
                 0x20..=0x7e | 0x80..=0xff => self.insert(&[byte], output),
                 _ => {}
+            }
+            if self.line_revision != line_revision {
+                self.request_completion();
             }
             index += 1;
         }
@@ -1021,6 +1031,26 @@ mod tests {
         let length = editor.input_for_command(b"\xc3\xa9\r", &mut command, &mut output).unwrap();
         assert_eq!(length, MAX_LINE_BYTES - 1);
         assert_eq!(&command[..length], &prefix);
+    }
+
+    #[test]
+    fn proactive_completion_requests_follow_line_edits() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+
+        editor.input_for_command(b"he", &mut command, &mut output);
+        let first = editor.take_completion_request().unwrap();
+        assert_eq!(first.line(), Some(&b"he"[..]));
+
+        editor.input_for_command(b"l", &mut command, &mut output);
+        let second = editor.take_completion_request().unwrap();
+        assert_ne!(second.request_id, first.request_id);
+        assert_ne!(second.line_revision, first.line_revision);
+        assert_eq!(second.line(), Some(&b"hel"[..]));
+
+        editor.input_for_command(b"p\r", &mut command, &mut output);
+        assert!(editor.take_completion_request().is_none());
     }
 
     #[test]
