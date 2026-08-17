@@ -51,6 +51,10 @@ pub const INPUT_KEYBOARD_RING_BASE: usize = 0x0000_0100_1100_0000;
 pub const KEYBOARD_RING_CAPACITY: usize = 256;
 pub const IPC_PAGE_BYTES: usize = 4096;
 pub const MAX_IPC_BYTES: usize = 256;
+pub const COMPLETION_ABI_VERSION: u8 = 1;
+pub const MAX_COMPLETION_LINE_BYTES: usize = 248;
+pub const MAX_COMPLETION_CANDIDATES: usize = 8;
+pub const MAX_COMPLETION_ITEM_BYTES: usize = 24;
 pub const IPC_FLAG_MORE: u8 = 1 << 0;
 pub const RENDER_FLAG_MORE: u8 = IPC_FLAG_MORE;
 pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
@@ -837,6 +841,8 @@ pub enum MessageKind {
     StorageResponse = 9,
     NetworkRequest = 10,
     NetworkResponse = 11,
+    CompletionRequest = 12,
+    CompletionResponse = 13,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1112,6 +1118,136 @@ impl IpcBytes {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
+pub struct CompletionRequest {
+    pub version: u8,
+    pub reserved: u8,
+    pub request_id: u16,
+    pub cursor: u16,
+    pub line_len: u8,
+    pub reserved_tail: u8,
+    pub line: [u8; MAX_COMPLETION_LINE_BYTES],
+}
+
+impl CompletionRequest {
+    pub fn new(request_id: u16, line: &[u8], cursor: usize) -> Option<Self> {
+        if request_id == 0 || line.len() > MAX_COMPLETION_LINE_BYTES || cursor > line.len() {
+            return None;
+        }
+        let mut request = Self {
+            version: COMPLETION_ABI_VERSION,
+            reserved: 0,
+            request_id,
+            cursor: cursor as u16,
+            line_len: line.len() as u8,
+            reserved_tail: 0,
+            line: [0; MAX_COMPLETION_LINE_BYTES],
+        };
+        request.line[..line.len()].copy_from_slice(line);
+        Some(request)
+    }
+
+    pub fn is_valid(self) -> bool {
+        self.version == COMPLETION_ABI_VERSION
+            && self.reserved == 0
+            && self.request_id != 0
+            && self.reserved_tail == 0
+            && usize::from(self.line_len) <= MAX_COMPLETION_LINE_BYTES
+            && usize::from(self.cursor) <= usize::from(self.line_len)
+    }
+
+    pub fn line(&self) -> Option<&[u8]> {
+        self.is_valid().then(|| &self.line[..usize::from(self.line_len)])
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum CompletionStatus {
+    Ok = 0,
+    NoMatch = 1,
+    Unavailable = 2,
+    Malformed = 3,
+}
+
+impl CompletionStatus {
+    pub const fn is_valid(self) -> bool {
+        matches!(self, Self::Ok | Self::NoMatch | Self::Unavailable | Self::Malformed)
+    }
+}
+
+pub const COMPLETION_FLAG_TRUNCATED: u8 = 1 << 0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct CompletionResponse {
+    pub version: u8,
+    pub status: CompletionStatus,
+    pub request_id: u16,
+    pub replace_start: u8,
+    pub replace_end: u8,
+    pub candidate_count: u8,
+    pub flags: u8,
+    pub lengths: [u8; MAX_COMPLETION_CANDIDATES],
+    pub candidates: [[u8; MAX_COMPLETION_ITEM_BYTES]; MAX_COMPLETION_CANDIDATES],
+}
+
+impl CompletionResponse {
+    pub const fn empty(request_id: u16, status: CompletionStatus) -> Self {
+        Self {
+            version: COMPLETION_ABI_VERSION,
+            status,
+            request_id,
+            replace_start: 0,
+            replace_end: 0,
+            candidate_count: 0,
+            flags: 0,
+            lengths: [0; MAX_COMPLETION_CANDIDATES],
+            candidates: [[0; MAX_COMPLETION_ITEM_BYTES]; MAX_COMPLETION_CANDIDATES],
+        }
+    }
+
+    pub fn push_candidate(&mut self, candidate: &[u8]) -> bool {
+        let index = usize::from(self.candidate_count);
+        if index >= MAX_COMPLETION_CANDIDATES || candidate.len() > MAX_COMPLETION_ITEM_BYTES {
+            return false;
+        }
+        self.candidates[index][..candidate.len()].copy_from_slice(candidate);
+        self.lengths[index] = candidate.len() as u8;
+        self.candidate_count += 1;
+        true
+    }
+
+    pub fn candidate(&self, index: usize) -> Option<&[u8]> {
+        if index >= usize::from(self.candidate_count)
+            || index >= MAX_COMPLETION_CANDIDATES
+            || usize::from(self.lengths[index]) > MAX_COMPLETION_ITEM_BYTES
+        {
+            return None;
+        }
+        Some(&self.candidates[index][..usize::from(self.lengths[index])])
+    }
+
+    pub fn is_valid_for(self, request: CompletionRequest) -> bool {
+        self.version == COMPLETION_ABI_VERSION
+            && self.status.is_valid()
+            && self.request_id == request.request_id
+            && self.flags & !COMPLETION_FLAG_TRUNCATED == 0
+            && usize::from(self.candidate_count) <= MAX_COMPLETION_CANDIDATES
+            && self.replace_start <= self.replace_end
+            && usize::from(self.replace_end) <= usize::from(request.line_len)
+            && self
+                .lengths
+                .iter()
+                .take(usize::from(self.candidate_count))
+                .all(|length| usize::from(*length) <= MAX_COMPLETION_ITEM_BYTES)
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<CompletionRequest>() <= MAX_IPC_BYTES);
+const _: () = assert!(core::mem::size_of::<CompletionResponse>() <= MAX_IPC_BYTES);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
 pub struct EndpointHeader {
     pub abi_version: u16,
     pub generation: u16,
@@ -1375,6 +1511,26 @@ mod tests {
         assert!(
             IpcBytes::from_bytes(MessageKind::SessionOutput, &[0; MAX_IPC_BYTES + 1]).is_none()
         );
+    }
+
+    #[test]
+    fn completion_messages_are_bounded_and_correlated() {
+        let request = CompletionRequest::new(7, b"service[\"st", 11).unwrap();
+        assert!(request.is_valid());
+        assert_eq!(request.line(), Some(&b"service[\"st"[..]));
+        assert!(CompletionRequest::new(0, b"x", 1).is_none());
+        assert!(CompletionRequest::new(8, &[b'x'; MAX_COMPLETION_LINE_BYTES + 1], 0).is_none());
+
+        let mut response = CompletionResponse::empty(7, CompletionStatus::Ok);
+        response.replace_start = 9;
+        response.replace_end = 11;
+        assert!(response.push_candidate(b"orage\"]"));
+        assert!(response.is_valid_for(request));
+        assert_eq!(response.candidate(0), Some(&b"orage\"]"[..]));
+
+        let mut stale = response;
+        stale.request_id = 8;
+        assert!(!stale.is_valid_for(request));
     }
 
     #[test]
