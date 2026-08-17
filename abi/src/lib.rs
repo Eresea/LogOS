@@ -1188,6 +1188,7 @@ pub struct CompletionResponse {
     pub candidate_count: u8,
     pub flags: u8,
     pub lengths: [u8; MAX_COMPLETION_CANDIDATES],
+    pub cursor_offsets: [u8; MAX_COMPLETION_CANDIDATES],
     pub candidates: [[u8; MAX_COMPLETION_ITEM_BYTES]; MAX_COMPLETION_CANDIDATES],
 }
 
@@ -1203,17 +1204,26 @@ impl CompletionResponse {
             candidate_count: 0,
             flags: 0,
             lengths: [0; MAX_COMPLETION_CANDIDATES],
+            cursor_offsets: [0; MAX_COMPLETION_CANDIDATES],
             candidates: [[0; MAX_COMPLETION_ITEM_BYTES]; MAX_COMPLETION_CANDIDATES],
         }
     }
 
     pub fn push_candidate(&mut self, candidate: &[u8]) -> bool {
+        self.push_candidate_with_cursor(candidate, candidate.len())
+    }
+
+    pub fn push_candidate_with_cursor(&mut self, candidate: &[u8], cursor_offset: usize) -> bool {
         let index = usize::from(self.candidate_count);
-        if index >= MAX_COMPLETION_CANDIDATES || candidate.len() > MAX_COMPLETION_ITEM_BYTES {
+        if index >= MAX_COMPLETION_CANDIDATES
+            || candidate.len() > MAX_COMPLETION_ITEM_BYTES
+            || cursor_offset > candidate.len()
+        {
             return false;
         }
         self.candidates[index][..candidate.len()].copy_from_slice(candidate);
         self.lengths[index] = candidate.len() as u8;
+        self.cursor_offsets[index] = cursor_offset as u8;
         self.candidate_count += 1;
         true
     }
@@ -1237,11 +1247,12 @@ impl CompletionResponse {
             && usize::from(self.candidate_count) <= MAX_COMPLETION_CANDIDATES
             && self.replace_start <= self.replace_end
             && usize::from(self.replace_end) <= usize::from(request.line_len)
-            && self
-                .lengths
-                .iter()
-                .take(usize::from(self.candidate_count))
-                .all(|length| usize::from(*length) <= MAX_COMPLETION_ITEM_BYTES)
+            && self.lengths.iter().take(usize::from(self.candidate_count)).enumerate().all(
+                |(index, length)| {
+                    usize::from(*length) <= MAX_COMPLETION_ITEM_BYTES
+                        && usize::from(self.cursor_offsets[index]) <= usize::from(*length)
+                },
+            )
     }
 }
 
@@ -1529,6 +1540,12 @@ mod tests {
         assert!(response.push_candidate(b"orage\"]"));
         assert!(response.is_valid_for(request));
         assert_eq!(response.candidate(0), Some(&b"orage\"]"[..]));
+
+        let mut helper = CompletionResponse::empty(7, CompletionStatus::Ok);
+        helper.replace_end = 4;
+        assert!(helper.push_candidate_with_cursor(b"echo(\"\")", 6));
+        assert_eq!(helper.cursor_offsets[0], 6);
+        assert!(helper.is_valid_for(request));
 
         let mut stale_revision = response;
         stale_revision.line_revision = request.line_revision.wrapping_add(1);
