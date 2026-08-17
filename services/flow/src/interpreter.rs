@@ -12,6 +12,7 @@ pub const MAX_STATEMENTS: usize = 16;
 pub const MAX_VARIABLES: usize = 8;
 pub const MAX_ARGUMENTS: usize = 3;
 pub const MAX_VARIABLE_NAME_BYTES: usize = 24;
+pub const MAX_FILE_PATH_BYTES: usize = 256;
 pub const MAX_PROMISES: usize = 4;
 pub const MAX_CALLBACK_DEPTH: usize = 4;
 pub const MAX_VALUE_BYTES: usize = 8192;
@@ -116,8 +117,8 @@ impl OperationRegistry {
             OperationSignature::new(
                 NamespaceKind::Filesystem,
                 b"list",
-                [FlowType::String, FlowType::Void, FlowType::Void],
-                1,
+                [FlowType::Void, FlowType::Void, FlowType::Void],
+                0,
                 PromiseType::String.flow_type(),
             ),
             OperationSignature::new(
@@ -308,7 +309,7 @@ pub enum FlowValue {
     String { bytes: [u8; MAX_VALUE_BYTES], len: usize },
     Bytes { bytes: [u8; MAX_VALUE_BYTES], len: usize },
     Response { status: u16, body: [u8; MAX_VALUE_BYTES], body_len: usize },
-    FileHandle { path: [u8; MAX_VARIABLE_NAME_BYTES], path_len: usize, create: bool },
+    FileHandle { path: [u8; MAX_FILE_PATH_BYTES], path_len: usize, create: bool },
 }
 
 impl FlowValue {
@@ -341,6 +342,15 @@ impl FlowValue {
         let mut value = [0; MAX_VALUE_BYTES];
         value[..bytes.len()].copy_from_slice(bytes);
         Some(Self::String { bytes: value, len: bytes.len() })
+    }
+
+    pub fn response(status: u16, body: &[u8]) -> Option<Self> {
+        if body.len() > MAX_VALUE_BYTES {
+            return None;
+        }
+        let mut value = [0; MAX_VALUE_BYTES];
+        value[..body.len()].copy_from_slice(body);
+        Some(Self::Response { status, body: value, body_len: body.len() })
     }
 
     pub fn bytes(self, output: &mut [u8]) -> Option<usize> {
@@ -461,6 +471,24 @@ impl PromiseTable {
             PromiseState::Vacant => Err(PromiseError::InvalidHandle),
         }
     }
+
+    pub fn peek(&self, handle: PromiseHandle) -> Result<FlowValue, PromiseError> {
+        let slot = self.slots.get(handle.index()).ok_or(PromiseError::InvalidHandle)?;
+        match slot.state {
+            PromiseState::Ready => slot.result.ok_or(PromiseError::NotReady),
+            PromiseState::Pending => Err(PromiseError::NotReady),
+            PromiseState::Rejected | PromiseState::Cancelled => Err(PromiseError::AlreadyComplete),
+            PromiseState::Vacant => Err(PromiseError::InvalidHandle),
+        }
+    }
+
+    fn reclaim_unreferenced(&mut self, referenced: &[bool; MAX_PROMISES]) {
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            if !referenced[index] {
+                *slot = PromiseSlot::EMPTY;
+            }
+        }
+    }
 }
 
 impl Default for PromiseTable {
@@ -493,12 +521,55 @@ impl FlowRuntime {
         self.variables.slot(name).and_then(|slot| self.values[slot])
     }
 
+    pub fn set_variable(&mut self, name: &[u8], value: FlowValue) -> bool {
+        let Some(slot) = self.variables.slot(name) else { return false };
+        self.values[slot] = Some(value);
+        true
+    }
+
     pub fn resolve(&mut self, handle: PromiseHandle, value: FlowValue) -> Result<(), PromiseError> {
         self.promises.resolve(handle, value)
     }
 
     pub fn cancel(&mut self, handle: PromiseHandle) -> Result<(), PromiseError> {
         self.promises.cancel(handle)
+    }
+
+    pub fn promise(&self, name: &[u8]) -> Option<(PromiseHandle, PromiseType)> {
+        let value = self.variable(name)?;
+        let FlowValue::Promise { handle, kind } = value else { return None };
+        Some((handle, kind))
+    }
+
+    pub fn promise_state(&self, name: &[u8]) -> Option<PromiseState> {
+        self.promise(name).and_then(|(handle, _)| self.promises.state(handle).ok())
+    }
+
+    pub fn resolve_variable(&mut self, name: &[u8], value: FlowValue) -> Result<(), PromiseError> {
+        let (handle, _) = self.promise(name).ok_or(PromiseError::InvalidHandle)?;
+        self.promises.resolve(handle, value)
+    }
+
+    pub fn take_variable(&mut self, name: &[u8]) -> Result<FlowValue, PromiseError> {
+        let (handle, _) = self.promise(name).ok_or(PromiseError::InvalidHandle)?;
+        self.promises.take(handle)
+    }
+
+    pub fn cancel_variable(&mut self, name: &[u8]) -> Result<(), PromiseError> {
+        let (handle, _) = self.promise(name).ok_or(PromiseError::InvalidHandle)?;
+        self.promises.cancel(handle)
+    }
+
+    pub fn reclaim_temporary_promises(&mut self) {
+        let mut referenced = [false; MAX_PROMISES];
+        for value in self.values.iter().flatten() {
+            if let FlowValue::Promise { handle, .. } = value {
+                if handle.index() < MAX_PROMISES {
+                    referenced[handle.index()] = true;
+                }
+            }
+        }
+        self.promises.reclaim_unreferenced(&referenced);
     }
 }
 
@@ -1395,6 +1466,14 @@ struct Evaluator<'a, 'p> {
 }
 
 impl<'a, 'p> Evaluator<'a, 'p> {
+    fn type_checker(&self) -> TypeChecker<'a, 'p> {
+        let mut variables = self.runtime.variables;
+        if let Some((parameter, value)) = self.callback_value {
+            let _ = variables.declare(parameter, value.kind(), Span::EMPTY);
+        }
+        TypeChecker { program: self.program, variables }
+    }
+
     fn expression(&mut self, id: ExprId) -> Result<FlowEvalResult, FlowEvalError> {
         let node = self.program.expression(id);
         match node.kind {
@@ -1414,7 +1493,7 @@ impl<'a, 'p> Evaluator<'a, 'p> {
                 let FlowEvalResult::Ready(FlowValue::Promise { handle, .. }) = value else {
                     return Err(FlowEvalError::Type(FlowTypeError::ExpectedPromise(node.span)));
                 };
-                match self.runtime.promises.take(handle) {
+                match self.runtime.promises.peek(handle) {
                     Ok(value) => Ok(FlowEvalResult::Ready(value)),
                     Err(PromiseError::NotReady) => Ok(FlowEvalResult::Pending(handle)),
                     Err(error) => Err(FlowEvalError::Promise(error)),
@@ -1453,14 +1532,12 @@ impl<'a, 'p> Evaluator<'a, 'p> {
         let callee_node = self.program.expression(callee);
         if let ExprKind::Name(name) = callee_node.kind {
             if name == b"clear" {
-                let mut checker =
-                    TypeChecker { program: self.program, variables: self.runtime.variables };
+                let mut checker = self.type_checker();
                 checker.expr_type(call_id).map_err(FlowEvalError::Type)?;
                 return Ok(FlowEvalResult::Ready(FlowValue::Void));
             }
             if name == b"echo" {
-                let mut checker =
-                    TypeChecker { program: self.program, variables: self.runtime.variables };
+                let mut checker = self.type_checker();
                 checker.expr_type(call_id).map_err(FlowEvalError::Type)?;
                 let FlowEvalResult::Ready(FlowValue::String { bytes, len }) =
                     self.expression(args[0])?
@@ -1472,8 +1549,7 @@ impl<'a, 'p> Evaluator<'a, 'p> {
                 ));
             }
             if name == b"help" {
-                let mut checker =
-                    TypeChecker { program: self.program, variables: self.runtime.variables };
+                let mut checker = self.type_checker();
                 checker.expr_type(call_id).map_err(FlowEvalError::Type)?;
                 let mut topic = [0; MAX_VALUE_BYTES];
                 let topic_len = if let Some(argument) = args.first() {
@@ -1500,6 +1576,25 @@ impl<'a, 'p> Evaluator<'a, 'p> {
             }
         }
         if let ExprKind::Member { base, name } = callee_node.kind {
+            if matches!(name, b"open" | b"touch") {
+                let mut checker = self.type_checker();
+                checker.expr_type(call_id).map_err(FlowEvalError::Type)?;
+                let FlowEvalResult::Ready(FlowValue::String { bytes, len }) =
+                    self.expression(args[0])?
+                else {
+                    return Err(FlowEvalError::Unsupported(span));
+                };
+                if len > MAX_FILE_PATH_BYTES {
+                    return Err(FlowEvalError::Unsupported(span));
+                }
+                let mut path = [0; MAX_FILE_PATH_BYTES];
+                path[..len].copy_from_slice(&bytes[..len]);
+                return Ok(FlowEvalResult::Ready(FlowValue::FileHandle {
+                    path,
+                    path_len: len,
+                    create: name == b"touch",
+                }));
+            }
             if name == b"cancel" {
                 if let FlowEvalResult::Ready(FlowValue::Promise { handle, .. }) =
                     self.expression(base)?
@@ -1534,7 +1629,7 @@ impl<'a, 'p> Evaluator<'a, 'p> {
                         == PromiseState::Ready
                     {
                         let value =
-                            self.runtime.promises.take(handle).map_err(FlowEvalError::Promise)?;
+                            self.runtime.promises.peek(handle).map_err(FlowEvalError::Promise)?;
                         self.callback_value = Some((parameter, value));
                         let callback_result = if let Some(expression) = expression {
                             self.expression(expression)?
@@ -1561,6 +1656,12 @@ impl<'a, 'p> Evaluator<'a, 'p> {
                                 Ok(FlowEvalResult::Ready(FlowValue::Promise { handle, kind }))
                             }
                             FlowEvalResult::Ready(value) => {
+                                if let FlowValue::Promise { handle, kind } = value {
+                                    return Ok(FlowEvalResult::Ready(FlowValue::Promise {
+                                        handle,
+                                        kind,
+                                    }));
+                                }
                                 let promise_kind = promise_type(value.kind())
                                     .ok_or(FlowEvalError::Unsupported(span))?;
                                 let output = self
@@ -1582,7 +1683,7 @@ impl<'a, 'p> Evaluator<'a, 'p> {
                 }
             }
         }
-        let mut checker = TypeChecker { program: self.program, variables: self.runtime.variables };
+        let mut checker = self.type_checker();
         let kind = checker.expr_type(call_id).map_err(FlowEvalError::Type)?;
         let FlowType::Promise(promise) = kind else {
             return Err(FlowEvalError::Unsupported(span));
@@ -1797,7 +1898,8 @@ mod tests {
                 FlowValue::Response { status: 200, body: [0; MAX_VALUE_BYTES], body_len: 0 },
             )
             .unwrap();
-        let callback = Program::parse(b"await response.then((item) => item.status)").unwrap();
+        let callback =
+            Program::parse(b"await response.then((item) => { return item.status; })").unwrap();
         assert_eq!(
             callback.evaluate(&mut runtime),
             Ok(FlowEvalResult::Ready(FlowValue::Number(200)))

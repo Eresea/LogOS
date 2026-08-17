@@ -111,11 +111,12 @@ struct FetchClient {
     cancel_pending: bool,
     response_mode: bool,
     foreground: bool,
-    response_ready: bool,
     response_status: u16,
     response_ok: bool,
     body: [u8; logos_flow::interpreter::MAX_VALUE_BYTES],
     body_len: usize,
+    promise_name: [u8; logos_flow::interpreter::MAX_VARIABLE_NAME_BYTES],
+    promise_name_len: usize,
     callback_destination: [u8; logos_flow::MAX_FLOW_BYTES],
     callback_destination_len: usize,
 }
@@ -129,11 +130,12 @@ impl FetchClient {
             cancel_pending: false,
             response_mode: false,
             foreground: true,
-            response_ready: false,
             response_status: 0,
             response_ok: false,
             body: [0; logos_flow::interpreter::MAX_VALUE_BYTES],
             body_len: 0,
+            promise_name: [0; logos_flow::interpreter::MAX_VARIABLE_NAME_BYTES],
+            promise_name_len: 0,
             callback_destination: [0; logos_flow::MAX_FLOW_BYTES],
             callback_destination_len: 0,
         }
@@ -168,7 +170,6 @@ impl FetchClient {
         self.cancel_pending = false;
         self.response_mode = destination.is_empty();
         self.foreground = foreground;
-        self.response_ready = false;
         self.response_status = 0;
         self.response_ok = false;
         self.body_len = 0;
@@ -197,6 +198,15 @@ impl FetchClient {
         self.start_with_mode(url, &[], false)
     }
 
+    fn start_named_response(&mut self, url: &[u8], name: &[u8], foreground: bool) -> bool {
+        if name.len() > self.promise_name.len() || !self.start_with_mode(url, &[], foreground) {
+            return false;
+        }
+        self.promise_name[..name.len()].copy_from_slice(name);
+        self.promise_name_len = name.len();
+        true
+    }
+
     fn start_to_file_mode(&mut self, url: &[u8], destination: &[u8], foreground: bool) -> bool {
         self.start_with_mode(url, destination, foreground)
     }
@@ -217,18 +227,6 @@ impl FetchClient {
         self.foreground
     }
 
-    fn await_foreground(&mut self) -> bool {
-        if self.active {
-            self.foreground = true;
-            true
-        } else if self.response_ready {
-            self.response_ready = false;
-            true
-        } else {
-            false
-        }
-    }
-
     fn take_callback(&mut self) -> Option<(&[u8], &[u8])> {
         if self.callback_destination_len == 0 || self.active || !self.response_ok {
             return None;
@@ -243,6 +241,27 @@ impl FetchClient {
         self.callback_destination_len = 0;
         self.body_len = 0;
         self.response_ok = false;
+    }
+
+    fn active_promise_is(&self, name: &[u8]) -> bool {
+        self.promise_name_len == name.len() && self.promise_name[..self.promise_name_len] == *name
+    }
+
+    fn resolve_promise(&mut self, flow: &mut logos_flow::FlowService) {
+        if self.active || self.promise_name_len == 0 {
+            return;
+        }
+        let name = &self.promise_name[..self.promise_name_len];
+        if self.response_ok {
+            let _ = flow.resolve_response_promise(
+                name,
+                self.response_status,
+                &self.body[..self.body_len],
+            );
+        } else {
+            let _ = flow.cancel_promise(name);
+        }
+        self.promise_name_len = 0;
     }
 
     fn cancel(&mut self) {
@@ -355,9 +374,10 @@ impl FetchClient {
                     b"fetch failed\r\n"
                 }
             };
-            if response.status == FetchStatus::Ok && !self.foreground {
-                self.response_ready = true;
-            } else if self.callback_destination_len == 0 || response.status != FetchStatus::Ok {
+            if !(response.status == FetchStatus::Ok
+                && !self.foreground
+                && self.callback_destination_len == 0)
+            {
                 pending.stage(message);
             }
         } else {
@@ -810,6 +830,7 @@ enum StorageWork {
     Touch,
     Cat,
     Write,
+    TouchWrite,
     Remove,
     Move,
     #[cfg(feature = "storage-proof")]
@@ -822,6 +843,10 @@ enum StoragePhase {
     Operation,
     Commit,
     Abort,
+    StageBegin,
+    StageChunk,
+    StageCommit,
+    StageAbort,
     Read,
     List,
     Idle,
@@ -888,6 +913,9 @@ impl StorageClient {
             logos_flow::StorageCommand::Write { path, data } => {
                 (StorageWork::Write, StoragePhase::Begin, path, &[][..], data)
             }
+            logos_flow::StorageCommand::TouchWrite { path, data } => {
+                (StorageWork::TouchWrite, StoragePhase::StageBegin, path, &[][..], data)
+            }
             logos_flow::StorageCommand::Remove { path } => {
                 (StorageWork::Remove, StoragePhase::Begin, path, &[][..], &[][..])
             }
@@ -898,8 +926,8 @@ impl StorageClient {
         self.start_work(work, phase, path, secondary, data)
     }
 
-    fn start_write(&mut self, path: &[u8], data: &[u8]) -> bool {
-        self.start_work(StorageWork::Write, StoragePhase::Begin, path, &[], data)
+    fn start_touch_write(&mut self, path: &[u8], data: &[u8]) -> bool {
+        self.start_work(StorageWork::TouchWrite, StoragePhase::StageBegin, path, &[], data)
     }
 
     #[cfg(feature = "storage-proof")]
@@ -967,7 +995,14 @@ impl StorageClient {
             if self.transaction_id == 0 {
                 self.fail(StorageApiStatus::Unsupported);
             } else {
-                self.phase = StoragePhase::Abort;
+                self.phase = if matches!(
+                    self.phase,
+                    StoragePhase::StageBegin | StoragePhase::StageChunk | StoragePhase::StageCommit
+                ) {
+                    StoragePhase::StageAbort
+                } else {
+                    StoragePhase::Abort
+                };
                 self.next_request();
             }
         }
@@ -984,7 +1019,7 @@ impl StorageClient {
             StoragePhase::Operation => {
                 let operation = match self.work {
                     StorageWork::Touch => StorageApiOperation::CreateFile,
-                    StorageWork::Write => StorageApiOperation::Write,
+                    StorageWork::Write | StorageWork::TouchWrite => StorageApiOperation::Write,
                     StorageWork::Remove => StorageApiOperation::Remove,
                     StorageWork::Move => StorageApiOperation::Rename,
                     #[cfg(feature = "storage-proof")]
@@ -1011,6 +1046,46 @@ impl StorageClient {
             StoragePhase::Abort => {
                 (StorageApiOperation::Abort, self.transaction_id, 0, 0, &[][..], &[][..], &[][..])
             }
+            StoragePhase::StageBegin => (
+                StorageApiOperation::StageWriteBegin,
+                0,
+                0,
+                0,
+                &self.path[..self.path_len],
+                &[][..],
+                &[][..],
+            ),
+            StoragePhase::StageChunk => {
+                let start = self.cursor as usize;
+                let end = (start + 192).min(self.data_len);
+                (
+                    StorageApiOperation::StageWriteChunk,
+                    self.transaction_id,
+                    0,
+                    self.cursor,
+                    &[][..],
+                    &[][..],
+                    &self.data[start..end],
+                )
+            }
+            StoragePhase::StageCommit => (
+                StorageApiOperation::StageWriteCommit,
+                self.transaction_id,
+                0,
+                0,
+                &[][..],
+                &[][..],
+                &[][..],
+            ),
+            StoragePhase::StageAbort => (
+                StorageApiOperation::StageWriteAbort,
+                self.transaction_id,
+                0,
+                0,
+                &[][..],
+                &[][..],
+                &[][..],
+            ),
             StoragePhase::Read => (
                 StorageApiOperation::Read,
                 0,
@@ -1099,9 +1174,18 @@ impl StorageClient {
 
     fn handle_response(&mut self, response: StorageApiResponse<'_>) {
         if response.status != StorageApiStatus::Ok {
-            if self.phase == StoragePhase::Operation && self.transaction_id != 0 {
+            if matches!(
+                self.phase,
+                StoragePhase::Operation | StoragePhase::StageChunk | StoragePhase::StageCommit
+            ) && self.transaction_id != 0
+            {
                 self.failure = response.status;
-                self.phase = StoragePhase::Abort;
+                self.phase =
+                    if matches!(self.phase, StoragePhase::StageChunk | StoragePhase::StageCommit) {
+                        StoragePhase::StageAbort
+                    } else {
+                        StoragePhase::Abort
+                    };
                 self.next_request();
             } else {
                 self.fail(response.status);
@@ -1118,6 +1202,32 @@ impl StorageClient {
                     self.next_request();
                 }
             }
+            StoragePhase::StageBegin => {
+                if response.transaction_id == 0 {
+                    self.fail(StorageApiStatus::Invalid);
+                } else {
+                    self.transaction_id = response.transaction_id;
+                    self.phase = if self.data_len == 0 {
+                        StoragePhase::StageCommit
+                    } else {
+                        StoragePhase::StageChunk
+                    };
+                    self.next_request();
+                }
+            }
+            StoragePhase::StageChunk => {
+                self.cursor = self.cursor.saturating_add(
+                    (self.data_len.saturating_sub(self.cursor as usize).min(192)) as u32,
+                );
+                self.phase = if self.cursor as usize >= self.data_len {
+                    StoragePhase::StageCommit
+                } else {
+                    StoragePhase::StageChunk
+                };
+                self.next_request();
+            }
+            StoragePhase::StageCommit => self.succeed(),
+            StoragePhase::StageAbort => self.fail(self.failure),
             StoragePhase::Operation => {
                 self.phase = if self.operation_aborts() {
                     StoragePhase::Abort
@@ -1191,7 +1301,11 @@ impl StorageClient {
         self.last_status = StorageApiStatus::Ok;
         if matches!(
             self.work,
-            StorageWork::Touch | StorageWork::Write | StorageWork::Remove | StorageWork::Move
+            StorageWork::Touch
+                | StorageWork::Write
+                | StorageWork::TouchWrite
+                | StorageWork::Remove
+                | StorageWork::Move
         ) {
             self.append(b"ok\r\n");
         } else if matches!(self.work, StorageWork::Cat) {
@@ -1888,8 +2002,9 @@ pub extern "C" fn _start() -> ! {
         if fetch.active() {
             progressed |= fetch.drive(pending);
             if !fetch.active() {
+                fetch.resolve_promise(flow);
                 if let Some((destination, body)) = fetch.take_callback() {
-                    if storage.start_write(destination, body) {
+                    if storage.start_touch_write(destination, body) {
                         fetch.clear_callback();
                         progressed = true;
                     } else {
@@ -1979,11 +2094,19 @@ pub extern "C" fn _start() -> ! {
                                 }
                             }
                         },
-                        Ok(Some(logos_flow::FlowOperation::CancelPromise)) => {
+                        Ok(Some(logos_flow::FlowOperation::CancelPromise { name })) => {
                             let foreground = flow_is_foreground(bytes);
-                            fetch.cancel();
+                            let active = fetch.active_promise_is(name);
+                            let cancelled = flow.cancel_promise(name);
+                            if active {
+                                fetch.cancel();
+                            }
                             if !foreground {
-                                pending.stage(&[]);
+                                pending.stage(if cancelled || active {
+                                    &[]
+                                } else {
+                                    b"flow: promise is not active\r\n"
+                                });
                             }
                         }
                         Ok(Some(logos_flow::FlowOperation::FetchResponse { url })) => {
@@ -1998,20 +2121,41 @@ pub extern "C" fn _start() -> ! {
                                 pending.stage(&[]);
                             }
                         }
-                        Ok(Some(logos_flow::FlowOperation::FetchResponseVariable { url })) => {
+                        Ok(Some(logos_flow::FlowOperation::FetchResponseVariable {
+                            name,
+                            url,
+                            url_is_variable,
+                        })) => {
                             let mut resolved = [0; logos_flow::MAX_FLOW_BYTES];
                             let foreground = flow_is_foreground(bytes);
-                            let started = flow
-                                .copy_string_variable(url, &mut resolved)
-                                .is_some_and(|length| {
-                                    if foreground {
-                                        fetch.start_response(&resolved[..length])
-                                    } else {
-                                        fetch.start_response_background(&resolved[..length])
-                                    }
-                                });
+                            let (resolved_url, resolved_len) = if url_is_variable {
+                                let Some(length) = flow.copy_string_variable(url, &mut resolved)
+                                else {
+                                    pending.stage(b"flow: string variable is unavailable\r\n");
+                                    continue;
+                                };
+                                (&resolved[..], length)
+                            } else {
+                                (url, url.len())
+                            };
+                            let started = if name.is_empty() {
+                                if foreground {
+                                    fetch.start_response(&resolved_url[..resolved_len])
+                                } else {
+                                    fetch.start_response_background(&resolved_url[..resolved_len])
+                                }
+                            } else {
+                                fetch.start_named_response(
+                                    &resolved_url[..resolved_len],
+                                    name,
+                                    foreground,
+                                )
+                            };
                             if !started {
-                                pending.stage(b"flow: string variable is unavailable\r\n");
+                                if !name.is_empty() {
+                                    let _ = flow.cancel_promise(name);
+                                }
+                                pending.stage(b"fetch request busy or too large\r\n");
                             } else if !foreground {
                                 pending.stage(&[]);
                             }
@@ -2064,20 +2208,99 @@ pub extern "C" fn _start() -> ! {
                                 pending.stage(b"fetch request busy or too large\r\n");
                             }
                         }
-                        Ok(None) => {
-                            if trim_flow_input(bytes).starts_with(b"await ")
-                                && trim_flow_input(bytes)[6..].starts_with(b"response")
-                            {
-                                let ready = fetch.response_ready;
-                                if fetch.await_foreground() {
-                                    if ready {
-                                        pending.stage(b"fetch complete\r\n");
-                                    }
-                                } else {
-                                    pending.stage(b"flow: promise is not active\r\n");
+                        Ok(Some(logos_flow::FlowOperation::WriteResponsePromise {
+                            name,
+                            destination,
+                            destination_is_variable,
+                        })) => {
+                            let mut body = [0; logos_flow::interpreter::MAX_VALUE_BYTES];
+                            if destination_is_variable {
+                                let mut resolved = [0; logos_flow::MAX_FLOW_BYTES];
+                                let Some(length) =
+                                    flow.copy_string_variable(destination, &mut resolved)
+                                else {
+                                    pending.stage(b"flow: string variable is unavailable\r\n");
+                                    continue;
+                                };
+                                let Some((_, body_len)) =
+                                    flow.copy_response_promise(name, &mut body)
+                                else {
+                                    pending.stage(b"flow: promise is not ready\r\n");
+                                    continue;
+                                };
+                                if storage.start_touch_write(&resolved[..length], &body[..body_len])
+                                {
+                                    let _ = flow.take_promise(name);
+                                    continue;
                                 }
-                                continue;
+                                pending.stage(b"flow: response publication failed\r\n");
+                            } else {
+                                let Some((_, body_len)) =
+                                    flow.copy_response_promise(name, &mut body)
+                                else {
+                                    pending.stage(b"flow: promise is not ready\r\n");
+                                    continue;
+                                };
+                                if storage.start_touch_write(destination, &body[..body_len]) {
+                                    let _ = flow.take_promise(name);
+                                    continue;
+                                }
+                                pending.stage(b"flow: response publication failed\r\n");
                             }
+                        }
+                        Ok(Some(logos_flow::FlowOperation::WriteResponseVariables {
+                            url,
+                            destination,
+                            url_is_variable,
+                            destination_is_variable,
+                        })) => {
+                            let mut resolved_url = [0; logos_flow::MAX_FLOW_BYTES];
+                            let mut resolved_destination = [0; logos_flow::MAX_FLOW_BYTES];
+                            let url = if url_is_variable {
+                                let Some(length) =
+                                    flow.copy_string_variable(url, &mut resolved_url)
+                                else {
+                                    pending.stage(b"flow: string variable is unavailable\r\n");
+                                    continue;
+                                };
+                                &resolved_url[..length]
+                            } else {
+                                url
+                            };
+                            let destination = if destination_is_variable {
+                                let Some(length) = flow
+                                    .copy_string_variable(destination, &mut resolved_destination)
+                                else {
+                                    pending.stage(b"flow: string variable is unavailable\r\n");
+                                    continue;
+                                };
+                                &resolved_destination[..length]
+                            } else {
+                                destination
+                            };
+                            if !fetch.start_response_to_file(
+                                url,
+                                destination,
+                                flow_is_foreground(bytes),
+                            ) {
+                                pending.stage(b"fetch request busy or too large\r\n");
+                            }
+                        }
+                        Ok(Some(logos_flow::FlowOperation::AwaitPromise { name })) => {
+                            match flow.promise_state(name) {
+                                Some(logos_flow::PromiseState::Pending)
+                                    if fetch.active_promise_is(name) =>
+                                {
+                                    fetch.foreground = true;
+                                }
+                                Some(logos_flow::PromiseState::Ready) => {
+                                    let _ = flow.take_promise(name);
+                                    pending.stage(b"fetch complete\r\n");
+                                }
+                                _ => pending.stage(b"flow: promise is not active\r\n"),
+                            }
+                        }
+                        Ok(None) => {
                             pending.stage(b"flow: operation not found\r\n");
                         }
                         Err(error) => {

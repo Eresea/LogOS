@@ -3,8 +3,9 @@
 pub mod interpreter;
 
 pub use interpreter::{
-    FlowParseError, FlowType, FlowTypeError, NamespaceKind, OperationRegistry, OperationSignature,
-    Program as FlowProgram, PromiseType, Variables as FlowVariables,
+    FlowEvalError, FlowParseError, FlowRuntime, FlowType, FlowTypeError, NamespaceKind,
+    OperationRegistry, OperationSignature, Program as FlowProgram, PromiseState, PromiseType,
+    Variables as FlowVariables,
 };
 
 #[cfg(test)]
@@ -239,6 +240,7 @@ pub enum StorageCommand<'a> {
     Touch { path: &'a [u8] },
     Cat { path: &'a [u8] },
     Write { path: &'a [u8], data: &'a [u8] },
+    TouchWrite { path: &'a [u8], data: &'a [u8] },
     Remove { path: &'a [u8] },
     Move { from: &'a [u8], to: &'a [u8] },
 }
@@ -337,24 +339,62 @@ pub fn root_relative_path<'a>(path: &[u8], output: &'a mut [u8]) -> Option<&'a [
 pub enum FlowDiagnostic {
     Parse(FlowParseError),
     Type(FlowTypeError),
+    Eval(FlowEvalError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FlowOperation<'a> {
-    Help { topic: Option<&'a [u8]> },
+    Help {
+        topic: Option<&'a [u8]>,
+    },
     Clear,
-    Echo { text: &'a [u8] },
-    EchoVariable { name: &'a [u8] },
+    Echo {
+        text: &'a [u8],
+    },
+    EchoVariable {
+        name: &'a [u8],
+    },
     Storage(StorageCommand<'a>),
     Service(ServiceCommand<'a>),
     Network(NetworkCommand<'a>),
     System(SystemOperation),
-    CancelPromise,
-    FetchResponse { url: &'a [u8] },
-    FetchResponseVariable { url: &'a [u8] },
-    FetchResponseToFile { url: &'a [u8], destination: &'a [u8] },
-    FetchResponseToFileVariables { url: &'a [u8], destination: &'a [u8] },
-    WriteResponse { url: &'a [u8], destination: &'a [u8] },
+    CancelPromise {
+        name: &'a [u8],
+    },
+    AwaitPromise {
+        name: &'a [u8],
+    },
+    FetchResponse {
+        url: &'a [u8],
+    },
+    FetchResponseVariable {
+        name: &'a [u8],
+        url: &'a [u8],
+        url_is_variable: bool,
+    },
+    FetchResponseToFile {
+        url: &'a [u8],
+        destination: &'a [u8],
+    },
+    FetchResponseToFileVariables {
+        url: &'a [u8],
+        destination: &'a [u8],
+    },
+    WriteResponse {
+        url: &'a [u8],
+        destination: &'a [u8],
+    },
+    WriteResponseVariables {
+        url: &'a [u8],
+        destination: &'a [u8],
+        url_is_variable: bool,
+        destination_is_variable: bool,
+    },
+    WriteResponsePromise {
+        name: &'a [u8],
+        destination: &'a [u8],
+        destination_is_variable: bool,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -426,14 +466,52 @@ fn parse_flow_operation_unchecked<'a>(
         return Ok(Some(FlowOperation::EchoVariable { name }));
     }
     if expression.ends_with(b".cancel()") {
-        return Ok(Some(FlowOperation::CancelPromise));
+        let name = expression
+            .strip_suffix(b".cancel()")
+            .and_then(|value| value.rsplit(|byte| *byte == b'.').next())
+            .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
+        return Ok(Some(FlowOperation::CancelPromise { name }));
+    }
+    if trimmed.starts_with(b"await ") && is_identifier(expression) {
+        return Ok(Some(FlowOperation::AwaitPromise { name: expression }));
     }
     if contains(expression, b".then(") {
+        if !contains(expression, b"net.fetch(") {
+            let name = expression
+                .split(|byte| *byte == b'.')
+                .next()
+                .filter(|name| is_identifier(name))
+                .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(
+                    SpanForDiagnostic::span(),
+                )))?;
+            let destination = quoted_after(expression, b"fs.touch(")
+                .or_else(|| identifier_after(expression, b"fs.touch("))
+                .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(
+                    SpanForDiagnostic::span(),
+                )))?;
+            return Ok(Some(FlowOperation::WriteResponsePromise {
+                name,
+                destination,
+                destination_is_variable: quoted_after(expression, b"fs.touch(").is_none(),
+            }));
+        }
         let url = quoted_after(expression, b"net.fetch(")
+            .or_else(|| identifier_after(expression, b"net.fetch("))
             .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
         let destination = quoted_after(expression, b"fs.touch(")
+            .or_else(|| identifier_after(expression, b"fs.touch("))
             .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
-        return Ok(Some(FlowOperation::WriteResponse { url, destination }));
+        let url_is_variable = quoted_after(expression, b"net.fetch(").is_none();
+        let destination_is_variable = quoted_after(expression, b"fs.touch(").is_none();
+        if !url_is_variable && !destination_is_variable {
+            return Ok(Some(FlowOperation::WriteResponse { url, destination }));
+        }
+        return Ok(Some(FlowOperation::WriteResponseVariables {
+            url,
+            destination,
+            url_is_variable,
+            destination_is_variable,
+        }));
     }
     if contains(expression, b"net.fetch(") {
         let url = quoted_after(expression, b"net.fetch(");
@@ -468,10 +546,15 @@ fn parse_flow_operation_unchecked<'a>(
                 }));
             }
         }
-        return Ok(Some(if url.is_some() {
-            FlowOperation::FetchResponse { url: url.unwrap_or_default() }
+        let name = flow_assignment_name(trimmed);
+        return Ok(Some(if name.is_some() || url.is_none() {
+            FlowOperation::FetchResponseVariable {
+                name: name.unwrap_or_default(),
+                url: url_name,
+                url_is_variable: url.is_none(),
+            }
         } else {
-            FlowOperation::FetchResponseVariable { url: url_name }
+            FlowOperation::FetchResponse { url: url.unwrap_or_default() }
         }));
     }
     if (contains(expression, b"fs.touch(") || contains(expression, b"fs.open("))
@@ -482,7 +565,11 @@ fn parse_flow_operation_unchecked<'a>(
             .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
         let data = quoted_after(expression, b").write(")
             .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
-        return Ok(Some(FlowOperation::Storage(StorageCommand::Write { path, data })));
+        return Ok(Some(FlowOperation::Storage(if expression.starts_with(b"fs.touch(") {
+            StorageCommand::TouchWrite { path, data }
+        } else {
+            StorageCommand::Write { path, data }
+        })));
     }
     if contains(expression, b"fs.open(") && contains(expression, b").read()") {
         let path = quoted_after(expression, b"fs.open(")
@@ -543,6 +630,21 @@ fn contains(source: &[u8], needle: &[u8]) -> bool {
     source.windows(needle.len()).any(|window| window == needle)
 }
 
+fn is_identifier(source: &[u8]) -> bool {
+    !source.is_empty()
+        && source[0].is_ascii_alphabetic()
+        && source.iter().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn flow_assignment_name(source: &[u8]) -> Option<&[u8]> {
+    if !source.starts_with(b"var ") {
+        return None;
+    }
+    let equal = source.iter().position(|byte| *byte == b'=')?;
+    let name = trim_command(&source[4..equal]);
+    is_identifier(name).then_some(name)
+}
+
 fn quoted_after<'a>(source: &'a [u8], marker: &[u8]) -> Option<&'a [u8]> {
     let start = source.windows(marker.len()).position(|window| window == marker)? + marker.len();
     let rest = &source[start..];
@@ -572,23 +674,23 @@ impl SpanForDiagnostic {
 }
 
 pub struct FlowService {
-    variables: FlowVariables,
+    runtime: FlowRuntime,
     strings: [FlowStringVariable; interpreter::MAX_VARIABLES],
 }
 
 impl FlowService {
     pub const fn new() -> Self {
         Self {
-            variables: FlowVariables::new(),
+            runtime: FlowRuntime::new(),
             strings: [FlowStringVariable::EMPTY; interpreter::MAX_VARIABLES],
         }
     }
 
     pub fn validate(&mut self, source: &[u8]) -> Result<FlowType, FlowDiagnostic> {
-        let mut candidate = self.variables;
+        let mut candidate = self.runtime.variables;
         let result = check_flow(source, &mut candidate);
         if result.is_ok() {
-            self.variables = candidate;
+            self.runtime.variables = candidate;
             self.remember_string_assignment(source);
         }
         result
@@ -634,14 +736,52 @@ impl FlowService {
         entry.value[..value.len()].copy_from_slice(value);
         entry.value_len = value.len();
         self.strings[index] = entry;
+        if let Some(value) = interpreter::FlowValue::string(value) {
+            let _ = self.runtime.set_variable(name, value);
+        }
     }
 
     pub fn operation<'a>(
         &mut self,
         source: &'a [u8],
     ) -> Result<Option<FlowOperation<'a>>, FlowDiagnostic> {
-        self.validate(source)?;
+        let program = FlowProgram::parse(source).map_err(FlowDiagnostic::Parse)?;
+        program.type_check(&mut self.runtime.variables).map_err(FlowDiagnostic::Type)?;
+        if !contains(source, b".then(") {
+            program.evaluate(&mut self.runtime).map_err(FlowDiagnostic::Eval)?;
+            self.runtime.reclaim_temporary_promises();
+        }
+        self.remember_string_assignment(source);
         parse_flow_operation_unchecked(source)
+    }
+
+    pub fn promise_state(&self, name: &[u8]) -> Option<PromiseState> {
+        self.runtime.promise_state(name)
+    }
+
+    pub fn resolve_response_promise(&mut self, name: &[u8], status: u16, body: &[u8]) -> bool {
+        let Some(value) = interpreter::FlowValue::response(status, body) else { return false };
+        self.runtime.resolve_variable(name, value).is_ok()
+    }
+
+    pub fn take_promise(&mut self, name: &[u8]) -> bool {
+        self.runtime.take_variable(name).is_ok()
+    }
+
+    pub fn copy_response_promise(&self, name: &[u8], output: &mut [u8]) -> Option<(u16, usize)> {
+        let value = self.runtime.variable(name)?;
+        let interpreter::FlowValue::Response { status, body, body_len } = value else {
+            return None;
+        };
+        if output.len() < body_len {
+            return None;
+        }
+        output[..body_len].copy_from_slice(&body[..body_len]);
+        Some((status, body_len))
+    }
+
+    pub fn cancel_promise(&mut self, name: &[u8]) -> bool {
+        self.runtime.cancel_variable(name).is_ok()
     }
 }
 
@@ -743,6 +883,26 @@ pub fn format_flow_diagnostic(error: FlowDiagnostic, output: &mut [u8]) -> usize
                 }
             }
             length
+        }
+        FlowDiagnostic::Eval(error) => {
+            let message = match error {
+                interpreter::FlowEvalError::Type(error) => {
+                    return format_flow_diagnostic(FlowDiagnostic::Type(error), output);
+                }
+                interpreter::FlowEvalError::UnknownValue(_)
+                | interpreter::FlowEvalError::Unsupported(_) => {
+                    b"flow: unsupported expression" as &[u8]
+                }
+                interpreter::FlowEvalError::Promise(_) => b"flow: promise error" as &[u8],
+            };
+            let length = copy_bounded(message, output);
+            if length + 2 <= output.len() {
+                output[length] = b'\r';
+                output[length + 1] = b'\n';
+                length + 2
+            } else {
+                length
+            }
         }
     }
 }
@@ -1332,7 +1492,10 @@ mod tests {
         );
         assert_eq!(
             parse_flow_operation(b"fs.touch(\"/file\").write(\"data\")").unwrap(),
-            Some(FlowOperation::Storage(StorageCommand::Write { path: b"/file", data: b"data" }))
+            Some(FlowOperation::Storage(StorageCommand::TouchWrite {
+                path: b"/file",
+                data: b"data",
+            }))
         );
         assert_eq!(
             parse_flow_operation(b"fs.open(\"/file\").write(\"data\")").unwrap(),
@@ -1346,7 +1509,11 @@ mod tests {
         assert!(service.validate(b"var url = \"http://10.0.2.2/readme\"").is_ok());
         assert_eq!(
             service.operation(b"var response = net.fetch(url)").unwrap(),
-            Some(FlowOperation::FetchResponseVariable { url: b"url" })
+            Some(FlowOperation::FetchResponseVariable {
+                name: b"response",
+                url: b"url",
+                url_is_variable: true,
+            })
         );
         assert!(service.validate(b"var destination = \"/download\"").is_ok());
         assert_eq!(
@@ -1415,8 +1582,47 @@ mod tests {
                 .map(|signature| signature.argument_count),
             Some(1)
         );
+        assert_eq!(
+            OperationRegistry::lookup(NamespaceKind::Filesystem, b"list")
+                .map(|signature| signature.argument_count),
+            Some(0)
+        );
         assert!(OperationRegistry::lookup(NamespaceKind::Supervisor, b"restart").is_some());
         assert!(OperationRegistry::lookup(NamespaceKind::Filesystem, b"create").is_none());
+    }
+
+    #[test]
+    fn flow_service_keeps_named_fetch_promises_and_callbacks_typed() {
+        let mut service = std::boxed::Box::new(FlowService::new());
+        assert_eq!(
+            service.operation(b"var response = net.fetch(\"http://10.0.2.2/readme\")").unwrap(),
+            Some(FlowOperation::FetchResponseVariable {
+                name: b"response",
+                url: b"http://10.0.2.2/readme",
+                url_is_variable: false,
+            })
+        );
+        assert_eq!(service.promise_state(b"response"), Some(PromiseState::Pending));
+        assert!(service.resolve_response_promise(b"response", 200, b"body"));
+        assert_eq!(service.promise_state(b"response"), Some(PromiseState::Ready));
+        assert_eq!(
+            service.operation(b"await response").unwrap(),
+            Some(FlowOperation::AwaitPromise { name: b"response" })
+        );
+        assert!(service.validate(b"var destination = \"/download\"").is_ok());
+        assert_eq!(
+            service
+                .operation(
+                    b"await response.then((value) => { return fs.touch(destination).write(value.body); })"
+                )
+                .unwrap(),
+            Some(FlowOperation::WriteResponsePromise {
+                name: b"response",
+                destination: b"destination",
+                destination_is_variable: true,
+            })
+        );
+        assert!(service.take_promise(b"response"));
     }
 
     #[test]
