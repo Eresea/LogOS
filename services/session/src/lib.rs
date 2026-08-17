@@ -21,7 +21,6 @@ const STRING_COLOR: &[u8] = b"\x1b[32m";
 const RESET_COLOR: &[u8] = b"\x1b[0m";
 const DIM_COLOR: &[u8] = b"\x1b[2m";
 const COMPLETION_ERROR: &[u8] = b"\r\ncompletion unavailable\r\n";
-const PROMPT_WIDTH: usize = 8;
 const COMPLETION_TIMEOUT_TICKS: u8 = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,9 +108,9 @@ pub struct LineEditor {
     completion_replace_end: usize,
     completion_count: usize,
     completion_lengths: [u8; MAX_COMPLETION_CANDIDATES],
+    completion_cursor_offsets: [u8; MAX_COMPLETION_CANDIDATES],
     completion_candidates: [[u8; MAX_COMPLETION_ITEM_BYTES]; MAX_COMPLETION_CANDIDATES],
     completion_selected: usize,
-    completion_rendered_rows: usize,
 }
 
 /// Entry-ready Session facade over one bounded line-editing operation.
@@ -214,9 +213,9 @@ impl LineEditor {
             completion_replace_end: 0,
             completion_count: 0,
             completion_lengths: [0; MAX_COMPLETION_CANDIDATES],
+            completion_cursor_offsets: [0; MAX_COMPLETION_CANDIDATES],
             completion_candidates: [[0; MAX_COMPLETION_ITEM_BYTES]; MAX_COMPLETION_CANDIDATES],
             completion_selected: 0,
-            completion_rendered_rows: 0,
         }
     }
 
@@ -257,7 +256,7 @@ impl LineEditor {
 
     pub fn completion_failed(&mut self, output: &mut ShellOutput) {
         self.completion_enabled = false;
-        let had_menu = self.completion_active || self.completion_rendered_rows != 0;
+        let had_menu = self.completion_active;
         self.clear_completion_state();
         if had_menu {
             self.redraw(output);
@@ -288,6 +287,7 @@ impl LineEditor {
                 self.completion_replace_end = usize::from(response.replace_end);
                 self.completion_count = usize::from(response.candidate_count);
                 self.completion_lengths = response.lengths;
+                self.completion_cursor_offsets = response.cursor_offsets;
                 self.completion_candidates = response.candidates;
                 self.completion_selected = 0;
                 self.completion_active = true;
@@ -321,7 +321,7 @@ impl LineEditor {
     }
 
     fn dismiss_completion(&mut self, output: &mut ShellOutput) {
-        let had_menu = self.completion_active || self.completion_rendered_rows != 0;
+        let had_menu = self.completion_active;
         self.clear_completion_state();
         if had_menu {
             self.redraw(output);
@@ -365,7 +365,9 @@ impl LineEditor {
         self.line.copy_within(end..self.line_len, start + replacement_len);
         self.line[start..start + replacement_len].copy_from_slice(&replacement[..replacement_len]);
         self.line_len = new_len;
-        self.cursor = start + replacement_len;
+        self.cursor = start
+            + usize::from(self.completion_cursor_offsets[self.completion_selected])
+                .min(replacement_len);
         self.bump_line_revision();
         self.clear_completion_state();
         self.redraw(output);
@@ -674,7 +676,6 @@ impl LineEditor {
     }
 
     fn redraw(&mut self, output: &mut ShellOutput) {
-        self.clear_completion_rows(output);
         output.push(b'\r');
         self.prompt(output);
         self.highlight_line(output);
@@ -686,41 +687,6 @@ impl LineEditor {
             b'D',
             display_width(&self.line[self.cursor..self.line_len]) + ghost_width,
         );
-        if self.completion_active && self.completion_count != 0 {
-            move_cursor(output, b'B', 1);
-            for index in 0..self.completion_count {
-                output.push(b'\r');
-                if index == self.completion_selected {
-                    output.extend(COMMAND_COLOR);
-                    output.extend(b"> ");
-                    output.extend(RESET_COLOR);
-                } else {
-                    output.extend(b"  ");
-                }
-                self.append_completion_display(index, output);
-                output.extend(b"\x1b[K");
-                if index + 1 < self.completion_count {
-                    move_cursor(output, b'B', 1);
-                }
-            }
-            move_cursor(output, b'A', self.completion_count);
-            output.push(b'\r');
-            move_cursor(output, b'C', PROMPT_WIDTH + display_width(&self.line[..self.cursor]));
-            self.completion_rendered_rows = self.completion_count;
-        }
-    }
-
-    fn clear_completion_rows(&mut self, output: &mut ShellOutput) {
-        if self.completion_rendered_rows == 0 {
-            return;
-        }
-        output.push(b'\r');
-        move_cursor(output, b'B', self.completion_rendered_rows);
-        for _ in 0..self.completion_rendered_rows {
-            output.extend(b"\r\x1b[K");
-            move_cursor(output, b'A', 1);
-        }
-        self.completion_rendered_rows = 0;
     }
 
     fn append_completion_ghost(&self, output: &mut ShellOutput) -> usize {
@@ -738,15 +704,6 @@ impl LineEditor {
         output.extend(ghost);
         output.extend(RESET_COLOR);
         display_width(ghost)
-    }
-
-    fn append_completion_display(&self, index: usize, output: &mut ShellOutput) {
-        let Some(candidate) = self.completion_candidate(index) else { return };
-        let start = self.completion_replace_start.min(self.line_len);
-        let end = self.completion_replace_end.min(self.line_len).max(start);
-        output.extend(&self.line[..start]);
-        output.extend(candidate);
-        output.extend(&self.line[end..self.line_len]);
     }
 
     fn highlight_line(&self, output: &mut ShellOutput) {
@@ -1066,10 +1023,28 @@ mod tests {
         assert!(response.push_candidate(b"help()"));
         editor.apply_completion_response(response, &mut output);
         assert!(output.as_bytes().windows(DIM_COLOR.len()).any(|window| window == DIM_COLOR));
+        assert!(!output.as_bytes().windows(4).any(|window| window == b"\x1b[1B"));
 
         output = ShellOutput::new();
         editor.input_for_command(b"\t\r", &mut command, &mut output);
         assert_eq!(&command[..6], b"help()");
+    }
+
+    #[test]
+    fn completion_accepts_string_argument_with_inner_cursor() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"echo", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_end = 4;
+        assert!(response.push_candidate_with_cursor(b"echo(\"\")", 6));
+        editor.apply_completion_response(response, &mut output);
+        editor.input_for_command(b"\t", &mut command, &mut output);
+        assert_eq!(&editor.line[..editor.line_len], b"echo(\"\")");
+        assert_eq!(editor.cursor, 6);
     }
 
     #[test]
