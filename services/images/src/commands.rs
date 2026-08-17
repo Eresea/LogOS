@@ -193,8 +193,16 @@ impl CompletionService {
                         continue;
                     }
                     let (punctuation, cursor_offset) = match spec.kind {
-                        logos_commands::CommandKind::Echo => {
+                        logos_commands::CommandKind::Help
+                        | logos_commands::CommandKind::Echo
+                        | logos_commands::CommandKind::List
+                        | logos_commands::CommandKind::Touch
+                        | logos_commands::CommandKind::Cat
+                        | logos_commands::CommandKind::Remove => {
                             (b"(\"\")".as_slice(), spec.name.len() + 2)
+                        }
+                        logos_commands::CommandKind::Write | logos_commands::CommandKind::Move => {
+                            (b"(\"\", \"\")".as_slice(), spec.name.len() + 2)
                         }
                         logos_commands::CommandKind::Service => {
                             (b"[\"".as_slice(), spec.name.len() + 2)
@@ -1474,6 +1482,14 @@ mod tests {
         let echo = provider.complete(CompletionRequest::new(4, b"echo", 4).unwrap());
         assert_eq!(echo.candidate(0), Some(&b"echo(\"\")"[..]));
         assert_eq!(echo.cursor_offsets[0], 6);
+
+        let cat = provider.complete(CompletionRequest::new(5, b"cat", 3).unwrap());
+        assert_eq!(cat.candidate(0), Some(&b"cat(\"\")"[..]));
+        assert_eq!(cat.cursor_offsets[0], 5);
+
+        let write = provider.complete(CompletionRequest::new(6, b"write", 5).unwrap());
+        assert_eq!(write.candidate(0), Some(&b"write(\"\", \"\")"[..]));
+        assert_eq!(write.cursor_offsets[0], 7);
 
         let member =
             provider.complete(CompletionRequest::new(2, b"service[\"storage\"].re", 21).unwrap());
