@@ -76,9 +76,11 @@ Late responses are ignored when their request ID or line revision is stale.
 The current targets are root expressions (`he` → `help()`, `serv` → `service["`), live service
 registry names, service members (`status`, `name`, `version`, `start()`, `stop()`, `restart()`),
 network members (`status`, `ping()`, `tcp-probe()`, `interface["`), and the fixed `eth0` interface
-entry. Filesystem paths and arbitrary method arguments remain deferred. Candidate payloads are
-fixed-size and bounded. A provider error or timeout prints `completion unavailable` once and disables
-completion for that Session; command editing and execution continue normally.
+entry. String-taking root commands provide quoted argument scaffolds such as `cat("")`, while
+multi-argument commands provide bounded scaffolds such as `write("", "")` with the caret in the
+first argument. Filesystem paths and arbitrary method arguments remain deferred. Candidate payloads
+are fixed-size and bounded. A provider error or timeout prints `completion unavailable` once and
+disables completion for that Session; command editing and execution continue normally.
 
 ## Deferred command progress
 
