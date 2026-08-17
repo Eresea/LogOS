@@ -747,7 +747,15 @@ impl FlowService {
     ) -> Result<Option<FlowOperation<'a>>, FlowDiagnostic> {
         let program = FlowProgram::parse(source).map_err(FlowDiagnostic::Parse)?;
         program.type_check(&mut self.runtime.variables).map_err(FlowDiagnostic::Type)?;
-        if !contains(source, b".then(") {
+        // Registry-backed operations are dispatched by the image below.  The
+        // evaluator only needs to materialize promise values for assignments;
+        // evaluating every command copies MAX_VALUE_BYTES-sized values on the
+        // fixed service stack and can strand Flow before dispatch.
+        let assigns_promise = source
+            .windows(b"=".len())
+            .position(|window| window == b"=")
+            .is_some_and(|equal| contains(&source[equal + 1..], b"net.fetch("));
+        if assigns_promise && !contains(source, b".then(") {
             program.evaluate(&mut self.runtime).map_err(FlowDiagnostic::Eval)?;
             self.runtime.reclaim_temporary_promises();
         }
@@ -1480,11 +1488,15 @@ mod tests {
             Some(FlowOperation::Help { topic: Some(b"fs") })
         );
         assert_eq!(parse_flow_operation(b"clear()").unwrap(), Some(FlowOperation::Clear));
+        let mut service = FlowService::new();
+        assert_eq!(
+            service.operation(b"help()").unwrap(),
+            Some(FlowOperation::Help { topic: None })
+        );
         assert_eq!(
             parse_flow_operation(br#"echo("hello")"#).unwrap(),
             Some(FlowOperation::Echo { text: b"hello" })
         );
-        let mut service = FlowService::new();
         assert!(service.validate(br#"var text = "hello""#).is_ok());
         assert_eq!(
             service.operation(b"echo(text)").unwrap(),
@@ -1504,6 +1516,13 @@ mod tests {
         assert_eq!(
             parse_flow_operation(b"await net.fetch(\"http://10.0.2.2/readme\")").unwrap(),
             Some(FlowOperation::FetchResponse { url: b"http://10.0.2.2/readme" })
+        );
+        assert_eq!(
+            parse_flow_operation(b"net.fetch(\"http://10.0.2.2/readme\", \"/readme\")").unwrap(),
+            Some(FlowOperation::FetchResponseToFile {
+                url: b"http://10.0.2.2/readme",
+                destination: b"/readme",
+            })
         );
         let mut service = FlowService::new();
         assert!(service.validate(b"var url = \"http://10.0.2.2/readme\"").is_ok());
