@@ -192,10 +192,17 @@ impl CompletionService {
                     if !spec.name.starts_with(context.prefix) {
                         continue;
                     }
-                    let punctuation = match spec.kind {
-                        logos_commands::CommandKind::Service => b"[\"".as_slice(),
-                        logos_commands::CommandKind::Network => b".".as_slice(),
-                        _ => b"()".as_slice(),
+                    let (punctuation, cursor_offset) = match spec.kind {
+                        logos_commands::CommandKind::Echo => {
+                            (b"(\"\")".as_slice(), spec.name.len() + 2)
+                        }
+                        logos_commands::CommandKind::Service => {
+                            (b"[\"".as_slice(), spec.name.len() + 2)
+                        }
+                        logos_commands::CommandKind::Network => {
+                            (b".".as_slice(), spec.name.len() + 1)
+                        }
+                        _ => (b"()".as_slice(), spec.name.len() + 2),
                     };
                     let mut candidate = [0; MAX_COMPLETION_ITEM_BYTES];
                     let Some(length) = copy_candidate(&mut candidate, spec.name, punctuation)
@@ -203,7 +210,7 @@ impl CompletionService {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
                         continue;
                     };
-                    if !response.push_candidate(&candidate[..length]) {
+                    if !response.push_candidate_with_cursor(&candidate[..length], cursor_offset) {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
                         break;
                     }
@@ -1463,6 +1470,10 @@ mod tests {
         let root = provider.complete(CompletionRequest::new(1, b"he", 2).unwrap());
         assert_eq!(root.status, CompletionStatus::Ok);
         assert_eq!(root.candidate(0), Some(&b"help()"[..]));
+
+        let echo = provider.complete(CompletionRequest::new(4, b"echo", 4).unwrap());
+        assert_eq!(echo.candidate(0), Some(&b"echo(\"\")"[..]));
+        assert_eq!(echo.cursor_offsets[0], 6);
 
         let member =
             provider.complete(CompletionRequest::new(2, b"service[\"storage\"].re", 21).unwrap());
