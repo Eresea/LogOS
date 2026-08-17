@@ -1124,7 +1124,7 @@ pub struct CompletionRequest {
     pub request_id: u16,
     pub cursor: u16,
     pub line_len: u8,
-    pub reserved_tail: u8,
+    pub line_revision: u8,
     pub line: [u8; MAX_COMPLETION_LINE_BYTES],
 }
 
@@ -1139,7 +1139,7 @@ impl CompletionRequest {
             request_id,
             cursor: cursor as u16,
             line_len: line.len() as u8,
-            reserved_tail: 0,
+            line_revision: 0,
             line: [0; MAX_COMPLETION_LINE_BYTES],
         };
         request.line[..line.len()].copy_from_slice(line);
@@ -1150,7 +1150,6 @@ impl CompletionRequest {
         self.version == COMPLETION_ABI_VERSION
             && self.reserved == 0
             && self.request_id != 0
-            && self.reserved_tail == 0
             && usize::from(self.line_len) <= MAX_COMPLETION_LINE_BYTES
             && usize::from(self.cursor) <= usize::from(self.line_len)
     }
@@ -1183,6 +1182,7 @@ pub struct CompletionResponse {
     pub version: u8,
     pub status: CompletionStatus,
     pub request_id: u16,
+    pub line_revision: u8,
     pub replace_start: u8,
     pub replace_end: u8,
     pub candidate_count: u8,
@@ -1197,6 +1197,7 @@ impl CompletionResponse {
             version: COMPLETION_ABI_VERSION,
             status,
             request_id,
+            line_revision: 0,
             replace_start: 0,
             replace_end: 0,
             candidate_count: 0,
@@ -1231,6 +1232,7 @@ impl CompletionResponse {
         self.version == COMPLETION_ABI_VERSION
             && self.status.is_valid()
             && self.request_id == request.request_id
+            && self.line_revision == request.line_revision
             && self.flags & !COMPLETION_FLAG_TRUNCATED == 0
             && usize::from(self.candidate_count) <= MAX_COMPLETION_CANDIDATES
             && self.replace_start <= self.replace_end
@@ -1243,7 +1245,7 @@ impl CompletionResponse {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<CompletionRequest>() <= MAX_IPC_BYTES);
+const _: () = assert!(core::mem::size_of::<CompletionRequest>() == MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<CompletionResponse>() <= MAX_IPC_BYTES);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1527,6 +1529,10 @@ mod tests {
         assert!(response.push_candidate(b"orage\"]"));
         assert!(response.is_valid_for(request));
         assert_eq!(response.candidate(0), Some(&b"orage\"]"[..]));
+
+        let mut stale_revision = response;
+        stale_revision.line_revision = request.line_revision.wrapping_add(1);
+        assert!(!stale_revision.is_valid_for(request));
 
         let mut stale = response;
         stale.request_id = 8;

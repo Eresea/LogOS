@@ -98,6 +98,7 @@ pub struct LineEditor {
     escape_param: u8,
     escape_modifier: u8,
     completion_enabled: bool,
+    line_revision: u8,
     completion_requested: bool,
     completion_next_id: u16,
     completion_pending_id: Option<u16>,
@@ -202,6 +203,7 @@ impl LineEditor {
             escape_param: 0,
             escape_modifier: 0,
             completion_enabled,
+            line_revision: 0,
             completion_requested: false,
             completion_next_id: 1,
             completion_pending_id: None,
@@ -230,7 +232,9 @@ impl LineEditor {
         self.completion_requested = false;
         let request_id = self.completion_next_id;
         self.completion_next_id = self.completion_next_id.wrapping_add(1).max(1);
-        let request = CompletionRequest::new(request_id, &self.line[..self.line_len], self.cursor)?;
+        let mut request =
+            CompletionRequest::new(request_id, &self.line[..self.line_len], self.cursor)?;
+        request.line_revision = self.line_revision;
         self.completion_pending_id = Some(request_id);
         self.completion_pending_request = Some(request);
         self.completion_wait = 0;
@@ -362,6 +366,7 @@ impl LineEditor {
         self.line[start..start + replacement_len].copy_from_slice(&replacement[..replacement_len]);
         self.line_len = new_len;
         self.cursor = start + replacement_len;
+        self.bump_line_revision();
         self.clear_completion_state();
         self.redraw(output);
     }
@@ -428,6 +433,7 @@ impl LineEditor {
                     command[..length].copy_from_slice(&line[..length]);
                     self.line_len = 0;
                     self.cursor = 0;
+                    self.bump_line_revision();
                     output.extend(b"\r\n");
                     return Some(length);
                 }
@@ -531,6 +537,7 @@ impl LineEditor {
         self.line[self.cursor..self.cursor + bytes.len()].copy_from_slice(bytes);
         self.cursor += bytes.len();
         self.line_len += bytes.len();
+        self.bump_line_revision();
         self.redraw(output);
     }
 
@@ -542,6 +549,7 @@ impl LineEditor {
         self.line.copy_within(self.cursor..self.line_len, start);
         self.line_len -= self.cursor - start;
         self.cursor = start;
+        self.bump_line_revision();
         self.redraw(output);
     }
 
@@ -552,17 +560,20 @@ impl LineEditor {
         let end = next_boundary(&self.line, self.cursor, self.line_len);
         self.line.copy_within(end..self.line_len, self.cursor);
         self.line_len -= end - self.cursor;
+        self.bump_line_revision();
         self.redraw(output);
     }
 
     fn delete_to_end(&mut self, output: &mut ShellOutput) {
         self.line_len = self.cursor;
+        self.bump_line_revision();
         self.redraw(output);
     }
 
     fn clear_line(&mut self, output: &mut ShellOutput) {
         self.line_len = 0;
         self.cursor = 0;
+        self.bump_line_revision();
         self.redraw(output);
     }
 
@@ -576,6 +587,7 @@ impl LineEditor {
         }
         self.line.copy_within(end..self.line_len, self.cursor);
         self.line_len -= end - self.cursor;
+        self.bump_line_revision();
         self.redraw(output);
     }
 
@@ -590,7 +602,12 @@ impl LineEditor {
         self.line.copy_within(self.cursor..self.line_len, start);
         self.line_len -= self.cursor - start;
         self.cursor = start;
+        self.bump_line_revision();
         self.redraw(output);
+    }
+
+    fn bump_line_revision(&mut self) {
+        self.line_revision = self.line_revision.wrapping_add(1);
     }
 
     fn move_left(&mut self, output: &mut ShellOutput) {
@@ -792,6 +809,7 @@ impl LineEditor {
             self.line_len = entry.len;
             self.cursor = entry.len;
         }
+        self.bump_line_revision();
         self.redraw(output);
     }
 }
@@ -1013,6 +1031,7 @@ mod tests {
         editor.input_for_command(b"he\t", &mut command, &mut output);
         let request = editor.take_completion_request().unwrap();
         let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
         response.replace_end = 2;
         assert!(response.push_candidate(b"help()"));
         editor.apply_completion_response(response, &mut output);
@@ -1032,6 +1051,7 @@ mod tests {
         editor.input_for_command(b"\t", &mut command, &mut output);
         let request = editor.take_completion_request().unwrap();
         let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
         response.replace_start = 4;
         response.replace_end = 4;
         assert!(response.push_candidate(b"status"));
@@ -1043,6 +1063,7 @@ mod tests {
         editor.input_for_command(b"\t", &mut command, &mut output);
         let request = editor.take_completion_request().unwrap();
         let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
         response.replace_start = 10;
         response.replace_end = 10;
         assert!(response.push_candidate(b"status"));
@@ -1058,10 +1079,10 @@ mod tests {
         let mut output = ShellOutput::new();
         editor.input_for_command(b"he\t", &mut command, &mut output);
         let request = editor.take_completion_request().unwrap();
-        editor.apply_completion_response(
-            CompletionResponse::empty(request.request_id, CompletionStatus::Unavailable),
-            &mut output,
-        );
+        let mut response =
+            CompletionResponse::empty(request.request_id, CompletionStatus::Unavailable);
+        response.line_revision = request.line_revision;
+        editor.apply_completion_response(response, &mut output);
         assert!(
             output
                 .as_bytes()

@@ -163,17 +163,27 @@ impl CompletionService {
 
     fn complete(&mut self, request: CompletionRequest) -> CompletionResponse {
         if !self.enabled || !request.is_valid() {
-            return CompletionResponse::empty(request.request_id, CompletionStatus::Unavailable);
+            let mut response =
+                CompletionResponse::empty(request.request_id, CompletionStatus::Unavailable);
+            response.line_revision = request.line_revision;
+            return response;
         }
         let Some(line) = request.line() else {
-            return CompletionResponse::empty(request.request_id, CompletionStatus::Malformed);
+            let mut response =
+                CompletionResponse::empty(request.request_id, CompletionStatus::Malformed);
+            response.line_revision = request.line_revision;
+            return response;
         };
         let Ok(Some(context)) =
             logos_commands::completion_context(line, usize::from(request.cursor))
         else {
-            return CompletionResponse::empty(request.request_id, CompletionStatus::NoMatch);
+            let mut response =
+                CompletionResponse::empty(request.request_id, CompletionStatus::NoMatch);
+            response.line_revision = request.line_revision;
+            return response;
         };
         let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
         response.replace_start = context.replace_start as u8;
         response.replace_end = context.replace_end as u8;
         match context.target {
