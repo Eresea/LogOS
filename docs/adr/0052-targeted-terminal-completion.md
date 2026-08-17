@@ -20,5 +20,5 @@ a completion-only failure and follows the existing graph-restart policy.
 
 ## Consequences
 
-Session owns the bounded ghost/list interaction and stale-response checks. Terminal supports only the
-vertical cursor movement needed to redraw that list. No scrolling or general popup framework is added.
+Session owns the bounded inline-ghost interaction and stale-response checks. No scrolling or general
+popup framework is added.

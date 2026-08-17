@@ -68,8 +68,9 @@ return a bounded status such as `disabled`, `unavailable`, or `configuring`.
 
 Completion is enabled by default for each Session, but it is an optional Commands-owned sub-service
 over the existing Session↔Commands queues. Tab requests only the expression fragment at the cursor.
-The first candidate is shown as a dim suffix and in a bounded candidate list; `↑` / `↓` select,
-Tab accepts, and Escape dismisses. Printable input dismisses the current list and continues editing.
+The selected candidate is shown as a dim inline suffix; `↑` / `↓` change the selected ghost,
+Tab accepts, and Escape dismisses. Printable input dismisses the current suggestion and continues
+editing.
 Late responses are ignored when their request ID or line revision is stale.
 
 The current targets are root expressions (`he` → `help()`, `serv` → `service["`), live service
