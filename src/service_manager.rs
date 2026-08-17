@@ -142,6 +142,10 @@ impl ServiceManager {
         if slot.service.is_some() {
             slot.state = if enabled { ManagerState::Stopped } else { ManagerState::Disabled };
         }
+        let fetch = &mut self.slots[logos_abi::ServiceId::Fetch.index()];
+        if fetch.service.is_some() {
+            fetch.state = if enabled { ManagerState::Stopped } else { ManagerState::Disabled };
+        }
     }
 
     pub const fn record(&self, slot: usize) -> Option<ServiceManagerRecord> {
@@ -638,7 +642,7 @@ mod tests {
         );
         assert_eq!(
             manager
-                .request(request(ManagerOperation::Start, 7, 1), ManagerRights::ALL)
+                .request(request(ManagerOperation::Start, 8, 1), ManagerRights::ALL)
                 .response
                 .status,
             ManagerStatus::Unsupported
@@ -677,6 +681,7 @@ mod tests {
             decision.action,
             ManagerAction::Restart(
                 [
+                    ServiceId::Fetch,
                     ServiceId::Commands,
                     ServiceId::Session,
                     ServiceId::Input,
@@ -684,9 +689,8 @@ mod tests {
                     ServiceId::Input,
                     ServiceId::Input,
                     ServiceId::Input,
-                    ServiceId::Input,
                 ],
-                2,
+                3,
             )
         );
     }

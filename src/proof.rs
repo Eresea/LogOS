@@ -75,7 +75,7 @@ pub fn initialize(cpu_count: usize) {
 }
 
 pub fn configure_network(enabled: bool) {
-    NETWORK_REQUIRED.store(enabled, Ordering::Release);
+    NETWORK_REQUIRED.store(enabled && !cfg!(feature = "fetch-proof"), Ordering::Release);
 }
 
 pub fn network_tx() {

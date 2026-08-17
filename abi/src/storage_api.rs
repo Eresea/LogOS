@@ -1,6 +1,6 @@
 use super::{IPC_FLAG_MORE, IpcBytes, MAX_IPC_BYTES, MessageKind};
 
-pub const STORAGE_API_VERSION: u8 = 1;
+pub const STORAGE_API_VERSION: u8 = 2;
 pub const STORAGE_API_FLAG_REPLACE: u8 = 1;
 const REQUEST_HEADER_BYTES: usize = 26;
 const RESPONSE_HEADER_BYTES: usize = 18;
@@ -18,6 +18,10 @@ pub enum StorageApiOperation {
     Write = 7,
     Remove = 8,
     Rename = 9,
+    StageWriteBegin = 10,
+    StageWriteChunk = 11,
+    StageWriteCommit = 12,
+    StageWriteAbort = 13,
 }
 
 impl StorageApiOperation {
@@ -32,6 +36,10 @@ impl StorageApiOperation {
             7 => Some(Self::Write),
             8 => Some(Self::Remove),
             9 => Some(Self::Rename),
+            10 => Some(Self::StageWriteBegin),
+            11 => Some(Self::StageWriteChunk),
+            12 => Some(Self::StageWriteCommit),
+            13 => Some(Self::StageWriteAbort),
             _ => None,
         }
     }
@@ -221,6 +229,15 @@ fn request_shape_is_valid(
         StorageApiOperation::Write => secondary_path.is_empty(),
         StorageApiOperation::Rename => {
             !path.is_empty() && !secondary_path.is_empty() && data.is_empty()
+        }
+        StorageApiOperation::StageWriteBegin => {
+            !path.is_empty() && secondary_path.is_empty() && data.is_empty()
+        }
+        StorageApiOperation::StageWriteChunk => {
+            path.is_empty() && secondary_path.is_empty() && !data.is_empty()
+        }
+        StorageApiOperation::StageWriteCommit | StorageApiOperation::StageWriteAbort => {
+            path.is_empty() && secondary_path.is_empty() && data.is_empty()
         }
     }
 }

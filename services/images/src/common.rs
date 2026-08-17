@@ -59,6 +59,16 @@ pub fn heartbeat_tick(ticks: &mut u16, service: ServiceId) {
     }
 }
 
+#[cfg(feature = "qemu-proof")]
+#[allow(dead_code)]
+pub fn proof_line(message: &[u8]) {
+    for &byte in message {
+        unsafe { asm!("out dx, al", in("dx") 0xe9u16, in("al") byte) };
+    }
+    unsafe { asm!("out dx, al", in("dx") 0xe9u16, in("al") b'\r') };
+    unsafe { asm!("out dx, al", in("dx") 0xe9u16, in("al") b'\n') };
+}
+
 #[inline(always)]
 pub fn wait(mask: u64, service: ServiceId) {
     unsafe {

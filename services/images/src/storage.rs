@@ -5,8 +5,9 @@
 mod common;
 
 use logos_abi::{
-    IpcBytes, IpcCapability, IpcEndpointId, IpcStatus, MessageKind, StorageApiStatus,
-    StorageOperation, StorageRequest, StorageResponse, StorageStatus,
+    IpcBytes, IpcCapability, IpcEndpointId, IpcStatus, MessageKind, StorageApiOperation,
+    StorageApiRequest, StorageApiStatus, StorageOperation, StorageRequest, StorageResponse,
+    StorageStatus,
 };
 use logos_storage::Block;
 use logos_storage_service::{
@@ -33,6 +34,29 @@ const COMMANDS_SEND_CAPABILITY: usize = common::capability_slot(
     IpcEndpointId::StorageToCommands,
     logos_abi::IpcRights::Send,
 );
+const FETCH_RECEIVE_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Storage,
+    IpcEndpointId::FetchToStorage,
+    logos_abi::IpcRights::Receive,
+);
+const FETCH_SEND_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Storage,
+    IpcEndpointId::StorageToFetch,
+    logos_abi::IpcRights::Send,
+);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Client {
+    Commands,
+    Fetch,
+}
+
+fn send_response(client: Client, response: &IpcBytes) -> IpcStatus {
+    match client {
+        Client::Commands => common::ipc_send(COMMANDS_SEND_CAPABILITY, response),
+        Client::Fetch => common::ipc_send(FETCH_SEND_CAPABILITY, response),
+    }
+}
 
 struct StorageTransport {
     operation: Option<StorageOperation>,
@@ -131,13 +155,13 @@ fn storage_error_status(error: NamespaceError) -> StorageApiStatus {
 }
 
 fn serve_storage_error(status: StorageApiStatus) -> ! {
-    let mut pending_response = None;
+    let mut pending_response: Option<(Client, IpcBytes)> = None;
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
         let mut progressed = false;
-        if let Some(response) = pending_response {
-            match common::ipc_send(COMMANDS_SEND_CAPABILITY, &response) {
+        if let Some((client, response)) = pending_response {
+            match send_response(client, &response) {
                 IpcStatus::Ok => {
                     pending_response = None;
                     progressed = true;
@@ -151,9 +175,19 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
         }
         if pending_response.is_none() {
             let mut request = IpcBytes::empty(MessageKind::StorageRequest);
-            match common::ipc_receive(COMMANDS_RECEIVE_CAPABILITY, &mut request) {
+            let mut client = Client::Commands;
+            let status_from_client =
+                match common::ipc_receive(COMMANDS_RECEIVE_CAPABILITY, &mut request) {
+                    IpcStatus::Ok => IpcStatus::Ok,
+                    _ => {
+                        client = Client::Fetch;
+                        common::ipc_receive(FETCH_RECEIVE_CAPABILITY, &mut request)
+                    }
+                };
+            match status_from_client {
                 IpcStatus::Ok => {
-                    pending_response = error_response(&request, status);
+                    pending_response =
+                        error_response(&request, status).map(|response| (client, response));
                     progressed = true;
                 }
                 IpcStatus::Empty => {}
@@ -163,7 +197,9 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
         if !progressed {
             common::wait(
                 common::ipc_read_event(IpcEndpointId::CommandsToStorage)
-                    | common::ipc_write_event(IpcEndpointId::StorageToCommands),
+                    | common::ipc_write_event(IpcEndpointId::StorageToCommands)
+                    | common::ipc_read_event(IpcEndpointId::FetchToStorage)
+                    | common::ipc_write_event(IpcEndpointId::StorageToFetch),
                 logos_abi::ServiceId::Storage,
             );
         }
@@ -195,28 +231,53 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
     filesystem.flush().unwrap_or_else(|error| serve_storage_error(storage_error_status(error)));
 
     let mut api = StorageApi::new(filesystem);
-    let mut pending_response = None;
+    let mut pending_response: Option<(Client, IpcBytes)> = None;
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
         let mut progressed = false;
-        if let Some(response) = pending_response {
-            if common::ipc_send(COMMANDS_SEND_CAPABILITY, &response) == IpcStatus::Ok {
+        if let Some((client, response)) = pending_response {
+            if send_response(client, &response) == IpcStatus::Ok {
                 pending_response = None;
                 progressed = true;
             }
         }
         if pending_response.is_none() {
             let mut request = IpcBytes::empty(MessageKind::StorageRequest);
-            if common::ipc_receive(COMMANDS_RECEIVE_CAPABILITY, &mut request) == IpcStatus::Ok {
-                pending_response = api.handle(&request);
+            let mut client = Client::Commands;
+            let received = match common::ipc_receive(COMMANDS_RECEIVE_CAPABILITY, &mut request) {
+                IpcStatus::Ok => IpcStatus::Ok,
+                _ => {
+                    client = Client::Fetch;
+                    common::ipc_receive(FETCH_RECEIVE_CAPABILITY, &mut request)
+                }
+            };
+            if received == IpcStatus::Ok {
+                let stage_from_commands = client == Client::Commands
+                    && StorageApiRequest::decode(&request).is_ok_and(|request| {
+                        matches!(
+                            request.operation,
+                            StorageApiOperation::StageWriteBegin
+                                | StorageApiOperation::StageWriteChunk
+                                | StorageApiOperation::StageWriteCommit
+                                | StorageApiOperation::StageWriteAbort
+                        )
+                    });
+                pending_response = if stage_from_commands {
+                    error_response(&request, StorageApiStatus::Invalid)
+                } else {
+                    api.handle(&request)
+                }
+                .map(|response| (client, response));
                 progressed = true;
             }
         }
         if !progressed {
             common::wait(
                 common::ipc_read_event(IpcEndpointId::CommandsToStorage)
-                    | common::ipc_write_event(IpcEndpointId::StorageToCommands),
+                    | common::ipc_write_event(IpcEndpointId::StorageToCommands)
+                    | common::ipc_read_event(IpcEndpointId::FetchToStorage)
+                    | common::ipc_write_event(IpcEndpointId::StorageToFetch),
                 logos_abi::ServiceId::Storage,
             );
         }

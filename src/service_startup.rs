@@ -65,7 +65,7 @@ mod tests {
 
     #[test]
     fn graph_starts_in_dependency_order() {
-        let all_services = (1 << crate::service_images::SERVICE_IMAGES.len()) - 1;
+        let all_services = u8::MAX;
         let mut startup = ServiceStartup::new();
         startup.mark_launch_ready();
         assert!(startup.all_launch_ready());
@@ -76,6 +76,7 @@ mod tests {
         startup.start(ServiceId::Storage).unwrap();
         startup.start(ServiceId::Commands).unwrap();
         startup.start(ServiceId::Network).unwrap();
+        startup.start(ServiceId::Fetch).unwrap();
         assert_eq!(startup.started, all_services);
     }
 }

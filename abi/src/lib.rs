@@ -58,19 +58,20 @@ pub const MAX_COMPLETION_ITEM_BYTES: usize = 24;
 pub const IPC_FLAG_MORE: u8 = 1 << 0;
 pub const RENDER_FLAG_MORE: u8 = IPC_FLAG_MORE;
 pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
-pub const IPC_STAGING_BASE: usize = SERVICE_IPC_BASE + 0x10_000;
-pub const STORAGE_DATA_BASE: usize = SERVICE_IPC_BASE + 0x11_000;
-pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x12_000;
+pub const IPC_STAGING_BASE: usize = SERVICE_IPC_BASE + 0x14_000;
+pub const STORAGE_DATA_BASE: usize = SERVICE_IPC_BASE + 0x15_000;
+pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x16_000;
 pub const MANAGER_CAPABILITY_BASE: usize = IPC_CAPABILITY_BASE + IPC_PAGE_BYTES;
 pub const MANAGER_CAPABILITY_SLOT: usize = 0;
-pub const NETWORK_CONFIG_BASE: usize = SERVICE_IPC_BASE + 0x16_000;
-pub const MAX_IPC_CAPABILITIES: usize = 6;
+pub const NETWORK_CONFIG_BASE: usize = SERVICE_IPC_BASE + 0x1a_000;
+pub const MAX_IPC_CAPABILITIES: usize = 8;
 pub const MAX_MANAGER_SERVICES: usize = 8;
 pub const MAX_SERVICE_NAME_BYTES: usize = 16;
 pub const SERVICE_HEARTBEAT_INTERVAL_TICKS: u64 = 100;
 pub const STORAGE_BLOCK_BYTES: u16 = 4096;
 pub const STORAGE_MAX_BLOCKS_PER_REQUEST: u16 = 1;
-pub const NETWORK_ABI_VERSION: u16 = 1;
+pub const NETWORK_ABI_VERSION: u16 = 2;
+pub const NETWORK_INLINE_PAYLOAD_BYTES: usize = 192;
 pub const NETWORK_MAX_SOCKET_SLOTS: usize = 8;
 pub const NETWORK_MAX_LISTENER_SLOTS: usize = 2;
 pub const NETWORK_MAX_FRAME_BYTES: usize = 1536;
@@ -80,11 +81,12 @@ pub const NETWORK_PACKET_PAGE_COUNT: usize = 32;
 pub const NETWORK_PACKET_PAGE_BYTES: usize = NETWORK_DMA_BUFFER_BYTES;
 pub const NETWORK_RX_PACKET_PAGES: usize = 16;
 pub const NETWORK_TX_PACKET_PAGES: usize = 16;
-pub const NETWORK_PACKET_BASE: usize = SERVICE_IPC_BASE + 0x17_000;
+pub const NETWORK_PACKET_BASE: usize = SERVICE_IPC_BASE + 0x1b_000;
 pub const NETWORK_GATEWAY_ARP_DEADLINE_TICKS: u32 = 5_000;
 pub const NETWORK_DHCP_DEADLINE_TICKS: u32 = 10_000;
-// Keep a ping deadline below the bounded Commands receive budget.
+// Keep interactive network probes below the bounded Commands receive budget.
 pub const NETWORK_PING_TIMEOUT_TICKS: u32 = 128;
+pub const NETWORK_TCP_CONNECT_TIMEOUT_TICKS: u32 = 128;
 pub const NETWORK_REQUEST_FLAG_LISTENER: u8 = 1 << 0;
 
 pub const IPC_SYSCALL_SEND: usize = 4;
@@ -94,7 +96,7 @@ pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
 
-pub const IPC_ENDPOINT_COUNT: usize = 14;
+pub const IPC_ENDPOINT_COUNT: usize = 20;
 pub const IPC_READ_EVENT_BASE: usize = 0;
 pub const IPC_WRITE_EVENT_BASE: usize = IPC_READ_EVENT_BASE + IPC_ENDPOINT_COUNT;
 pub const KEYBOARD_READ_EVENT: usize = IPC_WRITE_EVENT_BASE + IPC_ENDPOINT_COUNT;
@@ -151,6 +153,7 @@ pub enum ServiceId {
     Commands = 5,
     Storage = 6,
     Network = 7,
+    Fetch = 8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -433,6 +436,7 @@ pub enum NetworkOperation {
     TcpRead = 9,
     TcpWrite = 10,
     Close = 11,
+    Cancel = 12,
 }
 
 impl NetworkOperation {
@@ -449,6 +453,7 @@ impl NetworkOperation {
             9 => Some(Self::TcpRead),
             10 => Some(Self::TcpWrite),
             11 => Some(Self::Close),
+            12 => Some(Self::Cancel),
             _ => None,
         }
     }
@@ -480,6 +485,7 @@ pub enum NetworkResult {
     Refused = 9,
     Checksum = 10,
     Unsupported = 11,
+    Cancelled = 12,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -495,10 +501,10 @@ pub struct NetworkRequest {
     pub service_epoch: u64,
     pub address: [u8; 4],
     pub port: u16,
-    pub payload_page: u16,
     pub payload_len: u16,
     pub timeout_ticks: u32,
     pub reserved_tail: [u8; 16],
+    pub payload: [u8; NETWORK_INLINE_PAYLOAD_BYTES],
 }
 
 impl NetworkRequest {
@@ -514,10 +520,10 @@ impl NetworkRequest {
             service_epoch: 0,
             address: [0; 4],
             port: 0,
-            payload_page: 0,
             payload_len: 0,
             timeout_ticks: 0,
             reserved_tail: [0; 16],
+            payload: [0; NETWORK_INLINE_PAYLOAD_BYTES],
         }
     }
 
@@ -528,8 +534,7 @@ impl NetworkRequest {
             && self.flags & !NETWORK_REQUEST_FLAG_LISTENER == 0
             && self.reserved == 0
             && self.reserved_tail.iter().all(|byte| *byte == 0)
-            && self.payload_page < NETWORK_PACKET_PAGE_COUNT as u16
-            && self.payload_len as usize <= NETWORK_PACKET_PAGE_BYTES
+            && self.payload_len as usize <= NETWORK_INLINE_PAYLOAD_BYTES
     }
 }
 
@@ -545,9 +550,9 @@ pub struct NetworkResponse {
     pub generation: u16,
     pub reserved: u16,
     pub service_epoch: u64,
-    pub payload_page: u16,
     pub payload_len: u16,
     pub detail: [u8; 16],
+    pub payload: [u8; NETWORK_INLINE_PAYLOAD_BYTES],
 }
 
 impl NetworkResponse {
@@ -567,9 +572,9 @@ impl NetworkResponse {
             generation: 0,
             reserved: 0,
             service_epoch: 0,
-            payload_page: 0,
             payload_len: 0,
             detail: [0; 16],
+            payload: [0; NETWORK_INLINE_PAYLOAD_BYTES],
         }
     }
 
@@ -578,8 +583,7 @@ impl NetworkResponse {
             && self.operation as u8 == request.operation as u8
             && self.request_id == request.request_id
             && self.reserved == 0
-            && self.payload_page < NETWORK_PACKET_PAGE_COUNT as u16
-            && self.payload_len as usize <= NETWORK_PACKET_PAGE_BYTES
+            && self.payload_len as usize <= NETWORK_INLINE_PAYLOAD_BYTES
     }
 }
 
@@ -684,6 +688,7 @@ impl ServiceId {
             Self::Commands => 4,
             Self::Storage => 5,
             Self::Network => 6,
+            Self::Fetch => 7,
         }
     }
 
@@ -696,6 +701,7 @@ impl ServiceId {
             4 => Some(Self::Commands),
             5 => Some(Self::Storage),
             6 => Some(Self::Network),
+            7 => Some(Self::Fetch),
             _ => None,
         }
     }
@@ -718,6 +724,12 @@ pub enum IpcEndpointId {
     CoreToNetwork = 11,
     CommandsToNetwork = 12,
     NetworkToCommands = 13,
+    CommandsToFetch = 14,
+    FetchToCommands = 15,
+    FetchToStorage = 16,
+    StorageToFetch = 17,
+    FetchToNetwork = 18,
+    NetworkToFetch = 19,
 }
 
 impl IpcEndpointId {
@@ -743,6 +755,12 @@ impl IpcEndpointId {
             11 => Some(Self::CoreToNetwork),
             12 => Some(Self::CommandsToNetwork),
             13 => Some(Self::NetworkToCommands),
+            14 => Some(Self::CommandsToFetch),
+            15 => Some(Self::FetchToCommands),
+            16 => Some(Self::FetchToStorage),
+            17 => Some(Self::StorageToFetch),
+            18 => Some(Self::FetchToNetwork),
+            19 => Some(Self::NetworkToFetch),
             _ => None,
         }
     }
@@ -761,6 +779,10 @@ impl IpcEndpointId {
                 ServiceId::Network
             }
             Self::CommandsToNetwork => ServiceId::Commands,
+            Self::CommandsToFetch => ServiceId::Commands,
+            Self::FetchToCommands | Self::FetchToStorage | Self::FetchToNetwork => ServiceId::Fetch,
+            Self::StorageToFetch => ServiceId::Storage,
+            Self::NetworkToFetch => ServiceId::Network,
         }
     }
 
@@ -778,6 +800,9 @@ impl IpcEndpointId {
                 ServiceId::Network
             }
             Self::NetworkToCommands => ServiceId::Commands,
+            Self::CommandsToFetch | Self::FetchToStorage | Self::FetchToNetwork => ServiceId::Fetch,
+            Self::FetchToCommands => ServiceId::Commands,
+            Self::StorageToFetch | Self::NetworkToFetch => ServiceId::Fetch,
         }
     }
 
@@ -823,6 +848,18 @@ pub const fn ipc_capability_slot(
         (ServiceId::Network, IpcEndpointId::NetworkToCommands, IpcRights::Send) => Some(3),
         (ServiceId::Commands, IpcEndpointId::CommandsToNetwork, IpcRights::Send) => Some(4),
         (ServiceId::Commands, IpcEndpointId::NetworkToCommands, IpcRights::Receive) => Some(5),
+        (ServiceId::Commands, IpcEndpointId::CommandsToFetch, IpcRights::Send) => Some(6),
+        (ServiceId::Commands, IpcEndpointId::FetchToCommands, IpcRights::Receive) => Some(7),
+        (ServiceId::Fetch, IpcEndpointId::FetchToCommands, IpcRights::Send) => Some(0),
+        (ServiceId::Fetch, IpcEndpointId::CommandsToFetch, IpcRights::Receive) => Some(1),
+        (ServiceId::Fetch, IpcEndpointId::FetchToStorage, IpcRights::Send) => Some(2),
+        (ServiceId::Fetch, IpcEndpointId::StorageToFetch, IpcRights::Receive) => Some(3),
+        (ServiceId::Fetch, IpcEndpointId::FetchToNetwork, IpcRights::Send) => Some(4),
+        (ServiceId::Fetch, IpcEndpointId::NetworkToFetch, IpcRights::Receive) => Some(5),
+        (ServiceId::Storage, IpcEndpointId::FetchToStorage, IpcRights::Receive) => Some(4),
+        (ServiceId::Storage, IpcEndpointId::StorageToFetch, IpcRights::Send) => Some(5),
+        (ServiceId::Network, IpcEndpointId::FetchToNetwork, IpcRights::Receive) => Some(4),
+        (ServiceId::Network, IpcEndpointId::NetworkToFetch, IpcRights::Send) => Some(5),
         _ => None,
     }
 }
@@ -843,6 +880,11 @@ pub enum MessageKind {
     NetworkResponse = 11,
     CompletionRequest = 12,
     CompletionResponse = 13,
+    FetchRequest = 14,
+    FetchControl = 15,
+    FetchResponse = 16,
+    CommandProgress = 17,
+    CommandControl = 18,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1074,7 +1116,7 @@ pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
     match endpoint {
         0 => Some(IpcMessageType::Input),
         1 => Some(IpcMessageType::Render),
-        2..=5 | 8..=9 | 12..=13 => Some(IpcMessageType::Bytes),
+        2..=5 | 8..=9 | 12..=19 => Some(IpcMessageType::Bytes),
         10..=11 => Some(IpcMessageType::Packet),
         _ => None,
     }
@@ -1115,6 +1157,232 @@ impl IpcBytes {
         (self.len as usize <= MAX_IPC_BYTES).then(|| &self.bytes[..self.len as usize])
     }
 }
+
+pub const FETCH_REQUEST_DATA_BYTES: usize = 240;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct FetchRequest {
+    pub request_id: u32,
+    pub url_len: u16,
+    pub destination_len: u16,
+    pub reserved: u16,
+    pub data: [u8; FETCH_REQUEST_DATA_BYTES],
+}
+
+impl FetchRequest {
+    pub fn new(request_id: u32, url: &[u8], destination: &[u8]) -> Option<Self> {
+        if request_id == 0 || url.is_empty() || destination.is_empty() {
+            return None;
+        }
+        let total = url.len().checked_add(destination.len())?;
+        if total > FETCH_REQUEST_DATA_BYTES || url.len() > u16::MAX as usize {
+            return None;
+        }
+        let mut request = Self {
+            request_id,
+            url_len: url.len() as u16,
+            destination_len: destination.len() as u16,
+            reserved: 0,
+            data: [0; FETCH_REQUEST_DATA_BYTES],
+        };
+        request.data[..url.len()].copy_from_slice(url);
+        request.data[url.len()..total].copy_from_slice(destination);
+        Some(request)
+    }
+
+    pub fn is_valid(self) -> bool {
+        self.request_id != 0
+            && self.reserved == 0
+            && usize::from(self.url_len) + usize::from(self.destination_len)
+                <= FETCH_REQUEST_DATA_BYTES
+            && self.url_len != 0
+            && self.destination_len != 0
+    }
+
+    pub fn url(&self) -> Option<&[u8]> {
+        self.is_valid().then(|| &self.data[..usize::from(self.url_len)])
+    }
+
+    pub fn destination(&self) -> Option<&[u8]> {
+        self.is_valid().then(|| {
+            let start = usize::from(self.url_len);
+            &self.data[start..start + usize::from(self.destination_len)]
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum FetchControlOperation {
+    Cancel = 1,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct FetchControl {
+    pub request_id: u32,
+    pub operation: FetchControlOperation,
+    pub reserved: [u8; 3],
+}
+
+impl FetchControl {
+    pub const fn cancel(request_id: u32) -> Self {
+        Self { request_id, operation: FetchControlOperation::Cancel, reserved: [0; 3] }
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.request_id != 0
+            && matches!(self.operation, FetchControlOperation::Cancel)
+            && self.reserved[0] == 0
+            && self.reserved[1] == 0
+            && self.reserved[2] == 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum FetchPhase {
+    Idle = 0,
+    Connect = 1,
+    SendRequest = 2,
+    ReadResponse = 3,
+    StageStorage = 4,
+    Commit = 5,
+    Complete = 6,
+    Failed = 7,
+    Cancelled = 8,
+}
+
+impl FetchPhase {
+    pub const fn is_valid(self) -> bool {
+        matches!(
+            self,
+            Self::Idle
+                | Self::Connect
+                | Self::SendRequest
+                | Self::ReadResponse
+                | Self::StageStorage
+                | Self::Commit
+                | Self::Complete
+                | Self::Failed
+                | Self::Cancelled
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum FetchStatus {
+    Ok = 0,
+    InProgress = 1,
+    Cancelled = 2,
+    Invalid = 3,
+    Network = 4,
+    Storage = 5,
+    Timeout = 6,
+    Malformed = 7,
+    Oversized = 8,
+    Busy = 9,
+    Stale = 10,
+}
+
+impl FetchStatus {
+    pub const fn is_valid(self) -> bool {
+        matches!(
+            self,
+            Self::Ok
+                | Self::InProgress
+                | Self::Cancelled
+                | Self::Invalid
+                | Self::Network
+                | Self::Storage
+                | Self::Timeout
+                | Self::Malformed
+                | Self::Oversized
+                | Self::Busy
+                | Self::Stale
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct FetchResponse {
+    pub request_id: u32,
+    pub phase: FetchPhase,
+    pub status: FetchStatus,
+    pub reserved: u16,
+    pub downloaded_bytes: u32,
+    pub total_bytes: u32,
+}
+
+impl FetchResponse {
+    pub const fn new(
+        request_id: u32,
+        phase: FetchPhase,
+        status: FetchStatus,
+        downloaded_bytes: u32,
+        total_bytes: Option<u32>,
+    ) -> Self {
+        Self {
+            request_id,
+            phase,
+            status,
+            reserved: 0,
+            downloaded_bytes,
+            total_bytes: match total_bytes {
+                Some(value) => value,
+                None => u32::MAX,
+            },
+        }
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.request_id != 0
+            && self.phase.is_valid()
+            && self.status.is_valid()
+            && self.reserved == 0
+    }
+
+    pub const fn total(self) -> Option<u32> {
+        if self.total_bytes == u32::MAX { None } else { Some(self.total_bytes) }
+    }
+}
+
+pub type CommandProgress = FetchResponse;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct CommandControl {
+    pub request_id: u32,
+    pub operation: FetchControlOperation,
+    pub reserved: [u8; 3],
+}
+
+impl CommandControl {
+    pub const fn cancel(request_id: u32) -> Self {
+        Self { request_id, operation: FetchControlOperation::Cancel, reserved: [0; 3] }
+    }
+
+    pub const fn is_valid(self) -> bool {
+        // Zero is the bounded "cancel the active command" wildcard. Commands
+        // resolves it only against its one active Fetch operation.
+        matches!(self.operation, FetchControlOperation::Cancel)
+            && self.reserved[0] == 0
+            && self.reserved[1] == 0
+            && self.reserved[2] == 0
+    }
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<NetworkRequest>() <= MAX_IPC_BYTES);
+    assert!(core::mem::size_of::<NetworkResponse>() <= MAX_IPC_BYTES);
+    assert!(core::mem::size_of::<FetchRequest>() <= MAX_IPC_BYTES);
+    assert!(core::mem::size_of::<FetchControl>() <= MAX_IPC_BYTES);
+    assert!(core::mem::size_of::<FetchResponse>() <= MAX_IPC_BYTES);
+    assert!(core::mem::size_of::<CommandControl>() <= MAX_IPC_BYTES);
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -1649,6 +1917,25 @@ mod tests {
     }
 
     #[test]
+    fn command_cancel_can_target_the_active_operation_without_its_id() {
+        assert!(CommandControl::cancel(0).is_valid());
+        assert!(!FetchControl::cancel(0).is_valid());
+        assert!(CommandControl::cancel(7).is_valid());
+    }
+
+    #[test]
+    fn network_inline_payloads_are_bounded_and_round_trip() {
+        assert!(core::mem::size_of::<NetworkRequest>() <= MAX_IPC_BYTES);
+        assert!(core::mem::size_of::<NetworkResponse>() <= MAX_IPC_BYTES);
+        let mut request = NetworkRequest::new(NetworkOperation::TcpWrite, 9);
+        request.payload_len = NETWORK_INLINE_PAYLOAD_BYTES as u16;
+        request.payload[0] = 0x5a;
+        assert!(request.is_valid());
+        request.payload_len += 1;
+        assert!(!request.is_valid());
+    }
+
+    #[test]
     fn capability_page_rejects_empty_and_out_of_range_slots() {
         let mut page = IpcCapabilityPage::empty();
         assert_eq!(page.get(0), None);
@@ -1721,7 +2008,7 @@ mod tests {
         let keyboard = keyboard_read_event_mask();
         assert_eq!(all & keyboard, 0);
         all |= keyboard;
-        assert_eq!(EVENT_COUNT, 29);
+        assert_eq!(EVENT_COUNT, 41);
         assert_eq!(all.count_ones(), EVENT_COUNT as u32);
     }
 

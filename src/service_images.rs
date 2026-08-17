@@ -51,7 +51,7 @@ pub enum ServiceImageError {
     InvalidElf(ProcessError),
 }
 
-pub const SERVICE_IMAGES: [ServiceImageSpec; 7] = [
+pub const SERVICE_IMAGES: [ServiceImageSpec; 8] = [
     ServiceImageSpec::new(ServiceId::Input, b"input", b"\\EFI\\LOGOS\\INPUT.ELF", 0),
     ServiceImageSpec::new(ServiceId::Display, b"display", b"\\EFI\\LOGOS\\DISPLAY.ELF", 0),
     ServiceImageSpec::new(
@@ -74,9 +74,17 @@ pub const SERVICE_IMAGES: [ServiceImageSpec; 7] = [
     ),
     ServiceImageSpec::new(ServiceId::Storage, b"storage", b"\\EFI\\LOGOS\\STORAGE.ELF", 0),
     ServiceImageSpec::new(ServiceId::Network, b"network", b"\\EFI\\LOGOS\\NETWORK.ELF", 0),
+    ServiceImageSpec::new(
+        ServiceId::Fetch,
+        b"fetch",
+        b"\\EFI\\LOGOS\\FETCH.ELF",
+        (1 << ServiceId::Commands.index())
+            | (1 << ServiceId::Storage.index())
+            | (1 << ServiceId::Network.index()),
+    ),
 ];
 
-pub const SERVICE_START_ORDER: [ServiceId; 7] = [
+pub const SERVICE_START_ORDER: [ServiceId; 8] = [
     ServiceId::Input,
     ServiceId::Display,
     ServiceId::Terminal,
@@ -84,6 +92,7 @@ pub const SERVICE_START_ORDER: [ServiceId; 7] = [
     ServiceId::Storage,
     ServiceId::Commands,
     ServiceId::Network,
+    ServiceId::Fetch,
 ];
 
 pub const fn service_image(service: ServiceId) -> ServiceImageSpec {
@@ -97,7 +106,8 @@ const fn manifest_is_indexed() -> bool {
         if spec.service().index() != index
             || spec.name().is_empty()
             || spec.name().len() > MAX_SERVICE_NAME_BYTES
-            || spec.dependencies() & !((1 << SERVICE_IMAGES.len()) - 1) != 0
+            || (SERVICE_IMAGES.len() < 8
+                && spec.dependencies() & !((1u16 << SERVICE_IMAGES.len()) - 1) as u8 != 0)
         {
             return false;
         }
@@ -143,7 +153,7 @@ mod tests {
 
     #[test]
     fn manifest_is_fixed_and_dependencies_are_valid() {
-        assert_eq!(SERVICE_IMAGES.len(), 7);
+        assert_eq!(SERVICE_IMAGES.len(), 8);
         assert_eq!(SERVICE_IMAGES[0].service(), ServiceId::Input);
         assert_eq!(SERVICE_IMAGES[1].service(), ServiceId::Display);
         assert_eq!(SERVICE_IMAGES[2].service(), ServiceId::Terminal);
@@ -155,6 +165,7 @@ mod tests {
         assert_eq!(SERVICE_IMAGES[5].dependencies(), 0);
         assert_eq!(SERVICE_IMAGES[5].name(), b"storage");
         assert_eq!(SERVICE_IMAGES[6].service(), ServiceId::Network);
+        assert_eq!(SERVICE_IMAGES[7].service(), ServiceId::Fetch);
         assert_eq!(service_image(ServiceId::Display).path(), b"\\EFI\\LOGOS\\DISPLAY.ELF");
     }
 

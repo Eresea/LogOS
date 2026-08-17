@@ -115,6 +115,7 @@ impl ServiceRuntime {
                 LoadedImage::empty(),
                 LoadedImage::empty(),
                 LoadedImage::empty(),
+                LoadedImage::empty(),
             ],
             tables: [const { MaybeUninit::uninit() }; SERVICE_COUNT],
             table_ready: [false; SERVICE_COUNT],
@@ -607,8 +608,9 @@ impl ServiceRuntime {
             self.queue_network_link();
         }
         for service in crate::service_images::SERVICE_START_ORDER {
-            if service == ServiceId::Network
-                && self.manager.state(service.index()) == Some(logos_abi::ManagerState::Disabled)
+            if (service == ServiceId::Network || service == ServiceId::Fetch)
+                && self.manager.state(ServiceId::Network.index())
+                    == Some(logos_abi::ManagerState::Disabled)
             {
                 continue;
             }
@@ -695,11 +697,10 @@ impl ServiceRuntime {
                         .write(self.network_config);
                 }
             }
-            for frame in &self.network_packet_frames {
-                if let Some(frame) = *frame {
-                    memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
-                }
-            }
+            // Packet pages are Core-owned VirtIO DMA buffers. A targeted
+            // Network restart must not clear them while the device can still
+            // own a descriptor; the new service instance reinitializes its
+            // protocol state without touching the transport ring.
         }
         Ok(())
     }
@@ -1099,15 +1100,12 @@ impl ServiceRuntime {
             self.storage_proof.observe_request(bytes);
         }
         let outcome = graph.send(service, capability, bytes);
-        if outcome.notified {
-            crate::arch::signal_events(logos_abi::ipc_read_event_mask(
-                capability.endpoint as usize,
-            ));
-        } else if outcome.status == logos_abi::IpcStatus::Ok
-            && (capability.endpoint_index()
-                == Some(logos_abi::IpcEndpointId::CommandsToNetwork.index())
-                || capability.endpoint_index()
-                    == Some(logos_abi::IpcEndpointId::NetworkToCommands.index()))
+        if outcome.notified
+            || (outcome.status == logos_abi::IpcStatus::Ok
+                && (capability.endpoint_index()
+                    == Some(logos_abi::IpcEndpointId::CommandsToNetwork.index())
+                    || capability.endpoint_index()
+                        == Some(logos_abi::IpcEndpointId::NetworkToCommands.index())))
         {
             crate::arch::signal_events(logos_abi::ipc_read_event_mask(
                 capability.endpoint as usize,
@@ -1560,7 +1558,6 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::RestartLimit);
         }
         crate::arch::begin_service_runtime_transition();
-        crate::arch::reset_network_device();
         self.manager.mark_stopping(ServiceId::Network);
         self.network_config.service_epoch =
             self.network_config.service_epoch.wrapping_add(1).max(1);
@@ -1590,7 +1587,11 @@ impl ServiceRuntime {
         self.reset_service_image(ServiceId::Network)?;
         self.queue_network_link();
         self.start_service_task(ServiceId::Network)?;
-        self.manager.restart_complete(&[ServiceId::Network]);
+        if self.tasks[ServiceId::Fetch.index()].is_none() {
+            self.reset_service_image(ServiceId::Fetch)?;
+            self.start_service_task(ServiceId::Fetch)?;
+        }
+        self.manager.restart_complete(&[ServiceId::Fetch, ServiceId::Network]);
         crate::arch::finish_service_runtime_transition();
         #[cfg(feature = "qemu-proof")]
         crate::proof::network_restart_completed();
@@ -1631,7 +1632,11 @@ impl ServiceRuntime {
                 self.pending_restart = Some((services, count));
                 return Ok(false);
             }
-            if count == 1 && services[0] == ServiceId::Network {
+            if (count == 1 && services[0] == ServiceId::Network)
+                || (count == 2
+                    && services[0] == ServiceId::Fetch
+                    && services[1] == ServiceId::Network)
+            {
                 self.restart_network(runtime_guard)?;
                 return Ok(true);
             }
@@ -1815,7 +1820,13 @@ fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint) {
             | logos_abi::IpcEndpointId::CommandsToStorage
             | logos_abi::IpcEndpointId::StorageToCommands
             | logos_abi::IpcEndpointId::CommandsToNetwork
-            | logos_abi::IpcEndpointId::NetworkToCommands => (frame as *mut logos_abi::StreamIpc)
+            | logos_abi::IpcEndpointId::NetworkToCommands
+            | logos_abi::IpcEndpointId::CommandsToFetch
+            | logos_abi::IpcEndpointId::FetchToCommands
+            | logos_abi::IpcEndpointId::FetchToStorage
+            | logos_abi::IpcEndpointId::StorageToFetch
+            | logos_abi::IpcEndpointId::FetchToNetwork
+            | logos_abi::IpcEndpointId::NetworkToFetch => (frame as *mut logos_abi::StreamIpc)
                 .write(logos_abi::StreamIpc::new(endpoint.header())),
             _ => {}
         }

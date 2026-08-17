@@ -8,6 +8,7 @@ license = "MIT"
 [features]
 qemu-proof = []
 storage-proof = []
+fetch-proof = []
 
 [dependencies]
 logos-abi = { path = "../../abi" }
@@ -19,6 +20,7 @@ logos-storage = { path = "../../storage" }
 logos-storage-service = { path = "../storage" }
 logos-terminal = { path = "../terminal" }
 logos-network = { path = "../../network" }
+logos-fetch = { path = "../fetch" }
 
 [[bin]]
 name = "logos-input"
@@ -59,5 +61,11 @@ bench = false
 [[bin]]
 name = "logos-network"
 path = "src/network.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "logos-fetch"
+path = "src/fetch.rs"
 test = false
 bench = false

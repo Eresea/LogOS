@@ -27,14 +27,15 @@ Status: active preemptive SMP Core milestone.
   command API writes, reboot reopen, aborted and removed files, and torn-journal recovery. Host tests
   cover the versioned API, malformed requests, transaction ownership, bounded namespace operations,
   command parsing, committed/staged visibility, and prepared checkpoint recovery.
-- Network v1 host coverage passes for bounded configuration parsing and fail-closed Disabled mode,
-  the versioned Network ABI, smoltcp packet-device copying, IPv4 checksums, static-to-DHCP fallback,
+- Network v2 host coverage passes for bounded configuration parsing and fail-closed Disabled mode,
+  inline payload validation, multi-client request routing, smoltcp packet-device copying, IPv4 checksums, static-to-DHCP fallback,
   fixed socket/listener capacities, listener accept pairing, stale socket generations, modern VirtIO
   capability parsing, and the bounded VirtIO queue model.
-- The enabled real-peer Network proof reaches VirtIO discovery, static ARP/ICMP readiness, a TCP
-  client response, Network-only restart, listener creation/accept, and bounded write handling. The
-  final peer-to-guest TCP data/read step is still failing, so the enabled proof does not yet reach
-  `QEMU proof PASS`; this is a post-merge TCP follow-up.
+- Storage v2 staged writes and the host-tested Fetch protocol pass bounded creation, replacement,
+  abort, chunk ordering, HTTP framing, split responses, and body limits. The Fetch image is wired
+  into the fixed service graph and terminal/session path; the dedicated real-peer Fetch persistence
+  proof is wired but currently blocked in the QMP harness: keyboard interrupts arrive, while the
+  long command is not yet reaching the guest parser reliably.
 - The local-APIC period is measured against the calibrated TSC on the BSP and each AP before its
   timer is enabled.
 - Non-proof UEFI boot reaches `LogOS vNext: core ready` and remains in the scheduler for 1, 2, and
@@ -47,9 +48,9 @@ Runtime orchestration beyond the first bounded operation table, multi-client sto
 permissions, directories, or real-peer Network packet/TCP behavior. AP startup
 is limited to healthy xAPIC IDs, eight CPUs, fixed low-memory trampoline staging, and current CR3.
 
-The enabled-profile Network QEMU proof still needs peer-to-guest TCP data/read completion. DHCP
-fallback QEMU proof is also deferred post-merge. Neither is a PR gate for this branch. No v1
-massive-traffic claim is made; smoltcp 0.12 TCP congestion-control/high-throughput work remains
-Network v2.
+The enabled-profile Network and dedicated Fetch QEMU proofs are not yet PR gates; the Network
+listener path and Fetch terminal-input path still need a stable real-peer proof. DHCP fallback
+QEMU proof is also deferred post-merge. No massive-traffic claim is made; smoltcp 0.12 TCP
+congestion-control/high-throughput work remains outside this milestone.
 
 `v1_docs/` and reviewed v1 status records are historical reference only.

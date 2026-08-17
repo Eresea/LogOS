@@ -1,11 +1,22 @@
 param(
     [ValidateRange(1024, 65535)]
-    [int]$Port = 4450
+    [int]$Port = 4450,
+    [string]$TracePath
 )
 
 $ErrorActionPreference = 'Stop'
 $gatewayIp = [byte[]](10, 0, 2, 2)
 $gatewayMac = [byte[]](0x52, 0x54, 0x00, 0x00, 0x00, 0x02)
+$trace = $null
+if ($TracePath) {
+    $trace = [System.IO.StreamWriter]::new($TracePath, $false, [Text.Encoding]::ASCII)
+    $trace.AutoFlush = $true
+}
+
+function Trace {
+    param([string]$Text)
+    if ($trace) { $trace.WriteLine($Text) }
+}
 
 function Read-Exact {
     param(
@@ -185,7 +196,6 @@ function New-TcpSynAck {
     Write-UInt16 $reply ($tcpOffset + 14) 65535
     Write-UInt16 $reply ($tcpOffset + 16) 0
     Write-UInt16 $reply ($tcpOffset + 18) 0
-
     $pseudo = New-Object byte[] 32
     [Array]::Copy($reply, $ipOffset + 12, $pseudo, 0, 4)
     [Array]::Copy($reply, $ipOffset + 16, $pseudo, 4, 4)
@@ -327,19 +337,14 @@ function Handle-Frame {
     return $null
 }
 
-$client = $null
+$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+$listener.Start()
+Trace 'peer listening'
 while ($true) {
+    $client = $null
     try {
-        $client = [System.Net.Sockets.TcpClient]::new()
-        $client.Connect('127.0.0.1', $Port)
-        break
-    } catch {
-        if ($client) { $client.Dispose() }
-        Start-Sleep -Milliseconds 100
-    }
-}
-
-try {
+        $client = $listener.AcceptTcpClient()
+        Trace 'peer connected'
     $stream = $client.GetStream()
     while ($true) {
         $prefix = New-Object byte[] 4
@@ -349,29 +354,93 @@ try {
         if ($length -lt 14 -or $length -gt 2048) { break }
         $frame = New-Object byte[] $length
         if (-not (Read-Exact $stream $frame 0 $length)) { break }
+        Trace ("RX len={0} type={1:x4}" -f $length, (([int]$frame[12] -shl 8) -bor $frame[13]))
+        if ((([int]$frame[12] -shl 8) -bor $frame[13]) -eq 0x0800) {
+            $traceIhl = ($frame[14] -band 0x0f) * 4
+            if ($frame[23] -eq 6) {
+                $traceTcp = 14 + $traceIhl
+                $traceSource = ([int]$frame[$traceTcp] -shl 8) -bor $frame[$traceTcp + 1]
+                $traceDestination = ([int]$frame[$traceTcp + 2] -shl 8) -bor $frame[$traceTcp + 3]
+                Trace ("TCP source={0} destination={1} flags={2:x2} seq={3} ack={4}" -f
+                    $traceSource, $traceDestination, $frame[$traceTcp + 13],
+                    (Read-UInt32 $frame ($traceTcp + 4)), (Read-UInt32 $frame ($traceTcp + 8)))
+            } else { Trace ("IP protocol={0}" -f $frame[23]) }
+        }
         $icmp = New-IcmpReply $frame
         if ($icmp) {
+            Trace 'TX icmp'
             Write-Frame $stream $icmp
             $syn = New-TcpSyn $frame
-            if ($syn) { Write-Frame $stream $syn }
+            if ($syn) {
+                Trace 'TX tcp syn'
+                Write-Frame $stream $syn
+            }
             continue
         }
         $reply = Handle-Frame $frame
         if ($reply) {
-            Write-Frame $stream $reply
-            $tcpOffset = 14 + (($frame[14] -band 0x0f) * 4)
-            if ((([int]$frame[12] -shl 8) -bor $frame[13]) -eq 0x0800 -and
-                $frame[23] -eq 6 -and $frame[$tcpOffset + 13] -eq 0x12) {
-                $guestSequence = Read-UInt32 $frame ($tcpOffset + 4)
-                $hostSequence = Read-UInt32 $frame ($tcpOffset + 8)
-                $data = New-TcpAckData $frame $hostSequence (($guestSequence + 1) -band 0xffffffff) ([byte[]](0x4e))
-                if ($data) {
-                    Start-Sleep -Milliseconds 25
-                    Write-Frame $stream $data
-                }
+            Trace ("TX reply len={0}" -f $reply.Length)
+            if ($reply.Length -ge 54 -and $reply[23] -eq 6) {
+                $replyIhl = ($reply[14] -band 0x0f) * 4
+                $replyTcp = 14 + $replyIhl
+                $replyIpLength = ([int]$reply[16] -shl 8) -bor $reply[17]
+                $replyTcpLength = $replyIpLength - $replyIhl
+                $replyPseudo = New-Object byte[] (12 + $replyTcpLength)
+                [Array]::Copy($reply, 26, $replyPseudo, 0, 8)
+                $replyPseudo[9] = 6
+                Write-UInt16 $replyPseudo 10 $replyTcpLength
+                [Array]::Copy($reply, $replyTcp, $replyPseudo, 12, $replyTcpLength)
+                Trace ("TX tcp flags={0:x2} ip-checksum={1:x4} tcp-checksum={2:x4}" -f
+                    $reply[$replyTcp + 13], (Get-Checksum $reply 14 $replyIhl),
+                    (Get-Checksum $replyPseudo 0 $replyPseudo.Length))
+                Trace ("TX ip={0}.{1}.{2}.{3}->{4}.{5}.{6}.{7} seq={8} ack={9}" -f
+                    $reply[26], $reply[27], $reply[28], $reply[29], $reply[30], $reply[31],
+                    $reply[32], $reply[33], (Read-UInt32 $reply ($replyTcp + 4)),
+                    (Read-UInt32 $reply ($replyTcp + 8)))
+                Trace ([BitConverter]::ToString($reply))
             }
+            Write-Frame $stream $reply
+                    $tcpOffset = 14 + (($frame[14] -band 0x0f) * 4)
+                    $destinationPort = ([int]$frame[$tcpOffset + 2] -shl 8) -bor $frame[$tcpOffset + 3]
+                    $dataOffset = (($frame[$tcpOffset + 12] -shr 4) -band 0x0f) * 4
+                    $ipLength = ([int]$frame[16] -shl 8) -bor $frame[17]
+                    $payloadLength = [Math]::Max(0, $ipLength - (($frame[14] -band 0x0f) * 4) - $dataOffset)
+                    if ((([int]$frame[12] -shl 8) -bor $frame[13]) -eq 0x0800 -and
+                    $frame[23] -eq 6 -and ($frame[$tcpOffset + 13] -band 0x10) -ne 0 -and
+                    $payloadLength -eq 0) {
+                        $guestSequence = Read-UInt32 $frame ($tcpOffset + 4)
+                        $hostSequence = Read-UInt32 $frame ($tcpOffset + 8)
+                        if ($destinationPort -eq 8081) {
+                        $data = New-TcpAckData $frame $hostSequence (($guestSequence + 1) -band 0xffffffff) ([byte[]](0x4e))
+                        if ($data) {
+                            Trace 'TX listener data'
+                            Start-Sleep -Milliseconds 25
+                            Write-Frame $stream $data
+                        }
+                        }
+                    }
+                if ($destinationPort -eq 8080 -and $payloadLength -gt 0 -and ($frame[$tcpOffset + 13] -band 0x10) -ne 0) {
+                    $guestSequence = Read-UInt32 $frame ($tcpOffset + 4)
+                    $hostSequence = Read-UInt32 $frame ($tcpOffset + 8)
+                    $http = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nTransfer-Encoding: chunked`r`nConnection: close`r`n`r`n4`r`nLogO`r`n4`r`nS-Fetch`r`n0`r`n`r`n")
+                    $data = New-TcpAckData $frame $hostSequence (($guestSequence + $payloadLength) -band 0xffffffff) $http
+                    if ($data) {
+                        Trace 'TX http data'
+                        $requestPayload = [Text.Encoding]::ASCII.GetString(
+                            $frame,
+                            $tcpOffset + $dataOffset,
+                            $payloadLength
+                        )
+                        $delay = if ($requestPayload.Contains('/cancel')) { 5000 } else { 25 }
+                        Start-Sleep -Milliseconds $delay
+                        Write-Frame $stream $data
+                    }
+                }
         }
     }
-} finally {
-    if ($client) { $client.Dispose() }
+    } catch {
+        Trace ("peer reconnect: {0}" -f $_.Exception.Message)
+    } finally {
+        if ($client) { $client.Dispose() }
+    }
 }

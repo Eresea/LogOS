@@ -1,9 +1,10 @@
 //! Fixed health and restart policy for the live service graph.
 
 use crate::process::ProcessState;
+use crate::service_images::SERVICE_IMAGES;
 use logos_abi::ServiceId;
 
-pub const MAX_SERVICES: usize = 7;
+pub const MAX_SERVICES: usize = SERVICE_IMAGES.len();
 pub const HEARTBEAT_INTERVAL: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS;
 pub const MISSED_HEARTBEATS: u8 = 3;
 pub const MAX_RESTARTS: u8 = 3;

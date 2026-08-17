@@ -17,6 +17,16 @@ const COMMANDS_SEND: usize = common::capability_slot(
     logos_abi::IpcEndpointId::NetworkToCommands,
     logos_abi::IpcRights::Send,
 );
+const FETCH_RECEIVE: usize = common::capability_slot(
+    ServiceId::Network,
+    logos_abi::IpcEndpointId::FetchToNetwork,
+    logos_abi::IpcRights::Receive,
+);
+const FETCH_SEND: usize = common::capability_slot(
+    ServiceId::Network,
+    logos_abi::IpcEndpointId::NetworkToFetch,
+    logos_abi::IpcRights::Send,
+);
 const CORE_RECEIVE: usize = common::capability_slot(
     ServiceId::Network,
     logos_abi::IpcEndpointId::CoreToNetwork,
@@ -281,11 +291,8 @@ mod stack {
         }
     }
 
-    pub fn udp_send(slot: u32, address: [u8; 4], port: u16, page: u16, length: u16) -> bool {
+    pub fn udp_send(slot: u32, address: [u8; 4], port: u16, payload: &[u8]) -> bool {
         let slot = slot as usize;
-        let Some(payload) = payload(page, length) else {
-            return false;
-        };
         if !ready() || slot >= UDP_SOCKET_COUNT || port == 0 {
             return false;
         }
@@ -304,9 +311,8 @@ mod stack {
         }
     }
 
-    pub fn udp_receive(slot: u32, page: u16, capacity: u16) -> Option<(usize, [u8; 4], u16)> {
+    pub fn udp_receive(slot: u32, output: &mut [u8]) -> Option<(usize, [u8; 4], u16)> {
         let slot = slot as usize;
-        let output = payload_mut(page, capacity)?;
         if !ready() || slot >= UDP_SOCKET_COUNT {
             return None;
         }
@@ -416,8 +422,7 @@ mod stack {
         }
     }
 
-    pub fn tcp_read(slot: u32, page: u16, capacity: u16) -> Option<usize> {
-        let output = payload_mut(page, capacity)?;
+    pub fn tcp_read(slot: u32, output: &mut [u8]) -> Option<usize> {
         let index = tcp_index(slot)?;
         if !ready() {
             return None;
@@ -431,10 +436,7 @@ mod stack {
         }
     }
 
-    pub fn tcp_write(slot: u32, page: u16, length: u16) -> bool {
-        let Some(payload) = payload(page, length) else {
-            return false;
-        };
+    pub fn tcp_write(slot: u32, payload: &[u8]) -> bool {
         let Some(index) = tcp_index(slot) else {
             return false;
         };
@@ -479,26 +481,6 @@ mod stack {
                 (*ptr::addr_of_mut!(TCP_ACCEPTED_FROM))[slot] = None;
             }
         }
-    }
-
-    fn payload(page: u16, length: u16) -> Option<&'static [u8]> {
-        if page >= logos_abi::NETWORK_PACKET_PAGE_COUNT as u16
-            || usize::from(length) > logos_abi::NETWORK_PACKET_PAGE_BYTES
-        {
-            return None;
-        }
-        let address = logos_abi::NETWORK_PACKET_BASE + usize::from(page) * 4096;
-        Some(unsafe { core::slice::from_raw_parts(address as *const u8, usize::from(length)) })
-    }
-
-    fn payload_mut(page: u16, length: u16) -> Option<&'static mut [u8]> {
-        if page >= logos_abi::NETWORK_PACKET_PAGE_COUNT as u16
-            || usize::from(length) > logos_abi::NETWORK_PACKET_PAGE_BYTES
-        {
-            return None;
-        }
-        let address = logos_abi::NETWORK_PACKET_BASE + usize::from(page) * 4096;
-        Some(unsafe { core::slice::from_raw_parts_mut(address as *mut u8, usize::from(length)) })
     }
 
     pub fn take_tx(page: u16, output: &mut [u8]) -> Option<usize> {
@@ -555,18 +537,27 @@ struct PendingRequest {
     request: NetworkRequest,
     response: NetworkResponse,
     started: u32,
+    peer: Peer,
 }
 
 #[cfg(target_os = "none")]
-fn send_network_response(response: NetworkResponse) {
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Peer {
+    Commands,
+    Fetch,
+}
+
+#[cfg(target_os = "none")]
+fn send_network_response(peer: Peer, response: NetworkResponse) {
     let response = response_message(response);
+    let (capability, endpoint) = match peer {
+        Peer::Commands => (COMMANDS_SEND, logos_abi::IpcEndpointId::NetworkToCommands),
+        Peer::Fetch => (FETCH_SEND, logos_abi::IpcEndpointId::NetworkToFetch),
+    };
     loop {
-        match common::ipc_send(COMMANDS_SEND, &response) {
+        match common::ipc_send(capability, &response) {
             IpcStatus::Ok => break,
-            IpcStatus::Full => common::wait(
-                common::ipc_write_event(logos_abi::IpcEndpointId::NetworkToCommands),
-                ServiceId::Network,
-            ),
+            IpcStatus::Full => common::wait(common::ipc_write_event(endpoint), ServiceId::Network),
             _ => break,
         }
     }
@@ -669,156 +660,180 @@ pub extern "C" fn _start() -> ! {
                 } else {
                     logos_abi::NetworkResult::Timeout
                 };
-                send_network_response(response);
+                send_network_response(pending.peer, response);
                 pending_request = None;
             }
         }
         let mut message = IpcBytes::empty(MessageKind::NetworkRequest);
-        let command_status = if pending_request.is_none() {
-            common::ipc_receive(COMMANDS_RECEIVE, &mut message)
+        let status = common::ipc_receive(COMMANDS_RECEIVE, &mut message);
+        let (command_status, peer) = if status == IpcStatus::Ok {
+            (status, Peer::Commands)
         } else {
-            IpcStatus::Empty
+            (common::ipc_receive(FETCH_RECEIVE, &mut message), Peer::Fetch)
         };
         if command_status == IpcStatus::Ok {
             if let Some(request) = request_from_message(&message) {
-                let mut response = service.handle(request);
-                let mut wait_for_result = false;
-                if response.result == logos_abi::NetworkResult::Ok
-                    && request.operation == logos_abi::NetworkOperation::UdpBind
-                    && !stack::udp_bind(response.handle, request.port)
-                {
-                    response.result = logos_abi::NetworkResult::Full;
-                } else if response.result == logos_abi::NetworkResult::WouldBlock
-                    && request.operation == logos_abi::NetworkOperation::UdpSend
-                {
-                    response.result = if stack::udp_send(
-                        request.handle,
-                        request.address,
-                        request.port,
-                        request.payload_page,
-                        request.payload_len,
-                    ) {
-                        logos_abi::NetworkResult::Ok
-                    } else {
-                        logos_abi::NetworkResult::WouldBlock
-                    };
-                } else if response.result == logos_abi::NetworkResult::WouldBlock
-                    && request.operation == logos_abi::NetworkOperation::IcmpPing
-                {
-                    if stack::ping(request.address) {
-                        wait_for_result = true;
-                    } else {
-                        response.result = logos_abi::NetworkResult::Full;
+                if request.operation == logos_abi::NetworkOperation::Cancel {
+                    let mut response = NetworkResponse::new(
+                        logos_abi::NetworkOperation::Cancel,
+                        logos_abi::NetworkResult::Stale,
+                        service.state(),
+                        request.request_id,
+                    );
+                    if let Some(pending) = pending_request
+                        && pending.peer == peer
+                        && pending.request.request_id == request.request_id
+                    {
+                        pending_request = None;
+                        if pending.request.operation == logos_abi::NetworkOperation::TcpConnect {
+                            stack::close(pending.response.handle, false);
+                        }
+                        response.result = logos_abi::NetworkResult::Cancelled;
                     }
-                } else if response.result == logos_abi::NetworkResult::WouldBlock
-                    && request.operation == logos_abi::NetworkOperation::TcpConnect
-                {
-                    if stack::tcp_connect(response.handle, request.address, request.port) {
-                        wait_for_result = true;
-                    } else {
-                        response.result = logos_abi::NetworkResult::Full;
+                    if peer == Peer::Commands {
+                        send_network_response(peer, response);
                     }
-                } else if response.result == logos_abi::NetworkResult::Ok
-                    && request.operation == logos_abi::NetworkOperation::TcpListen
-                    && !stack::tcp_listen(response.handle, request.port)
-                {
-                    response.result = logos_abi::NetworkResult::Full;
-                } else if request.operation == logos_abi::NetworkOperation::TcpAccept
-                    && response.result == logos_abi::NetworkResult::WouldBlock
-                {
-                    response.result = match stack::tcp_accept(request.handle) {
-                        Some(listener_slot) => {
-                            let listener = logos_network::SocketHandle {
-                                slot: request.handle as u8,
-                                generation: request.generation,
-                                service_epoch: request.service_epoch,
-                            };
-                            match service.accept(listener) {
-                                Ok(accepted) => {
-                                    stack::bind_accepted(accepted.slot as u32, listener_slot);
-                                    response.handle = u32::from(accepted.slot);
-                                    response.generation = accepted.generation;
-                                    response.service_epoch = accepted.service_epoch;
-                                    logos_abi::NetworkResult::Ok
-                                }
-                                Err(logos_network::SocketError::Full) => {
-                                    logos_abi::NetworkResult::Full
-                                }
-                                Err(logos_network::SocketError::Stale) => {
-                                    logos_abi::NetworkResult::Stale
-                                }
-                                Err(logos_network::SocketError::Invalid) => {
-                                    logos_abi::NetworkResult::Invalid
+                } else {
+                    let mut response = service.handle(request);
+                    let mut wait_for_result = false;
+                    if response.result == logos_abi::NetworkResult::Ok
+                        && request.operation == logos_abi::NetworkOperation::UdpBind
+                        && !stack::udp_bind(response.handle, request.port)
+                    {
+                        response.result = logos_abi::NetworkResult::Full;
+                    } else if response.result == logos_abi::NetworkResult::WouldBlock
+                        && request.operation == logos_abi::NetworkOperation::UdpSend
+                    {
+                        response.result = if stack::udp_send(
+                            request.handle,
+                            request.address,
+                            request.port,
+                            &request.payload[..usize::from(request.payload_len)],
+                        ) {
+                            logos_abi::NetworkResult::Ok
+                        } else {
+                            logos_abi::NetworkResult::WouldBlock
+                        };
+                    } else if response.result == logos_abi::NetworkResult::WouldBlock
+                        && request.operation == logos_abi::NetworkOperation::IcmpPing
+                    {
+                        if stack::ping(request.address) {
+                            wait_for_result = true;
+                        } else {
+                            response.result = logos_abi::NetworkResult::Full;
+                        }
+                    } else if response.result == logos_abi::NetworkResult::WouldBlock
+                        && request.operation == logos_abi::NetworkOperation::TcpConnect
+                    {
+                        if stack::tcp_connect(response.handle, request.address, request.port) {
+                            wait_for_result = true;
+                        } else {
+                            response.result = logos_abi::NetworkResult::Full;
+                        }
+                    } else if response.result == logos_abi::NetworkResult::Ok
+                        && request.operation == logos_abi::NetworkOperation::TcpListen
+                        && !stack::tcp_listen(response.handle, request.port)
+                    {
+                        response.result = logos_abi::NetworkResult::Full;
+                    } else if request.operation == logos_abi::NetworkOperation::TcpAccept
+                        && response.result == logos_abi::NetworkResult::WouldBlock
+                    {
+                        response.result = match stack::tcp_accept(request.handle) {
+                            Some(listener_slot) => {
+                                let listener = logos_network::SocketHandle {
+                                    slot: request.handle as u8,
+                                    generation: request.generation,
+                                    service_epoch: request.service_epoch,
+                                };
+                                match service.accept(listener) {
+                                    Ok(accepted) => {
+                                        stack::bind_accepted(accepted.slot as u32, listener_slot);
+                                        response.handle = u32::from(accepted.slot);
+                                        response.generation = accepted.generation;
+                                        response.service_epoch = accepted.service_epoch;
+                                        logos_abi::NetworkResult::Ok
+                                    }
+                                    Err(logos_network::SocketError::Full) => {
+                                        logos_abi::NetworkResult::Full
+                                    }
+                                    Err(logos_network::SocketError::Stale) => {
+                                        logos_abi::NetworkResult::Stale
+                                    }
+                                    Err(logos_network::SocketError::Invalid) => {
+                                        logos_abi::NetworkResult::Invalid
+                                    }
                                 }
                             }
-                        }
-                        None => logos_abi::NetworkResult::WouldBlock,
-                    };
-                } else if request.operation == logos_abi::NetworkOperation::TcpRead
-                    && response.result == logos_abi::NetworkResult::WouldBlock
-                {
-                    response.result = match stack::tcp_read(
-                        request.handle,
-                        request.payload_page,
-                        request.payload_len,
-                    ) {
-                        Some(length) => {
-                            response.payload_page = request.payload_page;
-                            response.payload_len = length as u16;
+                            None => logos_abi::NetworkResult::WouldBlock,
+                        };
+                    } else if request.operation == logos_abi::NetworkOperation::TcpRead
+                        && response.result == logos_abi::NetworkResult::WouldBlock
+                    {
+                        response.result = match stack::tcp_read(
+                            request.handle,
+                            &mut response.payload[..logos_abi::NETWORK_INLINE_PAYLOAD_BYTES],
+                        ) {
+                            Some(length) => {
+                                response.payload_len = length as u16;
+                                logos_abi::NetworkResult::Ok
+                            }
+                            None => logos_abi::NetworkResult::WouldBlock,
+                        };
+                    } else if request.operation == logos_abi::NetworkOperation::TcpWrite
+                        && response.result == logos_abi::NetworkResult::WouldBlock
+                    {
+                        response.result = if stack::tcp_write(
+                            request.handle,
+                            &request.payload[..usize::from(request.payload_len)],
+                        ) {
                             logos_abi::NetworkResult::Ok
-                        }
-                        None => logos_abi::NetworkResult::WouldBlock,
-                    };
-                } else if request.operation == logos_abi::NetworkOperation::TcpWrite
-                    && response.result == logos_abi::NetworkResult::WouldBlock
-                {
-                    response.result = if stack::tcp_write(
-                        request.handle,
-                        request.payload_page,
-                        request.payload_len,
-                    ) {
-                        logos_abi::NetworkResult::Ok
+                        } else {
+                            logos_abi::NetworkResult::WouldBlock
+                        };
+                    } else if request.operation == logos_abi::NetworkOperation::UdpReceive
+                        && response.result == logos_abi::NetworkResult::WouldBlock
+                    {
+                        response.result = match stack::udp_receive(
+                            request.handle,
+                            &mut response.payload[..logos_abi::NETWORK_INLINE_PAYLOAD_BYTES],
+                        ) {
+                            Some((length, address, port)) => {
+                                response.payload_len = length as u16;
+                                response.detail[..4].copy_from_slice(&address);
+                                response.detail[4..6].copy_from_slice(&port.to_be_bytes());
+                                logos_abi::NetworkResult::Ok
+                            }
+                            None => logos_abi::NetworkResult::WouldBlock,
+                        };
+                    } else if request.operation == logos_abi::NetworkOperation::Close
+                        && response.result == logos_abi::NetworkResult::Ok
+                    {
+                        stack::close(
+                            request.handle,
+                            request.flags & logos_abi::NETWORK_REQUEST_FLAG_LISTENER != 0,
+                        );
+                    }
+                    if wait_for_result {
+                        pending_request = Some(PendingRequest {
+                            request,
+                            response,
+                            started: elapsed_ticks,
+                            peer,
+                        });
                     } else {
-                        logos_abi::NetworkResult::WouldBlock
-                    };
-                } else if request.operation == logos_abi::NetworkOperation::UdpReceive
-                    && response.result == logos_abi::NetworkResult::WouldBlock
-                {
-                    response.result = match stack::udp_receive(
-                        request.handle,
-                        request.payload_page,
-                        request.payload_len,
-                    ) {
-                        Some((length, address, port)) => {
-                            response.payload_page = request.payload_page;
-                            response.payload_len = length as u16;
-                            response.detail[..4].copy_from_slice(&address);
-                            response.detail[4..6].copy_from_slice(&port.to_be_bytes());
-                            logos_abi::NetworkResult::Ok
-                        }
-                        None => logos_abi::NetworkResult::WouldBlock,
-                    };
-                } else if request.operation == logos_abi::NetworkOperation::Close
-                    && response.result == logos_abi::NetworkResult::Ok
-                {
-                    stack::close(
-                        request.handle,
-                        request.flags & logos_abi::NETWORK_REQUEST_FLAG_LISTENER != 0,
-                    );
-                }
-                if wait_for_result {
-                    pending_request =
-                        Some(PendingRequest { request, response, started: elapsed_ticks });
-                } else {
-                    send_network_response(response);
+                        send_network_response(peer, response);
+                    }
                 }
             } else {
-                send_network_response(NetworkResponse::new(
-                    logos_abi::NetworkOperation::Status,
-                    logos_abi::NetworkResult::Invalid,
-                    service.state(),
-                    0,
-                ));
+                send_network_response(
+                    peer,
+                    NetworkResponse::new(
+                        logos_abi::NetworkOperation::Status,
+                        logos_abi::NetworkResult::Invalid,
+                        service.state(),
+                        0,
+                    ),
+                );
             }
         }
         if !pending_tx {
@@ -838,18 +853,12 @@ pub extern "C" fn _start() -> ! {
                 sequence = sequence.wrapping_add(1).max(1);
             }
         }
-        if pending_request.is_none() {
-            common::wait(
-                common::ipc_read_event(logos_abi::IpcEndpointId::CommandsToNetwork)
-                    | common::ipc_read_event(logos_abi::IpcEndpointId::CoreToNetwork),
-                ServiceId::Network,
-            );
-        } else {
-            common::wait(
-                common::ipc_read_event(logos_abi::IpcEndpointId::CoreToNetwork),
-                ServiceId::Network,
-            );
-        }
+        common::wait(
+            common::ipc_read_event(logos_abi::IpcEndpointId::CommandsToNetwork)
+                | common::ipc_read_event(logos_abi::IpcEndpointId::FetchToNetwork)
+                | common::ipc_read_event(logos_abi::IpcEndpointId::CoreToNetwork),
+            ServiceId::Network,
+        );
     }
 }
 

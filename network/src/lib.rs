@@ -532,6 +532,7 @@ impl NetworkService {
         response.service_epoch = self.service_epoch;
         match request.operation {
             NetworkOperation::Status => response.result = NetworkResult::Ok,
+            NetworkOperation::Cancel => response.result = NetworkResult::Unsupported,
             NetworkOperation::IcmpPing => response.result = NetworkResult::WouldBlock,
             NetworkOperation::UdpBind => match self.allocate_udp() {
                 Ok(handle) => {

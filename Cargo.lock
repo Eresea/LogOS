@@ -76,6 +76,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos-fetch"
+version = "0.1.0"
+dependencies = [
+ "logos-storage-service",
+]
+
+[[package]]
 name = "logos-input"
 version = "0.1.0"
 dependencies = [
@@ -100,6 +107,7 @@ dependencies = [
  "logos-abi",
  "logos-commands",
  "logos-display",
+ "logos-fetch",
  "logos-input",
  "logos-network",
  "logos-session",

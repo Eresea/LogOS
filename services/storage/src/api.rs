@@ -4,7 +4,10 @@ use logos_abi::{
 };
 use logos_storage::BlockStore;
 
-use crate::{DurableNamespace, NamespaceError, NamespaceTransaction};
+use crate::{DurableNamespace, MAX_FILE_BYTES, NamespaceError, NamespaceTransaction};
+
+const STAGE_CHUNK_BYTES: usize = 192;
+const STAGE_PATH_BYTES: usize = logos_abi::MAX_IPC_BYTES - 26;
 
 pub fn error_response(message: &IpcBytes, status: StorageApiStatus) -> Option<IpcBytes> {
     let request = match StorageApiRequest::decode(message) {
@@ -39,16 +42,33 @@ struct ActiveTransaction {
     transaction: NamespaceTransaction,
 }
 
+struct StagedWrite {
+    handle: u64,
+    path: [u8; STAGE_PATH_BYTES],
+    path_len: usize,
+    data: [u8; MAX_FILE_BYTES],
+    len: usize,
+}
+
 pub struct StorageApi<B> {
     namespace: DurableNamespace<B>,
     active: Option<ActiveTransaction>,
     next_transaction: u64,
+    next_stage: u64,
+    staged: Option<StagedWrite>,
     failed: bool,
 }
 
 impl<B: BlockStore> StorageApi<B> {
     pub fn new(namespace: DurableNamespace<B>) -> Self {
-        Self { namespace, active: None, next_transaction: 1, failed: false }
+        Self {
+            namespace,
+            active: None,
+            next_transaction: 1,
+            next_stage: 1,
+            staged: None,
+            failed: false,
+        }
     }
 
     pub fn into_namespace(self) -> DurableNamespace<B> {
@@ -90,6 +110,10 @@ impl<B: BlockStore> StorageApi<B> {
             StorageApiOperation::Write => self.write(&request),
             StorageApiOperation::Remove => self.remove(&request),
             StorageApiOperation::Rename => self.rename(&request),
+            StorageApiOperation::StageWriteBegin => self.stage_begin(&request),
+            StorageApiOperation::StageWriteChunk => self.stage_chunk(&request),
+            StorageApiOperation::StageWriteCommit => self.stage_commit(&request),
+            StorageApiOperation::StageWriteAbort => self.stage_abort(&request),
         };
         Self::encode(request.request_id, response)
     }
@@ -311,6 +335,88 @@ impl<B: BlockStore> StorageApi<B> {
             },
             Err(status) => ResponsePayload::empty(status, request.transaction_id),
         }
+    }
+
+    fn stage_begin(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        if request.transaction_id != 0 || request.path.len() > STAGE_PATH_BYTES {
+            return ResponsePayload::empty(StorageApiStatus::Invalid, request.transaction_id);
+        }
+        let handle = self.next_stage;
+        self.next_stage = self.next_stage.wrapping_add(1).max(1);
+        let mut path = [0; STAGE_PATH_BYTES];
+        path[..request.path.len()].copy_from_slice(request.path);
+        self.staged = Some(StagedWrite {
+            handle,
+            path,
+            path_len: request.path.len(),
+            data: [0; MAX_FILE_BYTES],
+            len: 0,
+        });
+        ResponsePayload::empty(StorageApiStatus::Ok, handle)
+    }
+
+    fn stage_chunk(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        let Some(stage) = &mut self.staged else {
+            return ResponsePayload::empty(StorageApiStatus::NoTransaction, request.transaction_id);
+        };
+        if stage.handle != request.transaction_id {
+            return ResponsePayload::empty(StorageApiStatus::Stale, request.transaction_id);
+        }
+        if request.data.len() > STAGE_CHUNK_BYTES || request.offset as usize != stage.len {
+            return ResponsePayload::empty(StorageApiStatus::Invalid, stage.handle);
+        }
+        let end = stage.len.saturating_add(request.data.len());
+        if end > MAX_FILE_BYTES {
+            return ResponsePayload::empty(StorageApiStatus::TooLarge, stage.handle);
+        }
+        stage.data[stage.len..end].copy_from_slice(request.data);
+        stage.len = end;
+        ResponsePayload::empty(StorageApiStatus::Ok, stage.handle)
+    }
+
+    fn stage_commit(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        let Some(stage) = self.staged.take() else {
+            return ResponsePayload::empty(StorageApiStatus::NoTransaction, request.transaction_id);
+        };
+        if stage.handle != request.transaction_id {
+            self.staged = Some(stage);
+            return ResponsePayload::empty(StorageApiStatus::Stale, request.transaction_id);
+        }
+        let path = &stage.path[..stage.path_len];
+        let mut transaction = self.namespace.begin_transaction();
+        let result = match transaction.stat(path) {
+            Ok(_) => transaction.write(path, 0, &stage.data[..stage.len], true).map(|_| ()),
+            Err(NamespaceError::NotFound) => transaction.create_file(path).and_then(|_| {
+                transaction.write(path, 0, &stage.data[..stage.len], true).map(|_| ())
+            }),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => match transaction.commit(&mut self.namespace) {
+                Ok(_) => ResponsePayload::empty(StorageApiStatus::Ok, stage.handle),
+                Err(error) => {
+                    if error == NamespaceError::Recovery {
+                        self.failed = true;
+                    }
+                    ResponsePayload::empty(map_error(error), stage.handle)
+                }
+            },
+            Err(error) => {
+                transaction.abort();
+                ResponsePayload::empty(map_error(error), stage.handle)
+            }
+        }
+    }
+
+    fn stage_abort(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        let Some(stage) = self.staged.take() else {
+            return ResponsePayload::empty(StorageApiStatus::NoTransaction, request.transaction_id);
+        };
+        if stage.handle != request.transaction_id {
+            self.staged = Some(stage);
+            return ResponsePayload::empty(StorageApiStatus::Stale, request.transaction_id);
+        }
+        ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id)
     }
 }
 
@@ -638,6 +744,115 @@ mod tests {
             .status,
             StorageApiStatus::NotFound
         );
+    }
+
+    #[test]
+    fn staged_write_is_invisible_ordered_and_atomic() {
+        let namespace = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
+        let mut api = StorageApi::new(namespace);
+        let begin_message = api
+            .handle(&request(StorageApiOperation::StageWriteBegin, 0, b"/stage", b"", b"", 0, 1))
+            .unwrap();
+        let begin = status(&begin_message);
+        let handle = begin.transaction_id;
+        assert_eq!(begin.status, StorageApiStatus::Ok);
+        assert_eq!(
+            status(
+                &api.handle(&request(StorageApiOperation::Read, 0, b"/stage", b"", b"", 0, 2))
+                    .unwrap()
+            )
+            .status,
+            StorageApiStatus::NotFound
+        );
+        assert_eq!(
+            status(
+                &api.handle(&request(
+                    StorageApiOperation::StageWriteChunk,
+                    handle,
+                    b"",
+                    b"",
+                    b"hello",
+                    0,
+                    3
+                ))
+                .unwrap()
+            )
+            .status,
+            StorageApiStatus::Ok
+        );
+        let second = StorageApiRequest::encode(
+            StorageApiOperation::StageWriteChunk,
+            0,
+            4,
+            handle,
+            5,
+            b"",
+            b"",
+            b" world",
+        )
+        .unwrap();
+        assert_eq!(status(&api.handle(&second).unwrap()).status, StorageApiStatus::Ok);
+        assert_eq!(
+            status(
+                &api.handle(&request(
+                    StorageApiOperation::StageWriteCommit,
+                    handle,
+                    b"",
+                    b"",
+                    b"",
+                    0,
+                    5
+                ))
+                .unwrap()
+            )
+            .status,
+            StorageApiStatus::Ok
+        );
+        let read_message =
+            api.handle(&request(StorageApiOperation::Read, 0, b"/stage", b"", b"", 0, 6)).unwrap();
+        let read = status(&read_message);
+        assert_eq!(read.data, b"hello world");
+
+        let replacement_message = api
+            .handle(&request(StorageApiOperation::StageWriteBegin, 0, b"/stage", b"", b"", 0, 7))
+            .unwrap();
+        let replacement = status(&replacement_message).transaction_id;
+        assert_eq!(
+            status(
+                &api.handle(&request(
+                    StorageApiOperation::StageWriteChunk,
+                    replacement,
+                    b"",
+                    b"",
+                    b"new",
+                    0,
+                    8
+                ))
+                .unwrap()
+            )
+            .status,
+            StorageApiStatus::Ok
+        );
+        assert_eq!(
+            status(
+                &api.handle(&request(
+                    StorageApiOperation::StageWriteAbort,
+                    replacement,
+                    b"",
+                    b"",
+                    b"",
+                    0,
+                    9
+                ))
+                .unwrap()
+            )
+            .status,
+            StorageApiStatus::Ok
+        );
+        let read_message =
+            api.handle(&request(StorageApiOperation::Read, 0, b"/stage", b"", b"", 0, 10)).unwrap();
+        let read = status(&read_message);
+        assert_eq!(read.data, b"hello world");
     }
 
     #[test]

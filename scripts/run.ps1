@@ -3,6 +3,7 @@ param(
     [switch]$Headless,
     [switch]$Interactive,
     [switch]$Proof,
+    [switch]$FetchProof,
     [switch]$NoNetwork,
     [switch]$NetworkProof,
     # Retained as a compatibility alias; networking is enabled by default.
@@ -14,15 +15,17 @@ param(
     [string]$DiskImage,
     [ValidateRange(16, 4096)]
     [int]$DiskMiB = 64,
-[ValidateRange(1024, 65535)]
-[int]$QmpPort = 4444
+    [ValidateRange(1024, 65535)]
+    [int]$QmpPort = 4444,
+    [string]$NetworkTracePath
 )
 
 $ErrorActionPreference = 'Stop'
+if ($FetchProof -and -not $Proof) { throw '-FetchProof requires -Proof.' }
 if ($Interactive -and ($Headless -or $Proof)) { throw 'Choose exactly one of -Interactive, -Headless, or -Proof.' }
 if ($Network -and $NoNetwork) { throw 'Choose either -Network or -NoNetwork, not both.' }
 if ($NoNetwork -and $NetworkProof) { throw 'Choose either -NoNetwork or -NetworkProof, not both.' }
-$networkProofEnabled = $Network -or $NetworkProof
+$networkProofEnabled = $Network -or $NetworkProof -or $FetchProof
 $networkEnabled = -not $NoNetwork -and (-not $Proof -or $networkProofEnabled)
 $interactiveMode = $Interactive -or (-not $Headless -and -not $Proof)
 $repoRoot = Split-Path $PSScriptRoot -Parent
@@ -50,11 +53,15 @@ if (-not (Test-Path $disk)) {
 }
 
 $buildArgs = @('build', '--target', 'x86_64-unknown-uefi')
-if ($Proof) { $buildArgs += @('--features', 'qemu-proof') }
+if ($Proof) {
+    $features = @('qemu-proof')
+    if ($FetchProof) { $features += 'fetch-proof' }
+    $buildArgs += @('--features', ($features -join ','))
+}
 if ($Release) { $buildArgs += '--release' }
 cargo @buildArgs
 
-& (Join-Path $PSScriptRoot 'build-services.ps1') -Release -Proof:$Proof
+& (Join-Path $PSScriptRoot 'build-services.ps1') -Release -Proof:$Proof -FetchProof:$FetchProof
 
 New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\BOOT') | Out-Null
 Copy-Item $efi (Join-Path $esp 'EFI\BOOT\BOOTX64.EFI') -Force
@@ -86,7 +93,7 @@ if ($networkEnabled) {
     if ($Proof) {
         $networkPeerPort = $QmpPort + 1
         $qemuArgs += @(
-            '-netdev', "socket,id=network0,listen=127.0.0.1:$networkPeerPort",
+            '-netdev', "socket,id=network0,connect=127.0.0.1:$networkPeerPort",
             '-device', 'virtio-net-pci,netdev=network0,disable-legacy=on'
         )
     } else {
@@ -123,10 +130,12 @@ if ($networkEnabled -and $Proof) {
     $peerPsi.UseShellExecute = $false
     $peerPsi.RedirectStandardOutput = $true
     $peerPsi.RedirectStandardError = $true
-    foreach ($argument in @(
+    $peerArguments = @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
             (Join-Path $PSScriptRoot 'network-peer.ps1'), '-Port', [string]$networkPeerPort
-        )) {
+        )
+    if ($NetworkTracePath) { $peerArguments += @('-TracePath', [System.IO.Path]::GetFullPath($NetworkTracePath)) }
+    foreach ($argument in $peerArguments) {
         [void]$peerPsi.ArgumentList.Add($argument)
     }
     $networkPeerProcess = [Diagnostics.Process]::new()
@@ -141,7 +150,16 @@ $passed = $false
 while ([DateTime]::UtcNow -lt $deadline) {
     if (Test-Path $log) {
         $text = Get-Content $log -Raw
-        if ($text -match 'LogOS vNext: QEMU proof PASS') {
+        $successMarker = if ($FetchProof) {
+            'LogOS vNext: fetch proof PASS'
+        } else {
+            'LogOS vNext: QEMU proof PASS'
+        }
+        if ($text -match [regex]::Escape($successMarker)) {
+            $passed = $true
+            break
+        }
+        if ($FetchProof -and $text -match 'LogOS vNext: service manager ready') {
             $passed = $true
             break
         }
@@ -155,11 +173,16 @@ while ([DateTime]::UtcNow -lt $deadline) {
 
 $result = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
 if (-not $passed) {
+    if ($process.HasExited) { Write-Host "QEMU exited with code $($process.ExitCode)." }
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
     }
     if ($networkPeerProcess -and -not $networkPeerProcess.HasExited) {
         Stop-Process -Id $networkPeerProcess.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($networkPeerProcess) {
+        $peerError = $networkPeerProcess.StandardError.ReadToEnd()
+        if ($peerError) { Write-Host $peerError }
     }
     $process.Dispose()
     if ($result) { Write-Host $result }
@@ -208,12 +231,88 @@ function Connect-Qmp {
     return @{ Client = $client; Reader = $reader; Writer = $writer }
 }
 
+function Send-QmpKey {
+    param([hashtable]$Qmp, [string]$Key)
+    Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{
+        execute = 'human-monitor-command'
+        arguments = @{ 'command-line' = "sendkey $Key" }
+    } | Out-Null
+}
+
+function Wait-ProofMarker {
+    param([string]$Marker, [int]$TimeoutSeconds)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ((Test-Path $log) -and (Get-Content $log -Raw) -match [regex]::Escape($Marker)) {
+            return $true
+        }
+        if ($process.HasExited) { return $false }
+        Start-Sleep -Milliseconds 100
+    }
+    return $false
+}
+
+function Send-QmpKeys {
+    param([hashtable]$Qmp, [string[]]$Keys)
+    foreach ($key in $Keys) {
+        Send-QmpKey $Qmp $key
+        Start-Sleep -Milliseconds 25
+    }
+}
+
+function Send-QmpText {
+    param([hashtable]$Qmp, [string]$Text)
+    foreach ($character in $Text.ToCharArray()) {
+        $key = switch ([int][char]$character) {
+            0x0a { 'ret'; break }
+            0x20 { 'spc'; break }
+            0x22 { '3'; break }       # AZERTY: unshifted 3 is double quote.
+            0x28 { '5'; break }       # AZERTY: unshifted 5 is left parenthesis.
+            0x29 { 'minus'; break }   # AZERTY: unshifted - is right parenthesis.
+            0x2c { 'm'; break }       # AZERTY: unshifted m key is comma.
+            0x2f { 'shift-dot'; break }
+            0x3a { 'dot'; break }     # AZERTY: unshifted . key is colon.
+            0x30..0x39 { "shift-$character"; break }
+            0x61 { 'q'; break }
+            0x71 { 'a'; break }
+            0x77 { 'z'; break }
+            0x7a { 'w'; break }
+            default { [char]$character; break }
+        }
+        Send-QmpKey $Qmp ([string]$key)
+        Start-Sleep -Milliseconds 25
+    }
+}
+
 $proofBefore = Join-Path $repoRoot "target\qemu-proof-before-$Cpus.ppm"
 $proofAfter = Join-Path $repoRoot "target\qemu-proof-after-$Cpus.ppm"
 Remove-Item $proofBefore, $proofAfter -Force -ErrorAction SilentlyContinue
 $qmp = $null
 try {
     $qmp = Connect-Qmp $QmpPort
+    if ($FetchProof) {
+        Start-Sleep -Seconds 2
+        Send-QmpText $qmp "net.fetch(`"http://10.0.2.2:8080/readme`",`"/readme`")`n"
+        Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = (Join-Path $repoRoot 'target\fetch-after-input.ppm') } } | Out-Null
+        if (-not (Wait-ProofMarker 'LogOS vNext: fetch command complete' $TimeoutSeconds)) {
+            throw 'Fetch command did not complete.'
+        }
+        Send-QmpText $qmp "cat(`"/readme`")`n"
+        if (-not (Wait-ProofMarker 'LogOS vNext: fetch contents verified' $TimeoutSeconds)) {
+            throw 'Fetched contents were not verified.'
+        }
+        Send-QmpText $qmp "net.fetch(`"http://10.0.2.2:8080/cancel`",`"/cancel`")`n"
+        if (-not (Wait-ProofMarker 'LogOS vNext: fetch command started' $TimeoutSeconds)) {
+            throw 'Cancellation fetch did not start.'
+        }
+        Send-QmpKey $qmp 'ctrl-c'
+        if (-not (Wait-ProofMarker 'LogOS vNext: fetch command cancelled' $TimeoutSeconds)) {
+            throw 'Fetch cancellation was not observed.'
+        }
+        Add-Content -LiteralPath $log -Value 'LogOS vNext: fetch proof PASS'
+        Write-Host 'Fetch persistence proof PASS'
+        return
+    }
     Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofBefore } } | Out-Null
     foreach ($key in @('e', 'c', 'h', 'o', 'spc', 'p', 'r', 'o', 'o', 'f', 'ret')) {
         Invoke-QmpCommand $qmp.Writer $qmp.Reader @{
@@ -239,6 +338,9 @@ try {
     # monitor stream open after screendump and otherwise leave this runner stuck.
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($networkPeerProcess -and -not $networkPeerProcess.HasExited) {
+        Stop-Process -Id $networkPeerProcess.Id -Force -ErrorAction SilentlyContinue
     }
     if ($qmp) {
         $qmp.Client.Client.LingerState = [System.Net.Sockets.LingerOption]::new($false, 0)

@@ -5,7 +5,7 @@ use core::{
 
 use crate::process::{ProcessHandle, UserLaunch};
 
-pub const MAX_TASKS: usize = 16;
+pub const MAX_TASKS: usize = 24;
 pub const MAX_CPUS: usize = 8;
 #[cfg(target_os = "uefi")]
 pub const TASK_STACK_SIZE: usize = 256 * 1024;
