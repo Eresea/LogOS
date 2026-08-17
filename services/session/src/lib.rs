@@ -610,14 +610,14 @@ impl LineEditor {
     fn move_left(&mut self, output: &mut ShellOutput) {
         if self.cursor > 0 {
             self.cursor = previous_boundary(&self.line, self.cursor);
-            output.extend(b"\x1b[D");
+            self.redraw(output);
         }
     }
 
     fn move_right(&mut self, output: &mut ShellOutput) {
         if self.cursor < self.line_len {
             self.cursor = next_boundary(&self.line, self.cursor, self.line_len);
-            output.extend(b"\x1b[C");
+            self.redraw(output);
         }
     }
 
@@ -1160,6 +1160,27 @@ mod tests {
         editor.input_for_command(b"\x1b[1;5D", &mut command, &mut output);
         assert_eq!(&editor.line[..editor.line_len], b"hel");
         assert_eq!(editor.cursor, 0);
+    }
+
+    #[test]
+    fn arrows_redraw_from_the_authoritative_cursor_after_completion() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"help", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_end = 4;
+        assert!(response.push_candidate_with_cursor(b"help()", 4));
+        editor.apply_completion_response(response, &mut output);
+        editor.input_for_command(b"\t", &mut command, &mut output);
+        output = ShellOutput::new();
+
+        editor.input_for_command(b"\x1b[C", &mut command, &mut output);
+        assert_eq!(editor.cursor, 5);
+        assert!(output.as_bytes().starts_with(b"\r"));
+        assert!(output.as_bytes().windows(2).any(|window| window == b"()"));
     }
 
     #[test]
