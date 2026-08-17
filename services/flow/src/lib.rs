@@ -1675,4 +1675,17 @@ mod tests {
         assert_eq!(root_relative_path(b"toolong", &mut [0; 8]), Some(&b"/toolong"[..]));
         assert_eq!(root_relative_path(b"toolong", &mut [0; 7]), None);
     }
+
+    #[test]
+    fn help_operation_fits_a_service_sized_stack() {
+        let service = std::boxed::Box::new(FlowService::new());
+        let worker = std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let mut service = service;
+                service.operation(b"help()").unwrap()
+            })
+            .unwrap();
+        assert_eq!(worker.join().unwrap(), Some(FlowOperation::Help { topic: None }));
+    }
 }

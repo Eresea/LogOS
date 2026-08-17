@@ -8,6 +8,8 @@ pub const USER_STACK_PAGES: usize = 8;
 pub const STORAGE_STACK_PAGES: usize = 128;
 /// Network protocol polling uses bounded smoltcp packet-processing frames.
 pub const NETWORK_STACK_PAGES: usize = 128;
+/// Flow parsing and type checking use bounded arenas with a deeper call chain.
+pub const FLOW_STACK_PAGES: usize = 128;
 pub const MAX_IMAGE_BYTES: usize = 512 * 1024;
 pub const MAX_PROGRAM_HEADERS: usize = 16;
 

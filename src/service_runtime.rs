@@ -200,6 +200,7 @@ impl ServiceRuntime {
             let stack_pages = match service {
                 ServiceId::Storage => crate::process::STORAGE_STACK_PAGES,
                 ServiceId::Network => crate::process::NETWORK_STACK_PAGES,
+                ServiceId::Flow => crate::process::FLOW_STACK_PAGES,
                 _ => crate::process::USER_STACK_PAGES,
             };
             let mut loaded =
