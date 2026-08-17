@@ -311,6 +311,15 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
                 self.cursor_column =
                     self.cursor_column.saturating_sub(self.parser.param(0, 1) as usize);
             }
+            b'A' => {
+                self.cursor_row = self.cursor_row.saturating_sub(self.parser.param(0, 1) as usize);
+            }
+            b'B' => {
+                self.cursor_row = self
+                    .cursor_row
+                    .saturating_add(self.parser.param(0, 1) as usize)
+                    .min(DEFAULT_ROWS - 1);
+            }
             b'H' | b'f' => {
                 self.cursor_row = self.parser.param(0, 1).saturating_sub(1) as usize;
                 self.cursor_column = self.parser.param(1, 1).saturating_sub(1) as usize;
@@ -773,6 +782,15 @@ mod tests {
         let message = terminal.next_render().unwrap();
         assert_eq!(message.count, 0);
         assert_eq!((message.cursor_column, message.cursor_row), (3, 0));
+    }
+
+    #[test]
+    fn vertical_cursor_motion_is_bounded() {
+        let mut terminal = Terminal::new();
+        terminal.feed(b"\x1b[10B\x1b[3A");
+        assert_eq!(terminal.cursor(), (0, 7));
+        terminal.feed(b"\x1b[99B");
+        assert_eq!(terminal.cursor(), (0, DEFAULT_ROWS - 1));
     }
 
     #[test]
