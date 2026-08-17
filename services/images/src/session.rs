@@ -5,8 +5,8 @@
 mod common;
 
 use logos_abi::{
-    CompletionRequest, CompletionResponse, IPC_FLAG_MORE, IpcBytes, IpcStatus, MAX_IPC_BYTES,
-    MessageKind,
+    CommandControl, CompletionRequest, CompletionResponse, FetchPhase, FetchResponse, FetchStatus,
+    IPC_FLAG_MORE, IpcBytes, IpcStatus, MAX_IPC_BYTES, MessageKind,
 };
 use logos_session::MAX_LINE_BYTES;
 
@@ -128,6 +128,43 @@ fn completion_response(message: &IpcBytes) -> Option<CompletionResponse> {
     .then(|| unsafe { core::ptr::read_unaligned(message.bytes.as_ptr().cast()) })
 }
 
+fn fetch_progress(message: &IpcBytes) -> Option<FetchResponse> {
+    (message.kind == MessageKind::CommandProgress
+        && message.len as usize == core::mem::size_of::<FetchResponse>())
+    .then(|| unsafe { core::ptr::read_unaligned(message.bytes.as_ptr().cast()) })
+    .filter(|response: &FetchResponse| response.is_valid())
+}
+
+fn command_control_message(request_id: u32) -> IpcBytes {
+    let control = CommandControl::cancel(request_id);
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&control as *const CommandControl).cast::<u8>(),
+            core::mem::size_of::<CommandControl>(),
+        )
+    };
+    IpcBytes::from_bytes(MessageKind::CommandControl, bytes)
+        .unwrap_or_else(|| IpcBytes::empty(MessageKind::CommandControl))
+}
+
+fn render_fetch_progress(response: FetchResponse, output: &mut logos_session::ShellOutput) {
+    output.extend(b"\r\x1b[Kfetch: ");
+    match response.phase {
+        FetchPhase::Connect => output.extend(b"connecting"),
+        FetchPhase::SendRequest => output.extend(b"request sent"),
+        FetchPhase::ReadResponse => {
+            output.push_decimal(response.downloaded_bytes as usize);
+            output.extend(b" bytes");
+        }
+        FetchPhase::StageStorage => output.extend(b"staging"),
+        FetchPhase::Commit => output.extend(b"committing"),
+        _ => output.extend(match response.status {
+            FetchStatus::Cancelled => &b"cancelled"[..],
+            _ => &b"working"[..],
+        }),
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     let session = unsafe { &mut *core::ptr::addr_of_mut!(SESSION) };
@@ -138,12 +175,39 @@ pub extern "C" fn _start() -> ! {
     let mut command_response_len = 0;
     let mut waiting_for_command = false;
     let mut pending_completion = None;
+    let mut pending_control = None;
     let mut prompt = logos_session::ShellOutput::new();
     session.prompt(&mut prompt);
     pending.stage(prompt.as_bytes());
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Session);
+        if waiting_for_command && pending_control.is_none() {
+            let mut terminal_input = IpcBytes::empty(MessageKind::SessionInput);
+            if common::ipc_receive(INPUT_CAPABILITY, &mut terminal_input) == IpcStatus::Ok
+                && terminal_input.kind == MessageKind::SessionInput
+                && terminal_input.as_bytes().is_some_and(|bytes| bytes == [0x03])
+            {
+                pending_control = Some(command_control_message(0));
+            }
+        }
+        if let Some(control) = pending_control {
+            match common::ipc_send(COMMANDS_CAPABILITY, &control) {
+                IpcStatus::Ok => pending_control = None,
+                IpcStatus::Full => {
+                    common::wait(
+                        common::ipc_write_event(logos_abi::IpcEndpointId::SessionToCommands),
+                        logos_abi::ServiceId::Session,
+                    );
+                    continue;
+                }
+                IpcStatus::Stale
+                | IpcStatus::Disconnected
+                | IpcStatus::Unauthorized
+                | IpcStatus::Malformed
+                | IpcStatus::Empty => pending_control = None,
+            }
+        }
         let mut progressed = pending.flush(OUTPUT_CAPABILITY);
         if !pending.is_empty() {
             if !progressed {
@@ -206,6 +270,11 @@ pub extern "C" fn _start() -> ! {
                     if edit_output.len > 0 {
                         pending.stage(edit_output.as_bytes());
                     }
+                    progressed = true;
+                } else if let Some(response) = fetch_progress(&message) {
+                    let mut progress = logos_session::ShellOutput::new();
+                    render_fetch_progress(response, &mut progress);
+                    pending.stage(progress.as_bytes());
                     progressed = true;
                 } else if message.kind == MessageKind::SessionOutput {
                     if let Some(bytes) = message.as_bytes() {

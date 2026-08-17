@@ -1,7 +1,7 @@
 # LogOS vNext Core architecture
 
 The package has two targets and no allocator: the UEFI binary in `src/main.rs` calls `boot()` in
-`src/lib.rs`. Core owns mechanisms only; Runtime and the seven fixed services execute through
+`src/lib.rs`. Core owns mechanisms only; Runtime and the eight fixed services execute through
 fixed service boundaries.
 
 | Boundary | Owner | Invariant / proof |
@@ -13,14 +13,14 @@ fixed service boundaries.
 | Control plane | `process` + `user_mode` | admission-time fixed service mappings plus bounded Wait/Notify, IpcSend, IpcReceive, and ServiceManager calls with process-bound capability checks |
 | ELF page admission | `loader` | maps validated segments and fixed user stacks to owned frames, then populates them through a page-local sink with bounded reclamation; Storage receives a fixed 128-page stack for journal replay and transaction shadow state |
 | User page tables | `page_table` | builds four-level user mappings with fixed root/intermediate-frame bounds, W^X/NX flags, conflict rejection, and grouped reclamation |
-| Service address spaces | `service_runtime` | loads seven retained ELFs into owned frames and retains one isolated root per service before scheduler admission |
+| Service address spaces | `service_runtime` | loads eight retained ELFs into owned frames and retains one isolated root per service before scheduler admission |
 | Service process admission | `service_runtime` + `process` | binds each service root, coalesced mappings, and validated user launch metadata without entering service RIPs prematurely |
 | User launch transition | `arch` + `scheduler` | selects the task root before restore and provides the fixed-selector `iretq` path for service entry |
-| Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Storage → Commands dependencies; Network is independent |
-| Service IPC boundary | `service_ipc` + `service_runtime` | keeps the six existing terminal queues and adds dedicated process-bound StorageToCore/CoreToStorage capabilities through private staging pages; no queue, MMIO, or DMA frame is mapped into a service root |
-| Network IPC extension | `service_ipc` + `service_runtime` | adds NetworkToCore/CoreToNetwork and CommandsToNetwork/NetworkToCommands, raises the endpoint/capability bounds to 14/6, and maps only private Network packet pages; no DMA frame is mapped into Network |
+| Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Storage → Commands → Fetch dependencies; Network is independent and Fetch depends on it |
+| Service IPC boundary | `service_ipc` + `service_runtime` | keeps fixed terminal queues and adds Commands↔Fetch, Fetch↔Storage, and Fetch↔Network edges plus dedicated Core storage/network capabilities; no queue, MMIO, or DMA frame is mapped into a service root |
+| Network IPC extension | `service_ipc` + `service_runtime` | adds Commands/Fetch client routing with ABI v2 inline payloads capped at 192 bytes; Core-owned packet descriptors/pages remain private to Network |
 | Storage boundary | Core VirtIO block adapter + `logos-storage` format + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, MSI-X interrupt delivery, reset, timeouts, and flush; Storage owns fixed request lifecycles, superblocks, journal, checkpoints, replay, recovery, durability, object IDs, namespace resolution, and bounded file operations; Commands reaches Storage through versioned `CommandsToStorage`/`StorageToCommands` messages over private staging pages; one active transaction uses fixed shadow state and at most `MAX_RECORDS_PER_TRANSACTION` records; Core stores no paths or namespace state; split-ring generations reset the bounded queue before descriptor reuse |
-| Network boundary | Core VirtIO-net adapter + Network service + versioned Network IPC | Core owns optional PCI discovery, one fixed 64-entry RX/TX pair, 2 KiB DMA buffers, interrupts, reset, and deadlines; Network owns smoltcp Ethernet/ARP/IPv4/ICMP/UDP/DHCPv4/TCP state, eight sockets, two listeners, and private packet pages; disabled profiles initialize no hardware or task; Network recovery does not restart other services |
+| Network boundary | Core VirtIO-net adapter + Network service + versioned Network IPC | Core owns optional PCI discovery, one fixed 64-entry RX/TX pair, 2 KiB DMA buffers, interrupts, reset, and deadlines; Network owns smoltcp Ethernet/ARP/IPv4/ICMP/UDP/DHCPv4/TCP state, eight sockets, two listeners, and private packet pages; Commands and Fetch receive routed inline payload responses; HTTP remains outside Network |
 | Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE` plus one read-only `FramebufferConfig` page at `DISPLAY_CONFIG_BASE`; boot rejects modes below the fixed 80×25/8×16 profile; no other service or kernel drawing path receives it |
 | Keyboard byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring with an observable drop counter and maps it only into Input at `INPUT_KEYBOARD_RING_BASE`; PS/2 decoding remains outside the kernel |
 | PS/2 interrupt adapter | `arch` | remaps the legacy PIC, unmasks only IRQ1 after the Input ring is published, and copies port `0x60` bytes into that ring; no key decoding occurs in Core |
@@ -40,14 +40,15 @@ fixed service boundaries.
 | Terminal service | `services/images/src/terminal` + `logos-terminal::TerminalState` | ring-3 owns a bounded fixed 80×25 live surface, consumes Input and Session rings, and emits compact Session input and dirty-cell Display messages |
 | Display service | `services/images/src/display` + `logos-display` | ring-3 validates cell diffs and endpoint generations, then rasterizes dirty cells through embedded glyphs into its mapped GOP framebuffer |
 | Session service | `services/images/src/session` + `logos-session::SessionService` | ring-3 owns bounded line editing and forwards completed commands/results; command execution remains in Commands and no state survives restart or reboot |
-| Commands service | `services/images/src/commands` + `logos-commands::CommandService` | receives bounded Session requests, executes built-ins, manages services through the structured Core API, provides best-effort targeted completion through the existing Session↔Commands queues, and performs `ls`, `touch`, `cat`, `write`, `rm`, and `mv` through Storage transactions; returns backpressured output over its reverse IPC rings |
+| Commands service | `services/images/src/commands` + `logos-commands::CommandService` | receives bounded Session requests, executes built-ins, manages services through the structured Core API, provides best-effort targeted completion through the existing Session↔Commands queues, and dispatches `sys.*` and `fs.*` commands through the appropriate system and Storage paths; returns backpressured output over its reverse IPC rings |
+| Fetch service | `services/images/src/fetch` + `logos-fetch` | owns one bounded HTTP operation, split-frame response parsing, progress/cancellation, and staged Storage publication; only numeric IPv4 `http://` 2xx downloads are accepted |
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 64 validated mappings per process, and exit/fault/reclaim outcomes |
 | User launch contract | `process::UserLaunch` + `Scheduler::spawn_user` | a running process with a bound root publishes entry RIP, aligned stack top, root, and process generation before its task becomes runnable |
 | Ring-3 CPU migration | `scheduler::claim_next` + `arch::context` | published ring-3 tasks may migrate after a context boundary; the target loads CR3 and its TSS `RSP0` before restore, while live mappings remain immutable |
-| Service image manifest | `service_images::SERVICE_IMAGES` | seven fixed ESP paths and bounded ELF admission; `SERVICE_START_ORDER` launches them topologically |
-| Retained service images | `service_loader::ServiceImageBundle` | seven validated ELF records with page-aligned retained addresses, loaded before `ExitBootServices`, and no filesystem lifetime after UEFI exit |
-| Service ELF packaging | `services/images` + `scripts/build-services.ps1` | seven independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
-| Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all seven staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
+| Service image manifest | `service_images::SERVICE_IMAGES` | eight fixed ESP paths and bounded ELF admission; `SERVICE_START_ORDER` launches them topologically |
+| Retained service images | `service_loader::ServiceImageBundle` | eight validated ELF records with page-aligned retained addresses, loaded before `ExitBootServices`, and no filesystem lifetime after UEFI exit |
+| Service ELF packaging | `services/images` + `scripts/build-services.ps1` | eight independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
+| Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all eight staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
 | Service supervisor | `supervisor::LiveSupervisor` + `service_runtime` | live heartbeat polling, graph-wide quiesce, generation-bumped IPC rebuild, bounded process/page-table/frame reclamation, and restart limits |
 | Service manager | `service_manager` + `service_runtime` | eight fixed service slots, generation-safe handles, dependency-aware list/status/start/stop/restart, one Commands-only manager capability page, and a deferred filesystem-package image seam |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
@@ -66,7 +67,7 @@ allocators, affinity, priorities, and AVX/XSAVE are not part of this milestone.
 
 The handoff registers one root task. That task owns the first fixed Runtime operation table; Core does
 not inspect, schedule, or orchestrate Runtime state. Runtime operations use the scheduler's sleep and
-wake primitives but retain their own deadlines, terminal states, and slot generations. The six service
+wake primitives but retain their own deadlines, terminal states, and slot generations. The eight service
 ELFs are loaded before `ExitBootServices`, receive isolated roots and explicit mappings, and enter
 through the normal scheduler path. QEMU exercises the live service images and supervisor-driven restart.
 The fixed scheduler task stack is 64 KiB with a 256-byte canary so bounded interrupt

@@ -9,14 +9,16 @@ These are the commands currently built into the LogOS terminal. Type a command a
 | `clear()` | Clears the terminal display. |
 | `true()` | Succeeds without output. |
 | `false()` | Fails without output. |
-| `version()` | Prints the LogOS version. |
-| `uname()` | Prints the operating-system name. |
-| `ls()` / `ls("path")` | Lists the root or a directory's files. |
-| `touch("path")` | Creates an empty file. |
-| `cat("path")` | Prints a file's contents. |
-| `write("path", "data")` | Atomically replaces a file's contents. |
-| `rm("path")` | Removes a file. |
-| `mv("from", "to")` | Renames a file. |
+| `sys.version()` | Prints the LogOS version. |
+| `sys.uname()` | Prints the operating-system name. |
+| `sys.shutdown()` | Requests a system shutdown. |
+| `sys.reboot()` | Requests a system reboot. |
+| `fs.list()` / `fs.list("path")` | Lists the root or a directory's files. |
+| `fs.create("path")` | Creates an empty file. |
+| `fs.read("path")` | Prints a file's contents. |
+| `fs.write("path", "data")` | Atomically replaces a file's contents. |
+| `fs.remove("path")` | Removes a file. |
+| `fs.move("from", "to")` | Renames a file. |
 | `service["name"]` | Selects a managed service. |
 | `service["name"].status` | Reads a managed service state. |
 | `service["name"].name` | Reads a managed service name. |
@@ -27,6 +29,7 @@ These are the commands currently built into the LogOS terminal. Type a command a
 | `net.status` | Reads Network state and readiness. |
 | `net.ping("ipv4")` | Sends one bounded ICMP echo request through Network. |
 | `net.tcp-probe("ipv4", port)` | Opens one bounded TCP probe through Network. |
+| `net.fetch("url", "path")` | Downloads a numeric-IPv4 HTTP/1.1 response and atomically stores it. |
 | `net.interface["name"].status` | Reads the selected network interface state. |
 
 Examples:
@@ -38,19 +41,20 @@ echo("hello, LogOS")
 clear()
 true()
 false()
-version()
-uname()
-ls()
-touch("/notes")
-write("/notes", "durable data")
-cat("/notes")
-mv("/notes", "/archive")
-rm("/archive")
+sys.version()
+sys.uname()
+fs.list()
+fs.create("/notes")
+fs.write("/notes", "durable data")
+fs.read("/notes")
+fs.move("/notes", "/archive")
+fs.remove("/archive")
 service["storage"].status
 service["storage"].restart()
 net.status
 net.ping("10.0.2.2")
 net.tcp-probe("10.0.2.2", 80)
+net.fetch("http://10.0.2.2:8080/readme", "/readme")
 net.interface["eth0"].status
 ```
 
@@ -75,21 +79,22 @@ Late responses are ignored when their request ID or line revision is stale.
 
 The current targets are root expressions (`he` → `help()`, `serv` → `service["`), live service
 registry names, service members (`status`, `name`, `version`, `start()`, `stop()`, `restart()`),
-network members (`status`, `ping()`, `tcp-probe()`, `interface["`), and the fixed `eth0` interface
-entry. String-taking root commands provide quoted argument scaffolds such as `cat("")`, while
-multi-argument commands provide bounded scaffolds such as `write("", "")` with the caret in the
-first argument. Filesystem paths and arbitrary method arguments remain deferred. Candidate payloads
-are fixed-size and bounded. A provider error or timeout prints `completion unavailable` once and
-disables completion for that Session; command editing and execution continue normally.
+system members (`version()`, `uname()`, `shutdown()`, `reboot()`), filesystem members
+(`list()`, `create()`, `read()`, `write()`, `remove()`, `move()`), network members (`status`,
+`ping()`, `tcp-probe()`, `interface["`), and the fixed `eth0` interface entry. Filesystem paths
+and arbitrary method arguments remain deferred. Candidate payloads are fixed-size and bounded. A
+provider error or timeout prints `completion unavailable` once and disables completion for that
+Session; command editing and execution continue normally.
 
-## Deferred command progress
+## Fetch progress and cancellation
 
-Long-running commands currently wait for their service response before producing output. A later
-command-transaction slice should give each action a bounded request ID, stage, and deadline, then
-publish an immediate progress state to Terminal (for example, a loading indicator) before replacing
-it with the final result. The design must keep one fixed command slot, explicit timeout/cancel
-outcomes, and stale-response rejection; this is deferred until the command/Terminal IPC contract is
-extended.
+`net.fetch` owns one fixed operation. Session renders connection, request, download, staging, and
+commit progress without opening a new prompt. While it runs, ordinary input is ignored; Ctrl-C sends
+the active request ID to Fetch and the final result is `fetch cancelled`. Fetch accepts only numeric
+IPv4 `http://` URLs, port 80 by default, bounded origin paths, and normalizes a relative destination
+such as `readme` to `/readme`. It accepts 2xx responses, Content-Length or
+chunked bodies, and the current Storage file limit. Redirects, TLS, compression, trailers, and
+partial destinations are rejected.
 
 ## Deferred transient navigation mode
 

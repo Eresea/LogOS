@@ -13,6 +13,8 @@ pub enum CompletionTarget {
     ServiceMember,
     NetworkMember,
     InterfaceName,
+    SystemMember,
+    FilesystemMember,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,8 +33,12 @@ pub enum CompletionError {
 
 pub const SERVICE_COMPLETION_MEMBERS: [&[u8]; 6] =
     [b"status", b"name", b"version", b"start()", b"stop()", b"restart()"];
-pub const NETWORK_COMPLETION_MEMBERS: [&[u8]; 4] =
-    [b"status", b"ping()", b"tcp-probe()", b"interface[\""];
+pub const NETWORK_COMPLETION_MEMBERS: [&[u8]; 5] =
+    [b"status", b"ping()", b"tcp-probe()", b"fetch()", b"interface[\""];
+pub const SYSTEM_COMPLETION_MEMBERS: [&[u8]; 4] =
+    [b"version()", b"uname()", b"shutdown()", b"reboot()"];
+pub const FILESYSTEM_COMPLETION_MEMBERS: [&[u8]; 6] =
+    [b"list()", b"create()", b"read()", b"write()", b"remove()", b"move()"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandKind {
@@ -41,16 +47,8 @@ pub enum CommandKind {
     Clear,
     True,
     False,
-    Version,
-    Uname,
-    Shutdown,
-    Reboot,
-    List,
-    Touch,
-    Cat,
-    Write,
-    Remove,
-    Move,
+    System,
+    Filesystem,
     Service,
     Network,
 }
@@ -72,7 +70,7 @@ pub struct CommandSpec {
     pub manual: &'static [u8],
 }
 
-pub const COMMAND_SPECS: [CommandSpec; 17] = [
+pub const COMMAND_SPECS: [CommandSpec; 9] = [
     CommandSpec {
         name: b"help",
         kind: CommandKind::Help,
@@ -109,74 +107,18 @@ pub const COMMAND_SPECS: [CommandSpec; 17] = [
         manual: b"Completes with a failure status.",
     },
     CommandSpec {
-        name: b"version",
-        kind: CommandKind::Version,
-        usage: b"version()",
-        summary: b"show the version",
-        manual: b"Prints the LogOS version.",
+        name: b"sys",
+        kind: CommandKind::System,
+        usage: b"sys.version() / sys.uname() / sys.shutdown() / sys.reboot()",
+        summary: b"inspect and control the system",
+        manual: b"Shows system information or requests shutdown/reboot.",
     },
     CommandSpec {
-        name: b"uname",
-        kind: CommandKind::Uname,
-        usage: b"uname()",
-        summary: b"show the system name",
-        manual: b"Prints the operating-system name.",
-    },
-    CommandSpec {
-        name: b"shutdown",
-        kind: CommandKind::Shutdown,
-        usage: b"shutdown()",
-        summary: b"power off",
-        manual: b"Requests a system shutdown.",
-    },
-    CommandSpec {
-        name: b"reboot",
-        kind: CommandKind::Reboot,
-        usage: b"reboot()",
-        summary: b"restart",
-        manual: b"Requests a system reboot.",
-    },
-    CommandSpec {
-        name: b"ls",
-        kind: CommandKind::List,
-        usage: b"ls() / ls(\"path\")",
-        summary: b"list files",
-        manual: b"Lists files in the root or specified directory.",
-    },
-    CommandSpec {
-        name: b"touch",
-        kind: CommandKind::Touch,
-        usage: b"touch(\"path\")",
-        summary: b"create an empty file",
-        manual: b"Creates an empty file at path.",
-    },
-    CommandSpec {
-        name: b"cat",
-        kind: CommandKind::Cat,
-        usage: b"cat(\"path\")",
-        summary: b"print a file",
-        manual: b"Prints a file's contents.",
-    },
-    CommandSpec {
-        name: b"write",
-        kind: CommandKind::Write,
-        usage: b"write(\"path\", \"data\")",
-        summary: b"replace file contents",
-        manual: b"Atomically replaces an existing file's contents. Data must be non-empty.",
-    },
-    CommandSpec {
-        name: b"rm",
-        kind: CommandKind::Remove,
-        usage: b"rm(\"path\")",
-        summary: b"remove a file",
-        manual: b"Removes a file.",
-    },
-    CommandSpec {
-        name: b"mv",
-        kind: CommandKind::Move,
-        usage: b"mv(\"from\", \"to\")",
-        summary: b"rename a file",
-        manual: b"Renames a file from one path to another.",
+        name: b"fs",
+        kind: CommandKind::Filesystem,
+        usage: b"fs.list() / fs.create(\"path\") / fs.read(\"path\")",
+        summary: b"manage files",
+        manual: b"Lists, creates, reads, writes, removes, or moves files.",
     },
     CommandSpec {
         name: b"service",
@@ -188,9 +130,9 @@ pub const COMMAND_SPECS: [CommandSpec; 17] = [
     CommandSpec {
         name: b"net",
         kind: CommandKind::Network,
-        usage: b"net.status / net.ping(\"address\")",
+        usage: b"net.status / net.fetch(\"url\", \"path\")",
         summary: b"inspect and probe networking",
-        manual: b"Shows network status or performs bounded ICMP and TCP probes.",
+        manual: b"Shows network status, probes networking, or fetches an HTTP file.",
     },
 ];
 
@@ -254,6 +196,24 @@ pub fn completion_context<'a>(
             replace_start: 4,
             replace_end: cursor,
             prefix: &before[4..],
+        }));
+    }
+
+    if before.starts_with(b"sys.") && before[4..].iter().all(|byte| is_member_byte(*byte)) {
+        return Ok(Some(CompletionContext {
+            target: CompletionTarget::SystemMember,
+            replace_start: 4,
+            replace_end: cursor,
+            prefix: &before[4..],
+        }));
+    }
+
+    if before.starts_with(b"fs.") && before[3..].iter().all(|byte| is_member_byte(*byte)) {
+        return Ok(Some(CompletionContext {
+            target: CompletionTarget::FilesystemMember,
+            replace_start: 3,
+            replace_end: cursor,
+            prefix: &before[3..],
         }));
     }
 
@@ -344,6 +304,7 @@ pub enum NetworkCommand<'a> {
     InterfaceStatus { name: &'a [u8] },
     Ping { address: [u8; 4] },
     TcpProbe { address: [u8; 4], port: u16 },
+    Fetch { url: &'a [u8], destination: &'a [u8] },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -520,104 +481,91 @@ impl CommandService {
             output.extend(b"command syntax error\r\n");
             return output;
         };
-        if expression.part_count != 0 {
+        let Some(spec) = Self::command_spec(expression.root) else {
+            output.status = 127;
+            output.extend(b"command not found\r\n");
+            return output;
+        };
+        if expression.part_count != 0
+            && !matches!(spec.kind, CommandKind::System | CommandKind::Filesystem)
+        {
             output.status = 127;
             output.extend(b"command not found\r\n");
             return output;
         }
-        match Self::command_spec(expression.root) {
-            Some(spec) => match spec.kind {
-                CommandKind::Help => return Self::help(expression),
-                CommandKind::Echo => {
-                    if call.arg_count > 1 || (call.arg_count == 1 && !call.args[0].quoted) {
-                        output.status = 2;
-                        output.extend(b"usage: echo(\"text\")\r\n");
-                        return output;
-                    }
-                    output.extend(call.args[0].bytes);
-                    output.extend(b"\r\n");
+        match spec.kind {
+            CommandKind::Help => return Self::help(expression),
+            CommandKind::Echo => {
+                if call.arg_count > 1 || (call.arg_count == 1 && !call.args[0].quoted) {
+                    output.status = 2;
+                    output.extend(b"usage: echo(\"text\")\r\n");
+                    return output;
                 }
-                CommandKind::Clear => {
-                    if call.arg_count == 0 {
-                        output.clear_screen = true;
-                    } else {
-                        output.status = 2;
-                        output.extend(spec.usage);
-                        output.extend(b"\r\n");
-                    }
-                }
-                CommandKind::True => {
-                    if call.arg_count != 0 {
-                        output.status = 2;
-                        output.extend(spec.usage);
-                        output.extend(b"\r\n");
-                    }
-                }
-                CommandKind::False => {
-                    if call.arg_count == 0 {
-                        output.status = 1;
-                    } else {
-                        output.status = 2;
-                        output.extend(spec.usage);
-                        output.extend(b"\r\n");
-                    }
-                }
-                CommandKind::Version => {
-                    if call.arg_count == 0 {
-                        output.extend(b"LogOS vNext 0.1.0\r\n");
-                    } else {
-                        output.status = 2;
-                        output.extend(spec.usage);
-                        output.extend(b"\r\n");
-                    }
-                }
-                CommandKind::Uname => {
-                    if call.arg_count == 0 {
-                        output.extend(b"LogOS\r\n");
-                    } else {
-                        output.status = 2;
-                        output.extend(spec.usage);
-                        output.extend(b"\r\n");
-                    }
-                }
-                CommandKind::Shutdown => {
-                    if call.arg_count == 0 {
-                        output.action = CommandAction::Shutdown;
-                    } else {
-                        output.status = 2;
-                        output.extend(spec.usage);
-                        output.extend(b"\r\n");
-                    }
-                }
-                CommandKind::Reboot => {
-                    if call.arg_count == 0 {
-                        output.action = CommandAction::Reboot;
-                    } else {
-                        output.status = 2;
-                        output.extend(spec.usage);
-                        output.extend(b"\r\n");
-                    }
-                }
-                CommandKind::List
-                | CommandKind::Touch
-                | CommandKind::Cat
-                | CommandKind::Write
-                | CommandKind::Remove
-                | CommandKind::Move => output.extend(b"storage command unavailable\r\n"),
-                CommandKind::Service => {
+                output.extend(call.args[0].bytes);
+                output.extend(b"\r\n");
+            }
+            CommandKind::Clear => {
+                if call.arg_count == 0 {
+                    output.clear_screen = true;
+                } else {
                     output.status = 2;
                     output.extend(spec.usage);
                     output.extend(b"\r\n");
                 }
-                CommandKind::Network => {
+            }
+            CommandKind::True => {
+                if call.arg_count != 0 {
                     output.status = 2;
                     output.extend(spec.usage);
                     output.extend(b"\r\n");
                 }
-            },
-            None => {
-                output.status = 127;
-                output.extend(b"command not found\r\n");
+            }
+            CommandKind::False => {
+                if call.arg_count == 0 {
+                    output.status = 1;
+                } else {
+                    output.status = 2;
+                    output.extend(spec.usage);
+                    output.extend(b"\r\n");
+                }
+            }
+            CommandKind::System => {
+                let member = expression.parts.first().and_then(|part| match part {
+                    ExpressionPart::Member(member) => Some(*member),
+                    ExpressionPart::Lookup(_) => None,
+                });
+                if expression.part_count != 1 || call.arg_count != 0 {
+                    output.status = 2;
+                    output.extend(spec.usage);
+                    output.extend(b"\r\n");
+                } else {
+                    match member {
+                        Some(b"version") => output.extend(b"LogOS vNext 0.1.0\r\n"),
+                        Some(b"uname") => output.extend(b"LogOS\r\n"),
+                        Some(b"shutdown") => output.action = CommandAction::Shutdown,
+                        Some(b"reboot") => output.action = CommandAction::Reboot,
+                        _ => {
+                            output.status = 2;
+                            output.extend(spec.usage);
+                            output.extend(b"\r\n");
+                        }
+                    }
+                }
+            }
+            CommandKind::Filesystem => {
+                output.status = 2;
+                output.extend(spec.usage);
+                output.extend(b"\r\n");
+            }
+            CommandKind::Service => {
+                output.status = 2;
+                output.extend(spec.usage);
+                output.extend(b"\r\n");
+            }
+            CommandKind::Network => {
+                output.status = 2;
+                output.extend(spec.usage);
+                output.extend(b"\r\n");
             }
         }
         output
@@ -843,17 +791,6 @@ fn scoped_expression<'a>(line: &'a [u8], root: &[u8]) -> Result<Option<ParsedExp
     Ok(Some(parse_expression(line)?))
 }
 
-fn unqualified_expression<'a>(
-    line: &'a [u8],
-    roots: &[&[u8]],
-) -> Result<Option<ParsedExpression<'a>>, ()> {
-    let Some(root) = expression_root(line) else { return Ok(None) };
-    if !roots.contains(&root) {
-        return Ok(None);
-    }
-    Ok(Some(parse_expression(line)?))
-}
-
 pub fn parse_service_command(
     line: &[u8],
 ) -> Result<Option<ServiceCommand<'_>>, ServiceCommandError> {
@@ -908,19 +845,24 @@ pub fn parse_storage_command(
     line: &[u8],
 ) -> Result<Option<StorageCommand<'_>>, StorageCommandError> {
     let Some(expression) =
-        unqualified_expression(line, &[b"ls", b"touch", b"cat", b"write", b"rm", b"mv"])
-            .map_err(|_| StorageCommandError::Usage)?
+        scoped_expression(line, b"fs").map_err(|_| StorageCommandError::Usage)?
     else {
         return Ok(None);
     };
+    if expression.part_count != 1 {
+        return Err(StorageCommandError::Usage);
+    }
+    let ExpressionPart::Member(member) = expression.parts[0] else {
+        return Err(StorageCommandError::Usage);
+    };
     let Some(call) = expression.call else { return Err(StorageCommandError::Usage) };
     let args = &call.args[..call.arg_count];
-    match (expression.root, call.arg_count) {
-        (b"ls", 0) => Ok(Some(StorageCommand::List { path: b"/" })),
-        (b"ls", 1) => Ok(Some(StorageCommand::List { path: path_arg(args[0])? })),
-        (b"touch", 1) => Ok(Some(StorageCommand::Touch { path: path_arg(args[0])? })),
-        (b"cat", 1) => Ok(Some(StorageCommand::Cat { path: path_arg(args[0])? })),
-        (b"rm", 1) => Ok(Some(StorageCommand::Remove { path: path_arg(args[0])? })),
+    match (member, call.arg_count) {
+        (b"list", 0) => Ok(Some(StorageCommand::List { path: b"/" })),
+        (b"list", 1) => Ok(Some(StorageCommand::List { path: path_arg(args[0])? })),
+        (b"create", 1) => Ok(Some(StorageCommand::Touch { path: path_arg(args[0])? })),
+        (b"read", 1) => Ok(Some(StorageCommand::Cat { path: path_arg(args[0])? })),
+        (b"remove", 1) => Ok(Some(StorageCommand::Remove { path: path_arg(args[0])? })),
         (b"write", 2) => {
             let path = path_arg(args[0])?;
             let data = string_arg(args[1]).map_err(|_| StorageCommandError::Usage)?;
@@ -929,7 +871,7 @@ pub fn parse_storage_command(
             }
             Ok(Some(StorageCommand::Write { path, data }))
         }
-        (b"mv", 2) => {
+        (b"move", 2) => {
             Ok(Some(StorageCommand::Move { from: path_arg(args[0])?, to: path_arg(args[1])? }))
         }
         _ => Err(StorageCommandError::Usage),
@@ -966,6 +908,15 @@ pub fn parse_network_command(
                         parse_port(call.args[1].bytes)?
                     },
                 }))
+            }
+            (b"fetch", Some(call)) if call.arg_count == 2 => {
+                let url = string_arg(call.args[0]).map_err(|_| NetworkCommandError::Usage)?;
+                let destination =
+                    string_arg(call.args[1]).map_err(|_| NetworkCommandError::Usage)?;
+                if url.is_empty() || destination.is_empty() {
+                    return Err(NetworkCommandError::Usage);
+                }
+                Ok(Some(NetworkCommand::Fetch { url, destination }))
             }
             _ => Err(NetworkCommandError::Usage),
         };
@@ -1075,8 +1026,8 @@ mod tests {
         assert!(help.as_bytes().len() <= MAX_OUTPUT_BYTES);
         assert!(help.as_bytes().windows(b"service".len()).any(|window| window == b"service"));
         assert_eq!(
-            commands.execute(b"help(\"write\")").as_bytes(),
-            b"write - replace file contents\r\nUsage: write(\"path\", \"data\")\r\nAtomically replaces an existing file's contents. Data must be non-empty.\r\n"
+            commands.execute(b"help(\"fs\")").as_bytes(),
+            b"fs - manage files\r\nUsage: fs.list() / fs.create(\"path\") / fs.read(\"path\")\r\nLists, creates, reads, writes, removes, or moves files.\r\n"
         );
         assert_eq!(commands.execute(b"help(\"missing\")").status, 1);
         assert!(commands.execute(b"help(\"missing\")").as_bytes().len() <= MAX_OUTPUT_BYTES);
@@ -1087,11 +1038,11 @@ mod tests {
         assert!(commands.execute(b"clear()").clear_screen);
         assert_eq!(commands.execute(b"true()").status, 0);
         assert_eq!(commands.execute(b"false()").status, 1);
-        assert_eq!(commands.execute(b"version()").as_bytes(), b"LogOS vNext 0.1.0\r\n");
-        assert_eq!(commands.execute(b" version() ").as_bytes(), b"LogOS vNext 0.1.0\r\n");
-        assert_eq!(commands.execute(b"uname()").as_bytes(), b"LogOS\r\n");
-        assert_eq!(commands.execute(b"shutdown()").action, CommandAction::Shutdown);
-        assert_eq!(commands.execute(b"reboot()").action, CommandAction::Reboot);
+        assert_eq!(commands.execute(b"sys.version()").as_bytes(), b"LogOS vNext 0.1.0\r\n");
+        assert_eq!(commands.execute(b" sys.version() ").as_bytes(), b"LogOS vNext 0.1.0\r\n");
+        assert_eq!(commands.execute(b"sys.uname()").as_bytes(), b"LogOS\r\n");
+        assert_eq!(commands.execute(b"sys.shutdown()").action, CommandAction::Shutdown);
+        assert_eq!(commands.execute(b"sys.reboot()").action, CommandAction::Reboot);
         assert_eq!(commands.execute(b"missing()").status, 127);
     }
 
@@ -1103,16 +1054,16 @@ mod tests {
         assert_ne!(commands.execute(b"clear()").status, 127);
         assert_ne!(commands.execute(b"true()").status, 127);
         assert_ne!(commands.execute(b"false()").status, 127);
-        assert_ne!(commands.execute(b"version()").status, 127);
-        assert_ne!(commands.execute(b"uname()").status, 127);
-        assert_ne!(commands.execute(b"shutdown()").status, 127);
-        assert_ne!(commands.execute(b"reboot()").status, 127);
-        assert_ne!(commands.execute(b"ls()").status, 127);
-        assert_ne!(commands.execute(b"touch()").status, 127);
-        assert_ne!(commands.execute(b"cat()").status, 127);
-        assert_ne!(commands.execute(b"write()").status, 127);
-        assert_ne!(commands.execute(b"rm()").status, 127);
-        assert_ne!(commands.execute(b"mv()").status, 127);
+        assert_ne!(commands.execute(b"sys.version()").status, 127);
+        assert_ne!(commands.execute(b"sys.uname()").status, 127);
+        assert_ne!(commands.execute(b"sys.shutdown()").status, 127);
+        assert_ne!(commands.execute(b"sys.reboot()").status, 127);
+        assert_ne!(commands.execute(b"fs.list()").status, 127);
+        assert_ne!(commands.execute(b"fs.create()").status, 127);
+        assert_ne!(commands.execute(b"fs.read()").status, 127);
+        assert_ne!(commands.execute(b"fs.write()").status, 127);
+        assert_ne!(commands.execute(b"fs.remove()").status, 127);
+        assert_ne!(commands.execute(b"fs.move()").status, 127);
         assert_ne!(commands.execute(b"service()").status, 127);
         assert_ne!(commands.execute(b"net()").status, 127);
     }
@@ -1159,6 +1110,14 @@ mod tests {
             CompletionTarget::NetworkMember
         );
         assert_eq!(
+            completion_context(b"sys.", 4).unwrap().unwrap().target,
+            CompletionTarget::SystemMember
+        );
+        assert_eq!(
+            completion_context(b"fs.", 3).unwrap().unwrap().target,
+            CompletionTarget::FilesystemMember
+        );
+        assert_eq!(
             completion_context(b"net.interface[\"e", 16).unwrap().unwrap().target,
             CompletionTarget::InterfaceName
         );
@@ -1169,22 +1128,22 @@ mod tests {
     #[test]
     fn storage_commands_parse_with_bounded_arguments() {
         assert_eq!(
-            parse_storage_command(b"ls()").unwrap(),
+            parse_storage_command(b"fs.list()").unwrap(),
             Some(StorageCommand::List { path: b"/" })
         );
         assert_eq!(
-            parse_storage_command(b"write(\"/file\", \"durable data\")").unwrap(),
+            parse_storage_command(b"fs.write(\"/file\", \"durable data\")").unwrap(),
             Some(StorageCommand::Write { path: b"/file", data: b"durable data" })
         );
         assert_eq!(
-            parse_storage_command(b"mv(\"/old\", \"/new\")").unwrap(),
+            parse_storage_command(b"fs.move(\"/old\", \"/new\")").unwrap(),
             Some(StorageCommand::Move { from: b"/old", to: b"/new" })
         );
         assert_eq!(
-            parse_storage_command(b"write(\"/file\")").unwrap_err(),
+            parse_storage_command(b"fs.write(\"/file\")").unwrap_err(),
             StorageCommandError::Usage
         );
-        assert!(parse_storage_command(b"not-storage()").unwrap().is_none());
+        assert!(parse_storage_command(b"cat(\"/file\")").unwrap().is_none());
     }
 
     #[test]
@@ -1234,6 +1193,14 @@ mod tests {
         assert_eq!(
             parse_network_command(b"net.tcp-probe(\"10.0.2.2\", 8080)").unwrap(),
             Some(NetworkCommand::TcpProbe { address: [10, 0, 2, 2], port: 8080 })
+        );
+        assert_eq!(
+            parse_network_command(b"net.fetch(\"http://10.0.2.2:8080/readme\", \"/readme\")")
+                .unwrap(),
+            Some(NetworkCommand::Fetch {
+                url: b"http://10.0.2.2:8080/readme",
+                destination: b"/readme"
+            })
         );
         assert_eq!(
             parse_network_command(b"net.ping(\"10.0.2.999\")").unwrap_err(),

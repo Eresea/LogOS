@@ -65,7 +65,7 @@ impl InputDecoder {
             break_code: false,
             modifiers: 0,
             caps_lock: false,
-            num_lock: false,
+            num_lock: true,
             layout,
         }
     }
@@ -499,9 +499,13 @@ mod tests {
     fn numpad_keys_follow_num_lock_and_keep_navigation() {
         let mut decoder = InputDecoder::new();
 
-        decoder.feed(0xe0);
-        let home = decoder.feed(0x6c).unwrap();
-        assert_eq!(KeyCode::from_raw(home.key.code), KeyCode::HOME);
+        let initial = decoder.feed(0x70).unwrap();
+        assert_eq!(initial.text.unwrap().text_bytes(), Some(&b"0"[..]));
+        assert_eq!(initial.key.modifiers & MOD_NUM_LOCK, MOD_NUM_LOCK);
+
+        let num_lock = decoder.feed(0x77).unwrap();
+        assert_eq!(KeyCode::from_raw(num_lock.key.code), KeyCode::NUM_LOCK);
+        assert_eq!(num_lock.key.modifiers & MOD_NUM_LOCK, 0);
 
         let num_lock = decoder.feed(0x77).unwrap();
         assert_eq!(KeyCode::from_raw(num_lock.key.code), KeyCode::NUM_LOCK);
@@ -620,20 +624,16 @@ mod tests {
 
     #[test]
     fn terminal_graph_forwards_one_command_and_renders_output() {
-        let mut decoder = InputDecoder::with_layout(KeyboardLayout::Qwerty);
         let mut terminal = TerminalService::new();
         let mut session = SessionService::new();
         let mut commands = CommandService::new();
         let mut command = [0; MAX_LINE_BYTES];
         let mut committed = None;
 
-        for scancode in [
-            0x2a, 0x24, 0x2d, 0x1b, 0x43, 0x44, 0x31, 0x12, 0x46, 0xf0, 0x12, 0x12, 0x45, 0xf0,
-            0x12, 0x5a,
+        for message in [
+            InputMessage::text(b"sys.version()").unwrap(),
+            InputMessage::key(KeyCode::ENTER, KeyState::Pressed, 0),
         ] {
-            let Some(message) = decoder.feed(scancode).map(|event| event.terminal_message()) else {
-                continue;
-            };
             let Some(stream) = terminal.input(&message) else { continue };
             let Some(bytes) = stream.as_bytes() else { continue };
             let mut edit_output = ShellOutput::new();
@@ -644,7 +644,7 @@ mod tests {
         }
 
         let length = committed.expect("enter commits the command");
-        assert_eq!(&command[..length], b"version()");
+        assert_eq!(&command[..length], b"sys.version()");
         let result = commands.execute(&command[..length]);
         assert_eq!(result.as_bytes(), b"LogOS vNext 0.1.0\r\n");
         let mut output = ShellOutput::new();

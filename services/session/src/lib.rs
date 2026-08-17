@@ -51,7 +51,7 @@ impl ShellOutput {
         &self.bytes[..self.len]
     }
 
-    fn push_decimal(&mut self, mut value: usize) {
+    pub fn push_decimal(&mut self, mut value: usize) {
         let mut digits = [0; 3];
         let mut count = 0;
         if value == 0 {

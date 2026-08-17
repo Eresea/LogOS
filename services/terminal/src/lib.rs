@@ -774,6 +774,13 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_emits_the_interrupt_byte() {
+        let mut terminal = Terminal::new();
+        let control_c = InputMessage::key(KeyCode::character(b'c'), KeyState::Pressed, MOD_CTRL);
+        assert_eq!(terminal.input(&control_c).unwrap().as_bytes(), Some(&[0x03][..]));
+    }
+
+    #[test]
     fn cursor_motion_emits_cursor_only_render_updates() {
         let mut terminal = Terminal::new();
         terminal.feed(b"hello");
