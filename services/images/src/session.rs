@@ -4,7 +4,10 @@
 
 mod common;
 
-use logos_abi::{IPC_FLAG_MORE, IpcBytes, IpcStatus, MAX_IPC_BYTES, MessageKind};
+use logos_abi::{
+    CompletionRequest, CompletionResponse, IPC_FLAG_MORE, IpcBytes, IpcStatus, MAX_IPC_BYTES,
+    MessageKind,
+};
 use logos_session::MAX_LINE_BYTES;
 
 const INPUT_CAPABILITY: usize = common::capability_slot(
@@ -108,6 +111,23 @@ static mut SESSION: logos_session::SessionService = logos_session::SessionServic
 static mut PENDING: PendingOutput = PendingOutput::new();
 static mut COMMAND: PendingCommand = PendingCommand::new();
 
+fn completion_request_message(request: CompletionRequest) -> IpcBytes {
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&request as *const CompletionRequest).cast::<u8>(),
+            core::mem::size_of::<CompletionRequest>(),
+        )
+    };
+    IpcBytes::from_bytes(MessageKind::CompletionRequest, bytes)
+        .unwrap_or_else(|| IpcBytes::empty(MessageKind::CompletionRequest))
+}
+
+fn completion_response(message: &IpcBytes) -> Option<CompletionResponse> {
+    (message.kind == MessageKind::CompletionResponse
+        && message.len as usize == core::mem::size_of::<CompletionResponse>())
+    .then(|| unsafe { core::ptr::read_unaligned(message.bytes.as_ptr().cast()) })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     let session = unsafe { &mut *core::ptr::addr_of_mut!(SESSION) };
@@ -117,6 +137,7 @@ pub extern "C" fn _start() -> ! {
     let mut command_response = [0; logos_session::MAX_OUTPUT_BYTES];
     let mut command_response_len = 0;
     let mut waiting_for_command = false;
+    let mut pending_completion = None;
     let mut prompt = logos_session::ShellOutput::new();
     session.prompt(&mut prompt);
     pending.stage(prompt.as_bytes());
@@ -132,6 +153,32 @@ pub extern "C" fn _start() -> ! {
                 );
             }
             continue;
+        }
+        if let Some(message) = pending_completion {
+            match common::ipc_send(COMMANDS_CAPABILITY, &message) {
+                IpcStatus::Ok => {
+                    pending_completion = None;
+                    progressed = true;
+                }
+                IpcStatus::Full => {
+                    common::wait(
+                        common::ipc_write_event(logos_abi::IpcEndpointId::SessionToCommands),
+                        logos_abi::ServiceId::Session,
+                    );
+                    continue;
+                }
+                IpcStatus::Stale
+                | IpcStatus::Disconnected
+                | IpcStatus::Unauthorized
+                | IpcStatus::Malformed
+                | IpcStatus::Empty => {
+                    pending_completion = None;
+                    let mut failure = logos_session::ShellOutput::new();
+                    session.completion_failed(&mut failure);
+                    pending.stage(failure.as_bytes());
+                    continue;
+                }
+            }
         }
         if !command.is_empty() {
             if let Some(message) = command.take() {
@@ -153,20 +200,31 @@ pub extern "C" fn _start() -> ! {
         if waiting_for_command {
             let mut message = IpcBytes::empty(MessageKind::SessionOutput);
             if common::ipc_receive(COMMAND_OUTPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
-                if let Some(bytes) = message.as_bytes() {
-                    let count = bytes.len().min(command_response.len() - command_response_len);
-                    command_response[command_response_len..command_response_len + count]
-                        .copy_from_slice(&bytes[..count]);
-                    command_response_len += count;
-                    if message.flags & IPC_FLAG_MORE == 0 {
-                        let mut result = logos_session::ShellOutput::new();
-                        session
-                            .command_output(&command_response[..command_response_len], &mut result);
-                        pending.stage(result.as_bytes());
-                        command_response_len = 0;
-                        waiting_for_command = false;
+                if let Some(response) = completion_response(&message) {
+                    let mut edit_output = logos_session::ShellOutput::new();
+                    session.apply_completion_response(response, &mut edit_output);
+                    if edit_output.len > 0 {
+                        pending.stage(edit_output.as_bytes());
                     }
                     progressed = true;
+                } else if message.kind == MessageKind::SessionOutput {
+                    if let Some(bytes) = message.as_bytes() {
+                        let count = bytes.len().min(command_response.len() - command_response_len);
+                        command_response[command_response_len..command_response_len + count]
+                            .copy_from_slice(&bytes[..count]);
+                        command_response_len += count;
+                        if message.flags & IPC_FLAG_MORE == 0 {
+                            let mut result = logos_session::ShellOutput::new();
+                            session.command_output(
+                                &command_response[..command_response_len],
+                                &mut result,
+                            );
+                            pending.stage(result.as_bytes());
+                            command_response_len = 0;
+                            waiting_for_command = false;
+                        }
+                        progressed = true;
+                    }
                 }
             }
             if !progressed {
@@ -176,6 +234,18 @@ pub extern "C" fn _start() -> ! {
                 );
             }
             continue;
+        }
+        let mut completion_message = IpcBytes::empty(MessageKind::CompletionResponse);
+        if common::ipc_receive(COMMAND_OUTPUT_CAPABILITY, &mut completion_message) == IpcStatus::Ok
+        {
+            if let Some(response) = completion_response(&completion_message) {
+                let mut edit_output = logos_session::ShellOutput::new();
+                session.apply_completion_response(response, &mut edit_output);
+                if edit_output.len > 0 {
+                    pending.stage(edit_output.as_bytes());
+                }
+                progressed = true;
+            }
         }
         let mut message = IpcBytes::empty(MessageKind::SessionInput);
         while common::ipc_receive(INPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
@@ -192,16 +262,25 @@ pub extern "C" fn _start() -> ! {
             {
                 command.stage(&command_bytes[..length]);
             }
+            if let Some(request) = session.take_completion_request() {
+                pending_completion = Some(completion_request_message(request));
+            }
             if edit_output.len > 0 {
                 pending.stage(edit_output.as_bytes());
                 break;
             }
         }
+        let mut completion_output = logos_session::ShellOutput::new();
+        session.completion_tick(&mut completion_output);
+        if completion_output.len > 0 {
+            pending.stage(completion_output.as_bytes());
+        }
         if !progressed {
-            common::wait(
-                common::ipc_read_event(logos_abi::IpcEndpointId::TerminalToSession),
-                logos_abi::ServiceId::Session,
-            );
+            let mut wait_mask = common::ipc_read_event(logos_abi::IpcEndpointId::TerminalToSession);
+            if session.completion_pending() {
+                wait_mask |= common::ipc_read_event(logos_abi::IpcEndpointId::CommandsToSession);
+            }
+            common::wait(wait_mask, logos_abi::ServiceId::Session);
         }
     }
 }
