@@ -1048,6 +1048,23 @@ mod tests {
     }
 
     #[test]
+    fn completion_accepts_multi_argument_helper_in_first_slot() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"write", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_end = 5;
+        assert!(response.push_candidate_with_cursor(b"write(\"\", \"\")", 7));
+        editor.apply_completion_response(response, &mut output);
+        editor.input_for_command(b"\t", &mut command, &mut output);
+        assert_eq!(&editor.line[..editor.line_len], b"write(\"\", \"\")");
+        assert_eq!(editor.cursor, 7);
+    }
+
+    #[test]
     fn targeted_completion_navigates_and_dismisses() {
         let mut editor = LineEditor::new();
         let mut command = [0; MAX_LINE_BYTES];
