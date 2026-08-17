@@ -11,4 +11,3 @@ bench = false
 
 [dependencies]
 logos-abi = { path = "../../abi" }
-logos-commands = { path = "../commands" }

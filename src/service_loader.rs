@@ -346,9 +346,9 @@ mod tests {
     #[test]
     fn clear_releases_all_fixed_records() {
         let mut bundle = ServiceImageBundle::new();
-        bundle.admit(service_image(ServiceId::Commands), 0x50_000, &image()).unwrap();
+        bundle.admit(service_image(ServiceId::Flow), 0x50_000, &image()).unwrap();
         bundle.clear();
         assert_eq!(bundle.count(), 0);
-        assert_eq!(bundle.location(ServiceId::Commands), None);
+        assert_eq!(bundle.location(ServiceId::Flow), None);
     }
 }

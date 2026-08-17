@@ -16,14 +16,14 @@ const ENDPOINTS: [logos_abi::IpcEndpointId; 16] = [
     logos_abi::IpcEndpointId::TerminalToDisplay,
     logos_abi::IpcEndpointId::TerminalToSession,
     logos_abi::IpcEndpointId::SessionToTerminal,
-    logos_abi::IpcEndpointId::SessionToCommands,
-    logos_abi::IpcEndpointId::CommandsToSession,
-    logos_abi::IpcEndpointId::CommandsToStorage,
-    logos_abi::IpcEndpointId::StorageToCommands,
-    logos_abi::IpcEndpointId::CommandsToNetwork,
-    logos_abi::IpcEndpointId::NetworkToCommands,
-    logos_abi::IpcEndpointId::CommandsToFetch,
-    logos_abi::IpcEndpointId::FetchToCommands,
+    logos_abi::IpcEndpointId::SessionToFlow,
+    logos_abi::IpcEndpointId::FlowToSession,
+    logos_abi::IpcEndpointId::FlowToStorage,
+    logos_abi::IpcEndpointId::StorageToFlow,
+    logos_abi::IpcEndpointId::FlowToNetwork,
+    logos_abi::IpcEndpointId::NetworkToFlow,
+    logos_abi::IpcEndpointId::FlowToFetch,
+    logos_abi::IpcEndpointId::FetchToFlow,
     logos_abi::IpcEndpointId::FetchToStorage,
     logos_abi::IpcEndpointId::StorageToFetch,
     logos_abi::IpcEndpointId::FetchToNetwork,
@@ -381,16 +381,16 @@ fn disconnect_ipc_page(endpoint: IpcEndpoint) {
             }
             logos_abi::IpcEndpointId::TerminalToSession
             | logos_abi::IpcEndpointId::SessionToTerminal
-            | logos_abi::IpcEndpointId::SessionToCommands
-            | logos_abi::IpcEndpointId::CommandsToSession => {
+            | logos_abi::IpcEndpointId::SessionToFlow
+            | logos_abi::IpcEndpointId::FlowToSession => {
                 (*(frame as *const logos_abi::StreamIpc)).disconnect()
             }
-            logos_abi::IpcEndpointId::CommandsToStorage
-            | logos_abi::IpcEndpointId::StorageToCommands
-            | logos_abi::IpcEndpointId::CommandsToNetwork
-            | logos_abi::IpcEndpointId::NetworkToCommands
-            | logos_abi::IpcEndpointId::CommandsToFetch
-            | logos_abi::IpcEndpointId::FetchToCommands
+            logos_abi::IpcEndpointId::FlowToStorage
+            | logos_abi::IpcEndpointId::StorageToFlow
+            | logos_abi::IpcEndpointId::FlowToNetwork
+            | logos_abi::IpcEndpointId::NetworkToFlow
+            | logos_abi::IpcEndpointId::FlowToFetch
+            | logos_abi::IpcEndpointId::FetchToFlow
             | logos_abi::IpcEndpointId::FetchToStorage
             | logos_abi::IpcEndpointId::StorageToFetch
             | logos_abi::IpcEndpointId::FetchToNetwork
@@ -439,13 +439,13 @@ mod tests {
         assert_eq!(graph.count(), 16);
         assert_eq!(graph.endpoint(0).unwrap().producer(), ServiceId::Input);
         assert_eq!(graph.endpoint(0).unwrap().consumer(), ServiceId::Terminal);
-        assert_eq!(graph.endpoint(5).unwrap().producer(), ServiceId::Commands);
+        assert_eq!(graph.endpoint(5).unwrap().producer(), ServiceId::Flow);
         assert_eq!(graph.endpoint(5).unwrap().consumer(), ServiceId::Session);
-        assert_eq!(graph.endpoint(6).unwrap().id(), logos_abi::IpcEndpointId::CommandsToStorage);
-        assert_eq!(graph.endpoint(7).unwrap().id(), logos_abi::IpcEndpointId::StorageToCommands);
-        assert_eq!(graph.endpoint(8).unwrap().id(), logos_abi::IpcEndpointId::CommandsToNetwork);
-        assert_eq!(graph.endpoint(9).unwrap().id(), logos_abi::IpcEndpointId::NetworkToCommands);
-        assert_eq!(graph.endpoint(10).unwrap().id(), logos_abi::IpcEndpointId::CommandsToFetch);
+        assert_eq!(graph.endpoint(6).unwrap().id(), logos_abi::IpcEndpointId::FlowToStorage);
+        assert_eq!(graph.endpoint(7).unwrap().id(), logos_abi::IpcEndpointId::StorageToFlow);
+        assert_eq!(graph.endpoint(8).unwrap().id(), logos_abi::IpcEndpointId::FlowToNetwork);
+        assert_eq!(graph.endpoint(9).unwrap().id(), logos_abi::IpcEndpointId::NetworkToFlow);
+        assert_eq!(graph.endpoint(10).unwrap().id(), logos_abi::IpcEndpointId::FlowToFetch);
         assert_eq!(graph.endpoint(15).unwrap().id(), logos_abi::IpcEndpointId::NetworkToFetch);
         assert_eq!(graph.endpoint(5).unwrap().generation(), 1);
         let terminal = graph.capabilities(ServiceId::Terminal).unwrap();
@@ -453,7 +453,7 @@ mod tests {
         assert_eq!(terminal.get(1).unwrap().rights, IpcRights::Send);
         assert_eq!(terminal.get(3).unwrap().rights, IpcRights::Receive);
         assert_eq!(terminal.get(4), None);
-        let commands = graph.capabilities(ServiceId::Commands).unwrap();
+        let commands = graph.capabilities(ServiceId::Flow).unwrap();
         assert_eq!(commands.get(2).unwrap().endpoint_index(), Some(8));
         assert_eq!(commands.get(3).unwrap().endpoint_index(), Some(9));
         assert_eq!(commands.get(4).unwrap().endpoint_index(), Some(12));

@@ -10,51 +10,52 @@ use core::{
 mod common;
 
 use logos_abi::{
-    COMPLETION_FLAG_TRUNCATED, CommandControl, CompletionRequest, CompletionResponse,
-    CompletionStatus, FetchControl, FetchPhase, FetchRequest, FetchResponse, FetchStatus,
-    IPC_FLAG_MORE, IpcBytes, IpcStatus, MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation,
-    NetworkRequest, NetworkResponse, NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE,
-    StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus,
+    COMPLETION_FLAG_TRUNCATED, CompletionRequest, CompletionResponse, CompletionStatus,
+    FetchBodyChunk, FetchControl, FetchPhase, FetchRequest, FetchResponse, FetchStatus,
+    FlowControl, IPC_FLAG_MORE, IpcBytes, IpcStatus, MAX_COMPLETION_ITEM_BYTES, MessageKind,
+    NetworkOperation, NetworkRequest, NetworkResponse, NetworkResult, NetworkState,
+    STORAGE_API_FLAG_REPLACE, StorageApiOperation, StorageApiRequest, StorageApiResponse,
+    StorageApiStatus,
 };
 
 const INPUT_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Commands,
-    logos_abi::IpcEndpointId::SessionToCommands,
+    logos_abi::ServiceId::Flow,
+    logos_abi::IpcEndpointId::SessionToFlow,
     logos_abi::IpcRights::Receive,
 );
 const OUTPUT_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Commands,
-    logos_abi::IpcEndpointId::CommandsToSession,
+    logos_abi::ServiceId::Flow,
+    logos_abi::IpcEndpointId::FlowToSession,
     logos_abi::IpcRights::Send,
 );
 const STORAGE_SEND_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Commands,
-    logos_abi::IpcEndpointId::CommandsToStorage,
+    logos_abi::ServiceId::Flow,
+    logos_abi::IpcEndpointId::FlowToStorage,
     logos_abi::IpcRights::Send,
 );
 const STORAGE_RECEIVE_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Commands,
-    logos_abi::IpcEndpointId::StorageToCommands,
+    logos_abi::ServiceId::Flow,
+    logos_abi::IpcEndpointId::StorageToFlow,
     logos_abi::IpcRights::Receive,
 );
 const NETWORK_SEND_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Commands,
-    logos_abi::IpcEndpointId::CommandsToNetwork,
+    logos_abi::ServiceId::Flow,
+    logos_abi::IpcEndpointId::FlowToNetwork,
     logos_abi::IpcRights::Send,
 );
 const NETWORK_RECEIVE_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Commands,
-    logos_abi::IpcEndpointId::NetworkToCommands,
+    logos_abi::ServiceId::Flow,
+    logos_abi::IpcEndpointId::NetworkToFlow,
     logos_abi::IpcRights::Receive,
 );
 const FETCH_SEND_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Commands,
-    logos_abi::IpcEndpointId::CommandsToFetch,
+    logos_abi::ServiceId::Flow,
+    logos_abi::IpcEndpointId::FlowToFetch,
     logos_abi::IpcRights::Send,
 );
 const FETCH_RECEIVE_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Commands,
-    logos_abi::IpcEndpointId::FetchToCommands,
+    logos_abi::ServiceId::Flow,
+    logos_abi::IpcEndpointId::FetchToFlow,
     logos_abi::IpcRights::Receive,
 );
 
@@ -108,18 +109,41 @@ struct FetchClient {
     request_id: u32,
     initial_progress: Option<FetchResponse>,
     cancel_pending: bool,
+    response_mode: bool,
+    foreground: bool,
+    response_ready: bool,
+    response_status: u16,
+    response_ok: bool,
+    body: [u8; logos_flow::interpreter::MAX_VALUE_BYTES],
+    body_len: usize,
+    callback_destination: [u8; logos_flow::MAX_FLOW_BYTES],
+    callback_destination_len: usize,
 }
 
 impl FetchClient {
     const fn new() -> Self {
-        Self { active: false, request_id: 0, initial_progress: None, cancel_pending: false }
+        Self {
+            active: false,
+            request_id: 0,
+            initial_progress: None,
+            cancel_pending: false,
+            response_mode: false,
+            foreground: true,
+            response_ready: false,
+            response_status: 0,
+            response_ok: false,
+            body: [0; logos_flow::interpreter::MAX_VALUE_BYTES],
+            body_len: 0,
+            callback_destination: [0; logos_flow::MAX_FLOW_BYTES],
+            callback_destination_len: 0,
+        }
     }
 
     fn active(&self) -> bool {
         self.active
     }
 
-    fn start(&mut self, url: &[u8], destination: &[u8]) -> bool {
+    fn start_with_mode(&mut self, url: &[u8], destination: &[u8], foreground: bool) -> bool {
         if self.active {
             return false;
         }
@@ -142,6 +166,13 @@ impl FetchClient {
         self.active = true;
         self.request_id = request_id;
         self.cancel_pending = false;
+        self.response_mode = destination.is_empty();
+        self.foreground = foreground;
+        self.response_ready = false;
+        self.response_status = 0;
+        self.response_ok = false;
+        self.body_len = 0;
+        self.callback_destination_len = 0;
         self.initial_progress = Some(FetchResponse::new(
             request_id,
             FetchPhase::Connect,
@@ -150,8 +181,68 @@ impl FetchClient {
             None,
         ));
         #[cfg(feature = "fetch-proof")]
-        common::proof_line(b"LogOS vNext: fetch command started");
+        common::proof_line(b"LogOS vNext: Flow fetch started");
         true
+    }
+
+    fn start(&mut self, url: &[u8], destination: &[u8]) -> bool {
+        self.start_with_mode(url, destination, true)
+    }
+
+    fn start_response(&mut self, url: &[u8]) -> bool {
+        self.start_with_mode(url, &[], true)
+    }
+
+    fn start_response_background(&mut self, url: &[u8]) -> bool {
+        self.start_with_mode(url, &[], false)
+    }
+
+    fn start_to_file_mode(&mut self, url: &[u8], destination: &[u8], foreground: bool) -> bool {
+        self.start_with_mode(url, destination, foreground)
+    }
+
+    fn start_response_to_file(&mut self, url: &[u8], destination: &[u8], foreground: bool) -> bool {
+        if destination.is_empty() || destination.len() > self.callback_destination.len() {
+            return false;
+        }
+        if !self.start_with_mode(url, &[], foreground) {
+            return false;
+        }
+        self.callback_destination[..destination.len()].copy_from_slice(destination);
+        self.callback_destination_len = destination.len();
+        true
+    }
+
+    fn foreground(&self) -> bool {
+        self.foreground
+    }
+
+    fn await_foreground(&mut self) -> bool {
+        if self.active {
+            self.foreground = true;
+            true
+        } else if self.response_ready {
+            self.response_ready = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn take_callback(&mut self) -> Option<(&[u8], &[u8])> {
+        if self.callback_destination_len == 0 || self.active || !self.response_ok {
+            return None;
+        }
+        Some((
+            &self.callback_destination[..self.callback_destination_len],
+            &self.body[..self.body_len],
+        ))
+    }
+
+    fn clear_callback(&mut self) {
+        self.callback_destination_len = 0;
+        self.body_len = 0;
+        self.response_ok = false;
     }
 
     fn cancel(&mut self) {
@@ -205,6 +296,29 @@ impl FetchClient {
                 return true;
             }
         }
+        if message.kind == MessageKind::FetchBodyChunk {
+            if message.len as usize != mem::size_of::<FetchBodyChunk>() {
+                self.active = false;
+                pending.stage(b"fetch body malformed\r\n");
+                return true;
+            }
+            let chunk: FetchBodyChunk =
+                unsafe { ptr::read_unaligned(message.bytes.as_ptr().cast()) };
+            let end = chunk.offset as usize + usize::from(chunk.len);
+            if !self.response_mode
+                || !chunk.is_valid()
+                || chunk.request_id != self.request_id
+                || chunk.offset as usize != self.body_len
+                || end > self.body.len()
+            {
+                self.active = false;
+                pending.stage(b"fetch body stale\r\n");
+                return true;
+            }
+            self.body[self.body_len..end].copy_from_slice(&chunk.bytes[..usize::from(chunk.len)]);
+            self.body_len = end;
+            return true;
+        }
         if message.len as usize != mem::size_of::<FetchResponse>() {
             self.active = false;
             pending.stage(b"fetch failed\r\n");
@@ -220,25 +334,32 @@ impl FetchClient {
             response.phase,
             FetchPhase::Complete | FetchPhase::Failed | FetchPhase::Cancelled
         ) {
+            self.response_status = response.response_status;
+            self.response_ok = response.status == FetchStatus::Ok;
             self.active = false;
             self.cancel_pending = false;
-            pending.stage(match response.status {
+            let message = match response.status {
                 FetchStatus::Ok => {
                     #[cfg(feature = "fetch-proof")]
-                    common::proof_line(b"LogOS vNext: fetch command complete");
-                    b"fetch complete\r\n"
+                    common::proof_line(b"LogOS vNext: Flow fetch complete");
+                    b"fetch complete\r\n" as &[u8]
                 }
                 FetchStatus::Cancelled => {
                     #[cfg(feature = "fetch-proof")]
-                    common::proof_line(b"LogOS vNext: fetch command cancelled");
+                    common::proof_line(b"LogOS vNext: Flow fetch cancelled");
                     b"fetch cancelled\r\n"
                 }
                 _ => {
                     #[cfg(feature = "fetch-proof")]
-                    common::proof_line(b"LogOS vNext: fetch command failed");
+                    common::proof_line(b"LogOS vNext: Flow fetch failed");
                     b"fetch failed\r\n"
                 }
-            });
+            };
+            if response.status == FetchStatus::Ok && !self.foreground {
+                self.response_ready = true;
+            } else if self.callback_destination_len == 0 || response.status != FetchStatus::Ok {
+                pending.stage(message);
+            }
         } else {
             let _ = forward_fetch_progress(response);
         }
@@ -253,19 +374,19 @@ fn forward_fetch_progress(response: FetchResponse) -> IpcStatus {
             mem::size_of::<FetchResponse>(),
         )
     };
-    let Some(message) = IpcBytes::from_bytes(MessageKind::CommandProgress, bytes) else {
+    let Some(message) = IpcBytes::from_bytes(MessageKind::FlowProgress, bytes) else {
         return IpcStatus::Malformed;
     };
     common::ipc_send(OUTPUT_CAPABILITY, &message)
 }
 
 fn fetch_control(message: &IpcBytes, fetch: &mut FetchClient) -> bool {
-    if message.kind != MessageKind::CommandControl
-        || message.len as usize != mem::size_of::<CommandControl>()
+    if message.kind != MessageKind::FlowControl
+        || message.len as usize != mem::size_of::<FlowControl>()
     {
         return false;
     }
-    let control: CommandControl = unsafe { ptr::read_unaligned(message.bytes.as_ptr().cast()) };
+    let control: FlowControl = unsafe { ptr::read_unaligned(message.bytes.as_ptr().cast()) };
     if control.is_valid() && (control.request_id == 0 || control.request_id == fetch.request_id) {
         fetch.cancel();
         true
@@ -310,11 +431,11 @@ impl NetworkClient {
         let mut cancel_sent = false;
         for _ in 0..256 {
             if !cancel_requested {
-                let mut control = IpcBytes::empty(MessageKind::CommandControl);
+                let mut control = IpcBytes::empty(MessageKind::FlowControl);
                 if common::ipc_receive(INPUT_CAPABILITY, &mut control) == IpcStatus::Ok
-                    && control.len as usize == mem::size_of::<CommandControl>()
+                    && control.len as usize == mem::size_of::<FlowControl>()
                 {
-                    let value: CommandControl =
+                    let value: FlowControl =
                         unsafe { ptr::read_unaligned(control.bytes.as_ptr().cast()) };
                     cancel_requested = value.is_valid()
                         && (value.request_id == 0 || value.request_id == request.request_id);
@@ -335,8 +456,8 @@ impl NetworkClient {
                     IpcStatus::Ok => cancel_sent = true,
                     IpcStatus::Full => {
                         common::wait(
-                            common::ipc_write_event(logos_abi::IpcEndpointId::CommandsToNetwork),
-                            logos_abi::ServiceId::Commands,
+                            common::ipc_write_event(logos_abi::IpcEndpointId::FlowToNetwork),
+                            logos_abi::ServiceId::Flow,
                         );
                         continue;
                     }
@@ -365,9 +486,9 @@ impl NetworkClient {
                     return value.is_valid_for(request).then_some(value).ok_or(IpcStatus::Stale);
                 }
                 IpcStatus::Empty => common::wait(
-                    common::ipc_read_event(logos_abi::IpcEndpointId::NetworkToCommands)
-                        | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToCommands),
-                    logos_abi::ServiceId::Commands,
+                    common::ipc_read_event(logos_abi::IpcEndpointId::NetworkToFlow)
+                        | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
+                    logos_abi::ServiceId::Flow,
                 ),
                 status => return Err(status),
             }
@@ -406,8 +527,8 @@ fn manager_boot_probe() -> bool {
     {
         return false;
     }
-    let mut output = [0; logos_commands::MAX_OUTPUT_BYTES];
-    let length = logos_commands::format_service_record(&response.record, &mut output);
+    let mut output = [0; logos_flow::MAX_OUTPUT_BYTES];
+    let length = logos_flow::format_service_record(&response.record, &mut output);
     output[..length].starts_with(b"input ") && output[..length].ends_with(b"\r\n")
 }
 
@@ -433,8 +554,7 @@ impl CompletionService {
             response.line_revision = request.line_revision;
             return response;
         };
-        let Ok(Some(context)) =
-            logos_commands::completion_context(line, usize::from(request.cursor))
+        let Ok(Some(context)) = logos_flow::completion_context(line, usize::from(request.cursor))
         else {
             let mut response =
                 CompletionResponse::empty(request.request_id, CompletionStatus::NoMatch);
@@ -446,28 +566,31 @@ impl CompletionService {
         response.replace_start = context.replace_start as u8;
         response.replace_end = context.replace_end as u8;
         match context.target {
-            logos_commands::CompletionTarget::Root => {
-                for spec in logos_commands::COMMAND_SPECS {
+            logos_flow::CompletionTarget::Root => {
+                if b"help".starts_with(context.prefix)
+                    && !response.push_candidate_with_cursor(b"help()", 4)
+                {
+                    response.flags |= COMPLETION_FLAG_TRUNCATED;
+                }
+                if b"clear".starts_with(context.prefix)
+                    && !response.push_candidate_with_cursor(b"clear()", 5)
+                {
+                    response.flags |= COMPLETION_FLAG_TRUNCATED;
+                }
+                if b"echo".starts_with(context.prefix)
+                    && !response.push_candidate_with_cursor(b"echo(\"\")", 5)
+                {
+                    response.flags |= COMPLETION_FLAG_TRUNCATED;
+                }
+                for spec in logos_flow::FLOW_SPECS {
                     if !spec.name.starts_with(context.prefix) {
                         continue;
                     }
                     let (punctuation, cursor_offset) = match spec.kind {
-                        logos_commands::CommandKind::Help | logos_commands::CommandKind::Echo => {
-                            (b"(\"\")".as_slice(), spec.name.len() + 2)
-                        }
-                        logos_commands::CommandKind::Filesystem => {
-                            (b".".as_slice(), spec.name.len() + 1)
-                        }
-                        logos_commands::CommandKind::Service => {
-                            (b"[\"".as_slice(), spec.name.len() + 2)
-                        }
-                        logos_commands::CommandKind::Network => {
-                            (b".".as_slice(), spec.name.len() + 1)
-                        }
-                        logos_commands::CommandKind::System => {
-                            (b".".as_slice(), spec.name.len() + 1)
-                        }
-                        _ => (b"()".as_slice(), spec.name.len() + 2),
+                        logos_flow::FlowKind::Filesystem => (b".".as_slice(), spec.name.len() + 1),
+                        logos_flow::FlowKind::Service => (b"[\"".as_slice(), spec.name.len() + 2),
+                        logos_flow::FlowKind::Network => (b".".as_slice(), spec.name.len() + 1),
+                        logos_flow::FlowKind::System => (b".".as_slice(), spec.name.len() + 1),
                     };
                     let mut candidate = [0; MAX_COMPLETION_ITEM_BYTES];
                     let Some(length) = copy_candidate(&mut candidate, spec.name, punctuation)
@@ -481,13 +604,13 @@ impl CompletionService {
                     }
                 }
             }
-            logos_commands::CompletionTarget::ServiceName => {
+            logos_flow::CompletionTarget::ServiceName => {
                 if self.append_service_names(context.prefix, &mut response).is_err() {
                     response.status = CompletionStatus::Unavailable;
                 }
             }
-            logos_commands::CompletionTarget::ServiceMember => {
-                for candidate in logos_commands::SERVICE_COMPLETION_MEMBERS {
+            logos_flow::CompletionTarget::ServiceMember => {
+                for candidate in logos_flow::SERVICE_COMPLETION_MEMBERS {
                     if candidate.starts_with(context.prefix) && !response.push_candidate(candidate)
                     {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
@@ -495,8 +618,8 @@ impl CompletionService {
                     }
                 }
             }
-            logos_commands::CompletionTarget::NetworkMember => {
-                for candidate in logos_commands::NETWORK_COMPLETION_MEMBERS {
+            logos_flow::CompletionTarget::NetworkMember => {
+                for candidate in logos_flow::NETWORK_COMPLETION_MEMBERS {
                     if candidate.starts_with(context.prefix) && !response.push_candidate(candidate)
                     {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
@@ -504,8 +627,8 @@ impl CompletionService {
                     }
                 }
             }
-            logos_commands::CompletionTarget::SystemMember => {
-                for candidate in logos_commands::SYSTEM_COMPLETION_MEMBERS {
+            logos_flow::CompletionTarget::SystemMember => {
+                for candidate in logos_flow::SYSTEM_COMPLETION_MEMBERS {
                     if candidate.starts_with(context.prefix) && !response.push_candidate(candidate)
                     {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
@@ -513,16 +636,14 @@ impl CompletionService {
                     }
                 }
             }
-            logos_commands::CompletionTarget::FilesystemMember => {
+            logos_flow::CompletionTarget::FilesystemMember => {
                 for (index, candidate) in
-                    logos_commands::FILESYSTEM_COMPLETION_MEMBERS.iter().enumerate()
+                    logos_flow::FILESYSTEM_COMPLETION_MEMBERS.iter().enumerate()
                 {
                     if candidate.starts_with(context.prefix)
                         && !response.push_candidate_with_cursor(
                             candidate,
-                            usize::from(
-                                logos_commands::FILESYSTEM_COMPLETION_CURSOR_OFFSETS[index],
-                            ),
+                            usize::from(logos_flow::FILESYSTEM_COMPLETION_CURSOR_OFFSETS[index]),
                         )
                     {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
@@ -530,7 +651,7 @@ impl CompletionService {
                     }
                 }
             }
-            logos_commands::CompletionTarget::InterfaceName => {
+            logos_flow::CompletionTarget::InterfaceName => {
                 if b"eth0".starts_with(context.prefix) && !response.push_candidate(b"eth0\"]") {
                     response.flags |= COMPLETION_FLAG_TRUNCATED;
                 }
@@ -617,8 +738,20 @@ fn completion_message(response: CompletionResponse) -> IpcBytes {
         .unwrap_or_else(|| IpcBytes::empty(MessageKind::CompletionResponse))
 }
 
+fn trim_flow_input(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    &bytes[start..]
+}
+
+fn flow_is_foreground(bytes: &[u8]) -> bool {
+    trim_flow_input(bytes).starts_with(b"await ")
+}
+
 struct PendingOutput {
-    bytes: [u8; logos_commands::MAX_OUTPUT_BYTES],
+    bytes: [u8; logos_flow::MAX_OUTPUT_BYTES],
     len: usize,
     offset: usize,
     pending: bool,
@@ -626,7 +759,7 @@ struct PendingOutput {
 
 impl PendingOutput {
     const fn new() -> Self {
-        Self { bytes: [0; logos_commands::MAX_OUTPUT_BYTES], len: 0, offset: 0, pending: false }
+        Self { bytes: [0; logos_flow::MAX_OUTPUT_BYTES], len: 0, offset: 0, pending: false }
     }
 
     fn stage(&mut self, bytes: &[u8]) {
@@ -703,13 +836,13 @@ struct StorageClient {
     request_id: u32,
     transaction_id: u64,
     cursor: u32,
-    path: [u8; logos_commands::MAX_COMMAND_BYTES],
+    path: [u8; logos_flow::MAX_FLOW_BYTES],
     path_len: usize,
-    secondary_path: [u8; logos_commands::MAX_COMMAND_BYTES],
+    secondary_path: [u8; logos_flow::MAX_FLOW_BYTES],
     secondary_len: usize,
-    data: [u8; logos_commands::MAX_COMMAND_BYTES],
+    data: [u8; logos_storage_service::MAX_FILE_BYTES],
     data_len: usize,
-    result: [u8; logos_commands::MAX_OUTPUT_BYTES],
+    result: [u8; logos_flow::MAX_OUTPUT_BYTES],
     result_len: usize,
     failure: StorageApiStatus,
     last_status: StorageApiStatus,
@@ -727,13 +860,13 @@ impl StorageClient {
             request_id: 1,
             transaction_id: 0,
             cursor: 0,
-            path: [0; logos_commands::MAX_COMMAND_BYTES],
+            path: [0; logos_flow::MAX_FLOW_BYTES],
             path_len: 0,
-            secondary_path: [0; logos_commands::MAX_COMMAND_BYTES],
+            secondary_path: [0; logos_flow::MAX_FLOW_BYTES],
             secondary_len: 0,
-            data: [0; logos_commands::MAX_COMMAND_BYTES],
+            data: [0; logos_storage_service::MAX_FILE_BYTES],
             data_len: 0,
-            result: [0; logos_commands::MAX_OUTPUT_BYTES],
+            result: [0; logos_flow::MAX_OUTPUT_BYTES],
             result_len: 0,
             failure: StorageApiStatus::Invalid,
             last_status: StorageApiStatus::Invalid,
@@ -741,28 +874,32 @@ impl StorageClient {
         }
     }
 
-    fn start(&mut self, command: logos_commands::StorageCommand<'_>) -> bool {
+    fn start(&mut self, command: logos_flow::StorageCommand<'_>) -> bool {
         let (work, phase, path, secondary, data) = match command {
-            logos_commands::StorageCommand::List { path } => {
+            logos_flow::StorageCommand::List { path } => {
                 (StorageWork::List, StoragePhase::List, path, &[][..], &[][..])
             }
-            logos_commands::StorageCommand::Touch { path } => {
+            logos_flow::StorageCommand::Touch { path } => {
                 (StorageWork::Touch, StoragePhase::Begin, path, &[][..], &[][..])
             }
-            logos_commands::StorageCommand::Cat { path } => {
+            logos_flow::StorageCommand::Cat { path } => {
                 (StorageWork::Cat, StoragePhase::Read, path, &[][..], &[][..])
             }
-            logos_commands::StorageCommand::Write { path, data } => {
+            logos_flow::StorageCommand::Write { path, data } => {
                 (StorageWork::Write, StoragePhase::Begin, path, &[][..], data)
             }
-            logos_commands::StorageCommand::Remove { path } => {
+            logos_flow::StorageCommand::Remove { path } => {
                 (StorageWork::Remove, StoragePhase::Begin, path, &[][..], &[][..])
             }
-            logos_commands::StorageCommand::Move { from, to } => {
+            logos_flow::StorageCommand::Move { from, to } => {
                 (StorageWork::Move, StoragePhase::Begin, from, to, &[][..])
             }
         };
         self.start_work(work, phase, path, secondary, data)
+    }
+
+    fn start_write(&mut self, path: &[u8], data: &[u8]) -> bool {
+        self.start_work(StorageWork::Write, StoragePhase::Begin, path, &[], data)
     }
 
     #[cfg(feature = "storage-proof")]
@@ -791,12 +928,12 @@ impl StorageClient {
         self.last_status = StorageApiStatus::Invalid;
         self.cancelled = false;
         let Some(path_len) =
-            logos_commands::root_relative_path(path, &mut self.path).map(|path| path.len())
+            logos_flow::root_relative_path(path, &mut self.path).map(|path| path.len())
         else {
             return false;
         };
         let Some(secondary_len) =
-            logos_commands::root_relative_path(secondary, &mut self.secondary_path)
+            logos_flow::root_relative_path(secondary, &mut self.secondary_path)
                 .map(|path| path.len())
         else {
             return false;
@@ -1159,26 +1296,26 @@ impl StorageProof {
             return false;
         }
         let started = match self.step {
-            0 => storage.start(logos_commands::StorageCommand::Touch { path: b"/api-survivor" }),
-            1 => storage.start(logos_commands::StorageCommand::Write {
+            0 => storage.start(logos_flow::StorageCommand::Touch { path: b"/api-survivor" }),
+            1 => storage.start(logos_flow::StorageCommand::Write {
                 path: b"/api-survivor",
                 data: if self.recovery { b"recovered-api" } else { b"durable-api" },
             }),
             2 => storage.start_proof_abort(b"/api-aborted"),
             3 if self.recovery => {
-                storage.start(logos_commands::StorageCommand::Touch { path: b"/api-removed" })
+                storage.start(logos_flow::StorageCommand::Touch { path: b"/api-removed" })
             }
-            3 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-survivor" }),
+            3 => storage.start(logos_flow::StorageCommand::Cat { path: b"/api-survivor" }),
             4 if self.recovery => {
-                storage.start(logos_commands::StorageCommand::Remove { path: b"/api-removed" })
+                storage.start(logos_flow::StorageCommand::Remove { path: b"/api-removed" })
             }
-            4 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-aborted" }),
+            4 => storage.start(logos_flow::StorageCommand::Cat { path: b"/api-aborted" }),
             5 if self.recovery => {
-                storage.start(logos_commands::StorageCommand::Cat { path: b"/api-survivor" })
+                storage.start(logos_flow::StorageCommand::Cat { path: b"/api-survivor" })
             }
-            5 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-removed" }),
-            6 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-aborted" }),
-            7 => storage.start(logos_commands::StorageCommand::Cat { path: b"/api-removed" }),
+            5 => storage.start(logos_flow::StorageCommand::Cat { path: b"/api-removed" }),
+            6 => storage.start(logos_flow::StorageCommand::Cat { path: b"/api-aborted" }),
+            7 => storage.start(logos_flow::StorageCommand::Cat { path: b"/api-removed" }),
             _ => false,
         };
         if started {
@@ -1255,56 +1392,32 @@ fn manager_record(name: &[u8]) -> Result<Option<logos_abi::ServiceManagerRecord>
     Ok(None)
 }
 
-fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut PendingOutput) {
+fn service_command(command: logos_flow::ServiceCommand<'_>, pending: &mut PendingOutput) {
     let (operation, name, list, property) = match command {
-        logos_commands::ServiceCommand::List => (
-            logos_abi::ManagerOperation::List,
-            &[][..],
-            true,
-            logos_commands::ServiceProperty::Record,
-        ),
-        logos_commands::ServiceCommand::Lookup { name } => (
-            logos_abi::ManagerOperation::Status,
-            name,
-            false,
-            logos_commands::ServiceProperty::Record,
-        ),
-        logos_commands::ServiceCommand::Status { name } => (
-            logos_abi::ManagerOperation::Status,
-            name,
-            false,
-            logos_commands::ServiceProperty::Status,
-        ),
-        logos_commands::ServiceCommand::Name { name } => (
-            logos_abi::ManagerOperation::Status,
-            name,
-            false,
-            logos_commands::ServiceProperty::Name,
-        ),
-        logos_commands::ServiceCommand::Version { name } => (
-            logos_abi::ManagerOperation::Status,
-            name,
-            false,
-            logos_commands::ServiceProperty::Version,
-        ),
-        logos_commands::ServiceCommand::Start { name } => (
-            logos_abi::ManagerOperation::Start,
-            name,
-            false,
-            logos_commands::ServiceProperty::Record,
-        ),
-        logos_commands::ServiceCommand::Stop { name } => (
-            logos_abi::ManagerOperation::Stop,
-            name,
-            false,
-            logos_commands::ServiceProperty::Record,
-        ),
-        logos_commands::ServiceCommand::Restart { name } => (
-            logos_abi::ManagerOperation::Restart,
-            name,
-            false,
-            logos_commands::ServiceProperty::Record,
-        ),
+        logos_flow::ServiceCommand::List => {
+            (logos_abi::ManagerOperation::List, &[][..], true, logos_flow::ServiceProperty::Record)
+        }
+        logos_flow::ServiceCommand::Lookup { name } => {
+            (logos_abi::ManagerOperation::Status, name, false, logos_flow::ServiceProperty::Record)
+        }
+        logos_flow::ServiceCommand::Status { name } => {
+            (logos_abi::ManagerOperation::Status, name, false, logos_flow::ServiceProperty::Status)
+        }
+        logos_flow::ServiceCommand::Name { name } => {
+            (logos_abi::ManagerOperation::Status, name, false, logos_flow::ServiceProperty::Name)
+        }
+        logos_flow::ServiceCommand::Version { name } => {
+            (logos_abi::ManagerOperation::Status, name, false, logos_flow::ServiceProperty::Version)
+        }
+        logos_flow::ServiceCommand::Start { name } => {
+            (logos_abi::ManagerOperation::Start, name, false, logos_flow::ServiceProperty::Record)
+        }
+        logos_flow::ServiceCommand::Stop { name } => {
+            (logos_abi::ManagerOperation::Stop, name, false, logos_flow::ServiceProperty::Record)
+        }
+        logos_flow::ServiceCommand::Restart { name } => {
+            (logos_abi::ManagerOperation::Restart, name, false, logos_flow::ServiceProperty::Record)
+        }
     };
     let target = if list {
         None
@@ -1321,7 +1434,7 @@ fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut Pe
             }
         }
     };
-    let mut output = [0; logos_commands::MAX_OUTPUT_BYTES];
+    let mut output = [0; logos_flow::MAX_OUTPUT_BYTES];
     let mut output_len = 0;
     let mut cursor = 0u8;
     for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
@@ -1350,9 +1463,9 @@ fn service_command(command: logos_commands::ServiceCommand<'_>, pending: &mut Pe
         }
         if !list || response.cursor != u8::MAX {
             let record = response.record;
-            output_len += logos_commands::format_service_property(
+            output_len += logos_flow::format_service_property(
                 &record,
-                if list { logos_commands::ServiceProperty::Record } else { property },
+                if list { logos_flow::ServiceProperty::Record } else { property },
                 &mut output[output_len..],
             );
         }
@@ -1393,12 +1506,12 @@ fn network_state_text(state: NetworkState) -> &'static [u8] {
 }
 
 fn network_command(
-    command: logos_commands::NetworkCommand<'_>,
+    command: logos_flow::NetworkCommand<'_>,
     client: &mut NetworkClient,
     fetch: &mut FetchClient,
     pending: &mut PendingOutput,
 ) {
-    if let logos_commands::NetworkCommand::Fetch { url, destination } = command {
+    if let logos_flow::NetworkCommand::Fetch { url, destination } = command {
         if !fetch.start(url, destination) {
             pending.stage(if fetch.active() {
                 b"fetch already active\r\n"
@@ -1408,7 +1521,7 @@ fn network_command(
         }
         return;
     }
-    if let logos_commands::NetworkCommand::InterfaceStatus { name } = command {
+    if let logos_flow::NetworkCommand::InterfaceStatus { name } = command {
         if name != b"eth0" {
             pending.stage(b"network interface not found\r\n");
             return;
@@ -1416,17 +1529,17 @@ fn network_command(
     }
     let (operation, address, port, success): (NetworkOperation, [u8; 4], u16, &[u8]) = match command
     {
-        logos_commands::NetworkCommand::Status => (NetworkOperation::Status, [0; 4], 0, b""),
-        logos_commands::NetworkCommand::InterfaceStatus { .. } => {
+        logos_flow::NetworkCommand::Status => (NetworkOperation::Status, [0; 4], 0, b""),
+        logos_flow::NetworkCommand::InterfaceStatus { .. } => {
             (NetworkOperation::Status, [0; 4], 0, b"")
         }
-        logos_commands::NetworkCommand::Ping { address } => {
+        logos_flow::NetworkCommand::Ping { address } => {
             (NetworkOperation::IcmpPing, address, 0, b"ping ok\r\n")
         }
-        logos_commands::NetworkCommand::TcpProbe { address, port } => {
+        logos_flow::NetworkCommand::TcpProbe { address, port } => {
             (NetworkOperation::TcpConnect, address, port, b"tcp probe ok\r\n")
         }
-        logos_commands::NetworkCommand::Fetch { .. } => unreachable!(),
+        logos_flow::NetworkCommand::Fetch { .. } => unreachable!(),
     };
     match client.request(operation, address, port) {
         Ok(response) if operation == NetworkOperation::Status => {
@@ -1589,11 +1702,11 @@ fn network_proof_probe(network: &mut NetworkClient) -> bool {
                         .request_message(close)
                         .is_ok_and(|response| response.result == NetworkResult::Stale);
                 }
-                common::wait(0, logos_abi::ServiceId::Commands);
+                common::wait(0, logos_abi::ServiceId::Flow);
             }
             return false;
         }
-        common::wait(0, logos_abi::ServiceId::Commands);
+        common::wait(0, logos_abi::ServiceId::Flow);
     }
     false
 }
@@ -1629,7 +1742,7 @@ fn manager_command_probe(pending: &mut PendingOutput, network: &mut NetworkClien
     if initial_storage.generation != 1 {
         return network_proof_probe(network);
     }
-    service_command(logos_commands::ServiceCommand::List, pending);
+    service_command(logos_flow::ServiceCommand::List, pending);
     let list = &pending.bytes[..pending.len];
     let list_valid = pending.pending
         && list
@@ -1642,7 +1755,7 @@ fn manager_command_probe(pending: &mut PendingOutput, network: &mut NetworkClien
     if !list_valid {
         return false;
     }
-    service_command(logos_commands::ServiceCommand::Stop { name: b"input" }, pending);
+    service_command(logos_flow::ServiceCommand::Stop { name: b"input" }, pending);
     let expected = b"service dependency violation\r\n";
     let dependency_valid = pending.pending
         && pending.len == expected.len()
@@ -1656,7 +1769,7 @@ fn manager_command_probe(pending: &mut PendingOutput, network: &mut NetworkClien
     network_proof_probe(network) && manager_restart_probe()
 }
 
-static mut COMMANDS: logos_commands::CommandService = logos_commands::CommandService::new();
+static mut FLOW: logos_flow::FlowService = logos_flow::FlowService::new();
 static mut PENDING: PendingOutput = PendingOutput::new();
 static mut STORAGE: StorageClient = StorageClient::new();
 static mut NETWORK: NetworkClient = NetworkClient::new();
@@ -1666,7 +1779,7 @@ static mut PENDING_COMPLETION: Option<IpcBytes> = None;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    let commands = unsafe { &mut *core::ptr::addr_of_mut!(COMMANDS) };
+    let flow = unsafe { &mut *core::ptr::addr_of_mut!(FLOW) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
     let network = unsafe { &mut *core::ptr::addr_of_mut!(NETWORK) };
@@ -1675,7 +1788,7 @@ pub extern "C" fn _start() -> ! {
     let pending_completion = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_COMPLETION) };
     #[cfg(feature = "qemu-proof")]
     while !manager_boot_probe() {
-        common::wait(0, logos_abi::ServiceId::Commands);
+        common::wait(0, logos_abi::ServiceId::Flow);
     }
     #[cfg(feature = "qemu-proof")]
     if !manager_command_probe(pending, network) {
@@ -1685,17 +1798,17 @@ pub extern "C" fn _start() -> ! {
     let mut proof = StorageProof::new();
     let mut heartbeat_ticks = 0u16;
     loop {
-        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Commands);
+        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Flow);
         let mut progressed = pending.flush(OUTPUT_CAPABILITY);
-        if fetch.active() || storage.active() {
-            let mut control = IpcBytes::empty(MessageKind::CommandControl);
+        if storage.active() || (fetch.active() && fetch.foreground()) {
+            let mut control = IpcBytes::empty(MessageKind::FlowControl);
             if common::ipc_receive(INPUT_CAPABILITY, &mut control) == IpcStatus::Ok {
                 if fetch.active() {
                     progressed |= fetch_control(&control, fetch);
-                } else if control.kind == MessageKind::CommandControl
-                    && control.len as usize == mem::size_of::<CommandControl>()
+                } else if control.kind == MessageKind::FlowControl
+                    && control.len as usize == mem::size_of::<FlowControl>()
                 {
-                    let value: CommandControl =
+                    let value: FlowControl =
                         unsafe { ptr::read_unaligned(control.bytes.as_ptr().cast()) };
                     if value.is_valid() {
                         storage.cancel();
@@ -1709,8 +1822,8 @@ pub extern "C" fn _start() -> ! {
                 IpcStatus::Ok => fetch.cancel_pending = false,
                 IpcStatus::Full => {
                     common::wait(
-                        common::ipc_write_event(logos_abi::IpcEndpointId::CommandsToFetch),
-                        logos_abi::ServiceId::Commands,
+                        common::ipc_write_event(logos_abi::IpcEndpointId::FlowToFetch),
+                        logos_abi::ServiceId::Flow,
                     );
                     continue;
                 }
@@ -1720,8 +1833,8 @@ pub extern "C" fn _start() -> ! {
         if pending.pending {
             if !progressed {
                 common::wait(
-                    common::ipc_write_event(logos_abi::IpcEndpointId::CommandsToSession),
-                    logos_abi::ServiceId::Commands,
+                    common::ipc_write_event(logos_abi::IpcEndpointId::FlowToSession),
+                    logos_abi::ServiceId::Flow,
                 );
             }
             continue;
@@ -1742,8 +1855,8 @@ pub extern "C" fn _start() -> ! {
             if pending_completion.is_some() {
                 if !progressed {
                     common::wait(
-                        common::ipc_write_event(logos_abi::IpcEndpointId::CommandsToSession),
-                        logos_abi::ServiceId::Commands,
+                        common::ipc_write_event(logos_abi::IpcEndpointId::FlowToSession),
+                        logos_abi::ServiceId::Flow,
                     );
                 }
                 continue;
@@ -1763,10 +1876,10 @@ pub extern "C" fn _start() -> ! {
             if storage.active() {
                 if !progressed {
                     common::wait(
-                        common::ipc_read_event(logos_abi::IpcEndpointId::StorageToCommands)
-                            | common::ipc_write_event(logos_abi::IpcEndpointId::CommandsToStorage)
-                            | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToCommands),
-                        logos_abi::ServiceId::Commands,
+                        common::ipc_read_event(logos_abi::IpcEndpointId::StorageToFlow)
+                            | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToStorage)
+                            | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
+                        logos_abi::ServiceId::Flow,
                     );
                 }
                 continue;
@@ -1774,19 +1887,32 @@ pub extern "C" fn _start() -> ! {
         }
         if fetch.active() {
             progressed |= fetch.drive(pending);
-            if fetch.active() {
+            if !fetch.active() {
+                if let Some((destination, body)) = fetch.take_callback() {
+                    if storage.start_write(destination, body) {
+                        fetch.clear_callback();
+                        progressed = true;
+                    } else {
+                        fetch.clear_callback();
+                        pending.stage(b"flow: response publication failed\r\n");
+                    }
+                }
+            }
+            if fetch.active() && fetch.foreground() {
                 if !progressed {
                     common::wait(
-                        common::ipc_read_event(logos_abi::IpcEndpointId::FetchToCommands)
-                            | common::ipc_write_event(logos_abi::IpcEndpointId::CommandsToFetch)
-                            | common::ipc_write_event(logos_abi::IpcEndpointId::CommandsToSession)
-                            | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToCommands),
-                        logos_abi::ServiceId::Commands,
+                        common::ipc_read_event(logos_abi::IpcEndpointId::FetchToFlow)
+                            | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToFetch)
+                            | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToSession)
+                            | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
+                        logos_abi::ServiceId::Flow,
                     );
                 }
                 continue;
             }
-            continue;
+            if fetch.active() {
+                progressed = true;
+            }
         }
         #[cfg(feature = "storage-proof")]
         if proof.consume_result(storage) {
@@ -1806,54 +1932,169 @@ pub extern "C" fn _start() -> ! {
                 }
             } else if message.kind == MessageKind::SessionInput {
                 if let Some(bytes) = message.as_bytes() {
-                    match logos_commands::parse_service_command(bytes) {
-                        Ok(Some(command)) => service_command(command, pending),
-                        Err(logos_commands::ServiceCommandError::Usage) => {
-                            pending.stage(
-                                    b"usage: service[\"name\"].status | service[\"name\"].start() | service[\"name\"].stop() | service[\"name\"].restart()\r\n",
-                                );
+                    match flow.operation(bytes) {
+                        Ok(Some(logos_flow::FlowOperation::Help { topic })) => {
+                            let mut output = [0; logos_flow::MAX_OUTPUT_BYTES];
+                            let length = logos_flow::format_help(topic, &mut output);
+                            pending.stage(&output[..length]);
                         }
-                        Ok(None) => match logos_commands::parse_network_command(bytes) {
-                            Ok(Some(command)) => network_command(command, network, fetch, pending),
-                            Err(logos_commands::NetworkCommandError::Usage) => {
-                                pending.stage(
-                                    b"usage: net.status | net.ping(\"address\") | net.fetch(\"url\", \"path\") | net.interface[\"name\"].status\r\n",
-                                );
+                        Ok(Some(logos_flow::FlowOperation::Clear)) => {
+                            pending.stage(b"\x1b[2J\x1b[H");
+                        }
+                        Ok(Some(logos_flow::FlowOperation::Echo { text })) => {
+                            pending.stage(text);
+                        }
+                        Ok(Some(logos_flow::FlowOperation::EchoVariable { name })) => {
+                            let mut output = [0; logos_flow::MAX_OUTPUT_BYTES];
+                            if let Some(length) = flow.copy_string_variable(name, &mut output) {
+                                pending.stage(&output[..length]);
+                            } else {
+                                pending.stage(b"flow: string variable is unavailable\r\n");
                             }
-                            Ok(None) => match logos_commands::parse_storage_command(bytes) {
-                                Ok(Some(command)) => {
-                                    if !storage.start(command) {
-                                        pending.stage(b"storage request too large\r\n");
-                                    }
+                        }
+                        Ok(Some(logos_flow::FlowOperation::Service(command))) => {
+                            service_command(command, pending)
+                        }
+                        Ok(Some(logos_flow::FlowOperation::Network(command))) => {
+                            network_command(command, network, fetch, pending)
+                        }
+                        Ok(Some(logos_flow::FlowOperation::Storage(command))) => {
+                            if !storage.start(command) {
+                                pending.stage(b"storage request too large\r\n");
+                            }
+                        }
+                        Ok(Some(logos_flow::FlowOperation::System(operation))) => match operation {
+                            logos_flow::SystemOperation::Version => {
+                                pending.stage(b"LogOS vNext 0.1.0\r\n")
+                            }
+                            logos_flow::SystemOperation::Uname => pending.stage(b"LogOS\r\n"),
+                            logos_flow::SystemOperation::Shutdown => {
+                                if common::power(logos_flow::FlowAction::Shutdown as usize) != 0 {
+                                    pending.stage(b"power action denied\r\n");
                                 }
-                                Err(logos_commands::StorageCommandError::Usage) => {
-                                    pending.stage(b"usage error\r\n");
+                            }
+                            logos_flow::SystemOperation::Reboot => {
+                                if common::power(logos_flow::FlowAction::Reboot as usize) != 0 {
+                                    pending.stage(b"power action denied\r\n");
                                 }
-                                Ok(None) => {
-                                    let result = commands.execute(bytes);
-                                    if result.action != logos_commands::CommandAction::None {
-                                        let status = common::power(result.action as usize);
-                                        if status != 0 {
-                                            pending.stage(b"power action denied\r\n");
-                                        }
-                                    } else if result.clear_screen {
-                                        pending.stage(b"\x1b[2J\x1b[H");
-                                    } else {
-                                        pending.stage(result.as_bytes());
-                                    }
-                                }
-                            },
+                            }
                         },
+                        Ok(Some(logos_flow::FlowOperation::CancelPromise)) => {
+                            let foreground = flow_is_foreground(bytes);
+                            fetch.cancel();
+                            if !foreground {
+                                pending.stage(&[]);
+                            }
+                        }
+                        Ok(Some(logos_flow::FlowOperation::FetchResponse { url })) => {
+                            let foreground = flow_is_foreground(bytes);
+                            if !(if foreground {
+                                fetch.start_response(url)
+                            } else {
+                                fetch.start_response_background(url)
+                            }) {
+                                pending.stage(b"fetch request busy or too large\r\n");
+                            } else if !foreground {
+                                pending.stage(&[]);
+                            }
+                        }
+                        Ok(Some(logos_flow::FlowOperation::FetchResponseVariable { url })) => {
+                            let mut resolved = [0; logos_flow::MAX_FLOW_BYTES];
+                            let foreground = flow_is_foreground(bytes);
+                            let started = flow
+                                .copy_string_variable(url, &mut resolved)
+                                .is_some_and(|length| {
+                                    if foreground {
+                                        fetch.start_response(&resolved[..length])
+                                    } else {
+                                        fetch.start_response_background(&resolved[..length])
+                                    }
+                                });
+                            if !started {
+                                pending.stage(b"flow: string variable is unavailable\r\n");
+                            } else if !foreground {
+                                pending.stage(&[]);
+                            }
+                        }
+                        Ok(Some(logos_flow::FlowOperation::FetchResponseToFile {
+                            url,
+                            destination,
+                        })) => {
+                            let foreground = flow_is_foreground(bytes);
+                            if !fetch.start_to_file_mode(url, destination, foreground) {
+                                pending.stage(b"fetch request busy or too large\r\n");
+                            } else if !foreground {
+                                pending.stage(&[]);
+                            }
+                        }
+                        Ok(Some(logos_flow::FlowOperation::FetchResponseToFileVariables {
+                            url,
+                            destination,
+                        })) => {
+                            let mut resolved_url = [0; logos_flow::MAX_FLOW_BYTES];
+                            let mut resolved_destination = [0; logos_flow::MAX_FLOW_BYTES];
+                            let foreground = flow_is_foreground(bytes);
+                            let Some(url_len) = flow.copy_string_variable(url, &mut resolved_url)
+                            else {
+                                pending.stage(b"flow: string variable is unavailable\r\n");
+                                continue;
+                            };
+                            let Some(destination_len) =
+                                flow.copy_string_variable(destination, &mut resolved_destination)
+                            else {
+                                pending.stage(b"flow: string variable is unavailable\r\n");
+                                continue;
+                            };
+                            if !fetch.start_to_file_mode(
+                                &resolved_url[..url_len],
+                                &resolved_destination[..destination_len],
+                                foreground,
+                            ) {
+                                pending.stage(b"fetch request busy or too large\r\n");
+                            } else if !foreground {
+                                pending.stage(&[]);
+                            }
+                        }
+                        Ok(Some(logos_flow::FlowOperation::WriteResponse { url, destination })) => {
+                            if !fetch.start_response_to_file(
+                                url,
+                                destination,
+                                flow_is_foreground(bytes),
+                            ) {
+                                pending.stage(b"fetch request busy or too large\r\n");
+                            }
+                        }
+                        Ok(None) => {
+                            if trim_flow_input(bytes).starts_with(b"await ")
+                                && trim_flow_input(bytes)[6..].starts_with(b"response")
+                            {
+                                let ready = fetch.response_ready;
+                                if fetch.await_foreground() {
+                                    if ready {
+                                        pending.stage(b"fetch complete\r\n");
+                                    }
+                                } else {
+                                    pending.stage(b"flow: promise is not active\r\n");
+                                }
+                                continue;
+                            }
+                            pending.stage(b"flow: operation not found\r\n");
+                        }
+                        Err(error) => {
+                            let mut diagnostic = [0; logos_flow::MAX_OUTPUT_BYTES];
+                            let length = logos_flow::format_flow_diagnostic(error, &mut diagnostic);
+                            pending.stage(&diagnostic[..length]);
+                        }
                     }
                 }
             }
         }
         if !progressed {
             common::wait(
-                common::ipc_read_event(logos_abi::IpcEndpointId::SessionToCommands)
-                    | common::ipc_read_event(logos_abi::IpcEndpointId::StorageToCommands)
-                    | common::ipc_read_event(logos_abi::IpcEndpointId::FetchToCommands),
-                logos_abi::ServiceId::Commands,
+                common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow)
+                    | common::ipc_read_event(logos_abi::IpcEndpointId::StorageToFlow)
+                    | common::ipc_read_event(logos_abi::IpcEndpointId::FetchToFlow),
+                logos_abi::ServiceId::Flow,
             );
         }
     }
@@ -1875,21 +2116,26 @@ mod tests {
     #[test]
     fn completion_provider_returns_targeted_static_candidates() {
         let mut provider = CompletionService::new();
-        let root = provider.complete(CompletionRequest::new(1, b"he", 2).unwrap());
+        let root = provider.complete(CompletionRequest::new(1, b"f", 1).unwrap());
         assert_eq!(root.status, CompletionStatus::Ok);
-        assert_eq!(root.candidate(0), Some(&b"help()"[..]));
+        assert_eq!(root.candidate(0), Some(&b"fs."[..]));
 
-        let echo = provider.complete(CompletionRequest::new(4, b"echo", 4).unwrap());
+        let help = provider.complete(CompletionRequest::new(4, b"hel", 3).unwrap());
+        assert_eq!(help.candidate(0), Some(&b"help()"[..]));
+
+        let clear = provider.complete(CompletionRequest::new(8, b"cle", 3).unwrap());
+        assert_eq!(clear.candidate(0), Some(&b"clear()"[..]));
+
+        let echo = provider.complete(CompletionRequest::new(9, b"ech", 3).unwrap());
         assert_eq!(echo.candidate(0), Some(&b"echo(\"\")"[..]));
-        assert_eq!(echo.cursor_offsets[0], 6);
 
-        let fs = provider.complete(CompletionRequest::new(5, b"fs.r", 4).unwrap());
-        assert_eq!(fs.candidate(0), Some(&b"read(\"\")"[..]));
+        let fs = provider.complete(CompletionRequest::new(5, b"fs.l", 4).unwrap());
+        assert_eq!(fs.candidate(0), Some(&b"list()"[..]));
         assert_eq!(fs.cursor_offsets[0], 6);
 
-        let fs_write = provider.complete(CompletionRequest::new(7, b"fs.w", 4).unwrap());
-        assert_eq!(fs_write.candidate(0), Some(&b"write(\"\", \"\")"[..]));
-        assert_eq!(fs_write.cursor_offsets[0], 7);
+        let fs_touch = provider.complete(CompletionRequest::new(7, b"fs.t", 4).unwrap());
+        assert_eq!(fs_touch.candidate(0), Some(&b"touch(\"\").create()"[..]));
+        assert_eq!(fs_touch.cursor_offsets[0], 8);
 
         let sys = provider.complete(CompletionRequest::new(6, b"sys.v", 5).unwrap());
         assert_eq!(sys.candidate(0), Some(&b"version()"[..]));

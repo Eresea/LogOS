@@ -74,7 +74,7 @@ mod tests {
         startup.start(ServiceId::Terminal).unwrap();
         startup.start(ServiceId::Session).unwrap();
         startup.start(ServiceId::Storage).unwrap();
-        startup.start(ServiceId::Commands).unwrap();
+        startup.start(ServiceId::Flow).unwrap();
         startup.start(ServiceId::Network).unwrap();
         startup.start(ServiceId::Fetch).unwrap();
         assert_eq!(startup.started, all_services);

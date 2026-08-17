@@ -870,9 +870,8 @@ impl ServiceRuntime {
             };
             return crate::service_ipc::IpcOutcome { status, notified: false };
         }
-        if service == ServiceId::Commands
-            && capability.endpoint_index()
-                == Some(logos_abi::IpcEndpointId::CommandsToNetwork.index())
+        if service == ServiceId::Flow
+            && capability.endpoint_index() == Some(logos_abi::IpcEndpointId::FlowToNetwork.index())
             && self.manager.state(ServiceId::Network.index())
                 == Some(logos_abi::ManagerState::Disabled)
         {
@@ -923,7 +922,7 @@ impl ServiceRuntime {
                 );
             }
             let response_capability = logos_abi::IpcCapability::new(
-                logos_abi::IpcEndpointId::NetworkToCommands.index(),
+                logos_abi::IpcEndpointId::NetworkToFlow.index(),
                 logos_abi::IpcRights::Send,
                 self.ipc_generation,
                 self.service_epoch,
@@ -940,7 +939,7 @@ impl ServiceRuntime {
             let outcome = graph.send(ServiceId::Network, response_capability, bytes);
             if outcome.notified {
                 crate::arch::signal_events(logos_abi::ipc_read_event_mask(
-                    logos_abi::IpcEndpointId::NetworkToCommands.index(),
+                    logos_abi::IpcEndpointId::NetworkToFlow.index(),
                 ));
             }
             return outcome;
@@ -1093,9 +1092,8 @@ impl ServiceRuntime {
             core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
         };
         #[cfg(feature = "storage-proof")]
-        if service == ServiceId::Commands
-            && capability.endpoint_index()
-                == Some(logos_abi::IpcEndpointId::CommandsToStorage as usize)
+        if service == ServiceId::Flow
+            && capability.endpoint_index() == Some(logos_abi::IpcEndpointId::FlowToStorage as usize)
         {
             self.storage_proof.observe_request(bytes);
         }
@@ -1103,9 +1101,9 @@ impl ServiceRuntime {
         if outcome.notified
             || (outcome.status == logos_abi::IpcStatus::Ok
                 && (capability.endpoint_index()
-                    == Some(logos_abi::IpcEndpointId::CommandsToNetwork.index())
+                    == Some(logos_abi::IpcEndpointId::FlowToNetwork.index())
                     || capability.endpoint_index()
-                        == Some(logos_abi::IpcEndpointId::NetworkToCommands.index())))
+                        == Some(logos_abi::IpcEndpointId::NetworkToFlow.index())))
         {
             crate::arch::signal_events(logos_abi::ipc_read_event_mask(
                 capability.endpoint as usize,
@@ -1255,8 +1253,8 @@ impl ServiceRuntime {
         let outcome = graph.receive(service, capability, bytes);
         #[cfg(feature = "qemu-proof")]
         if outcome.status == logos_abi::IpcStatus::Ok
-            && service == ServiceId::Commands
-            && index == logos_abi::IpcEndpointId::NetworkToCommands.index()
+            && service == ServiceId::Flow
+            && index == logos_abi::IpcEndpointId::NetworkToFlow.index()
         {
             let message =
                 unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<logos_abi::IpcBytes>()) };
@@ -1282,8 +1280,8 @@ impl ServiceRuntime {
         }
         #[cfg(feature = "storage-proof")]
         if outcome.status == logos_abi::IpcStatus::Ok
-            && service == ServiceId::Commands
-            && index == logos_abi::IpcEndpointId::StorageToCommands as usize
+            && service == ServiceId::Flow
+            && index == logos_abi::IpcEndpointId::StorageToFlow as usize
         {
             self.storage_proof.observe_response(bytes);
         }
@@ -1411,8 +1409,8 @@ impl ServiceRuntime {
         &mut self,
         request: logos_abi::ManagerRequest,
     ) -> Option<logos_abi::ManagerResponse> {
-        let process = self.launch(ServiceId::Commands)?.0;
-        let frame = self.ipc_staging_frames[ServiceId::Commands.index()]?;
+        let process = self.launch(ServiceId::Flow)?.0;
+        let frame = self.ipc_staging_frames[ServiceId::Flow.index()]?;
         unsafe {
             core::ptr::write_unaligned(
                 frame.raw() as usize as *mut logos_abi::ManagerRequest,
@@ -1480,10 +1478,10 @@ impl ServiceRuntime {
             if !staging || !capabilities {
                 return false;
             }
-            if service == ServiceId::Commands && !manager_capability {
+            if service == ServiceId::Flow && !manager_capability {
                 return false;
             }
-            if service != ServiceId::Commands && manager_capability {
+            if service != ServiceId::Flow && manager_capability {
                 return false;
             }
         }
@@ -1792,7 +1790,7 @@ fn old_identity_matches(identity: EndpointIdentity, header: logos_abi::EndpointH
 
 const fn manager_rights(service: ServiceId) -> logos_abi::ManagerRights {
     match service {
-        ServiceId::Commands => logos_abi::ManagerRights::ALL,
+        ServiceId::Flow => logos_abi::ManagerRights::ALL,
         _ => logos_abi::ManagerRights::NONE,
     }
 }
@@ -1815,14 +1813,14 @@ fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint) {
                 .write(logos_abi::RenderIpc::new(endpoint.header())),
             logos_abi::IpcEndpointId::TerminalToSession
             | logos_abi::IpcEndpointId::SessionToTerminal
-            | logos_abi::IpcEndpointId::SessionToCommands
-            | logos_abi::IpcEndpointId::CommandsToSession
-            | logos_abi::IpcEndpointId::CommandsToStorage
-            | logos_abi::IpcEndpointId::StorageToCommands
-            | logos_abi::IpcEndpointId::CommandsToNetwork
-            | logos_abi::IpcEndpointId::NetworkToCommands
-            | logos_abi::IpcEndpointId::CommandsToFetch
-            | logos_abi::IpcEndpointId::FetchToCommands
+            | logos_abi::IpcEndpointId::SessionToFlow
+            | logos_abi::IpcEndpointId::FlowToSession
+            | logos_abi::IpcEndpointId::FlowToStorage
+            | logos_abi::IpcEndpointId::StorageToFlow
+            | logos_abi::IpcEndpointId::FlowToNetwork
+            | logos_abi::IpcEndpointId::NetworkToFlow
+            | logos_abi::IpcEndpointId::FlowToFetch
+            | logos_abi::IpcEndpointId::FetchToFlow
             | logos_abi::IpcEndpointId::FetchToStorage
             | logos_abi::IpcEndpointId::StorageToFetch
             | logos_abi::IpcEndpointId::FetchToNetwork

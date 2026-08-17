@@ -7,14 +7,14 @@ mod common;
 use core::{mem, ptr};
 use logos_abi::{IpcBytes, IpcStatus, MessageKind, NetworkRequest, NetworkResponse, ServiceId};
 
-const COMMANDS_RECEIVE: usize = common::capability_slot(
+const FLOW_RECEIVE: usize = common::capability_slot(
     ServiceId::Network,
-    logos_abi::IpcEndpointId::CommandsToNetwork,
+    logos_abi::IpcEndpointId::FlowToNetwork,
     logos_abi::IpcRights::Receive,
 );
-const COMMANDS_SEND: usize = common::capability_slot(
+const FLOW_SEND: usize = common::capability_slot(
     ServiceId::Network,
-    logos_abi::IpcEndpointId::NetworkToCommands,
+    logos_abi::IpcEndpointId::NetworkToFlow,
     logos_abi::IpcRights::Send,
 );
 const FETCH_RECEIVE: usize = common::capability_slot(
@@ -543,7 +543,7 @@ struct PendingRequest {
 #[cfg(target_os = "none")]
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Peer {
-    Commands,
+    Flow,
     Fetch,
 }
 
@@ -551,7 +551,7 @@ enum Peer {
 fn send_network_response(peer: Peer, response: NetworkResponse) {
     let response = response_message(response);
     let (capability, endpoint) = match peer {
-        Peer::Commands => (COMMANDS_SEND, logos_abi::IpcEndpointId::NetworkToCommands),
+        Peer::Flow => (FLOW_SEND, logos_abi::IpcEndpointId::NetworkToFlow),
         Peer::Fetch => (FETCH_SEND, logos_abi::IpcEndpointId::NetworkToFetch),
     };
     loop {
@@ -665,9 +665,9 @@ pub extern "C" fn _start() -> ! {
             }
         }
         let mut message = IpcBytes::empty(MessageKind::NetworkRequest);
-        let status = common::ipc_receive(COMMANDS_RECEIVE, &mut message);
+        let status = common::ipc_receive(FLOW_RECEIVE, &mut message);
         let (command_status, peer) = if status == IpcStatus::Ok {
-            (status, Peer::Commands)
+            (status, Peer::Flow)
         } else {
             (common::ipc_receive(FETCH_RECEIVE, &mut message), Peer::Fetch)
         };
@@ -690,7 +690,7 @@ pub extern "C" fn _start() -> ! {
                         }
                         response.result = logos_abi::NetworkResult::Cancelled;
                     }
-                    if peer == Peer::Commands {
+                    if peer == Peer::Flow {
                         send_network_response(peer, response);
                     }
                 } else {
@@ -854,7 +854,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
         common::wait(
-            common::ipc_read_event(logos_abi::IpcEndpointId::CommandsToNetwork)
+            common::ipc_read_event(logos_abi::IpcEndpointId::FlowToNetwork)
                 | common::ipc_read_event(logos_abi::IpcEndpointId::FetchToNetwork)
                 | common::ipc_read_event(logos_abi::IpcEndpointId::CoreToNetwork),
             ServiceId::Network,

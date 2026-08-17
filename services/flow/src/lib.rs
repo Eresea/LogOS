@@ -1,9 +1,16 @@
 #![no_std]
 
+pub mod interpreter;
+
+pub use interpreter::{
+    FlowParseError, FlowType, FlowTypeError, NamespaceKind, OperationRegistry, OperationSignature,
+    Program as FlowProgram, PromiseType, Variables as FlowVariables,
+};
+
 #[cfg(test)]
 extern crate std;
 
-pub const MAX_COMMAND_BYTES: usize = 256;
+pub const MAX_FLOW_BYTES: usize = 256;
 pub const MAX_OUTPUT_BYTES: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,26 +41,21 @@ pub enum CompletionError {
 pub const SERVICE_COMPLETION_MEMBERS: [&[u8]; 6] =
     [b"status", b"name", b"version", b"start()", b"stop()", b"restart()"];
 pub const NETWORK_COMPLETION_MEMBERS: [&[u8]; 5] =
-    [b"status", b"ping()", b"tcp-probe()", b"fetch()", b"interface[\""];
+    [b"status", b"ping(\"\")", b"tcp-probe(\"\", 0)", b"fetch(\"\")", b"interface[\""];
 pub const SYSTEM_COMPLETION_MEMBERS: [&[u8]; 4] =
     [b"version()", b"uname()", b"shutdown()", b"reboot()"];
 pub const FILESYSTEM_COMPLETION_MEMBERS: [&[u8]; 6] = [
     b"list()",
-    b"create(\"\")",
-    b"read(\"\")",
-    b"write(\"\", \"\")",
+    b"open(\"\").read()",
+    b"touch(\"\").create()",
+    b"touch(\"\").write(\"\")",
     b"remove(\"\")",
     b"move(\"\", \"\")",
 ];
-pub const FILESYSTEM_COMPLETION_CURSOR_OFFSETS: [u8; 6] = [6, 8, 6, 7, 8, 6];
+pub const FILESYSTEM_COMPLETION_CURSOR_OFFSETS: [u8; 6] = [6, 7, 8, 8, 8, 6];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CommandKind {
-    Help,
-    Echo,
-    Clear,
-    True,
-    False,
+pub enum FlowKind {
     System,
     Filesystem,
     Service,
@@ -62,82 +64,47 @@ pub enum CommandKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
-pub enum CommandAction {
+pub enum FlowAction {
     None = 0,
     Shutdown = logos_abi::POWER_SHUTDOWN,
     Reboot = logos_abi::POWER_REBOOT,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CommandSpec {
+pub struct FlowSpec {
     pub name: &'static [u8],
-    pub kind: CommandKind,
+    pub kind: FlowKind,
     pub usage: &'static [u8],
     pub summary: &'static [u8],
     pub manual: &'static [u8],
 }
 
-pub const COMMAND_SPECS: [CommandSpec; 9] = [
-    CommandSpec {
-        name: b"help",
-        kind: CommandKind::Help,
-        usage: b"help() / help(\"command\")",
-        summary: b"show command help",
-        manual: b"Lists commands or shows one command manual.",
-    },
-    CommandSpec {
-        name: b"echo",
-        kind: CommandKind::Echo,
-        usage: b"echo(\"text\")",
-        summary: b"print text",
-        manual: b"Prints the supplied text.",
-    },
-    CommandSpec {
-        name: b"clear",
-        kind: CommandKind::Clear,
-        usage: b"clear()",
-        summary: b"clear the screen",
-        manual: b"Clears the terminal display.",
-    },
-    CommandSpec {
-        name: b"true",
-        kind: CommandKind::True,
-        usage: b"true()",
-        summary: b"succeed",
-        manual: b"Completes successfully without output.",
-    },
-    CommandSpec {
-        name: b"false",
-        kind: CommandKind::False,
-        usage: b"false()",
-        summary: b"fail",
-        manual: b"Completes with a failure status.",
-    },
-    CommandSpec {
+pub const FLOW_SPECS: [FlowSpec; 4] = [
+    FlowSpec {
         name: b"sys",
-        kind: CommandKind::System,
+        kind: FlowKind::System,
         usage: b"sys.version() / sys.uname() / sys.shutdown() / sys.reboot()",
         summary: b"inspect and control the system",
         manual: b"Shows system information or requests shutdown/reboot.",
     },
-    CommandSpec {
+    FlowSpec {
         name: b"fs",
-        kind: CommandKind::Filesystem,
-        usage: b"fs.list() / fs.create(\"path\") / fs.read(\"path\")",
+        kind: FlowKind::Filesystem,
+        usage: b"fs.list() / fs.open(\"path\").read() / fs.touch(\"path\").write(\"data\")",
         summary: b"manage files",
         manual: b"Lists, creates, reads, writes, removes, or moves files.",
     },
-    CommandSpec {
+    FlowSpec {
         name: b"service",
-        kind: CommandKind::Service,
+        kind: FlowKind::Service,
         usage: b"service[\"name\"].status / service[\"name\"].restart()",
         summary: b"manage services",
         manual: b"Lists, inspects, starts, stops, or restarts a service.",
     },
-    CommandSpec {
+    FlowSpec {
         name: b"net",
-        kind: CommandKind::Network,
-        usage: b"net.status / net.fetch(\"url\", \"path\")",
+        kind: FlowKind::Network,
+        usage: b"net.status / net.fetch(\"url\") / net.fetch(\"url\", \"path\")",
         summary: b"inspect and probe networking",
         manual: b"Shows network status, probes networking, or fetches an HTTP file.",
     },
@@ -366,216 +333,314 @@ pub fn root_relative_path<'a>(path: &[u8], output: &'a mut [u8]) -> Option<&'a [
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CommandOutput {
-    pub bytes: [u8; MAX_OUTPUT_BYTES],
-    pub len: usize,
-    pub status: u8,
-    pub clear_screen: bool,
-    pub action: CommandAction,
+pub enum FlowDiagnostic {
+    Parse(FlowParseError),
+    Type(FlowTypeError),
 }
 
-impl CommandOutput {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FlowOperation<'a> {
+    Help { topic: Option<&'a [u8]> },
+    Clear,
+    Echo { text: &'a [u8] },
+    EchoVariable { name: &'a [u8] },
+    Storage(StorageCommand<'a>),
+    Service(ServiceCommand<'a>),
+    Network(NetworkCommand<'a>),
+    System(SystemOperation),
+    CancelPromise,
+    FetchResponse { url: &'a [u8] },
+    FetchResponseVariable { url: &'a [u8] },
+    FetchResponseToFile { url: &'a [u8], destination: &'a [u8] },
+    FetchResponseToFileVariables { url: &'a [u8], destination: &'a [u8] },
+    WriteResponse { url: &'a [u8], destination: &'a [u8] },
+}
+
+#[derive(Clone, Copy)]
+struct FlowStringVariable {
+    name: [u8; interpreter::MAX_VARIABLE_NAME_BYTES],
+    name_len: usize,
+    value: [u8; MAX_FLOW_BYTES],
+    value_len: usize,
+}
+
+impl FlowStringVariable {
+    const EMPTY: Self = Self {
+        name: [0; interpreter::MAX_VARIABLE_NAME_BYTES],
+        name_len: 0,
+        value: [0; MAX_FLOW_BYTES],
+        value_len: 0,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SystemOperation {
+    Version,
+    Uname,
+    Shutdown,
+    Reboot,
+}
+
+pub fn check_flow(
+    source: &[u8],
+    variables: &mut FlowVariables,
+) -> Result<FlowType, FlowDiagnostic> {
+    let program = FlowProgram::parse(source).map_err(FlowDiagnostic::Parse)?;
+    program.type_check(variables).map_err(FlowDiagnostic::Type)
+}
+
+/// Converts the typed Flow surface into the fixed service operations.  The
+/// registry/type-check pass runs before this adapter, so unsupported aliases
+/// cannot reach Storage or Network.
+pub fn parse_flow_operation<'a>(
+    source: &'a [u8],
+) -> Result<Option<FlowOperation<'a>>, FlowDiagnostic> {
+    let mut variables = FlowVariables::new();
+    check_flow(source, &mut variables)?;
+    parse_flow_operation_unchecked(source)
+}
+
+fn parse_flow_operation_unchecked<'a>(
+    source: &'a [u8],
+) -> Result<Option<FlowOperation<'a>>, FlowDiagnostic> {
+    let trimmed = trim_command(source);
+    let expression = trim_flow_prefix(trimmed);
+    if expression == b"help()" {
+        return Ok(Some(FlowOperation::Help { topic: None }));
+    }
+    if expression.starts_with(b"help(") {
+        let topic = quoted_after(expression, b"help(")
+            .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
+        return Ok(Some(FlowOperation::Help { topic: Some(topic) }));
+    }
+    if expression == b"clear()" {
+        return Ok(Some(FlowOperation::Clear));
+    }
+    if expression.starts_with(b"echo(") {
+        if let Some(text) = quoted_after(expression, b"echo(") {
+            return Ok(Some(FlowOperation::Echo { text }));
+        }
+        let name = identifier_after(expression, b"echo(")
+            .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
+        return Ok(Some(FlowOperation::EchoVariable { name }));
+    }
+    if expression.ends_with(b".cancel()") {
+        return Ok(Some(FlowOperation::CancelPromise));
+    }
+    if contains(expression, b".then(") {
+        let url = quoted_after(expression, b"net.fetch(")
+            .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
+        let destination = quoted_after(expression, b"fs.touch(")
+            .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
+        return Ok(Some(FlowOperation::WriteResponse { url, destination }));
+    }
+    if contains(expression, b"net.fetch(") {
+        let url = quoted_after(expression, b"net.fetch(");
+        let url_name = url.or_else(|| identifier_after(expression, b"net.fetch("));
+        let Some(url_name) = url_name else {
+            return Err(FlowDiagnostic::Type(
+                FlowTypeError::InvalidCall(SpanForDiagnostic::span()),
+            ));
+        };
+        let destination = quoted_after(expression, b"net.fetch(").and_then(|_first| {
+            let start = expression
+                .windows(b"net.fetch(".len())
+                .position(|window| window == b"net.fetch(")?;
+            quoted_after(&expression[start + b"net.fetch(".len()..], b",")
+        });
+        let destination_name = destination.or_else(|| {
+            let start = expression
+                .windows(b"net.fetch(".len())
+                .position(|window| window == b"net.fetch(")?;
+            identifier_after(&expression[start + b"net.fetch(".len()..], b",")
+        });
+        if let Some(destination) = destination {
+            if let Some(url) = url {
+                return Ok(Some(FlowOperation::FetchResponseToFile { url, destination }));
+            }
+        }
+        if let Some(destination) = destination_name {
+            if url.is_none() {
+                return Ok(Some(FlowOperation::FetchResponseToFileVariables {
+                    url: url_name,
+                    destination,
+                }));
+            }
+        }
+        return Ok(Some(if url.is_some() {
+            FlowOperation::FetchResponse { url: url.unwrap_or_default() }
+        } else {
+            FlowOperation::FetchResponseVariable { url: url_name }
+        }));
+    }
+    if (contains(expression, b"fs.touch(") || contains(expression, b"fs.open("))
+        && contains(expression, b").write(")
+    {
+        let path = quoted_after(expression, b"fs.touch(")
+            .or_else(|| quoted_after(expression, b"fs.open("))
+            .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
+        let data = quoted_after(expression, b").write(")
+            .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
+        return Ok(Some(FlowOperation::Storage(StorageCommand::Write { path, data })));
+    }
+    if contains(expression, b"fs.open(") && contains(expression, b").read()") {
+        let path = quoted_after(expression, b"fs.open(")
+            .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
+        return Ok(Some(FlowOperation::Storage(StorageCommand::Cat { path })));
+    }
+    if contains(expression, b"fs.touch(") && contains(expression, b").create()") {
+        let path = quoted_after(expression, b"fs.touch(")
+            .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
+        return Ok(Some(FlowOperation::Storage(StorageCommand::Touch { path })));
+    }
+    if let Some(command) = parse_service_command(expression)
+        .map_err(|_| FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?
+    {
+        return Ok(Some(FlowOperation::Service(command)));
+    }
+    if let Some(command) = parse_network_command(expression)
+        .map_err(|_| FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?
+    {
+        return Ok(Some(FlowOperation::Network(command)));
+    }
+    if let Some(command) = parse_storage_command(expression)
+        .map_err(|_| FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?
+    {
+        return Ok(Some(FlowOperation::Storage(command)));
+    }
+    let system = match expression {
+        b"sys.version()" => Some(SystemOperation::Version),
+        b"sys.uname()" => Some(SystemOperation::Uname),
+        b"sys.shutdown()" => Some(SystemOperation::Shutdown),
+        b"sys.reboot()" => Some(SystemOperation::Reboot),
+        _ => None,
+    };
+    if let Some(operation) = system {
+        return Ok(Some(FlowOperation::System(operation)));
+    }
+    Ok(None)
+}
+
+fn trim_flow_prefix(source: &[u8]) -> &[u8] {
+    let mut source = source;
+    loop {
+        if source.starts_with(b"var ") {
+            if let Some(index) = source.iter().position(|byte| *byte == b'=') {
+                source = trim_command(&source[index + 1..]);
+                continue;
+            }
+        }
+        if source.starts_with(b"await ") {
+            source = trim_command(&source[6..]);
+        }
+        break;
+    }
+    source
+}
+
+fn contains(source: &[u8], needle: &[u8]) -> bool {
+    source.windows(needle.len()).any(|window| window == needle)
+}
+
+fn quoted_after<'a>(source: &'a [u8], marker: &[u8]) -> Option<&'a [u8]> {
+    let start = source.windows(marker.len()).position(|window| window == marker)? + marker.len();
+    let rest = &source[start..];
+    let quote = rest.iter().position(|byte| *byte == b'"')? + 1;
+    let end = rest[quote..].iter().position(|byte| *byte == b'"')? + quote;
+    Some(&rest[quote..end])
+}
+
+fn identifier_after<'a>(source: &'a [u8], marker: &[u8]) -> Option<&'a [u8]> {
+    let start = source.windows(marker.len()).position(|window| window == marker)? + marker.len();
+    let rest = &source[start..];
+    let start = rest.iter().position(|byte| byte.is_ascii_alphabetic() || *byte == b'_')?;
+    let end = rest[start..]
+        .iter()
+        .position(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+        .map_or(rest.len(), |offset| start + offset);
+    Some(&rest[start..end])
+}
+
+// Keeps the adapter's diagnostics source-aware without adding an owned error
+// object to the fixed service ABI.
+struct SpanForDiagnostic;
+impl SpanForDiagnostic {
+    const fn span() -> interpreter::Span {
+        interpreter::Span { start: 0, end: 0 }
+    }
+}
+
+pub struct FlowService {
+    variables: FlowVariables,
+    strings: [FlowStringVariable; interpreter::MAX_VARIABLES],
+}
+
+impl FlowService {
     pub const fn new() -> Self {
         Self {
-            bytes: [0; MAX_OUTPUT_BYTES],
-            len: 0,
-            status: 0,
-            clear_screen: false,
-            action: CommandAction::None,
+            variables: FlowVariables::new(),
+            strings: [FlowStringVariable::EMPTY; interpreter::MAX_VARIABLES],
         }
     }
 
-    fn push(&mut self, byte: u8) {
-        if self.len < self.bytes.len() {
-            self.bytes[self.len] = byte;
-            self.len += 1;
+    pub fn validate(&mut self, source: &[u8]) -> Result<FlowType, FlowDiagnostic> {
+        let mut candidate = self.variables;
+        let result = check_flow(source, &mut candidate);
+        if result.is_ok() {
+            self.variables = candidate;
+            self.remember_string_assignment(source);
         }
+        result
     }
 
-    fn extend(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.push(byte);
-        }
+    pub fn copy_string_variable(&self, name: &[u8], output: &mut [u8]) -> Option<usize> {
+        self.strings[..].iter().find(|entry| &entry.name[..entry.name_len] == name).and_then(
+            |entry| {
+                (output.len() >= entry.value_len).then(|| {
+                    output[..entry.value_len].copy_from_slice(&entry.value[..entry.value_len]);
+                    entry.value_len
+                })
+            },
+        )
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
-    }
-}
-
-impl Default for CommandOutput {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub struct CommandService;
-
-impl CommandService {
-    pub const fn new() -> Self {
-        Self
-    }
-
-    fn command_spec(name: &[u8]) -> Option<CommandSpec> {
-        COMMAND_SPECS.iter().find(|spec| spec.name == name).copied()
-    }
-
-    fn help(expression: ParsedExpression<'_>) -> CommandOutput {
-        let mut output = CommandOutput::new();
-        let Some(call) = expression.call else {
-            output.status = 2;
-            output.extend(b"usage: help() / help(\"command\")\r\n");
-            return output;
-        };
-        if call.arg_count > 1 {
-            output.status = 2;
-            output.extend(b"usage: help() / help(\"command\")\r\n");
-            return output;
+    fn remember_string_assignment(&mut self, source: &[u8]) {
+        let source = trim_command(source);
+        let Some(equal) = source.iter().position(|byte| *byte == b'=') else { return };
+        let mut name = &source[..equal];
+        if name.starts_with(b"var ") {
+            name = trim_command(&name[4..]);
         }
-        if call.arg_count == 0 {
-            output.extend(b"Available commands:\r\n");
-            for spec in COMMAND_SPECS {
-                output.extend(spec.usage);
-                output.extend(b" - ");
-                output.extend(spec.summary);
-                output.extend(b"\r\n");
-            }
-            output.extend(b"Use help(\"command\") for details.\r\n");
-            return output;
+        if name.is_empty() || name.len() > interpreter::MAX_VARIABLE_NAME_BYTES {
+            return;
         }
-        let target = call.args[0];
-        if !target.quoted {
-            output.status = 2;
-            output.extend(b"usage: help() / help(\"command\")\r\n");
-            return output;
+        let value = trim_command(&source[equal + 1..]);
+        if value.len() < 2 || value[0] != b'"' || value[value.len() - 1] != b'"' {
+            return;
         }
-        let Some(spec) = COMMAND_SPECS.iter().find(|spec| spec.name == target.bytes) else {
-            output.status = 1;
-            output.extend(b"help: no manual entry for ");
-            output.extend(target.bytes);
-            output.extend(b"\r\n");
-            return output;
-        };
-        output.extend(spec.name);
-        output.extend(b" - ");
-        output.extend(spec.summary);
-        output.extend(b"\r\nUsage: ");
-        output.extend(spec.usage);
-        output.extend(b"\r\n");
-        output.extend(spec.manual);
-        output.extend(b"\r\n");
-        output
+        let value = &value[1..value.len() - 1];
+        if value.len() > MAX_FLOW_BYTES {
+            return;
+        }
+        let index = self
+            .strings
+            .iter()
+            .position(|entry| entry.name_len == 0 || &entry.name[..entry.name_len] == name);
+        let Some(index) = index else { return };
+        let mut entry = FlowStringVariable::EMPTY;
+        entry.name[..name.len()].copy_from_slice(name);
+        entry.name_len = name.len();
+        entry.value[..value.len()].copy_from_slice(value);
+        entry.value_len = value.len();
+        self.strings[index] = entry;
     }
 
-    pub fn execute(&mut self, line: &[u8]) -> CommandOutput {
-        let mut output = CommandOutput::new();
-        if line.len() > MAX_COMMAND_BYTES {
-            output.status = 2;
-            output.extend(b"command too long\r\n");
-            return output;
-        }
-        let line = trim_command(line);
-        let expression = match parse_expression(line) {
-            Ok(expression) => expression,
-            Err(()) => {
-                output.status = 2;
-                output.extend(b"command syntax error\r\n");
-                return output;
-            }
-        };
-        let Some(call) = expression.call else {
-            output.status = 2;
-            output.extend(b"command syntax error\r\n");
-            return output;
-        };
-        let Some(spec) = Self::command_spec(expression.root) else {
-            output.status = 127;
-            output.extend(b"command not found\r\n");
-            return output;
-        };
-        if expression.part_count != 0
-            && !matches!(spec.kind, CommandKind::System | CommandKind::Filesystem)
-        {
-            output.status = 127;
-            output.extend(b"command not found\r\n");
-            return output;
-        }
-        match spec.kind {
-            CommandKind::Help => return Self::help(expression),
-            CommandKind::Echo => {
-                if call.arg_count > 1 || (call.arg_count == 1 && !call.args[0].quoted) {
-                    output.status = 2;
-                    output.extend(b"usage: echo(\"text\")\r\n");
-                    return output;
-                }
-                output.extend(call.args[0].bytes);
-                output.extend(b"\r\n");
-            }
-            CommandKind::Clear => {
-                if call.arg_count == 0 {
-                    output.clear_screen = true;
-                } else {
-                    output.status = 2;
-                    output.extend(spec.usage);
-                    output.extend(b"\r\n");
-                }
-            }
-            CommandKind::True => {
-                if call.arg_count != 0 {
-                    output.status = 2;
-                    output.extend(spec.usage);
-                    output.extend(b"\r\n");
-                }
-            }
-            CommandKind::False => {
-                if call.arg_count == 0 {
-                    output.status = 1;
-                } else {
-                    output.status = 2;
-                    output.extend(spec.usage);
-                    output.extend(b"\r\n");
-                }
-            }
-            CommandKind::System => {
-                let member = expression.parts.first().and_then(|part| match part {
-                    ExpressionPart::Member(member) => Some(*member),
-                    ExpressionPart::Lookup(_) => None,
-                });
-                if expression.part_count != 1 || call.arg_count != 0 {
-                    output.status = 2;
-                    output.extend(spec.usage);
-                    output.extend(b"\r\n");
-                } else {
-                    match member {
-                        Some(b"version") => output.extend(b"LogOS vNext 0.1.0\r\n"),
-                        Some(b"uname") => output.extend(b"LogOS\r\n"),
-                        Some(b"shutdown") => output.action = CommandAction::Shutdown,
-                        Some(b"reboot") => output.action = CommandAction::Reboot,
-                        _ => {
-                            output.status = 2;
-                            output.extend(spec.usage);
-                            output.extend(b"\r\n");
-                        }
-                    }
-                }
-            }
-            CommandKind::Filesystem => {
-                output.status = 2;
-                output.extend(spec.usage);
-                output.extend(b"\r\n");
-            }
-            CommandKind::Service => {
-                output.status = 2;
-                output.extend(spec.usage);
-                output.extend(b"\r\n");
-            }
-            CommandKind::Network => {
-                output.status = 2;
-                output.extend(spec.usage);
-                output.extend(b"\r\n");
-            }
-        }
-        output
+    pub fn operation<'a>(
+        &mut self,
+        source: &'a [u8],
+    ) -> Result<Option<FlowOperation<'a>>, FlowDiagnostic> {
+        self.validate(source)?;
+        parse_flow_operation_unchecked(source)
     }
 }
 
@@ -597,6 +662,88 @@ pub fn format_service_record(record: &logos_abi::ServiceManagerRecord, output: &
         length += count;
     }
     length
+}
+
+pub fn format_help(topic: Option<&[u8]>, output: &mut [u8]) -> usize {
+    let mut length = 0;
+    match topic {
+        None => {
+            append_help(&mut length, output, b"Flow operations:\r\n");
+            for spec in FLOW_SPECS {
+                append_help(&mut length, output, b"  ");
+                append_help(&mut length, output, spec.name);
+                append_help(&mut length, output, b" - ");
+                append_help(&mut length, output, spec.summary);
+                append_help(&mut length, output, b"\r\n");
+            }
+            append_help(&mut length, output, b"Terminal context:\r\n");
+            append_help(&mut length, output, b"  help() - show Flow help\r\n");
+            append_help(&mut length, output, b"  clear() - clear the terminal\r\n");
+            append_help(&mut length, output, b"  echo(\"text\") - print text\r\n");
+            append_help(&mut length, output, b"Use help(\"name\") for details.\r\n");
+        }
+        Some(topic) => {
+            if topic == b"clear" {
+                append_help(&mut length, output, b"clear\r\nUsage: clear()\r\n");
+                append_help(&mut length, output, b"Clears the terminal display.\r\n");
+                return length;
+            }
+            if topic == b"echo" {
+                append_help(&mut length, output, b"echo\r\nUsage: echo(\"text\")\r\n");
+                append_help(&mut length, output, b"Prints text or a string variable.\r\n");
+                return length;
+            }
+            let Some(spec) = FLOW_SPECS.iter().find(|spec| spec.name == topic) else {
+                append_help(&mut length, output, b"flow: no help for ");
+                append_help(&mut length, output, topic);
+                append_help(&mut length, output, b"\r\n");
+                return length;
+            };
+            append_help(&mut length, output, spec.name);
+            append_help(&mut length, output, b"\r\nUsage: ");
+            append_help(&mut length, output, spec.usage);
+            append_help(&mut length, output, b"\r\n");
+            append_help(&mut length, output, spec.manual);
+            append_help(&mut length, output, b"\r\n");
+        }
+    }
+    length
+}
+
+fn append_help(length: &mut usize, output: &mut [u8], bytes: &[u8]) {
+    let count = bytes.len().min(output.len().saturating_sub(*length));
+    output[*length..*length + count].copy_from_slice(&bytes[..count]);
+    *length += count;
+}
+
+pub fn format_flow_diagnostic(error: FlowDiagnostic, output: &mut [u8]) -> usize {
+    match error {
+        FlowDiagnostic::Parse(error) => {
+            let message = match error {
+                FlowParseError::TooLong => b"flow: source exceeds 256 bytes\r\n" as &[u8],
+                FlowParseError::TooManyExpressions => b"flow: expression limit reached\r\n",
+                FlowParseError::TooManyStatements => b"flow: statement limit reached\r\n",
+                FlowParseError::TooManyArguments(_) => b"flow: too many arguments\r\n",
+                FlowParseError::CallbackLimit(_) => b"flow: callback nesting limit reached\r\n",
+                FlowParseError::InvalidToken(_)
+                | FlowParseError::UnexpectedToken(_)
+                | FlowParseError::UnterminatedString(_)
+                | FlowParseError::MissingExpression(_) => b"flow: syntax error\r\n",
+            };
+            copy_bounded(message, output)
+        }
+        FlowDiagnostic::Type(error) => {
+            let length = interpreter::format_diagnostic(error, output);
+            if length < output.len() {
+                output[length] = b'\r';
+                if length + 1 < output.len() {
+                    output[length + 1] = b'\n';
+                    return length + 2;
+                }
+            }
+            length
+        }
+    }
 }
 
 pub fn format_service_property(
@@ -867,17 +1014,7 @@ pub fn parse_storage_command(
     match (member, call.arg_count) {
         (b"list", 0) => Ok(Some(StorageCommand::List { path: b"/" })),
         (b"list", 1) => Ok(Some(StorageCommand::List { path: path_arg(args[0])? })),
-        (b"create", 1) => Ok(Some(StorageCommand::Touch { path: path_arg(args[0])? })),
-        (b"read", 1) => Ok(Some(StorageCommand::Cat { path: path_arg(args[0])? })),
         (b"remove", 1) => Ok(Some(StorageCommand::Remove { path: path_arg(args[0])? })),
-        (b"write", 2) => {
-            let path = path_arg(args[0])?;
-            let data = string_arg(args[1]).map_err(|_| StorageCommandError::Usage)?;
-            if data.is_empty() {
-                return Err(StorageCommandError::Usage);
-            }
-            Ok(Some(StorageCommand::Write { path, data }))
-        }
         (b"move", 2) => {
             Ok(Some(StorageCommand::Move { from: path_arg(args[0])?, to: path_arg(args[1])? }))
         }
@@ -1016,7 +1153,7 @@ fn trim_command(line: &[u8]) -> &[u8] {
     &line[start..end]
 }
 
-impl Default for CommandService {
+impl Default for FlowService {
     fn default() -> Self {
         Self::new()
     }
@@ -1025,63 +1162,6 @@ impl Default for CommandService {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn builtins_are_bounded_and_deterministic() {
-        let mut commands = CommandService::new();
-        let help = commands.execute(b"help()");
-        assert!(help.as_bytes().len() <= MAX_OUTPUT_BYTES);
-        assert!(help.as_bytes().windows(b"service".len()).any(|window| window == b"service"));
-        assert_eq!(
-            commands.execute(b"help(\"fs\")").as_bytes(),
-            b"fs - manage files\r\nUsage: fs.list() / fs.create(\"path\") / fs.read(\"path\")\r\nLists, creates, reads, writes, removes, or moves files.\r\n"
-        );
-        assert_eq!(commands.execute(b"help(\"missing\")").status, 1);
-        assert!(commands.execute(b"help(\"missing\")").as_bytes().len() <= MAX_OUTPUT_BYTES);
-        assert_eq!(commands.execute(b"echo()").as_bytes(), b"\r\n");
-        assert_eq!(commands.execute(b"echo(\"hi\")").as_bytes(), b"hi\r\n");
-        assert_eq!(commands.execute(b"echo(\"hello\")").as_bytes(), b"hello\r\n");
-        assert_eq!(commands.execute(b"echo(hello)").status, 2);
-        assert!(commands.execute(b"clear()").clear_screen);
-        assert_eq!(commands.execute(b"true()").status, 0);
-        assert_eq!(commands.execute(b"false()").status, 1);
-        assert_eq!(commands.execute(b"sys.version()").as_bytes(), b"LogOS vNext 0.1.0\r\n");
-        assert_eq!(commands.execute(b" sys.version() ").as_bytes(), b"LogOS vNext 0.1.0\r\n");
-        assert_eq!(commands.execute(b"sys.uname()").as_bytes(), b"LogOS\r\n");
-        assert_eq!(commands.execute(b"sys.shutdown()").action, CommandAction::Shutdown);
-        assert_eq!(commands.execute(b"sys.reboot()").action, CommandAction::Reboot);
-        assert_eq!(commands.execute(b"missing()").status, 127);
-    }
-
-    #[test]
-    fn every_catalog_entry_has_dispatch_behavior() {
-        let mut commands = CommandService::new();
-        assert_ne!(commands.execute(b"help()").status, 127);
-        assert_ne!(commands.execute(b"echo()").status, 127);
-        assert_ne!(commands.execute(b"clear()").status, 127);
-        assert_ne!(commands.execute(b"true()").status, 127);
-        assert_ne!(commands.execute(b"false()").status, 127);
-        assert_ne!(commands.execute(b"sys.version()").status, 127);
-        assert_ne!(commands.execute(b"sys.uname()").status, 127);
-        assert_ne!(commands.execute(b"sys.shutdown()").status, 127);
-        assert_ne!(commands.execute(b"sys.reboot()").status, 127);
-        assert_ne!(commands.execute(b"fs.list()").status, 127);
-        assert_ne!(commands.execute(b"fs.create()").status, 127);
-        assert_ne!(commands.execute(b"fs.read()").status, 127);
-        assert_ne!(commands.execute(b"fs.write()").status, 127);
-        assert_ne!(commands.execute(b"fs.remove()").status, 127);
-        assert_ne!(commands.execute(b"fs.move()").status, 127);
-        assert_ne!(commands.execute(b"service()").status, 127);
-        assert_ne!(commands.execute(b"net()").status, 127);
-    }
-
-    #[test]
-    fn command_input_is_bounded() {
-        let mut commands = CommandService::new();
-        let output = commands.execute(&[b'x'; MAX_COMMAND_BYTES + 1]);
-        assert_eq!(output.status, 2);
-        assert!(output.as_bytes().len() <= MAX_OUTPUT_BYTES);
-    }
 
     #[test]
     fn completion_context_targets_expression_parts() {
@@ -1139,15 +1219,19 @@ mod tests {
             Some(StorageCommand::List { path: b"/" })
         );
         assert_eq!(
-            parse_storage_command(b"fs.write(\"/file\", \"durable data\")").unwrap(),
-            Some(StorageCommand::Write { path: b"/file", data: b"durable data" })
-        );
-        assert_eq!(
             parse_storage_command(b"fs.move(\"/old\", \"/new\")").unwrap(),
             Some(StorageCommand::Move { from: b"/old", to: b"/new" })
         );
         assert_eq!(
-            parse_storage_command(b"fs.write(\"/file\")").unwrap_err(),
+            parse_storage_command(b"fs.create(\"/file\")").unwrap_err(),
+            StorageCommandError::Usage
+        );
+        assert_eq!(
+            parse_storage_command(b"fs.read(\"/file\")").unwrap_err(),
+            StorageCommandError::Usage
+        );
+        assert_eq!(
+            parse_storage_command(b"fs.write(\"/file\", \"data\")").unwrap_err(),
             StorageCommandError::Usage
         );
         assert!(parse_storage_command(b"cat(\"/file\")").unwrap().is_none());
@@ -1221,6 +1305,116 @@ mod tests {
             parse_network_command(b"net.tcp-probe(10.0.2.2, 0)").unwrap_err(),
             NetworkCommandError::Usage
         );
+    }
+
+    #[test]
+    fn canonical_flow_operations_are_typed_before_dispatch() {
+        assert_eq!(
+            parse_flow_operation(b"help()").unwrap(),
+            Some(FlowOperation::Help { topic: None })
+        );
+        assert_eq!(
+            parse_flow_operation(br#"help("fs")"#).unwrap(),
+            Some(FlowOperation::Help { topic: Some(b"fs") })
+        );
+        assert_eq!(parse_flow_operation(b"clear()").unwrap(), Some(FlowOperation::Clear));
+        assert_eq!(
+            parse_flow_operation(br#"echo("hello")"#).unwrap(),
+            Some(FlowOperation::Echo { text: b"hello" })
+        );
+        let mut service = FlowService::new();
+        assert!(service.validate(br#"var text = "hello""#).is_ok());
+        assert_eq!(
+            service.operation(b"echo(text)").unwrap(),
+            Some(FlowOperation::EchoVariable { name: b"text" })
+        );
+        assert_eq!(
+            parse_flow_operation(b"fs.touch(\"/file\").write(\"data\")").unwrap(),
+            Some(FlowOperation::Storage(StorageCommand::Write { path: b"/file", data: b"data" }))
+        );
+        assert_eq!(
+            parse_flow_operation(b"fs.open(\"/file\").write(\"data\")").unwrap(),
+            Some(FlowOperation::Storage(StorageCommand::Write { path: b"/file", data: b"data" }))
+        );
+        assert_eq!(
+            parse_flow_operation(b"await net.fetch(\"http://10.0.2.2/readme\")").unwrap(),
+            Some(FlowOperation::FetchResponse { url: b"http://10.0.2.2/readme" })
+        );
+        let mut service = FlowService::new();
+        assert!(service.validate(b"var url = \"http://10.0.2.2/readme\"").is_ok());
+        assert_eq!(
+            service.operation(b"var response = net.fetch(url)").unwrap(),
+            Some(FlowOperation::FetchResponseVariable { url: b"url" })
+        );
+        assert!(service.validate(b"var destination = \"/download\"").is_ok());
+        assert_eq!(
+            service.operation(b"net.fetch(url, destination)").unwrap(),
+            Some(FlowOperation::FetchResponseToFileVariables {
+                url: b"url",
+                destination: b"destination",
+            })
+        );
+        assert_eq!(
+            parse_flow_operation(
+                br#"await net.fetch("http://10.0.2.2/readme").then((response) => { return fs.touch("/download").write(response.body); })"#,
+            )
+            .unwrap(),
+            Some(FlowOperation::WriteResponse {
+                url: b"http://10.0.2.2/readme",
+                destination: b"/download",
+            })
+        );
+        assert!(matches!(
+            parse_flow_operation(b"fs.create(\"/file\")"),
+            Err(FlowDiagnostic::Type(_))
+        ));
+    }
+
+    #[test]
+    fn help_is_bounded_and_uses_flow_specs() {
+        let mut output = [0; MAX_OUTPUT_BYTES];
+        let length = format_help(None, &mut output);
+        assert!(length <= MAX_OUTPUT_BYTES);
+        assert!(output[..length].starts_with(b"Flow operations:\r\n"));
+
+        let length = format_help(Some(b"fs"), &mut output);
+        assert!(output[..length].starts_with(b"fs\r\nUsage: fs."));
+
+        let length = format_help(Some(b"missing"), &mut output);
+        assert_eq!(&output[..length], b"flow: no help for missing\r\n");
+
+        let length = format_help(Some(b"clear"), &mut output);
+        assert_eq!(
+            &output[..length],
+            b"clear\r\nUsage: clear()\r\nClears the terminal display.\r\n"
+        );
+
+        let length = format_help(Some(b"echo"), &mut output);
+        assert_eq!(
+            &output[..length],
+            b"echo\r\nUsage: echo(\"text\")\r\nPrints text or a string variable.\r\n"
+        );
+    }
+
+    #[test]
+    fn failed_flow_does_not_commit_partial_variables() {
+        let mut service = FlowService::new();
+        assert!(service.validate(b"var url = \"http://10.0.2.2/readme\"; missing()").is_err());
+        assert!(matches!(
+            service.operation(b"net.fetch(url)"),
+            Err(FlowDiagnostic::Type(FlowTypeError::UnknownVariable(_)))
+        ));
+    }
+
+    #[test]
+    fn typed_registry_covers_canonical_namespaces() {
+        assert_eq!(
+            OperationRegistry::lookup(NamespaceKind::Network, b"fetch")
+                .map(|signature| signature.argument_count),
+            Some(1)
+        );
+        assert!(OperationRegistry::lookup(NamespaceKind::Supervisor, b"restart").is_some());
+        assert!(OperationRegistry::lookup(NamespaceKind::Filesystem, b"create").is_none());
     }
 
     #[test]

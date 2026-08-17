@@ -24,14 +24,14 @@ const RESPONSE_CAPABILITY: usize = common::capability_slot(
     logos_abi::IpcEndpointId::CoreToStorage,
     logos_abi::IpcRights::Receive,
 );
-const COMMANDS_RECEIVE_CAPABILITY: usize = common::capability_slot(
+const FLOW_RECEIVE_CAPABILITY: usize = common::capability_slot(
     logos_abi::ServiceId::Storage,
-    IpcEndpointId::CommandsToStorage,
+    IpcEndpointId::FlowToStorage,
     logos_abi::IpcRights::Receive,
 );
-const COMMANDS_SEND_CAPABILITY: usize = common::capability_slot(
+const FLOW_SEND_CAPABILITY: usize = common::capability_slot(
     logos_abi::ServiceId::Storage,
-    IpcEndpointId::StorageToCommands,
+    IpcEndpointId::StorageToFlow,
     logos_abi::IpcRights::Send,
 );
 const FETCH_RECEIVE_CAPABILITY: usize = common::capability_slot(
@@ -47,13 +47,13 @@ const FETCH_SEND_CAPABILITY: usize = common::capability_slot(
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Client {
-    Commands,
+    Flow,
     Fetch,
 }
 
 fn send_response(client: Client, response: &IpcBytes) -> IpcStatus {
     match client {
-        Client::Commands => common::ipc_send(COMMANDS_SEND_CAPABILITY, response),
+        Client::Flow => common::ipc_send(FLOW_SEND_CAPABILITY, response),
         Client::Fetch => common::ipc_send(FETCH_SEND_CAPABILITY, response),
     }
 }
@@ -175,9 +175,9 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
         }
         if pending_response.is_none() {
             let mut request = IpcBytes::empty(MessageKind::StorageRequest);
-            let mut client = Client::Commands;
+            let mut client = Client::Flow;
             let status_from_client =
-                match common::ipc_receive(COMMANDS_RECEIVE_CAPABILITY, &mut request) {
+                match common::ipc_receive(FLOW_RECEIVE_CAPABILITY, &mut request) {
                     IpcStatus::Ok => IpcStatus::Ok,
                     _ => {
                         client = Client::Fetch;
@@ -196,8 +196,8 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
         }
         if !progressed {
             common::wait(
-                common::ipc_read_event(IpcEndpointId::CommandsToStorage)
-                    | common::ipc_write_event(IpcEndpointId::StorageToCommands)
+                common::ipc_read_event(IpcEndpointId::FlowToStorage)
+                    | common::ipc_write_event(IpcEndpointId::StorageToFlow)
                     | common::ipc_read_event(IpcEndpointId::FetchToStorage)
                     | common::ipc_write_event(IpcEndpointId::StorageToFetch),
                 logos_abi::ServiceId::Storage,
@@ -244,8 +244,8 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
         }
         if pending_response.is_none() {
             let mut request = IpcBytes::empty(MessageKind::StorageRequest);
-            let mut client = Client::Commands;
-            let received = match common::ipc_receive(COMMANDS_RECEIVE_CAPABILITY, &mut request) {
+            let mut client = Client::Flow;
+            let received = match common::ipc_receive(FLOW_RECEIVE_CAPABILITY, &mut request) {
                 IpcStatus::Ok => IpcStatus::Ok,
                 _ => {
                     client = Client::Fetch;
@@ -253,7 +253,7 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
                 }
             };
             if received == IpcStatus::Ok {
-                let stage_from_commands = client == Client::Commands
+                let stage_from_flow = client == Client::Flow
                     && StorageApiRequest::decode(&request).is_ok_and(|request| {
                         matches!(
                             request.operation,
@@ -263,7 +263,7 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
                                 | StorageApiOperation::StageWriteAbort
                         )
                     });
-                pending_response = if stage_from_commands {
+                pending_response = if stage_from_flow {
                     error_response(&request, StorageApiStatus::Invalid)
                 } else {
                     api.handle(&request)
@@ -274,8 +274,8 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
         }
         if !progressed {
             common::wait(
-                common::ipc_read_event(IpcEndpointId::CommandsToStorage)
-                    | common::ipc_write_event(IpcEndpointId::StorageToCommands)
+                common::ipc_read_event(IpcEndpointId::FlowToStorage)
+                    | common::ipc_write_event(IpcEndpointId::StorageToFlow)
                     | common::ipc_read_event(IpcEndpointId::FetchToStorage)
                     | common::ipc_write_event(IpcEndpointId::StorageToFetch),
                 logos_abi::ServiceId::Storage,

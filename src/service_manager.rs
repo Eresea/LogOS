@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn stop_rejects_transitional_dependents() {
         let mut manager = manager();
-        manager.mark_starting(ServiceId::Commands);
+        manager.mark_starting(ServiceId::Flow);
         let handle = manager.handle(ServiceId::Session.index()).unwrap();
         let response = manager
             .request(
@@ -682,7 +682,7 @@ mod tests {
             ManagerAction::Restart(
                 [
                     ServiceId::Fetch,
-                    ServiceId::Commands,
+                    ServiceId::Flow,
                     ServiceId::Session,
                     ServiceId::Input,
                     ServiceId::Input,
