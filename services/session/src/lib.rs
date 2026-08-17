@@ -2,7 +2,7 @@
 
 //! Bounded command-line editing for the Session service.
 //!
-//! Commands are executed by the Commands service. Session only edits a line,
+//! Flow is executed by the Flow service. Session only edits a line,
 //! forwards completed input, and prepends the prompt to command output.
 
 #[cfg(test)]
@@ -591,12 +591,7 @@ impl LineEditor {
 
     fn delete_word(&mut self, output: &mut ShellOutput) {
         let end = self.cursor;
-        while self.cursor > 0 && self.line[self.cursor - 1] == b' ' {
-            self.cursor -= 1;
-        }
-        while self.cursor > 0 && self.line[self.cursor - 1] != b' ' {
-            self.cursor = previous_boundary(&self.line, self.cursor);
-        }
+        self.cursor = word_left_boundary(&self.line, self.cursor);
         self.line.copy_within(end..self.line_len, self.cursor);
         self.line_len -= end - self.cursor;
         self.bump_line_revision();
@@ -605,12 +600,7 @@ impl LineEditor {
 
     fn delete_word_forward(&mut self, output: &mut ShellOutput) {
         let start = self.cursor;
-        while self.cursor < self.line_len && self.line[self.cursor] == b' ' {
-            self.cursor += 1;
-        }
-        while self.cursor < self.line_len && self.line[self.cursor] != b' ' {
-            self.cursor = next_boundary(&self.line, self.cursor, self.line_len);
-        }
+        self.cursor = word_right_boundary(&self.line, self.cursor, self.line_len);
         self.line.copy_within(self.cursor..self.line_len, start);
         self.line_len -= self.cursor - start;
         self.cursor = start;
@@ -638,23 +628,13 @@ impl LineEditor {
 
     fn move_word_left(&mut self, output: &mut ShellOutput) {
         let old_cursor = self.cursor;
-        while self.cursor > 0 && self.line[self.cursor - 1] == b' ' {
-            self.cursor -= 1;
-        }
-        while self.cursor > 0 && self.line[self.cursor - 1] != b' ' {
-            self.cursor = previous_boundary(&self.line, self.cursor);
-        }
+        self.cursor = word_left_boundary(&self.line, self.cursor);
         move_cursor(output, b'D', display_width(&self.line[self.cursor..old_cursor]));
     }
 
     fn move_word_right(&mut self, output: &mut ShellOutput) {
         let old_cursor = self.cursor;
-        while self.cursor < self.line_len && self.line[self.cursor] == b' ' {
-            self.cursor += 1;
-        }
-        while self.cursor < self.line_len && self.line[self.cursor] != b' ' {
-            self.cursor = next_boundary(&self.line, self.cursor, self.line_len);
-        }
+        self.cursor = word_right_boundary(&self.line, self.cursor, self.line_len);
         move_cursor(output, b'C', display_width(&self.line[old_cursor..self.cursor]));
     }
 
@@ -821,6 +801,72 @@ fn next_boundary(bytes: &[u8], index: usize, len: usize) -> usize {
     index
 }
 
+fn is_flow_word_start(bytes: &[u8], index: usize) -> bool {
+    let Some(&byte) = bytes.get(index) else { return false };
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') || byte >= 0x80
+}
+
+fn word_left_boundary(bytes: &[u8], index: usize) -> usize {
+    let mut cursor = index;
+    while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+        cursor = previous_boundary(bytes, cursor);
+    }
+    if cursor >= 2 && bytes[cursor - 2] == b'(' && bytes[cursor - 1] == b')' {
+        return cursor - 2;
+    }
+    let previous = previous_boundary(bytes, cursor);
+    if bytes.get(previous) == Some(&b'"') {
+        let mut quote = previous;
+        while quote > 0 {
+            quote = previous_boundary(bytes, quote);
+            if bytes.get(quote) == Some(&b'"') {
+                return quote;
+            }
+        }
+        return 0;
+    }
+    if is_flow_word_start(bytes, previous) {
+        cursor = previous;
+        while cursor > 0 {
+            let candidate = previous_boundary(bytes, cursor);
+            if !is_flow_word_start(bytes, candidate) {
+                break;
+            }
+            cursor = candidate;
+        }
+        return cursor;
+    }
+    previous
+}
+
+fn word_right_boundary(bytes: &[u8], index: usize, len: usize) -> usize {
+    let mut cursor = index;
+    while cursor < len && bytes[cursor].is_ascii_whitespace() {
+        cursor = next_boundary(bytes, cursor, len);
+    }
+    if cursor + 1 < len && bytes[cursor] == b'(' && bytes[cursor + 1] == b')' {
+        return cursor + 2;
+    }
+    if bytes.get(cursor) == Some(&b'"') {
+        cursor = next_boundary(bytes, cursor, len);
+        while cursor < len {
+            if bytes[cursor] == b'"' {
+                return next_boundary(bytes, cursor, len);
+            }
+            cursor = next_boundary(bytes, cursor, len);
+        }
+        return len;
+    }
+    if is_flow_word_start(bytes, cursor) {
+        cursor = next_boundary(bytes, cursor, len);
+        while cursor < len && is_flow_word_start(bytes, cursor) {
+            cursor = next_boundary(bytes, cursor, len);
+        }
+        return cursor;
+    }
+    next_boundary(bytes, cursor, len)
+}
+
 fn display_width(bytes: &[u8]) -> usize {
     bytes.iter().filter(|byte| !is_utf8_continuation(**byte)).count()
 }
@@ -956,6 +1002,44 @@ mod tests {
     }
 
     #[test]
+    fn flow_word_navigation_stops_at_syntax_tokens() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"fs.list()", &mut command, &mut output);
+        assert_eq!(editor.cursor, 9);
+
+        editor.input_for_command(b"\x1b[1;5D", &mut command, &mut output);
+        assert_eq!(editor.cursor, 7);
+        editor.input_for_command(b"\x1b[1;5D", &mut command, &mut output);
+        assert_eq!(editor.cursor, 3);
+        editor.input_for_command(b"\x1b[1;5D", &mut command, &mut output);
+        assert_eq!(editor.cursor, 2);
+        editor.input_for_command(b"\x1b[1;5D", &mut command, &mut output);
+        assert_eq!(editor.cursor, 0);
+
+        editor.input_for_command(b"\x1b[1;5C", &mut command, &mut output);
+        assert_eq!(editor.cursor, 2);
+        editor.input_for_command(b"\x1b[1;5C", &mut command, &mut output);
+        assert_eq!(editor.cursor, 3);
+        editor.input_for_command(b"\x1b[1;5C", &mut command, &mut output);
+        assert_eq!(editor.cursor, 7);
+        editor.input_for_command(b"\x1b[1;5C", &mut command, &mut output);
+        assert_eq!(editor.cursor, 9);
+    }
+
+    #[test]
+    fn flow_ctrl_delete_removes_one_syntax_token() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        let length = editor
+            .input_for_command(b"fs.list()\x1b[H\x1b[3;5~\r", &mut command, &mut output)
+            .unwrap();
+        assert_eq!(&command[..length], b".list()");
+    }
+
+    #[test]
     fn ctrl_delete_removes_the_forward_word() {
         let mut editor = LineEditor::new();
         let mut command = [0; MAX_LINE_BYTES];
@@ -1015,19 +1099,19 @@ mod tests {
         let mut editor = LineEditor::new();
         let mut command = [0; MAX_LINE_BYTES];
         let mut output = ShellOutput::new();
-        editor.input_for_command(b"he\t", &mut command, &mut output);
+        editor.input_for_command(b"f\t", &mut command, &mut output);
         let request = editor.take_completion_request().unwrap();
         let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
         response.line_revision = request.line_revision;
-        response.replace_end = 2;
-        assert!(response.push_candidate(b"help()"));
+        response.replace_end = 1;
+        assert!(response.push_candidate(b"fs."));
         editor.apply_completion_response(response, &mut output);
         assert!(output.as_bytes().windows(DIM_COLOR.len()).any(|window| window == DIM_COLOR));
         assert!(!output.as_bytes().windows(4).any(|window| window == b"\x1b[1B"));
 
         output = ShellOutput::new();
         editor.input_for_command(b"\t\r", &mut command, &mut output);
-        assert_eq!(&command[..6], b"help()");
+        assert_eq!(&command[..3], b"fs.");
     }
 
     #[test]
@@ -1035,16 +1119,17 @@ mod tests {
         let mut editor = LineEditor::new();
         let mut command = [0; MAX_LINE_BYTES];
         let mut output = ShellOutput::new();
-        editor.input_for_command(b"echo", &mut command, &mut output);
+        editor.input_for_command(b"net.fe", &mut command, &mut output);
         let request = editor.take_completion_request().unwrap();
         let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
         response.line_revision = request.line_revision;
-        response.replace_end = 4;
-        assert!(response.push_candidate_with_cursor(b"echo(\"\")", 6));
+        response.replace_start = 4;
+        response.replace_end = 6;
+        assert!(response.push_candidate_with_cursor(b"fetch(\"\")", 7));
         editor.apply_completion_response(response, &mut output);
         editor.input_for_command(b"\t", &mut command, &mut output);
-        assert_eq!(&editor.line[..editor.line_len], b"echo(\"\")");
-        assert_eq!(editor.cursor, 6);
+        assert_eq!(&editor.line[..editor.line_len], b"net.fetch(\"\")");
+        assert_eq!(editor.cursor, 11);
     }
 
     #[test]
@@ -1052,16 +1137,17 @@ mod tests {
         let mut editor = LineEditor::new();
         let mut command = [0; MAX_LINE_BYTES];
         let mut output = ShellOutput::new();
-        editor.input_for_command(b"write", &mut command, &mut output);
+        editor.input_for_command(b"fs.mo", &mut command, &mut output);
         let request = editor.take_completion_request().unwrap();
         let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
         response.line_revision = request.line_revision;
+        response.replace_start = 3;
         response.replace_end = 5;
-        assert!(response.push_candidate_with_cursor(b"write(\"\", \"\")", 7));
+        assert!(response.push_candidate_with_cursor(b"move(\"\", \"\")", 6));
         editor.apply_completion_response(response, &mut output);
         editor.input_for_command(b"\t", &mut command, &mut output);
-        assert_eq!(&editor.line[..editor.line_len], b"write(\"\", \"\")");
-        assert_eq!(editor.cursor, 7);
+        assert_eq!(&editor.line[..editor.line_len], b"fs.move(\"\", \"\")");
+        assert_eq!(editor.cursor, 9);
     }
 
     #[test]
@@ -1069,16 +1155,16 @@ mod tests {
         let mut editor = LineEditor::new();
         let mut command = [0; MAX_LINE_BYTES];
         let mut output = ShellOutput::new();
-        editor.input_for_command(b"fs.read", &mut command, &mut output);
+        editor.input_for_command(b"fs.open", &mut command, &mut output);
         let request = editor.take_completion_request().unwrap();
         let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
         response.line_revision = request.line_revision;
         response.replace_start = 3;
         response.replace_end = 7;
-        assert!(response.push_candidate_with_cursor(b"read(\"\")", 6));
+        assert!(response.push_candidate_with_cursor(b"open(\"\").read()", 6));
         editor.apply_completion_response(response, &mut output);
         editor.input_for_command(b"\t", &mut command, &mut output);
-        assert_eq!(&editor.line[..editor.line_len], b"fs.read(\"\")");
+        assert_eq!(&editor.line[..editor.line_len], b"fs.open(\"\").read()");
         assert_eq!(editor.cursor, 9);
     }
 
