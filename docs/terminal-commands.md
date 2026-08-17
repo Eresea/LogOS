@@ -64,6 +64,21 @@ commits one bounded Storage transaction; transaction controls are API-only. Unkn
 `command not found`. Network commands remain available when Network is disabled or restarting; they
 return a bounded status such as `disabled`, `unavailable`, or `configuring`.
 
+## Targeted completion
+
+Completion is enabled by default for each Session, but it is an optional Commands-owned sub-service
+over the existing Session↔Commands queues. Tab requests only the expression fragment at the cursor.
+The first candidate is shown as a dim suffix and in a bounded candidate list; `↑` / `↓` select,
+Tab accepts, and Escape dismisses. Printable input dismisses the current list and continues editing.
+Late responses are ignored when their request ID or line revision is stale.
+
+The current targets are root expressions (`he` → `help()`, `serv` → `service["`), live service
+registry names, service members (`status`, `name`, `version`, `start()`, `stop()`, `restart()`),
+network members (`status`, `ping()`, `tcp-probe()`, `interface["`), and the fixed `eth0` interface
+entry. Filesystem paths and arbitrary method arguments remain deferred. Candidate payloads are
+fixed-size and bounded. A provider error or timeout prints `completion unavailable` once and disables
+completion for that Session; command editing and execution continue normally.
+
 ## Deferred command progress
 
 Long-running commands currently wait for their service response before producing output. A later

@@ -53,3 +53,4 @@
 | [0049](0049-service-manager-control-plane.md) | Accepted | Core-owned bounded service lifecycle API uses a process-bound manager capability and fixed control syscall |
 | [0050](0050-network-service-boundary.md) | Accepted | Optional Network service owns protocol state while Core owns VirtIO-net transport and targeted recovery |
 | [0051](0051-terminal-render-batching.md) | Accepted | Terminal render batches coalesce before display while full redraws clear the complete framebuffer |
+| [0052](0052-targeted-terminal-completion.md) | Accepted | Commands-owned bounded completion is optional, best-effort, and isolated from terminal execution failures |

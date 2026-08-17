@@ -10,6 +10,7 @@ flowchart LR
     I[Input decoder] -->|semantic key/text| T[Terminal emulator]
     T -->|session bytes| S[Session line editor]
     S -->|completed command| C[Commands]
+    S <-->|bounded completion request/response| C
     C -->|output bytes| S
     C <-->|versioned file API| V[Storage]
     C -->|manager syscall| M[Core service manager]
@@ -35,6 +36,12 @@ Commands exposes `service["name"].status`, `service["name"].start()`, `service["
 `service["name"].restart()` as a typed text adapter over the versioned Core manager ABI. The manager
 validates a private, process-bound capability before changing lifecycle state; a future GUI shell can
 use the same request/response values without parsing terminal output.
+
+Session also sends bounded completion requests to the Commands image over the existing reverse queue.
+Commands resolves root expressions, live service names, service and network members, and the fixed
+`eth0` interface entry. Completion is a best-effort sub-service: malformed, unavailable, or timed-out
+requests produce one Session diagnostic and disable completion for that Session, without affecting
+input or command execution. A Commands process crash still follows the normal graph-restart policy.
 
 This document describes the terminal contract path. The current QEMU proof validates service image
 loading, isolated roots, framebuffer and keyboard mappings, ring-3 entry, rendering, semantic input,
