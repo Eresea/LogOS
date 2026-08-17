@@ -10,9 +10,10 @@ use core::{
 mod common;
 
 use logos_abi::{
-    IPC_FLAG_MORE, IpcBytes, IpcStatus, MessageKind, NetworkOperation, NetworkRequest,
-    NetworkResponse, NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE, StorageApiOperation,
-    StorageApiRequest, StorageApiResponse, StorageApiStatus,
+    COMPLETION_FLAG_TRUNCATED, CompletionRequest, CompletionResponse, CompletionStatus,
+    IPC_FLAG_MORE, IpcBytes, IpcStatus, MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation,
+    NetworkRequest, NetworkResponse, NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE,
+    StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus,
 };
 
 const INPUT_CAPABILITY: usize = common::capability_slot(
@@ -149,6 +150,163 @@ fn manager_boot_probe() -> bool {
     let mut output = [0; logos_commands::MAX_OUTPUT_BYTES];
     let length = logos_commands::format_service_record(&response.record, &mut output);
     output[..length].starts_with(b"input ") && output[..length].ends_with(b"\r\n")
+}
+
+struct CompletionService {
+    enabled: bool,
+}
+
+impl CompletionService {
+    const fn new() -> Self {
+        Self { enabled: true }
+    }
+
+    fn complete(&mut self, request: CompletionRequest) -> CompletionResponse {
+        if !self.enabled || !request.is_valid() {
+            return CompletionResponse::empty(request.request_id, CompletionStatus::Unavailable);
+        }
+        let Some(line) = request.line() else {
+            return CompletionResponse::empty(request.request_id, CompletionStatus::Malformed);
+        };
+        let Ok(Some(context)) =
+            logos_commands::completion_context(line, usize::from(request.cursor))
+        else {
+            return CompletionResponse::empty(request.request_id, CompletionStatus::NoMatch);
+        };
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.replace_start = context.replace_start as u8;
+        response.replace_end = context.replace_end as u8;
+        match context.target {
+            logos_commands::CompletionTarget::Root => {
+                for spec in logos_commands::COMMAND_SPECS {
+                    if !spec.name.starts_with(context.prefix) {
+                        continue;
+                    }
+                    let punctuation = match spec.kind {
+                        logos_commands::CommandKind::Service => b"[\"".as_slice(),
+                        logos_commands::CommandKind::Network => b".".as_slice(),
+                        _ => b"()".as_slice(),
+                    };
+                    let mut candidate = [0; MAX_COMPLETION_ITEM_BYTES];
+                    let Some(length) = copy_candidate(&mut candidate, spec.name, punctuation)
+                    else {
+                        response.flags |= COMPLETION_FLAG_TRUNCATED;
+                        continue;
+                    };
+                    if !response.push_candidate(&candidate[..length]) {
+                        response.flags |= COMPLETION_FLAG_TRUNCATED;
+                        break;
+                    }
+                }
+            }
+            logos_commands::CompletionTarget::ServiceName => {
+                if self.append_service_names(context.prefix, &mut response).is_err() {
+                    response.status = CompletionStatus::Unavailable;
+                }
+            }
+            logos_commands::CompletionTarget::ServiceMember => {
+                for candidate in logos_commands::SERVICE_COMPLETION_MEMBERS {
+                    if candidate.starts_with(context.prefix) && !response.push_candidate(candidate)
+                    {
+                        response.flags |= COMPLETION_FLAG_TRUNCATED;
+                        break;
+                    }
+                }
+            }
+            logos_commands::CompletionTarget::NetworkMember => {
+                for candidate in logos_commands::NETWORK_COMPLETION_MEMBERS {
+                    if candidate.starts_with(context.prefix) && !response.push_candidate(candidate)
+                    {
+                        response.flags |= COMPLETION_FLAG_TRUNCATED;
+                        break;
+                    }
+                }
+            }
+            logos_commands::CompletionTarget::InterfaceName => {
+                if b"eth0".starts_with(context.prefix) && !response.push_candidate(b"eth0\"]") {
+                    response.flags |= COMPLETION_FLAG_TRUNCATED;
+                }
+            }
+        }
+        if response.candidate_count == 0 && response.status == CompletionStatus::Ok {
+            response.status = CompletionStatus::NoMatch;
+        }
+        response
+    }
+
+    fn append_service_names(
+        &mut self,
+        prefix: &[u8],
+        response: &mut CompletionResponse,
+    ) -> Result<(), ()> {
+        let mut cursor = 0u8;
+        for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
+            let request_id = next_manager_request_id();
+            let mut request =
+                logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, request_id);
+            request.cursor = cursor;
+            let mut manager_response = logos_abi::ManagerResponse::new(
+                logos_abi::ManagerOperation::List,
+                logos_abi::ManagerStatus::Malformed,
+                request_id,
+            );
+            if common::manager_call(&request, &mut manager_response) != IpcStatus::Ok
+                || manager_response.status != logos_abi::ManagerStatus::Ok
+            {
+                return Err(());
+            }
+            let name_len = usize::from(manager_response.record.name_len)
+                .min(manager_response.record.name.len());
+            let name = &manager_response.record.name[..name_len];
+            if name.starts_with(prefix) {
+                let mut candidate = [0; MAX_COMPLETION_ITEM_BYTES];
+                let Some(length) = copy_candidate(&mut candidate, name, b"\"]") else {
+                    response.flags |= COMPLETION_FLAG_TRUNCATED;
+                    return Ok(());
+                };
+                if !response.push_candidate(&candidate[..length]) {
+                    response.flags |= COMPLETION_FLAG_TRUNCATED;
+                    return Ok(());
+                }
+            }
+            if manager_response.cursor == u8::MAX {
+                break;
+            }
+            cursor = manager_response.cursor;
+        }
+        Ok(())
+    }
+}
+
+fn copy_candidate(
+    output: &mut [u8; MAX_COMPLETION_ITEM_BYTES],
+    first: &[u8],
+    second: &[u8],
+) -> Option<usize> {
+    let length = first.len().checked_add(second.len())?;
+    if length > output.len() {
+        return None;
+    }
+    output[..first.len()].copy_from_slice(first);
+    output[first.len()..length].copy_from_slice(second);
+    Some(length)
+}
+
+fn completion_request(message: &IpcBytes) -> Option<CompletionRequest> {
+    (message.kind == MessageKind::CompletionRequest
+        && message.len as usize == core::mem::size_of::<CompletionRequest>())
+    .then(|| unsafe { ptr::read_unaligned(message.bytes.as_ptr().cast()) })
+}
+
+fn completion_message(response: CompletionResponse) -> IpcBytes {
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&response as *const CompletionResponse).cast::<u8>(),
+            mem::size_of::<CompletionResponse>(),
+        )
+    };
+    IpcBytes::from_bytes(MessageKind::CompletionResponse, bytes)
+        .unwrap_or_else(|| IpcBytes::empty(MessageKind::CompletionResponse))
 }
 
 struct PendingOutput {
@@ -1126,6 +1284,8 @@ static mut COMMANDS: logos_commands::CommandService = logos_commands::CommandSer
 static mut PENDING: PendingOutput = PendingOutput::new();
 static mut STORAGE: StorageClient = StorageClient::new();
 static mut NETWORK: NetworkClient = NetworkClient;
+static mut COMPLETION: CompletionService = CompletionService::new();
+static mut PENDING_COMPLETION: Option<IpcBytes> = None;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -1133,6 +1293,8 @@ pub extern "C" fn _start() -> ! {
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
     let network = unsafe { &mut *core::ptr::addr_of_mut!(NETWORK) };
+    let completion = unsafe { &mut *core::ptr::addr_of_mut!(COMPLETION) };
+    let pending_completion = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_COMPLETION) };
     #[cfg(feature = "qemu-proof")]
     while !manager_boot_probe() {
         common::wait(0, logos_abi::ServiceId::Commands);
@@ -1155,6 +1317,29 @@ pub extern "C" fn _start() -> ! {
                 );
             }
             continue;
+        }
+        if let Some(message) = *pending_completion {
+            match common::ipc_send(OUTPUT_CAPABILITY, &message) {
+                IpcStatus::Ok | IpcStatus::Stale | IpcStatus::Disconnected => {
+                    *pending_completion = None;
+                    if message.kind == MessageKind::CompletionResponse {
+                        progressed = true;
+                    }
+                }
+                IpcStatus::Full => {}
+                IpcStatus::Unauthorized | IpcStatus::Malformed | IpcStatus::Empty => {
+                    *pending_completion = None;
+                }
+            }
+            if pending_completion.is_some() {
+                if !progressed {
+                    common::wait(
+                        common::ipc_write_event(logos_abi::IpcEndpointId::CommandsToSession),
+                        logos_abi::ServiceId::Commands,
+                    );
+                }
+                continue;
+            }
         }
         if storage.active() {
             progressed |= storage.drive();
@@ -1190,7 +1375,12 @@ pub extern "C" fn _start() -> ! {
         let mut message = IpcBytes::empty(MessageKind::SessionInput);
         if common::ipc_receive(INPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
             progressed = true;
-            if message.kind == MessageKind::SessionInput {
+            if message.kind == MessageKind::CompletionRequest {
+                if let Some(request) = completion_request(&message) {
+                    *pending_completion = Some(completion_message(completion.complete(request)));
+                    progressed = true;
+                }
+            } else if message.kind == MessageKind::SessionInput {
                 if let Some(bytes) = message.as_bytes() {
                     match logos_commands::parse_service_command(bytes) {
                         Ok(Some(command)) => service_command(command, pending),
@@ -1252,3 +1442,24 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 
 #[cfg(not(target_os = "none"))]
 fn main() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_provider_returns_targeted_static_candidates() {
+        let mut provider = CompletionService::new();
+        let root = provider.complete(CompletionRequest::new(1, b"he", 2).unwrap());
+        assert_eq!(root.status, CompletionStatus::Ok);
+        assert_eq!(root.candidate(0), Some(&b"help()"[..]));
+
+        let member =
+            provider.complete(CompletionRequest::new(2, b"service[\"storage\"].re", 21).unwrap());
+        assert_eq!(member.candidate(0), Some(&b"restart()"[..]));
+
+        let interface =
+            provider.complete(CompletionRequest::new(3, b"net.interface[\"e", 16).unwrap());
+        assert_eq!(interface.candidate(0), Some(&b"eth0\"]"[..]));
+    }
+}

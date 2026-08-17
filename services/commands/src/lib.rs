@@ -7,6 +7,34 @@ pub const MAX_COMMAND_BYTES: usize = 256;
 pub const MAX_OUTPUT_BYTES: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompletionTarget {
+    Root,
+    ServiceName,
+    ServiceMember,
+    NetworkMember,
+    InterfaceName,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompletionContext<'a> {
+    pub target: CompletionTarget,
+    pub replace_start: usize,
+    pub replace_end: usize,
+    pub prefix: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompletionError {
+    InvalidCursor,
+    LineTooLong,
+}
+
+pub const SERVICE_COMPLETION_MEMBERS: [&[u8]; 6] =
+    [b"status", b"name", b"version", b"start()", b"stop()", b"restart()"];
+pub const NETWORK_COMPLETION_MEMBERS: [&[u8]; 4] =
+    [b"status", b"ping()", b"tcp-probe()", b"interface[\""];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandKind {
     Help,
     Echo,
@@ -165,6 +193,110 @@ pub const COMMAND_SPECS: [CommandSpec; 17] = [
         manual: b"Shows network status or performs bounded ICMP and TCP probes.",
     },
 ];
+
+pub fn completion_context<'a>(
+    line: &'a [u8],
+    cursor: usize,
+) -> Result<Option<CompletionContext<'a>>, CompletionError> {
+    if line.len() > logos_abi::MAX_COMPLETION_LINE_BYTES {
+        return Err(CompletionError::LineTooLong);
+    }
+    if cursor > line.len() {
+        return Err(CompletionError::InvalidCursor);
+    }
+    let before = &line[..cursor];
+    const SERVICE_NAME_PREFIX: &[u8] = b"service[\"";
+    const INTERFACE_NAME_PREFIX: &[u8] = b"net.interface[\"";
+
+    if before.starts_with(SERVICE_NAME_PREFIX) {
+        let start = SERVICE_NAME_PREFIX.len();
+        if let Some(close) = find_bytes(&before[start..], b"\"]") {
+            let member_start = start + close + 2;
+            if before.get(member_start) == Some(&b'.')
+                && before[member_start + 1..].iter().all(|byte| is_member_byte(*byte))
+            {
+                return Ok(Some(CompletionContext {
+                    target: CompletionTarget::ServiceMember,
+                    replace_start: member_start + 1,
+                    replace_end: cursor,
+                    prefix: &before[member_start + 1..],
+                }));
+            }
+            return Ok(None);
+        }
+        if before[start..].iter().all(|byte| is_name_byte(*byte)) {
+            return Ok(Some(CompletionContext {
+                target: CompletionTarget::ServiceName,
+                replace_start: start,
+                replace_end: cursor,
+                prefix: &before[start..],
+            }));
+        }
+        return Ok(None);
+    }
+
+    if before.starts_with(INTERFACE_NAME_PREFIX) {
+        let start = INTERFACE_NAME_PREFIX.len();
+        if before[start..].iter().all(|byte| is_name_byte(*byte)) {
+            return Ok(Some(CompletionContext {
+                target: CompletionTarget::InterfaceName,
+                replace_start: start,
+                replace_end: cursor,
+                prefix: &before[start..],
+            }));
+        }
+        return Ok(None);
+    }
+
+    if before.starts_with(b"net.") && before[4..].iter().all(|byte| is_member_byte(*byte)) {
+        return Ok(Some(CompletionContext {
+            target: CompletionTarget::NetworkMember,
+            replace_start: 4,
+            replace_end: cursor,
+            prefix: &before[4..],
+        }));
+    }
+
+    let start = before.iter().position(|byte| byte.is_ascii_alphabetic() || *byte == b'_');
+    let Some(start) = start else {
+        return before
+            .is_empty()
+            .then_some(CompletionContext {
+                target: CompletionTarget::Root,
+                replace_start: 0,
+                replace_end: 0,
+                prefix: &[],
+            })
+            .map_or(Ok(None), |context| Ok(Some(context)));
+    };
+    if before[..start].iter().any(|byte| !byte.is_ascii_whitespace())
+        || !before[start..].iter().all(|byte| is_root_byte(*byte))
+    {
+        return Ok(None);
+    }
+    Ok(Some(CompletionContext {
+        target: CompletionTarget::Root,
+        replace_start: start,
+        replace_end: cursor,
+        prefix: &before[start..],
+    }))
+}
+
+fn is_root_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+}
+
+fn is_member_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-'
+}
+
+fn is_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+}
+
+fn find_bytes(bytes: &[u8], needle: &[u8]) -> Option<usize> {
+    bytes.windows(needle.len()).position(|window| window == needle)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageCommand<'a> {
@@ -991,6 +1123,47 @@ mod tests {
         let output = commands.execute(&[b'x'; MAX_COMMAND_BYTES + 1]);
         assert_eq!(output.status, 2);
         assert!(output.as_bytes().len() <= MAX_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn completion_context_targets_expression_parts() {
+        assert_eq!(
+            completion_context(b"he", 2).unwrap(),
+            Some(CompletionContext {
+                target: CompletionTarget::Root,
+                replace_start: 0,
+                replace_end: 2,
+                prefix: b"he",
+            })
+        );
+        assert_eq!(
+            completion_context(b"service[\"st", 11).unwrap(),
+            Some(CompletionContext {
+                target: CompletionTarget::ServiceName,
+                replace_start: 9,
+                replace_end: 11,
+                prefix: b"st",
+            })
+        );
+        assert_eq!(
+            completion_context(b"service[\"storage\"].re", 21).unwrap(),
+            Some(CompletionContext {
+                target: CompletionTarget::ServiceMember,
+                replace_start: 19,
+                replace_end: 21,
+                prefix: b"re",
+            })
+        );
+        assert_eq!(
+            completion_context(b"net.", 4).unwrap().unwrap().target,
+            CompletionTarget::NetworkMember
+        );
+        assert_eq!(
+            completion_context(b"net.interface[\"e", 16).unwrap().unwrap().target,
+            CompletionTarget::InterfaceName
+        );
+        assert!(completion_context(b"service[storage", 15).unwrap().is_none());
+        assert!(completion_context(&[b'x'; logos_abi::MAX_COMPLETION_LINE_BYTES + 1], 0).is_err());
     }
 
     #[test]
