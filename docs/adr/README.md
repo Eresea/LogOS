@@ -54,3 +54,4 @@
 | [0050](0050-network-service-boundary.md) | Accepted | Optional Network service owns protocol state while Core owns VirtIO-net transport and targeted recovery |
 | [0051](0051-terminal-render-batching.md) | Accepted | Terminal render batches coalesce before display while full redraws clear the complete framebuffer |
 | [0052](0052-targeted-terminal-completion.md) | Accepted | Commands-owned bounded completion is optional, best-effort, and isolated from terminal execution failures |
+| [0054](0054-flow-interpreter-service-migration.md) | Accepted | Flow replaces Commands in the existing slot with bounded typed evaluation, promise lifecycle, response-body transport, and cancellation |

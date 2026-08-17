@@ -294,19 +294,19 @@ try {
         Start-Sleep -Seconds 2
         Send-QmpText $qmp "net.fetch(`"http://10.0.2.2:8080/readme`",`"/readme`")`n"
         Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = (Join-Path $repoRoot 'target\fetch-after-input.ppm') } } | Out-Null
-        if (-not (Wait-ProofMarker 'LogOS vNext: fetch command complete' $TimeoutSeconds)) {
-            throw 'Fetch command did not complete.'
+        if (-not (Wait-ProofMarker 'LogOS vNext: Flow fetch complete' $TimeoutSeconds)) {
+            throw 'Flow fetch did not complete.'
         }
-        Send-QmpText $qmp "cat(`"/readme`")`n"
+        Send-QmpText $qmp "await fs.open(`"/readme`").read()`n"
         if (-not (Wait-ProofMarker 'LogOS vNext: fetch contents verified' $TimeoutSeconds)) {
             throw 'Fetched contents were not verified.'
         }
         Send-QmpText $qmp "net.fetch(`"http://10.0.2.2:8080/cancel`",`"/cancel`")`n"
-        if (-not (Wait-ProofMarker 'LogOS vNext: fetch command started' $TimeoutSeconds)) {
+        if (-not (Wait-ProofMarker 'LogOS vNext: Flow fetch started' $TimeoutSeconds)) {
             throw 'Cancellation fetch did not start.'
         }
         Send-QmpKey $qmp 'ctrl-c'
-        if (-not (Wait-ProofMarker 'LogOS vNext: fetch command cancelled' $TimeoutSeconds)) {
+        if (-not (Wait-ProofMarker 'LogOS vNext: Flow fetch cancelled' $TimeoutSeconds)) {
             throw 'Fetch cancellation was not observed.'
         }
         Add-Content -LiteralPath $log -Value 'LogOS vNext: fetch proof PASS'
@@ -314,7 +314,7 @@ try {
         return
     }
     Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofBefore } } | Out-Null
-    foreach ($key in @('e', 'c', 'h', 'o', 'spc', 'p', 'r', 'o', 'o', 'f', 'ret')) {
+    foreach ($key in @('n', 'e', 't', 'dot', 's', 't', 'a', 't', 'u', 's', 'ret')) {
         Invoke-QmpCommand $qmp.Writer $qmp.Reader @{
             execute = 'human-monitor-command'
             arguments = @{ 'command-line' = "sendkey $key" }

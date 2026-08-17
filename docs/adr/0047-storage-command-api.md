@@ -12,7 +12,7 @@ allocator.
 
 ## Decision
 
-- Add `CommandsToStorage` and `StorageToCommands` while preserving the existing low-level Storage
+- Add `FlowToStorage` and `StorageToFlow` while preserving the existing low-level Storage
   endpoint IDs. Commands and Storage each use exactly four capability slots.
 - Encode versioned `Begin`, `Commit`, `Abort`, `List`, `CreateFile`, `Read`, `Write`, `Remove`, and
   `Rename` messages in the existing `IpcBytes` transport. Lengths, versions, operations, flags,
