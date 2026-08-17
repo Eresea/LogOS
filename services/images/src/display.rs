@@ -62,9 +62,6 @@ pub extern "C" fn _start() -> ! {
             progressed = true;
             if display.apply(generation, &message).is_ok() {
                 let more = message.flags & RENDER_FLAG_MORE != 0;
-                if message.kind == MessageKind::FullRedraw && more {
-                    render(display, framebuffer, config);
-                }
                 render_pending = true;
                 render_complete = !more;
             }

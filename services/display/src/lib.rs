@@ -243,6 +243,10 @@ impl Display {
     /// surface so the next full redraw cannot inherit stale cells.
     pub fn replace_generation(&mut self, generation: u16) {
         self.generation = generation;
+        self.columns = 0;
+        self.rows = 0;
+        self.cursor_column = 0;
+        self.cursor_row = 0;
         self.cells.fill(Cell::EMPTY);
         self.dirty.fill(true);
         self.surface_initialized = false;
@@ -519,5 +523,20 @@ mod tests {
         let message = RenderMessage::empty(MessageKind::FullRedraw);
         assert_eq!(display.apply(1, &message), Err(DisplayError::StaleGeneration));
         assert_eq!(display.apply(2, &message), Err(DisplayError::InvalidMessage));
+    }
+
+    #[test]
+    fn replacement_generation_drops_old_geometry_and_cursor() {
+        let mut display = Display::new(1);
+        let mut message = RenderMessage::empty(MessageKind::RenderCells);
+        message.columns = 2;
+        message.rows = 1;
+        message.cursor_column = 1;
+        display.apply(1, &message).unwrap();
+        display.replace_generation(2);
+        assert_eq!(display.columns, 0);
+        assert_eq!(display.rows, 0);
+        assert_eq!((display.cursor_column, display.cursor_row), (0, 0));
+        assert!(!display.toggle_cursor());
     }
 }

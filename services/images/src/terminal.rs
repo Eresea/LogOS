@@ -37,6 +37,7 @@ pub extern "C" fn _start() -> ! {
     let pending_render = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_RENDER) };
     let pending_session_input = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_SESSION_INPUT) };
     let mut heartbeat_ticks = 0u16;
+    let mut render_more = false;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Terminal);
         let mut wait_mask = 0;
@@ -95,6 +96,7 @@ pub extern "C" fn _start() -> ! {
             match common::ipc_send(DISPLAY_CAPABILITY, &render) {
                 IpcStatus::Ok => {
                     *pending_render = None;
+                    render_more = render.flags & logos_abi::RENDER_FLAG_MORE != 0;
                 }
                 IpcStatus::Full => {
                     wait_mask |=
@@ -104,8 +106,14 @@ pub extern "C" fn _start() -> ! {
                 | IpcStatus::Disconnected
                 | IpcStatus::Unauthorized
                 | IpcStatus::Malformed
-                | IpcStatus::Empty => *pending_render = None,
+                | IpcStatus::Empty => {
+                    *pending_render = None;
+                    render_more = false;
+                }
             }
+        }
+        if pending_render.is_none() && render_more {
+            continue;
         }
         if wait_mask != 0 {
             common::wait(wait_mask, logos_abi::ServiceId::Terminal);

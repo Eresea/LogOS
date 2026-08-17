@@ -102,6 +102,7 @@ impl Parser {
 pub struct TerminalState<const CELL_COUNT: usize> {
     cursor_column: usize,
     cursor_row: usize,
+    wrap_pending: bool,
     cursor_dirty: bool,
     screen: [Cell; CELL_COUNT],
     dirty: [bool; CELL_COUNT],
@@ -162,6 +163,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         Self {
             cursor_column: 0,
             cursor_row: 0,
+            wrap_pending: false,
             cursor_dirty: false,
             screen: [blank_cell(); CELL_COUNT],
             dirty: [true; CELL_COUNT],
@@ -187,6 +189,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     pub fn reset(&mut self) {
         self.cursor_column = 0;
         self.cursor_row = 0;
+        self.wrap_pending = false;
         self.cursor_dirty = true;
         self.full_redraw_pending = true;
         self.parser = Parser::new();
@@ -251,14 +254,27 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             return;
         }
         match byte {
-            0x1b => self.parser.state = ParserState::Escape,
-            0x08 | 0x7f => self.cursor_column = self.cursor_column.saturating_sub(1),
+            0x1b => {
+                self.wrap_pending = false;
+                self.parser.state = ParserState::Escape;
+            }
+            0x08 | 0x7f => {
+                self.wrap_pending = false;
+                self.cursor_column = self.cursor_column.saturating_sub(1);
+            }
             0x09 => {
+                self.wrap_pending = false;
                 self.cursor_column =
                     ((self.cursor_column / 8) + 1).saturating_mul(8).min(DEFAULT_COLUMNS - 1)
             }
-            0x0a..=0x0c => self.line_feed(),
-            0x0d => self.cursor_column = 0,
+            0x0a..=0x0c => {
+                self.wrap_pending = false;
+                self.line_feed();
+            }
+            0x0d => {
+                self.wrap_pending = false;
+                self.cursor_column = 0;
+            }
             0x20..=0x7e => self.put(byte as u32),
             0xc2..=0xdf => {
                 self.utf8_codepoint = u32::from(byte & 0x1f);
@@ -300,6 +316,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     }
 
     fn dispatch_csi(&mut self, final_byte: u8) {
+        self.wrap_pending = false;
         match final_byte {
             b'C' => {
                 self.cursor_column = self
@@ -325,6 +342,25 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
                 self.cursor_column = self.parser.param(1, 1).saturating_sub(1) as usize;
                 self.cursor_row = self.cursor_row.min(DEFAULT_ROWS - 1);
                 self.cursor_column = self.cursor_column.min(DEFAULT_COLUMNS - 1);
+            }
+            b'G' | b'`' => {
+                self.cursor_column = self.parser.param(0, 1).saturating_sub(1) as usize;
+                self.cursor_column = self.cursor_column.min(DEFAULT_COLUMNS - 1);
+            }
+            b'd' => {
+                self.cursor_row = self.parser.param(0, 1).saturating_sub(1) as usize;
+                self.cursor_row = self.cursor_row.min(DEFAULT_ROWS - 1);
+            }
+            b'E' => {
+                self.cursor_row = self
+                    .cursor_row
+                    .saturating_add(self.parser.param(0, 1) as usize)
+                    .min(DEFAULT_ROWS - 1);
+                self.cursor_column = 0;
+            }
+            b'F' => {
+                self.cursor_row = self.cursor_row.saturating_sub(self.parser.param(0, 1) as usize);
+                self.cursor_column = 0;
             }
             b'J' => self.erase_display(self.parser.param(0, 0)),
             b'K' => self.erase_line(self.parser.param(0, 0)),
@@ -372,9 +408,10 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     }
 
     fn put(&mut self, codepoint: u32) {
-        if self.cursor_column >= DEFAULT_COLUMNS {
+        if self.wrap_pending {
             self.line_feed();
             self.cursor_column = 0;
+            self.wrap_pending = false;
         }
         let index = Self::index(self.cursor_column, self.cursor_row);
         self.screen[index] = Cell {
@@ -385,10 +422,16 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             ..blank_cell()
         };
         self.dirty[index] = true;
-        self.cursor_column += 1;
+        if self.cursor_column + 1 >= DEFAULT_COLUMNS {
+            self.cursor_column = DEFAULT_COLUMNS - 1;
+            self.wrap_pending = true;
+        } else {
+            self.cursor_column += 1;
+        }
     }
 
     fn line_feed(&mut self) {
+        self.wrap_pending = false;
         if self.cursor_row + 1 >= DEFAULT_ROWS {
             self.scroll_up();
         } else {
@@ -707,6 +750,25 @@ mod tests {
     }
 
     #[test]
+    fn full_width_text_keeps_cursor_in_the_last_cell_until_wrap() {
+        let mut terminal = Terminal::new();
+        terminal.feed(&[b'x'; DEFAULT_COLUMNS]);
+        assert_eq!(terminal.cursor(), (DEFAULT_COLUMNS - 1, 0));
+        terminal.feed(b"y");
+        assert_eq!(terminal.screen[DEFAULT_COLUMNS].codepoint, b'y' as u32);
+        assert_eq!(terminal.cursor(), (1, 1));
+    }
+
+    #[test]
+    fn cursor_motion_cancels_pending_wrap() {
+        let mut terminal = Terminal::new();
+        terminal.feed(&[b'x'; DEFAULT_COLUMNS]);
+        terminal.feed(b"\x1b[Dz");
+        assert_eq!(terminal.screen[DEFAULT_COLUMNS - 2].codepoint, b'z' as u32);
+        assert_eq!(terminal.cursor(), (DEFAULT_COLUMNS - 1, 0));
+    }
+
+    #[test]
     fn cursor_and_erase_are_bounded() {
         let mut terminal = Terminal::new();
         terminal.feed(b"\x1b[2;4Hx\x1b[2K");
@@ -798,6 +860,15 @@ mod tests {
         assert_eq!(terminal.cursor(), (0, 7));
         terminal.feed(b"\x1b[99B");
         assert_eq!(terminal.cursor(), (0, DEFAULT_ROWS - 1));
+    }
+
+    #[test]
+    fn common_absolute_and_relative_cursor_sequences_are_bounded() {
+        let mut terminal = Terminal::new();
+        terminal.feed(b"\x1b[12G\x1b[8d\x1b[2E");
+        assert_eq!(terminal.cursor(), (0, 9));
+        terminal.feed(b"\x1b[3F");
+        assert_eq!(terminal.cursor(), (0, 6));
     }
 
     #[test]
