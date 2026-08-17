@@ -578,7 +578,7 @@ impl CompletionService {
                     response.flags |= COMPLETION_FLAG_TRUNCATED;
                 }
                 if b"echo".starts_with(context.prefix)
-                    && !response.push_candidate_with_cursor(b"echo(\"\")", 5)
+                    && !response.push_candidate_with_cursor(b"echo(\"\")", 6)
                 {
                     response.flags |= COMPLETION_FLAG_TRUNCATED;
                 }
@@ -2123,11 +2123,15 @@ mod tests {
         let help = provider.complete(CompletionRequest::new(4, b"hel", 3).unwrap());
         assert_eq!(help.candidate(0), Some(&b"help()"[..]));
 
+        let repeated_help = provider.complete(CompletionRequest::new(10, b"help()", 4).unwrap());
+        assert_eq!(repeated_help.status, CompletionStatus::NoMatch);
+
         let clear = provider.complete(CompletionRequest::new(8, b"cle", 3).unwrap());
         assert_eq!(clear.candidate(0), Some(&b"clear()"[..]));
 
         let echo = provider.complete(CompletionRequest::new(9, b"ech", 3).unwrap());
         assert_eq!(echo.candidate(0), Some(&b"echo(\"\")"[..]));
+        assert_eq!(echo.cursor_offsets[0], 6);
 
         let fs = provider.complete(CompletionRequest::new(5, b"fs.l", 4).unwrap());
         assert_eq!(fs.candidate(0), Some(&b"list()"[..]));

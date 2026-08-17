@@ -408,11 +408,6 @@ impl LineEditor {
                     index += 1;
                     continue;
                 }
-                if byte == 0x1b {
-                    self.dismiss_completion(output);
-                    index += 1;
-                    continue;
-                }
                 self.dismiss_completion(output);
             } else if self.completion_pending_id.is_some() && byte != b'\t' {
                 self.clear_completion_state();
@@ -1130,6 +1125,41 @@ mod tests {
         editor.input_for_command(b"\t", &mut command, &mut output);
         assert_eq!(&editor.line[..editor.line_len], b"net.fetch(\"\")");
         assert_eq!(editor.cursor, 11);
+    }
+
+    #[test]
+    fn completion_places_echo_cursor_between_quotes() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"echo", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_end = 4;
+        assert!(response.push_candidate_with_cursor(b"echo(\"\")", 6));
+        editor.apply_completion_response(response, &mut output);
+        editor.input_for_command(b"\t", &mut command, &mut output);
+        assert_eq!(&editor.line[..editor.line_len], b"echo(\"\")");
+        assert_eq!(editor.cursor, 6);
+    }
+
+    #[test]
+    fn escape_sequence_dismisses_completion_without_inserting_bytes() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"hel", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_end = 3;
+        assert!(response.push_candidate_with_cursor(b"help()", 4));
+        editor.apply_completion_response(response, &mut output);
+
+        editor.input_for_command(b"\x1b[1;5D", &mut command, &mut output);
+        assert_eq!(&editor.line[..editor.line_len], b"hel");
+        assert_eq!(editor.cursor, 0);
     }
 
     #[test]

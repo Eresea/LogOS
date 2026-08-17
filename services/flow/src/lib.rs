@@ -205,6 +205,7 @@ pub fn completion_context<'a>(
     };
     if before[..start].iter().any(|byte| !byte.is_ascii_whitespace())
         || !before[start..].iter().all(|byte| is_root_byte(*byte))
+        || line[cursor..].iter().any(|byte| !byte.is_ascii_whitespace())
     {
         return Ok(None);
     }
@@ -1208,6 +1209,7 @@ mod tests {
             completion_context(b"net.interface[\"e", 16).unwrap().unwrap().target,
             CompletionTarget::InterfaceName
         );
+        assert!(completion_context(b"help()", 4).unwrap().is_none());
         assert!(completion_context(b"service[storage", 15).unwrap().is_none());
         assert!(completion_context(&[b'x'; logos_abi::MAX_COMPLETION_LINE_BYTES + 1], 0).is_err());
     }
