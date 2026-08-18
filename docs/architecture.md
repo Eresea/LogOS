@@ -28,6 +28,8 @@ Terminal → Session → Flow → typed system API registry
 | Service IPC boundary | `service_ipc` + `service_runtime` | keeps fixed terminal queues and adds Flow↔Fetch, Fetch↔Storage, and Fetch↔Network edges plus dedicated Core storage/network capabilities; no queue, MMIO, or DMA frame is mapped into a service root |
 | Network IPC extension | `service_ipc` + `service_runtime` | adds Flow/Fetch client routing with ABI v2 inline payloads capped at 192 bytes; Core-owned packet descriptors/pages remain private to Network |
 | Storage boundary | Core VirtIO block adapter + `logos-storage` format + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, MSI-X interrupt delivery, reset, timeouts, and flush; Storage owns fixed request lifecycles, superblocks, journal, checkpoints, replay, recovery, durability, object IDs, namespace resolution, and bounded file operations; Flow reaches Storage through versioned `FlowToStorage`/`StorageToFlow` messages over private staging pages; one active transaction uses fixed shadow state and at most `MAX_RECORDS_PER_TRANSACTION` records; Core stores no paths or namespace state; split-ring generations reset the bounded queue before descriptor reuse |
+| Filesystem package boundary | `logos-package` + Storage v3 + `storage_ipc` + `service_runtime` | A versioned envelope accepts only one `Service` package kind and one ELF; v3 keeps ordinary files capped at 8 KiB and stores up to eight generation-safe package records in a disk-derived extent arena; Core↔Storage package Lookup/Read uses one outstanding request and one reused 4 KiB frame with request, generation, offset, length, and service-epoch validation |
+| Package memory budget | `loader` + `frame_pool` + `memory` | Package extents allocate only the blocks required by the package; prepared ELF images allocate exact code/data/BSS/stack/page-table frames under the selected service owner, and every failed prepare or restart path reclaims them before the old graph is discarded |
 | Network boundary | Core VirtIO-net adapter + Network service + versioned Network IPC | Core owns optional PCI discovery, one fixed 64-entry RX/TX pair, 2 KiB DMA buffers, interrupts, reset, and deadlines; Network owns smoltcp Ethernet/ARP/IPv4/ICMP/UDP/DHCPv4/TCP state, eight sockets, two listeners, and private packet pages; Flow and Fetch receive routed inline payload responses; HTTP remains outside Network |
 | Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE` plus one read-only `FramebufferConfig` page at `DISPLAY_CONFIG_BASE`; boot rejects modes below the fixed 80×25/8×16 profile; no other service or kernel drawing path receives it |
 | Keyboard byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring with an observable drop counter and maps it only into Input at `INPUT_KEYBOARD_RING_BASE`; PS/2 decoding remains outside the kernel |
@@ -58,7 +60,7 @@ Terminal → Session → Flow → typed system API registry
 | Service ELF packaging | `services/images` + `scripts/build-services.ps1` | eight independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
 | Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all eight staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
 | Service supervisor | `supervisor::LiveSupervisor` + `service_runtime` | live heartbeat polling, graph-wide quiesce, generation-bumped IPC rebuild, bounded process/page-table/frame reclamation, and restart limits |
-| Service manager | `service_manager` + `service_runtime` | eight fixed service slots, generation-safe handles, dependency-aware list/status/start/stop/restart, one Flow-only manager capability page, and a deferred filesystem-package image seam |
+| Service manager | `service_manager` + `service_runtime` | eight fixed service slots, generation-safe handles, dependency-aware list/status/start/stop/restart, one Flow-only manager capability page, and an internal package activation hook; package-manager policy remains outside this boundary |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
 | Runtime handoff | `handoff_to_runtime` | registers one root `TaskEntry`; the scheduler starts it through the normal context path |
@@ -92,14 +94,17 @@ the format, journal, namespace, file API, and IPC adapter. The boot image is adm
 the kernel-mediated storage endpoint is identity-checked; requests reach the bounded VirtIO adapter,
 and the fresh-disk QEMU proof covers format, flush, reopen, and torn-journal recovery.
 
-Storage compatibility is fail-closed. The current format version is v2; legacy v1 media remains
-readable without checkpointing. An unknown superblock or journal-record version returns
+Storage compatibility is fail-closed. The current format version is v3; legacy v1/v2 media remains
+readable, but package operations on those volumes return `Unsupported`. An unknown superblock or journal-record version returns
 `UnsupportedVersion` and is never reformatted or silently replayed. Version 2 checkpoints compact
-the fixed namespace into two durable slots before reusing the bounded journal prefix. A future
-format migration must be explicitly implemented and proved before its version is accepted.
+the fixed namespace into two durable slots before reusing the bounded journal prefix. Version 3 adds
+a package arena between the bounded journal and checkpoint regions; package data is written and
+flushed before its catalog record is committed. A future format migration must be explicitly
+implemented and proved before its version is accepted.
 
 ## Deferred next-step improvements
 
-The bounded storage milestone now proves durable Flow filesystem workflows, reboot reopen, and torn-journal
-recovery. Filesystem-loaded service packages remain deferred because ordinary files are currently
-bounded below the retained service image size. Arbitrary runtime IPC topology also remains deferred.
+The bounded storage milestone now proves durable Flow filesystem workflows, reboot reopen, torn-journal
+recovery, variable-sized service packages, reader-based ELF streaming, and graph-wide package
+activation. Package-manager UI, dependency resolution, signatures, boot preference, program packages,
+and program installation remain deferred. Arbitrary runtime IPC topology also remains deferred.

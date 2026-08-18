@@ -55,3 +55,4 @@
 | [0051](0051-terminal-render-batching.md) | Accepted | Terminal render batches coalesce before display while full redraws clear the complete framebuffer |
 | [0052](0052-targeted-terminal-completion.md) | Accepted | Commands-owned bounded completion is optional, best-effort, and isolated from terminal execution failures |
 | [0054](0054-flow-interpreter-service-migration.md) | Accepted | Flow replaces Commands in the existing slot with bounded typed evaluation, promise lifecycle, response-body transport, and cancellation |
+| [0055](0055-filesystem-service-packages.md) | Accepted | Storage v3 stores variable-sized service packages in a bounded extent arena and Core activates validated ELF packages through a fixed channel |
