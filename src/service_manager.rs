@@ -95,11 +95,15 @@ impl Slot {
 
 pub struct ServiceManager {
     slots: [Slot; MAX_SERVICE_SLOTS],
+    image_sources: [ServiceImageSource; MAX_SERVICE_SLOTS],
 }
 
 impl ServiceManager {
     pub const fn new() -> Self {
-        let mut manager = Self { slots: [Slot::EMPTY; MAX_SERVICE_SLOTS] };
+        let mut manager = Self {
+            slots: [Slot::EMPTY; MAX_SERVICE_SLOTS],
+            image_sources: [ServiceImageSource::Predeclared; MAX_SERVICE_SLOTS],
+        };
         manager.install_profiles();
         manager
     }
@@ -161,14 +165,21 @@ impl ServiceManager {
 
     pub const fn image_source(&self, service: logos_abi::ServiceId) -> Option<ServiceImageSource> {
         if service.index() < SERVICE_IMAGES.len() && self.slots[service.index()].service.is_some() {
-            Some(ServiceImageSource::Predeclared)
+            Some(self.image_sources[service.index()])
         } else {
             None
         }
     }
 
-    /// Filesystem package loading remains a deliberate future seam until the
-    /// bounded package object format is available.
+    pub fn set_image_source(&mut self, service: logos_abi::ServiceId, source: ServiceImageSource) {
+        if service.index() < self.image_sources.len()
+            && self.slots[service.index()].service.is_some()
+        {
+            self.image_sources[service.index()] = source;
+        }
+    }
+
+    /// Package-manager policy remains outside this internal activation seam.
     pub fn load_filesystem_package(
         &mut self,
         _service: logos_abi::ServiceId,
