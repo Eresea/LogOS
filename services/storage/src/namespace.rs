@@ -1474,11 +1474,13 @@ mod tests {
     #[test]
     fn incomplete_package_write_is_not_published_after_reopen() {
         let mut fs = DurableNamespace::format(heap_store()).unwrap();
-        let mut incomplete =
-            fs.begin_package_install(ServiceId::Flow, BLOCK_BYTES * 2 + 1).unwrap();
-        let incomplete_start = incomplete.extents[0].start;
-        fs.write_package_chunk(&mut incomplete, 0, &[0; BLOCK_BYTES]).unwrap();
-        drop(incomplete);
+        let incomplete_start = {
+            let mut incomplete =
+                fs.begin_package_install(ServiceId::Flow, BLOCK_BYTES * 2 + 1).unwrap();
+            let incomplete_start = incomplete.extents[0].start;
+            fs.write_package_chunk(&mut incomplete, 0, &[0; BLOCK_BYTES]).unwrap();
+            incomplete_start
+        };
 
         let store = fs.into_store();
         let mut reopened = DurableNamespace::open(store).unwrap();
