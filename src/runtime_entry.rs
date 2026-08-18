@@ -154,6 +154,8 @@ pub(crate) fn run() {
         if crate::supervise_services() {
             #[cfg(feature = "qemu-proof")]
             proof::live_service_restarted();
+            #[cfg(feature = "package-proof")]
+            proof::package_persistence_restarted();
         }
         sleep_current_for(3);
         #[cfg(feature = "qemu-proof")]

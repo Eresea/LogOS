@@ -541,6 +541,7 @@ pub fn validate_elf(image: &[u8]) -> Result<u64, ProcessError> {
     Ok(ElfLoadPlan::parse(image)?.entry() as u64)
 }
 
+#[allow(clippy::len_without_is_empty)]
 pub trait ImageReader {
     fn len(&self) -> usize;
     fn read(&mut self, offset: usize, output: &mut [u8]) -> Result<usize, ProcessError>;

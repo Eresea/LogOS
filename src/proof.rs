@@ -211,6 +211,14 @@ pub fn package_corrupt_rejected() {
 }
 
 #[cfg(feature = "package-proof")]
+pub fn package_persistence_restarted() {
+    if !package_graph_running() {
+        crate::arch_fatal(b"LogOS vNext: package persistence graph");
+    }
+    crate::arch_proof_line(b"LogOS vNext: package persistence PASS");
+}
+
+#[cfg(feature = "package-proof")]
 fn package_graph_running() -> bool {
     let mut cursor = 0;
     let mut terminal_running = false;

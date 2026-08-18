@@ -28,6 +28,7 @@ pub enum PackageError {
     CrcMismatch,
 }
 
+#[allow(clippy::len_without_is_empty)]
 pub trait PackageReader {
     fn len(&self) -> usize;
     fn read(&mut self, offset: usize, output: &mut [u8]) -> Result<usize, PackageError>;

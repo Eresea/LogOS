@@ -67,7 +67,8 @@ function Invoke-PackageBoot {
             if (Test-Path $log) {
                 $text = Get-Content $log -Raw
                 $complete = $text -match 'LogOS vNext: package activation PASS' `
-                    -and $text -match 'LogOS vNext: corrupt package rollback PASS'
+                    -and $text -match 'LogOS vNext: corrupt package rollback PASS' `
+                    -and $text -match 'LogOS vNext: package persistence PASS'
                 if ($complete) {
                     Write-Host "Filesystem package boot $BootNumber PASS"
                     return
