@@ -85,6 +85,7 @@ pub struct ServiceRuntime {
     package_response: Option<logos_abi::PackageResponse>,
     package_next_request: u32,
     prepared_package: Option<PreparedServiceImage>,
+    active_package: Option<ActivePackageImage>,
     network_packet_response: Option<logos_abi::NetworkPacketDescriptor>,
     network_packet_sequence: u32,
     suppressed_heartbeats: [AtomicBool; SERVICE_COUNT],
@@ -97,6 +98,11 @@ struct PreparedServiceImage {
     service: ServiceId,
     plan: crate::process::ElfLoadPlan,
     image: LoadedImage,
+}
+
+struct ActivePackageImage {
+    service: ServiceId,
+    plan: crate::process::ElfLoadPlan,
 }
 
 struct RuntimePackageReader<'a, 'b> {
@@ -251,6 +257,7 @@ impl ServiceRuntime {
             package_response: None,
             package_next_request: 1,
             prepared_package: None,
+            active_package: None,
             network_packet_response: None,
             network_packet_sequence: 1,
             suppressed_heartbeats: [const { AtomicBool::new(false) }; SERVICE_COUNT],
@@ -1074,6 +1081,24 @@ impl ServiceRuntime {
             service,
             crate::service_manager::ServiceImageSource::FilesystemPackage,
         );
+        self.active_package = Some(ActivePackageImage { service, plan });
+        Ok(())
+    }
+
+    fn retain_active_package_image(&mut self) -> Result<(), ServiceRuntimeError> {
+        let Some(active) = self.active_package.as_ref() else {
+            return Ok(());
+        };
+        if self.prepared_package.is_some() {
+            return Ok(());
+        }
+        let index = active.service.index();
+        if !self.table_ready[index] {
+            return Err(ServiceRuntimeError::Image);
+        }
+        let image = core::mem::replace(&mut self.images[index], LoadedImage::empty());
+        self.prepared_package =
+            Some(PreparedServiceImage { service: active.service, plan: active.plan, image });
         Ok(())
     }
 
@@ -1974,6 +1999,7 @@ impl ServiceRuntime {
         }
         self.manager.prepare_graph_restart();
         self.stop_tasks(runtime_guard)?;
+        self.retain_active_package_image()?;
         crate::arch::prepare_task_address_space(0);
         crate::arch::restart_critical_section(|| {
             crate::arch::disable_keyboard_irq();
