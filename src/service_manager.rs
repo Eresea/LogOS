@@ -16,11 +16,6 @@ pub enum ServiceImageSource {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ServiceImageError {
-    Unsupported,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServiceHandle {
     slot: u8,
     generation: u32,
@@ -95,11 +90,15 @@ impl Slot {
 
 pub struct ServiceManager {
     slots: [Slot; MAX_SERVICE_SLOTS],
+    image_sources: [ServiceImageSource; MAX_SERVICE_SLOTS],
 }
 
 impl ServiceManager {
     pub const fn new() -> Self {
-        let mut manager = Self { slots: [Slot::EMPTY; MAX_SERVICE_SLOTS] };
+        let mut manager = Self {
+            slots: [Slot::EMPTY; MAX_SERVICE_SLOTS],
+            image_sources: [ServiceImageSource::Predeclared; MAX_SERVICE_SLOTS],
+        };
         manager.install_profiles();
         manager
     }
@@ -161,20 +160,18 @@ impl ServiceManager {
 
     pub const fn image_source(&self, service: logos_abi::ServiceId) -> Option<ServiceImageSource> {
         if service.index() < SERVICE_IMAGES.len() && self.slots[service.index()].service.is_some() {
-            Some(ServiceImageSource::Predeclared)
+            Some(self.image_sources[service.index()])
         } else {
             None
         }
     }
 
-    /// Filesystem package loading remains a deliberate future seam until the
-    /// bounded package object format is available.
-    pub fn load_filesystem_package(
-        &mut self,
-        _service: logos_abi::ServiceId,
-        _image: &[u8],
-    ) -> Result<(), ServiceImageError> {
-        Err(ServiceImageError::Unsupported)
+    pub fn set_image_source(&mut self, service: logos_abi::ServiceId, source: ServiceImageSource) {
+        if service.index() < self.image_sources.len()
+            && self.slots[service.index()].service.is_some()
+        {
+            self.image_sources[service.index()] = source;
+        }
     }
 
     pub const fn handle(&self, slot: usize) -> Option<ServiceHandle> {
@@ -646,10 +643,6 @@ mod tests {
                 .response
                 .status,
             ManagerStatus::Unsupported
-        );
-        assert_eq!(
-            manager.load_filesystem_package(ServiceId::Input, &[0; 1]),
-            Err(ServiceImageError::Unsupported)
         );
         assert_eq!(manager.image_source(ServiceId::Input), Some(ServiceImageSource::Predeclared));
     }

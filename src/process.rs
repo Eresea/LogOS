@@ -31,6 +31,7 @@ pub enum ProcessError {
     InvalidHandle,
     NotRunning,
     AddressSpace,
+    ReadFailure,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -389,7 +390,11 @@ impl ProcessTable {
     }
 
     pub fn start(&mut self, image: &[u8]) -> Result<ProcessHandle, ProcessError> {
-        let entry = validate_elf(image)?;
+        self.start_plan(ElfLoadPlan::parse(image)?)
+    }
+
+    pub fn start_plan(&mut self, plan: ElfLoadPlan) -> Result<ProcessHandle, ProcessError> {
+        let entry = plan.entry() as u64;
         let Some(slot) =
             self.slots.iter_mut().enumerate().find_map(|(slot, process)| {
                 (process.state == ProcessState::Vacant).then_some(slot)
@@ -536,6 +541,31 @@ pub fn validate_elf(image: &[u8]) -> Result<u64, ProcessError> {
     Ok(ElfLoadPlan::parse(image)?.entry() as u64)
 }
 
+#[allow(clippy::len_without_is_empty)]
+pub trait ImageReader {
+    fn len(&self) -> usize;
+    fn read(&mut self, offset: usize, output: &mut [u8]) -> Result<usize, ProcessError>;
+}
+
+struct SliceImageReader<'a> {
+    image: &'a [u8],
+}
+
+impl ImageReader for SliceImageReader<'_> {
+    fn len(&self) -> usize {
+        self.image.len()
+    }
+
+    fn read(&mut self, offset: usize, output: &mut [u8]) -> Result<usize, ProcessError> {
+        let end = offset.checked_add(output.len()).ok_or(ProcessError::ReadFailure)?;
+        let Some(bytes) = self.image.get(offset..end) else {
+            return Err(ProcessError::ReadFailure);
+        };
+        output.copy_from_slice(bytes);
+        Ok(output.len())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadSegment {
     file_offset: usize,
@@ -581,48 +611,71 @@ pub struct ElfLoadPlan {
 
 impl ElfLoadPlan {
     pub fn parse(image: &[u8]) -> Result<Self, ProcessError> {
-        if image.len() < 64
-            || image.len() > MAX_IMAGE_BYTES
-            || &image[..4] != ELF_MAGIC
-            || image[4] != 2
-            || image[5] != 1
-            || read_u16(image, 18) != Some(0x3e)
-            || read_u16(image, 16) != Some(2)
+        let mut reader = SliceImageReader { image };
+        Self::parse_reader(&mut reader)
+    }
+
+    pub fn parse_reader<R: ImageReader>(reader: &mut R) -> Result<Self, ProcessError> {
+        if reader.len() < 64 || reader.len() > MAX_IMAGE_BYTES {
+            return Err(ProcessError::InvalidImage);
+        }
+        let mut header = [0; 64];
+        read_exact(reader, 0, &mut header)?;
+        if &header[..4] != ELF_MAGIC
+            || header[4] != 2
+            || header[5] != 1
+            || read_u16_at(&header, 18) != Some(0x3e)
+            || read_u16_at(&header, 16) != Some(2)
         {
             return Err(ProcessError::InvalidImage);
         }
-        let entry = usize_from_u64(read_u64(image, 24).ok_or(ProcessError::InvalidImage)?)?;
-        let ph_offset = usize_from_u64(read_u64(image, 32).ok_or(ProcessError::InvalidImage)?)?;
-        let ph_entry_size = read_u16(image, 54).ok_or(ProcessError::InvalidImage)? as usize;
-        let ph_count = read_u16(image, 56).ok_or(ProcessError::InvalidImage)? as usize;
+        let entry = usize_from_u64(read_u64_at(&header, 24).ok_or(ProcessError::InvalidImage)?)?;
+        let ph_offset =
+            usize_from_u64(read_u64_at(&header, 32).ok_or(ProcessError::InvalidImage)?)?;
+        let ph_entry_size = read_u16_at(&header, 54).ok_or(ProcessError::InvalidImage)? as usize;
+        let ph_count = read_u16_at(&header, 56).ok_or(ProcessError::InvalidImage)? as usize;
         let ph_bytes = ph_entry_size.checked_mul(ph_count).ok_or(ProcessError::InvalidImage)?;
         if entry == 0
             || ph_entry_size < 56
             || ph_count == 0
             || ph_count > MAX_PROGRAM_HEADERS
             || ph_offset.checked_add(ph_bytes).is_none()
-            || ph_offset + ph_bytes > image.len()
+            || ph_offset + ph_bytes > reader.len()
         {
             return Err(ProcessError::InvalidImage);
         }
         let mut plan =
             Self { entry, segments: [None; MAX_PROGRAM_HEADERS], count: 0, memory_bytes: 0 };
         let mut entry_executable = false;
+        let mut program_headers = [0; MAX_PROGRAM_HEADERS * 56];
+        if ph_entry_size == 56 {
+            read_exact(reader, ph_offset, &mut program_headers[..ph_bytes])?;
+        }
         for index in 0..ph_count {
             let offset = ph_offset + index * ph_entry_size;
-            let kind = read_u32_at(image, offset).ok_or(ProcessError::InvalidImage)?;
+            let mut program_header = [0; 56];
+            if ph_entry_size == 56 {
+                let start = index * 56;
+                program_header.copy_from_slice(&program_headers[start..start + 56]);
+            } else {
+                read_exact(reader, offset, &mut program_header)?;
+            }
+            let kind = read_u32_at(&program_header, 0).ok_or(ProcessError::InvalidImage)?;
             if kind != 1 {
                 continue;
             }
-            let flags = read_u32_at(image, offset + 4).ok_or(ProcessError::InvalidImage)?;
+            let flags = read_u32_at(&program_header, 4).ok_or(ProcessError::InvalidImage)?;
             let file_offset =
-                usize_from_u64(read_u64_at(image, offset + 8).ok_or(ProcessError::InvalidImage)?)?;
-            let virtual_address =
-                usize_from_u64(read_u64_at(image, offset + 16).ok_or(ProcessError::InvalidImage)?)?;
-            let file_size =
-                usize_from_u64(read_u64_at(image, offset + 32).ok_or(ProcessError::InvalidImage)?)?;
-            let memory_size =
-                usize_from_u64(read_u64_at(image, offset + 40).ok_or(ProcessError::InvalidImage)?)?;
+                usize_from_u64(read_u64_at(&program_header, 8).ok_or(ProcessError::InvalidImage)?)?;
+            let virtual_address = usize_from_u64(
+                read_u64_at(&program_header, 16).ok_or(ProcessError::InvalidImage)?,
+            )?;
+            let file_size = usize_from_u64(
+                read_u64_at(&program_header, 32).ok_or(ProcessError::InvalidImage)?,
+            )?;
+            let memory_size = usize_from_u64(
+                read_u64_at(&program_header, 40).ok_or(ProcessError::InvalidImage)?,
+            )?;
             let Some(file_end) = file_offset.checked_add(file_size) else {
                 return Err(ProcessError::InvalidImage);
             };
@@ -631,7 +684,7 @@ impl ElfLoadPlan {
             };
             if memory_size == 0
                 || file_size > memory_size
-                || file_end > image.len()
+                || file_end > reader.len()
                 || virtual_address < 0x1000
                 || virtual_end > 0x0000_8000_0000_0000
                 || memory_size > MAX_IMAGE_BYTES
@@ -684,13 +737,23 @@ impl ElfLoadPlan {
     }
 }
 
+fn read_exact<R: ImageReader>(
+    reader: &mut R,
+    offset: usize,
+    output: &mut [u8],
+) -> Result<(), ProcessError> {
+    let end = offset.checked_add(output.len()).ok_or(ProcessError::InvalidImage)?;
+    if end > reader.len() {
+        return Err(ProcessError::InvalidImage);
+    }
+    let amount = reader.read(offset, output)?;
+    (amount == output.len()).then_some(()).ok_or(ProcessError::ReadFailure)
+}
+
 fn usize_from_u64(value: u64) -> Result<usize, ProcessError> {
     (value <= usize::MAX as u64).then_some(value as usize).ok_or(ProcessError::InvalidImage)
 }
 
-fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
-    read_u16_at(bytes, offset)
-}
 fn read_u16_at(bytes: &[u8], offset: usize) -> Option<u16> {
     Some(u16::from_le_bytes([*bytes.get(offset)?, *bytes.get(offset + 1)?]))
 }
@@ -701,9 +764,6 @@ fn read_u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
         *bytes.get(offset + 2)?,
         *bytes.get(offset + 3)?,
     ]))
-}
-fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
-    read_u64_at(bytes, offset)
 }
 fn read_u64_at(bytes: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_le_bytes([

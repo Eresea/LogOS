@@ -75,6 +75,10 @@ impl<B: BlockStore> StorageApi<B> {
         self.namespace
     }
 
+    pub fn namespace_mut(&mut self) -> &mut DurableNamespace<B> {
+        &mut self.namespace
+    }
+
     pub fn handle(&mut self, message: &IpcBytes) -> Option<IpcBytes> {
         let request = match StorageApiRequest::decode(message) {
             Ok(request) => request,
@@ -451,6 +455,8 @@ fn map_error(error: NamespaceError) -> StorageApiStatus {
         NamespaceError::TooLarge => StorageApiStatus::TooLarge,
         NamespaceError::Recovery => StorageApiStatus::Io,
         NamespaceError::Format(_) | NamespaceError::Block(_) => StorageApiStatus::Io,
+        NamespaceError::Unsupported => StorageApiStatus::Unsupported,
+        NamespaceError::Package(_) => StorageApiStatus::Io,
     }
 }
 
@@ -880,7 +886,7 @@ mod tests {
             .status,
             StorageApiStatus::Ok
         );
-        api.namespace.test_store_mut().fail();
+        api.namespace.block_store_mut().fail();
         assert_eq!(
             status(
                 &api.handle(&request(

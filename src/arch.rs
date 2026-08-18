@@ -1094,6 +1094,34 @@ pub(crate) fn manager_proof(
     unsafe { (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).manager_proof(request) }
 }
 
+// Package activation remains an internal Core hook until package-manager policy exists.
+#[allow(dead_code)]
+pub(crate) fn activate_service_package(
+    service: logos_abi::ServiceId,
+) -> Result<(), crate::service_runtime::ServiceRuntimeError> {
+    let mut runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME))
+            .activate_package(service, &mut runtime_guard)
+    }
+}
+
+#[cfg(feature = "package-proof")]
+pub(crate) fn restart_service_graph_for_proof() -> bool {
+    let mut runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME))
+            .restart_for_package_proof(&mut runtime_guard)
+            .is_ok()
+    }
+}
+
+#[cfg(feature = "package-proof")]
+pub(crate) fn package_frame_accounting_valid() -> bool {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).package_frame_accounting_valid() }
+}
+
 #[cfg(feature = "qemu-proof")]
 pub(crate) fn hostile_ipc_layout_valid() -> bool {
     let _runtime_guard = ServiceRuntimeGuard::acquire();
@@ -1109,7 +1137,8 @@ pub(crate) fn suppress_service_heartbeat(service: logos_abi::ServiceId) {
 pub(crate) fn fault_service_process(process: crate::process::ProcessHandle, vector: u8) -> bool {
     let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe {
-        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).fault_process(process, vector).is_ok()
+        let runtime = &mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME);
+        runtime.fault_process(process, vector).is_ok()
     }
 }
 

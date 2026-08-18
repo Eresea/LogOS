@@ -40,3 +40,13 @@ real-peer QEMU network proof is a separate enabled-profile gate.
 
 Proof mode captures debugcon output, rejects fatal markers, requires the structured PASS marker,
 and terminates QEMU after the bounded timeout.
+
+The filesystem package proof seeds a fresh v3 disk with a real service ELF, activates it through the
+internal Core hook, checks corrupt-package rollback, and boots again to prove package reopen:
+
+```powershell
+.\scripts\package-proof.ps1 -Release
+```
+
+Each offline package boot has a ten-second maximum; the broader scheduler proof remains a
+separate gate.

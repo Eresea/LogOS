@@ -49,8 +49,16 @@ permissions, directories, or real-peer Network packet/TCP behavior. AP startup
 is limited to healthy xAPIC IDs, eight CPUs, fixed low-memory trampoline staging, and current CR3.
 
 The enabled-profile Network and dedicated Fetch QEMU proofs are not yet PR gates; the Network
-listener path and Fetch terminal-input path still need a stable real-peer proof. DHCP fallback
-QEMU proof is also deferred post-merge. No massive-traffic claim is made; smoltcp 0.12 TCP
-congestion-control/high-throughput work remains outside this milestone.
+  listener path and Fetch terminal-input path still need a stable real-peer proof. DHCP fallback
+  QEMU proof is also deferred post-merge. No massive-traffic claim is made; smoltcp 0.12 TCP
+  congestion-control/high-throughput work remains outside this milestone.
+
+- Storage v3 package host coverage passes variable-sized extent allocation/reuse, atomic replacement,
+  abort, incomplete-write non-publication after reopen, stale handles, ordinary-file limits, and v1/v2
+  package incompatibility. Package-format tests cover header, kind, service, ABI, size, truncation, and
+  CRC failures. Reader-based ELF tests cover cross-page streaming, zeroing, read failure, exact service
+  ownership, exhaustion, and reclamation. The dedicated `scripts/package-proof.ps1` gate seeds a real
+  service ELF, activates it through Core↔Storage, rejects a corrupt package without disturbing the graph,
+  and reopens the package after reboot under a ten-second per-boot non-network timeout.
 
 `v1_docs/` and reviewed v1 status records are historical reference only.

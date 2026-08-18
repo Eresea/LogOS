@@ -51,7 +51,6 @@ static NETWORK_RESTART_COMPLETED: AtomicBool = AtomicBool::new(false);
 static NETWORK_STALE_REJECTED: AtomicBool = AtomicBool::new(false);
 static PROBE_RING: logos_abi::RenderIpc =
     logos_abi::RenderIpc::new(logos_abi::EndpointHeader::new(1, 1));
-
 unsafe extern "C" {
     fn proof_task_a();
     fn proof_task_b();
@@ -193,6 +192,58 @@ pub fn manager_restart_completed() {
 
 pub fn manager_syscall_succeeded() {
     MANAGER_SYSCALL_SUCCEEDED.store(true, Ordering::Release);
+}
+
+#[cfg(feature = "package-proof")]
+pub fn package_activation_complete() {
+    if !package_graph_running() {
+        crate::arch_fatal(b"LogOS vNext: package graph recovery");
+    }
+    crate::arch_proof_line(b"LogOS vNext: package activation PASS");
+}
+
+#[cfg(feature = "package-proof")]
+pub fn package_corrupt_rejected() {
+    if !package_graph_running() {
+        crate::arch_fatal(b"LogOS vNext: corrupt package graph");
+    }
+    crate::arch_proof_line(b"LogOS vNext: corrupt package rollback PASS");
+}
+
+#[cfg(feature = "package-proof")]
+pub fn package_persistence_restarted() {
+    if !package_graph_running() {
+        crate::arch_fatal(b"LogOS vNext: package persistence graph");
+    }
+    crate::arch_proof_line(b"LogOS vNext: package persistence PASS");
+}
+
+#[cfg(feature = "package-proof")]
+fn package_graph_running() -> bool {
+    let mut cursor = 0;
+    let mut terminal_running = false;
+    let mut storage_running = false;
+    for request_id in 1..=logos_abi::MAX_MANAGER_SERVICES {
+        let mut request =
+            logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, request_id as u32);
+        request.cursor = cursor;
+        let Some(response) = crate::arch::manager_proof(request) else {
+            return false;
+        };
+        if response.status != logos_abi::ManagerStatus::Ok {
+            return false;
+        }
+        let name = &response.record.name[..response.record.name_len as usize];
+        terminal_running |=
+            name == b"terminal" && response.record.state == logos_abi::ManagerState::Running;
+        storage_running |=
+            name == b"storage" && response.record.state == logos_abi::ManagerState::Running;
+        if response.cursor == u8::MAX {
+            break;
+        }
+        cursor = response.cursor;
+    }
+    terminal_running && storage_running && crate::arch::package_frame_accounting_valid()
 }
 
 pub fn observe_ring3_cpu(cpu: usize, expected_root: usize, actual_root: usize) {

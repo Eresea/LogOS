@@ -1,7 +1,8 @@
 use crate::{BLOCK_BYTES, Block, BlockError, BlockIndex, BlockStore};
 
 pub const LEGACY_FORMAT_VERSION: u16 = 1;
-pub const FORMAT_VERSION: u16 = 2;
+pub const V2_FORMAT_VERSION: u16 = 2;
+pub const FORMAT_VERSION: u16 = 3;
 pub const PROVISIONED_BLANK_MAGIC: &[u8; 8] = b"LOGOSBLK";
 pub const CHECKPOINT_PAYLOAD_BYTES: usize = (CHECKPOINT_BLOCKS - 1) * BLOCK_BYTES;
 /// Reserved record kind used only for internal transaction commit markers.
@@ -26,6 +27,7 @@ const COMPACTION_CLEAN: u8 = 0;
 const COMPACTION_PREPARED: u8 = 1;
 const MIN_JOURNAL_BLOCKS: u64 = MAX_RECORDS_PER_TRANSACTION as u64 + 1;
 const MAX_REPLAY_BLOCKS: u64 = 64;
+const V3_JOURNAL_BLOCKS: u64 = MAX_REPLAY_BLOCKS;
 
 pub const MAX_RECORD_PAYLOAD_BYTES: usize = BLOCK_BYTES - RECORD_HEADER_BYTES;
 
@@ -38,6 +40,17 @@ const fn checkpoint_start_for(block_count: u64) -> u64 {
 }
 
 const fn journal_end_for(block_count: u64) -> u64 {
+    let checkpoint_start = checkpoint_start_for(block_count);
+    if checkpoint_start == 0 {
+        block_count
+    } else if checkpoint_start > JOURNAL_START + V3_JOURNAL_BLOCKS {
+        JOURNAL_START + V3_JOURNAL_BLOCKS
+    } else {
+        checkpoint_start
+    }
+}
+
+const fn legacy_journal_end_for(block_count: u64) -> u64 {
     let checkpoint_start = checkpoint_start_for(block_count);
     if checkpoint_start == 0 { block_count } else { checkpoint_start }
 }
@@ -115,6 +128,16 @@ struct Superblock {
 
 impl Volume {
     pub fn format<B: BlockStore>(store: &mut B) -> Result<Self, FormatError> {
+        Self::format_as(store, FORMAT_VERSION)
+    }
+
+    pub fn format_as<B: BlockStore>(store: &mut B, version: u16) -> Result<Self, FormatError> {
+        if version != LEGACY_FORMAT_VERSION
+            && version != V2_FORMAT_VERSION
+            && version != FORMAT_VERSION
+        {
+            return Err(FormatError::UnsupportedVersion);
+        }
         let block_count = store.block_count();
         if block_count <= JOURNAL_START {
             return Err(FormatError::TooSmall);
@@ -128,7 +151,7 @@ impl Volume {
             }
         }
 
-        Self::format_metadata(store)
+        Self::format_metadata(store, version)
     }
 
     pub fn format_provisioned<B: BlockStore>(store: &mut B) -> Result<Self, FormatError> {
@@ -143,10 +166,10 @@ impl Volume {
         {
             return Err(FormatError::NotBlank);
         }
-        Self::format_metadata(store)
+        Self::format_metadata(store, FORMAT_VERSION)
     }
 
-    fn format_metadata<B: BlockStore>(store: &mut B) -> Result<Self, FormatError> {
+    fn format_metadata<B: BlockStore>(store: &mut B, version: u16) -> Result<Self, FormatError> {
         let block_count = store.block_count();
         if block_count <= JOURNAL_START {
             return Err(FormatError::TooSmall);
@@ -154,11 +177,19 @@ impl Volume {
         let info = VolumeInfo {
             generation: 1,
             journal_start: JOURNAL_START,
-            journal_end: journal_end_for(block_count),
+            journal_end: if version == FORMAT_VERSION {
+                journal_end_for(block_count)
+            } else {
+                legacy_journal_end_for(block_count)
+            },
             journal_head: JOURNAL_START,
             journal_tail: JOURNAL_START,
             root_transaction_id: 0,
-            checkpoint_start: checkpoint_start_for(block_count),
+            checkpoint_start: if version == LEGACY_FORMAT_VERSION {
+                0
+            } else {
+                checkpoint_start_for(block_count)
+            },
             checkpoint_slot: 0,
             compaction_state: COMPACTION_CLEAN,
         };
@@ -166,12 +197,12 @@ impl Volume {
         let empty = Block::zero();
         store.write_block(BlockIndex::new(JOURNAL_START), &empty)?;
         store.flush()?;
-        write_superblock(store, SUPERBLOCK_A, info)?;
+        write_superblock_version(store, SUPERBLOCK_A, info, version)?;
         store.flush()?;
-        write_superblock(store, SUPERBLOCK_B, info)?;
+        write_superblock_version(store, SUPERBLOCK_B, info, version)?;
         store.flush()?;
 
-        Ok(Self { info, active_superblock: 1, format_version: FORMAT_VERSION })
+        Ok(Self { info, active_superblock: 1, format_version: version })
     }
 
     pub fn open<B: BlockStore>(store: &mut B) -> Result<Self, FormatError> {
@@ -214,6 +245,20 @@ impl Volume {
 
     pub const fn info(self) -> VolumeInfo {
         self.info
+    }
+
+    pub const fn format_version(self) -> u16 {
+        self.format_version
+    }
+
+    pub const fn package_arena(self) -> Option<(u64, u64)> {
+        if self.format_version == FORMAT_VERSION
+            && self.info.checkpoint_start > self.info.journal_end
+        {
+            Some((self.info.journal_end, self.info.checkpoint_start))
+        } else {
+            None
+        }
     }
 
     pub const fn should_checkpoint(self) -> bool {
@@ -273,6 +318,7 @@ impl Volume {
     ) -> Result<Option<u64>, FormatError> {
         if self.info.checkpoint_start == 0
             || self.info.compaction_state != COMPACTION_CLEAN
+            || self.info.root_transaction_id == 0
             || self.info.journal_head != self.info.journal_start
             || self.info.journal_tail != self.info.journal_start
         {
@@ -562,6 +608,7 @@ struct DecodedRecord {
     payload: Block,
 }
 
+#[cfg(test)]
 fn write_superblock<B: BlockStore>(
     store: &mut B,
     index: BlockIndex,
@@ -700,7 +747,8 @@ fn read_superblock<B: BlockStore>(
         return Err(FormatError::Corrupt);
     }
     let version = get_u16(bytes, 8);
-    if version != FORMAT_VERSION && version != LEGACY_FORMAT_VERSION {
+    if version != FORMAT_VERSION && version != V2_FORMAT_VERSION && version != LEGACY_FORMAT_VERSION
+    {
         return Err(FormatError::UnsupportedVersion);
     }
     let stored_checksum = get_u32(bytes, SUPERBLOCK_CHECKSUM_OFFSET);
@@ -729,10 +777,13 @@ fn read_superblock<B: BlockStore>(
         return Err(FormatError::Corrupt);
     }
     let checkpoint_range_invalid = info.checkpoint_start != 0
-        && match info.journal_end.checked_add(CHECKPOINT_TOTAL_BLOCKS) {
+        && match info.checkpoint_start.checked_add(CHECKPOINT_TOTAL_BLOCKS) {
             Some(end) => end > store.block_count(),
             None => true,
         };
+    let checkpoint_layout_invalid = info.checkpoint_start != 0
+        && ((version == V2_FORMAT_VERSION && info.checkpoint_start != info.journal_end)
+            || (version == FORMAT_VERSION && info.checkpoint_start < info.journal_end));
     if info.generation == 0
         || info.journal_start != JOURNAL_START
         || info.journal_end > store.block_count()
@@ -741,7 +792,7 @@ fn read_superblock<B: BlockStore>(
         || info.journal_tail > info.journal_head
         || info.journal_head > info.journal_end
         || (info.checkpoint_start != 0
-            && (info.checkpoint_start != info.journal_end
+            && (checkpoint_layout_invalid
                 || info.checkpoint_slot as usize >= CHECKPOINT_SLOTS
                 || info.compaction_state > COMPACTION_PREPARED
                 || checkpoint_range_invalid))

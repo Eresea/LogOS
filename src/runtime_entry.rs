@@ -17,6 +17,26 @@ pub(crate) fn run() {
     #[cfg(feature = "qemu-proof")]
     crate::suppress_service_heartbeat(logos_abi::ServiceId::Terminal);
 
+    #[cfg(feature = "package-proof")]
+    {
+        sleep_current_for(2);
+        if crate::arch::activate_service_package(logos_abi::ServiceId::Input).is_err() {
+            arch_fatal(b"LogOS vNext: package activation");
+        }
+        if crate::arch::activate_service_package(logos_abi::ServiceId::Session).is_err() {
+            arch_fatal(b"LogOS vNext: second package activation");
+        }
+        proof::package_activation_complete();
+        if crate::arch::activate_service_package(logos_abi::ServiceId::Display).is_ok() {
+            arch_fatal(b"LogOS vNext: corrupt package accepted");
+        }
+        proof::package_corrupt_rejected();
+        if !crate::arch::restart_service_graph_for_proof() {
+            arch_fatal(b"LogOS vNext: package persistence restart");
+        }
+        proof::package_persistence_restarted();
+    }
+
     let mut runtime = Runtime::new();
     if runtime.submit(RuntimeCommand::Submit).is_err() {
         arch_fatal(b"LogOS vNext: runtime capacity");

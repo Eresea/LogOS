@@ -1,7 +1,7 @@
 //! Bounded ELF page admission backed by the fixed frame pool.
 
 use crate::frame_pool::{FrameAddress, FramePool, FramePoolError};
-use crate::process::{AddressSpaceRoot, ElfLoadPlan, MappingFlags, UserLaunch};
+use crate::process::{AddressSpaceRoot, ElfLoadPlan, ImageReader, MappingFlags, UserLaunch};
 
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_LOAD_PAGES: usize =
@@ -48,6 +48,7 @@ pub enum LoadError {
     Exhausted,
     Overlap,
     Write,
+    Read,
 }
 
 /// Destination for bytes belonging to a loaded user image.
@@ -98,6 +99,20 @@ impl LoadedImage {
         pool: &mut FramePool,
         stack_pages: usize,
     ) -> Result<Self, LoadError> {
+        Self::load_with_stack_pages_for_owner(
+            plan,
+            pool,
+            stack_pages,
+            crate::memory::OwnerId::KERNEL,
+        )
+    }
+
+    pub fn load_with_stack_pages_for_owner(
+        plan: ElfLoadPlan,
+        pool: &mut FramePool,
+        stack_pages: usize,
+        owner: crate::memory::OwnerId,
+    ) -> Result<Self, LoadError> {
         let stack_bytes = stack_pages.checked_mul(PAGE_SIZE).ok_or(LoadError::Capacity)?;
         let stack_top = USER_STACK_BASE.checked_add(stack_bytes).ok_or(LoadError::Capacity)?;
         let mut image =
@@ -126,12 +141,17 @@ impl LoadedImage {
                     image.reclaim(pool);
                     return Err(LoadError::Overlap);
                 }
-                image.push_page(pool, virtual_address, segment.flags())?;
+                image.push_page(pool, virtual_address, segment.flags(), owner)?;
             }
         }
 
         for offset in 0..stack_pages {
-            image.push_page(pool, USER_STACK_BASE + offset * PAGE_SIZE, MappingFlags::DATA)?;
+            image.push_page(
+                pool,
+                USER_STACK_BASE + offset * PAGE_SIZE,
+                MappingFlags::DATA,
+                owner,
+            )?;
         }
         Ok(image)
     }
@@ -223,6 +243,69 @@ impl LoadedImage {
         Ok(())
     }
 
+    /// Populate pages from a bounded reader using one page-sized scratch buffer.
+    pub fn populate_reader<R: ImageReader, S: PageSink>(
+        &self,
+        plan: ElfLoadPlan,
+        reader: &mut R,
+        scratch: &mut [u8],
+        sink: &mut S,
+    ) -> Result<(), LoadError> {
+        if plan.entry() != self.entry || scratch.len() < PAGE_SIZE {
+            return Err(LoadError::InvalidPlan);
+        }
+        for index in 0..plan.segment_count() {
+            let Some(segment) = plan.segment(index) else {
+                return Err(LoadError::InvalidPlan);
+            };
+            let Some(file_end) = segment.file_offset().checked_add(segment.file_size()) else {
+                return Err(LoadError::InvalidPlan);
+            };
+            if file_end > reader.len() {
+                return Err(LoadError::InvalidPlan);
+            }
+        }
+        for page in self.pages[..self.count].iter().flatten() {
+            sink.clear(page.frame)?;
+        }
+        for index in 0..plan.segment_count() {
+            let Some(segment) = plan.segment(index) else {
+                return Err(LoadError::InvalidPlan);
+            };
+            let Some(segment_end) = segment.virtual_address().checked_add(segment.memory_size())
+            else {
+                return Err(LoadError::InvalidPlan);
+            };
+            let first_page = segment.virtual_address() & !(PAGE_SIZE - 1);
+            let Some(end_page) = align_up(segment_end) else {
+                return Err(LoadError::InvalidPlan);
+            };
+            for page_address in (first_page..end_page).step_by(PAGE_SIZE) {
+                let Some(page) = self.page_for_virtual(page_address) else {
+                    return Err(LoadError::InvalidPlan);
+                };
+                let overlap_start = page_address.max(segment.virtual_address());
+                let overlap_end = (page_address + PAGE_SIZE).min(segment_end);
+                if overlap_start >= overlap_end {
+                    continue;
+                }
+                let memory_offset = overlap_start - page_address;
+                let file_offset = overlap_start - segment.virtual_address();
+                if file_offset >= segment.file_size() {
+                    continue;
+                }
+                let copy_len = (overlap_end - overlap_start).min(segment.file_size() - file_offset);
+                let source_offset = segment.file_offset() + file_offset;
+                let amount = read_image_bytes(reader, source_offset, &mut scratch[..copy_len])?;
+                if amount != copy_len {
+                    return Err(LoadError::Read);
+                }
+                sink.write(page.frame(), memory_offset, &scratch[..copy_len])?;
+            }
+        }
+        Ok(())
+    }
+
     /// Populate pages after their virtual mappings are active in the current
     /// address space.
     pub fn populate_virtual<S: VirtualPageSink>(
@@ -301,12 +384,13 @@ impl LoadedImage {
         pool: &mut FramePool,
         virtual_address: usize,
         flags: MappingFlags,
+        owner: crate::memory::OwnerId,
     ) -> Result<(), LoadError> {
         if self.count == MAX_LOAD_PAGES {
             self.reclaim(pool);
             return Err(LoadError::Capacity);
         }
-        let frame = pool.allocate().map_err(|error| {
+        let frame = pool.allocate_for(owner).map_err(|error| {
             self.reclaim(pool);
             match error {
                 FramePoolError::Exhausted => LoadError::Exhausted,
@@ -327,6 +411,14 @@ impl LoadedImage {
     }
 }
 
+fn read_image_bytes<R: ImageReader>(
+    reader: &mut R,
+    offset: usize,
+    output: &mut [u8],
+) -> Result<usize, LoadError> {
+    reader.read(offset, output).map_err(|_| LoadError::Read)
+}
+
 fn align_up(address: usize) -> Option<usize> {
     address.checked_add(PAGE_SIZE - 1).map(|value| value & !(PAGE_SIZE - 1))
 }
@@ -335,7 +427,8 @@ fn align_up(address: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::boot_resources::{MemoryDescriptor, MemoryMap};
-    use crate::process::ProcessError;
+    use crate::process::{ImageReader, ProcessError};
+    use logos_abi::ServiceId;
 
     const TEST_SINK_PAGES: usize = 16;
 
@@ -390,6 +483,52 @@ mod tests {
             self.bytes[index][offset..offset + bytes.len()].copy_from_slice(bytes);
             Ok(())
         }
+    }
+
+    struct TestReader {
+        image: [u8; 8192],
+        fail_payload: bool,
+    }
+
+    impl ImageReader for TestReader {
+        fn len(&self) -> usize {
+            self.image.len()
+        }
+
+        fn read(&mut self, offset: usize, output: &mut [u8]) -> Result<usize, ProcessError> {
+            if self.fail_payload && offset >= 4090 {
+                return Err(ProcessError::ReadFailure);
+            }
+            let end = offset.checked_add(output.len()).ok_or(ProcessError::ReadFailure)?;
+            let Some(bytes) = self.image.get(offset..end) else {
+                return Err(ProcessError::ReadFailure);
+            };
+            output.copy_from_slice(bytes);
+            Ok(output.len())
+        }
+    }
+
+    fn cross_page_image() -> [u8; 8192] {
+        let mut image = [0; 8192];
+        image[..4].copy_from_slice(b"\x7fELF");
+        image[4] = 2;
+        image[5] = 1;
+        image[16..18].copy_from_slice(&2u16.to_le_bytes());
+        image[18..20].copy_from_slice(&0x3eu16.to_le_bytes());
+        image[24..32].copy_from_slice(&0x1ff0u64.to_le_bytes());
+        image[32..40].copy_from_slice(&64u64.to_le_bytes());
+        image[54..56].copy_from_slice(&56u16.to_le_bytes());
+        image[56..58].copy_from_slice(&1u16.to_le_bytes());
+        image[64..68].copy_from_slice(&1u32.to_le_bytes());
+        image[68..72].copy_from_slice(&5u32.to_le_bytes());
+        image[72..80].copy_from_slice(&4090u64.to_le_bytes());
+        image[80..88].copy_from_slice(&0x1ff0u64.to_le_bytes());
+        image[96..104].copy_from_slice(&32u64.to_le_bytes());
+        image[104..112].copy_from_slice(&5000u64.to_le_bytes());
+        for (index, byte) in image[4090..4122].iter_mut().enumerate() {
+            *byte = index as u8 + 1;
+        }
+        image
     }
 
     fn image() -> [u8; 128] {
@@ -498,5 +637,67 @@ mod tests {
         let stack = loaded.page(loaded.page_count() - 1).unwrap().frame();
         let stack_slot = sink.slot(stack).unwrap();
         assert!(sink.bytes[stack_slot].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn reader_population_streams_cross_page_data_and_reclaims_service_frames() {
+        let image = cross_page_image();
+        let mut reader = TestReader { image, fail_payload: false };
+        let plan = ElfLoadPlan::parse_reader(&mut reader).unwrap();
+        let mut map = MemoryMap::new();
+        map.push(MemoryDescriptor::new(0x1000, 32, true).unwrap()).unwrap();
+        let mut pool = FramePool::empty();
+        pool.initialize(&map).unwrap();
+        let owner = crate::memory::OwnerId::service(ServiceId::Storage);
+        let loaded = LoadedImage::load_with_stack_pages_for_owner(
+            plan,
+            &mut pool,
+            crate::process::USER_STACK_PAGES,
+            owner,
+        )
+        .unwrap();
+        assert_eq!(pool.manager().owner_live(owner), loaded.page_count() as u32);
+        let mut sink = TestSink::new();
+        let mut scratch = [0; PAGE_SIZE];
+        loaded.populate_reader(plan, &mut reader, &mut scratch, &mut sink).unwrap();
+        let first = loaded.page(0).unwrap().frame();
+        let first_slot = sink.slot(first).unwrap();
+        assert_eq!(
+            sink.bytes[first_slot][PAGE_SIZE - 16..],
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
+        let second = loaded.page(1).unwrap().frame();
+        let second_slot = sink.slot(second).unwrap();
+        assert_eq!(
+            sink.bytes[second_slot][0..16],
+            [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
+        );
+        let mut reclaimed = loaded;
+        reclaimed.reclaim(&mut pool);
+        assert_eq!(pool.manager().owner_live(owner), 0);
+    }
+
+    #[test]
+    fn reader_failure_is_reported_without_partial_frame_leak() {
+        let image = cross_page_image();
+        let mut reader = TestReader { image, fail_payload: false };
+        let plan = ElfLoadPlan::parse_reader(&mut reader).unwrap();
+        let mut map = MemoryMap::new();
+        map.push(MemoryDescriptor::new(0x1000, 32, true).unwrap()).unwrap();
+        let mut pool = FramePool::empty();
+        pool.initialize(&map).unwrap();
+        let owner = crate::memory::OwnerId::service(ServiceId::Storage);
+        let loaded =
+            LoadedImage::load_with_stack_pages_for_owner(plan, &mut pool, 8, owner).unwrap();
+        let mut scratch = [0; PAGE_SIZE];
+        let mut sink = TestSink::new();
+        reader.fail_payload = true;
+        assert_eq!(
+            loaded.populate_reader(plan, &mut reader, &mut scratch, &mut sink),
+            Err(LoadError::Read)
+        );
+        let mut reclaimed = loaded;
+        reclaimed.reclaim(&mut pool);
+        assert_eq!(pool.manager().owner_live(owner), 0);
     }
 }

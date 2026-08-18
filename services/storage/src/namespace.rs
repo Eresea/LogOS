@@ -1,3 +1,10 @@
+use crate::packages::{
+    PACKAGE_INSTALL_KIND, PACKAGE_RECORD_BYTES, PACKAGE_SNAPSHOT_BYTES, PackageCatalog,
+    PackageCatalogError, PackageHandle, PackageInfo, PackageInstall, encode_install_record,
+    validate_install_on_store,
+};
+use logos_abi::ServiceId;
+use logos_package::PACKAGE_HEADER_BYTES;
 use logos_storage::{
     BLOCK_BYTES, BlockError, BlockStore, CHECKPOINT_PAYLOAD_BYTES, FormatError, JournalRecord,
     MAX_RECORD_PAYLOAD_BYTES, ReplayError, ReplaySink, Volume,
@@ -19,8 +26,9 @@ const TRUNCATE_KIND: u16 = 5;
 const SNAPSHOT_RECORD_BYTES: usize =
     4 + 2 + 4 + 1 + 1 + 2 + MAX_COMPONENT_BYTES + 4 + MAX_FILE_BYTES;
 const SNAPSHOT_BYTES: usize = MAX_OBJECTS * SNAPSHOT_RECORD_BYTES;
+const STORAGE_SNAPSHOT_BYTES: usize = SNAPSHOT_BYTES + PACKAGE_SNAPSHOT_BYTES;
 
-const _: () = assert!(SNAPSHOT_BYTES <= CHECKPOINT_PAYLOAD_BYTES);
+const _: () = assert!(STORAGE_SNAPSHOT_BYTES <= CHECKPOINT_PAYLOAD_BYTES);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectId {
@@ -69,6 +77,8 @@ pub enum NamespaceError {
     InvalidRecord,
     GenerationExhausted,
     Recovery,
+    Unsupported,
+    Package(PackageCatalogError),
 }
 
 impl From<FormatError> for NamespaceError {
@@ -80,6 +90,12 @@ impl From<FormatError> for NamespaceError {
 impl From<BlockError> for NamespaceError {
     fn from(error: BlockError) -> Self {
         Self::Block(error)
+    }
+}
+
+impl From<PackageCatalogError> for NamespaceError {
+    fn from(error: PackageCatalogError) -> Self {
+        Self::Package(error)
     }
 }
 
@@ -615,44 +631,111 @@ impl ReplaySink for ObjectNamespace {
     }
 }
 
+struct RecoverySink<'a> {
+    namespace: &'a mut ObjectNamespace,
+    packages: &'a mut PackageCatalog,
+    package_arena: Option<(u64, u64)>,
+}
+
+impl ReplaySink for RecoverySink<'_> {
+    fn record(
+        &mut self,
+        _transaction_id: u64,
+        kind: u16,
+        payload: &[u8],
+    ) -> Result<(), ReplayError> {
+        if kind == PACKAGE_INSTALL_KIND {
+            self.packages
+                .apply_record(kind, payload, self.package_arena)
+                .map_err(|_| ReplayError::Rejected)
+        } else {
+            self.namespace.apply_record(kind, payload).map_err(|_| ReplayError::Rejected)
+        }
+    }
+}
+
 pub struct DurableNamespace<B> {
     store: B,
     volume: Volume,
     namespace: ObjectNamespace,
+    packages: PackageCatalog,
+    active_package_install: Option<u32>,
+    next_package_install: u32,
 }
 
 impl<B: BlockStore> DurableNamespace<B> {
     pub fn format(mut store: B) -> Result<Self, NamespaceError> {
         let volume = Volume::format(&mut store)?;
-        Ok(Self { store, volume, namespace: ObjectNamespace::new() })
+        Ok(Self {
+            store,
+            volume,
+            namespace: ObjectNamespace::new(),
+            packages: PackageCatalog::new(),
+            active_package_install: None,
+            next_package_install: 1,
+        })
     }
 
     pub fn format_provisioned(mut store: B) -> Result<Self, NamespaceError> {
         let volume = Volume::format_provisioned(&mut store)?;
-        Ok(Self { store, volume, namespace: ObjectNamespace::new() })
+        Ok(Self {
+            store,
+            volume,
+            namespace: ObjectNamespace::new(),
+            packages: PackageCatalog::new(),
+            active_package_install: None,
+            next_package_install: 1,
+        })
     }
 
     pub fn open(mut store: B) -> Result<Self, NamespaceError> {
         let mut volume = Volume::open(&mut store)?;
         let mut namespace = ObjectNamespace::new();
-        let mut snapshot = [0; SNAPSHOT_BYTES];
+        let mut packages = PackageCatalog::new();
+        let mut snapshot = [0; STORAGE_SNAPSHOT_BYTES];
         if volume.load_checkpoint(&mut store, &mut snapshot)?.is_some() {
-            namespace.restore_snapshot(&snapshot)?;
+            namespace.restore_snapshot(&snapshot[..SNAPSHOT_BYTES])?;
+            if volume.format_version() == logos_storage::FORMAT_VERSION {
+                packages.restore_snapshot(&snapshot[SNAPSHOT_BYTES..], volume.package_arena())?;
+            }
         }
-        volume.recover(&mut store, &mut namespace)?;
-        Ok(Self { store, volume, namespace })
+        let mut recovery = RecoverySink {
+            namespace: &mut namespace,
+            packages: &mut packages,
+            package_arena: volume.package_arena(),
+        };
+        volume.recover(&mut store, &mut recovery)?;
+        Ok(Self {
+            store,
+            volume,
+            namespace,
+            packages,
+            active_package_install: None,
+            next_package_install: 1,
+        })
     }
 
     fn reopen(&mut self) -> Result<(), NamespaceError> {
         let mut volume = Volume::open(&mut self.store)?;
         let mut namespace = ObjectNamespace::new();
-        let mut snapshot = [0; SNAPSHOT_BYTES];
+        let mut packages = PackageCatalog::new();
+        let mut snapshot = [0; STORAGE_SNAPSHOT_BYTES];
         if volume.load_checkpoint(&mut self.store, &mut snapshot)?.is_some() {
-            namespace.restore_snapshot(&snapshot)?;
+            namespace.restore_snapshot(&snapshot[..SNAPSHOT_BYTES])?;
+            if volume.format_version() == logos_storage::FORMAT_VERSION {
+                packages.restore_snapshot(&snapshot[SNAPSHOT_BYTES..], volume.package_arena())?;
+            }
         }
-        volume.recover(&mut self.store, &mut namespace)?;
+        let mut recovery = RecoverySink {
+            namespace: &mut namespace,
+            packages: &mut packages,
+            package_arena: volume.package_arena(),
+        };
+        volume.recover(&mut self.store, &mut recovery)?;
         self.volume = volume;
         self.namespace = namespace;
+        self.packages = packages;
+        self.active_package_install = None;
         Ok(())
     }
 
@@ -664,8 +747,7 @@ impl<B: BlockStore> DurableNamespace<B> {
         self.store
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_store_mut(&mut self) -> &mut B {
+    pub fn block_store_mut(&mut self) -> &mut B {
         &mut self.store
     }
 
@@ -706,8 +788,14 @@ impl<B: BlockStore> DurableNamespace<B> {
         if !self.volume.should_checkpoint() {
             return Ok(());
         }
-        let mut snapshot = [0; SNAPSHOT_BYTES];
-        let length = self.namespace.encode_snapshot(&mut snapshot)?;
+        let mut snapshot = [0; STORAGE_SNAPSHOT_BYTES];
+        let namespace_length = self.namespace.encode_snapshot(&mut snapshot[..SNAPSHOT_BYTES])?;
+        let length = if self.volume.format_version() == logos_storage::FORMAT_VERSION {
+            self.packages.encode_snapshot(&mut snapshot[SNAPSHOT_BYTES..])?;
+            namespace_length + PACKAGE_SNAPSHOT_BYTES
+        } else {
+            namespace_length
+        };
         match self.volume.checkpoint(&mut self.store, &snapshot[..length]) {
             Ok(()) => Ok(()),
             Err(error) => match self.reopen() {
@@ -839,6 +927,140 @@ impl<B: BlockStore> DurableNamespace<B> {
 
     pub fn flush(&mut self) -> Result<(), NamespaceError> {
         self.store.flush().map_err(NamespaceError::Block)
+    }
+
+    pub fn lookup_package(&self, service: ServiceId) -> Result<PackageInfo, NamespaceError> {
+        if self.volume.package_arena().is_none() {
+            return Err(NamespaceError::Unsupported);
+        }
+        self.packages.lookup(service).ok_or(NamespaceError::NotFound)
+    }
+
+    pub fn begin_package_install(
+        &mut self,
+        service: ServiceId,
+        bytes: usize,
+    ) -> Result<PackageInstall, NamespaceError> {
+        if self.active_package_install.is_some() {
+            return Err(NamespaceError::Package(PackageCatalogError::Busy));
+        }
+        let arena = self.volume.package_arena().ok_or(NamespaceError::Unsupported)?;
+        let install_id = self.next_package_install;
+        self.next_package_install = self
+            .next_package_install
+            .checked_add(1)
+            .ok_or(NamespaceError::Package(PackageCatalogError::InvalidRequest))?;
+        let mut install = self.packages.plan_install(arena, service, bytes)?;
+        install.install_id = install_id;
+        self.active_package_install = Some(install_id);
+        Ok(install)
+    }
+
+    pub fn write_package_chunk(
+        &mut self,
+        install: &mut PackageInstall,
+        offset: usize,
+        input: &[u8],
+    ) -> Result<(), NamespaceError> {
+        if self.active_package_install != Some(install.install_id) {
+            return Err(NamespaceError::InvalidRecord);
+        }
+        if !install.write_offset_valid(offset, input.len())
+            || (offset + input.len() < install.bytes() && input.len() != BLOCK_BYTES)
+        {
+            return Err(NamespaceError::InvalidRecord);
+        }
+        let block_index =
+            install.logical_block(offset / BLOCK_BYTES).ok_or(NamespaceError::InvalidRecord)?;
+        let mut block = logos_storage::Block::zero();
+        block.as_bytes_mut()[..input.len()].copy_from_slice(input);
+        self.store.write_block(logos_storage::BlockIndex::new(block_index), &block)?;
+        install.mark_written(offset);
+        Ok(())
+    }
+
+    pub fn abort_package_install(&mut self, install: PackageInstall) {
+        if self.active_package_install == Some(install.install_id) {
+            self.active_package_install = None;
+        }
+    }
+
+    pub fn commit_package_install(
+        &mut self,
+        install: PackageInstall,
+    ) -> Result<PackageHandle, NamespaceError> {
+        if self.active_package_install != Some(install.install_id) {
+            return Err(NamespaceError::InvalidRecord);
+        }
+        let result = self.commit_package_install_inner(install);
+        self.active_package_install = None;
+        result
+    }
+
+    fn commit_package_install_inner(
+        &mut self,
+        install: PackageInstall,
+    ) -> Result<PackageHandle, NamespaceError> {
+        let arena = self.volume.package_arena().ok_or(NamespaceError::Unsupported)?;
+        if !install.complete() {
+            return Err(NamespaceError::InvalidRecord);
+        }
+        self.store.flush()?;
+        let mut scratch = [0; BLOCK_BYTES];
+        let header = validate_install_on_store(&mut self.store, &install, &mut scratch)?;
+        if header.payload_length as usize + PACKAGE_HEADER_BYTES != install.bytes() {
+            return Err(NamespaceError::InvalidRecord);
+        }
+        self.checkpoint_current()?;
+        let generation = self.packages.next_generation(install.service)?;
+        let mut payload = [0; PACKAGE_RECORD_BYTES];
+        encode_install_record(&install, header, generation, &mut payload)?;
+        self.volume.commit(
+            &mut self.store,
+            &[JournalRecord { kind: PACKAGE_INSTALL_KIND, payload: &payload }],
+        )?;
+        self.packages.apply_record(PACKAGE_INSTALL_KIND, &payload, Some(arena))?;
+        self.checkpoint_current()?;
+        Ok(PackageHandle { service: install.service, generation })
+    }
+
+    pub fn read_package(
+        &mut self,
+        handle: PackageHandle,
+        offset: usize,
+        output: &mut [u8],
+    ) -> Result<usize, NamespaceError> {
+        if self.volume.package_arena().is_none() {
+            return Err(NamespaceError::Unsupported);
+        }
+        let info = self.packages.validate_handle(handle)?;
+        if offset > info.bytes as usize {
+            return Err(NamespaceError::TooLarge);
+        }
+        let length = output.len().min(info.bytes as usize - offset);
+        let mut copied = 0;
+        while copied < length {
+            let absolute = offset + copied;
+            let block_index = absolute / BLOCK_BYTES;
+            let block_offset = absolute % BLOCK_BYTES;
+            let amount = (length - copied).min(BLOCK_BYTES - block_offset);
+            let mut block = logos_storage::Block::zero();
+            let mut remaining = block_index as u64;
+            let mut physical = None;
+            for extent in info.extents[..info.extent_count as usize].iter() {
+                if remaining < extent.blocks as u64 {
+                    physical = Some(extent.start + remaining);
+                    break;
+                }
+                remaining -= extent.blocks as u64;
+            }
+            let physical = physical.ok_or(NamespaceError::InvalidRecord)?;
+            self.store.read_block(logos_storage::BlockIndex::new(physical), &mut block)?;
+            output[copied..copied + amount]
+                .copy_from_slice(&block.as_bytes()[block_offset..block_offset + amount]);
+            copied += amount;
+        }
+        Ok(length)
     }
 }
 
@@ -1046,7 +1268,53 @@ fn get_u32(bytes: &[u8], offset: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logos_storage::MemoryBlockStore;
+    use logos_abi::ServiceId;
+    use logos_package::{PACKAGE_HEADER_BYTES, ServicePackageHeader, crc32c};
+    use logos_storage::{Block, BlockError, BlockIndex, BlockStore, MemoryBlockStore};
+    use std::boxed::Box;
+    use std::vec;
+
+    struct HeapStore(Box<MemoryBlockStore<96>>);
+
+    impl BlockStore for HeapStore {
+        fn block_count(&self) -> u64 {
+            self.0.block_count()
+        }
+
+        fn read_block(&mut self, index: BlockIndex, output: &mut Block) -> Result<(), BlockError> {
+            self.0.read_block(index, output)
+        }
+
+        fn write_block(&mut self, index: BlockIndex, input: &Block) -> Result<(), BlockError> {
+            self.0.write_block(index, input)
+        }
+
+        fn flush(&mut self) -> Result<(), BlockError> {
+            self.0.flush()
+        }
+    }
+
+    fn heap_store() -> HeapStore {
+        HeapStore(Box::new(MemoryBlockStore::new()))
+    }
+
+    fn install(
+        filesystem: &mut DurableNamespace<HeapStore>,
+        service: ServiceId,
+        payload: &[u8],
+        version: u32,
+    ) -> PackageHandle {
+        let header =
+            ServicePackageHeader::new(service, version, payload.len(), crc32c(payload)).unwrap();
+        let mut package = vec![0; PACKAGE_HEADER_BYTES + payload.len()];
+        header.encode(&mut package).unwrap();
+        package[PACKAGE_HEADER_BYTES..].copy_from_slice(payload);
+        let mut transaction = filesystem.begin_package_install(service, package.len()).unwrap();
+        for (offset, chunk) in package.chunks(BLOCK_BYTES).enumerate() {
+            filesystem.write_package_chunk(&mut transaction, offset * BLOCK_BYTES, chunk).unwrap();
+        }
+        filesystem.commit_package_install(transaction).unwrap()
+    }
 
     #[test]
     fn object_lifecycle_is_bounded_and_generation_safe() {
@@ -1221,5 +1489,109 @@ mod tests {
         transaction.create_file(b"/discarded").unwrap();
         transaction.abort();
         assert_eq!(fs.resolve_path(b"/discarded"), Err(NamespaceError::NotFound));
+    }
+
+    #[test]
+    fn package_install_has_one_owner_and_rejects_stale_handles() {
+        let mut fs = DurableNamespace::format(heap_store()).unwrap();
+        let first = fs.begin_package_install(ServiceId::Flow, PACKAGE_HEADER_BYTES).unwrap();
+        let mut stale = first;
+        assert!(matches!(
+            fs.begin_package_install(ServiceId::Storage, PACKAGE_HEADER_BYTES),
+            Err(NamespaceError::Package(PackageCatalogError::Busy))
+        ));
+        fs.abort_package_install(first);
+
+        let second = fs.begin_package_install(ServiceId::Storage, PACKAGE_HEADER_BYTES).unwrap();
+        assert_eq!(
+            fs.write_package_chunk(&mut stale, 0, &[0; PACKAGE_HEADER_BYTES]),
+            Err(NamespaceError::InvalidRecord)
+        );
+        fs.abort_package_install(second);
+    }
+
+    #[test]
+    fn packages_use_actual_extents_and_reuse_aborted_space() {
+        let mut fs = DurableNamespace::format(heap_store()).unwrap();
+        let first_payload = [0x11; 100];
+        let first = install(&mut fs, ServiceId::Storage, &first_payload, 1);
+        let first_info = fs.lookup_package(ServiceId::Storage).unwrap();
+        assert_eq!(first_info.bytes as usize, PACKAGE_HEADER_BYTES + first_payload.len());
+        assert_eq!(first_info.extent_count, 1);
+        assert_eq!(first_info.extents[0].blocks, 1);
+
+        let mut abandoned = fs.begin_package_install(ServiceId::Flow, BLOCK_BYTES * 2 + 1).unwrap();
+        let abandoned_start = abandoned.extents[0].start;
+        fs.write_package_chunk(&mut abandoned, 0, &[0; BLOCK_BYTES]).unwrap();
+        fs.abort_package_install(abandoned);
+
+        let second_payload = [0x22; BLOCK_BYTES + 32];
+        let second = install(&mut fs, ServiceId::Flow, &second_payload, 2);
+        let second_info = fs.lookup_package(ServiceId::Flow).unwrap();
+        assert_eq!(second_info.extents[0].blocks, 2);
+        assert_eq!(second_info.extents[0].start, abandoned_start);
+        assert_eq!(fs.lookup_package(ServiceId::Storage).unwrap().handle, first);
+        assert_eq!(fs.lookup_package(ServiceId::Flow).unwrap().handle, second);
+    }
+
+    #[test]
+    fn incomplete_package_write_is_not_published_after_reopen() {
+        let mut fs = DurableNamespace::format(heap_store()).unwrap();
+        let incomplete_start = {
+            let mut incomplete =
+                fs.begin_package_install(ServiceId::Flow, BLOCK_BYTES * 2 + 1).unwrap();
+            let incomplete_start = incomplete.extents[0].start;
+            fs.write_package_chunk(&mut incomplete, 0, &[0; BLOCK_BYTES]).unwrap();
+            incomplete_start
+        };
+
+        let store = fs.into_store();
+        let mut reopened = DurableNamespace::open(store).unwrap();
+        assert_eq!(reopened.lookup_package(ServiceId::Flow), Err(NamespaceError::NotFound));
+
+        let payload = [0x55; BLOCK_BYTES + 32];
+        let handle = install(&mut reopened, ServiceId::Flow, &payload, 1);
+        let info = reopened.lookup_package(ServiceId::Flow).unwrap();
+        assert_eq!(info.handle, handle);
+        assert_eq!(info.extents[0].start, incomplete_start);
+    }
+
+    #[test]
+    fn replacement_is_generation_safe_and_reopens_from_journal() {
+        let mut fs = DurableNamespace::format(heap_store()).unwrap();
+        let old_payload = [0x33; 100];
+        let old = install(&mut fs, ServiceId::Storage, &old_payload, 1);
+        let new_payload = [0x44; BLOCK_BYTES + 100];
+        let new = install(&mut fs, ServiceId::Storage, &new_payload, 2);
+        assert_ne!(old.generation, new.generation);
+        let mut output = vec![0; PACKAGE_HEADER_BYTES + new_payload.len()];
+        assert_eq!(fs.read_package(new, 0, &mut output).unwrap(), output.len());
+        assert_eq!(&output[PACKAGE_HEADER_BYTES..], &new_payload);
+        assert_eq!(
+            fs.read_package(old, 0, &mut output),
+            Err(NamespaceError::Package(PackageCatalogError::Stale))
+        );
+
+        let store = fs.into_store();
+        let mut reopened = DurableNamespace::open(store).unwrap();
+        let info = reopened.lookup_package(ServiceId::Storage).unwrap();
+        assert_eq!(info.handle, new);
+        let mut reopened_output = vec![0; output.len()];
+        assert_eq!(reopened.read_package(new, 0, &mut reopened_output).unwrap(), output.len());
+        assert_eq!(reopened_output, output);
+    }
+
+    #[test]
+    fn ordinary_files_keep_the_8k_limit_and_v2_rejects_package_operations() {
+        let mut fs = DurableNamespace::format(heap_store()).unwrap();
+        let file = fs.create_file(fs.root(), b"ordinary").unwrap();
+        assert_eq!(fs.write(file, 0, &[0; MAX_FILE_BYTES]).unwrap(), MAX_FILE_BYTES);
+        assert_eq!(fs.write(file, MAX_FILE_BYTES, &[1]), Err(NamespaceError::TooLarge));
+
+        let mut legacy_store = heap_store();
+        logos_storage::Volume::format_as(&mut legacy_store, logos_storage::V2_FORMAT_VERSION)
+            .unwrap();
+        let legacy = DurableNamespace::open(legacy_store).unwrap();
+        assert_eq!(legacy.lookup_package(ServiceId::Storage), Err(NamespaceError::Unsupported));
     }
 }

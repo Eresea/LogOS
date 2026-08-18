@@ -19,10 +19,9 @@ dependencies, stops reject active dependents, and restarts include the running
 dependent closure. Heartbeat failures continue to use the existing graph-wide
 supervisor recovery path.
 
-Filesystem-loaded service packages are not part of this boundary. The current
-filesystem file limit is smaller than the retained service image limit, so
-the image-source seam returns an explicit unsupported result until bounded
-package storage is proved.
+Filesystem-loaded service packages are not targeted by this boundary's image reset path. Their
+manager Start/Restart operations return an explicit unsupported result until bounded durable
+reloading exists; graph-wide supervisor recovery remains package-aware.
 
 ## Consequences
 

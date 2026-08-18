@@ -7,4 +7,5 @@ license = "MIT"
 
 [dependencies]
 logos-abi = { path = "../../abi" }
+logos-package = { path = "../../package" }
 logos-storage = { path = "../../storage" }

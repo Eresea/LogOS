@@ -101,6 +101,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos-package"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
 name = "logos-service-images"
 version = "0.1.0"
 dependencies = [
@@ -132,6 +139,7 @@ name = "logos-storage-service"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
+ "logos-package",
  "logos-storage",
 ]
 
@@ -147,6 +155,7 @@ name = "logos-vnext"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
+ "logos-package",
  "logos-storage",
  "uefi",
 ]

@@ -1,6 +1,7 @@
 param(
     [switch]$Release,
     [switch]$Proof,
+    [switch]$PackageProof,
     [switch]$StorageProof,
     [switch]$FetchProof
 )
@@ -18,6 +19,7 @@ $buildArgs = @(
 )
 $features = @()
 if ($Proof) { $features += 'qemu-proof' }
+if ($PackageProof) { $features += 'package-proof' }
 if ($StorageProof) { $features += 'storage-proof' }
 if ($FetchProof) { $features += 'fetch-proof' }
 if ($features.Count -gt 0) { $buildArgs += @('--features', ($features -join ',')) }

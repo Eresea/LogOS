@@ -5,12 +5,18 @@ extern crate std;
 
 mod api;
 mod namespace;
+mod packages;
 
 pub use api::{StorageApi, error_response};
 pub use namespace::{
     DurableNamespace, MAX_COMPONENT_BYTES, MAX_FILE_BLOCKS, MAX_FILE_BYTES, MAX_OBJECTS,
     MAX_PATH_DEPTH, NamespaceError, NamespaceTransaction, ObjectId, ObjectInfo, ObjectKind,
     ObjectList, ObjectNamespace,
+};
+pub use packages::{
+    MAX_PACKAGE_EXTENTS, MAX_PACKAGE_RECORDS, PACKAGE_INSTALL_KIND, PACKAGE_RECORD_BYTES,
+    PACKAGE_SNAPSHOT_BYTES, PackageCatalogError, PackageExtent, PackageHandle, PackageInfo,
+    PackageInstall,
 };
 
 use logos_abi::{
