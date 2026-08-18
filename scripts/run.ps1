@@ -270,9 +270,10 @@ function Send-QmpText {
             0x28 { '5'; break }       # AZERTY: unshifted 5 is left parenthesis.
             0x29 { 'minus'; break }   # AZERTY: unshifted - is right parenthesis.
             0x2c { 'm'; break }       # AZERTY: unshifted m key is comma.
+            0x2e { 'shift-comma'; break } # AZERTY: shifted ; key is period.
             0x2f { 'shift-dot'; break }
             0x3a { 'dot'; break }     # AZERTY: unshifted . key is colon.
-            0x30..0x39 { "shift-$character"; break }
+            0x30..0x39 { "$character"; break } # AZERTY: digits are unshifted.
             0x61 { 'q'; break }
             0x71 { 'a'; break }
             0x77 { 'z'; break }

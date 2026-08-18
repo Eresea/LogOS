@@ -236,13 +236,37 @@ fn find_bytes(bytes: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageCommand<'a> {
-    List { path: &'a [u8] },
-    Touch { path: &'a [u8] },
-    Cat { path: &'a [u8] },
-    Write { path: &'a [u8], data: &'a [u8] },
-    TouchWrite { path: &'a [u8], data: &'a [u8] },
-    Remove { path: &'a [u8] },
-    Move { from: &'a [u8], to: &'a [u8] },
+    List {
+        path: &'a [u8],
+    },
+    Touch {
+        path: &'a [u8],
+    },
+    Cat {
+        path: &'a [u8],
+    },
+    Write {
+        path: &'a [u8],
+        data: &'a [u8],
+    },
+    TouchWrite {
+        path: &'a [u8],
+        data: &'a [u8],
+    },
+    WriteVariables {
+        path: &'a [u8],
+        data: &'a [u8],
+        path_is_variable: bool,
+        data_is_variable: bool,
+        create: bool,
+    },
+    Remove {
+        path: &'a [u8],
+    },
+    Move {
+        from: &'a [u8],
+        to: &'a [u8],
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -561,11 +585,25 @@ fn parse_flow_operation_unchecked<'a>(
         && contains(expression, b").write(")
     {
         let path = quoted_after(expression, b"fs.touch(")
+            .or_else(|| identifier_after(expression, b"fs.touch("))
             .or_else(|| quoted_after(expression, b"fs.open("))
+            .or_else(|| identifier_after(expression, b"fs.open("))
             .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
         let data = quoted_after(expression, b").write(")
+            .or_else(|| identifier_after(expression, b").write("))
             .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
-        return Ok(Some(FlowOperation::Storage(if expression.starts_with(b"fs.touch(") {
+        let path_is_variable = quoted_after(expression, b"fs.touch(").is_none()
+            && quoted_after(expression, b"fs.open(").is_none();
+        let data_is_variable = quoted_after(expression, b").write(").is_none();
+        return Ok(Some(FlowOperation::Storage(if path_is_variable || data_is_variable {
+            StorageCommand::WriteVariables {
+                path,
+                data,
+                path_is_variable,
+                data_is_variable,
+                create: expression.starts_with(b"fs.touch("),
+            }
+        } else if expression.starts_with(b"fs.touch(") {
             StorageCommand::TouchWrite { path, data }
         } else {
             StorageCommand::Write { path, data }
@@ -707,6 +745,19 @@ impl FlowService {
         )
     }
 
+    pub fn copy_value(&self, name: &[u8], output: &mut [u8]) -> Option<usize> {
+        let value = self.runtime.variable(name)?;
+        let (bytes, length) = match value {
+            interpreter::FlowValue::String { bytes, len }
+            | interpreter::FlowValue::Bytes { bytes, len } => (bytes, len),
+            _ => return None,
+        };
+        (output.len() >= length).then(|| {
+            output[..length].copy_from_slice(&bytes[..length]);
+            length
+        })
+    }
+
     fn remember_string_assignment(&mut self, source: &[u8]) {
         let source = trim_command(source);
         let Some(equal) = source.iter().position(|byte| *byte == b'=') else { return };
@@ -747,20 +798,17 @@ impl FlowService {
     ) -> Result<Option<FlowOperation<'a>>, FlowDiagnostic> {
         let program = FlowProgram::parse(source).map_err(FlowDiagnostic::Parse)?;
         program.type_check(&mut self.runtime.variables).map_err(FlowDiagnostic::Type)?;
-        // Registry-backed operations are dispatched by the image below.  The
-        // evaluator only needs to materialize promise values for assignments;
-        // evaluating every command copies MAX_VALUE_BYTES-sized values on the
-        // fixed service stack and can strand Flow before dispatch.
-        let assigns_promise = source
-            .windows(b"=".len())
-            .position(|window| window == b"=")
-            .is_some_and(|equal| contains(&source[equal + 1..], b"net.fetch("));
-        if assigns_promise && !contains(source, b".then(") {
+        let operation = parse_flow_operation_unchecked(source)?;
+        let materializes_promise = matches!(
+            operation,
+            Some(FlowOperation::FetchResponseVariable { name, .. }) if !name.is_empty()
+        );
+        if materializes_promise {
             program.evaluate(&mut self.runtime).map_err(FlowDiagnostic::Eval)?;
             self.runtime.reclaim_temporary_promises();
         }
         self.remember_string_assignment(source);
-        parse_flow_operation_unchecked(source)
+        Ok(operation)
     }
 
     pub fn promise_state(&self, name: &[u8]) -> Option<PromiseState> {
@@ -1205,6 +1253,7 @@ pub fn parse_network_command(
         };
         return match (member, expression.call) {
             (b"status", None) => Ok(Some(NetworkCommand::Status)),
+            (b"status", Some(call)) if call.arg_count == 0 => Ok(Some(NetworkCommand::Status)),
             (b"ping", Some(call)) if call.arg_count == 1 => Ok(Some(NetworkCommand::Ping {
                 address: parse_ipv4(
                     string_arg(call.args[0]).map_err(|_| NetworkCommandError::Usage)?,
@@ -1235,7 +1284,7 @@ pub fn parse_network_command(
         };
     }
     if expression.part_count == 3
-        && expression.call.is_none()
+        && expression.call.is_none_or(|call| call.arg_count == 0)
         && expression.parts[0] == ExpressionPart::Member(b"interface")
         && expression.parts[2] == ExpressionPart::Member(b"status")
     {
@@ -1451,6 +1500,7 @@ mod tests {
             parse_network_command(b"net.interface[\"eth0\"].status").unwrap(),
             Some(NetworkCommand::InterfaceStatus { name: b"eth0" })
         );
+        assert_eq!(parse_network_command(b"net.status()").unwrap(), Some(NetworkCommand::Status));
         assert_eq!(
             parse_network_command(b"net.tcp-probe(\"10.0.2.2\", 8080)").unwrap(),
             Some(NetworkCommand::TcpProbe { address: [10, 0, 2, 2], port: 8080 })
@@ -1512,6 +1562,26 @@ mod tests {
         assert_eq!(
             parse_flow_operation(b"fs.open(\"/file\").write(\"data\")").unwrap(),
             Some(FlowOperation::Storage(StorageCommand::Write { path: b"/file", data: b"data" }))
+        );
+        assert!(service.validate(br#"var path = "/file""#).is_ok());
+        assert!(service.validate(br#"var data = "data""#).is_ok());
+        assert_eq!(
+            service.operation(b"fs.touch(path).write(data)").unwrap(),
+            Some(FlowOperation::Storage(StorageCommand::WriteVariables {
+                path: b"path",
+                data: b"data",
+                path_is_variable: true,
+                data_is_variable: true,
+                create: true,
+            }))
+        );
+        assert_eq!(
+            service.operation(b"net.status").unwrap(),
+            Some(FlowOperation::Network(NetworkCommand::Status))
+        );
+        assert_eq!(
+            service.operation(b"net.interface[\"eth0\"].status").unwrap(),
+            Some(FlowOperation::Network(NetworkCommand::InterfaceStatus { name: b"eth0" }))
         );
         assert_eq!(
             parse_flow_operation(b"await net.fetch(\"http://10.0.2.2/readme\")").unwrap(),
@@ -1599,6 +1669,11 @@ mod tests {
         assert_eq!(
             OperationRegistry::lookup(NamespaceKind::Network, b"fetch")
                 .map(|signature| signature.argument_count),
+            Some(2)
+        );
+        assert_eq!(
+            OperationRegistry::lookup(NamespaceKind::Network, b"fetch")
+                .map(|signature| signature.minimum_argument_count),
             Some(1)
         );
         assert_eq!(

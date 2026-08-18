@@ -916,6 +916,7 @@ impl StorageClient {
             logos_flow::StorageCommand::TouchWrite { path, data } => {
                 (StorageWork::TouchWrite, StoragePhase::StageBegin, path, &[][..], data)
             }
+            logos_flow::StorageCommand::WriteVariables { .. } => return false,
             logos_flow::StorageCommand::Remove { path } => {
                 (StorageWork::Remove, StoragePhase::Begin, path, &[][..], &[][..])
             }
@@ -2073,11 +2074,52 @@ pub extern "C" fn _start() -> ! {
                         Ok(Some(logos_flow::FlowOperation::Network(command))) => {
                             network_command(command, network, fetch, pending)
                         }
-                        Ok(Some(logos_flow::FlowOperation::Storage(command))) => {
-                            if !storage.start(command) {
-                                pending.stage(b"storage request too large\r\n");
+                        Ok(Some(logos_flow::FlowOperation::Storage(command))) => match command {
+                            logos_flow::StorageCommand::WriteVariables {
+                                path,
+                                data,
+                                path_is_variable,
+                                data_is_variable,
+                                create,
+                            } => {
+                                let mut resolved_path = [0; logos_flow::MAX_FLOW_BYTES];
+                                let mut resolved_data = [0; logos_storage_service::MAX_FILE_BYTES];
+                                let path = if path_is_variable {
+                                    let Some(length) =
+                                        flow.copy_string_variable(path, &mut resolved_path)
+                                    else {
+                                        pending.stage(b"flow: string variable is unavailable\r\n");
+                                        continue;
+                                    };
+                                    &resolved_path[..length]
+                                } else {
+                                    path
+                                };
+                                let data = if data_is_variable {
+                                    let Some(length) = flow.copy_value(data, &mut resolved_data)
+                                    else {
+                                        pending.stage(b"flow: value is unavailable\r\n");
+                                        continue;
+                                    };
+                                    &resolved_data[..length]
+                                } else {
+                                    data
+                                };
+                                let accepted = if create {
+                                    storage.start_touch_write(path, data)
+                                } else {
+                                    storage.start(logos_flow::StorageCommand::Write { path, data })
+                                };
+                                if !accepted {
+                                    pending.stage(b"storage request too large\r\n");
+                                }
                             }
-                        }
+                            command => {
+                                if !storage.start(command) {
+                                    pending.stage(b"storage request too large\r\n");
+                                }
+                            }
+                        },
                         Ok(Some(logos_flow::FlowOperation::System(operation))) => match operation {
                             logos_flow::SystemOperation::Version => {
                                 pending.stage(b"LogOS vNext 0.1.0\r\n")

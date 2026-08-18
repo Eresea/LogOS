@@ -91,6 +91,7 @@ pub struct OperationSignature {
     pub namespace: NamespaceKind,
     pub name: &'static [u8],
     pub arguments: [FlowType; MAX_ARGUMENTS],
+    pub minimum_argument_count: u8,
     pub argument_count: u8,
     pub result: FlowType,
 }
@@ -139,9 +140,10 @@ impl OperationRegistry {
                 NamespaceKind::Network,
                 b"fetch",
                 [FlowType::String, FlowType::String, FlowType::Void],
-                1,
+                2,
                 PromiseType::Response.flow_type(),
-            ),
+            )
+            .with_minimum_argument_count(1),
             OperationSignature::new(
                 NamespaceKind::Network,
                 b"status",
@@ -253,7 +255,19 @@ impl OperationSignature {
         argument_count: u8,
         result: FlowType,
     ) -> Self {
-        Self { namespace, name, arguments, argument_count, result }
+        Self {
+            namespace,
+            name,
+            arguments,
+            minimum_argument_count: argument_count,
+            argument_count,
+            result,
+        }
+    }
+
+    const fn with_minimum_argument_count(mut self, count: u8) -> Self {
+        self.minimum_argument_count = count;
+        self
     }
 }
 
@@ -1231,8 +1245,18 @@ impl<'a, 'p> TypeChecker<'a, 'p> {
                 None => Err(FlowTypeError::UnknownVariable(node.span)),
             },
             ExprKind::Index { base, key } => {
-                let base_kind = self.expr_type(base)?;
                 let key_kind = self.expr_type(key)?;
+                if let ExprKind::Member { base: namespace, name } =
+                    self.program.expression(base).kind
+                {
+                    if name == b"interface"
+                        && self.expr_type(namespace)? == FlowType::Namespace(NamespaceKind::Network)
+                        && key_kind == FlowType::String
+                    {
+                        return Ok(FlowType::Service);
+                    }
+                }
+                let base_kind = self.expr_type(base)?;
                 if matches!(
                     base_kind,
                     FlowType::Namespace(NamespaceKind::Supervisor) | FlowType::Service
@@ -1248,6 +1272,9 @@ impl<'a, 'p> TypeChecker<'a, 'p> {
                 match (base_kind, name) {
                     (FlowType::Response, b"body") => Ok(FlowType::Bytes),
                     (FlowType::Response, b"status") => Ok(FlowType::Number),
+                    (FlowType::Namespace(NamespaceKind::Network), b"status") => {
+                        Ok(FlowType::Callback)
+                    }
                     (FlowType::Promise(_), b"then" | b"cancel") => Ok(FlowType::Callback),
                     (FlowType::FileHandle, b"create" | b"read" | b"write") => {
                         Ok(FlowType::Callback)
