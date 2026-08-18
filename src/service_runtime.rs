@@ -7,7 +7,7 @@ use core::{
 
 use logos_abi::ServiceId;
 
-use crate::memory::{ExclusionKind, MemoryExclusion};
+use crate::memory::{ExclusionKind, MemoryExclusion, OwnerId};
 use crate::{
     frame_pool::{FrameAddress, FramePool},
     loader::{LoadError, LoadedImage},
@@ -364,7 +364,15 @@ impl ServiceRuntime {
                 }
                 (plan, loaded)
             };
-            let mut tables = match PageTableBuilder::new(&mut self.frame_pool, &mut memory) {
+            let mut tables = match if uses_prepared {
+                PageTableBuilder::new_for_owner(
+                    &mut self.frame_pool,
+                    &mut memory,
+                    OwnerId::service(service),
+                )
+            } else {
+                PageTableBuilder::new(&mut self.frame_pool, &mut memory)
+            } {
                 Ok(tables) => tables,
                 Err(error) => {
                     loaded.reclaim(&mut self.frame_pool);
@@ -627,6 +635,8 @@ impl ServiceRuntime {
             let expected = match self.manager.image_source(service) {
                 Some(crate::service_manager::ServiceImageSource::FilesystemPackage) => {
                     image.page_count() as u32
+                        + unsafe { self.tables[service.index()].assume_init_ref().table_count() }
+                            as u32
                 }
                 Some(crate::service_manager::ServiceImageSource::Predeclared) => 0,
                 None => return false,

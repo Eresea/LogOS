@@ -3,6 +3,7 @@
 use crate::{
     frame_pool::{FrameAddress, FramePool, FramePoolError},
     loader::{LoadedImage, LoadedPage, MAX_LOAD_PAGES, PAGE_SIZE},
+    memory::OwnerId,
 };
 
 #[cfg(any(test, target_os = "uefi"))]
@@ -52,6 +53,7 @@ pub struct PageTableBuilder {
     count: usize,
     root: FrameAddress,
     mapped_pages: usize,
+    owner: OwnerId,
 }
 
 impl PageTableBuilder {
@@ -59,13 +61,21 @@ impl PageTableBuilder {
         pool: &mut FramePool,
         memory: &mut M,
     ) -> Result<Self, PageTableError> {
-        let root = pool.allocate().map_err(map_pool_error)?;
+        Self::new_for_owner(pool, memory, OwnerId::KERNEL)
+    }
+
+    pub fn new_for_owner<M: PageTableMemory>(
+        pool: &mut FramePool,
+        memory: &mut M,
+        owner: OwnerId,
+    ) -> Result<Self, PageTableError> {
+        let root = pool.allocate_for(owner).map_err(map_pool_error)?;
         if memory.clear(root).is_err() {
             let _ = pool.release(root);
             return Err(PageTableError::Memory);
         }
         let mut builder =
-            Self { frames: [None; MAX_PAGE_TABLE_FRAMES], count: 1, root, mapped_pages: 0 };
+            Self { frames: [None; MAX_PAGE_TABLE_FRAMES], count: 1, root, mapped_pages: 0, owner };
         builder.frames[0] = Some(root);
         if memory.seed_kernel_root(root).is_err() {
             builder.reclaim(pool, memory);
@@ -173,7 +183,7 @@ impl PageTableBuilder {
         if self.count == MAX_PAGE_TABLE_FRAMES {
             return Err(PageTableError::Capacity);
         }
-        let frame = pool.allocate().map_err(map_pool_error)?;
+        let frame = pool.allocate_for(self.owner).map_err(map_pool_error)?;
         if memory.clear(frame).is_err() {
             let _ = pool.release(frame);
             return Err(PageTableError::Memory);
@@ -340,6 +350,7 @@ mod tests {
     use crate::{
         boot_resources::{MemoryDescriptor, MemoryMap},
         loader::LoadedImage,
+        memory::OwnerId,
         process::ElfLoadPlan,
     };
     use std::{boxed::Box, vec::Vec};
@@ -450,6 +461,26 @@ mod tests {
         let page = loaded.page(0).unwrap();
         tables.map_page(page, &mut pool, &mut memory).unwrap();
         assert_eq!(tables.map_page(page, &mut pool, &mut memory), Err(PageTableError::Conflict));
+    }
+
+    #[test]
+    fn owner_builder_accounts_all_page_table_frames() {
+        let image = image();
+        let plan = ElfLoadPlan::parse(&image).unwrap();
+        let mut map = MemoryMap::new();
+        map.push(MemoryDescriptor::new(0x1000, 32, true).unwrap()).unwrap();
+        let mut pool = FramePool::empty();
+        pool.initialize(&map).unwrap();
+        let loaded = LoadedImage::load(plan, &mut pool).unwrap();
+        let owner = OwnerId::service(logos_abi::ServiceId::Input);
+        let mut memory = TestMemory::new();
+        let mut tables = PageTableBuilder::new_for_owner(&mut pool, &mut memory, owner).unwrap();
+
+        tables.map_image(&loaded, &mut pool, &mut memory).unwrap();
+
+        assert_eq!(pool.manager().owner_live(owner), tables.table_count() as u32);
+        tables.reclaim(&mut pool, &mut memory);
+        assert_eq!(pool.manager().owner_live(owner), 0);
     }
 
     #[test]
