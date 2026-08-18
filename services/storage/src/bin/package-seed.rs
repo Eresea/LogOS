@@ -114,6 +114,8 @@ fn main() {
             .expect("format v3 disk");
     let input = package(ServiceId::Input, &payload);
     let input_info = install(&mut filesystem, ServiceId::Input, &input);
+    let session = package(ServiceId::Session, &payload);
+    install(&mut filesystem, ServiceId::Session, &session);
     let mut round_trip = vec![0; input.len()];
     let bytes_read = filesystem
         .read_package(

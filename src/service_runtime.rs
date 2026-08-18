@@ -87,8 +87,8 @@ pub struct ServiceRuntime {
     package_response: Option<logos_abi::PackageResponse>,
     #[allow(dead_code)]
     package_next_request: u32,
-    prepared_package: Option<PreparedServiceImage>,
-    active_package: Option<ActivePackageImage>,
+    prepared_packages: [Option<PreparedServiceImage>; SERVICE_COUNT],
+    active_packages: [Option<ActivePackageImage>; SERVICE_COUNT],
     network_packet_response: Option<logos_abi::NetworkPacketDescriptor>,
     network_packet_sequence: u32,
     suppressed_heartbeats: [AtomicBool; SERVICE_COUNT],
@@ -103,6 +103,7 @@ struct PreparedServiceImage {
     image: LoadedImage,
 }
 
+#[derive(Clone, Copy)]
 struct ActivePackageImage {
     service: ServiceId,
     plan: crate::process::ElfLoadPlan,
@@ -282,8 +283,8 @@ impl ServiceRuntime {
             package_request: None,
             package_response: None,
             package_next_request: 1,
-            prepared_package: None,
-            active_package: None,
+            prepared_packages: [const { None }; SERVICE_COUNT],
+            active_packages: [None; SERVICE_COUNT],
             network_packet_response: None,
             network_packet_sequence: 1,
             suppressed_heartbeats: [const { AtomicBool::new(false) }; SERVICE_COUNT],
@@ -297,7 +298,7 @@ impl ServiceRuntime {
         let result = self.start_inner(bundle);
         if let Err(error) = result {
             let reclaim_result = self.reclaim_resources();
-            self.reclaim_prepared_package();
+            self.reclaim_prepared_packages();
             reclaim_result?;
             return Err(error);
         }
@@ -346,11 +347,13 @@ impl ServiceRuntime {
                 ServiceId::Flow => crate::process::FLOW_STACK_PAGES,
                 _ => crate::process::USER_STACK_PAGES,
             };
-            let uses_prepared =
-                self.prepared_package.as_ref().is_some_and(|prepared| prepared.service == service);
+            let uses_prepared = self.prepared_packages[index]
+                .as_ref()
+                .is_some_and(|prepared| prepared.service == service);
             let mut memory = IdentityPageTableMemory;
             let (plan, mut loaded) = if uses_prepared {
-                let prepared = self.prepared_package.take().ok_or(ServiceRuntimeError::Image)?;
+                let prepared =
+                    self.prepared_packages[index].take().ok_or(ServiceRuntimeError::Image)?;
                 (prepared.plan, prepared.image)
             } else {
                 let image = unsafe { bundle.image(service) }.ok_or(ServiceRuntimeError::Image)?;
@@ -1041,6 +1044,9 @@ impl ServiceRuntime {
         service: ServiceId,
         runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
     ) -> Result<(), ServiceRuntimeError> {
+        if self.prepared_packages[service.index()].is_some() {
+            return Err(ServiceRuntimeError::Image);
+        }
         let bundle = crate::arch::service_images().ok_or(ServiceRuntimeError::Resources)?;
         let request = self
             .next_package_request(logos_abi::PackageOperation::Lookup, service, 0, 0, 0)
@@ -1112,16 +1118,17 @@ impl ServiceRuntime {
             image.reclaim(&mut self.frame_pool);
             return Err(ServiceRuntimeError::Populate(error));
         }
-        self.prepared_package = Some(PreparedServiceImage { service, plan, image });
+        self.prepared_packages[service.index()] =
+            Some(PreparedServiceImage { service, plan, image });
         if let Err(error) = self.restart(bundle, runtime_guard) {
-            self.reclaim_prepared_package();
+            self.reclaim_prepared_packages();
             return Err(error);
         }
         self.manager.set_image_source(
             service,
             crate::service_manager::ServiceImageSource::FilesystemPackage,
         );
-        self.active_package = Some(ActivePackageImage { service, plan });
+        self.active_packages[service.index()] = Some(ActivePackageImage { service, plan });
         Ok(())
     }
 
@@ -1134,20 +1141,21 @@ impl ServiceRuntime {
         self.restart(bundle, runtime_guard)
     }
 
-    fn retain_active_package_image(&mut self) -> Result<(), ServiceRuntimeError> {
-        let Some(active) = self.active_package.as_ref() else {
-            return Ok(());
-        };
-        if self.prepared_package.is_some() {
-            return Ok(());
+    fn retain_active_package_images(&mut self) -> Result<(), ServiceRuntimeError> {
+        for index in 0..SERVICE_COUNT {
+            let Some(active) = self.active_packages[index] else {
+                continue;
+            };
+            if self.prepared_packages[index].is_some() {
+                continue;
+            }
+            if !self.table_ready[index] {
+                return Err(ServiceRuntimeError::Image);
+            }
+            let image = core::mem::replace(&mut self.images[index], LoadedImage::empty());
+            self.prepared_packages[index] =
+                Some(PreparedServiceImage { service: active.service, plan: active.plan, image });
         }
-        let index = active.service.index();
-        if !self.table_ready[index] {
-            return Err(ServiceRuntimeError::Image);
-        }
-        let image = core::mem::replace(&mut self.images[index], LoadedImage::empty());
-        self.prepared_package =
-            Some(PreparedServiceImage { service: active.service, plan: active.plan, image });
         Ok(())
     }
 
@@ -2054,7 +2062,7 @@ impl ServiceRuntime {
         }
         self.manager.prepare_graph_restart();
         self.stop_tasks(runtime_guard)?;
-        self.retain_active_package_image()?;
+        self.retain_active_package_images()?;
         crate::arch::prepare_task_address_space(0);
         crate::arch::restart_critical_section(|| {
             crate::arch::disable_keyboard_irq();
@@ -2335,9 +2343,11 @@ impl ServiceRuntime {
         Ok(())
     }
 
-    fn reclaim_prepared_package(&mut self) {
-        if let Some(mut prepared) = self.prepared_package.take() {
-            prepared.image.reclaim(&mut self.frame_pool);
+    fn reclaim_prepared_packages(&mut self) {
+        for prepared in &mut self.prepared_packages {
+            if let Some(mut prepared) = prepared.take() {
+                prepared.image.reclaim(&mut self.frame_pool);
+            }
         }
     }
 }

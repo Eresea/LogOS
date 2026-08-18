@@ -23,6 +23,9 @@ pub(crate) fn run() {
         if crate::arch::activate_service_package(logos_abi::ServiceId::Input).is_err() {
             arch_fatal(b"LogOS vNext: package activation");
         }
+        if crate::arch::activate_service_package(logos_abi::ServiceId::Session).is_err() {
+            arch_fatal(b"LogOS vNext: second package activation");
+        }
         proof::package_activation_complete();
         if crate::arch::activate_service_package(logos_abi::ServiceId::Display).is_ok() {
             arch_fatal(b"LogOS vNext: corrupt package accepted");
