@@ -449,7 +449,7 @@ const fn azerty_code(byte: u8) -> KeyCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logos_commands::CommandService;
+    use logos_flow::{FlowOperation, FlowService, SystemOperation};
     use logos_session::{MAX_LINE_BYTES, SessionService, ShellOutput};
     use logos_terminal::TerminalService;
 
@@ -626,7 +626,7 @@ mod tests {
     fn terminal_graph_forwards_one_command_and_renders_output() {
         let mut terminal = TerminalService::new();
         let mut session = SessionService::new();
-        let mut commands = CommandService::new();
+        let mut flow = FlowService::new();
         let mut command = [0; MAX_LINE_BYTES];
         let mut committed = None;
 
@@ -645,10 +645,12 @@ mod tests {
 
         let length = committed.expect("enter commits the command");
         assert_eq!(&command[..length], b"sys.version()");
-        let result = commands.execute(&command[..length]);
-        assert_eq!(result.as_bytes(), b"LogOS vNext 0.1.0\r\n");
+        assert_eq!(
+            flow.operation(&command[..length]).unwrap(),
+            Some(FlowOperation::System(SystemOperation::Version))
+        );
         let mut output = ShellOutput::new();
-        session.command_output(result.as_bytes(), &mut output);
+        session.command_output(b"LogOS vNext 0.1.0\r\n", &mut output);
         terminal.session_output_bytes(output.as_bytes());
         assert!(terminal.next_render().is_some());
     }

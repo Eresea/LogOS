@@ -6,20 +6,20 @@ mod common;
 
 use core::mem;
 use logos_abi::{
-    FetchControl, FetchPhase, FetchRequest, FetchResponse, FetchStatus, IpcBytes, IpcStatus,
-    MessageKind, NetworkOperation, NetworkRequest, NetworkResponse, NetworkResult,
+    FetchBodyChunk, FetchControl, FetchPhase, FetchRequest, FetchResponse, FetchStatus, IpcBytes,
+    IpcStatus, MessageKind, NetworkOperation, NetworkRequest, NetworkResponse, NetworkResult,
     StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus,
 };
 use logos_fetch::{ResponseParser, Url};
 
-const COMMANDS_RECEIVE: usize = common::capability_slot(
+const FLOW_RECEIVE: usize = common::capability_slot(
     logos_abi::ServiceId::Fetch,
-    logos_abi::IpcEndpointId::CommandsToFetch,
+    logos_abi::IpcEndpointId::FlowToFetch,
     logos_abi::IpcRights::Receive,
 );
-const COMMANDS_SEND: usize = common::capability_slot(
+const FLOW_SEND: usize = common::capability_slot(
     logos_abi::ServiceId::Fetch,
-    logos_abi::IpcEndpointId::FetchToCommands,
+    logos_abi::IpcEndpointId::FetchToFlow,
     logos_abi::IpcRights::Send,
 );
 const STORAGE_SEND: usize = common::capability_slot(
@@ -50,6 +50,7 @@ const POLL_TIMEOUT_TICKS: u32 = 30_000;
 enum PendingKind {
     Network,
     Storage,
+    Body,
 }
 
 struct Operation {
@@ -57,6 +58,7 @@ struct Operation {
     url: Url,
     destination: [u8; MAX_PATH_BYTES],
     destination_len: usize,
+    response_mode: bool,
     request_bytes: [u8; logos_abi::NETWORK_INLINE_PAYLOAD_BYTES],
     request_len: usize,
     parser: ResponseParser,
@@ -71,6 +73,7 @@ struct Operation {
     next_storage_request: u32,
     started: u32,
     next_progress: usize,
+    body_offset: usize,
     cancel: bool,
 }
 
@@ -79,10 +82,8 @@ impl Operation {
         let url = Url::parse(request.url().ok_or(FetchStatus::Invalid)?)
             .map_err(|_| FetchStatus::Invalid)?;
         let destination = request.destination().ok_or(FetchStatus::Invalid)?;
-        if destination.is_empty() {
-            return Err(FetchStatus::Invalid);
-        }
-        let needs_root = !destination.starts_with(b"/");
+        let response_mode = destination.is_empty();
+        let needs_root = !response_mode && !destination.starts_with(b"/");
         let destination_len = destination.len() + usize::from(needs_root);
         if destination_len > MAX_PATH_BYTES {
             return Err(FetchStatus::Invalid);
@@ -100,6 +101,7 @@ impl Operation {
             url,
             destination: destination_copy,
             destination_len,
+            response_mode,
             request_bytes,
             request_len,
             parser: ResponseParser::new(),
@@ -114,6 +116,7 @@ impl Operation {
             next_storage_request: 1,
             started: now,
             next_progress: 512,
+            body_offset: 0,
             cancel: false,
         })
     }
@@ -126,6 +129,7 @@ impl Operation {
             self.parser.body().len() as u32,
             self.parser.content_length().map(|n| n as u32),
         )
+        .with_response_status(self.parser.status())
     }
 }
 
@@ -138,7 +142,33 @@ fn bytes_message<T: Copy>(kind: MessageKind, value: &T) -> Option<IpcBytes> {
 
 fn send_progress(operation: &Operation, status: FetchStatus) {
     if let Some(message) = bytes_message(MessageKind::FetchResponse, &operation.response(status)) {
-        let _ = common::ipc_send(COMMANDS_SEND, &message);
+        let _ = common::ipc_send(FLOW_SEND, &message);
+    }
+}
+
+fn send_body_chunk(operation: &mut Operation) -> Result<bool, FetchStatus> {
+    let body = operation.parser.body();
+    if operation.body_offset >= body.len() {
+        return Ok(true);
+    }
+    let end = (operation.body_offset + logos_abi::FETCH_BODY_CHUNK_BYTES).min(body.len());
+    let Some(chunk) = FetchBodyChunk::new(
+        operation.request_id,
+        operation.body_offset as u32,
+        &body[operation.body_offset..end],
+    ) else {
+        return Err(FetchStatus::Malformed);
+    };
+    let Some(message) = bytes_message(MessageKind::FetchBodyChunk, &chunk) else {
+        return Err(FetchStatus::Malformed);
+    };
+    match common::ipc_send(FLOW_SEND, &message) {
+        IpcStatus::Ok => {
+            operation.body_offset = end;
+            Ok(operation.body_offset == body.len())
+        }
+        IpcStatus::Full => Ok(false),
+        _ => Err(FetchStatus::Network),
     }
 }
 
@@ -311,21 +341,30 @@ fn handle_network(operation: &mut Operation, response: NetworkResponse) -> Optio
                 }
             }
             if operation.parser.complete() {
-                operation.phase = FetchPhase::StageStorage;
-                send_progress(operation, FetchStatus::InProgress);
-                let mut path = [0; MAX_PATH_BYTES];
-                let path_len = operation.destination_len;
-                path[..path_len].copy_from_slice(&operation.destination[..path_len]);
-                let (message, id) = storage_request(
-                    operation,
-                    StorageApiOperation::StageWriteBegin,
-                    0,
-                    0,
-                    &path[..path_len],
-                    &[],
-                );
-                if !send_storage(operation, message, id) {
-                    return Some(FetchStatus::Storage);
+                if operation.response_mode {
+                    operation.phase = FetchPhase::Complete;
+                    match send_body_chunk(operation) {
+                        Ok(true) => return Some(FetchStatus::Ok),
+                        Ok(false) => operation.pending = Some((PendingKind::Body, 0)),
+                        Err(status) => return Some(status),
+                    }
+                } else {
+                    operation.phase = FetchPhase::StageStorage;
+                    send_progress(operation, FetchStatus::InProgress);
+                    let mut path = [0; MAX_PATH_BYTES];
+                    let path_len = operation.destination_len;
+                    path[..path_len].copy_from_slice(&operation.destination[..path_len]);
+                    let (message, id) = storage_request(
+                        operation,
+                        StorageApiOperation::StageWriteBegin,
+                        0,
+                        0,
+                        &path[..path_len],
+                        &[],
+                    );
+                    if !send_storage(operation, message, id) {
+                        return Some(FetchStatus::Storage);
+                    }
                 }
             } else {
                 let mut request = NetworkRequest::new(NetworkOperation::TcpRead, 1);
@@ -449,7 +488,7 @@ pub extern "C" fn _start() -> ! {
         common::heartbeat_tick(&mut ticks, logos_abi::ServiceId::Fetch);
         elapsed = elapsed.saturating_add(1);
         let mut control = IpcBytes::empty(MessageKind::FetchControl);
-        if common::ipc_receive(COMMANDS_RECEIVE, &mut control) == IpcStatus::Ok
+        if common::ipc_receive(FLOW_RECEIVE, &mut control) == IpcStatus::Ok
             && control.len as usize == mem::size_of::<FetchControl>()
         {
             let value: FetchControl =
@@ -475,7 +514,7 @@ pub extern "C" fn _start() -> ! {
         }
         if operation.is_none() {
             let mut message = IpcBytes::empty(MessageKind::FetchRequest);
-            if common::ipc_receive(COMMANDS_RECEIVE, &mut message) == IpcStatus::Ok
+            if common::ipc_receive(FLOW_RECEIVE, &mut message) == IpcStatus::Ok
                 && message.len as usize == mem::size_of::<FetchRequest>()
             {
                 let request: FetchRequest =
@@ -503,7 +542,7 @@ pub extern "C" fn _start() -> ! {
                             if let Some(message) =
                                 bytes_message(MessageKind::FetchResponse, &response)
                             {
-                                let _ = common::ipc_send(COMMANDS_SEND, &message);
+                                let _ = common::ipc_send(FLOW_SEND, &message);
                             }
                         }
                     }
@@ -523,7 +562,7 @@ pub extern "C" fn _start() -> ! {
                             finish(&mut operation, status);
                         }
                     }
-                } else {
+                } else if kind == PendingKind::Storage {
                     let mut message = IpcBytes::empty(MessageKind::StorageResponse);
                     if common::ipc_receive(STORAGE_RECEIVE, &mut message) == IpcStatus::Ok {
                         if let Ok(response) = StorageApiResponse::decode(&message) {
@@ -534,11 +573,18 @@ pub extern "C" fn _start() -> ! {
                             finish(&mut operation, FetchStatus::Storage);
                         }
                     }
+                } else {
+                    current.pending = None;
+                    match send_body_chunk(current) {
+                        Ok(true) => finish(&mut operation, FetchStatus::Ok),
+                        Ok(false) => current.pending = Some((PendingKind::Body, 0)),
+                        Err(status) => finish(&mut operation, status),
+                    }
                 }
             }
         }
         common::wait(
-            common::ipc_read_event(logos_abi::IpcEndpointId::CommandsToFetch)
+            common::ipc_read_event(logos_abi::IpcEndpointId::FlowToFetch)
                 | common::ipc_read_event(logos_abi::IpcEndpointId::NetworkToFetch)
                 | common::ipc_read_event(logos_abi::IpcEndpointId::StorageToFetch),
             logos_abi::ServiceId::Fetch,

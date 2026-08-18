@@ -67,9 +67,9 @@ pub const SERVICE_IMAGES: [ServiceImageSpec; 8] = [
         1 << ServiceId::Terminal.index(),
     ),
     ServiceImageSpec::new(
-        ServiceId::Commands,
-        b"commands",
-        b"\\EFI\\LOGOS\\COMMANDS.ELF",
+        ServiceId::Flow,
+        b"flow",
+        b"\\EFI\\LOGOS\\FLOW.ELF",
         (1 << ServiceId::Session.index()) | (1 << ServiceId::Storage.index()),
     ),
     ServiceImageSpec::new(ServiceId::Storage, b"storage", b"\\EFI\\LOGOS\\STORAGE.ELF", 0),
@@ -78,7 +78,7 @@ pub const SERVICE_IMAGES: [ServiceImageSpec; 8] = [
         ServiceId::Fetch,
         b"fetch",
         b"\\EFI\\LOGOS\\FETCH.ELF",
-        (1 << ServiceId::Commands.index())
+        (1 << ServiceId::Flow.index())
             | (1 << ServiceId::Storage.index())
             | (1 << ServiceId::Network.index()),
     ),
@@ -90,7 +90,7 @@ pub const SERVICE_START_ORDER: [ServiceId; 8] = [
     ServiceId::Terminal,
     ServiceId::Session,
     ServiceId::Storage,
-    ServiceId::Commands,
+    ServiceId::Flow,
     ServiceId::Network,
     ServiceId::Fetch,
 ];
@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(SERVICE_IMAGES[1].service(), ServiceId::Display);
         assert_eq!(SERVICE_IMAGES[2].service(), ServiceId::Terminal);
         assert_eq!(SERVICE_IMAGES[3].service(), ServiceId::Session);
-        assert_eq!(SERVICE_IMAGES[4].service(), ServiceId::Commands);
+        assert_eq!(SERVICE_IMAGES[4].service(), ServiceId::Flow);
         assert_eq!(SERVICE_IMAGES[5].service(), ServiceId::Storage);
         assert_eq!(SERVICE_IMAGES[2].dependencies(), 0b0000_0011);
         assert_eq!(SERVICE_IMAGES[4].dependencies(), 0b0010_1000);

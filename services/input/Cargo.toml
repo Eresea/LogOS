@@ -13,6 +13,6 @@ bench = false
 logos-abi = { path = "../../abi" }
 
 [dev-dependencies]
-logos-commands = { path = "../commands" }
+logos-flow = { path = "../flow" }
 logos-session = { path = "../session" }
 logos-terminal = { path = "../terminal" }

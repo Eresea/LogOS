@@ -4,6 +4,14 @@ The package has two targets and no allocator: the UEFI binary in `src/main.rs` c
 `src/lib.rs`. Core owns mechanisms only; Runtime and the eight fixed services execute through
 fixed service boundaries.
 
+```text
+Terminal → Session → Flow → typed system API registry
+                         ├── Storage
+                         ├── Network
+                         ├── Supervisor
+                         └── Fetch
+```
+
 | Boundary | Owner | Invariant / proof |
 | --- | --- | --- |
 | UEFI handoff | `arch::boot` | discovers 1–8 healthy CPUs, stages fixed AP trampoline, exits boot services |
@@ -16,11 +24,11 @@ fixed service boundaries.
 | Service address spaces | `service_runtime` | loads eight retained ELFs into owned frames and retains one isolated root per service before scheduler admission |
 | Service process admission | `service_runtime` + `process` | binds each service root, coalesced mappings, and validated user launch metadata without entering service RIPs prematurely |
 | User launch transition | `arch` + `scheduler` | selects the task root before restore and provides the fixed-selector `iretq` path for service entry |
-| Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Storage → Commands → Fetch dependencies; Network is independent and Fetch depends on it |
-| Service IPC boundary | `service_ipc` + `service_runtime` | keeps fixed terminal queues and adds Commands↔Fetch, Fetch↔Storage, and Fetch↔Network edges plus dedicated Core storage/network capabilities; no queue, MMIO, or DMA frame is mapped into a service root |
-| Network IPC extension | `service_ipc` + `service_runtime` | adds Commands/Fetch client routing with ABI v2 inline payloads capped at 192 bytes; Core-owned packet descriptors/pages remain private to Network |
-| Storage boundary | Core VirtIO block adapter + `logos-storage` format + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, MSI-X interrupt delivery, reset, timeouts, and flush; Storage owns fixed request lifecycles, superblocks, journal, checkpoints, replay, recovery, durability, object IDs, namespace resolution, and bounded file operations; Commands reaches Storage through versioned `CommandsToStorage`/`StorageToCommands` messages over private staging pages; one active transaction uses fixed shadow state and at most `MAX_RECORDS_PER_TRANSACTION` records; Core stores no paths or namespace state; split-ring generations reset the bounded queue before descriptor reuse |
-| Network boundary | Core VirtIO-net adapter + Network service + versioned Network IPC | Core owns optional PCI discovery, one fixed 64-entry RX/TX pair, 2 KiB DMA buffers, interrupts, reset, and deadlines; Network owns smoltcp Ethernet/ARP/IPv4/ICMP/UDP/DHCPv4/TCP state, eight sockets, two listeners, and private packet pages; Commands and Fetch receive routed inline payload responses; HTTP remains outside Network |
+| Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Storage → Flow → Fetch dependencies; Network is independent and Fetch depends on it |
+| Service IPC boundary | `service_ipc` + `service_runtime` | keeps fixed terminal queues and adds Flow↔Fetch, Fetch↔Storage, and Fetch↔Network edges plus dedicated Core storage/network capabilities; no queue, MMIO, or DMA frame is mapped into a service root |
+| Network IPC extension | `service_ipc` + `service_runtime` | adds Flow/Fetch client routing with ABI v2 inline payloads capped at 192 bytes; Core-owned packet descriptors/pages remain private to Network |
+| Storage boundary | Core VirtIO block adapter + `logos-storage` format + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, MSI-X interrupt delivery, reset, timeouts, and flush; Storage owns fixed request lifecycles, superblocks, journal, checkpoints, replay, recovery, durability, object IDs, namespace resolution, and bounded file operations; Flow reaches Storage through versioned `FlowToStorage`/`StorageToFlow` messages over private staging pages; one active transaction uses fixed shadow state and at most `MAX_RECORDS_PER_TRANSACTION` records; Core stores no paths or namespace state; split-ring generations reset the bounded queue before descriptor reuse |
+| Network boundary | Core VirtIO-net adapter + Network service + versioned Network IPC | Core owns optional PCI discovery, one fixed 64-entry RX/TX pair, 2 KiB DMA buffers, interrupts, reset, and deadlines; Network owns smoltcp Ethernet/ARP/IPv4/ICMP/UDP/DHCPv4/TCP state, eight sockets, two listeners, and private packet pages; Flow and Fetch receive routed inline payload responses; HTTP remains outside Network |
 | Display device mapping | `service_runtime` + `process` | maps only the bounded retained GOP range into Display at `DISPLAY_FRAMEBUFFER_BASE` plus one read-only `FramebufferConfig` page at `DISPLAY_CONFIG_BASE`; boot rejects modes below the fixed 80×25/8×16 profile; no other service or kernel drawing path receives it |
 | Keyboard byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring with an observable drop counter and maps it only into Input at `INPUT_KEYBOARD_RING_BASE`; PS/2 decoding remains outside the kernel |
 | PS/2 interrupt adapter | `arch` | remaps the legacy PIC, unmasks only IRQ1 after the Input ring is published, and copies port `0x60` bytes into that ring; no key decoding occurs in Core |
@@ -39,8 +47,8 @@ fixed service boundaries.
 | Input service | `services/images/src/input` + `logos-input::InputDecoder` | consumes the Input-only PS/2 byte mapping, produces semantic key/text messages on the Input→Terminal ring, and owns modifier/layout state |
 | Terminal service | `services/images/src/terminal` + `logos-terminal::TerminalState` | ring-3 owns a bounded fixed 80×25 live surface, consumes Input and Session rings, and emits compact Session input and dirty-cell Display messages |
 | Display service | `services/images/src/display` + `logos-display` | ring-3 validates cell diffs and endpoint generations, then rasterizes dirty cells through embedded glyphs into its mapped GOP framebuffer |
-| Session service | `services/images/src/session` + `logos-session::SessionService` | ring-3 owns bounded line editing and forwards completed commands/results; command execution remains in Commands and no state survives restart or reboot |
-| Commands service | `services/images/src/commands` + `logos-commands::CommandService` | receives bounded Session requests, executes built-ins, manages services through the structured Core API, provides best-effort targeted completion through the existing Session↔Commands queues, and dispatches `sys.*` and `fs.*` commands through the appropriate system and Storage paths; returns backpressured output over its reverse IPC rings |
+| Session service | `services/images/src/session` + `logos-session::SessionService` | ring-3 owns bounded line editing, history, prompt state, and completion requests; Flow evaluation state is not retained here and no state survives restart or reboot |
+| Flow service | `services/images/src/flow` + `logos-flow::FlowService` | receives bounded Session source, lexes/parses/type-checks/evaluates fixed Flow programs, owns eight variables and four promise slots, routes typed registry operations to Storage/Network/Supervisor/Fetch, provides stale-safe completion, and returns backpressured output over its reverse IPC ring |
 | Fetch service | `services/images/src/fetch` + `logos-fetch` | owns one bounded HTTP operation, split-frame response parsing, progress/cancellation, and staged Storage publication; only numeric IPv4 `http://` 2xx downloads are accepted |
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 64 validated mappings per process, and exit/fault/reclaim outcomes |
 | User launch contract | `process::UserLaunch` + `Scheduler::spawn_user` | a running process with a bound root publishes entry RIP, aligned stack top, root, and process generation before its task becomes runnable |
@@ -50,7 +58,7 @@ fixed service boundaries.
 | Service ELF packaging | `services/images` + `scripts/build-services.ps1` | eight independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
 | Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all eight staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
 | Service supervisor | `supervisor::LiveSupervisor` + `service_runtime` | live heartbeat polling, graph-wide quiesce, generation-bumped IPC rebuild, bounded process/page-table/frame reclamation, and restart limits |
-| Service manager | `service_manager` + `service_runtime` | eight fixed service slots, generation-safe handles, dependency-aware list/status/start/stop/restart, one Commands-only manager capability page, and a deferred filesystem-package image seam |
+| Service manager | `service_manager` + `service_runtime` | eight fixed service slots, generation-safe handles, dependency-aware list/status/start/stop/restart, one Flow-only manager capability page, and a deferred filesystem-package image seam |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
 | Runtime handoff | `handoff_to_runtime` | registers one root `TaskEntry`; the scheduler starts it through the normal context path |
@@ -92,6 +100,6 @@ format migration must be explicitly implemented and proved before its version is
 
 ## Deferred next-step improvements
 
-The bounded storage milestone now proves durable file commands, reboot reopen, and torn-journal
+The bounded storage milestone now proves durable Flow filesystem workflows, reboot reopen, and torn-journal
 recovery. Filesystem-loaded service packages remain deferred because ordinary files are currently
 bounded below the retained service image size. Arbitrary runtime IPC topology also remains deferred.

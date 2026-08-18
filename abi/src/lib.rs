@@ -84,7 +84,7 @@ pub const NETWORK_TX_PACKET_PAGES: usize = 16;
 pub const NETWORK_PACKET_BASE: usize = SERVICE_IPC_BASE + 0x1b_000;
 pub const NETWORK_GATEWAY_ARP_DEADLINE_TICKS: u32 = 5_000;
 pub const NETWORK_DHCP_DEADLINE_TICKS: u32 = 10_000;
-// Keep interactive network probes below the bounded Commands receive budget.
+// Keep interactive network probes below the bounded Flow receive budget.
 pub const NETWORK_PING_TIMEOUT_TICKS: u32 = 128;
 pub const NETWORK_TCP_CONNECT_TIMEOUT_TICKS: u32 = 128;
 pub const NETWORK_REQUEST_FLAG_LISTENER: u8 = 1 << 0;
@@ -150,7 +150,7 @@ pub enum ServiceId {
     Display = 2,
     Terminal = 3,
     Session = 4,
-    Commands = 5,
+    Flow = 5,
     Storage = 6,
     Network = 7,
     Fetch = 8,
@@ -685,7 +685,7 @@ impl ServiceId {
             Self::Display => 1,
             Self::Terminal => 2,
             Self::Session => 3,
-            Self::Commands => 4,
+            Self::Flow => 4,
             Self::Storage => 5,
             Self::Network => 6,
             Self::Fetch => 7,
@@ -698,7 +698,7 @@ impl ServiceId {
             1 => Some(Self::Display),
             2 => Some(Self::Terminal),
             3 => Some(Self::Session),
-            4 => Some(Self::Commands),
+            4 => Some(Self::Flow),
             5 => Some(Self::Storage),
             6 => Some(Self::Network),
             7 => Some(Self::Fetch),
@@ -714,18 +714,18 @@ pub enum IpcEndpointId {
     TerminalToDisplay = 1,
     TerminalToSession = 2,
     SessionToTerminal = 3,
-    SessionToCommands = 4,
-    CommandsToSession = 5,
+    SessionToFlow = 4,
+    FlowToSession = 5,
     StorageToCore = 6,
     CoreToStorage = 7,
-    CommandsToStorage = 8,
-    StorageToCommands = 9,
+    FlowToStorage = 8,
+    StorageToFlow = 9,
     NetworkToCore = 10,
     CoreToNetwork = 11,
-    CommandsToNetwork = 12,
-    NetworkToCommands = 13,
-    CommandsToFetch = 14,
-    FetchToCommands = 15,
+    FlowToNetwork = 12,
+    NetworkToFlow = 13,
+    FlowToFetch = 14,
+    FetchToFlow = 15,
     FetchToStorage = 16,
     StorageToFetch = 17,
     FetchToNetwork = 18,
@@ -745,18 +745,18 @@ impl IpcEndpointId {
             1 => Some(Self::TerminalToDisplay),
             2 => Some(Self::TerminalToSession),
             3 => Some(Self::SessionToTerminal),
-            4 => Some(Self::SessionToCommands),
-            5 => Some(Self::CommandsToSession),
+            4 => Some(Self::SessionToFlow),
+            5 => Some(Self::FlowToSession),
             6 => Some(Self::StorageToCore),
             7 => Some(Self::CoreToStorage),
-            8 => Some(Self::CommandsToStorage),
-            9 => Some(Self::StorageToCommands),
+            8 => Some(Self::FlowToStorage),
+            9 => Some(Self::StorageToFlow),
             10 => Some(Self::NetworkToCore),
             11 => Some(Self::CoreToNetwork),
-            12 => Some(Self::CommandsToNetwork),
-            13 => Some(Self::NetworkToCommands),
-            14 => Some(Self::CommandsToFetch),
-            15 => Some(Self::FetchToCommands),
+            12 => Some(Self::FlowToNetwork),
+            13 => Some(Self::NetworkToFlow),
+            14 => Some(Self::FlowToFetch),
+            15 => Some(Self::FetchToFlow),
             16 => Some(Self::FetchToStorage),
             17 => Some(Self::StorageToFetch),
             18 => Some(Self::FetchToNetwork),
@@ -769,18 +769,14 @@ impl IpcEndpointId {
         match self {
             Self::InputToTerminal => ServiceId::Input,
             Self::TerminalToDisplay | Self::TerminalToSession => ServiceId::Terminal,
-            Self::SessionToTerminal | Self::SessionToCommands => ServiceId::Session,
-            Self::CommandsToSession => ServiceId::Commands,
-            Self::StorageToCore | Self::CoreToStorage | Self::StorageToCommands => {
-                ServiceId::Storage
-            }
-            Self::CommandsToStorage => ServiceId::Commands,
-            Self::NetworkToCore | Self::NetworkToCommands | Self::CoreToNetwork => {
-                ServiceId::Network
-            }
-            Self::CommandsToNetwork => ServiceId::Commands,
-            Self::CommandsToFetch => ServiceId::Commands,
-            Self::FetchToCommands | Self::FetchToStorage | Self::FetchToNetwork => ServiceId::Fetch,
+            Self::SessionToTerminal | Self::SessionToFlow => ServiceId::Session,
+            Self::FlowToSession => ServiceId::Flow,
+            Self::StorageToCore | Self::CoreToStorage | Self::StorageToFlow => ServiceId::Storage,
+            Self::FlowToStorage => ServiceId::Flow,
+            Self::NetworkToCore | Self::NetworkToFlow | Self::CoreToNetwork => ServiceId::Network,
+            Self::FlowToNetwork => ServiceId::Flow,
+            Self::FlowToFetch => ServiceId::Flow,
+            Self::FetchToFlow | Self::FetchToStorage | Self::FetchToNetwork => ServiceId::Fetch,
             Self::StorageToFetch => ServiceId::Storage,
             Self::NetworkToFetch => ServiceId::Network,
         }
@@ -790,18 +786,14 @@ impl IpcEndpointId {
         match self {
             Self::InputToTerminal | Self::SessionToTerminal => ServiceId::Terminal,
             Self::TerminalToDisplay => ServiceId::Display,
-            Self::TerminalToSession | Self::CommandsToSession => ServiceId::Session,
-            Self::SessionToCommands => ServiceId::Commands,
-            Self::StorageToCore | Self::CoreToStorage | Self::CommandsToStorage => {
-                ServiceId::Storage
-            }
-            Self::StorageToCommands => ServiceId::Commands,
-            Self::NetworkToCore | Self::CoreToNetwork | Self::CommandsToNetwork => {
-                ServiceId::Network
-            }
-            Self::NetworkToCommands => ServiceId::Commands,
-            Self::CommandsToFetch | Self::FetchToStorage | Self::FetchToNetwork => ServiceId::Fetch,
-            Self::FetchToCommands => ServiceId::Commands,
+            Self::TerminalToSession | Self::FlowToSession => ServiceId::Session,
+            Self::SessionToFlow => ServiceId::Flow,
+            Self::StorageToCore | Self::CoreToStorage | Self::FlowToStorage => ServiceId::Storage,
+            Self::StorageToFlow => ServiceId::Flow,
+            Self::NetworkToCore | Self::CoreToNetwork | Self::FlowToNetwork => ServiceId::Network,
+            Self::NetworkToFlow => ServiceId::Flow,
+            Self::FlowToFetch | Self::FetchToStorage | Self::FetchToNetwork => ServiceId::Fetch,
+            Self::FetchToFlow => ServiceId::Flow,
             Self::StorageToFetch | Self::NetworkToFetch => ServiceId::Fetch,
         }
     }
@@ -832,26 +824,26 @@ pub const fn ipc_capability_slot(
         (ServiceId::Terminal, IpcEndpointId::SessionToTerminal, IpcRights::Receive) => Some(3),
         (ServiceId::Session, IpcEndpointId::TerminalToSession, IpcRights::Receive) => Some(0),
         (ServiceId::Session, IpcEndpointId::SessionToTerminal, IpcRights::Send) => Some(1),
-        (ServiceId::Session, IpcEndpointId::SessionToCommands, IpcRights::Send) => Some(2),
-        (ServiceId::Session, IpcEndpointId::CommandsToSession, IpcRights::Receive) => Some(3),
-        (ServiceId::Commands, IpcEndpointId::SessionToCommands, IpcRights::Receive) => Some(0),
-        (ServiceId::Commands, IpcEndpointId::CommandsToSession, IpcRights::Send) => Some(1),
-        (ServiceId::Commands, IpcEndpointId::CommandsToStorage, IpcRights::Send) => Some(2),
-        (ServiceId::Commands, IpcEndpointId::StorageToCommands, IpcRights::Receive) => Some(3),
-        (ServiceId::Storage, IpcEndpointId::CommandsToStorage, IpcRights::Receive) => Some(0),
-        (ServiceId::Storage, IpcEndpointId::StorageToCommands, IpcRights::Send) => Some(1),
+        (ServiceId::Session, IpcEndpointId::SessionToFlow, IpcRights::Send) => Some(2),
+        (ServiceId::Session, IpcEndpointId::FlowToSession, IpcRights::Receive) => Some(3),
+        (ServiceId::Flow, IpcEndpointId::SessionToFlow, IpcRights::Receive) => Some(0),
+        (ServiceId::Flow, IpcEndpointId::FlowToSession, IpcRights::Send) => Some(1),
+        (ServiceId::Flow, IpcEndpointId::FlowToStorage, IpcRights::Send) => Some(2),
+        (ServiceId::Flow, IpcEndpointId::StorageToFlow, IpcRights::Receive) => Some(3),
+        (ServiceId::Storage, IpcEndpointId::FlowToStorage, IpcRights::Receive) => Some(0),
+        (ServiceId::Storage, IpcEndpointId::StorageToFlow, IpcRights::Send) => Some(1),
         (ServiceId::Storage, IpcEndpointId::StorageToCore, IpcRights::Send) => Some(2),
         (ServiceId::Storage, IpcEndpointId::CoreToStorage, IpcRights::Receive) => Some(3),
         (ServiceId::Network, IpcEndpointId::NetworkToCore, IpcRights::Send) => Some(0),
         (ServiceId::Network, IpcEndpointId::CoreToNetwork, IpcRights::Receive) => Some(1),
-        (ServiceId::Network, IpcEndpointId::CommandsToNetwork, IpcRights::Receive) => Some(2),
-        (ServiceId::Network, IpcEndpointId::NetworkToCommands, IpcRights::Send) => Some(3),
-        (ServiceId::Commands, IpcEndpointId::CommandsToNetwork, IpcRights::Send) => Some(4),
-        (ServiceId::Commands, IpcEndpointId::NetworkToCommands, IpcRights::Receive) => Some(5),
-        (ServiceId::Commands, IpcEndpointId::CommandsToFetch, IpcRights::Send) => Some(6),
-        (ServiceId::Commands, IpcEndpointId::FetchToCommands, IpcRights::Receive) => Some(7),
-        (ServiceId::Fetch, IpcEndpointId::FetchToCommands, IpcRights::Send) => Some(0),
-        (ServiceId::Fetch, IpcEndpointId::CommandsToFetch, IpcRights::Receive) => Some(1),
+        (ServiceId::Network, IpcEndpointId::FlowToNetwork, IpcRights::Receive) => Some(2),
+        (ServiceId::Network, IpcEndpointId::NetworkToFlow, IpcRights::Send) => Some(3),
+        (ServiceId::Flow, IpcEndpointId::FlowToNetwork, IpcRights::Send) => Some(4),
+        (ServiceId::Flow, IpcEndpointId::NetworkToFlow, IpcRights::Receive) => Some(5),
+        (ServiceId::Flow, IpcEndpointId::FlowToFetch, IpcRights::Send) => Some(6),
+        (ServiceId::Flow, IpcEndpointId::FetchToFlow, IpcRights::Receive) => Some(7),
+        (ServiceId::Fetch, IpcEndpointId::FetchToFlow, IpcRights::Send) => Some(0),
+        (ServiceId::Fetch, IpcEndpointId::FlowToFetch, IpcRights::Receive) => Some(1),
         (ServiceId::Fetch, IpcEndpointId::FetchToStorage, IpcRights::Send) => Some(2),
         (ServiceId::Fetch, IpcEndpointId::StorageToFetch, IpcRights::Receive) => Some(3),
         (ServiceId::Fetch, IpcEndpointId::FetchToNetwork, IpcRights::Send) => Some(4),
@@ -883,8 +875,9 @@ pub enum MessageKind {
     FetchRequest = 14,
     FetchControl = 15,
     FetchResponse = 16,
-    CommandProgress = 17,
-    CommandControl = 18,
+    FlowProgress = 17,
+    FlowControl = 18,
+    FetchBodyChunk = 19,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1159,6 +1152,7 @@ impl IpcBytes {
 }
 
 pub const FETCH_REQUEST_DATA_BYTES: usize = 240;
+pub const FETCH_BODY_CHUNK_BYTES: usize = 240;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -1172,7 +1166,7 @@ pub struct FetchRequest {
 
 impl FetchRequest {
     pub fn new(request_id: u32, url: &[u8], destination: &[u8]) -> Option<Self> {
-        if request_id == 0 || url.is_empty() || destination.is_empty() {
+        if request_id == 0 || url.is_empty() {
             return None;
         }
         let total = url.len().checked_add(destination.len())?;
@@ -1197,7 +1191,6 @@ impl FetchRequest {
             && usize::from(self.url_len) + usize::from(self.destination_len)
                 <= FETCH_REQUEST_DATA_BYTES
             && self.url_len != 0
-            && self.destination_len != 0
     }
 
     pub fn url(&self) -> Option<&[u8]> {
@@ -1312,7 +1305,7 @@ pub struct FetchResponse {
     pub request_id: u32,
     pub phase: FetchPhase,
     pub status: FetchStatus,
-    pub reserved: u16,
+    pub response_status: u16,
     pub downloaded_bytes: u32,
     pub total_bytes: u32,
 }
@@ -1329,7 +1322,7 @@ impl FetchResponse {
             request_id,
             phase,
             status,
-            reserved: 0,
+            response_status: 0,
             downloaded_bytes,
             total_bytes: match total_bytes {
                 Some(value) => value,
@@ -1338,11 +1331,17 @@ impl FetchResponse {
         }
     }
 
+    pub const fn with_response_status(mut self, status: u16) -> Self {
+        self.response_status = status;
+        self
+    }
+
     pub const fn is_valid(self) -> bool {
         self.request_id != 0
             && self.phase.is_valid()
             && self.status.is_valid()
-            && self.reserved == 0
+            && (self.response_status == 0
+                || (self.response_status >= 200 && self.response_status < 300))
     }
 
     pub const fn total(self) -> Option<u32> {
@@ -1350,23 +1349,69 @@ impl FetchResponse {
     }
 }
 
-pub type CommandProgress = FetchResponse;
+pub type FlowProgress = FetchResponse;
+
+/// One bounded response-body fragment owned by Fetch and consumed by Flow.
+///
+/// Chunks use the same request correlation as progress messages.  The offset
+/// makes delivery idempotent and lets Flow reject stale or reordered data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct FetchBodyChunk {
+    pub request_id: u32,
+    pub offset: u32,
+    pub len: u16,
+    pub reserved: u16,
+    pub bytes: [u8; FETCH_BODY_CHUNK_BYTES],
+}
+
+impl FetchBodyChunk {
+    pub const fn new(request_id: u32, offset: u32, bytes: &[u8]) -> Option<Self> {
+        if request_id == 0 || bytes.is_empty() || bytes.len() > FETCH_BODY_CHUNK_BYTES {
+            return None;
+        }
+        let mut chunk = Self {
+            request_id,
+            offset,
+            len: bytes.len() as u16,
+            reserved: 0,
+            bytes: [0; FETCH_BODY_CHUNK_BYTES],
+        };
+        let mut index = 0;
+        while index < bytes.len() {
+            chunk.bytes[index] = bytes[index];
+            index += 1;
+        }
+        Some(chunk)
+    }
+
+    pub fn is_valid(self) -> bool {
+        self.request_id != 0
+            && self.reserved == 0
+            && self.len != 0
+            && usize::from(self.len) <= FETCH_BODY_CHUNK_BYTES
+    }
+
+    pub fn bytes(&self) -> Option<&[u8]> {
+        self.is_valid().then(|| &self.bytes[..usize::from(self.len)])
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
-pub struct CommandControl {
+pub struct FlowControl {
     pub request_id: u32,
     pub operation: FetchControlOperation,
     pub reserved: [u8; 3],
 }
 
-impl CommandControl {
+impl FlowControl {
     pub const fn cancel(request_id: u32) -> Self {
         Self { request_id, operation: FetchControlOperation::Cancel, reserved: [0; 3] }
     }
 
     pub const fn is_valid(self) -> bool {
-        // Zero is the bounded "cancel the active command" wildcard. Commands
+        // Zero is the bounded "cancel the active Flow" wildcard.
         // resolves it only against its one active Fetch operation.
         matches!(self.operation, FetchControlOperation::Cancel)
             && self.reserved[0] == 0
@@ -1381,7 +1426,8 @@ const _: () = {
     assert!(core::mem::size_of::<FetchRequest>() <= MAX_IPC_BYTES);
     assert!(core::mem::size_of::<FetchControl>() <= MAX_IPC_BYTES);
     assert!(core::mem::size_of::<FetchResponse>() <= MAX_IPC_BYTES);
-    assert!(core::mem::size_of::<CommandControl>() <= MAX_IPC_BYTES);
+    assert!(core::mem::size_of::<FetchBodyChunk>() <= MAX_IPC_BYTES);
+    assert!(core::mem::size_of::<FlowControl>() <= MAX_IPC_BYTES);
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1795,6 +1841,31 @@ mod tests {
     }
 
     #[test]
+    fn flow_fetch_body_chunks_are_bounded_and_correlated() {
+        let chunk = FetchBodyChunk::new(7, 240, &[b'x'; FETCH_BODY_CHUNK_BYTES]).unwrap();
+        assert!(chunk.is_valid());
+        assert_eq!(chunk.bytes(), Some(&[b'x'; FETCH_BODY_CHUNK_BYTES][..]));
+        assert!(FetchBodyChunk::new(0, 0, b"x").is_none());
+        assert!(FetchBodyChunk::new(7, 0, &[]).is_none());
+        assert!(FetchBodyChunk::new(7, 0, &[b'x'; FETCH_BODY_CHUNK_BYTES + 1]).is_none());
+        assert_eq!(ServiceId::Flow as u8, 5);
+        assert_eq!(IpcEndpointId::SessionToFlow as u8, 4);
+        assert_eq!(IpcEndpointId::FlowToFetch as u8, 14);
+        assert_eq!(MessageKind::FlowProgress as u8, 17);
+        assert_eq!(MessageKind::FlowControl as u8, 18);
+        assert!(
+            FetchResponse::new(7, FetchPhase::Complete, FetchStatus::Ok, 1, Some(1))
+                .with_response_status(200)
+                .is_valid()
+        );
+        assert!(
+            !FetchResponse::new(7, FetchPhase::Complete, FetchStatus::Ok, 1, Some(1))
+                .with_response_status(500)
+                .is_valid()
+        );
+    }
+
+    #[test]
     fn completion_messages_are_bounded_and_correlated() {
         let request = CompletionRequest::new(7, b"service[\"st", 11).unwrap();
         assert!(request.is_valid());
@@ -1918,9 +1989,9 @@ mod tests {
 
     #[test]
     fn command_cancel_can_target_the_active_operation_without_its_id() {
-        assert!(CommandControl::cancel(0).is_valid());
+        assert!(FlowControl::cancel(0).is_valid());
         assert!(!FetchControl::cancel(0).is_valid());
-        assert!(CommandControl::cancel(7).is_valid());
+        assert!(FlowControl::cancel(7).is_valid());
     }
 
     #[test]

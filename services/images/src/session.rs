@@ -5,7 +5,7 @@
 mod common;
 
 use logos_abi::{
-    CommandControl, CompletionRequest, CompletionResponse, FetchPhase, FetchResponse, FetchStatus,
+    CompletionRequest, CompletionResponse, FetchPhase, FetchResponse, FetchStatus, FlowControl,
     IPC_FLAG_MORE, IpcBytes, IpcStatus, MAX_IPC_BYTES, MessageKind,
 };
 use logos_session::MAX_LINE_BYTES;
@@ -20,14 +20,14 @@ const OUTPUT_CAPABILITY: usize = common::capability_slot(
     logos_abi::IpcEndpointId::SessionToTerminal,
     logos_abi::IpcRights::Send,
 );
-const COMMANDS_CAPABILITY: usize = common::capability_slot(
+const FLOW_CAPABILITY: usize = common::capability_slot(
     logos_abi::ServiceId::Session,
-    logos_abi::IpcEndpointId::SessionToCommands,
+    logos_abi::IpcEndpointId::SessionToFlow,
     logos_abi::IpcRights::Send,
 );
-const COMMAND_OUTPUT_CAPABILITY: usize = common::capability_slot(
+const FLOW_OUTPUT_CAPABILITY: usize = common::capability_slot(
     logos_abi::ServiceId::Session,
-    logos_abi::IpcEndpointId::CommandsToSession,
+    logos_abi::IpcEndpointId::FlowToSession,
     logos_abi::IpcRights::Receive,
 );
 
@@ -76,13 +76,13 @@ impl PendingOutput {
     }
 }
 
-struct PendingCommand {
+struct PendingFlowInput {
     bytes: [u8; MAX_LINE_BYTES],
     len: usize,
     pending: bool,
 }
 
-impl PendingCommand {
+impl PendingFlowInput {
     const fn new() -> Self {
         Self { bytes: [0; MAX_LINE_BYTES], len: 0, pending: false }
     }
@@ -109,7 +109,7 @@ impl PendingCommand {
 
 static mut SESSION: logos_session::SessionService = logos_session::SessionService::new();
 static mut PENDING: PendingOutput = PendingOutput::new();
-static mut COMMAND: PendingCommand = PendingCommand::new();
+static mut FLOW_INPUT: PendingFlowInput = PendingFlowInput::new();
 
 fn completion_request_message(request: CompletionRequest) -> IpcBytes {
     let bytes = unsafe {
@@ -129,22 +129,22 @@ fn completion_response(message: &IpcBytes) -> Option<CompletionResponse> {
 }
 
 fn fetch_progress(message: &IpcBytes) -> Option<FetchResponse> {
-    (message.kind == MessageKind::CommandProgress
+    (message.kind == MessageKind::FlowProgress
         && message.len as usize == core::mem::size_of::<FetchResponse>())
     .then(|| unsafe { core::ptr::read_unaligned(message.bytes.as_ptr().cast()) })
     .filter(|response: &FetchResponse| response.is_valid())
 }
 
-fn command_control_message(request_id: u32) -> IpcBytes {
-    let control = CommandControl::cancel(request_id);
+fn flow_control_message(request_id: u32) -> IpcBytes {
+    let control = FlowControl::cancel(request_id);
     let bytes = unsafe {
         core::slice::from_raw_parts(
-            (&control as *const CommandControl).cast::<u8>(),
-            core::mem::size_of::<CommandControl>(),
+            (&control as *const FlowControl).cast::<u8>(),
+            core::mem::size_of::<FlowControl>(),
         )
     };
-    IpcBytes::from_bytes(MessageKind::CommandControl, bytes)
-        .unwrap_or_else(|| IpcBytes::empty(MessageKind::CommandControl))
+    IpcBytes::from_bytes(MessageKind::FlowControl, bytes)
+        .unwrap_or_else(|| IpcBytes::empty(MessageKind::FlowControl))
 }
 
 fn render_fetch_progress(response: FetchResponse, output: &mut logos_session::ShellOutput) {
@@ -169,7 +169,7 @@ fn render_fetch_progress(response: FetchResponse, output: &mut logos_session::Sh
 pub extern "C" fn _start() -> ! {
     let session = unsafe { &mut *core::ptr::addr_of_mut!(SESSION) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
-    let command = unsafe { &mut *core::ptr::addr_of_mut!(COMMAND) };
+    let flow_input = unsafe { &mut *core::ptr::addr_of_mut!(FLOW_INPUT) };
     let mut command_bytes = [0; MAX_LINE_BYTES];
     let mut command_response = [0; logos_session::MAX_OUTPUT_BYTES];
     let mut command_response_len = 0;
@@ -188,15 +188,15 @@ pub extern "C" fn _start() -> ! {
                 && terminal_input.kind == MessageKind::SessionInput
                 && terminal_input.as_bytes().is_some_and(|bytes| bytes == [0x03])
             {
-                pending_control = Some(command_control_message(0));
+                pending_control = Some(flow_control_message(0));
             }
         }
         if let Some(control) = pending_control {
-            match common::ipc_send(COMMANDS_CAPABILITY, &control) {
+            match common::ipc_send(FLOW_CAPABILITY, &control) {
                 IpcStatus::Ok => pending_control = None,
                 IpcStatus::Full => {
                     common::wait(
-                        common::ipc_write_event(logos_abi::IpcEndpointId::SessionToCommands),
+                        common::ipc_write_event(logos_abi::IpcEndpointId::SessionToFlow),
                         logos_abi::ServiceId::Session,
                     );
                     continue;
@@ -219,14 +219,14 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
         if let Some(message) = pending_completion {
-            match common::ipc_send(COMMANDS_CAPABILITY, &message) {
+            match common::ipc_send(FLOW_CAPABILITY, &message) {
                 IpcStatus::Ok => {
                     pending_completion = None;
                     progressed = true;
                 }
                 IpcStatus::Full => {
                     common::wait(
-                        common::ipc_write_event(logos_abi::IpcEndpointId::SessionToCommands),
+                        common::ipc_write_event(logos_abi::IpcEndpointId::SessionToFlow),
                         logos_abi::ServiceId::Session,
                     );
                     continue;
@@ -244,18 +244,18 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
-        if !command.is_empty() {
-            if let Some(message) = command.take() {
-                if common::ipc_send(COMMANDS_CAPABILITY, &message) == IpcStatus::Ok {
+        if !flow_input.is_empty() {
+            if let Some(message) = flow_input.take() {
+                if common::ipc_send(FLOW_CAPABILITY, &message) == IpcStatus::Ok {
                     waiting_for_command = true;
                     progressed = true;
                 } else {
-                    command.stage(message.as_bytes().unwrap_or_default());
+                    flow_input.stage(message.as_bytes().unwrap_or_default());
                 }
             }
             if !progressed {
                 common::wait(
-                    common::ipc_write_event(logos_abi::IpcEndpointId::SessionToCommands),
+                    common::ipc_write_event(logos_abi::IpcEndpointId::SessionToFlow),
                     logos_abi::ServiceId::Session,
                 );
             }
@@ -263,7 +263,7 @@ pub extern "C" fn _start() -> ! {
         }
         if waiting_for_command {
             let mut message = IpcBytes::empty(MessageKind::SessionOutput);
-            if common::ipc_receive(COMMAND_OUTPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
+            if common::ipc_receive(FLOW_OUTPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
                 if let Some(response) = completion_response(&message) {
                     let mut edit_output = logos_session::ShellOutput::new();
                     session.apply_completion_response(response, &mut edit_output);
@@ -298,15 +298,14 @@ pub extern "C" fn _start() -> ! {
             }
             if !progressed {
                 common::wait(
-                    common::ipc_read_event(logos_abi::IpcEndpointId::CommandsToSession),
+                    common::ipc_read_event(logos_abi::IpcEndpointId::FlowToSession),
                     logos_abi::ServiceId::Session,
                 );
             }
             continue;
         }
         let mut completion_message = IpcBytes::empty(MessageKind::CompletionResponse);
-        if common::ipc_receive(COMMAND_OUTPUT_CAPABILITY, &mut completion_message) == IpcStatus::Ok
-        {
+        if common::ipc_receive(FLOW_OUTPUT_CAPABILITY, &mut completion_message) == IpcStatus::Ok {
             if let Some(response) = completion_response(&completion_message) {
                 let mut edit_output = logos_session::ShellOutput::new();
                 session.apply_completion_response(response, &mut edit_output);
@@ -329,7 +328,7 @@ pub extern "C" fn _start() -> ! {
             if let Some(length) =
                 session.input_for_command(bytes, &mut command_bytes, &mut edit_output)
             {
-                command.stage(&command_bytes[..length]);
+                flow_input.stage(&command_bytes[..length]);
             }
             if let Some(request) = session.take_completion_request() {
                 pending_completion = Some(completion_request_message(request));
@@ -347,7 +346,7 @@ pub extern "C" fn _start() -> ! {
         if !progressed {
             let mut wait_mask = common::ipc_read_event(logos_abi::IpcEndpointId::TerminalToSession);
             if session.completion_pending() {
-                wait_mask |= common::ipc_read_event(logos_abi::IpcEndpointId::CommandsToSession);
+                wait_mask |= common::ipc_read_event(logos_abi::IpcEndpointId::FlowToSession);
             }
             common::wait(wait_mask, logos_abi::ServiceId::Session);
         }

@@ -10,7 +10,7 @@ members = [
     "abi",
     "network",
     "storage",
-    "services/commands",
+    "services/flow",
     "services/display",
     "services/input",
     "services/session",

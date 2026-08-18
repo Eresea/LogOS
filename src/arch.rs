@@ -1221,7 +1221,7 @@ pub(crate) fn power_control(process: ProcessHandle, action: usize) -> bool {
         let _runtime_guard = ServiceRuntimeGuard::acquire();
         let authorized = unsafe {
             (&*core::ptr::addr_of!(SERVICE_RUNTIME))
-                .launch(logos_abi::ServiceId::Commands)
+                .launch(logos_abi::ServiceId::Flow)
                 .is_some_and(|(current, _)| current == process)
         };
         if !authorized {

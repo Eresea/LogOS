@@ -62,13 +62,6 @@ name = "logos-abi"
 version = "0.1.0"
 
 [[package]]
-name = "logos-commands"
-version = "0.1.0"
-dependencies = [
- "logos-abi",
-]
-
-[[package]]
 name = "logos-display"
 version = "0.1.0"
 dependencies = [
@@ -83,11 +76,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos-flow"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
 name = "logos-input"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
- "logos-commands",
+ "logos-flow",
  "logos-session",
  "logos-terminal",
 ]
@@ -105,9 +105,9 @@ name = "logos-service-images"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
- "logos-commands",
  "logos-display",
  "logos-fetch",
+ "logos-flow",
  "logos-input",
  "logos-network",
  "logos-session",
@@ -121,7 +121,6 @@ name = "logos-session"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
- "logos-commands",
 ]
 
 [[package]]
