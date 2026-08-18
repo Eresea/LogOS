@@ -1069,21 +1069,39 @@ impl ServiceRuntime {
             package_bytes,
         );
         let mut package_scratch = [0; crate::loader::PAGE_SIZE];
-        let header = logos_package::validate_package(
-            &mut raw_reader,
-            service,
-            logos_abi::ABI_VERSION,
-            &mut package_scratch,
-        )
-        .map_err(|_| ServiceRuntimeError::Image)?;
+        let mut prefix = [0; 10];
+        logos_package::PackageReader::read(&mut raw_reader, 0, &mut prefix)
+            .map_err(|_| ServiceRuntimeError::Image)?;
+        let format_version = u16::from_le_bytes([prefix[8], prefix[9]]);
+        let (payload_offset, payload_length) = if format_version
+            == logos_package::PACKAGE_FORMAT_VERSION_V2
+        {
+            let header = logos_package::validate_package_v2(&mut raw_reader, &mut package_scratch)
+                .map_err(|_| ServiceRuntimeError::Image)?;
+            if header.manifest.kind != logos_package::PackageKind::Service
+                || header.manifest.target != logos_package::PackageTarget::Service(service)
+            {
+                return Err(ServiceRuntimeError::Image);
+            }
+            (logos_package::PACKAGE_HEADER_V2_BYTES, header.payload_length as usize)
+        } else {
+            let header = logos_package::validate_package(
+                &mut raw_reader,
+                service,
+                logos_abi::ABI_VERSION,
+                &mut package_scratch,
+            )
+            .map_err(|_| ServiceRuntimeError::Image)?;
+            (logos_package::PACKAGE_HEADER_BYTES, header.payload_length as usize)
+        };
         drop(raw_reader);
         let mut payload_reader = RuntimePackageReader::new(
             self,
             runtime_guard,
             service,
             package_generation,
-            logos_package::PACKAGE_HEADER_BYTES,
-            header.payload_length as usize,
+            payload_offset,
+            payload_length,
         );
         let plan = crate::process::ElfLoadPlan::parse_reader(&mut payload_reader)
             .map_err(|_| ServiceRuntimeError::Image)?;
@@ -1107,8 +1125,8 @@ impl ServiceRuntime {
             runtime_guard,
             service,
             package_generation,
-            logos_package::PACKAGE_HEADER_BYTES,
-            header.payload_length as usize,
+            payload_offset,
+            payload_length,
         );
         let mut scratch = [0; crate::loader::PAGE_SIZE];
         let mut memory = IdentityPageTableMemory;

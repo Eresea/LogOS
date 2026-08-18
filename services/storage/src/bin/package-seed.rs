@@ -9,7 +9,9 @@ use std::{
 };
 
 use logos_abi::ServiceId;
-use logos_package::{PACKAGE_HEADER_BYTES, ServicePackageHeader, crc32c};
+use logos_package::{
+    PACKAGE_HEADER_V2_BYTES, PackageHeaderV2, PackageManifest, PackageName, SemanticVersion, crc32c,
+};
 use logos_storage::{BLOCK_BYTES, Block, BlockError, BlockIndex, BlockStore};
 use logos_storage_service::{DurableNamespace, PackageHandle, PackageInfo};
 
@@ -60,11 +62,22 @@ impl BlockStore for FileBlockStore {
 }
 
 fn package(service: ServiceId, payload: &[u8]) -> Vec<u8> {
-    let header = ServicePackageHeader::new(service, 1, payload.len(), crc32c(payload))
-        .expect("package size");
-    let mut bytes = vec![0; PACKAGE_HEADER_BYTES + payload.len()];
+    let name = match service {
+        ServiceId::Input => b"input".as_slice(),
+        ServiceId::Display => b"display".as_slice(),
+        ServiceId::Session => b"session".as_slice(),
+        _ => b"service".as_slice(),
+    };
+    let manifest = PackageManifest::for_service(
+        PackageName::parse(name).expect("package name"),
+        SemanticVersion::new(1, 0, 0),
+        service,
+    );
+    let header =
+        PackageHeaderV2::new(manifest, payload.len(), crc32c(payload)).expect("package size");
+    let mut bytes = vec![0; PACKAGE_HEADER_V2_BYTES + payload.len()];
     header.encode(&mut bytes).expect("package header");
-    bytes[PACKAGE_HEADER_BYTES..].copy_from_slice(payload);
+    bytes[PACKAGE_HEADER_V2_BYTES..].copy_from_slice(payload);
     bytes
 }
 
@@ -89,7 +102,7 @@ fn corrupt(filesystem: &mut DurableNamespace<FileBlockStore>, info: PackageInfo)
     let mut block = Block::zero();
     let store = filesystem.block_store_mut();
     store.read_block(BlockIndex::new(extent.start), &mut block).expect("read corrupt target");
-    block.as_bytes_mut()[PACKAGE_HEADER_BYTES] ^= 0xa5;
+    block.as_bytes_mut()[PACKAGE_HEADER_V2_BYTES] ^= 0xa5;
     store.write_block(BlockIndex::new(extent.start), &block).expect("write corrupt target");
     store.flush().expect("flush corrupt target");
 }

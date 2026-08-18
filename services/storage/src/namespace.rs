@@ -4,7 +4,10 @@ use crate::packages::{
     validate_install_on_store,
 };
 use logos_abi::ServiceId;
-use logos_package::PACKAGE_HEADER_BYTES;
+use logos_package::{
+    PACKAGE_FORMAT_VERSION_V2, PACKAGE_HEADER_BYTES, PACKAGE_HEADER_V2_BYTES, PackageHeaderV2,
+    PackageTarget, ServicePackageHeader,
+};
 use logos_storage::{
     BLOCK_BYTES, BlockError, BlockStore, CHECKPOINT_PAYLOAD_BYTES, FormatError, JournalRecord,
     MAX_RECORD_PAYLOAD_BYTES, ReplayError, ReplaySink, Volume,
@@ -929,11 +932,88 @@ impl<B: BlockStore> DurableNamespace<B> {
         self.store.flush().map_err(NamespaceError::Block)
     }
 
-    pub fn lookup_package(&self, service: ServiceId) -> Result<PackageInfo, NamespaceError> {
+    pub fn lookup_package(&mut self, service: ServiceId) -> Result<PackageInfo, NamespaceError> {
         if self.volume.package_arena().is_none() {
             return Err(NamespaceError::Unsupported);
         }
-        self.packages.lookup(service).ok_or(NamespaceError::NotFound)
+        match self.packages.lookup_with_store(&mut self.store, service) {
+            Err(PackageCatalogError::Stale) => Err(NamespaceError::NotFound),
+            result => result.map_err(NamespaceError::Package),
+        }
+    }
+
+    pub fn package_at(&mut self, index: usize) -> Result<Option<PackageInfo>, NamespaceError> {
+        if self.volume.package_arena().is_none() {
+            return Err(NamespaceError::Unsupported);
+        }
+        let Some(service) = self.packages.service_at(index) else {
+            return Ok(None);
+        };
+        self.lookup_package(service).map(Some)
+    }
+
+    pub fn lookup_package_name(&mut self, name: &[u8]) -> Result<PackageInfo, NamespaceError> {
+        let Ok(name) = logos_package::PackageName::parse(name) else {
+            return Err(NamespaceError::NotFound);
+        };
+        for index in 0..crate::packages::MAX_PACKAGE_RECORDS {
+            let Some(info) = self.package_at(index)? else {
+                break;
+            };
+            if info.manifest.is_some_and(|manifest| manifest.name == name) {
+                return Ok(info);
+            }
+        }
+        Err(NamespaceError::NotFound)
+    }
+
+    pub fn install_package_file(&mut self, path: &[u8]) -> Result<PackageHandle, NamespaceError> {
+        let id = self.namespace.resolve_path(path)?;
+        let info = self.namespace.stat(id)?;
+        if info.kind != ObjectKind::File || info.length == 0 {
+            return Err(NamespaceError::InvalidRecord);
+        }
+        let length = info.length as usize;
+        let mut prefix = [0; 10];
+        if self.namespace.read(id, 0, &mut prefix)? != prefix.len() {
+            return Err(NamespaceError::InvalidRecord);
+        }
+        let service = if u16::from_le_bytes([prefix[8], prefix[9]]) == PACKAGE_FORMAT_VERSION_V2 {
+            let mut header = [0; PACKAGE_HEADER_V2_BYTES];
+            if self.namespace.read(id, 0, &mut header)? != header.len() {
+                return Err(NamespaceError::InvalidRecord);
+            }
+            let header =
+                PackageHeaderV2::decode(&header).map_err(|_| NamespaceError::InvalidRecord)?;
+            match header.manifest.target {
+                PackageTarget::Service(service) => service,
+                PackageTarget::None => return Err(NamespaceError::InvalidRecord),
+            }
+        } else {
+            let mut header = [0; PACKAGE_HEADER_BYTES];
+            if self.namespace.read(id, 0, &mut header)? != header.len() {
+                return Err(NamespaceError::InvalidRecord);
+            }
+            ServicePackageHeader::decode(&header)
+                .map_err(|_| NamespaceError::InvalidRecord)?
+                .service
+        };
+        let mut install = self.begin_package_install(service, length)?;
+        let result = (|| {
+            for offset in (0..length).step_by(BLOCK_BYTES) {
+                let amount = (length - offset).min(BLOCK_BYTES);
+                let mut block = logos_storage::Block::zero();
+                if self.namespace.read(id, offset, &mut block.as_bytes_mut()[..amount])? != amount {
+                    return Err(NamespaceError::InvalidRecord);
+                }
+                self.write_package_chunk(&mut install, offset, &block.as_bytes()[..amount])?;
+            }
+            self.commit_package_install(install)
+        })();
+        if result.is_err() {
+            self.abort_package_install(install);
+        }
+        result
     }
 
     pub fn begin_package_install(
@@ -1007,14 +1087,20 @@ impl<B: BlockStore> DurableNamespace<B> {
         }
         self.store.flush()?;
         let mut scratch = [0; BLOCK_BYTES];
-        let header = validate_install_on_store(&mut self.store, &install, &mut scratch)?;
-        if header.payload_length as usize + PACKAGE_HEADER_BYTES != install.bytes() {
+        let package = validate_install_on_store(&mut self.store, &install, &mut scratch)?;
+        if package.payload_length as usize + package.header_bytes != install.bytes() {
             return Err(NamespaceError::InvalidRecord);
         }
+        self.packages.validate_install_policy(
+            &mut self.store,
+            install.service,
+            package,
+            &mut scratch,
+        )?;
         self.checkpoint_current()?;
         let generation = self.packages.next_generation(install.service)?;
         let mut payload = [0; PACKAGE_RECORD_BYTES];
-        encode_install_record(&install, header, generation, &mut payload)?;
+        encode_install_record(&install, package, generation, &mut payload)?;
         self.volume.commit(
             &mut self.store,
             &[JournalRecord { kind: PACKAGE_INSTALL_KIND, payload: &payload }],
@@ -1269,7 +1355,10 @@ fn get_u32(bytes: &[u8], offset: usize) -> u32 {
 mod tests {
     use super::*;
     use logos_abi::ServiceId;
-    use logos_package::{PACKAGE_HEADER_BYTES, ServicePackageHeader, crc32c};
+    use logos_package::{
+        PACKAGE_HEADER_BYTES, PACKAGE_HEADER_V2_BYTES, PackageDependency, PackageHeaderV2,
+        PackageManifest, PackageName, SemanticVersion, ServicePackageHeader, crc32c,
+    };
     use logos_storage::{Block, BlockError, BlockIndex, BlockStore, MemoryBlockStore};
     use std::boxed::Box;
     use std::vec;
@@ -1314,6 +1403,39 @@ mod tests {
             filesystem.write_package_chunk(&mut transaction, offset * BLOCK_BYTES, chunk).unwrap();
         }
         filesystem.commit_package_install(transaction).unwrap()
+    }
+
+    fn install_v2(
+        filesystem: &mut DurableNamespace<HeapStore>,
+        service: ServiceId,
+        name: &[u8],
+    ) -> PackageHandle {
+        let manifest = PackageManifest::for_service(
+            PackageName::parse(name).unwrap(),
+            SemanticVersion::new(1, 2, 3),
+            service,
+        );
+        install_v2_manifest(filesystem, manifest, b"managed-elf").unwrap()
+    }
+
+    fn install_v2_manifest(
+        filesystem: &mut DurableNamespace<HeapStore>,
+        manifest: PackageManifest,
+        payload: &[u8],
+    ) -> Result<PackageHandle, NamespaceError> {
+        let service = match manifest.target {
+            logos_package::PackageTarget::Service(service) => service,
+            logos_package::PackageTarget::None => panic!("test package must target a service"),
+        };
+        let header = PackageHeaderV2::new(manifest, payload.len(), crc32c(payload)).unwrap();
+        let mut package = vec![0; PACKAGE_HEADER_V2_BYTES + payload.len()];
+        header.encode(&mut package).unwrap();
+        package[PACKAGE_HEADER_V2_BYTES..].copy_from_slice(payload);
+        let mut transaction = filesystem.begin_package_install(service, package.len()).unwrap();
+        for (offset, chunk) in package.chunks(BLOCK_BYTES).enumerate() {
+            filesystem.write_package_chunk(&mut transaction, offset * BLOCK_BYTES, chunk).unwrap();
+        }
+        filesystem.commit_package_install(transaction)
     }
 
     #[test]
@@ -1535,6 +1657,90 @@ mod tests {
     }
 
     #[test]
+    fn v2_manifest_is_read_from_durable_package_header() {
+        let mut fs = DurableNamespace::format(heap_store()).unwrap();
+        let handle = install_v2(&mut fs, ServiceId::Flow, b"flow-managed");
+        let info = fs.lookup_package(ServiceId::Flow).unwrap();
+        assert_eq!(info.handle, handle);
+        assert_eq!(
+            info.manifest.map(|manifest| manifest.version),
+            Some(SemanticVersion::new(1, 2, 3))
+        );
+
+        fs.reopen().unwrap();
+        assert_eq!(
+            fs.lookup_package(ServiceId::Flow).unwrap().manifest.map(|manifest| manifest.name),
+            Some(PackageName::parse(b"flow-managed").unwrap())
+        );
+    }
+
+    #[test]
+    fn v2_updates_require_newer_versions_and_preserve_dependency_ranges() {
+        let mut fs = DurableNamespace::format(heap_store()).unwrap();
+        let base_name = PackageName::parse(b"base").unwrap();
+        let app_name = PackageName::parse(b"app").unwrap();
+        install_v2_manifest(
+            &mut fs,
+            PackageManifest::for_service(
+                base_name,
+                SemanticVersion::new(1, 0, 0),
+                ServiceId::Storage,
+            ),
+            b"base",
+        )
+        .unwrap();
+
+        let mut app =
+            PackageManifest::for_service(app_name, SemanticVersion::new(1, 0, 0), ServiceId::Flow);
+        app.add_dependency(PackageDependency::new(base_name, b"^1.0.0").unwrap()).unwrap();
+        install_v2_manifest(&mut fs, app, b"app").unwrap();
+
+        let same = PackageManifest::for_service(
+            base_name,
+            SemanticVersion::new(1, 0, 0),
+            ServiceId::Storage,
+        );
+        assert_eq!(
+            install_v2_manifest(&mut fs, same, b"same"),
+            Err(NamespaceError::Package(PackageCatalogError::VersionConflict))
+        );
+        let incompatible = PackageManifest::for_service(
+            base_name,
+            SemanticVersion::new(2, 0, 0),
+            ServiceId::Storage,
+        );
+        assert_eq!(
+            install_v2_manifest(&mut fs, incompatible, b"incompatible"),
+            Err(NamespaceError::Package(PackageCatalogError::DependencyConflict))
+        );
+        let compatible = PackageManifest::for_service(
+            base_name,
+            SemanticVersion::new(1, 1, 0),
+            ServiceId::Storage,
+        );
+        install_v2_manifest(&mut fs, compatible, b"compatible").unwrap();
+    }
+
+    #[test]
+    fn package_file_import_reuses_validation_and_publishes_generation() {
+        let mut fs = DurableNamespace::format(heap_store()).unwrap();
+        let payload = b"elf";
+        let header =
+            ServicePackageHeader::new(ServiceId::Flow, 7, payload.len(), crc32c(payload)).unwrap();
+        let mut package = vec![0; PACKAGE_HEADER_BYTES + payload.len()];
+        header.encode(&mut package).unwrap();
+        package[PACKAGE_HEADER_BYTES..].copy_from_slice(payload);
+        let source = fs.create_file(fs.root(), b"import.pkg").unwrap();
+        fs.write(source, 0, &package).unwrap();
+
+        let handle = fs.install_package_file(b"/import.pkg").unwrap();
+        assert_eq!(fs.lookup_package(ServiceId::Flow).unwrap().handle, handle);
+        let mut output = [0; 35];
+        assert_eq!(fs.read_package(handle, 0, &mut output).unwrap(), output.len());
+        assert_eq!(&output[PACKAGE_HEADER_BYTES..], payload);
+    }
+
+    #[test]
     fn incomplete_package_write_is_not_published_after_reopen() {
         let mut fs = DurableNamespace::format(heap_store()).unwrap();
         let incomplete_start = {
@@ -1591,7 +1797,7 @@ mod tests {
         let mut legacy_store = heap_store();
         logos_storage::Volume::format_as(&mut legacy_store, logos_storage::V2_FORMAT_VERSION)
             .unwrap();
-        let legacy = DurableNamespace::open(legacy_store).unwrap();
+        let mut legacy = DurableNamespace::open(legacy_store).unwrap();
         assert_eq!(legacy.lookup_package(ServiceId::Storage), Err(NamespaceError::Unsupported));
     }
 }
