@@ -634,6 +634,7 @@ impl ReplaySink for ObjectNamespace {
 struct RecoverySink<'a> {
     namespace: &'a mut ObjectNamespace,
     packages: &'a mut PackageCatalog,
+    package_arena: Option<(u64, u64)>,
 }
 
 impl ReplaySink for RecoverySink<'_> {
@@ -644,7 +645,9 @@ impl ReplaySink for RecoverySink<'_> {
         payload: &[u8],
     ) -> Result<(), ReplayError> {
         if kind == PACKAGE_INSTALL_KIND {
-            self.packages.apply_record(kind, payload).map_err(|_| ReplayError::Rejected)
+            self.packages
+                .apply_record(kind, payload, self.package_arena)
+                .map_err(|_| ReplayError::Rejected)
         } else {
             self.namespace.apply_record(kind, payload).map_err(|_| ReplayError::Rejected)
         }
@@ -687,10 +690,14 @@ impl<B: BlockStore> DurableNamespace<B> {
         if volume.load_checkpoint(&mut store, &mut snapshot)?.is_some() {
             namespace.restore_snapshot(&snapshot[..SNAPSHOT_BYTES])?;
             if volume.format_version() == logos_storage::FORMAT_VERSION {
-                packages.restore_snapshot(&snapshot[SNAPSHOT_BYTES..])?;
+                packages.restore_snapshot(&snapshot[SNAPSHOT_BYTES..], volume.package_arena())?;
             }
         }
-        let mut recovery = RecoverySink { namespace: &mut namespace, packages: &mut packages };
+        let mut recovery = RecoverySink {
+            namespace: &mut namespace,
+            packages: &mut packages,
+            package_arena: volume.package_arena(),
+        };
         volume.recover(&mut store, &mut recovery)?;
         Ok(Self { store, volume, namespace, packages })
     }
@@ -703,10 +710,14 @@ impl<B: BlockStore> DurableNamespace<B> {
         if volume.load_checkpoint(&mut self.store, &mut snapshot)?.is_some() {
             namespace.restore_snapshot(&snapshot[..SNAPSHOT_BYTES])?;
             if volume.format_version() == logos_storage::FORMAT_VERSION {
-                packages.restore_snapshot(&snapshot[SNAPSHOT_BYTES..])?;
+                packages.restore_snapshot(&snapshot[SNAPSHOT_BYTES..], volume.package_arena())?;
             }
         }
-        let mut recovery = RecoverySink { namespace: &mut namespace, packages: &mut packages };
+        let mut recovery = RecoverySink {
+            namespace: &mut namespace,
+            packages: &mut packages,
+            package_arena: volume.package_arena(),
+        };
         volume.recover(&mut self.store, &mut recovery)?;
         self.volume = volume;
         self.namespace = namespace;
@@ -946,9 +957,7 @@ impl<B: BlockStore> DurableNamespace<B> {
         &mut self,
         install: PackageInstall,
     ) -> Result<PackageHandle, NamespaceError> {
-        if self.volume.package_arena().is_none() {
-            return Err(NamespaceError::Unsupported);
-        }
+        let arena = self.volume.package_arena().ok_or(NamespaceError::Unsupported)?;
         if !install.complete() {
             return Err(NamespaceError::InvalidRecord);
         }
@@ -966,7 +975,7 @@ impl<B: BlockStore> DurableNamespace<B> {
             &mut self.store,
             &[JournalRecord { kind: PACKAGE_INSTALL_KIND, payload: &payload }],
         )?;
-        self.packages.apply_record(PACKAGE_INSTALL_KIND, &payload)?;
+        self.packages.apply_record(PACKAGE_INSTALL_KIND, &payload, Some(arena))?;
         self.checkpoint_current()?;
         Ok(PackageHandle { service: install.service, generation })
     }

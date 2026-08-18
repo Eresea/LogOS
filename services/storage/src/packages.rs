@@ -194,6 +194,7 @@ impl PackageCatalog {
         &mut self,
         kind: u16,
         payload: &[u8],
+        arena: Option<(u64, u64)>,
     ) -> Result<(), PackageCatalogError> {
         if kind != PACKAGE_INSTALL_KIND || payload.len() != PACKAGE_RECORD_BYTES {
             return Err(PackageCatalogError::InvalidRecord);
@@ -205,6 +206,8 @@ impl PackageCatalog {
             .position(|current| current.alive && current.service == record.service)
             .or_else(|| self.records.iter().position(|current| !current.alive))
             .ok_or(PackageCatalogError::Capacity)?;
+        let arena = arena.ok_or(PackageCatalogError::Unsupported)?;
+        validate_record_layout(&record, arena, &self.records, Some(slot))?;
         self.records[slot] = record;
         Ok(())
     }
@@ -222,7 +225,11 @@ impl PackageCatalog {
         Ok(PACKAGE_SNAPSHOT_BYTES)
     }
 
-    pub(crate) fn restore_snapshot(&mut self, input: &[u8]) -> Result<(), PackageCatalogError> {
+    pub(crate) fn restore_snapshot(
+        &mut self,
+        input: &[u8],
+        arena: Option<(u64, u64)>,
+    ) -> Result<(), PackageCatalogError> {
         if input.len() != PACKAGE_SNAPSHOT_BYTES
             || input[0] != 1
             || input[1] as usize != MAX_PACKAGE_RECORDS
@@ -232,6 +239,12 @@ impl PackageCatalog {
         let mut records = [PackageRecord::EMPTY; MAX_PACKAGE_RECORDS];
         for (index, record) in records.iter_mut().enumerate() {
             *record = decode_record(&input[2 + index * PACKAGE_RECORD_BYTES..])?;
+        }
+        for (index, record) in records.iter().enumerate() {
+            if record.alive {
+                let arena = arena.ok_or(PackageCatalogError::Unsupported)?;
+                validate_record_layout(record, arena, &records, Some(index))?;
+            }
         }
         *self = Self { records };
         Ok(())
@@ -376,7 +389,19 @@ fn decode_record(input: &[u8]) -> Result<PackageRecord, PackageCatalogError> {
     }
     let generation = get_u32(input, 4);
     let bytes = get_u32(input, 12);
-    if input[0] != 0 && (generation == 0 || bytes as usize > MAX_PACKAGE_BYTES) {
+    if input[0] != 0
+        && (generation == 0
+            || !(PACKAGE_HEADER_BYTES..=MAX_PACKAGE_BYTES).contains(&(bytes as usize)))
+    {
+        return Err(PackageCatalogError::InvalidRecord);
+    }
+    if input[0] == 0
+        && (generation != 0
+            || bytes != 0
+            || get_u32(input, 16) != 0
+            || extent_count != 0
+            || extents.iter().any(|extent| *extent != PackageExtent::EMPTY))
+    {
         return Err(PackageCatalogError::InvalidRecord);
     }
     Ok(PackageRecord {
@@ -389,6 +414,58 @@ fn decode_record(input: &[u8]) -> Result<PackageRecord, PackageCatalogError> {
         extents,
         extent_count: extent_count as u8,
     })
+}
+
+fn validate_record_layout(
+    record: &PackageRecord,
+    arena: (u64, u64),
+    records: &[PackageRecord; MAX_PACKAGE_RECORDS],
+    skip: Option<usize>,
+) -> Result<(), PackageCatalogError> {
+    if arena.1 <= arena.0 || !record.alive {
+        return Err(PackageCatalogError::InvalidRecord);
+    }
+    let expected_blocks = (record.bytes as usize).div_ceil(BLOCK_BYTES) as u64;
+    let mut total_blocks = 0u64;
+    for (index, extent) in record.extents[..record.extent_count as usize].iter().enumerate() {
+        let end = extent
+            .start
+            .checked_add(extent.blocks as u64)
+            .ok_or(PackageCatalogError::InvalidRecord)?;
+        if extent.start < arena.0 || end > arena.1 {
+            return Err(PackageCatalogError::InvalidRecord);
+        }
+        total_blocks = total_blocks
+            .checked_add(extent.blocks as u64)
+            .ok_or(PackageCatalogError::InvalidRecord)?;
+        for previous in &record.extents[..index] {
+            let previous_end = previous
+                .start
+                .checked_add(previous.blocks as u64)
+                .ok_or(PackageCatalogError::InvalidRecord)?;
+            if extent.start < previous_end && previous.start < end {
+                return Err(PackageCatalogError::InvalidRecord);
+            }
+        }
+        for (other_index, other) in records.iter().enumerate() {
+            if Some(other_index) == skip || !other.alive {
+                continue;
+            }
+            for other_extent in &other.extents[..other.extent_count as usize] {
+                let other_end = other_extent
+                    .start
+                    .checked_add(other_extent.blocks as u64)
+                    .ok_or(PackageCatalogError::InvalidRecord)?;
+                if extent.start < other_end && other_extent.start < end {
+                    return Err(PackageCatalogError::InvalidRecord);
+                }
+            }
+        }
+    }
+    if total_blocks != expected_blocks {
+        return Err(PackageCatalogError::InvalidRecord);
+    }
+    Ok(())
 }
 
 struct InstallReader<'a, B> {
@@ -458,4 +535,65 @@ fn get_u64(bytes: &[u8], offset: usize) -> u64 {
         bytes[offset + 6],
         bytes[offset + 7],
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(start: u64, blocks: u32, bytes: u32) -> PackageRecord {
+        let mut record = PackageRecord::EMPTY;
+        record.alive = true;
+        record.service = ServiceId::Input;
+        record.generation = 1;
+        record.bytes = bytes;
+        record.extent_count = 1;
+        record.extents[0] = PackageExtent { start, blocks };
+        record
+    }
+
+    #[test]
+    fn restore_rejects_invalid_package_geometry() {
+        let mut catalog = PackageCatalog::new();
+        let mut snapshot = [0; PACKAGE_SNAPSHOT_BYTES];
+        let mut records = [PackageRecord::EMPTY; MAX_PACKAGE_RECORDS];
+        records[0] = record(9, 1, PACKAGE_HEADER_BYTES as u32);
+        catalog.records = records;
+        catalog.encode_snapshot(&mut snapshot).unwrap();
+        assert_eq!(
+            PackageCatalog::new().restore_snapshot(&snapshot, Some((10, 20))),
+            Err(PackageCatalogError::InvalidRecord)
+        );
+
+        records[0] = record(10, 2, PACKAGE_HEADER_BYTES as u32);
+        catalog.records = records;
+        catalog.encode_snapshot(&mut snapshot).unwrap();
+        assert_eq!(
+            PackageCatalog::new().restore_snapshot(&snapshot, Some((10, 20))),
+            Err(PackageCatalogError::InvalidRecord)
+        );
+    }
+
+    #[test]
+    fn restore_and_replay_reject_overlapping_or_overflowing_extents() {
+        let mut catalog = PackageCatalog::new();
+        let mut snapshot = [0; PACKAGE_SNAPSHOT_BYTES];
+        let mut records = [PackageRecord::EMPTY; MAX_PACKAGE_RECORDS];
+        records[0] = record(10, 1, PACKAGE_HEADER_BYTES as u32);
+        records[1] = record(10, 1, PACKAGE_HEADER_BYTES as u32);
+        catalog.records = records;
+        catalog.encode_snapshot(&mut snapshot).unwrap();
+        assert_eq!(
+            PackageCatalog::new().restore_snapshot(&snapshot, Some((10, 20))),
+            Err(PackageCatalogError::InvalidRecord)
+        );
+
+        let overflowing = record(u64::MAX, 1, PACKAGE_HEADER_BYTES as u32);
+        let mut payload = [0; PACKAGE_RECORD_BYTES];
+        encode_record(&overflowing, &mut payload);
+        assert_eq!(
+            PackageCatalog::new().apply_record(PACKAGE_INSTALL_KIND, &payload, Some((10, 20))),
+            Err(PackageCatalogError::InvalidRecord)
+        );
+    }
 }
