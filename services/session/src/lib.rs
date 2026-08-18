@@ -1202,7 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_completion_places_cursor_in_first_argument() {
+    fn filesystem_open_completion_places_cursor_in_first_argument() {
         let mut editor = LineEditor::new();
         let mut command = [0; MAX_LINE_BYTES];
         let mut output = ShellOutput::new();
@@ -1212,10 +1212,10 @@ mod tests {
         response.line_revision = request.line_revision;
         response.replace_start = 3;
         response.replace_end = 7;
-        assert!(response.push_candidate_with_cursor(b"open(\"\").read()", 6));
+        assert!(response.push_candidate_with_cursor(b"open(\"\")", 6));
         editor.apply_completion_response(response, &mut output);
         editor.input_for_command(b"\t", &mut command, &mut output);
-        assert_eq!(&editor.line[..editor.line_len], b"fs.open(\"\").read()");
+        assert_eq!(&editor.line[..editor.line_len], b"fs.open(\"\")");
         assert_eq!(editor.cursor, 9);
     }
 

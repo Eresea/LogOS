@@ -47,13 +47,13 @@ pub const SYSTEM_COMPLETION_MEMBERS: [&[u8]; 4] =
     [b"version()", b"uname()", b"shutdown()", b"reboot()"];
 pub const FILESYSTEM_COMPLETION_MEMBERS: [&[u8]; 6] = [
     b"list()",
-    b"open(\"\").read()",
+    b"open(\"\")",
     b"touch(\"\").create()",
     b"touch(\"\").write(\"\")",
     b"remove(\"\")",
     b"move(\"\", \"\")",
 ];
-pub const FILESYSTEM_COMPLETION_CURSOR_OFFSETS: [u8; 6] = [6, 7, 8, 8, 8, 6];
+pub const FILESYSTEM_COMPLETION_CURSOR_OFFSETS: [u8; 6] = [6, 6, 8, 8, 8, 6];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FlowKind {
