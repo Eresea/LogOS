@@ -8,6 +8,7 @@ license = "MIT"
 [workspace]
 members = [
     "abi",
+    "package",
     "network",
     "storage",
     "services/flow",
@@ -27,11 +28,13 @@ unsafe_op_in_unsafe_fn = "warn"
 [dependencies]
 uefi = { version = "0.35" }
 logos-abi = { path = "abi" }
+logos-package = { path = "package" }
 logos-storage = { path = "storage" }
 
 [features]
 default = []
 qemu-proof = []
+package-proof = ["qemu-proof"]
 storage-proof = []
 fetch-proof = []
 
