@@ -102,6 +102,11 @@ a package arena between the bounded journal and checkpoint regions; package data
 flushed before its catalog record is committed. A future format migration must be explicitly
 implemented and proved before its version is accepted.
 
+Package-backed services are deliberately excluded from targeted manager image resets: Start and
+Restart return `Unsupported` until a bounded durable reload path exists. Supervisor failures route
+through the graph-wide restart, which retains the active package image while rebuilding IPC
+generations and service epochs.
+
 ## Deferred next-step improvements
 
 The bounded storage milestone now proves durable Flow filesystem workflows, reboot reopen, torn-journal

@@ -32,6 +32,8 @@ image only for the selected service, and reclaims old frames after task quiescen
 
 - Package size no longer inherits the 8 KiB ordinary-file limit or reserves a fixed 512 KiB object.
 - The first activation is intentionally graph-wide; targeted hot replacement can be optimized later.
+- Targeted manager Start/Restart for a package-backed service returns `Unsupported` until a bounded
+  durable reload path exists; supervisor failures use graph-wide restart and retain the active image.
 - Package installation is an internal Storage API for fixtures and future package-manager work.
 - Package-manager UI, dependency resolution, signatures, boot preference, program packages, and
   program installation remain deferred.

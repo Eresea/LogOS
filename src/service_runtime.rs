@@ -859,10 +859,18 @@ impl ServiceRuntime {
         Ok(())
     }
 
+    fn uses_package_image(&self, service: ServiceId) -> bool {
+        self.manager.image_source(service)
+            == Some(crate::service_manager::ServiceImageSource::FilesystemPackage)
+    }
+
     /// Reset the bounded image-owned memory and private staging before a
-    /// stopped service is started again. The process identity is reused, but
-    /// its code, data, BSS, and stack pages are restored to the retained ELF.
+    /// stopped predeclared service is started again. Package-backed services
+    /// require the graph restart path until durable reloading is available.
     fn reset_service_image(&mut self, service: ServiceId) -> Result<(), ServiceRuntimeError> {
+        if self.uses_package_image(service) {
+            return Err(ServiceRuntimeError::Image);
+        }
         let Some(bundle) = crate::arch::service_images() else {
             return Err(ServiceRuntimeError::Resources);
         };
@@ -1862,7 +1870,11 @@ impl ServiceRuntime {
         match decision.action {
             ManagerAction::None => {}
             ManagerAction::Start(service) => {
-                if self.reset_service_image(service).is_err()
+                if self.uses_package_image(service) {
+                    self.manager.mark_stopped(service);
+                    decision.response.status = logos_abi::ManagerStatus::Unsupported;
+                    self.refresh_manager_response_record(&mut decision.response);
+                } else if self.reset_service_image(service).is_err()
                     || self.start_service_task(service).is_err()
                 {
                     self.manager.mark_failed(service);
@@ -1885,7 +1897,9 @@ impl ServiceRuntime {
                 }
             },
             ManagerAction::Restart(services, count) => {
-                if self.pending_restart.is_some()
+                if services[..count].iter().any(|service| self.uses_package_image(*service)) {
+                    decision.response.status = logos_abi::ManagerStatus::Unsupported;
+                } else if self.pending_restart.is_some()
                     || services[..count].iter().any(|service| {
                         self.tasks[service.index()]
                             .is_none_or(|task| crate::SCHEDULER.state(task).is_none())
@@ -2156,6 +2170,10 @@ impl ServiceRuntime {
                 self.pending_restart = Some((services, count));
                 return Ok(false);
             }
+            if services[..count].iter().any(|service| self.uses_package_image(*service)) {
+                self.restart(bundle, runtime_guard)?;
+                return Ok(true);
+            }
             if (count == 1 && services[0] == ServiceId::Network)
                 || (count == 2
                     && services[0] == ServiceId::Fetch
@@ -2186,7 +2204,10 @@ impl ServiceRuntime {
             (self.manager.state(spec.service().index()) == Some(logos_abi::ManagerState::Failed))
                 .then_some(spec.service())
         }) {
-            if failed == ServiceId::Network {
+            if failed == ServiceId::Network
+                && !self.uses_package_image(ServiceId::Network)
+                && !self.uses_package_image(ServiceId::Fetch)
+            {
                 self.restart_network(runtime_guard)?;
             } else {
                 self.restart(bundle, runtime_guard)?;
@@ -2205,7 +2226,10 @@ impl ServiceRuntime {
             };
         }
         if let Some(failed) = self.supervisor.poll(now, heartbeats, process_states) {
-            if failed == ServiceId::Network {
+            if failed == ServiceId::Network
+                && !self.uses_package_image(ServiceId::Network)
+                && !self.uses_package_image(ServiceId::Fetch)
+            {
                 self.restart_network(runtime_guard)?;
             } else {
                 self.restart(bundle, runtime_guard)?;
