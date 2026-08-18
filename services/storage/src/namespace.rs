@@ -1472,6 +1472,26 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_package_write_is_not_published_after_reopen() {
+        let mut fs = DurableNamespace::format(heap_store()).unwrap();
+        let mut incomplete =
+            fs.begin_package_install(ServiceId::Flow, BLOCK_BYTES * 2 + 1).unwrap();
+        let incomplete_start = incomplete.extents[0].start;
+        fs.write_package_chunk(&mut incomplete, 0, &[0; BLOCK_BYTES]).unwrap();
+        drop(incomplete);
+
+        let store = fs.into_store();
+        let mut reopened = DurableNamespace::open(store).unwrap();
+        assert_eq!(reopened.lookup_package(ServiceId::Flow), Err(NamespaceError::NotFound));
+
+        let payload = [0x55; BLOCK_BYTES + 32];
+        let handle = install(&mut reopened, ServiceId::Flow, &payload, 1);
+        let info = reopened.lookup_package(ServiceId::Flow).unwrap();
+        assert_eq!(info.handle, handle);
+        assert_eq!(info.extents[0].start, incomplete_start);
+    }
+
+    #[test]
     fn replacement_is_generation_safe_and_reopens_from_journal() {
         let mut fs = DurableNamespace::format(heap_store()).unwrap();
         let old_payload = [0x33; 100];

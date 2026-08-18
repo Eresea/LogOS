@@ -54,11 +54,11 @@ The enabled-profile Network and dedicated Fetch QEMU proofs are not yet PR gates
   congestion-control/high-throughput work remains outside this milestone.
 
 - Storage v3 package host coverage passes variable-sized extent allocation/reuse, atomic replacement,
-  abort, reopen, stale handles, torn data rejection, ordinary-file limits, and v1/v2 package
-  incompatibility. Package-format tests cover header, kind, service, ABI, size, truncation, and CRC
-  failures. Reader-based ELF tests cover cross-page streaming, zeroing, read failure, exact service
+  abort, incomplete-write non-publication after reopen, stale handles, ordinary-file limits, and v1/v2
+  package incompatibility. Package-format tests cover header, kind, service, ABI, size, truncation, and
+  CRC failures. Reader-based ELF tests cover cross-page streaming, zeroing, read failure, exact service
   ownership, exhaustion, and reclamation. The dedicated `scripts/package-proof.ps1` gate seeds a real
-  service ELF, activates it through Core↔Storage, rejects a corrupt package without disturbing the
-  graph, and reopens the package after reboot under a ten-second per-boot non-network timeout.
+  service ELF, activates it through Core↔Storage, rejects a corrupt package without disturbing the graph,
+  and reopens the package after reboot under a ten-second per-boot non-network timeout.
 
 `v1_docs/` and reviewed v1 status records are historical reference only.
