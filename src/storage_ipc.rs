@@ -4,6 +4,10 @@ use logos_abi::{StorageOperation, StorageRequest, StorageResponse, StorageStatus
 
 pub const STORAGE_REQUEST_ENDPOINT: usize = logos_abi::IpcEndpointId::StorageToCore as usize;
 pub const STORAGE_RESPONSE_ENDPOINT: usize = logos_abi::IpcEndpointId::CoreToStorage as usize;
+pub const PACKAGE_REQUEST_ENDPOINT: usize = logos_abi::IpcEndpointId::CoreToStoragePackage as usize;
+pub const PACKAGE_RESPONSE_ENDPOINT: usize =
+    logos_abi::IpcEndpointId::StoragePackageToCore as usize;
+pub const PACKAGE_REQUEST_CAPABILITY_SLOT: usize = 6;
 
 pub fn validate_request(
     request: StorageRequest,
@@ -49,6 +53,15 @@ pub const fn unsupported_response(request: StorageRequest) -> StorageResponse {
     )
 }
 
+pub fn validate_package_request(
+    request: logos_abi::PackageRequest,
+    capability_slot: usize,
+    generation: u16,
+    service_epoch: u64,
+) -> Result<logos_abi::ServiceId, logos_abi::PackageStatus> {
+    request.validate(capability_slot, generation, service_epoch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +100,26 @@ mod tests {
         .unwrap();
         request.flags = 1;
         assert_eq!(validate_request(request, 0, 1, 2), Err(StorageStatus::Invalid));
+    }
+
+    #[test]
+    fn package_mailbox_validates_request_identity_and_shape() {
+        let request = logos_abi::PackageRequest::new(
+            logos_abi::PackageOperation::Lookup,
+            logos_abi::ServiceId::Storage,
+            1,
+            7,
+            6,
+            11,
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(validate_package_request(request, 6, 7, 11), Ok(logos_abi::ServiceId::Storage));
+        assert_eq!(
+            validate_package_request(request, 6, 8, 11),
+            Err(logos_abi::PackageStatus::Stale)
+        );
     }
 }

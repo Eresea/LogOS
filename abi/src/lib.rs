@@ -11,9 +11,14 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
 };
 
+mod package_ipc;
 mod service_manager;
 mod storage_api;
 
+pub use package_ipc::{
+    PACKAGE_ABI_VERSION, PACKAGE_TRANSFER_BYTES, PackageOperation, PackageRequest, PackageResponse,
+    PackageStatus,
+};
 pub use service_manager::{
     MANAGER_ABI_VERSION, ManagerCapability, ManagerCapabilityPage, ManagerOperation,
     ManagerRequest, ManagerResponse, ManagerRights, ManagerState, ManagerStatus,
@@ -96,7 +101,7 @@ pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
 
-pub const IPC_ENDPOINT_COUNT: usize = 20;
+pub const IPC_ENDPOINT_COUNT: usize = 22;
 pub const IPC_READ_EVENT_BASE: usize = 0;
 pub const IPC_WRITE_EVENT_BASE: usize = IPC_READ_EVENT_BASE + IPC_ENDPOINT_COUNT;
 pub const KEYBOARD_READ_EVENT: usize = IPC_WRITE_EVENT_BASE + IPC_ENDPOINT_COUNT;
@@ -730,6 +735,8 @@ pub enum IpcEndpointId {
     StorageToFetch = 17,
     FetchToNetwork = 18,
     NetworkToFetch = 19,
+    CoreToStoragePackage = 20,
+    StoragePackageToCore = 21,
 }
 
 impl IpcEndpointId {
@@ -761,6 +768,8 @@ impl IpcEndpointId {
             17 => Some(Self::StorageToFetch),
             18 => Some(Self::FetchToNetwork),
             19 => Some(Self::NetworkToFetch),
+            20 => Some(Self::CoreToStoragePackage),
+            21 => Some(Self::StoragePackageToCore),
             _ => None,
         }
     }
@@ -778,6 +787,7 @@ impl IpcEndpointId {
             Self::FlowToFetch => ServiceId::Flow,
             Self::FetchToFlow | Self::FetchToStorage | Self::FetchToNetwork => ServiceId::Fetch,
             Self::StorageToFetch => ServiceId::Storage,
+            Self::CoreToStoragePackage | Self::StoragePackageToCore => ServiceId::Storage,
             Self::NetworkToFetch => ServiceId::Network,
         }
     }
@@ -790,6 +800,7 @@ impl IpcEndpointId {
             Self::SessionToFlow => ServiceId::Flow,
             Self::StorageToCore | Self::CoreToStorage | Self::FlowToStorage => ServiceId::Storage,
             Self::StorageToFlow => ServiceId::Flow,
+            Self::CoreToStoragePackage | Self::StoragePackageToCore => ServiceId::Storage,
             Self::NetworkToCore | Self::CoreToNetwork | Self::FlowToNetwork => ServiceId::Network,
             Self::NetworkToFlow => ServiceId::Flow,
             Self::FlowToFetch | Self::FetchToStorage | Self::FetchToNetwork => ServiceId::Fetch,
@@ -834,6 +845,8 @@ pub const fn ipc_capability_slot(
         (ServiceId::Storage, IpcEndpointId::StorageToFlow, IpcRights::Send) => Some(1),
         (ServiceId::Storage, IpcEndpointId::StorageToCore, IpcRights::Send) => Some(2),
         (ServiceId::Storage, IpcEndpointId::CoreToStorage, IpcRights::Receive) => Some(3),
+        (ServiceId::Storage, IpcEndpointId::CoreToStoragePackage, IpcRights::Receive) => Some(6),
+        (ServiceId::Storage, IpcEndpointId::StoragePackageToCore, IpcRights::Send) => Some(7),
         (ServiceId::Network, IpcEndpointId::NetworkToCore, IpcRights::Send) => Some(0),
         (ServiceId::Network, IpcEndpointId::CoreToNetwork, IpcRights::Receive) => Some(1),
         (ServiceId::Network, IpcEndpointId::FlowToNetwork, IpcRights::Receive) => Some(2),
@@ -1121,6 +1134,12 @@ pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
     }
     if endpoint == IpcEndpointId::CoreToStorage as usize {
         return Some(core::mem::size_of::<StorageResponse>());
+    }
+    if endpoint == IpcEndpointId::CoreToStoragePackage as usize {
+        return Some(core::mem::size_of::<PackageRequest>());
+    }
+    if endpoint == IpcEndpointId::StoragePackageToCore as usize {
+        return Some(core::mem::size_of::<PackageResponse>());
     }
     match ipc_message_type(endpoint) {
         Some(IpcMessageType::Input) => Some(core::mem::size_of::<InputMessage>()),
@@ -2079,7 +2098,7 @@ mod tests {
         let keyboard = keyboard_read_event_mask();
         assert_eq!(all & keyboard, 0);
         all |= keyboard;
-        assert_eq!(EVENT_COUNT, 41);
+        assert_eq!(EVENT_COUNT, 45);
         assert_eq!(all.count_ones(), EVENT_COUNT as u32);
     }
 

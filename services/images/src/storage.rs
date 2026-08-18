@@ -5,9 +5,9 @@
 mod common;
 
 use logos_abi::{
-    IpcBytes, IpcCapability, IpcEndpointId, IpcStatus, MessageKind, StorageApiOperation,
-    StorageApiRequest, StorageApiStatus, StorageOperation, StorageRequest, StorageResponse,
-    StorageStatus,
+    IpcBytes, IpcCapability, IpcEndpointId, IpcStatus, MessageKind, PackageOperation,
+    PackageRequest, PackageResponse, PackageStatus, StorageApiOperation, StorageApiRequest,
+    StorageApiStatus, StorageOperation, StorageRequest, StorageResponse, StorageStatus,
 };
 use logos_storage::Block;
 use logos_storage_service::{
@@ -42,6 +42,16 @@ const FETCH_RECEIVE_CAPABILITY: usize = common::capability_slot(
 const FETCH_SEND_CAPABILITY: usize = common::capability_slot(
     logos_abi::ServiceId::Storage,
     IpcEndpointId::StorageToFetch,
+    logos_abi::IpcRights::Send,
+);
+const PACKAGE_RECEIVE_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Storage,
+    IpcEndpointId::CoreToStoragePackage,
+    logos_abi::IpcRights::Receive,
+);
+const PACKAGE_SEND_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Storage,
+    IpcEndpointId::StoragePackageToCore,
     logos_abi::IpcRights::Send,
 );
 
@@ -154,12 +164,87 @@ fn storage_error_status(error: NamespaceError) -> StorageApiStatus {
     }
 }
 
+fn package_status(error: NamespaceError) -> PackageStatus {
+    match error {
+        NamespaceError::Unsupported
+        | NamespaceError::Package(logos_storage_service::PackageCatalogError::Unsupported) => {
+            PackageStatus::Unsupported
+        }
+        NamespaceError::NotFound => PackageStatus::NotFound,
+        NamespaceError::Stale
+        | NamespaceError::Package(logos_storage_service::PackageCatalogError::Stale) => {
+            PackageStatus::Stale
+        }
+        _ => PackageStatus::Io,
+    }
+}
+
+fn handle_package_request<B: logos_storage::BlockStore>(
+    request: PackageRequest,
+    filesystem: &mut DurableNamespace<B>,
+) -> PackageResponse {
+    let Some(capability) = common::capability(PACKAGE_RECEIVE_CAPABILITY) else {
+        return PackageResponse::new(request, PackageStatus::Invalid);
+    };
+    let service = match request.validate(
+        PACKAGE_RECEIVE_CAPABILITY,
+        capability.generation,
+        capability.service_epoch,
+    ) {
+        Ok(service) => service,
+        Err(status) => return PackageResponse::new(request, status),
+    };
+    match request.operation {
+        PackageOperation::Lookup => match filesystem.lookup_package(service) {
+            Ok(info) => PackageResponse::new(request, PackageStatus::Ok).with_package(
+                info.handle.generation,
+                info.bytes,
+                info.package_version,
+                info.crc32c,
+            ),
+            Err(error) => PackageResponse::new(request, package_status(error)),
+        },
+        PackageOperation::Read => {
+            let handle = logos_storage_service::PackageHandle {
+                service,
+                generation: request.package_generation,
+            };
+            let mut block = logos_storage::Block::zero();
+            match filesystem.read_package(
+                handle,
+                request.offset as usize,
+                &mut block.as_bytes_mut()[..request.length as usize],
+            ) {
+                Ok(bytes) => {
+                    unsafe { *(logos_abi::STORAGE_DATA_BASE as *mut logos_storage::Block) = block };
+                    PackageResponse::new(request, PackageStatus::Ok).with_bytes(bytes as u16)
+                }
+                Err(error) => PackageResponse::new(request, package_status(error)),
+            }
+        }
+    }
+}
+
 fn serve_storage_error(status: StorageApiStatus) -> ! {
     let mut pending_response: Option<(Client, IpcBytes)> = None;
+    let mut pending_package: Option<PackageResponse> = None;
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
         let mut progressed = false;
+        if let Some(response) = pending_package {
+            match common::ipc_send(PACKAGE_SEND_CAPABILITY, &response) {
+                IpcStatus::Ok => {
+                    pending_package = None;
+                    progressed = true;
+                }
+                IpcStatus::Full => {}
+                _ => {
+                    pending_package = None;
+                    progressed = true;
+                }
+            }
+        }
         if let Some((client, response)) = pending_response {
             match send_response(client, &response) {
                 IpcStatus::Ok => {
@@ -173,7 +258,27 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
                 }
             }
         }
-        if pending_response.is_none() {
+        if pending_response.is_none() && pending_package.is_none() {
+            let mut request = PackageRequest::new(
+                PackageOperation::Lookup,
+                logos_abi::ServiceId::Storage,
+                1,
+                common::capability(PACKAGE_RECEIVE_CAPABILITY)
+                    .map_or(1, |capability| capability.generation),
+                PACKAGE_RECEIVE_CAPABILITY as u16,
+                common::capability(PACKAGE_RECEIVE_CAPABILITY)
+                    .map_or(1, |capability| capability.service_epoch),
+                0,
+                0,
+                0,
+            )
+            .unwrap();
+            if common::ipc_receive(PACKAGE_RECEIVE_CAPABILITY, &mut request) == IpcStatus::Ok {
+                pending_package = Some(PackageResponse::new(request, PackageStatus::Io));
+                progressed = true;
+            }
+        }
+        if pending_response.is_none() && pending_package.is_none() {
             let mut request = IpcBytes::empty(MessageKind::StorageRequest);
             let mut client = Client::Flow;
             let status_from_client =
@@ -199,7 +304,9 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
                 common::ipc_read_event(IpcEndpointId::FlowToStorage)
                     | common::ipc_write_event(IpcEndpointId::StorageToFlow)
                     | common::ipc_read_event(IpcEndpointId::FetchToStorage)
-                    | common::ipc_write_event(IpcEndpointId::StorageToFetch),
+                    | common::ipc_write_event(IpcEndpointId::StorageToFetch)
+                    | common::ipc_read_event(IpcEndpointId::CoreToStoragePackage)
+                    | common::ipc_write_event(IpcEndpointId::StoragePackageToCore),
                 logos_abi::ServiceId::Storage,
             );
         }
@@ -232,17 +339,51 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
 
     let mut api = StorageApi::new(filesystem);
     let mut pending_response: Option<(Client, IpcBytes)> = None;
+    let mut pending_package: Option<PackageResponse> = None;
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
         let mut progressed = false;
+        if let Some(response) = pending_package {
+            match common::ipc_send(PACKAGE_SEND_CAPABILITY, &response) {
+                IpcStatus::Ok => {
+                    pending_package = None;
+                    progressed = true;
+                }
+                IpcStatus::Full => {}
+                _ => {
+                    pending_package = None;
+                    progressed = true;
+                }
+            }
+        }
         if let Some((client, response)) = pending_response {
             if send_response(client, &response) == IpcStatus::Ok {
                 pending_response = None;
                 progressed = true;
             }
         }
-        if pending_response.is_none() {
+        if pending_response.is_none() && pending_package.is_none() {
+            let mut request = PackageRequest::new(
+                PackageOperation::Lookup,
+                logos_abi::ServiceId::Storage,
+                1,
+                common::capability(PACKAGE_RECEIVE_CAPABILITY)
+                    .map_or(1, |capability| capability.generation),
+                PACKAGE_RECEIVE_CAPABILITY as u16,
+                common::capability(PACKAGE_RECEIVE_CAPABILITY)
+                    .map_or(1, |capability| capability.service_epoch),
+                0,
+                0,
+                0,
+            )
+            .unwrap();
+            if common::ipc_receive(PACKAGE_RECEIVE_CAPABILITY, &mut request) == IpcStatus::Ok {
+                pending_package = Some(handle_package_request(request, api.namespace_mut()));
+                progressed = true;
+            }
+        }
+        if pending_response.is_none() && pending_package.is_none() {
             let mut request = IpcBytes::empty(MessageKind::StorageRequest);
             let mut client = Client::Flow;
             let received = match common::ipc_receive(FLOW_RECEIVE_CAPABILITY, &mut request) {
@@ -277,7 +418,9 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
                 common::ipc_read_event(IpcEndpointId::FlowToStorage)
                     | common::ipc_write_event(IpcEndpointId::StorageToFlow)
                     | common::ipc_read_event(IpcEndpointId::FetchToStorage)
-                    | common::ipc_write_event(IpcEndpointId::StorageToFetch),
+                    | common::ipc_write_event(IpcEndpointId::StorageToFetch)
+                    | common::ipc_read_event(IpcEndpointId::CoreToStoragePackage)
+                    | common::ipc_write_event(IpcEndpointId::StoragePackageToCore),
                 logos_abi::ServiceId::Storage,
             );
         }
