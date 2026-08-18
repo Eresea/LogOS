@@ -25,6 +25,8 @@ use crate::{
 
 const SERVICE_COUNT: usize = SERVICE_IMAGES.len();
 const MAX_ACTIVE_PAGE_TABLE_FRAMES: usize = 4096;
+// Package activation remains an internal hook until package-manager policy exists.
+#[allow(dead_code)]
 const PACKAGE_EXCHANGE_POLLS: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,6 +85,7 @@ pub struct ServiceRuntime {
     storage_response: Option<logos_abi::StorageResponse>,
     package_request: Option<logos_abi::PackageRequest>,
     package_response: Option<logos_abi::PackageResponse>,
+    #[allow(dead_code)]
     package_next_request: u32,
     prepared_package: Option<PreparedServiceImage>,
     active_package: Option<ActivePackageImage>,
@@ -105,6 +108,7 @@ struct ActivePackageImage {
     plan: crate::process::ElfLoadPlan,
 }
 
+#[allow(dead_code)]
 struct RuntimePackageReader<'a, 'b> {
     runtime: &'a mut ServiceRuntime,
     runtime_guard: &'b mut crate::arch::ServiceRuntimeGuard,
@@ -117,6 +121,7 @@ struct RuntimePackageReader<'a, 'b> {
     cache: [u8; logos_abi::PACKAGE_TRANSFER_BYTES],
 }
 
+#[allow(dead_code)]
 impl<'a, 'b> RuntimePackageReader<'a, 'b> {
     fn new(
         runtime: &'a mut ServiceRuntime,
@@ -897,6 +902,7 @@ impl ServiceRuntime {
         Ok(stop_requested)
     }
 
+    #[allow(dead_code)]
     fn next_package_request(
         &mut self,
         operation: logos_abi::PackageOperation,
@@ -929,11 +935,13 @@ impl ServiceRuntime {
     }
 
     #[inline]
+    #[allow(dead_code)]
     fn set_package_request_slot(&mut self, request: Option<logos_abi::PackageRequest>) {
         unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(self.package_request), request) }
     }
 
     #[inline]
+    #[allow(dead_code)]
     fn take_package_response_slot(&mut self) -> Option<logos_abi::PackageResponse> {
         let response =
             unsafe { core::ptr::read_volatile(core::ptr::addr_of!(self.package_response)) };
@@ -953,6 +961,7 @@ impl ServiceRuntime {
         }
     }
 
+    #[allow(dead_code)]
     fn package_exchange(
         &mut self,
         request: logos_abi::PackageRequest,
@@ -1008,6 +1017,7 @@ impl ServiceRuntime {
         Err(ProcessError::ReadFailure)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn activate_package(
         &mut self,
         service: ServiceId,
