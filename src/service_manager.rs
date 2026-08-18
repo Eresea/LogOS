@@ -16,11 +16,6 @@ pub enum ServiceImageSource {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ServiceImageError {
-    Unsupported,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServiceHandle {
     slot: u8,
     generation: u32,
@@ -177,15 +172,6 @@ impl ServiceManager {
         {
             self.image_sources[service.index()] = source;
         }
-    }
-
-    /// Package-manager policy remains outside this internal activation seam.
-    pub fn load_filesystem_package(
-        &mut self,
-        _service: logos_abi::ServiceId,
-        _image: &[u8],
-    ) -> Result<(), ServiceImageError> {
-        Err(ServiceImageError::Unsupported)
     }
 
     pub const fn handle(&self, slot: usize) -> Option<ServiceHandle> {
@@ -657,10 +643,6 @@ mod tests {
                 .response
                 .status,
             ManagerStatus::Unsupported
-        );
-        assert_eq!(
-            manager.load_filesystem_package(ServiceId::Input, &[0; 1]),
-            Err(ServiceImageError::Unsupported)
         );
         assert_eq!(manager.image_source(ServiceId::Input), Some(ServiceImageSource::Predeclared));
     }

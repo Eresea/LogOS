@@ -31,10 +31,6 @@ pub enum PackageError {
 pub trait PackageReader {
     fn len(&self) -> usize;
     fn read(&mut self, offset: usize, output: &mut [u8]) -> Result<usize, PackageError>;
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

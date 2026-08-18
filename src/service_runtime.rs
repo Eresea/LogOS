@@ -117,7 +117,28 @@ struct RuntimePackageReader<'a, 'b> {
     cache: [u8; logos_abi::PACKAGE_TRANSFER_BYTES],
 }
 
-impl RuntimePackageReader<'_, '_> {
+impl<'a, 'b> RuntimePackageReader<'a, 'b> {
+    fn new(
+        runtime: &'a mut ServiceRuntime,
+        runtime_guard: &'b mut crate::arch::ServiceRuntimeGuard,
+        service: ServiceId,
+        generation: u32,
+        base: usize,
+        bytes: usize,
+    ) -> Self {
+        Self {
+            runtime,
+            runtime_guard,
+            service,
+            generation,
+            base,
+            bytes,
+            cached_block: None,
+            cached_len: 0,
+            cache: [0; logos_abi::PACKAGE_TRANSFER_BYTES],
+        }
+    }
+
     fn read_cached(&mut self, offset: usize, output: &mut [u8]) -> Result<usize, ProcessError> {
         let end = offset.checked_add(output.len()).ok_or(ProcessError::ReadFailure)?;
         if end > self.bytes {
@@ -1005,17 +1026,14 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::Image);
         }
 
-        let mut raw_reader = RuntimePackageReader {
-            runtime: self,
+        let mut raw_reader = RuntimePackageReader::new(
+            self,
             runtime_guard,
             service,
-            generation: package_generation,
-            base: 0,
-            bytes: package_bytes,
-            cached_block: None,
-            cached_len: 0,
-            cache: [0; logos_abi::PACKAGE_TRANSFER_BYTES],
-        };
+            package_generation,
+            0,
+            package_bytes,
+        );
         let mut package_scratch = [0; crate::loader::PAGE_SIZE];
         let header = logos_package::validate_package(
             &mut raw_reader,
@@ -1025,17 +1043,14 @@ impl ServiceRuntime {
         )
         .map_err(|_| ServiceRuntimeError::Image)?;
         drop(raw_reader);
-        let mut payload_reader = RuntimePackageReader {
-            runtime: self,
+        let mut payload_reader = RuntimePackageReader::new(
+            self,
             runtime_guard,
             service,
-            generation: package_generation,
-            base: logos_package::PACKAGE_HEADER_BYTES,
-            bytes: header.payload_length as usize,
-            cached_block: None,
-            cached_len: 0,
-            cache: [0; logos_abi::PACKAGE_TRANSFER_BYTES],
-        };
+            package_generation,
+            logos_package::PACKAGE_HEADER_BYTES,
+            header.payload_length as usize,
+        );
         let plan = crate::process::ElfLoadPlan::parse_reader(&mut payload_reader)
             .map_err(|_| ServiceRuntimeError::Image)?;
         drop(payload_reader);
@@ -1053,17 +1068,14 @@ impl ServiceRuntime {
             owner,
         )
         .map_err(ServiceRuntimeError::Load)?;
-        let mut payload_reader = RuntimePackageReader {
-            runtime: self,
+        let mut payload_reader = RuntimePackageReader::new(
+            self,
             runtime_guard,
             service,
-            generation: package_generation,
-            base: logos_package::PACKAGE_HEADER_BYTES,
-            bytes: header.payload_length as usize,
-            cached_block: None,
-            cached_len: 0,
-            cache: [0; logos_abi::PACKAGE_TRANSFER_BYTES],
-        };
+            package_generation,
+            logos_package::PACKAGE_HEADER_BYTES,
+            header.payload_length as usize,
+        );
         let mut scratch = [0; crate::loader::PAGE_SIZE];
         let mut memory = IdentityPageTableMemory;
         if let Err(error) =

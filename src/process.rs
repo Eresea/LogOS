@@ -544,10 +544,6 @@ pub fn validate_elf(image: &[u8]) -> Result<u64, ProcessError> {
 pub trait ImageReader {
     fn len(&self) -> usize;
     fn read(&mut self, offset: usize, output: &mut [u8]) -> Result<usize, ProcessError>;
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 struct SliceImageReader<'a> {
