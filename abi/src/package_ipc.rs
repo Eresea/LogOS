@@ -322,4 +322,20 @@ mod tests {
             PackageResponse::new(lookup(), PackageStatus::Ok).with_package(0, 64, 1, 0);
         assert_eq!(invalid_lookup.validate_for(lookup(), 3, 9), Err(PackageStatus::Invalid));
     }
+
+    #[test]
+    fn stale_response_can_be_followed_by_current_response() {
+        let request =
+            PackageRequest::new(PackageOperation::Lookup, ServiceId::Storage, 1, 3, 6, 9, 0, 0, 0)
+                .unwrap();
+        let stale = PackageResponse::new(request, PackageStatus::Ok)
+            .with_package(1, PACKAGE_HEADER_BYTES as u32, 1, 0)
+            .with_bytes(0);
+        let current = PackageResponse::new(request, PackageStatus::Ok)
+            .with_package(2, PACKAGE_HEADER_BYTES as u32, 1, 0)
+            .with_bytes(0);
+
+        assert_eq!(stale.validate_for(request, 4, 9), Err(PackageStatus::Invalid));
+        assert_eq!(current.validate_for(request, 3, 9), Ok(()));
+    }
 }

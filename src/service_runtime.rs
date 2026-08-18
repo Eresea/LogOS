@@ -969,11 +969,11 @@ impl ServiceRuntime {
         ));
         for _ in 0..PACKAGE_EXCHANGE_POLLS {
             if let Some(response) = self.take_package_response_slot() {
-                self.set_package_request_slot(None);
                 if response.validate_for(request, self.ipc_generation, self.service_epoch).is_err()
                 {
                     continue;
                 }
+                self.set_package_request_slot(None);
                 if response.status != logos_abi::PackageStatus::Ok {
                     return Err(match response.status {
                         logos_abi::PackageStatus::NotFound
