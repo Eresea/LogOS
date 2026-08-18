@@ -55,6 +55,7 @@ pub enum NamespaceKind {
     Network,
     System,
     Supervisor,
+    Package,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -234,6 +235,27 @@ impl OperationRegistry {
                 [FlowType::Void, FlowType::Void, FlowType::Void],
                 0,
                 PromiseType::Void.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::Package,
+                b"list",
+                [FlowType::Void, FlowType::Void, FlowType::Void],
+                0,
+                PromiseType::String.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::Package,
+                b"info",
+                [FlowType::String, FlowType::Void, FlowType::Void],
+                1,
+                PromiseType::String.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::Package,
+                b"install",
+                [FlowType::String, FlowType::Void, FlowType::Void],
+                1,
+                PromiseType::String.flow_type(),
             ),
         ];
         let mut index = 0;
@@ -1242,6 +1264,7 @@ impl<'a, 'p> TypeChecker<'a, 'p> {
                 None if name == b"net" => Ok(FlowType::Namespace(NamespaceKind::Network)),
                 None if name == b"sys" => Ok(FlowType::Namespace(NamespaceKind::System)),
                 None if name == b"service" => Ok(FlowType::Namespace(NamespaceKind::Supervisor)),
+                None if name == b"pkg" => Ok(FlowType::Namespace(NamespaceKind::Package)),
                 None => Err(FlowTypeError::UnknownVariable(node.span)),
             },
             ExprKind::Index { base, key } => {
@@ -1375,6 +1398,20 @@ impl<'a, 'p> TypeChecker<'a, 'p> {
                     Self::require_arity(args, 2, span)?;
                     Self::require_type(self.expr_type(args[0])?, FlowType::String, span)?;
                     Self::require_type(self.expr_type(args[1])?, FlowType::Number, span)?;
+                    Ok(PromiseType::String.flow_type())
+                }
+                (FlowType::Namespace(NamespaceKind::Package), b"list") => {
+                    Self::require_arity(args, 0, span)?;
+                    Ok(PromiseType::String.flow_type())
+                }
+                (FlowType::Namespace(NamespaceKind::Package), b"info") => {
+                    Self::require_arity(args, 1, span)?;
+                    Self::require_type(self.expr_type(args[0])?, FlowType::String, span)?;
+                    Ok(PromiseType::String.flow_type())
+                }
+                (FlowType::Namespace(NamespaceKind::Package), b"install") => {
+                    Self::require_arity(args, 1, span)?;
+                    Self::require_type(self.expr_type(args[0])?, FlowType::String, span)?;
                     Ok(PromiseType::String.flow_type())
                 }
                 (FlowType::FileHandle, b"create") => {

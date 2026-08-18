@@ -56,3 +56,6 @@
 | [0052](0052-targeted-terminal-completion.md) | Accepted | Commands-owned bounded completion is optional, best-effort, and isolated from terminal execution failures |
 | [0054](0054-flow-interpreter-service-migration.md) | Accepted | Flow replaces Commands in the existing slot with bounded typed evaluation, promise lifecycle, response-body transport, and cancellation |
 | [0055](0055-filesystem-service-packages.md) | Accepted | Storage v3 stores variable-sized service packages in a bounded extent arena and Core activates validated ELF packages through a fixed channel |
+| [0056](0056-bounded-package-manifests-and-dependency-policy.md) | Accepted | Package metadata uses bounded names, semantic versions, npm-style ranges, four dependencies, strict newer replacement, and topological service activation |
+| [0057](0057-read-only-package-inventory-ipc.md) | Accepted | Flow reads bounded package inventory and manifest summaries through Storage without receiving package payload write authority |
+| [0058](0058-bounded-package-file-import.md) | Accepted | Flow requests Storage-owned package-file import; Storage streams the existing file into the package arena and reuses validation/update policy |

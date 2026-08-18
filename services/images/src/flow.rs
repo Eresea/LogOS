@@ -611,6 +611,7 @@ impl CompletionService {
                         logos_flow::FlowKind::Service => (b"[\"".as_slice(), spec.name.len() + 2),
                         logos_flow::FlowKind::Network => (b".".as_slice(), spec.name.len() + 1),
                         logos_flow::FlowKind::System => (b".".as_slice(), spec.name.len() + 1),
+                        logos_flow::FlowKind::Package => (b".".as_slice(), spec.name.len() + 1),
                     };
                     let mut candidate = [0; MAX_COMPLETION_ITEM_BYTES];
                     let Some(length) = copy_candidate(&mut candidate, spec.name, punctuation)
@@ -665,6 +666,15 @@ impl CompletionService {
                             candidate,
                             usize::from(logos_flow::FILESYSTEM_COMPLETION_CURSOR_OFFSETS[index]),
                         )
+                    {
+                        response.flags |= COMPLETION_FLAG_TRUNCATED;
+                        break;
+                    }
+                }
+            }
+            logos_flow::CompletionTarget::PackageMember => {
+                for candidate in logos_flow::PACKAGE_COMPLETION_MEMBERS {
+                    if candidate.starts_with(context.prefix) && !response.push_candidate(candidate)
                     {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
                         break;
@@ -905,6 +915,188 @@ struct StorageClient {
     failure: StorageApiStatus,
     last_status: StorageApiStatus,
     cancelled: bool,
+}
+
+#[derive(Clone, Copy)]
+enum PackageWork {
+    List,
+    Info,
+    Install,
+}
+
+struct PackageClient {
+    work: Option<PackageWork>,
+    name: [u8; logos_flow::MAX_FLOW_BYTES],
+    name_len: usize,
+    active: bool,
+    done: bool,
+    sent: bool,
+    request_id: u32,
+    cursor: u32,
+    result: [u8; logos_flow::MAX_OUTPUT_BYTES],
+    result_len: usize,
+    cancelled: bool,
+}
+
+impl PackageClient {
+    const fn new() -> Self {
+        Self {
+            work: None,
+            name: [0; logos_flow::MAX_FLOW_BYTES],
+            name_len: 0,
+            active: false,
+            done: false,
+            sent: false,
+            request_id: 1,
+            cursor: 0,
+            result: [0; logos_flow::MAX_OUTPUT_BYTES],
+            result_len: 0,
+            cancelled: false,
+        }
+    }
+
+    fn start(&mut self, command: logos_flow::PackageCommand<'_>) -> bool {
+        if self.active || self.done {
+            return false;
+        }
+        self.name_len = 0;
+        self.result_len = 0;
+        self.cursor = 0;
+        self.sent = false;
+        self.cancelled = false;
+        self.work = match command {
+            logos_flow::PackageCommand::List => Some(PackageWork::List),
+            logos_flow::PackageCommand::Info { name } => {
+                if name.is_empty() || name.len() > self.name.len() {
+                    return false;
+                }
+                self.name[..name.len()].copy_from_slice(name);
+                self.name_len = name.len();
+                Some(PackageWork::Info)
+            }
+            logos_flow::PackageCommand::Install { path } => {
+                let Some(path) = logos_flow::root_relative_path(path, &mut self.name) else {
+                    return false;
+                };
+                self.name_len = path.len();
+                Some(PackageWork::Install)
+            }
+        };
+        self.active = true;
+        true
+    }
+
+    fn active(&self) -> bool {
+        self.active
+    }
+
+    fn cancel(&mut self) {
+        if self.active {
+            self.cancelled = true;
+        }
+    }
+
+    fn request(&self) -> Option<IpcBytes> {
+        let (operation, offset, path) = match self.work {
+            Some(PackageWork::List) => (StorageApiOperation::PackageList, self.cursor, &[][..]),
+            Some(PackageWork::Info) => {
+                (StorageApiOperation::PackageInfo, 0, &self.name[..self.name_len])
+            }
+            Some(PackageWork::Install) => {
+                (StorageApiOperation::PackageInstall, 0, &self.name[..self.name_len])
+            }
+            None => return None,
+        };
+        StorageApiRequest::encode(operation, 0, self.request_id, 0, offset, path, &[], &[])
+    }
+
+    fn drive(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        if self.cancelled {
+            self.fail(StorageApiStatus::Unsupported);
+            return true;
+        }
+        if !self.sent {
+            let Some(request) = self.request() else {
+                self.fail(StorageApiStatus::Invalid);
+                return true;
+            };
+            match common::ipc_send(STORAGE_SEND_CAPABILITY, &request) {
+                IpcStatus::Ok => self.sent = true,
+                IpcStatus::Full => return false,
+                status => {
+                    self.fail(storage_ipc_error(status));
+                    return true;
+                }
+            }
+            return true;
+        }
+        let mut message = IpcBytes::empty(MessageKind::StorageResponse);
+        match common::ipc_receive(STORAGE_RECEIVE_CAPABILITY, &mut message) {
+            IpcStatus::Ok => self.sent = false,
+            IpcStatus::Empty => return false,
+            status => {
+                self.fail(storage_ipc_error(status));
+                return true;
+            }
+        }
+        let Ok(response) = StorageApiResponse::decode(&message) else {
+            self.fail(StorageApiStatus::Invalid);
+            return true;
+        };
+        if response.request_id != self.request_id {
+            self.fail(StorageApiStatus::Stale);
+            return true;
+        }
+        if response.status != StorageApiStatus::Ok {
+            self.fail(response.status);
+            return true;
+        }
+        self.append(response.data);
+        if response.more {
+            if response.data.is_empty() || self.result_len == self.result.len() {
+                self.fail(StorageApiStatus::Invalid);
+            } else {
+                self.cursor = self.cursor.saturating_add(1);
+                self.request_id = self.request_id.wrapping_add(1).max(1);
+            }
+        } else {
+            self.succeed();
+        }
+        true
+    }
+
+    fn append(&mut self, bytes: &[u8]) {
+        let amount = bytes.len().min(self.result.len().saturating_sub(self.result_len));
+        self.result[self.result_len..self.result_len + amount].copy_from_slice(&bytes[..amount]);
+        self.result_len += amount;
+    }
+
+    fn fail(&mut self, status: StorageApiStatus) {
+        self.result_len = 0;
+        if self.cancelled {
+            self.append(b"command cancelled\r\n");
+            self.cancelled = false;
+        } else {
+            self.append(status_text(status));
+        }
+        self.active = false;
+        self.done = true;
+    }
+
+    fn succeed(&mut self) {
+        self.active = false;
+        self.done = true;
+    }
+
+    fn take_result(&mut self, pending: &mut PendingOutput) {
+        if self.done {
+            pending.stage(&self.result[..self.result_len]);
+            self.done = false;
+        }
+    }
 }
 
 impl StorageClient {
@@ -1920,6 +2112,7 @@ fn manager_command_probe(pending: &mut PendingOutput, network: &mut NetworkClien
 static mut FLOW: logos_flow::FlowService = logos_flow::FlowService::new();
 static mut PENDING: PendingOutput = PendingOutput::new();
 static mut STORAGE: StorageClient = StorageClient::new();
+static mut PACKAGE: PackageClient = PackageClient::new();
 static mut NETWORK: NetworkClient = NetworkClient::new();
 static mut FETCH: FetchClient = FetchClient::new();
 static mut COMPLETION: CompletionService = CompletionService::new();
@@ -1930,6 +2123,7 @@ pub extern "C" fn _start() -> ! {
     let flow = unsafe { &mut *core::ptr::addr_of_mut!(FLOW) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
+    let package = unsafe { &mut *core::ptr::addr_of_mut!(PACKAGE) };
     let network = unsafe { &mut *core::ptr::addr_of_mut!(NETWORK) };
     let fetch = unsafe { &mut *core::ptr::addr_of_mut!(FETCH) };
     let completion = unsafe { &mut *core::ptr::addr_of_mut!(COMPLETION) };
@@ -1948,7 +2142,7 @@ pub extern "C" fn _start() -> ! {
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Flow);
         let mut progressed = pending.flush(OUTPUT_CAPABILITY);
-        if storage.active() || (fetch.active() && fetch.foreground()) {
+        if storage.active() || package.active() || (fetch.active() && fetch.foreground()) {
             let mut control = IpcBytes::empty(MessageKind::FlowControl);
             if common::ipc_receive(INPUT_CAPABILITY, &mut control) == IpcStatus::Ok {
                 if fetch.active() {
@@ -1959,7 +2153,11 @@ pub extern "C" fn _start() -> ! {
                     let value: FlowControl =
                         unsafe { ptr::read_unaligned(control.bytes.as_ptr().cast()) };
                     if value.is_valid() {
-                        storage.cancel();
+                        if storage.active() {
+                            storage.cancel();
+                        } else {
+                            package.cancel();
+                        }
                         progressed = true;
                     }
                 }
@@ -2022,6 +2220,24 @@ pub extern "C" fn _start() -> ! {
                 progressed = true;
             }
             if storage.active() {
+                if !progressed {
+                    common::wait(
+                        common::ipc_read_event(logos_abi::IpcEndpointId::StorageToFlow)
+                            | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToStorage)
+                            | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
+                        logos_abi::ServiceId::Flow,
+                    );
+                }
+                continue;
+            }
+        }
+        if package.active() {
+            progressed |= package.drive();
+            if package.done {
+                package.take_result(pending);
+                progressed = true;
+            }
+            if package.active() {
                 if !progressed {
                     common::wait(
                         common::ipc_read_event(logos_abi::IpcEndpointId::StorageToFlow)
@@ -2153,6 +2369,11 @@ pub extern "C" fn _start() -> ! {
                                 }
                             }
                         },
+                        Ok(Some(logos_flow::FlowOperation::Package(command))) => {
+                            if !package.start(command) {
+                                pending.stage(b"package request too large\r\n");
+                            }
+                        }
                         Ok(Some(logos_flow::FlowOperation::System(operation))) => match operation {
                             logos_flow::SystemOperation::Version => {
                                 pending.stage(b"LogOS vNext 0.1.0\r\n")

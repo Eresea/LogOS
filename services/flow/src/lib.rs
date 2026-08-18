@@ -23,6 +23,7 @@ pub enum CompletionTarget {
     InterfaceName,
     SystemMember,
     FilesystemMember,
+    PackageMember,
     FileHandleOpen,
     FileHandleOpenMember,
     FileHandleTouch,
@@ -66,6 +67,7 @@ pub const FILE_TOUCH_COMPLETION_MEMBERS: [&[u8]; 2] = [b".create()", b".write(\"
 pub const FILE_TOUCH_COMPLETION_OFFSETS: [u8; 2] = [9, 7];
 pub const FILE_TOUCH_MEMBER_COMPLETION: [&[u8]; 2] = [b"create()", b"write(\"\")"];
 pub const FILE_TOUCH_MEMBER_OFFSETS: [u8; 2] = [8, 6];
+pub const PACKAGE_COMPLETION_MEMBERS: [&[u8]; 3] = [b"list()", b"info(\"\")", b"install(\"\")"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FlowKind {
@@ -73,6 +75,7 @@ pub enum FlowKind {
     Filesystem,
     Service,
     Network,
+    Package,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,7 +95,7 @@ pub struct FlowSpec {
     pub manual: &'static [u8],
 }
 
-pub const FLOW_SPECS: [FlowSpec; 4] = [
+pub const FLOW_SPECS: [FlowSpec; 5] = [
     FlowSpec {
         name: b"sys",
         kind: FlowKind::System,
@@ -120,6 +123,13 @@ pub const FLOW_SPECS: [FlowSpec; 4] = [
         usage: b"net.status / net.fetch(\"url\") / net.fetch(\"url\", \"path\")",
         summary: b"inspect and probe networking",
         manual: b"Shows network status, probes networking, or fetches an HTTP file.",
+    },
+    FlowSpec {
+        name: b"pkg",
+        kind: FlowKind::Package,
+        usage: b"pkg.list() / pkg.info(\"name\")",
+        summary: b"inspect installed packages",
+        manual: b"Lists installed packages or shows one package manifest summary.",
     },
 ];
 
@@ -218,6 +228,15 @@ pub fn completion_context<'a>(
             replace_start: 3,
             replace_end: cursor,
             prefix: &before[3..],
+        }));
+    }
+
+    if before.starts_with(b"pkg.") && before[4..].iter().all(|byte| is_member_byte(*byte)) {
+        return Ok(Some(CompletionContext {
+            target: CompletionTarget::PackageMember,
+            replace_start: 4,
+            replace_end: cursor,
+            prefix: &before[4..],
         }));
     }
 
@@ -373,6 +392,13 @@ pub enum NetworkCommandError {
     Usage,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackageCommand<'a> {
+    List,
+    Info { name: &'a [u8] },
+    Install { path: &'a [u8] },
+}
+
 const MAX_CALL_ARGS: usize = 3;
 const MAX_EXPRESSION_PARTS: usize = 3;
 
@@ -441,6 +467,7 @@ pub enum FlowOperation<'a> {
     Storage(StorageCommand<'a>),
     Service(ServiceCommand<'a>),
     Network(NetworkCommand<'a>),
+    Package(PackageCommand<'a>),
     System(SystemOperation),
     CancelPromise {
         name: &'a [u8],
@@ -688,6 +715,19 @@ fn parse_flow_operation_unchecked<'a>(
         .map_err(|_| FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?
     {
         return Ok(Some(FlowOperation::Network(command)));
+    }
+    if expression == b"pkg.list()" {
+        return Ok(Some(FlowOperation::Package(PackageCommand::List)));
+    }
+    if expression.starts_with(b"pkg.info(") {
+        let name = quoted_after(expression, b"pkg.info(")
+            .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
+        return Ok(Some(FlowOperation::Package(PackageCommand::Info { name })));
+    }
+    if expression.starts_with(b"pkg.install(") {
+        let path = quoted_after(expression, b"pkg.install(")
+            .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
+        return Ok(Some(FlowOperation::Package(PackageCommand::Install { path })));
     }
     if let Some(command) = parse_storage_command(expression)
         .map_err(|_| FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?
@@ -1483,6 +1523,10 @@ mod tests {
             CompletionTarget::FilesystemMember
         );
         assert_eq!(
+            completion_context(b"pkg.", 4).unwrap().unwrap().target,
+            CompletionTarget::PackageMember
+        );
+        assert_eq!(
             completion_context(b"fs.open(\"test\")", 15).unwrap(),
             Some(CompletionContext {
                 target: CompletionTarget::FileHandleOpen,
@@ -1616,6 +1660,18 @@ mod tests {
             Some(FlowOperation::Help { topic: Some(b"fs") })
         );
         assert_eq!(parse_flow_operation(b"clear()").unwrap(), Some(FlowOperation::Clear));
+        assert_eq!(
+            parse_flow_operation(b"pkg.list()").unwrap(),
+            Some(FlowOperation::Package(PackageCommand::List))
+        );
+        assert_eq!(
+            parse_flow_operation(br#"pkg.info("flow")"#).unwrap(),
+            Some(FlowOperation::Package(PackageCommand::Info { name: b"flow" }))
+        );
+        assert_eq!(
+            parse_flow_operation(br#"pkg.install("/tmp/package")"#).unwrap(),
+            Some(FlowOperation::Package(PackageCommand::Install { path: b"/tmp/package" }))
+        );
         let mut service = FlowService::new();
         assert_eq!(
             service.operation(b"help()").unwrap(),

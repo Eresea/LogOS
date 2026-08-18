@@ -22,6 +22,9 @@ pub enum StorageApiOperation {
     StageWriteChunk = 11,
     StageWriteCommit = 12,
     StageWriteAbort = 13,
+    PackageList = 14,
+    PackageInfo = 15,
+    PackageInstall = 16,
 }
 
 impl StorageApiOperation {
@@ -40,6 +43,9 @@ impl StorageApiOperation {
             11 => Some(Self::StageWriteChunk),
             12 => Some(Self::StageWriteCommit),
             13 => Some(Self::StageWriteAbort),
+            14 => Some(Self::PackageList),
+            15 => Some(Self::PackageInfo),
+            16 => Some(Self::PackageInstall),
             _ => None,
         }
     }
@@ -239,6 +245,15 @@ fn request_shape_is_valid(
         StorageApiOperation::StageWriteCommit | StorageApiOperation::StageWriteAbort => {
             path.is_empty() && secondary_path.is_empty() && data.is_empty()
         }
+        StorageApiOperation::PackageList => {
+            path.is_empty() && secondary_path.is_empty() && data.is_empty()
+        }
+        StorageApiOperation::PackageInfo => {
+            !path.is_empty() && secondary_path.is_empty() && data.is_empty()
+        }
+        StorageApiOperation::PackageInstall => {
+            !path.is_empty() && secondary_path.is_empty() && data.is_empty()
+        }
     }
 }
 
@@ -393,6 +408,48 @@ mod tests {
                 &[0; MAX_IPC_BYTES]
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn package_requests_round_trip_with_bounded_shapes() {
+        let list =
+            StorageApiRequest::encode(StorageApiOperation::PackageList, 0, 4, 0, 2, &[], &[], &[])
+                .unwrap();
+        assert_eq!(
+            StorageApiRequest::decode(&list).unwrap().operation,
+            StorageApiOperation::PackageList
+        );
+        let info = StorageApiRequest::encode(
+            StorageApiOperation::PackageInfo,
+            0,
+            5,
+            0,
+            0,
+            b"flow",
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(StorageApiRequest::decode(&info).unwrap().path, b"flow");
+        assert!(
+            StorageApiRequest::encode(StorageApiOperation::PackageInfo, 0, 6, 0, 0, &[], &[], &[])
+                .is_none()
+        );
+        let install = StorageApiRequest::encode(
+            StorageApiOperation::PackageInstall,
+            0,
+            7,
+            0,
+            0,
+            b"/packages/flow.pkg",
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            StorageApiRequest::decode(&install).unwrap().operation,
+            StorageApiOperation::PackageInstall
         );
     }
 

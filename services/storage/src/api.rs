@@ -118,6 +118,9 @@ impl<B: BlockStore> StorageApi<B> {
             StorageApiOperation::StageWriteChunk => self.stage_chunk(&request),
             StorageApiOperation::StageWriteCommit => self.stage_commit(&request),
             StorageApiOperation::StageWriteAbort => self.stage_abort(&request),
+            StorageApiOperation::PackageList => self.package_list(&request),
+            StorageApiOperation::PackageInfo => self.package_info(&request),
+            StorageApiOperation::PackageInstall => self.package_install(&request),
         };
         Self::encode(request.request_id, response)
     }
@@ -252,6 +255,53 @@ impl<B: BlockStore> StorageApi<B> {
         response.data[..info.name_bytes().len()].copy_from_slice(info.name_bytes());
         response.len = info.name_bytes().len();
         response.more = index + 1 < list.len();
+        response
+    }
+
+    fn package_list(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        if request.transaction_id != 0 {
+            return ResponsePayload::empty(StorageApiStatus::Invalid, request.transaction_id);
+        }
+        let index = request.offset as usize;
+        let info = match self.namespace.package_at(index) {
+            Ok(Some(info)) => info,
+            Ok(None) => return ResponsePayload::empty(StorageApiStatus::Ok, 0),
+            Err(error) => return ResponsePayload::empty(map_error(error), 0),
+        };
+        let mut response = ResponsePayload::empty(StorageApiStatus::Ok, 0);
+        response.len = format_package_info(&info, &mut response.data);
+        response.more = self.namespace.package_at(index + 1).is_ok_and(|next| next.is_some());
+        response
+    }
+
+    fn package_info(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        if request.transaction_id != 0 {
+            return ResponsePayload::empty(StorageApiStatus::Invalid, request.transaction_id);
+        }
+        let info = match self.namespace.lookup_package_name(request.path) {
+            Ok(info) => info,
+            Err(error) => return ResponsePayload::empty(map_error(error), 0),
+        };
+        let mut response = ResponsePayload::empty(StorageApiStatus::Ok, 0);
+        response.len = format_package_info(&info, &mut response.data);
+        response
+    }
+
+    fn package_install(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        if request.transaction_id != 0 {
+            return ResponsePayload::empty(StorageApiStatus::Invalid, request.transaction_id);
+        }
+        if self.active.is_some() || self.staged.is_some() {
+            return ResponsePayload::empty(StorageApiStatus::Busy, 0);
+        }
+        let handle = match self.namespace.install_package_file(request.path) {
+            Ok(handle) => handle,
+            Err(error) => return ResponsePayload::empty(map_error(error), 0),
+        };
+        let mut response = ResponsePayload::empty(StorageApiStatus::Ok, 0);
+        append_bytes(&mut response.data, &mut response.len, b"installed generation ");
+        append_u32(&mut response.data, &mut response.len, handle.generation);
+        append_bytes(&mut response.data, &mut response.len, b"\r\n");
         response
     }
 
@@ -424,6 +474,90 @@ impl<B: BlockStore> StorageApi<B> {
     }
 }
 
+fn format_package_info(
+    info: &crate::packages::PackageInfo,
+    output: &mut [u8; STORAGE_API_RESPONSE_DATA_BYTES],
+) -> usize {
+    let mut length = 0;
+    if let Some(manifest) = info.manifest {
+        append_bytes(output, &mut length, manifest.name.as_bytes());
+        append_bytes(output, &mut length, b" ");
+        append_version(output, &mut length, manifest.version);
+        if manifest.dependency_count() != 0 {
+            append_bytes(output, &mut length, b" deps=");
+            for index in 0..manifest.dependency_count() {
+                if index != 0 {
+                    append_bytes(output, &mut length, b",");
+                }
+                let dependency = manifest.dependency(index).expect("dependency count is bounded");
+                append_bytes(output, &mut length, dependency.name.as_bytes());
+                append_bytes(output, &mut length, b"(");
+                append_bytes(output, &mut length, dependency.range());
+                append_bytes(output, &mut length, b")");
+            }
+        }
+    } else {
+        append_bytes(output, &mut length, service_name(info.handle.service));
+        append_bytes(output, &mut length, b" legacy-");
+        append_u32(output, &mut length, info.package_version);
+    }
+    append_bytes(output, &mut length, b"\r\n");
+    length
+}
+
+fn append_version(
+    output: &mut [u8; STORAGE_API_RESPONSE_DATA_BYTES],
+    length: &mut usize,
+    version: logos_package::SemanticVersion,
+) {
+    append_u32(output, length, version.major);
+    append_bytes(output, length, b".");
+    append_u32(output, length, version.minor);
+    append_bytes(output, length, b".");
+    append_u32(output, length, version.patch);
+}
+
+fn append_u32(output: &mut [u8; STORAGE_API_RESPONSE_DATA_BYTES], length: &mut usize, value: u32) {
+    let mut digits = [0; 10];
+    let mut count = 0;
+    let mut value = value;
+    loop {
+        digits[count] = b'0' + (value % 10) as u8;
+        count += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    while count != 0 {
+        count -= 1;
+        append_bytes(output, length, &digits[count..count + 1]);
+    }
+}
+
+fn append_bytes(
+    output: &mut [u8; STORAGE_API_RESPONSE_DATA_BYTES],
+    length: &mut usize,
+    bytes: &[u8],
+) {
+    let amount = bytes.len().min(output.len().saturating_sub(*length));
+    output[*length..*length + amount].copy_from_slice(&bytes[..amount]);
+    *length += amount;
+}
+
+fn service_name(service: logos_abi::ServiceId) -> &'static [u8] {
+    match service {
+        logos_abi::ServiceId::Input => b"input",
+        logos_abi::ServiceId::Display => b"display",
+        logos_abi::ServiceId::Terminal => b"terminal",
+        logos_abi::ServiceId::Session => b"session",
+        logos_abi::ServiceId::Flow => b"flow",
+        logos_abi::ServiceId::Storage => b"storage",
+        logos_abi::ServiceId::Network => b"network",
+        logos_abi::ServiceId::Fetch => b"fetch",
+    }
+}
+
 fn malformed_response(message: &IpcBytes) -> Option<IpcBytes> {
     if message.kind != logos_abi::MessageKind::StorageRequest {
         return None;
@@ -456,6 +590,11 @@ fn map_error(error: NamespaceError) -> StorageApiStatus {
         NamespaceError::Recovery => StorageApiStatus::Io,
         NamespaceError::Format(_) | NamespaceError::Block(_) => StorageApiStatus::Io,
         NamespaceError::Unsupported => StorageApiStatus::Unsupported,
+        NamespaceError::Package(
+            crate::packages::PackageCatalogError::VersionConflict
+            | crate::packages::PackageCatalogError::MissingDependency
+            | crate::packages::PackageCatalogError::DependencyConflict,
+        ) => StorageApiStatus::Invalid,
         NamespaceError::Package(_) => StorageApiStatus::Io,
     }
 }
@@ -463,8 +602,34 @@ fn map_error(error: NamespaceError) -> StorageApiStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logos_abi::{STORAGE_API_FLAG_REPLACE, StorageApiOperation, StorageApiResponse};
+    use crate::packages::{MAX_PACKAGE_EXTENTS, PackageExtent, PackageHandle, PackageInfo};
+    use logos_abi::{STORAGE_API_FLAG_REPLACE, ServiceId, StorageApiOperation, StorageApiResponse};
+    use logos_package::{
+        PACKAGE_HEADER_BYTES, PackageManifest, PackageName, SemanticVersion, ServicePackageHeader,
+        crc32c,
+    };
     use logos_storage::{Block, BlockError, BlockIndex, BlockStore, MemoryBlockStore};
+    use std::boxed::Box;
+
+    struct HeapStore(Box<MemoryBlockStore<96>>);
+
+    impl BlockStore for HeapStore {
+        fn block_count(&self) -> u64 {
+            self.0.block_count()
+        }
+
+        fn read_block(&mut self, index: BlockIndex, output: &mut Block) -> Result<(), BlockError> {
+            self.0.read_block(index, output)
+        }
+
+        fn write_block(&mut self, index: BlockIndex, input: &Block) -> Result<(), BlockError> {
+            self.0.write_block(index, input)
+        }
+
+        fn flush(&mut self) -> Result<(), BlockError> {
+            self.0.flush()
+        }
+    }
 
     struct RecoveryFailStore {
         inner: MemoryBlockStore<16>,
@@ -910,5 +1075,49 @@ mod tests {
             .status,
             StorageApiStatus::Io
         );
+    }
+
+    #[test]
+    fn package_summary_format_is_bounded_and_includes_manifest_version() {
+        let manifest = PackageManifest::for_service(
+            PackageName::parse(b"flow-addon").unwrap(),
+            SemanticVersion::new(2, 1, 0),
+            ServiceId::Flow,
+        );
+        let info = PackageInfo {
+            handle: PackageHandle { service: ServiceId::Flow, generation: 1 },
+            package_version: 0,
+            manifest: Some(manifest),
+            bytes: 1,
+            crc32c: 0,
+            extents: [PackageExtent { start: 1, blocks: 1 }; MAX_PACKAGE_EXTENTS],
+            extent_count: 1,
+        };
+        let mut output = [0; STORAGE_API_RESPONSE_DATA_BYTES];
+        let length = format_package_info(&info, &mut output);
+        assert_eq!(&output[..length], b"flow-addon 2.1.0\r\n");
+    }
+
+    #[test]
+    fn package_install_request_imports_an_existing_file() {
+        let mut namespace =
+            DurableNamespace::format(HeapStore(Box::new(MemoryBlockStore::new()))).unwrap();
+        let payload = b"elf";
+        let header =
+            ServicePackageHeader::new(ServiceId::Flow, 3, payload.len(), crc32c(payload)).unwrap();
+        let mut package = [0; PACKAGE_HEADER_BYTES + 3];
+        header.encode(&mut package).unwrap();
+        package[PACKAGE_HEADER_BYTES..].copy_from_slice(payload);
+        let source = namespace.create_file(namespace.root(), b"flow.pkg").unwrap();
+        namespace.write(source, 0, &package).unwrap();
+        let mut api = StorageApi::new(namespace);
+
+        let response = api
+            .handle(&request(StorageApiOperation::PackageInstall, 0, b"/flow.pkg", b"", b"", 0, 9))
+            .unwrap();
+        let response = status(&response);
+        assert_eq!(response.status, StorageApiStatus::Ok);
+        assert_eq!(response.data, b"installed generation 1\r\n");
+        assert!(api.into_namespace().lookup_package(ServiceId::Flow).is_ok());
     }
 }
