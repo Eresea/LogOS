@@ -938,9 +938,10 @@ impl ServiceRuntime {
         output: &mut [u8],
         runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
     ) -> Result<logos_abi::PackageResponse, ProcessError> {
-        if self.package_request_slot().is_some() || self.package_response_slot().is_some() {
+        if self.package_request_slot().is_some() {
             return Err(ProcessError::ReadFailure);
         }
+        let _ = self.take_package_response_slot();
         self.set_package_request_slot(Some(request));
         crate::arch::signal_events(logos_abi::ipc_read_event_mask(
             crate::storage_ipc::PACKAGE_REQUEST_ENDPOINT,
@@ -950,7 +951,7 @@ impl ServiceRuntime {
                 self.set_package_request_slot(None);
                 if response.validate_for(request, self.ipc_generation, self.service_epoch).is_err()
                 {
-                    return Err(ProcessError::ReadFailure);
+                    continue;
                 }
                 if response.status != logos_abi::PackageStatus::Ok {
                     return Err(match response.status {
@@ -983,7 +984,6 @@ impl ServiceRuntime {
             runtime_guard.resume();
         }
         self.set_package_request_slot(None);
-        self.set_package_response_slot(None);
         Err(ProcessError::ReadFailure)
     }
 
