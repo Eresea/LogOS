@@ -185,7 +185,10 @@ impl PackageCatalog {
         self.records.iter().any(|record| {
             record.alive
                 && record.extents[..record.extent_count as usize].iter().any(|extent| {
-                    block >= extent.start && block < extent.start + extent.blocks as u64
+                    extent
+                        .start
+                        .checked_add(extent.blocks as u64)
+                        .is_some_and(|end| block >= extent.start && block < end)
                 })
         })
     }
@@ -243,6 +246,12 @@ impl PackageCatalog {
         for (index, record) in records.iter().enumerate() {
             if record.alive {
                 let arena = arena.ok_or(PackageCatalogError::Unsupported)?;
+                if records[..index]
+                    .iter()
+                    .any(|other| other.alive && other.service == record.service)
+                {
+                    return Err(PackageCatalogError::InvalidRecord);
+                }
                 validate_record_layout(record, arena, &records, Some(index))?;
             }
         }
