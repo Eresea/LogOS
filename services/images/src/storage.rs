@@ -225,6 +225,42 @@ fn handle_package_request<B: logos_storage::BlockStore>(
     }
 }
 
+fn receive_package_request() -> Option<PackageRequest> {
+    let mut request = PackageRequest::new(
+        PackageOperation::Lookup,
+        logos_abi::ServiceId::Storage,
+        1,
+        common::capability(PACKAGE_RECEIVE_CAPABILITY)
+            .map_or(1, |capability| capability.generation),
+        PACKAGE_RECEIVE_CAPABILITY as u16,
+        common::capability(PACKAGE_RECEIVE_CAPABILITY)
+            .map_or(1, |capability| capability.service_epoch),
+        0,
+        0,
+        0,
+    )
+    .ok()?;
+    (common::ipc_receive(PACKAGE_RECEIVE_CAPABILITY, &mut request) == IpcStatus::Ok)
+        .then_some(request)
+}
+
+fn send_package_response(pending: &mut Option<PackageResponse>) -> bool {
+    let Some(response) = *pending else {
+        return false;
+    };
+    match common::ipc_send(PACKAGE_SEND_CAPABILITY, &response) {
+        IpcStatus::Ok => {
+            *pending = None;
+            true
+        }
+        IpcStatus::Full => false,
+        _ => {
+            *pending = None;
+            true
+        }
+    }
+}
+
 fn serve_storage_error(status: StorageApiStatus) -> ! {
     let mut pending_response: Option<(Client, IpcBytes)> = None;
     let mut pending_package: Option<PackageResponse> = None;
@@ -232,18 +268,8 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
         let mut progressed = false;
-        if let Some(response) = pending_package {
-            match common::ipc_send(PACKAGE_SEND_CAPABILITY, &response) {
-                IpcStatus::Ok => {
-                    pending_package = None;
-                    progressed = true;
-                }
-                IpcStatus::Full => {}
-                _ => {
-                    pending_package = None;
-                    progressed = true;
-                }
-            }
+        if send_package_response(&mut pending_package) {
+            progressed = true;
         }
         if let Some((client, response)) = pending_response {
             match send_response(client, &response) {
@@ -259,21 +285,7 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
             }
         }
         if pending_response.is_none() && pending_package.is_none() {
-            let mut request = PackageRequest::new(
-                PackageOperation::Lookup,
-                logos_abi::ServiceId::Storage,
-                1,
-                common::capability(PACKAGE_RECEIVE_CAPABILITY)
-                    .map_or(1, |capability| capability.generation),
-                PACKAGE_RECEIVE_CAPABILITY as u16,
-                common::capability(PACKAGE_RECEIVE_CAPABILITY)
-                    .map_or(1, |capability| capability.service_epoch),
-                0,
-                0,
-                0,
-            )
-            .unwrap();
-            if common::ipc_receive(PACKAGE_RECEIVE_CAPABILITY, &mut request) == IpcStatus::Ok {
+            if let Some(request) = receive_package_request() {
                 pending_package = Some(PackageResponse::new(request, PackageStatus::Io));
                 progressed = true;
             }
@@ -344,18 +356,8 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
         let mut progressed = false;
-        if let Some(response) = pending_package {
-            match common::ipc_send(PACKAGE_SEND_CAPABILITY, &response) {
-                IpcStatus::Ok => {
-                    pending_package = None;
-                    progressed = true;
-                }
-                IpcStatus::Full => {}
-                _ => {
-                    pending_package = None;
-                    progressed = true;
-                }
-            }
+        if send_package_response(&mut pending_package) {
+            progressed = true;
         }
         if let Some((client, response)) = pending_response {
             if send_response(client, &response) == IpcStatus::Ok {
@@ -364,21 +366,7 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
             }
         }
         if pending_response.is_none() && pending_package.is_none() {
-            let mut request = PackageRequest::new(
-                PackageOperation::Lookup,
-                logos_abi::ServiceId::Storage,
-                1,
-                common::capability(PACKAGE_RECEIVE_CAPABILITY)
-                    .map_or(1, |capability| capability.generation),
-                PACKAGE_RECEIVE_CAPABILITY as u16,
-                common::capability(PACKAGE_RECEIVE_CAPABILITY)
-                    .map_or(1, |capability| capability.service_epoch),
-                0,
-                0,
-                0,
-            )
-            .unwrap();
-            if common::ipc_receive(PACKAGE_RECEIVE_CAPABILITY, &mut request) == IpcStatus::Ok {
+            if let Some(request) = receive_package_request() {
                 pending_package = Some(handle_package_request(request, api.namespace_mut()));
                 progressed = true;
             }
