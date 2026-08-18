@@ -1097,6 +1097,15 @@ impl ServiceRuntime {
         Ok(())
     }
 
+    #[cfg(feature = "package-proof")]
+    pub(crate) fn restart_for_package_proof(
+        &mut self,
+        runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
+    ) -> Result<(), ServiceRuntimeError> {
+        let bundle = crate::arch::service_images().ok_or(ServiceRuntimeError::Resources)?;
+        self.restart(bundle, runtime_guard)
+    }
+
     fn retain_active_package_image(&mut self) -> Result<(), ServiceRuntimeError> {
         let Some(active) = self.active_package.as_ref() else {
             return Ok(());

@@ -1105,6 +1105,16 @@ pub(crate) fn activate_service_package(
 }
 
 #[cfg(feature = "package-proof")]
+pub(crate) fn restart_service_graph_for_proof() -> bool {
+    let mut runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME))
+            .restart_for_package_proof(&mut runtime_guard)
+            .is_ok()
+    }
+}
+
+#[cfg(feature = "package-proof")]
 pub(crate) fn package_frame_accounting_valid() -> bool {
     let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).package_frame_accounting_valid() }

@@ -238,8 +238,7 @@ fn receive_package_request() -> Option<PackageRequest> {
         0,
         0,
         0,
-    )
-    .ok()?;
+    )?;
     (common::ipc_receive(PACKAGE_RECEIVE_CAPABILITY, &mut request) == IpcStatus::Ok)
         .then_some(request)
 }

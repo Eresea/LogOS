@@ -28,6 +28,10 @@ pub(crate) fn run() {
             arch_fatal(b"LogOS vNext: corrupt package accepted");
         }
         proof::package_corrupt_rejected();
+        if !crate::arch::restart_service_graph_for_proof() {
+            arch_fatal(b"LogOS vNext: package persistence restart");
+        }
+        proof::package_persistence_restarted();
     }
 
     let mut runtime = Runtime::new();
@@ -154,8 +158,6 @@ pub(crate) fn run() {
         if crate::supervise_services() {
             #[cfg(feature = "qemu-proof")]
             proof::live_service_restarted();
-            #[cfg(feature = "package-proof")]
-            proof::package_persistence_restarted();
         }
         sleep_current_for(3);
         #[cfg(feature = "qemu-proof")]
