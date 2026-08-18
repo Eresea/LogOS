@@ -23,6 +23,10 @@ pub enum CompletionTarget {
     InterfaceName,
     SystemMember,
     FilesystemMember,
+    FileHandleOpen,
+    FileHandleOpenMember,
+    FileHandleTouch,
+    FileHandleTouchMember,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,6 +58,14 @@ pub const FILESYSTEM_COMPLETION_MEMBERS: [&[u8]; 6] = [
     b"move(\"\", \"\")",
 ];
 pub const FILESYSTEM_COMPLETION_CURSOR_OFFSETS: [u8; 6] = [6, 6, 8, 8, 8, 6];
+pub const FILE_OPEN_COMPLETION_MEMBERS: [&[u8]; 2] = [b".read()", b".write(\"\")"];
+pub const FILE_OPEN_COMPLETION_OFFSETS: [u8; 2] = [7, 7];
+pub const FILE_OPEN_MEMBER_COMPLETION: [&[u8]; 2] = [b"read()", b"write(\"\")"];
+pub const FILE_OPEN_MEMBER_OFFSETS: [u8; 2] = [6, 6];
+pub const FILE_TOUCH_COMPLETION_MEMBERS: [&[u8]; 2] = [b".create()", b".write(\"\")"];
+pub const FILE_TOUCH_COMPLETION_OFFSETS: [u8; 2] = [9, 7];
+pub const FILE_TOUCH_MEMBER_COMPLETION: [&[u8]; 2] = [b"create()", b"write(\"\")"];
+pub const FILE_TOUCH_MEMBER_OFFSETS: [u8; 2] = [8, 6];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FlowKind {
@@ -165,6 +177,23 @@ pub fn completion_context<'a>(
         return Ok(None);
     }
 
+    if let Some(context) = file_handle_completion_context(
+        before,
+        b"fs.open(\"",
+        CompletionTarget::FileHandleOpen,
+        CompletionTarget::FileHandleOpenMember,
+    ) {
+        return Ok(Some(context));
+    }
+    if let Some(context) = file_handle_completion_context(
+        before,
+        b"fs.touch(\"",
+        CompletionTarget::FileHandleTouch,
+        CompletionTarget::FileHandleTouchMember,
+    ) {
+        return Ok(Some(context));
+    }
+
     if before.starts_with(b"net.") && before[4..].iter().all(|byte| is_member_byte(*byte)) {
         return Ok(Some(CompletionContext {
             target: CompletionTarget::NetworkMember,
@@ -228,6 +257,37 @@ fn is_member_byte(byte: u8) -> bool {
 
 fn is_name_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+}
+
+fn file_handle_completion_context<'a>(
+    before: &'a [u8],
+    call_prefix: &[u8],
+    call_target: CompletionTarget,
+    member_target: CompletionTarget,
+) -> Option<CompletionContext<'a>> {
+    if !before.starts_with(call_prefix) {
+        return None;
+    }
+    let close = before[call_prefix.len()..].windows(2).position(|window| window == b"\")")?;
+    let call_end = call_prefix.len() + close + 2;
+    let suffix = &before[call_end..];
+    if suffix.is_empty() {
+        return Some(CompletionContext {
+            target: call_target,
+            replace_start: before.len(),
+            replace_end: before.len(),
+            prefix: &[],
+        });
+    }
+    if suffix[0] != b'.' || !suffix[1..].iter().all(|byte| is_member_byte(*byte)) {
+        return None;
+    }
+    Some(CompletionContext {
+        target: member_target,
+        replace_start: call_end + 1,
+        replace_end: before.len(),
+        prefix: &before[call_end + 1..],
+    })
 }
 
 fn find_bytes(bytes: &[u8], needle: &[u8]) -> Option<usize> {
@@ -1421,6 +1481,24 @@ mod tests {
         assert_eq!(
             completion_context(b"fs.", 3).unwrap().unwrap().target,
             CompletionTarget::FilesystemMember
+        );
+        assert_eq!(
+            completion_context(b"fs.open(\"test\")", 15).unwrap(),
+            Some(CompletionContext {
+                target: CompletionTarget::FileHandleOpen,
+                replace_start: 15,
+                replace_end: 15,
+                prefix: b"",
+            })
+        );
+        assert_eq!(
+            completion_context(b"fs.open(\"test\").wr", 18).unwrap(),
+            Some(CompletionContext {
+                target: CompletionTarget::FileHandleOpenMember,
+                replace_start: 16,
+                replace_end: 18,
+                prefix: b"wr",
+            })
         );
         assert_eq!(
             completion_context(b"net.interface[\"e", 16).unwrap().unwrap().target,

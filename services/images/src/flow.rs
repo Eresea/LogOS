@@ -671,6 +671,39 @@ impl CompletionService {
                     }
                 }
             }
+            logos_flow::CompletionTarget::FileHandleOpen
+            | logos_flow::CompletionTarget::FileHandleOpenMember
+            | logos_flow::CompletionTarget::FileHandleTouch
+            | logos_flow::CompletionTarget::FileHandleTouchMember => {
+                let (candidates, offsets) = match context.target {
+                    logos_flow::CompletionTarget::FileHandleOpen => (
+                        &logos_flow::FILE_OPEN_COMPLETION_MEMBERS,
+                        &logos_flow::FILE_OPEN_COMPLETION_OFFSETS,
+                    ),
+                    logos_flow::CompletionTarget::FileHandleOpenMember => (
+                        &logos_flow::FILE_OPEN_MEMBER_COMPLETION,
+                        &logos_flow::FILE_OPEN_MEMBER_OFFSETS,
+                    ),
+                    logos_flow::CompletionTarget::FileHandleTouch => (
+                        &logos_flow::FILE_TOUCH_COMPLETION_MEMBERS,
+                        &logos_flow::FILE_TOUCH_COMPLETION_OFFSETS,
+                    ),
+                    logos_flow::CompletionTarget::FileHandleTouchMember => (
+                        &logos_flow::FILE_TOUCH_MEMBER_COMPLETION,
+                        &logos_flow::FILE_TOUCH_MEMBER_OFFSETS,
+                    ),
+                    _ => unreachable!(),
+                };
+                for (index, candidate) in candidates.iter().enumerate() {
+                    if candidate.starts_with(context.prefix)
+                        && !response
+                            .push_candidate_with_cursor(candidate, usize::from(offsets[index]))
+                    {
+                        response.flags |= COMPLETION_FLAG_TRUNCATED;
+                        break;
+                    }
+                }
+            }
             logos_flow::CompletionTarget::InterfaceName => {
                 if b"eth0".starts_with(context.prefix) && !response.push_candidate(b"eth0\"]") {
                     response.flags |= COMPLETION_FLAG_TRUNCATED;

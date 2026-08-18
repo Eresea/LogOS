@@ -1220,6 +1220,42 @@ mod tests {
     }
 
     #[test]
+    fn file_handle_completion_adds_a_method_after_open() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"fs.open(\"test\")", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_start = 15;
+        response.replace_end = 15;
+        assert!(response.push_candidate_with_cursor(b".read()", 7));
+        editor.apply_completion_response(response, &mut output);
+        editor.input_for_command(b"\t", &mut command, &mut output);
+        assert_eq!(&editor.line[..editor.line_len], b"fs.open(\"test\").read()");
+        assert_eq!(editor.cursor, 22);
+    }
+
+    #[test]
+    fn file_handle_member_completion_places_write_cursor_in_quotes() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"fs.open(\"test\").w", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_start = 16;
+        response.replace_end = 17;
+        assert!(response.push_candidate_with_cursor(b"write(\"\")", 6));
+        editor.apply_completion_response(response, &mut output);
+        editor.input_for_command(b"\t", &mut command, &mut output);
+        assert_eq!(&editor.line[..editor.line_len], b"fs.open(\"test\").write(\"\")");
+        assert_eq!(editor.cursor, 22);
+    }
+
+    #[test]
     fn targeted_completion_navigates_and_dismisses() {
         let mut editor = LineEditor::new();
         let mut command = [0; MAX_LINE_BYTES];
