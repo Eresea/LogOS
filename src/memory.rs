@@ -339,6 +339,10 @@ pub struct OwnerId(u16);
 impl OwnerId {
     pub const KERNEL: Self = Self(1);
 
+    pub const fn service(service: logos_abi::ServiceId) -> Self {
+        Self(2 + service.index() as u16)
+    }
+
     pub const fn new(raw: u16) -> Option<Self> {
         if raw == 0 { None } else { Some(Self(raw)) }
     }

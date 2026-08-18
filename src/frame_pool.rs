@@ -61,8 +61,12 @@ impl FramePool {
     }
 
     pub fn allocate(&mut self) -> Result<FrameAddress, FramePoolError> {
+        self.allocate_for(OwnerId::KERNEL)
+    }
+
+    pub fn allocate_for(&mut self, owner: OwnerId) -> Result<FrameAddress, FramePoolError> {
         self.manager
-            .try_alloc(OwnerId::KERNEL, FrameState::Dirty)
+            .try_alloc(owner, FrameState::Dirty)
             .map(|lease| lease.address())
             .map_err(map_error)
     }
