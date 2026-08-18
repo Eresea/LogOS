@@ -17,6 +17,7 @@ const _: () = assert!(PACKAGE_SNAPSHOT_BYTES <= logos_storage::CHECKPOINT_PAYLOA
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PackageCatalogError {
     Unsupported,
+    Busy,
     Capacity,
     TooLarge,
     InvalidRequest,
@@ -146,6 +147,7 @@ impl PackageCatalog {
         }
         let blocks = bytes.div_ceil(BLOCK_BYTES);
         let mut install = PackageInstall {
+            install_id: 0,
             service,
             bytes: bytes as u32,
             blocks: blocks as u32,
@@ -266,7 +268,9 @@ impl Default for PackageCatalog {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct PackageInstall {
+    pub(crate) install_id: u32,
     pub(crate) service: ServiceId,
     pub(crate) bytes: u32,
     pub(crate) blocks: u32,
@@ -291,7 +295,7 @@ impl PackageInstall {
             && offset.checked_add(length).is_some_and(|end| end <= self.bytes as usize)
     }
 
-    pub fn mark_written(&mut self, offset: usize) {
+    pub(crate) fn mark_written(&mut self, offset: usize) {
         self.written[offset / BLOCK_BYTES] = true;
     }
 

@@ -659,6 +659,8 @@ pub struct DurableNamespace<B> {
     volume: Volume,
     namespace: ObjectNamespace,
     packages: PackageCatalog,
+    active_package_install: Option<u32>,
+    next_package_install: u32,
 }
 
 impl<B: BlockStore> DurableNamespace<B> {
@@ -669,6 +671,8 @@ impl<B: BlockStore> DurableNamespace<B> {
             volume,
             namespace: ObjectNamespace::new(),
             packages: PackageCatalog::new(),
+            active_package_install: None,
+            next_package_install: 1,
         })
     }
 
@@ -679,6 +683,8 @@ impl<B: BlockStore> DurableNamespace<B> {
             volume,
             namespace: ObjectNamespace::new(),
             packages: PackageCatalog::new(),
+            active_package_install: None,
+            next_package_install: 1,
         })
     }
 
@@ -699,7 +705,14 @@ impl<B: BlockStore> DurableNamespace<B> {
             package_arena: volume.package_arena(),
         };
         volume.recover(&mut store, &mut recovery)?;
-        Ok(Self { store, volume, namespace, packages })
+        Ok(Self {
+            store,
+            volume,
+            namespace,
+            packages,
+            active_package_install: None,
+            next_package_install: 1,
+        })
     }
 
     fn reopen(&mut self) -> Result<(), NamespaceError> {
@@ -722,6 +735,7 @@ impl<B: BlockStore> DurableNamespace<B> {
         self.volume = volume;
         self.namespace = namespace;
         self.packages = packages;
+        self.active_package_install = None;
         Ok(())
     }
 
@@ -923,12 +937,23 @@ impl<B: BlockStore> DurableNamespace<B> {
     }
 
     pub fn begin_package_install(
-        &self,
+        &mut self,
         service: ServiceId,
         bytes: usize,
     ) -> Result<PackageInstall, NamespaceError> {
+        if self.active_package_install.is_some() {
+            return Err(NamespaceError::Package(PackageCatalogError::Busy));
+        }
         let arena = self.volume.package_arena().ok_or(NamespaceError::Unsupported)?;
-        self.packages.plan_install(arena, service, bytes).map_err(Into::into)
+        let install_id = self.next_package_install;
+        self.next_package_install = self
+            .next_package_install
+            .checked_add(1)
+            .ok_or(NamespaceError::Package(PackageCatalogError::InvalidRequest))?;
+        let mut install = self.packages.plan_install(arena, service, bytes)?;
+        install.install_id = install_id;
+        self.active_package_install = Some(install_id);
+        Ok(install)
     }
 
     pub fn write_package_chunk(
@@ -937,6 +962,9 @@ impl<B: BlockStore> DurableNamespace<B> {
         offset: usize,
         input: &[u8],
     ) -> Result<(), NamespaceError> {
+        if self.active_package_install != Some(install.install_id) {
+            return Err(NamespaceError::InvalidRecord);
+        }
         if !install.write_offset_valid(offset, input.len())
             || (offset + input.len() < install.bytes() && input.len() != BLOCK_BYTES)
         {
@@ -951,9 +979,25 @@ impl<B: BlockStore> DurableNamespace<B> {
         Ok(())
     }
 
-    pub fn abort_package_install(&mut self, _install: PackageInstall) {}
+    pub fn abort_package_install(&mut self, install: PackageInstall) {
+        if self.active_package_install == Some(install.install_id) {
+            self.active_package_install = None;
+        }
+    }
 
     pub fn commit_package_install(
+        &mut self,
+        install: PackageInstall,
+    ) -> Result<PackageHandle, NamespaceError> {
+        if self.active_package_install != Some(install.install_id) {
+            return Err(NamespaceError::InvalidRecord);
+        }
+        let result = self.commit_package_install_inner(install);
+        self.active_package_install = None;
+        result
+    }
+
+    fn commit_package_install_inner(
         &mut self,
         install: PackageInstall,
     ) -> Result<PackageHandle, NamespaceError> {
@@ -1445,6 +1489,25 @@ mod tests {
         transaction.create_file(b"/discarded").unwrap();
         transaction.abort();
         assert_eq!(fs.resolve_path(b"/discarded"), Err(NamespaceError::NotFound));
+    }
+
+    #[test]
+    fn package_install_has_one_owner_and_rejects_stale_handles() {
+        let mut fs = DurableNamespace::format(heap_store()).unwrap();
+        let first = fs.begin_package_install(ServiceId::Flow, PACKAGE_HEADER_BYTES).unwrap();
+        let mut stale = first;
+        assert!(matches!(
+            fs.begin_package_install(ServiceId::Storage, PACKAGE_HEADER_BYTES),
+            Err(NamespaceError::Package(PackageCatalogError::Busy))
+        ));
+        fs.abort_package_install(first);
+
+        let second = fs.begin_package_install(ServiceId::Storage, PACKAGE_HEADER_BYTES).unwrap();
+        assert_eq!(
+            fs.write_package_chunk(&mut stale, 0, &[0; PACKAGE_HEADER_BYTES]),
+            Err(NamespaceError::InvalidRecord)
+        );
+        fs.abort_package_install(second);
     }
 
     #[test]
