@@ -58,16 +58,31 @@ pub const FILESYSTEM_COMPLETION_MEMBERS: [&[u8]; 6] = [
     b"remove(\"\")",
     b"move(\"\", \"\")",
 ];
-pub const FILESYSTEM_COMPLETION_CURSOR_OFFSETS: [u8; 6] = [6, 6, 8, 8, 8, 6];
+pub const FILESYSTEM_COMPLETION_CURSOR_OFFSETS: [u8; 6] = [6, 6, 7, 7, 8, 6];
 pub const FILE_OPEN_COMPLETION_MEMBERS: [&[u8]; 2] = [b".read()", b".write(\"\")"];
-pub const FILE_OPEN_COMPLETION_OFFSETS: [u8; 2] = [7, 7];
+pub const FILE_OPEN_COMPLETION_OFFSETS: [u8; 2] = [7, 8];
 pub const FILE_OPEN_MEMBER_COMPLETION: [&[u8]; 2] = [b"read()", b"write(\"\")"];
-pub const FILE_OPEN_MEMBER_OFFSETS: [u8; 2] = [6, 6];
+pub const FILE_OPEN_MEMBER_OFFSETS: [u8; 2] = [6, 7];
 pub const FILE_TOUCH_COMPLETION_MEMBERS: [&[u8]; 2] = [b".create()", b".write(\"\")"];
-pub const FILE_TOUCH_COMPLETION_OFFSETS: [u8; 2] = [9, 7];
+pub const FILE_TOUCH_COMPLETION_OFFSETS: [u8; 2] = [9, 8];
 pub const FILE_TOUCH_MEMBER_COMPLETION: [&[u8]; 2] = [b"create()", b"write(\"\")"];
-pub const FILE_TOUCH_MEMBER_OFFSETS: [u8; 2] = [8, 6];
+pub const FILE_TOUCH_MEMBER_OFFSETS: [u8; 2] = [8, 7];
 pub const PACKAGE_COMPLETION_MEMBERS: [&[u8]; 3] = [b"list()", b"info(\"\")", b"install(\"\")"];
+
+/// Return the cursor position for the first empty argument placeholder.
+pub const fn completion_cursor_offset(candidate: &[u8]) -> usize {
+    let mut index = 0;
+    while index + 1 < candidate.len() {
+        if (candidate[index] == b'"' && candidate[index + 1] == b'"')
+            || (candidate[index] == b'[' && candidate[index + 1] == b']')
+            || (candidate[index] == b'{' && candidate[index + 1] == b'}')
+        {
+            return index + 1;
+        }
+        index += 1;
+    }
+    candidate.len()
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FlowKind {
@@ -1551,6 +1566,16 @@ mod tests {
         assert!(completion_context(b"help()", 4).unwrap().is_none());
         assert!(completion_context(b"service[storage", 15).unwrap().is_none());
         assert!(completion_context(&[b'x'; logos_abi::MAX_COMPLETION_LINE_BYTES + 1], 0).is_err());
+    }
+
+    #[test]
+    fn completion_cursor_offset_targets_the_first_empty_argument_placeholder() {
+        assert_eq!(completion_cursor_offset(b"read()"), 6);
+        assert_eq!(completion_cursor_offset(b"write(\"\")"), 7);
+        assert_eq!(completion_cursor_offset(b"move(\"\", \"\")"), 6);
+        assert_eq!(completion_cursor_offset(b"move(\"/old\", \"\")"), 14);
+        assert_eq!(completion_cursor_offset(b"batch([1, []])"), 11);
+        assert_eq!(completion_cursor_offset(b"status"), 6);
     }
 
     #[test]

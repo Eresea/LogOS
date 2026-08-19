@@ -588,17 +588,26 @@ impl CompletionService {
         match context.target {
             logos_flow::CompletionTarget::Root => {
                 if b"help".starts_with(context.prefix)
-                    && !response.push_candidate_with_cursor(b"help()", 4)
+                    && !response.push_candidate_with_cursor(
+                        b"help()",
+                        logos_flow::completion_cursor_offset(b"help()"),
+                    )
                 {
                     response.flags |= COMPLETION_FLAG_TRUNCATED;
                 }
                 if b"clear".starts_with(context.prefix)
-                    && !response.push_candidate_with_cursor(b"clear()", 5)
+                    && !response.push_candidate_with_cursor(
+                        b"clear()",
+                        logos_flow::completion_cursor_offset(b"clear()"),
+                    )
                 {
                     response.flags |= COMPLETION_FLAG_TRUNCATED;
                 }
                 if b"echo".starts_with(context.prefix)
-                    && !response.push_candidate_with_cursor(b"echo(\"\")", 6)
+                    && !response.push_candidate_with_cursor(
+                        b"echo(\"\")",
+                        logos_flow::completion_cursor_offset(b"echo(\"\")"),
+                    )
                 {
                     response.flags |= COMPLETION_FLAG_TRUNCATED;
                 }
@@ -606,12 +615,12 @@ impl CompletionService {
                     if !spec.name.starts_with(context.prefix) {
                         continue;
                     }
-                    let (punctuation, cursor_offset) = match spec.kind {
-                        logos_flow::FlowKind::Filesystem => (b".".as_slice(), spec.name.len() + 1),
-                        logos_flow::FlowKind::Service => (b"[\"".as_slice(), spec.name.len() + 2),
-                        logos_flow::FlowKind::Network => (b".".as_slice(), spec.name.len() + 1),
-                        logos_flow::FlowKind::System => (b".".as_slice(), spec.name.len() + 1),
-                        logos_flow::FlowKind::Package => (b".".as_slice(), spec.name.len() + 1),
+                    let punctuation = match spec.kind {
+                        logos_flow::FlowKind::Filesystem => b".".as_slice(),
+                        logos_flow::FlowKind::Service => b"[\"".as_slice(),
+                        logos_flow::FlowKind::Network => b".".as_slice(),
+                        logos_flow::FlowKind::System => b".".as_slice(),
+                        logos_flow::FlowKind::Package => b".".as_slice(),
                     };
                     let mut candidate = [0; MAX_COMPLETION_ITEM_BYTES];
                     let Some(length) = copy_candidate(&mut candidate, spec.name, punctuation)
@@ -619,7 +628,10 @@ impl CompletionService {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
                         continue;
                     };
-                    if !response.push_candidate_with_cursor(&candidate[..length], cursor_offset) {
+                    if !response.push_candidate_with_cursor(
+                        &candidate[..length],
+                        logos_flow::completion_cursor_offset(&candidate[..length]),
+                    ) {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
                         break;
                     }
@@ -632,7 +644,11 @@ impl CompletionService {
             }
             logos_flow::CompletionTarget::ServiceMember => {
                 for candidate in logos_flow::SERVICE_COMPLETION_MEMBERS {
-                    if candidate.starts_with(context.prefix) && !response.push_candidate(candidate)
+                    if candidate.starts_with(context.prefix)
+                        && !response.push_candidate_with_cursor(
+                            candidate,
+                            logos_flow::completion_cursor_offset(candidate),
+                        )
                     {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
                         break;
@@ -641,7 +657,11 @@ impl CompletionService {
             }
             logos_flow::CompletionTarget::NetworkMember => {
                 for candidate in logos_flow::NETWORK_COMPLETION_MEMBERS {
-                    if candidate.starts_with(context.prefix) && !response.push_candidate(candidate)
+                    if candidate.starts_with(context.prefix)
+                        && !response.push_candidate_with_cursor(
+                            candidate,
+                            logos_flow::completion_cursor_offset(candidate),
+                        )
                     {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
                         break;
@@ -650,7 +670,11 @@ impl CompletionService {
             }
             logos_flow::CompletionTarget::SystemMember => {
                 for candidate in logos_flow::SYSTEM_COMPLETION_MEMBERS {
-                    if candidate.starts_with(context.prefix) && !response.push_candidate(candidate)
+                    if candidate.starts_with(context.prefix)
+                        && !response.push_candidate_with_cursor(
+                            candidate,
+                            logos_flow::completion_cursor_offset(candidate),
+                        )
                     {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
                         break;
@@ -658,13 +682,11 @@ impl CompletionService {
                 }
             }
             logos_flow::CompletionTarget::FilesystemMember => {
-                for (index, candidate) in
-                    logos_flow::FILESYSTEM_COMPLETION_MEMBERS.iter().enumerate()
-                {
+                for candidate in logos_flow::FILESYSTEM_COMPLETION_MEMBERS {
                     if candidate.starts_with(context.prefix)
                         && !response.push_candidate_with_cursor(
                             candidate,
-                            usize::from(logos_flow::FILESYSTEM_COMPLETION_CURSOR_OFFSETS[index]),
+                            logos_flow::completion_cursor_offset(candidate),
                         )
                     {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
@@ -674,7 +696,11 @@ impl CompletionService {
             }
             logos_flow::CompletionTarget::PackageMember => {
                 for candidate in logos_flow::PACKAGE_COMPLETION_MEMBERS {
-                    if candidate.starts_with(context.prefix) && !response.push_candidate(candidate)
+                    if candidate.starts_with(context.prefix)
+                        && !response.push_candidate_with_cursor(
+                            candidate,
+                            logos_flow::completion_cursor_offset(candidate),
+                        )
                     {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
                         break;
@@ -685,29 +711,27 @@ impl CompletionService {
             | logos_flow::CompletionTarget::FileHandleOpenMember
             | logos_flow::CompletionTarget::FileHandleTouch
             | logos_flow::CompletionTarget::FileHandleTouchMember => {
-                let (candidates, offsets) = match context.target {
-                    logos_flow::CompletionTarget::FileHandleOpen => (
-                        &logos_flow::FILE_OPEN_COMPLETION_MEMBERS,
-                        &logos_flow::FILE_OPEN_COMPLETION_OFFSETS,
-                    ),
-                    logos_flow::CompletionTarget::FileHandleOpenMember => (
-                        &logos_flow::FILE_OPEN_MEMBER_COMPLETION,
-                        &logos_flow::FILE_OPEN_MEMBER_OFFSETS,
-                    ),
-                    logos_flow::CompletionTarget::FileHandleTouch => (
-                        &logos_flow::FILE_TOUCH_COMPLETION_MEMBERS,
-                        &logos_flow::FILE_TOUCH_COMPLETION_OFFSETS,
-                    ),
-                    logos_flow::CompletionTarget::FileHandleTouchMember => (
-                        &logos_flow::FILE_TOUCH_MEMBER_COMPLETION,
-                        &logos_flow::FILE_TOUCH_MEMBER_OFFSETS,
-                    ),
+                let candidates = match context.target {
+                    logos_flow::CompletionTarget::FileHandleOpen => {
+                        &logos_flow::FILE_OPEN_COMPLETION_MEMBERS
+                    }
+                    logos_flow::CompletionTarget::FileHandleOpenMember => {
+                        &logos_flow::FILE_OPEN_MEMBER_COMPLETION
+                    }
+                    logos_flow::CompletionTarget::FileHandleTouch => {
+                        &logos_flow::FILE_TOUCH_COMPLETION_MEMBERS
+                    }
+                    logos_flow::CompletionTarget::FileHandleTouchMember => {
+                        &logos_flow::FILE_TOUCH_MEMBER_COMPLETION
+                    }
                     _ => unreachable!(),
                 };
-                for (index, candidate) in candidates.iter().enumerate() {
+                for candidate in candidates {
                     if candidate.starts_with(context.prefix)
-                        && !response
-                            .push_candidate_with_cursor(candidate, usize::from(offsets[index]))
+                        && !response.push_candidate_with_cursor(
+                            candidate,
+                            logos_flow::completion_cursor_offset(candidate),
+                        )
                     {
                         response.flags |= COMPLETION_FLAG_TRUNCATED;
                         break;
@@ -715,7 +739,12 @@ impl CompletionService {
                 }
             }
             logos_flow::CompletionTarget::InterfaceName => {
-                if b"eth0".starts_with(context.prefix) && !response.push_candidate(b"eth0\"]") {
+                if b"eth0".starts_with(context.prefix)
+                    && !response.push_candidate_with_cursor(
+                        b"eth0\"]",
+                        logos_flow::completion_cursor_offset(b"eth0\"]"),
+                    )
+                {
                     response.flags |= COMPLETION_FLAG_TRUNCATED;
                 }
             }
@@ -2698,7 +2727,19 @@ mod tests {
 
         let fs_touch = provider.complete(CompletionRequest::new(7, b"fs.t", 4).unwrap());
         assert_eq!(fs_touch.candidate(0), Some(&b"touch(\"\").create()"[..]));
-        assert_eq!(fs_touch.cursor_offsets[0], 8);
+        assert_eq!(fs_touch.cursor_offsets[0], 7);
+
+        let fs_move = provider.complete(CompletionRequest::new(13, b"fs.mo", 5).unwrap());
+        assert_eq!(fs_move.candidate(0), Some(&b"move(\"\", \"\")"[..]));
+        assert_eq!(fs_move.cursor_offsets[0], 6);
+
+        let network = provider.complete(CompletionRequest::new(14, b"net.", 4).unwrap());
+        assert_eq!(network.candidate(1), Some(&b"ping(\"\")"[..]));
+        assert_eq!(network.cursor_offsets[1], 6);
+        assert_eq!(network.candidate(2), Some(&b"tcp-probe(\"\", 0)"[..]));
+        assert_eq!(network.cursor_offsets[2], 11);
+        assert_eq!(network.candidate(3), Some(&b"fetch(\"\")"[..]));
+        assert_eq!(network.cursor_offsets[3], 7);
 
         let sys = provider.complete(CompletionRequest::new(6, b"sys.v", 5).unwrap());
         assert_eq!(sys.candidate(0), Some(&b"version()"[..]));
@@ -2706,6 +2747,24 @@ mod tests {
         let member =
             provider.complete(CompletionRequest::new(2, b"service[\"storage\"].re", 21).unwrap());
         assert_eq!(member.candidate(0), Some(&b"restart()"[..]));
+
+        let file_handle =
+            provider.complete(CompletionRequest::new(11, b"fs.open(\"test\").", 16).unwrap());
+        assert_eq!(file_handle.candidate_count, 2);
+        assert_eq!(file_handle.candidate(0), Some(&b"read()"[..]));
+        assert_eq!(file_handle.candidate(1), Some(&b"write(\"\")"[..]));
+        assert_eq!(file_handle.cursor_offsets[0], 6);
+        assert_eq!(file_handle.cursor_offsets[1], 7);
+
+        let packages = provider.complete(CompletionRequest::new(15, b"pkg.", 4).unwrap());
+        assert_eq!(packages.cursor_offsets[0], 6);
+        assert_eq!(packages.cursor_offsets[1], 6);
+        assert_eq!(packages.cursor_offsets[2], 9);
+
+        let filtered_file_handle =
+            provider.complete(CompletionRequest::new(12, b"fs.open(\"test\").re", 18).unwrap());
+        assert_eq!(filtered_file_handle.candidate_count, 1);
+        assert_eq!(filtered_file_handle.candidate(0), Some(&b"read()"[..]));
 
         let interface =
             provider.complete(CompletionRequest::new(3, b"net.interface[\"e", 16).unwrap());
