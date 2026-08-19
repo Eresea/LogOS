@@ -92,9 +92,12 @@ impl Parser {
     }
 
     fn param(&self, index: usize, default: u16) -> u16 {
-        match self.params.get(index).copied() {
-            Some(0) | None => default,
-            Some(value) => value,
+        if index >= self.param_count {
+            return default;
+        }
+        match self.params[index] {
+            0 => default,
+            value => value,
         }
     }
 }
@@ -102,6 +105,8 @@ impl Parser {
 pub struct TerminalState<const CELL_COUNT: usize> {
     cursor_column: usize,
     cursor_row: usize,
+    saved_cursor_column: usize,
+    saved_cursor_row: usize,
     wrap_pending: bool,
     cursor_dirty: bool,
     screen: [Cell; CELL_COUNT],
@@ -163,6 +168,8 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         Self {
             cursor_column: 0,
             cursor_row: 0,
+            saved_cursor_column: 0,
+            saved_cursor_row: 0,
             wrap_pending: false,
             cursor_dirty: false,
             screen: [blank_cell(); CELL_COUNT],
@@ -189,6 +196,8 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     pub fn reset(&mut self) {
         self.cursor_column = 0;
         self.cursor_row = 0;
+        self.saved_cursor_column = 0;
+        self.saved_cursor_row = 0;
         self.wrap_pending = false;
         self.cursor_dirty = true;
         self.full_redraw_pending = true;
@@ -361,6 +370,14 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             b'F' => {
                 self.cursor_row = self.cursor_row.saturating_sub(self.parser.param(0, 1) as usize);
                 self.cursor_column = 0;
+            }
+            b's' => {
+                self.saved_cursor_column = self.cursor_column;
+                self.saved_cursor_row = self.cursor_row;
+            }
+            b'u' => {
+                self.cursor_column = self.saved_cursor_column.min(DEFAULT_COLUMNS - 1);
+                self.cursor_row = self.saved_cursor_row.min(DEFAULT_ROWS - 1);
             }
             b'J' => self.erase_display(self.parser.param(0, 0)),
             b'K' => self.erase_line(self.parser.param(0, 0)),
@@ -851,6 +868,29 @@ mod tests {
         let message = terminal.next_render().unwrap();
         assert_eq!(message.count, 0);
         assert_eq!((message.cursor_column, message.cursor_row), (3, 0));
+    }
+
+    #[test]
+    fn cursor_save_and_restore_preserves_the_editing_position() {
+        let mut terminal = Terminal::new();
+        drain(&mut terminal);
+        terminal.feed(b"ab\x1b[sXY\x1b[uZ");
+        assert_eq!(terminal.screen[2].codepoint, b'Z' as u32);
+        assert_eq!(terminal.cursor(), (3, 0));
+    }
+
+    #[test]
+    fn completion_row_erase_clears_the_saved_menu_row() {
+        let mut terminal = Terminal::new();
+        drain(&mut terminal);
+        terminal.feed(b"            \x1b[sstatus\x1b[1B\x1b[6Dping()\x1b[u");
+        assert_eq!(terminal.cursor(), (12, 0));
+        terminal.feed(b"\x1b[s\x1b[1B");
+        assert_eq!(terminal.cursor(), (12, 1));
+        terminal.feed(b"\x1b[K");
+        assert_eq!(terminal.screen[DEFAULT_COLUMNS + 13].codepoint, b' ' as u32);
+        terminal.feed(b"\x1b[u");
+        assert_eq!(terminal.cursor(), (12, 0));
     }
 
     #[test]
