@@ -14,12 +14,14 @@ use logos_abi::{
 };
 
 pub const MAX_LINE_BYTES: usize = 256;
-pub const MAX_OUTPUT_BYTES: usize = 512;
+pub const MAX_OUTPUT_BYTES: usize = 1024;
 const PROMPT: &[u8] = b"\x1b[36mlogos\x1b[0m \x1b[33m>\x1b[0m ";
 const COMMAND_COLOR: &[u8] = b"\x1b[36m";
 const STRING_COLOR: &[u8] = b"\x1b[32m";
 const RESET_COLOR: &[u8] = b"\x1b[0m";
 const DIM_COLOR: &[u8] = b"\x1b[2m";
+const COMPLETION_MORE_INDICATOR: &[u8] = b"... more";
+const MAX_VISIBLE_COMPLETION_ROWS: usize = 4;
 const COMPLETION_ERROR: &[u8] = b"\r\ncompletion unavailable\r\n";
 const COMPLETION_TIMEOUT_TICKS: u8 = 32;
 
@@ -110,7 +112,8 @@ pub struct LineEditor {
     completion_lengths: [u8; MAX_COMPLETION_CANDIDATES],
     completion_cursor_offsets: [u8; MAX_COMPLETION_CANDIDATES],
     completion_candidates: [[u8; MAX_COMPLETION_ITEM_BYTES]; MAX_COMPLETION_CANDIDATES],
-    completion_selected: usize,
+    completion_active_index: usize,
+    completion_rendered_rows: usize,
 }
 
 /// Entry-ready Session facade over one bounded line-editing operation.
@@ -215,7 +218,8 @@ impl LineEditor {
             completion_lengths: [0; MAX_COMPLETION_CANDIDATES],
             completion_cursor_offsets: [0; MAX_COMPLETION_CANDIDATES],
             completion_candidates: [[0; MAX_COMPLETION_ITEM_BYTES]; MAX_COMPLETION_CANDIDATES],
-            completion_selected: 0,
+            completion_active_index: 0,
+            completion_rendered_rows: 0,
         }
     }
 
@@ -256,7 +260,7 @@ impl LineEditor {
 
     pub fn completion_failed(&mut self, output: &mut ShellOutput) {
         self.completion_enabled = false;
-        let had_menu = self.completion_active;
+        let had_menu = self.completion_active || self.completion_rendered_rows != 0;
         self.clear_completion_state();
         if had_menu {
             self.redraw(output);
@@ -289,18 +293,17 @@ impl LineEditor {
                 self.completion_lengths = response.lengths;
                 self.completion_cursor_offsets = response.cursor_offsets;
                 self.completion_candidates = response.candidates;
-                self.completion_selected = 0;
+                self.completion_active_index = 0;
                 self.completion_active = true;
                 self.redraw(output);
             }
-            CompletionStatus::NoMatch => {
+            CompletionStatus::NoMatch | CompletionStatus::Ok => {
                 self.dismiss_completion(output);
             }
             CompletionStatus::Unavailable | CompletionStatus::Malformed => {
                 self.completion_enabled = false;
                 self.completion_failed(output);
             }
-            CompletionStatus::Ok => {}
         }
     }
 
@@ -317,35 +320,35 @@ impl LineEditor {
         self.completion_wait = 0;
         self.completion_active = false;
         self.completion_count = 0;
-        self.completion_selected = 0;
+        self.completion_active_index = 0;
     }
 
     fn dismiss_completion(&mut self, output: &mut ShellOutput) {
-        let had_menu = self.completion_active;
+        let had_menu = self.completion_active || self.completion_rendered_rows != 0;
         self.clear_completion_state();
         if had_menu {
             self.redraw(output);
         }
     }
 
-    fn select_completion(&mut self, direction: isize, output: &mut ShellOutput) {
+    fn cycle_completion(&mut self, direction: isize, output: &mut ShellOutput) {
         if self.completion_count == 0 {
             return;
         }
-        self.completion_selected = if direction < 0 {
-            if self.completion_selected == 0 {
+        self.completion_active_index = if direction < 0 {
+            if self.completion_active_index == 0 {
                 self.completion_count - 1
             } else {
-                self.completion_selected - 1
+                self.completion_active_index - 1
             }
         } else {
-            (self.completion_selected + 1) % self.completion_count
+            (self.completion_active_index + 1) % self.completion_count
         };
         self.redraw(output);
     }
 
     fn accept_completion(&mut self, output: &mut ShellOutput) {
-        let Some(candidate) = self.completion_candidate(self.completion_selected) else {
+        let Some(candidate) = self.completion_candidate(self.completion_active_index) else {
             return;
         };
         let mut replacement = [0; MAX_COMPLETION_ITEM_BYTES];
@@ -366,7 +369,7 @@ impl LineEditor {
         self.line[start..start + replacement_len].copy_from_slice(&replacement[..replacement_len]);
         self.line_len = new_len;
         self.cursor = start
-            + usize::from(self.completion_cursor_offsets[self.completion_selected])
+            + usize::from(self.completion_cursor_offsets[self.completion_active_index])
                 .min(replacement_len);
         self.bump_line_revision();
         self.clear_completion_state();
@@ -393,12 +396,12 @@ impl LineEditor {
             let byte = bytes[index];
             if self.completion_active {
                 if bytes[index..].starts_with(b"\x1b[A") {
-                    self.select_completion(-1, output);
+                    self.cycle_completion(-1, output);
                     index += 3;
                     continue;
                 }
                 if bytes[index..].starts_with(b"\x1b[B") {
-                    self.select_completion(1, output);
+                    self.cycle_completion(1, output);
                     index += 3;
                     continue;
                 }
@@ -651,34 +654,79 @@ impl LineEditor {
     }
 
     fn redraw(&mut self, output: &mut ShellOutput) {
+        self.clear_completion_rows(output);
         output.push(b'\r');
+        output.extend(b"\x1b[2K");
         self.prompt(output);
         self.highlight_line(output);
-        let ghost_width = self.append_completion_ghost(output);
         output.extend(RESET_COLOR);
         output.extend(b"\x1b[K");
-        move_cursor(
-            output,
-            b'D',
-            display_width(&self.line[self.cursor..self.line_len]) + ghost_width,
-        );
+        move_cursor(output, b'D', display_width(&self.line[self.cursor..self.line_len]));
+        self.render_completion_rows(output);
     }
 
-    fn append_completion_ghost(&self, output: &mut ShellOutput) -> usize {
-        let Some(candidate) = self.completion_candidate(self.completion_selected) else {
-            return 0;
+    fn clear_completion_rows(&mut self, output: &mut ShellOutput) {
+        if self.completion_rendered_rows <= 1 {
+            self.completion_rendered_rows = 0;
+            return;
+        }
+        output.extend(b"\x1b[s");
+        for _ in 1..self.completion_rendered_rows {
+            move_cursor(output, b'B', 1);
+            output.extend(b"\x1b[K");
+        }
+        output.extend(b"\x1b[u");
+        self.completion_rendered_rows = 0;
+    }
+
+    fn completion_suffix(&self, index: usize) -> &[u8] {
+        let Some(candidate) = self.completion_candidate(index) else {
+            return &[];
         };
         let start = self.completion_replace_start.min(self.line_len);
         let end = self.completion_replace_end.min(self.line_len).max(start);
         let prefix = &self.line[start..end];
         if !candidate.starts_with(prefix) {
-            return 0;
+            return &[];
         }
-        let ghost = &candidate[prefix.len()..];
-        output.extend(DIM_COLOR);
-        output.extend(ghost);
-        output.extend(RESET_COLOR);
-        display_width(ghost)
+        &candidate[prefix.len()..]
+    }
+
+    fn completion_index_at(&self, row: usize) -> usize {
+        (self.completion_active_index + row) % self.completion_count
+    }
+
+    fn render_completion_rows(&mut self, output: &mut ShellOutput) {
+        if !self.completion_active || self.completion_count == 0 {
+            return;
+        }
+        let visible_count = self.completion_count.min(MAX_VISIBLE_COMPLETION_ROWS);
+        let has_more = self.completion_count > visible_count;
+        output.extend(b"\x1b[s");
+        for row in 0..visible_count {
+            let index = self.completion_index_at(row);
+            if row != 0 {
+                let previous = self.completion_suffix(self.completion_index_at(row - 1));
+                move_cursor(output, b'B', 1);
+                move_cursor(output, b'D', display_width(previous));
+            }
+            let ghost = self.completion_suffix(index);
+            output.extend(DIM_COLOR);
+            output.extend(ghost);
+            output.extend(RESET_COLOR);
+            output.extend(b"\x1b[K");
+        }
+        if has_more {
+            let previous = self.completion_suffix(self.completion_index_at(visible_count - 1));
+            move_cursor(output, b'B', 1);
+            move_cursor(output, b'D', display_width(previous));
+            output.extend(DIM_COLOR);
+            output.extend(COMPLETION_MORE_INDICATOR);
+            output.extend(RESET_COLOR);
+            output.extend(b"\x1b[K");
+        }
+        output.extend(b"\x1b[u");
+        self.completion_rendered_rows = visible_count + if has_more { 1 } else { 0 };
     }
 
     fn highlight_line(&self, output: &mut ShellOutput) {
@@ -1100,13 +1148,177 @@ mod tests {
         response.line_revision = request.line_revision;
         response.replace_end = 1;
         assert!(response.push_candidate(b"fs."));
+        output = ShellOutput::new();
         editor.apply_completion_response(response, &mut output);
         assert!(output.as_bytes().windows(DIM_COLOR.len()).any(|window| window == DIM_COLOR));
-        assert!(!output.as_bytes().windows(4).any(|window| window == b"\x1b[1B"));
+        assert!(output.as_bytes().windows(3).any(|window| window == b"\x1b[s"));
+        assert!(output.as_bytes().windows(3).any(|window| window == b"\x1b[u"));
 
         output = ShellOutput::new();
         editor.input_for_command(b"\t\r", &mut command, &mut output);
         assert_eq!(&command[..3], b"fs.");
+    }
+
+    #[test]
+    fn completion_after_dot_renders_aligned_candidates_and_navigates() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"fs.open(\"test\").", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        assert_eq!(request.line(), Some(&b"fs.open(\"test\")."[..]));
+
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_start = 16;
+        response.replace_end = 16;
+        assert!(response.push_candidate(b"read()"));
+        assert!(response.push_candidate(b"write(\"\")"));
+        output = ShellOutput::new();
+        editor.apply_completion_response(response, &mut output);
+        assert!(output.as_bytes().windows(b"read()".len()).any(|window| window == b"read()"));
+        assert!(
+            output.as_bytes().windows(b"write(\"\")".len()).any(|window| window == b"write(\"\")")
+        );
+        assert!(output.as_bytes().windows(4).any(|window| window == b"\x1b[1B"));
+
+        output = ShellOutput::new();
+        editor.input_for_command(b"\x1b[B", &mut command, &mut output);
+        assert_eq!(editor.completion_active_index, 1);
+        let write_position = output
+            .as_bytes()
+            .windows(b"write(\"\")".len())
+            .position(|window| window == b"write(\"\")");
+        let read_position =
+            output.as_bytes().windows(b"read()".len()).position(|window| window == b"read()");
+        assert!(write_position < read_position);
+
+        editor.input_for_command(b"\t", &mut command, &mut output);
+        assert_eq!(&editor.line[..editor.line_len], b"fs.open(\"test\").write(\"\")");
+    }
+
+    #[test]
+    fn completion_keeps_typed_prefix_and_renders_only_the_suffix() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"fs.open(\"test\").re", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_start = 16;
+        response.replace_end = 18;
+        assert!(response.push_candidate(b"read()"));
+        output = ShellOutput::new();
+        editor.apply_completion_response(response, &mut output);
+        assert!(output.as_bytes().windows(b"ad()".len()).any(|window| window == b"ad()"));
+        assert!(!output.as_bytes().windows(b"read()".len()).any(|window| window == b"read()"));
+    }
+
+    #[test]
+    fn dismissing_completion_clears_the_menu_before_normal_input() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"fs.open(\"test\").", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_start = 16;
+        response.replace_end = 16;
+        assert!(response.push_candidate(b"read()"));
+        assert!(response.push_candidate(b"write(\"\")"));
+        output = ShellOutput::new();
+        editor.apply_completion_response(response, &mut output);
+        assert_eq!(editor.completion_rendered_rows, 2);
+
+        output = ShellOutput::new();
+        editor.input_for_command(b"x", &mut command, &mut output);
+        assert_eq!(editor.completion_rendered_rows, 0);
+        assert!(output.as_bytes().windows(4).any(|window| window == b"\x1b[1B"));
+        assert!(output.as_bytes().windows(4).any(|window| window == b"\x1b[2K"));
+        assert_eq!(&editor.line[..editor.line_len], b"fs.open(\"test\").x");
+    }
+
+    #[test]
+    fn completion_rotates_a_bounded_window_and_shows_more_indicator() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"net.", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_start = 4;
+        response.replace_end = 4;
+        for candidate in [b"one()".as_slice(), b"two()", b"three()", b"four()", b"five()"] {
+            assert!(response.push_candidate(candidate));
+        }
+        output = ShellOutput::new();
+        editor.apply_completion_response(response, &mut output);
+        assert_eq!(editor.completion_rendered_rows, MAX_VISIBLE_COMPLETION_ROWS + 1);
+        assert!(
+            output
+                .as_bytes()
+                .windows(COMPLETION_MORE_INDICATOR.len())
+                .any(|window| { window == COMPLETION_MORE_INDICATOR })
+        );
+
+        output = ShellOutput::new();
+        editor.input_for_command(b"\x1b[B", &mut command, &mut output);
+        assert_eq!(editor.completion_active_index, 1);
+        let two_position =
+            output.as_bytes().windows(b"two()".len()).position(|window| window == b"two()");
+        let three_position =
+            output.as_bytes().windows(b"three()".len()).position(|window| window == b"three()");
+        assert!(two_position < three_position);
+
+        editor.input_for_command(b"\x1b[A", &mut command, &mut output);
+        assert_eq!(editor.completion_active_index, 0);
+    }
+
+    #[test]
+    fn enter_executes_typed_line_without_accepting_completion() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"net.", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_start = 4;
+        response.replace_end = 4;
+        assert!(response.push_candidate(b"status"));
+        editor.apply_completion_response(response, &mut output);
+
+        let length = editor.input_for_command(b"\r", &mut command, &mut output).unwrap();
+        assert_eq!(&command[..length], b"net.");
+    }
+
+    #[test]
+    fn empty_ok_completion_response_dismisses_the_existing_menu() {
+        let mut editor = LineEditor::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        editor.input_for_command(b"net.", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_start = 4;
+        response.replace_end = 4;
+        assert!(response.push_candidate(b"status"));
+        output = ShellOutput::new();
+        editor.apply_completion_response(response, &mut output);
+        assert!(editor.completion_active);
+
+        editor.input_for_command(b"\t", &mut command, &mut output);
+        let request = editor.take_completion_request().unwrap();
+        let mut empty = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        empty.line_revision = request.line_revision;
+        output = ShellOutput::new();
+        editor.apply_completion_response(empty, &mut output);
+        assert!(!editor.completion_active);
+        assert_eq!(editor.completion_rendered_rows, 0);
     }
 
     #[test]
@@ -1248,11 +1460,11 @@ mod tests {
         response.line_revision = request.line_revision;
         response.replace_start = 16;
         response.replace_end = 17;
-        assert!(response.push_candidate_with_cursor(b"write(\"\")", 6));
+        assert!(response.push_candidate_with_cursor(b"write(\"\")", 7));
         editor.apply_completion_response(response, &mut output);
         editor.input_for_command(b"\t", &mut command, &mut output);
         assert_eq!(&editor.line[..editor.line_len], b"fs.open(\"test\").write(\"\")");
-        assert_eq!(editor.cursor, 22);
+        assert_eq!(editor.cursor, 23);
     }
 
     #[test]
