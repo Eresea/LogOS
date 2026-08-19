@@ -31,7 +31,7 @@ $interactiveMode = $Interactive -or (-not $Headless -and -not $Proof)
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $target = Join-Path $repoRoot 'target'
 $disk = if ($DiskImage) { [System.IO.Path]::GetFullPath($DiskImage) } else {
-    Join-Path $target 'runtime-storage.raw'
+    Join-Path $target 'runtime-storage-v4.raw'
 }
 $profile = if ($Release) { 'release' } else { 'debug' }
 $efi = Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-vnext.efi"

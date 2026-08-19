@@ -3,12 +3,18 @@
 #[cfg(test)]
 extern crate std;
 
+mod cow;
 mod journal;
 mod pci;
 mod request;
 mod transport;
 mod virtio;
 
+pub use cow::{
+    COW_COMMIT_SLOTS, COW_FORMAT_VERSION, COW_MAX_BITMAP_BLOCKS, COW_MAX_RETIRED_EXTENTS,
+    COW_PROVISIONED_BLANK_MAGIC, COW_SUPERBLOCK_MAGIC, CowError, CowExtent, CowRoot,
+    CowTransaction, CowVolume,
+};
 pub use journal::{
     CHECKPOINT_PAYLOAD_BYTES, FORMAT_VERSION, FormatError, JOURNAL_COMMIT_KIND, JournalRecord,
     LEGACY_FORMAT_VERSION, MAX_RECORD_PAYLOAD_BYTES, MAX_RECORDS_PER_TRANSACTION,
@@ -58,6 +64,12 @@ pub struct Block {
     bytes: [u8; BLOCK_BYTES],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReadMap {
+    pub source_page: u64,
+    pub pages: u8,
+}
+
 impl Block {
     pub const ZERO: Self = Self { bytes: [0; BLOCK_BYTES] };
 
@@ -105,6 +117,14 @@ pub trait BlockStore {
     fn read_block(&mut self, index: BlockIndex, output: &mut Block) -> Result<(), BlockError>;
     fn write_block(&mut self, index: BlockIndex, input: &Block) -> Result<(), BlockError>;
     fn flush(&mut self) -> Result<(), BlockError>;
+
+    fn map_read_blocks(&mut self, _start: BlockIndex, _blocks: u32) -> Result<ReadMap, BlockError> {
+        Err(BlockError::InvalidRequest)
+    }
+
+    fn unmap_read(&mut self, _mapping: ReadMap) -> Result<(), BlockError> {
+        Ok(())
+    }
 }
 
 /// Fixed-capacity memory backend for format tests and fault-injection wrappers.

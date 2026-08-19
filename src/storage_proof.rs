@@ -49,7 +49,7 @@ impl StorageProofObserver {
             }
         }
         let mode = self.mode.load(Ordering::Acquire);
-        let expected_data: &[u8] = if mode == 1 { b"durable-api" } else { b"recovered-api" };
+        let expected_data: &[u8] = if mode == 1 { b"replacement-api" } else { b"recovered-api" };
         if operation == logos_abi::StorageApiOperation::Read as u8
             && response.status == logos_abi::StorageApiStatus::Ok
             && !response.more

@@ -1,10 +1,14 @@
 use super::{IPC_FLAG_MORE, IpcBytes, MAX_IPC_BYTES, MessageKind};
 
 pub const STORAGE_API_VERSION: u8 = 2;
+pub const STORAGE_API_EXTENSION_VERSION: u8 = 3;
+const _: () = assert!(STORAGE_API_EXTENSION_VERSION == STORAGE_API_VERSION + 1);
 pub const STORAGE_API_FLAG_REPLACE: u8 = 1;
 const REQUEST_HEADER_BYTES: usize = 26;
 const RESPONSE_HEADER_BYTES: usize = 18;
 pub const STORAGE_API_RESPONSE_DATA_BYTES: usize = MAX_IPC_BYTES - RESPONSE_HEADER_BYTES;
+pub const STORAGE_API_MAP_LENGTH_BYTES: usize = 4;
+pub const STORAGE_API_MAP_DESCRIPTOR_BYTES: usize = 9;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -25,6 +29,15 @@ pub enum StorageApiOperation {
     PackageList = 14,
     PackageInfo = 15,
     PackageInstall = 16,
+    Open = 17,
+    Close = 18,
+    Stat = 19,
+    Mkdir = 20,
+    HandleRead = 21,
+    HandleWrite = 22,
+    Fsync = 23,
+    MapRead = 24,
+    UnmapRead = 25,
 }
 
 impl StorageApiOperation {
@@ -46,6 +59,15 @@ impl StorageApiOperation {
             14 => Some(Self::PackageList),
             15 => Some(Self::PackageInfo),
             16 => Some(Self::PackageInstall),
+            17 => Some(Self::Open),
+            18 => Some(Self::Close),
+            19 => Some(Self::Stat),
+            20 => Some(Self::Mkdir),
+            21 => Some(Self::HandleRead),
+            22 => Some(Self::HandleWrite),
+            23 => Some(Self::Fsync),
+            24 => Some(Self::MapRead),
+            25 => Some(Self::UnmapRead),
             _ => None,
         }
     }
@@ -105,6 +127,7 @@ pub enum StorageApiError {
 }
 
 pub struct StorageApiRequest<'a> {
+    pub version: u8,
     pub operation: StorageApiOperation,
     pub flags: u8,
     pub request_id: u32,
@@ -127,7 +150,7 @@ impl<'a> StorageApiRequest<'a> {
         if bytes.len() < REQUEST_HEADER_BYTES {
             return Err(StorageApiError::Malformed);
         }
-        if bytes[0] != STORAGE_API_VERSION {
+        if !matches!(bytes[0], STORAGE_API_VERSION | STORAGE_API_EXTENSION_VERSION) {
             return Err(StorageApiError::InvalidVersion);
         }
         let operation =
@@ -161,6 +184,7 @@ impl<'a> StorageApiRequest<'a> {
             return Err(StorageApiError::Malformed);
         }
         Ok(Self {
+            version: bytes[0],
             operation,
             flags: bytes[2],
             request_id,
@@ -183,7 +207,60 @@ impl<'a> StorageApiRequest<'a> {
         secondary_path: &[u8],
         data: &[u8],
     ) -> Option<IpcBytes> {
-        if request_id == 0
+        Self::encode_versioned(
+            STORAGE_API_VERSION,
+            operation,
+            flags,
+            request_id,
+            transaction_id,
+            offset,
+            path,
+            secondary_path,
+            data,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_extension(
+        operation: StorageApiOperation,
+        flags: u8,
+        request_id: u32,
+        transaction_id: u64,
+        offset: u32,
+        path: &[u8],
+        secondary_path: &[u8],
+        data: &[u8],
+    ) -> Option<IpcBytes> {
+        if (operation as u8) < StorageApiOperation::Open as u8 {
+            return None;
+        }
+        Self::encode_versioned(
+            STORAGE_API_EXTENSION_VERSION,
+            operation,
+            flags,
+            request_id,
+            transaction_id,
+            offset,
+            path,
+            secondary_path,
+            data,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_versioned(
+        version: u8,
+        operation: StorageApiOperation,
+        flags: u8,
+        request_id: u32,
+        transaction_id: u64,
+        offset: u32,
+        path: &[u8],
+        secondary_path: &[u8],
+        data: &[u8],
+    ) -> Option<IpcBytes> {
+        if !matches!(version, STORAGE_API_VERSION | STORAGE_API_EXTENSION_VERSION)
+            || request_id == 0
             || path.len() > u16::MAX as usize
             || secondary_path.len() > u16::MAX as usize
             || data.len() > u16::MAX as usize
@@ -198,7 +275,7 @@ impl<'a> StorageApiRequest<'a> {
         }
         let mut message = IpcBytes::empty(MessageKind::StorageRequest);
         let bytes = &mut message.bytes[..total_len];
-        bytes[0] = STORAGE_API_VERSION;
+        bytes[0] = version;
         bytes[1] = operation as u8;
         bytes[2] = flags;
         put_u32(bytes, 4, request_id);
@@ -254,10 +331,28 @@ fn request_shape_is_valid(
         StorageApiOperation::PackageInstall => {
             !path.is_empty() && secondary_path.is_empty() && data.is_empty()
         }
+        StorageApiOperation::Open | StorageApiOperation::Stat | StorageApiOperation::Mkdir => {
+            !path.is_empty() && secondary_path.is_empty() && data.is_empty()
+        }
+        StorageApiOperation::Close
+        | StorageApiOperation::HandleRead
+        | StorageApiOperation::UnmapRead => {
+            path.is_empty() && secondary_path.is_empty() && data.is_empty()
+        }
+        StorageApiOperation::MapRead => {
+            path.is_empty()
+                && secondary_path.is_empty()
+                && data.len() == STORAGE_API_MAP_LENGTH_BYTES
+        }
+        StorageApiOperation::HandleWrite => path.is_empty() && secondary_path.is_empty(),
+        StorageApiOperation::Fsync => {
+            path.is_empty() && secondary_path.is_empty() && data.is_empty()
+        }
     }
 }
 
 pub struct StorageApiResponse<'a> {
+    pub version: u8,
     pub status: StorageApiStatus,
     pub request_id: u32,
     pub transaction_id: u64,
@@ -277,7 +372,7 @@ impl<'a> StorageApiResponse<'a> {
         if bytes.len() < RESPONSE_HEADER_BYTES {
             return Err(StorageApiError::Malformed);
         }
-        if bytes[0] != STORAGE_API_VERSION {
+        if !matches!(bytes[0], STORAGE_API_VERSION | STORAGE_API_EXTENSION_VERSION) {
             return Err(StorageApiError::InvalidVersion);
         }
         if bytes[3] != 0 {
@@ -293,6 +388,7 @@ impl<'a> StorageApiResponse<'a> {
             return Err(StorageApiError::Malformed);
         }
         Ok(Self {
+            version: bytes[0],
             status,
             request_id,
             transaction_id: get_u64(bytes, 8),
@@ -308,7 +404,38 @@ impl<'a> StorageApiResponse<'a> {
         data: &[u8],
         more: bool,
     ) -> Option<IpcBytes> {
-        if request_id == 0 || data.len() > u16::MAX as usize {
+        Self::encode_versioned(STORAGE_API_VERSION, status, request_id, transaction_id, data, more)
+    }
+
+    pub fn encode_extension(
+        status: StorageApiStatus,
+        request_id: u32,
+        transaction_id: u64,
+        data: &[u8],
+        more: bool,
+    ) -> Option<IpcBytes> {
+        Self::encode_versioned(
+            STORAGE_API_EXTENSION_VERSION,
+            status,
+            request_id,
+            transaction_id,
+            data,
+            more,
+        )
+    }
+
+    pub fn encode_versioned(
+        version: u8,
+        status: StorageApiStatus,
+        request_id: u32,
+        transaction_id: u64,
+        data: &[u8],
+        more: bool,
+    ) -> Option<IpcBytes> {
+        if !matches!(version, STORAGE_API_VERSION | STORAGE_API_EXTENSION_VERSION)
+            || request_id == 0
+            || data.len() > u16::MAX as usize
+        {
             return None;
         }
         let total_len = RESPONSE_HEADER_BYTES.checked_add(data.len())?;
@@ -317,7 +444,7 @@ impl<'a> StorageApiResponse<'a> {
         }
         let mut message = IpcBytes::empty(MessageKind::StorageResponse);
         let bytes = &mut message.bytes[..total_len];
-        bytes[0] = STORAGE_API_VERSION;
+        bytes[0] = version;
         bytes[1] = status as u8;
         put_u32(bytes, 4, request_id);
         put_u64(bytes, 8, transaction_id);
@@ -463,6 +590,32 @@ mod tests {
         assert_eq!(response.transaction_id, 11);
         assert_eq!(response.data, b"data");
         assert!(response.more);
+    }
+
+    #[test]
+    fn extension_version_round_trips_extension_operations() {
+        let message = StorageApiRequest::encode_extension(
+            StorageApiOperation::Open,
+            0,
+            9,
+            0,
+            0,
+            b"/file",
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            StorageApiRequest::decode(&message).unwrap().version,
+            STORAGE_API_EXTENSION_VERSION
+        );
+
+        let response =
+            StorageApiResponse::encode_extension(StorageApiStatus::Ok, 9, 17, &[], false).unwrap();
+        assert_eq!(
+            StorageApiResponse::decode(&response).unwrap().version,
+            STORAGE_API_EXTENSION_VERSION
+        );
     }
 
     #[test]

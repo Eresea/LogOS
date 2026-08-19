@@ -104,7 +104,7 @@ static STORAGE_INTERRUPT_COMPLETION: AtomicBool = AtomicBool::new(false);
 static STORAGE_PROOF_STATE: AtomicU8 = AtomicU8::new(0);
 
 #[cfg(feature = "storage-proof")]
-const SUPERBLOCK_MAGIC: &[u8; 8] = b"LOGOSFS\0";
+const SUPERBLOCK_MAGIC: &[u8; 8] = b"LOGOSCOW";
 
 impl QueueMemory {
     const EMPTY_DESCRIPTOR: Descriptor = Descriptor { address: 0, length: 0, flags: 0, next: 0 };
@@ -655,7 +655,7 @@ impl VirtioBlockDevice {
         let result = match completion.status {
             0 => {
                 #[cfg(feature = "storage-proof")]
-                self.record_transfer_success(request, staging_address);
+                self.record_transfer_success(request, dma_data_address() as usize);
                 Ok(())
             }
             1 => Err(DeviceError::Io),

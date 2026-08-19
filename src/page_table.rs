@@ -46,6 +46,8 @@ pub trait PageTableMemory {
     fn seed_kernel_root(&mut self, _root: FrameAddress) -> Result<(), PageTableError> {
         Ok(())
     }
+
+    fn invalidate_page(&mut self, _virtual_address: usize) {}
 }
 
 pub struct PageTableBuilder {
@@ -164,6 +166,42 @@ impl PageTableBuilder {
         let page = LoadedPage::from_parts(virtual_address, frame, flags)
             .ok_or(PageTableError::InvalidMapping)?;
         self.map_page(page, pool, memory)
+    }
+
+    /// Remove one leaf mapping and invalidate the corresponding translation.
+    /// Page-table frames stay owned by the builder and are reclaimed together.
+    pub fn unmap_page<M: PageTableMemory>(
+        &mut self,
+        virtual_address: usize,
+        memory: &mut M,
+    ) -> Result<FrameAddress, PageTableError> {
+        if virtual_address == 0
+            || virtual_address & (PAGE_SIZE - 1) != 0
+            || virtual_address >= 0x0000_8000_0000_0000
+        {
+            return Err(PageTableError::InvalidVirtualAddress);
+        }
+        let indices = indices(virtual_address);
+        let mut table = self.root;
+        for index in indices.iter().take(3) {
+            let entry = memory.read(table, *index)?;
+            if entry & PRESENT == 0 || entry & HUGE != 0 || entry & ADDRESS_MASK == 0 {
+                return Err(PageTableError::InvalidMapping);
+            }
+            table = FrameAddress::from_raw(entry & ADDRESS_MASK);
+            if !self.contains(table) {
+                return Err(PageTableError::Memory);
+            }
+        }
+        let entry = memory.read(table, indices[3])?;
+        if entry & PRESENT == 0 || entry & ADDRESS_MASK == 0 {
+            return Err(PageTableError::InvalidMapping);
+        }
+        let frame = FrameAddress::from_raw(entry & ADDRESS_MASK);
+        memory.write(table, indices[3], 0)?;
+        self.mapped_pages = self.mapped_pages.saturating_sub(1);
+        memory.invalidate_page(virtual_address);
+        Ok(frame)
     }
 
     pub fn reclaim<M: PageTableMemory>(&mut self, pool: &mut FramePool, _memory: &mut M) {
@@ -302,6 +340,15 @@ impl PageTableMemory for IdentityPageTableMemory {
         };
         Ok(())
     }
+
+    fn invalidate_page(&mut self, virtual_address: usize) {
+        // The active CR3 may differ from the builder root; the context switch
+        // path reloads CR3 before user execution. This still invalidates the
+        // current translation when a live address space is edited in place.
+        unsafe {
+            core::arch::asm!("invlpg [{}]", in(reg) virtual_address, options(nostack, preserves_flags));
+        }
+    }
 }
 
 #[cfg(any(test, target_os = "uefi"))]
@@ -358,11 +405,12 @@ mod tests {
     struct TestMemory {
         frames: Vec<FrameAddress>,
         tables: Vec<Box<[u64; ENTRY_COUNT]>>,
+        invalidated: Vec<usize>,
     }
 
     impl TestMemory {
         fn new() -> Self {
-            Self { frames: Vec::new(), tables: Vec::new() }
+            Self { frames: Vec::new(), tables: Vec::new(), invalidated: Vec::new() }
         }
 
         fn slot(&self, frame: FrameAddress) -> Result<usize, PageTableError> {
@@ -400,6 +448,10 @@ mod tests {
             let slot = self.slot(frame)?;
             self.tables[slot][index] = value;
             Ok(())
+        }
+
+        fn invalidate_page(&mut self, virtual_address: usize) {
+            self.invalidated.push(virtual_address);
         }
     }
 
@@ -461,6 +513,29 @@ mod tests {
         let page = loaded.page(0).unwrap();
         tables.map_page(page, &mut pool, &mut memory).unwrap();
         assert_eq!(tables.map_page(page, &mut pool, &mut memory), Err(PageTableError::Conflict));
+    }
+
+    #[test]
+    fn unmap_clears_leaf_and_invalidates_translation() {
+        let image = image();
+        let plan = ElfLoadPlan::parse(&image).unwrap();
+        let mut map = MemoryMap::new();
+        map.push(MemoryDescriptor::new(0x1000, 32, true).unwrap()).unwrap();
+        let mut pool = FramePool::empty();
+        pool.initialize(&map).unwrap();
+        let loaded = LoadedImage::load(plan, &mut pool).unwrap();
+        let mut memory = TestMemory::new();
+        let mut tables = PageTableBuilder::new(&mut pool, &mut memory).unwrap();
+        let page = loaded.page(0).unwrap();
+        tables.map_page(page, &mut pool, &mut memory).unwrap();
+
+        assert_eq!(tables.unmap_page(page.virtual_address(), &mut memory), Ok(page.frame()));
+        assert_eq!(tables.mapped_pages(), 0);
+        assert_eq!(memory.invalidated.as_slice(), &[page.virtual_address()]);
+        assert_eq!(
+            tables.unmap_page(page.virtual_address(), &mut memory),
+            Err(PageTableError::InvalidMapping)
+        );
     }
 
     #[test]

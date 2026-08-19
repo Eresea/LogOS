@@ -1599,7 +1599,7 @@ impl StorageProof {
             return false;
         }
         let expected_content = match (self.recovery, self.step) {
-            (false, 3) => Some(&b"durable-api\r\n"[..]),
+            (false, 4) => Some(&b"replacement-api\r\n"[..]),
             (true, 5) => Some(&b"recovered-api\r\n"[..]),
             _ => None,
         };
@@ -1619,16 +1619,16 @@ impl StorageProof {
             }
         } else {
             match self.step {
-                0 | 1 | 2 => status == StorageApiStatus::Ok,
-                3 => status == StorageApiStatus::Ok && content_valid,
-                4 | 5 => status == StorageApiStatus::NotFound,
+                0 | 1 | 2 | 3 => status == StorageApiStatus::Ok,
+                4 => status == StorageApiStatus::Ok && content_valid,
+                5 | 6 => status == StorageApiStatus::NotFound,
                 _ => false,
             }
         };
         if accepted {
             self.step = self.step.saturating_add(1);
             self.active = false;
-            if (!self.recovery && self.step > 5) || (self.recovery && self.step > 7) {
+            if (!self.recovery && self.step > 6) || (self.recovery && self.step > 7) {
                 self.step = u8::MAX;
             }
         } else {
@@ -1653,20 +1653,27 @@ impl StorageProof {
                 path: b"/api-survivor",
                 data: if self.recovery { b"recovered-api" } else { b"durable-api" },
             }),
-            2 => storage.start_proof_abort(b"/api-aborted"),
+            2 if self.recovery => storage.start_proof_abort(b"/api-aborted"),
+            2 => storage.start(logos_flow::StorageCommand::Write {
+                path: b"/api-survivor",
+                data: b"replacement-api",
+            }),
             3 if self.recovery => {
                 storage.start(logos_flow::StorageCommand::Touch { path: b"/api-removed" })
             }
-            3 => storage.start(logos_flow::StorageCommand::Cat { path: b"/api-survivor" }),
+            3 => storage.start_proof_abort(b"/api-aborted"),
             4 if self.recovery => {
                 storage.start(logos_flow::StorageCommand::Remove { path: b"/api-removed" })
             }
-            4 => storage.start(logos_flow::StorageCommand::Cat { path: b"/api-aborted" }),
+            4 => storage.start(logos_flow::StorageCommand::Cat { path: b"/api-survivor" }),
             5 if self.recovery => {
                 storage.start(logos_flow::StorageCommand::Cat { path: b"/api-survivor" })
             }
-            5 => storage.start(logos_flow::StorageCommand::Cat { path: b"/api-removed" }),
-            6 => storage.start(logos_flow::StorageCommand::Cat { path: b"/api-aborted" }),
+            5 => storage.start(logos_flow::StorageCommand::Cat { path: b"/api-aborted" }),
+            6 if self.recovery => {
+                storage.start(logos_flow::StorageCommand::Cat { path: b"/api-aborted" })
+            }
+            6 => storage.start(logos_flow::StorageCommand::Cat { path: b"/api-removed" }),
             7 => storage.start(logos_flow::StorageCommand::Cat { path: b"/api-removed" }),
             _ => false,
         };
@@ -1688,9 +1695,17 @@ fn storage_ipc_error(status: IpcStatus) -> StorageApiStatus {
 
 fn status_text(status: StorageApiStatus) -> &'static [u8] {
     match status {
+        StorageApiStatus::Invalid => b"invalid storage request\r\n",
         StorageApiStatus::NotFound => b"not found\r\n",
         StorageApiStatus::AlreadyExists => b"already exists\r\n",
         StorageApiStatus::Busy => b"storage busy\r\n",
+        StorageApiStatus::Capacity => b"storage capacity exhausted\r\n",
+        StorageApiStatus::Io => b"storage I/O error\r\n",
+        StorageApiStatus::Unsupported => b"storage unsupported\r\n",
+        StorageApiStatus::NotDirectory => b"not a directory\r\n",
+        StorageApiStatus::IsDirectory => b"is a directory\r\n",
+        StorageApiStatus::Root => b"cannot modify root\r\n",
+        StorageApiStatus::NotEmpty => b"directory not empty\r\n",
         StorageApiStatus::Stale => b"stale transaction\r\n",
         StorageApiStatus::TooLarge => b"data too large\r\n",
         StorageApiStatus::NoTransaction => b"no transaction\r\n",

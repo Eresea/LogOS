@@ -19,7 +19,7 @@ Terminal → Session → Flow → typed system API registry
 | Physical frames | `frame_pool` + `memory` | copied UEFI descriptors normalize into sorted disjoint runs; indexed bitmap words, generation-safe leases, bounded batches, reservations, zeroed/dirty state, per-CPU caches, sharded pools, and remote frees stay capped at 65,536 frames |
 | Memory subsystem contracts | `memory` | fixed async wait nodes, cancellation/deadlines, address-space generations, 4 KiB VM map operations, batched TLB queues, page-table caches, slab/page heap handles, pressure/reclaim callbacks, ownership quotas, and atomic observability are present before architecture-specific expansion |
 | Control plane | `process` + `user_mode` | admission-time fixed service mappings plus bounded Wait/Notify, IpcSend, IpcReceive, and ServiceManager calls with process-bound capability checks |
-| ELF page admission | `loader` | maps validated segments and fixed user stacks to owned frames, then populates them through a page-local sink with bounded reclamation; Storage receives a fixed 128-page stack for journal replay and transaction shadow state |
+| ELF page admission | `loader` | maps validated segments and fixed user stacks to owned frames, then populates them through a page-local sink with bounded reclamation; Storage receives a fixed 128-page stack for bounded snapshot decoding and transaction state |
 | User page tables | `page_table` | builds four-level user mappings with fixed root/intermediate-frame bounds, W^X/NX flags, conflict rejection, and grouped reclamation |
 | Service address spaces | `service_runtime` | loads eight retained ELFs into owned frames and retains one isolated root per service before scheduler admission |
 | Service process admission | `service_runtime` + `process` | binds each service root, coalesced mappings, and validated user launch metadata without entering service RIPs prematurely |
@@ -27,7 +27,7 @@ Terminal → Session → Flow → typed system API registry
 | Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Storage → Flow → Fetch dependencies; Network is independent and Fetch depends on it |
 | Service IPC boundary | `service_ipc` + `service_runtime` | keeps fixed terminal queues and adds Flow↔Fetch, Fetch↔Storage, and Fetch↔Network edges plus dedicated Core storage/network capabilities; no queue, MMIO, or DMA frame is mapped into a service root |
 | Network IPC extension | `service_ipc` + `service_runtime` | adds Flow/Fetch client routing with ABI v2 inline payloads capped at 192 bytes; Core-owned packet descriptors/pages remain private to Network |
-| Storage boundary | Core VirtIO block adapter + `logos-storage` format + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, MSI-X interrupt delivery, reset, timeouts, and flush; Storage owns fixed request lifecycles, superblocks, journal, checkpoints, replay, recovery, durability, object IDs, namespace resolution, and bounded file operations; Flow reaches Storage through versioned `FlowToStorage`/`StorageToFlow` messages over private staging pages, including read-only bounded package list/info queries; one active transaction uses fixed shadow state and at most `MAX_RECORDS_PER_TRANSACTION` records; Core stores no paths or namespace state; split-ring generations reset the bounded queue before descriptor reuse |
+| Storage boundary | Core VirtIO block adapter + `logos-storage` v4 COW store + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, MSI-X interrupt delivery, reset, timeouts, and flush; Storage owns dual roots, immutable pages/extents, persistent allocation metadata, flushed commit records, recovery, durable object publication, object IDs, namespace resolution, and bounded file operations; Flow reaches Storage through versioned messages over private staging pages; legacy media fails closed and is never silently reformatted; one active writer remains bounded while generation-safe handles, bounded multi-extent streamed files, and map/unmap validation are active |
 | Filesystem package boundary | `logos-package` + Storage v3 + `storage_ipc` + `service_runtime` | The legacy service envelope remains readable while the v2 service envelope carries a bounded manifest and streamed CRC validation; v3 keeps ordinary files capped at 8 KiB and stores up to sixteen generation-safe package records in a disk-derived extent arena; Storage reads v2 manifests from package extents on lookup and rejects non-newer updates or broken dependent ranges, while Core↔Storage package Lookup/Read retains one outstanding request and one reused 4 KiB frame with request, generation, offset, length, and service-epoch validation |
 | Package memory budget | `loader` + `frame_pool` + `memory` | Package extents allocate only the blocks required by the package; prepared ELF images allocate exact code/data/BSS/stack/page-table frames under the selected service owner, and every failed prepare or restart path reclaims them before the old graph is discarded |
 | Network boundary | Core VirtIO-net adapter + Network service + versioned Network IPC | Core owns optional PCI discovery, one fixed 64-entry RX/TX pair, 2 KiB DMA buffers, interrupts, reset, and deadlines; Network owns smoltcp Ethernet/ARP/IPv4/ICMP/UDP/DHCPv4/TCP state, eight sockets, two listeners, and private packet pages; Flow and Fetch receive routed inline payload responses; HTTP remains outside Network |
@@ -85,22 +85,20 @@ and syscall depth cannot silently overwrite adjacent CPU metadata.
 
 `v1_docs/` is historical and is not an active architecture contract.
 
-## Future persistence boundary
+## Persistence boundary
 
 Live supervisor restart rebuilds volatile state and abandons in-flight work. Durable state is introduced
-through the bounded storage boundary in ADR-0041, with explicit ownership, journal, replay, durability,
-and idempotency proofs. The host-tested `logos-storage` and `logos-storage-service` packages provide
-the format, journal, namespace, file API, and IPC adapter. The boot image is admitted independently;
+through the bounded storage boundary in ADR-0059, with explicit ownership, immutable roots, recovery,
+durability, and idempotency proofs. The host-tested `logos-storage` and `logos-storage-service`
+packages provide the v4 format, namespace, file API, and IPC adapter. The boot image is admitted independently;
 the kernel-mediated storage endpoint is identity-checked; requests reach the bounded VirtIO adapter,
-and the fresh-disk QEMU proof covers format, flush, reopen, and torn-journal recovery.
+and the fresh-disk QEMU proof covers format, flush, reopen, and torn-root recovery.
 
-Storage compatibility is fail-closed. The current format version is v3; legacy v1/v2 media remains
-readable, but package operations on those volumes return `Unsupported`. An unknown superblock or journal-record version returns
-`UnsupportedVersion` and is never reformatted or silently replayed. Version 2 checkpoints compact
-the fixed namespace into two durable slots before reusing the bounded journal prefix. Version 3 adds
-a package arena between the bounded journal and checkpoint regions; package data is written and
-flushed before its catalog record is committed. A future format migration must be explicitly
-implemented and proved before its version is accepted.
+Storage compatibility is fail-closed. The replacement format is v4; legacy v1/v2/v3 media returns
+`UnsupportedVersion` and is never silently reformatted. The COW store writes data, allocation
+metadata, a commit record, and an alternate root in order, flushing each publication boundary.
+Package payloads use an arena outside the metadata allocation prefix and are catalogued only after
+validation.
 
 Package-backed services are deliberately excluded from targeted manager image resets: Start and
 Restart return `Unsupported` until a bounded durable reload path exists. Supervisor failures route
@@ -109,8 +107,10 @@ generations and service epochs.
 
 ## Deferred next-step improvements
 
-The bounded storage milestone now proves durable Flow filesystem workflows, reboot reopen, torn-journal
-recovery, variable-sized service packages, reader-based ELF streaming, graph-wide package activation,
-read-only Flow package inventory/info queries, and bounded package-file import/update. Repository
+The bounded storage milestone now proves durable Flow filesystem workflows, reboot reopen, torn-root
+recovery, generation-safe file handles, bounded multi-extent COW-backed streamed files beyond the inline cache,
+single-extent read-only MapRead/UnmapRead pins, page-table unmap/TLB invalidation hooks, bounded Storage cache-window grants for Flow/Fetch, variable-sized
+service packages, reader-based ELF streaming, graph-wide package activation, read-only Flow package
+inventory/info queries, and bounded package-file import/update. Repository
 resolution, signatures, boot preference, program packages, and program installation remain deferred.
 Arbitrary runtime IPC topology also remains deferred.

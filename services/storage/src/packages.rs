@@ -114,6 +114,20 @@ impl PackageCatalog {
         Self { records: [PackageRecord::EMPTY; MAX_PACKAGE_RECORDS] }
     }
 
+    pub(crate) fn used_extents(
+        &self,
+        output: &mut [PackageExtent; MAX_PACKAGE_RECORDS * MAX_PACKAGE_EXTENTS],
+    ) -> usize {
+        let mut count = 0;
+        for record in self.records.iter().filter(|record| record.alive) {
+            for extent in record.extents[..record.extent_count as usize].iter() {
+                output[count] = *extent;
+                count += 1;
+            }
+        }
+        count
+    }
+
     pub fn lookup(&self, service: ServiceId) -> Option<PackageInfo> {
         self.records
             .iter()
