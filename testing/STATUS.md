@@ -24,7 +24,7 @@ Status: active preemptive SMP Core milestone.
   Hostile-peer coverage rejects forged process access, wrong-direction capabilities, stale and
   oversized operations, disconnected queues, and legacy endpoint mappings.
 - The fresh-disk storage proof reaches `Storage persistent-disk proof PASS` after proving durable
-  command API writes, reboot reopen, aborted and removed files, and torn-journal recovery. Host tests
+  command API writes, reboot reopen, aborted and removed files, and torn-root recovery. Host tests
   cover the versioned API, malformed requests, transaction ownership, bounded namespace operations,
   command parsing, committed/staged visibility, and prepared checkpoint recovery.
 - Network v2 host coverage passes for bounded configuration parsing and fail-closed Disabled mode,
