@@ -259,6 +259,21 @@ impl<T: KernelStorageIpc> BlockStore for IpcBlockStore<T> {
         Ok(())
     }
 
+    fn read_block_uncached(
+        &mut self,
+        index: BlockIndex,
+        output: &mut Block,
+    ) -> Result<(), BlockError> {
+        if index.get() >= self.blocks {
+            return Err(BlockError::OutOfBounds);
+        }
+        let mut request = self.request(StorageOperation::Read, 1, BLOCK_BYTES as u16)?;
+        request.start_block = index.get();
+        self.round_trip(request)?;
+        *output = self.staging;
+        Ok(())
+    }
+
     fn write_block(&mut self, index: BlockIndex, input: &Block) -> Result<(), BlockError> {
         if index.get() >= self.blocks {
             return Err(BlockError::OutOfBounds);

@@ -7,11 +7,13 @@ Status: Accepted
 The replacement on-disk format is v4. It has dual checksummed superblocks, immutable 4 KiB data
 pages, a persistent allocation bitmap, a bounded retired-extent record, and a two-slot commit
 record. A mutation publishes a new metadata extent only after page writes, allocation metadata,
-the commit record, and the alternate root have each been flushed.
+the commit record, and the alternate root have each been flushed and independently re-read through
+the uncached block seam. A mismatched readback fails before the newer root becomes authoritative.
 
 Recovery selects the newest valid root and may complete a valid flushed commit record. Torn or
 unknown formats fail closed; v1/v2/v3 media is reported as `UnsupportedVersion` and is never
-reformatted.
+reformatted. A post-format root whose metadata extent is all zeroes is also treated as corrupt;
+it is never silently reopened as an empty namespace.
 
 The Storage service persists its namespace/catalog snapshot through this store. Snapshot pages are
 streamed through one 4 KiB staging page and package payload extents are excluded from the metadata

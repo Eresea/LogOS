@@ -1026,7 +1026,10 @@ fn restore_snapshot_from_store<B: BlockStore>(
         let mut block = Block::zero();
         volume.read_metadata_root(store, &mut block)?;
         if block.as_bytes()[..8].iter().all(|byte| *byte == 0) {
-            return Ok(());
+            if volume.root().generation == 1 {
+                return Ok(());
+            }
+            return Err(NamespaceError::InvalidRecord);
         }
     }
     let mut decoder = SnapshotDecoder::new(volume, store)?;
@@ -2881,6 +2884,25 @@ mod tests {
         let mut output = [0; 7];
         assert_eq!(fs.read(file, 0, &mut output).unwrap(), 7);
         assert_eq!(&output, b"durable");
+    }
+
+    #[test]
+    fn committed_zero_snapshot_is_rejected_after_reopen() {
+        let store = MemoryBlockStore::<16>::new();
+        let mut fs = DurableNamespace::format(store).unwrap();
+        let mut transaction = fs.volume.begin(&mut fs.store).unwrap();
+        let metadata = transaction.allocate_blocks(&mut fs.store, 1).unwrap();
+        transaction.write_block(&mut fs.store, metadata.start, &Block::zero()).unwrap();
+        transaction
+            .retire_extent(
+                CowExtent::new(fs.volume.root().metadata_root, fs.volume.root().metadata_blocks)
+                    .unwrap(),
+            )
+            .unwrap();
+        fs.volume.commit(&mut fs.store, transaction, metadata).unwrap();
+
+        let store = fs.into_store();
+        assert!(matches!(DurableNamespace::open(store), Err(NamespaceError::InvalidRecord)));
     }
 
     #[test]

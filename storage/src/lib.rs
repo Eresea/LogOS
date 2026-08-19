@@ -115,6 +115,13 @@ pub enum BlockError {
 pub trait BlockStore {
     fn block_count(&self) -> u64;
     fn read_block(&mut self, index: BlockIndex, output: &mut Block) -> Result<(), BlockError>;
+    fn read_block_uncached(
+        &mut self,
+        index: BlockIndex,
+        output: &mut Block,
+    ) -> Result<(), BlockError> {
+        self.read_block(index, output)
+    }
     fn write_block(&mut self, index: BlockIndex, input: &Block) -> Result<(), BlockError>;
     fn flush(&mut self) -> Result<(), BlockError>;
 

@@ -17,6 +17,7 @@ const RETIRED_MAGIC: &[u8; 4] = b"LOSR";
 const COMMIT_MAGIC: &[u8; 4] = b"LOSC";
 const LEGACY_MAGIC: &[u8; 8] = b"LOGOSFS\0";
 const MAX_BLOCK_COUNT: u64 = (COW_MAX_BITMAP_BLOCKS * BLOCK_BYTES * 8) as u64;
+const WRITE_VERIFY_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CowError {
@@ -142,10 +143,16 @@ impl CowVolume {
         store.write_block(root.metadata_root, &empty)?;
         write_bitmap(store, root, &bitmap)?;
         store.flush()?;
+        verify_block(store, root.metadata_root, &empty)?;
+        verify_bitmap(store, root, &bitmap)?;
         write_superblock(store, SUPERBLOCK_A, root)?;
         store.flush()?;
+        let mut encoded_root = Block::zero();
+        encode_root(&mut encoded_root, root);
+        verify_block(store, SUPERBLOCK_A, &encoded_root)?;
         write_superblock(store, SUPERBLOCK_B, root)?;
         store.flush()?;
+        verify_block(store, SUPERBLOCK_B, &encoded_root)?;
         Ok(Self { root, active_superblock: 1 })
     }
 
@@ -187,6 +194,9 @@ impl CowVolume {
             let target = if active_superblock == 0 { SUPERBLOCK_B } else { SUPERBLOCK_A };
             write_superblock(store, target, root)?;
             store.flush()?;
+            let mut encoded_root = Block::zero();
+            encode_root(&mut encoded_root, root);
+            verify_block(store, target, &encoded_root)?;
             active_superblock ^= 1;
         }
         validate_root(root, store.block_count())?;
@@ -310,27 +320,78 @@ impl CowVolume {
         };
         write_bitmap(store, root, &bitmap)?;
         store.flush()?;
+        verify_extent(store, metadata)?;
+        verify_bitmap(store, root, &bitmap)?;
         let commit_slot = (generation as usize) % COW_COMMIT_SLOTS;
-        write_commit(
-            store,
-            commit_slot,
-            CommitRecord {
-                generation,
-                metadata_root: metadata.start,
-                metadata_blocks: metadata.blocks,
-                bitmap_slot: root.bitmap_slot,
-                retired_root,
-                checksum: 0,
-            },
-        )?;
+        let commit = CommitRecord {
+            generation,
+            metadata_root: metadata.start,
+            metadata_blocks: metadata.blocks,
+            bitmap_slot: root.bitmap_slot,
+            retired_root,
+            checksum: 0,
+        };
+        write_commit(store, commit_slot, commit)?;
         store.flush()?;
+        verify_block(
+            store,
+            BlockIndex::new(COMMIT_START + commit_slot as u64),
+            &encode_commit(commit),
+        )?;
         let target = if self.active_superblock == 0 { SUPERBLOCK_B } else { SUPERBLOCK_A };
         write_superblock(store, target, root)?;
         store.flush()?;
+        let mut encoded_root = Block::zero();
+        encode_root(&mut encoded_root, root);
+        verify_block(store, target, &encoded_root)?;
         self.root = root;
         self.active_superblock ^= 1;
         Ok(generation)
     }
+}
+
+fn verify_extent<B: BlockStore>(store: &mut B, extent: CowExtent) -> Result<(), CowError> {
+    for offset in 0..extent.blocks as u64 {
+        verify_cached_block(store, BlockIndex::new(extent.start.get() + offset))?;
+    }
+    Ok(())
+}
+
+fn verify_bitmap<B: BlockStore>(
+    store: &mut B,
+    root: CowRoot,
+    expected: &[Block; COW_MAX_BITMAP_BLOCKS],
+) -> Result<(), CowError> {
+    let start = root.bitmap_start.get() + root.bitmap_blocks as u64 * root.bitmap_slot as u64;
+    for offset in 0..root.bitmap_blocks as u64 {
+        verify_block(store, BlockIndex::new(start + offset), &expected[offset as usize])?;
+    }
+    Ok(())
+}
+
+fn verify_cached_block<B: BlockStore>(store: &mut B, index: BlockIndex) -> Result<(), CowError> {
+    let mut expected = Block::zero();
+    store.read_block(index, &mut expected)?;
+    verify_block(store, index, &expected)
+}
+
+fn verify_block<B: BlockStore>(
+    store: &mut B,
+    index: BlockIndex,
+    expected: &Block,
+) -> Result<(), CowError> {
+    for attempt in 0..WRITE_VERIFY_ATTEMPTS {
+        let mut actual = Block::zero();
+        store.read_block_uncached(index, &mut actual)?;
+        if actual == *expected {
+            return Ok(());
+        }
+        if attempt + 1 < WRITE_VERIFY_ATTEMPTS {
+            store.write_block(index, expected)?;
+            store.flush()?;
+        }
+    }
+    Err(CowError::Block(BlockError::Io))
 }
 
 impl CowTransaction {
@@ -679,8 +740,14 @@ fn validate_root(root: CowRoot, blocks: u64) -> Result<(), CowError> {
 fn write_commit<B: BlockStore>(
     store: &mut B,
     slot: usize,
-    mut record: CommitRecord,
+    record: CommitRecord,
 ) -> Result<(), CowError> {
+    let block = encode_commit(record);
+    store.write_block(BlockIndex::new(COMMIT_START + slot as u64), &block)?;
+    Ok(())
+}
+
+fn encode_commit(mut record: CommitRecord) -> Block {
     let mut block = Block::zero();
     block.as_bytes_mut()[..4].copy_from_slice(COMMIT_MAGIC);
     put_u64(block.as_bytes_mut(), 8, record.generation);
@@ -691,8 +758,7 @@ fn write_commit<B: BlockStore>(
     put_u32(block.as_bytes_mut(), 40, 0);
     record.checksum = crc32c(&block.as_bytes()[..40]);
     put_u32(block.as_bytes_mut(), 40, record.checksum);
-    store.write_block(BlockIndex::new(COMMIT_START + slot as u64), &block)?;
-    Ok(())
+    block
 }
 
 fn read_commit<B: BlockStore>(
@@ -861,6 +927,44 @@ mod tests {
         }
     }
 
+    struct StaleReadbackStore<const BLOCKS: usize> {
+        inner: MemoryBlockStore<BLOCKS>,
+        stale: Option<BlockIndex>,
+        stale_reads: usize,
+    }
+
+    impl<const BLOCKS: usize> BlockStore for StaleReadbackStore<BLOCKS> {
+        fn block_count(&self) -> u64 {
+            self.inner.block_count()
+        }
+
+        fn read_block(&mut self, index: BlockIndex, output: &mut Block) -> Result<(), BlockError> {
+            self.inner.read_block(index, output)
+        }
+
+        fn read_block_uncached(
+            &mut self,
+            index: BlockIndex,
+            output: &mut Block,
+        ) -> Result<(), BlockError> {
+            if self.stale == Some(index) && self.stale_reads != 0 {
+                self.stale_reads -= 1;
+                *output = Block::zero();
+                Ok(())
+            } else {
+                self.inner.read_block(index, output)
+            }
+        }
+
+        fn write_block(&mut self, index: BlockIndex, input: &Block) -> Result<(), BlockError> {
+            self.inner.write_block(index, input)
+        }
+
+        fn flush(&mut self) -> Result<(), BlockError> {
+            self.inner.flush()
+        }
+    }
+
     #[test]
     fn cow_root_publishes_after_data_and_recovers_commit_record() {
         let mut store = MemoryBlockStore::<128>::new();
@@ -879,6 +983,51 @@ mod tests {
         let mut output = Block::zero();
         reopened.read_metadata_root(&mut store, &mut output).unwrap();
         assert_eq!(output.as_bytes()[0], 0x5a);
+    }
+
+    #[test]
+    fn commit_rejects_a_stale_metadata_readback_before_publication() {
+        let mut store = StaleReadbackStore {
+            inner: MemoryBlockStore::<128>::new(),
+            stale: None,
+            stale_reads: 0,
+        };
+        let mut volume = CowVolume::format(&mut store).unwrap();
+        let mut transaction = volume.begin(&mut store).unwrap();
+        let metadata = transaction.allocate_blocks(&mut store, 1).unwrap();
+        let mut block = Block::zero();
+        block.as_bytes_mut()[0] = 0x5a;
+        transaction.write_block(&mut store, metadata.start, &block).unwrap();
+        transaction.retire_extent(CowExtent::new(volume.root().metadata_root, 1).unwrap()).unwrap();
+        store.stale = Some(metadata.start);
+        store.stale_reads = WRITE_VERIFY_ATTEMPTS;
+
+        assert_eq!(
+            volume.commit(&mut store, transaction, metadata),
+            Err(CowError::Block(BlockError::Io))
+        );
+        assert_eq!(volume.root().generation, 1);
+    }
+
+    #[test]
+    fn commit_retries_a_transient_stale_metadata_readback() {
+        let mut store = StaleReadbackStore {
+            inner: MemoryBlockStore::<128>::new(),
+            stale: None,
+            stale_reads: 0,
+        };
+        let mut volume = CowVolume::format(&mut store).unwrap();
+        let mut transaction = volume.begin(&mut store).unwrap();
+        let metadata = transaction.allocate_blocks(&mut store, 1).unwrap();
+        let mut block = Block::zero();
+        block.as_bytes_mut()[0] = 0x5a;
+        transaction.write_block(&mut store, metadata.start, &block).unwrap();
+        transaction.retire_extent(CowExtent::new(volume.root().metadata_root, 1).unwrap()).unwrap();
+        store.stale = Some(metadata.start);
+        store.stale_reads = 1;
+
+        assert_eq!(volume.commit(&mut store, transaction, metadata), Ok(2));
+        assert_eq!(volume.root().generation, 2);
     }
 
     #[test]
