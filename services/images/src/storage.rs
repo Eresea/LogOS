@@ -105,7 +105,8 @@ fn map_status(status: StorageStatus) -> StorageApiStatus {
 
 fn map_error_response(request: &IpcBytes, status: StorageApiStatus) -> Option<IpcBytes> {
     let request = logos_abi::StorageApiRequest::decode(request).ok()?;
-    logos_abi::StorageApiResponse::encode(
+    logos_abi::StorageApiResponse::encode_versioned(
+        request.version,
         status,
         request.request_id,
         request.transaction_id,

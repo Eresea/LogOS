@@ -770,6 +770,7 @@ fn crc32c(bytes: &[u8]) -> u32 {
 mod tests {
     use super::*;
     use crate::MemoryBlockStore;
+    use std::boxed::Box;
 
     #[derive(Clone, Copy)]
     enum FailurePoint {
@@ -778,15 +779,22 @@ mod tests {
     }
 
     struct CrashStore<const BLOCKS: usize> {
-        blocks: [Block; BLOCKS],
+        durable: Box<[Block; BLOCKS]>,
+        blocks: Box<[Block; BLOCKS]>,
         failure: Option<FailurePoint>,
         writes: usize,
         flushes: usize,
     }
 
     impl<const BLOCKS: usize> CrashStore<BLOCKS> {
-        const fn new() -> Self {
-            Self { blocks: [Block::ZERO; BLOCKS], failure: None, writes: 0, flushes: 0 }
+        fn new() -> Self {
+            Self {
+                durable: Box::new([Block::ZERO; BLOCKS]),
+                blocks: Box::new([Block::ZERO; BLOCKS]),
+                failure: None,
+                writes: 0,
+                flushes: 0,
+            }
         }
 
         fn arm(&mut self, failure: FailurePoint) {
@@ -813,6 +821,10 @@ mod tests {
                 self.failure = None;
             }
             fail
+        }
+
+        fn power_loss(&mut self) {
+            self.blocks.copy_from_slice(&self.durable[..]);
         }
     }
 
@@ -844,6 +856,7 @@ mod tests {
             if self.fail_flush() {
                 return Err(BlockError::Io);
             }
+            self.durable.copy_from_slice(&self.blocks[..]);
             Ok(())
         }
     }
@@ -977,9 +990,14 @@ mod tests {
 
             store.arm(failure);
             let _ = volume.commit(&mut store, transaction, metadata);
+            store.power_loss();
 
             let reopened = CowVolume::open(&mut store).expect("crash point must recover");
-            assert!(reopened.root().generation == 1 || reopened.root().generation == 2);
+            let expected_generation = match failure {
+                FailurePoint::Write(3) | FailurePoint::Flush(2) => 2,
+                FailurePoint::Write(_) | FailurePoint::Flush(_) => 1,
+            };
+            assert_eq!(reopened.root().generation, expected_generation);
         }
     }
 
