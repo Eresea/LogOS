@@ -359,21 +359,23 @@ impl PackageManifest {
             let offset = 64 + index * 80;
             let dependency_name_length = input[offset + 32] as usize;
             let range_length = input[offset + 33] as usize;
-            let reserved = &input[offset + 34 + range_length..offset + 80];
             if dependency_name_length > MAX_PACKAGE_NAME_BYTES
-                || range_length == 0
                 || range_length > MAX_VERSION_RANGE_BYTES
-                || reserved.iter().any(|byte| *byte != 0)
             {
-                if index < dependency_count {
-                    return Err(ManifestError::InvalidEncoding);
-                }
-                if dependency_name_length != 0 || range_length != 0 {
+                return Err(ManifestError::InvalidEncoding);
+            }
+            let reserved = &input[offset + 34 + range_length..offset + 80];
+            if range_length == 0 {
+                if index < dependency_count
+                    || dependency_name_length != 0
+                    || reserved.iter().any(|byte| *byte != 0)
+                {
                     return Err(ManifestError::InvalidEncoding);
                 }
                 continue;
             }
             if index >= dependency_count
+                || reserved.iter().any(|byte| *byte != 0)
                 || input[offset + dependency_name_length..offset + 32].iter().any(|byte| *byte != 0)
             {
                 return Err(ManifestError::InvalidEncoding);
@@ -1031,6 +1033,20 @@ mod tests {
         assert_eq!(manifest.dependency_count(), 1);
         assert_eq!(manifest.add_dependency(dependency), Err(ManifestError::DuplicateDependency));
         assert!(dependency.matches(SemanticVersion::new(1, 4, 0)).unwrap());
+    }
+
+    #[test]
+    fn manifest_decode_rejects_oversized_dependency_ranges_without_panicking() {
+        let mut bytes = [0; PACKAGE_MANIFEST_BYTES];
+        bytes[..4].copy_from_slice(b"demo");
+        bytes[32] = 4;
+        bytes[48] = PACKAGE_KIND_SERVICE;
+        bytes[49] = ServiceId::Flow as u8;
+        bytes[50] = 1;
+        bytes[64..67].copy_from_slice(b"dep");
+        bytes[96] = 3;
+        bytes[97] = u8::MAX;
+        assert_eq!(PackageManifest::decode(&bytes), Err(ManifestError::InvalidEncoding));
     }
 
     #[test]

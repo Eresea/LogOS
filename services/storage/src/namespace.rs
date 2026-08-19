@@ -1713,12 +1713,45 @@ mod tests {
             install_v2_manifest(&mut fs, incompatible, b"incompatible"),
             Err(NamespaceError::Package(PackageCatalogError::DependencyConflict))
         );
+        let renamed = PackageManifest::for_service(
+            PackageName::parse(b"renamed").unwrap(),
+            SemanticVersion::new(2, 0, 0),
+            ServiceId::Storage,
+        );
+        assert_eq!(
+            install_v2_manifest(&mut fs, renamed, b"renamed"),
+            Err(NamespaceError::Package(PackageCatalogError::DependencyConflict))
+        );
         let compatible = PackageManifest::for_service(
             base_name,
             SemanticVersion::new(1, 1, 0),
             ServiceId::Storage,
         );
         install_v2_manifest(&mut fs, compatible, b"compatible").unwrap();
+    }
+
+    #[test]
+    fn legacy_package_cannot_replace_a_v2_manifest() {
+        let mut fs = DurableNamespace::format(heap_store()).unwrap();
+        install_v2(&mut fs, ServiceId::Storage, b"storage");
+
+        let header =
+            ServicePackageHeader::new(ServiceId::Storage, 99, 6, crc32c(b"legacy")).unwrap();
+        let mut package = vec![0; PACKAGE_HEADER_BYTES + 6];
+        header.encode(&mut package).unwrap();
+        package[PACKAGE_HEADER_BYTES..].copy_from_slice(b"legacy");
+        let mut transaction = fs.begin_package_install(ServiceId::Storage, package.len()).unwrap();
+        for (offset, chunk) in package.chunks(BLOCK_BYTES).enumerate() {
+            fs.write_package_chunk(&mut transaction, offset * BLOCK_BYTES, chunk).unwrap();
+        }
+        assert_eq!(
+            fs.commit_package_install(transaction),
+            Err(NamespaceError::Package(PackageCatalogError::VersionConflict))
+        );
+        assert_eq!(
+            fs.lookup_package(ServiceId::Storage).unwrap().manifest.unwrap().name,
+            PackageName::parse(b"storage").unwrap()
+        );
     }
 
     #[test]

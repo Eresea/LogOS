@@ -1014,7 +1014,7 @@ impl PackageClient {
         if !self.active {
             return false;
         }
-        if self.cancelled {
+        if self.cancelled && !self.sent {
             self.fail(StorageApiStatus::Unsupported);
             return true;
         }
@@ -1046,13 +1046,26 @@ impl PackageClient {
             self.fail(StorageApiStatus::Invalid);
             return true;
         };
+        self.handle_response(response);
+        true
+    }
+
+    fn handle_response(&mut self, response: StorageApiResponse<'_>) {
         if response.request_id != self.request_id {
-            self.fail(StorageApiStatus::Stale);
-            return true;
+            if self.cancelled {
+                self.sent = true;
+            } else {
+                self.fail(StorageApiStatus::Stale);
+            }
+            return;
+        }
+        if self.cancelled {
+            self.fail(StorageApiStatus::Unsupported);
+            return;
         }
         if response.status != StorageApiStatus::Ok {
             self.fail(response.status);
-            return true;
+            return;
         }
         self.append(response.data);
         if response.more {
@@ -1065,7 +1078,6 @@ impl PackageClient {
         } else {
             self.succeed();
         }
-        true
     }
 
     fn append(&mut self, bytes: &[u8]) {
@@ -2670,5 +2682,25 @@ mod tests {
         let interface =
             provider.complete(CompletionRequest::new(3, b"net.interface[\"e", 16).unwrap());
         assert_eq!(interface.candidate(0), Some(&b"eth0\"]"[..]));
+    }
+
+    #[test]
+    fn cancelled_package_request_drains_its_response() {
+        let mut client = PackageClient::new();
+        assert!(client.start(logos_flow::PackageCommand::List));
+        client.sent = true;
+        client.cancel();
+        let message = StorageApiResponse::encode(
+            StorageApiStatus::Ok,
+            client.request_id,
+            0,
+            b"storage 1.0.0\r\n",
+            false,
+        )
+        .unwrap();
+        client.handle_response(StorageApiResponse::decode(&message).unwrap());
+        assert!(!client.active);
+        assert!(client.done);
+        assert_eq!(&client.result[..client.result_len], b"command cancelled\r\n");
     }
 }

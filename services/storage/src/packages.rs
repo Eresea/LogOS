@@ -168,6 +168,9 @@ impl PackageCatalog {
             if current.is_some_and(|current| manifest.version <= current.version) {
                 return Err(PackageCatalogError::VersionConflict);
             }
+            if current.is_some_and(|current| current.name != manifest.name) {
+                return Err(PackageCatalogError::DependencyConflict);
+            }
             for index in 0..manifest.dependency_count() {
                 let dependency = manifest.dependency(index).expect("dependency count is bounded");
                 if dependency.name == manifest.name {
@@ -215,6 +218,17 @@ impl PackageCatalog {
                 }
             }
         } else if let Some(current) = self.lookup(service) {
+            let current_is_v2 = self
+                .records
+                .iter()
+                .find(|record| record.alive && record.service == service)
+                .map(|record| self.manifest_with_store(store, record, scratch))
+                .transpose()?
+                .flatten()
+                .is_some();
+            if current_is_v2 {
+                return Err(PackageCatalogError::VersionConflict);
+            }
             if package.package_version <= current.package_version {
                 return Err(PackageCatalogError::VersionConflict);
             }
