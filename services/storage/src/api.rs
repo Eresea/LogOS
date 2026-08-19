@@ -1,6 +1,6 @@
 use logos_abi::{
     IpcBytes, STORAGE_API_FLAG_REPLACE, STORAGE_API_RESPONSE_DATA_BYTES, StorageApiOperation,
-    StorageApiRequest, StorageApiResponse, StorageApiStatus,
+    StorageApiRequest, StorageApiResponse, StorageApiStatus, StorageMapRequest, StorageMapResponse,
 };
 use logos_storage::BlockStore;
 use logos_storage::ReadMap;
@@ -20,7 +20,14 @@ pub fn error_response(message: &IpcBytes, status: StorageApiStatus) -> Option<Ip
         Ok(request) => request,
         Err(_) => return malformed_response(message),
     };
-    StorageApiResponse::encode(status, request.request_id, request.transaction_id, &[], false)
+    StorageApiResponse::encode_versioned(
+        request.version,
+        status,
+        request.request_id,
+        request.transaction_id,
+        &[],
+        false,
+    )
 }
 
 struct ResponsePayload {
@@ -67,10 +74,11 @@ struct ReadMapping {
     generation: u32,
     object: Option<crate::ObjectId>,
     mapping: Option<ReadMap>,
+    core_mapping: Option<StorageMapResponse>,
 }
 
 impl ReadMapping {
-    const EMPTY: Self = Self { generation: 1, object: None, mapping: None };
+    const EMPTY: Self = Self { generation: 1, object: None, mapping: None, core_mapping: None };
 }
 
 impl FileHandle {
@@ -110,6 +118,73 @@ impl<B: BlockStore> StorageApi<B> {
         &mut self.namespace
     }
 
+    pub fn map_request(
+        &self,
+        response: &IpcBytes,
+        generation: u64,
+        client: logos_abi::ServiceId,
+    ) -> Option<StorageMapRequest> {
+        let response = StorageApiResponse::decode(response).ok()?;
+        if response.status != StorageApiStatus::Ok
+            || response.data.len() != logos_abi::STORAGE_API_MAP_DESCRIPTOR_BYTES
+            || response.transaction_id == 0
+        {
+            return None;
+        }
+        Some(StorageMapRequest {
+            operation: 1,
+            flags: 0,
+            reserved: 0,
+            request_id: response.request_id,
+            generation,
+            client: client as u16,
+            pages: response.data[8] as u16,
+            source_page: u64::from_le_bytes(response.data[..8].try_into().ok()?),
+            target_page: 0,
+            window_generation: 0,
+            reserved_tail: 0,
+        })
+    }
+
+    pub fn complete_map(&mut self, handle: u64, response: StorageMapResponse) -> bool {
+        let Some((slot, generation)) = decode_map_handle(handle) else {
+            return false;
+        };
+        if response.status != logos_abi::StorageStatus::Ok
+            || self.maps[slot].generation != generation
+            || self.maps[slot].mapping.is_none()
+            || response.pages == 0
+        {
+            return false;
+        }
+        self.maps[slot].core_mapping = Some(response);
+        true
+    }
+
+    pub fn map_release(&self, handle: u64) -> Option<StorageMapResponse> {
+        let (slot, generation) = decode_map_handle(handle)?;
+        let mapping = self.maps[slot];
+        (mapping.generation == generation && mapping.mapping.is_some())
+            .then_some(mapping.core_mapping?)
+    }
+
+    pub fn cancel_map(&mut self, handle: u64) -> bool {
+        let Some((slot, generation)) = decode_map_handle(handle) else {
+            return false;
+        };
+        if self.maps[slot].generation != generation {
+            return false;
+        }
+        let Some(mapping) = self.maps[slot].mapping.take() else {
+            return false;
+        };
+        let _ = self.namespace.unmap_read(mapping);
+        self.maps[slot].object = None;
+        self.maps[slot].core_mapping = None;
+        self.maps[slot].generation = self.maps[slot].generation.wrapping_add(1).max(1);
+        true
+    }
+
     pub fn handle(&mut self, message: &IpcBytes) -> Option<IpcBytes> {
         let request = match StorageApiRequest::decode(message) {
             Ok(request) => request,
@@ -117,12 +192,14 @@ impl<B: BlockStore> StorageApi<B> {
         };
         if self.failed {
             return Self::encode(
+                request.version,
                 request.request_id,
                 ResponsePayload::empty(StorageApiStatus::Io, request.transaction_id),
             );
         }
         if request.operation != StorageApiOperation::Write && request.flags != 0 {
             return Self::encode(
+                request.version,
                 request.request_id,
                 ResponsePayload::empty(StorageApiStatus::Invalid, request.transaction_id),
             );
@@ -131,6 +208,7 @@ impl<B: BlockStore> StorageApi<B> {
             && request.flags & !STORAGE_API_FLAG_REPLACE != 0
         {
             return Self::encode(
+                request.version,
                 request.request_id,
                 ResponsePayload::empty(StorageApiStatus::Invalid, request.transaction_id),
             );
@@ -162,11 +240,12 @@ impl<B: BlockStore> StorageApi<B> {
             StorageApiOperation::Fsync => self.fsync(&request),
             StorageApiOperation::Mkdir => self.mkdir(&request),
         };
-        Self::encode(request.request_id, response)
+        Self::encode(request.version, request.request_id, response)
     }
 
-    fn encode(request_id: u32, response: ResponsePayload) -> Option<IpcBytes> {
-        StorageApiResponse::encode(
+    fn encode(version: u8, request_id: u32, response: ResponsePayload) -> Option<IpcBytes> {
+        StorageApiResponse::encode_versioned(
+            version,
             response.status,
             request_id,
             response.transaction_id,
@@ -486,6 +565,7 @@ impl<B: BlockStore> StorageApi<B> {
         };
         self.maps[slot].object = Some(object);
         self.maps[slot].mapping = Some(mapping);
+        self.maps[slot].core_mapping = None;
         let token = encode_map_handle(slot, generation);
         let mut response = ResponsePayload::empty(StorageApiStatus::Ok, token);
         response.data[..8].copy_from_slice(&mapping.source_page.to_le_bytes());
@@ -509,6 +589,7 @@ impl<B: BlockStore> StorageApi<B> {
         }
         self.maps[slot].object = None;
         self.maps[slot].mapping = None;
+        self.maps[slot].core_mapping = None;
         self.maps[slot].generation = self.maps[slot].generation.wrapping_add(1).max(1);
         ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id)
     }
@@ -819,7 +900,24 @@ fn malformed_response(message: &IpcBytes) -> Option<IpcBytes> {
     if request_id == 0 {
         return None;
     }
-    StorageApiResponse::encode(StorageApiStatus::Invalid, request_id, 0, &[], false)
+    let version = bytes
+        .first()
+        .copied()
+        .filter(|version| {
+            matches!(
+                *version,
+                logos_abi::STORAGE_API_VERSION | logos_abi::STORAGE_API_EXTENSION_VERSION
+            )
+        })
+        .unwrap_or(logos_abi::STORAGE_API_VERSION);
+    StorageApiResponse::encode_versioned(
+        version,
+        StorageApiStatus::Invalid,
+        request_id,
+        0,
+        &[],
+        false,
+    )
 }
 
 fn map_error(error: NamespaceError) -> StorageApiStatus {

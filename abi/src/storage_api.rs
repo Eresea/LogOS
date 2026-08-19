@@ -127,6 +127,7 @@ pub enum StorageApiError {
 }
 
 pub struct StorageApiRequest<'a> {
+    pub version: u8,
     pub operation: StorageApiOperation,
     pub flags: u8,
     pub request_id: u32,
@@ -149,7 +150,7 @@ impl<'a> StorageApiRequest<'a> {
         if bytes.len() < REQUEST_HEADER_BYTES {
             return Err(StorageApiError::Malformed);
         }
-        if bytes[0] != STORAGE_API_VERSION {
+        if !matches!(bytes[0], STORAGE_API_VERSION | STORAGE_API_EXTENSION_VERSION) {
             return Err(StorageApiError::InvalidVersion);
         }
         let operation =
@@ -183,6 +184,7 @@ impl<'a> StorageApiRequest<'a> {
             return Err(StorageApiError::Malformed);
         }
         Ok(Self {
+            version: bytes[0],
             operation,
             flags: bytes[2],
             request_id,
@@ -205,7 +207,60 @@ impl<'a> StorageApiRequest<'a> {
         secondary_path: &[u8],
         data: &[u8],
     ) -> Option<IpcBytes> {
-        if request_id == 0
+        Self::encode_versioned(
+            STORAGE_API_VERSION,
+            operation,
+            flags,
+            request_id,
+            transaction_id,
+            offset,
+            path,
+            secondary_path,
+            data,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_extension(
+        operation: StorageApiOperation,
+        flags: u8,
+        request_id: u32,
+        transaction_id: u64,
+        offset: u32,
+        path: &[u8],
+        secondary_path: &[u8],
+        data: &[u8],
+    ) -> Option<IpcBytes> {
+        if (operation as u8) < StorageApiOperation::Open as u8 {
+            return None;
+        }
+        Self::encode_versioned(
+            STORAGE_API_EXTENSION_VERSION,
+            operation,
+            flags,
+            request_id,
+            transaction_id,
+            offset,
+            path,
+            secondary_path,
+            data,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_versioned(
+        version: u8,
+        operation: StorageApiOperation,
+        flags: u8,
+        request_id: u32,
+        transaction_id: u64,
+        offset: u32,
+        path: &[u8],
+        secondary_path: &[u8],
+        data: &[u8],
+    ) -> Option<IpcBytes> {
+        if !matches!(version, STORAGE_API_VERSION | STORAGE_API_EXTENSION_VERSION)
+            || request_id == 0
             || path.len() > u16::MAX as usize
             || secondary_path.len() > u16::MAX as usize
             || data.len() > u16::MAX as usize
@@ -220,7 +275,7 @@ impl<'a> StorageApiRequest<'a> {
         }
         let mut message = IpcBytes::empty(MessageKind::StorageRequest);
         let bytes = &mut message.bytes[..total_len];
-        bytes[0] = STORAGE_API_VERSION;
+        bytes[0] = version;
         bytes[1] = operation as u8;
         bytes[2] = flags;
         put_u32(bytes, 4, request_id);
@@ -297,6 +352,7 @@ fn request_shape_is_valid(
 }
 
 pub struct StorageApiResponse<'a> {
+    pub version: u8,
     pub status: StorageApiStatus,
     pub request_id: u32,
     pub transaction_id: u64,
@@ -316,7 +372,7 @@ impl<'a> StorageApiResponse<'a> {
         if bytes.len() < RESPONSE_HEADER_BYTES {
             return Err(StorageApiError::Malformed);
         }
-        if bytes[0] != STORAGE_API_VERSION {
+        if !matches!(bytes[0], STORAGE_API_VERSION | STORAGE_API_EXTENSION_VERSION) {
             return Err(StorageApiError::InvalidVersion);
         }
         if bytes[3] != 0 {
@@ -332,6 +388,7 @@ impl<'a> StorageApiResponse<'a> {
             return Err(StorageApiError::Malformed);
         }
         Ok(Self {
+            version: bytes[0],
             status,
             request_id,
             transaction_id: get_u64(bytes, 8),
@@ -347,7 +404,38 @@ impl<'a> StorageApiResponse<'a> {
         data: &[u8],
         more: bool,
     ) -> Option<IpcBytes> {
-        if request_id == 0 || data.len() > u16::MAX as usize {
+        Self::encode_versioned(STORAGE_API_VERSION, status, request_id, transaction_id, data, more)
+    }
+
+    pub fn encode_extension(
+        status: StorageApiStatus,
+        request_id: u32,
+        transaction_id: u64,
+        data: &[u8],
+        more: bool,
+    ) -> Option<IpcBytes> {
+        Self::encode_versioned(
+            STORAGE_API_EXTENSION_VERSION,
+            status,
+            request_id,
+            transaction_id,
+            data,
+            more,
+        )
+    }
+
+    pub fn encode_versioned(
+        version: u8,
+        status: StorageApiStatus,
+        request_id: u32,
+        transaction_id: u64,
+        data: &[u8],
+        more: bool,
+    ) -> Option<IpcBytes> {
+        if !matches!(version, STORAGE_API_VERSION | STORAGE_API_EXTENSION_VERSION)
+            || request_id == 0
+            || data.len() > u16::MAX as usize
+        {
             return None;
         }
         let total_len = RESPONSE_HEADER_BYTES.checked_add(data.len())?;
@@ -356,7 +444,7 @@ impl<'a> StorageApiResponse<'a> {
         }
         let mut message = IpcBytes::empty(MessageKind::StorageResponse);
         let bytes = &mut message.bytes[..total_len];
-        bytes[0] = STORAGE_API_VERSION;
+        bytes[0] = version;
         bytes[1] = status as u8;
         put_u32(bytes, 4, request_id);
         put_u64(bytes, 8, transaction_id);
@@ -502,6 +590,32 @@ mod tests {
         assert_eq!(response.transaction_id, 11);
         assert_eq!(response.data, b"data");
         assert!(response.more);
+    }
+
+    #[test]
+    fn extension_version_round_trips_extension_operations() {
+        let message = StorageApiRequest::encode_extension(
+            StorageApiOperation::Open,
+            0,
+            9,
+            0,
+            0,
+            b"/file",
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            StorageApiRequest::decode(&message).unwrap().version,
+            STORAGE_API_EXTENSION_VERSION
+        );
+
+        let response =
+            StorageApiResponse::encode_extension(StorageApiStatus::Ok, 9, 17, &[], false).unwrap();
+        assert_eq!(
+            StorageApiResponse::decode(&response).unwrap().version,
+            STORAGE_API_EXTENSION_VERSION
+        );
     }
 
     #[test]

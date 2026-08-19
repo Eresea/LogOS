@@ -626,6 +626,8 @@ pub struct DurableNamespace<B> {
     packages: PackageCatalog,
     retired_file_extents: [CowExtent; MAX_OBJECTS * MAX_FILE_EXTENTS],
     retired_file_extent_count: usize,
+    retired_package_extents: [CowExtent; MAX_PACKAGE_EXTENTS],
+    retired_package_extent_count: usize,
     active_package_install: Option<u32>,
     next_package_install: u32,
 }
@@ -1152,6 +1154,8 @@ impl<B: BlockStore> DurableNamespace<B> {
             packages: PackageCatalog::new(),
             retired_file_extents: [CowExtent::EMPTY; MAX_OBJECTS * MAX_FILE_EXTENTS],
             retired_file_extent_count: 0,
+            retired_package_extents: [CowExtent::EMPTY; MAX_PACKAGE_EXTENTS],
+            retired_package_extent_count: 0,
             active_package_install: None,
             next_package_install: 1,
         };
@@ -1167,13 +1171,14 @@ impl<B: BlockStore> DurableNamespace<B> {
             packages: PackageCatalog::new(),
             retired_file_extents: [CowExtent::EMPTY; MAX_OBJECTS * MAX_FILE_EXTENTS],
             retired_file_extent_count: 0,
+            retired_package_extents: [CowExtent::EMPTY; MAX_PACKAGE_EXTENTS],
+            retired_package_extent_count: 0,
             active_package_install: None,
             next_package_install: 1,
         };
         Ok(filesystem)
     }
 
-    #[cfg(test)]
     fn reopen(&mut self) -> Result<(), NamespaceError> {
         let volume = CowVolume::open(&mut self.store)?;
         let mut namespace = ObjectNamespace::new();
@@ -1183,6 +1188,7 @@ impl<B: BlockStore> DurableNamespace<B> {
         self.namespace = namespace;
         self.packages = packages;
         self.retired_file_extent_count = 0;
+        self.retired_package_extent_count = 0;
         self.active_package_install = None;
         Ok(())
     }
@@ -1199,6 +1205,8 @@ impl<B: BlockStore> DurableNamespace<B> {
             packages,
             retired_file_extents: [CowExtent::EMPTY; MAX_OBJECTS * MAX_FILE_EXTENTS],
             retired_file_extent_count: 0,
+            retired_package_extents: [CowExtent::EMPTY; MAX_PACKAGE_EXTENTS],
+            retired_package_extent_count: 0,
             active_package_install: None,
             next_package_install: 1,
         })
@@ -1370,6 +1378,20 @@ impl<B: BlockStore> DurableNamespace<B> {
         Ok(())
     }
 
+    fn queue_retired_package_extents(
+        &mut self,
+        extents: &[CowExtent],
+    ) -> Result<(), NamespaceError> {
+        if self.retired_package_extent_count + extents.len() > self.retired_package_extents.len() {
+            return Err(NamespaceError::Capacity);
+        }
+        let end = self.retired_package_extent_count + extents.len();
+        self.retired_package_extents[self.retired_package_extent_count..end]
+            .copy_from_slice(extents);
+        self.retired_package_extent_count = end;
+        Ok(())
+    }
+
     fn persist_snapshot(&mut self) -> Result<u64, NamespaceError> {
         let transaction = self.volume.begin(&mut self.store)?;
         self.persist_snapshot_with(transaction)
@@ -1411,12 +1433,16 @@ impl<B: BlockStore> DurableNamespace<B> {
         for extent in self.retired_file_extents[..self.retired_file_extent_count].iter() {
             transaction.retire_extent(*extent)?;
         }
+        for extent in self.retired_package_extents[..self.retired_package_extent_count].iter() {
+            transaction.retire_extent(*extent)?;
+        }
         transaction.retire_extent(
             CowExtent::new(previous.metadata_root, previous.metadata_blocks)
                 .ok_or(NamespaceError::Recovery)?,
         )?;
         let generation = self.volume.commit(&mut self.store, transaction, extent)?;
         self.retired_file_extent_count = 0;
+        self.retired_package_extent_count = 0;
         Ok(generation)
     }
 
@@ -1435,7 +1461,12 @@ impl<B: BlockStore> DurableNamespace<B> {
         }
         self.namespace.apply_record(kind, payload)?;
         self.queue_retired_file_extents(&retired[..retired_count])?;
-        self.persist_snapshot()?;
+        if let Err(error) = self.persist_snapshot() {
+            return Err(match self.reopen() {
+                Ok(()) => error,
+                Err(recovery) => recovery,
+            });
+        }
         Ok(())
     }
 
@@ -1554,7 +1585,12 @@ impl<B: BlockStore> DurableNamespace<B> {
         for record in records.iter().take(count) {
             self.namespace.apply_record(WRITE_KIND, record.payload)?;
         }
-        self.persist_snapshot()?;
+        if let Err(error) = self.persist_snapshot() {
+            return Err(match self.reopen() {
+                Ok(()) => error,
+                Err(recovery) => recovery,
+            });
+        }
         Ok(input.len())
     }
 
@@ -1658,7 +1694,12 @@ impl<B: BlockStore> DurableNamespace<B> {
         }
         self.namespace.set_file_extents(id, &new_extents[..new_extent_count], new_length)?;
         self.queue_retired_file_extents(&old_extents[..old_extent_count])?;
-        self.persist_snapshot_with(transaction)?;
+        if let Err(error) = self.persist_snapshot_with(transaction) {
+            return Err(match self.reopen() {
+                Ok(()) => error,
+                Err(recovery) => recovery,
+            });
+        }
         Ok(input.len())
     }
 
@@ -1846,8 +1887,25 @@ impl<B: BlockStore> DurableNamespace<B> {
         let generation = self.packages.next_generation(install.service)?;
         let mut payload = [0; PACKAGE_RECORD_BYTES];
         encode_install_record(&install, package, generation, &mut payload)?;
+        let old_package = self.packages.lookup(install.service);
         self.packages.apply_record(PACKAGE_INSTALL_KIND, &payload, Some(arena))?;
-        self.persist_snapshot()?;
+        if let Some(old_package) = old_package {
+            let mut retired = [CowExtent::EMPTY; MAX_PACKAGE_EXTENTS];
+            let mut retired_count = 0;
+            for extent in old_package.extents[..old_package.extent_count as usize].iter() {
+                retired[retired_count] =
+                    CowExtent::new(BlockIndex::new(extent.start), extent.blocks)
+                        .ok_or(NamespaceError::Recovery)?;
+                retired_count += 1;
+            }
+            self.queue_retired_package_extents(&retired[..retired_count])?;
+        }
+        if let Err(error) = self.persist_snapshot() {
+            return Err(match self.reopen() {
+                Ok(()) => error,
+                Err(recovery) => recovery,
+            });
+        }
         Ok(PackageHandle { service: install.service, generation })
     }
 
@@ -2506,7 +2564,13 @@ impl NamespaceTransaction {
         }
         namespace.retired_file_extents = self.retired_extents;
         namespace.retired_file_extent_count = self.retired_extent_count;
-        namespace.persist_snapshot().map(|generation| generation.saturating_sub(1))
+        match namespace.persist_snapshot() {
+            Ok(generation) => Ok(generation.saturating_sub(1)),
+            Err(error) => Err(match namespace.reopen() {
+                Ok(()) => error,
+                Err(recovery) => recovery,
+            }),
+        }
     }
 
     pub fn abort(self) {}

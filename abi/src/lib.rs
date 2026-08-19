@@ -25,9 +25,9 @@ pub use service_manager::{
     ServiceManagerRecord,
 };
 pub use storage_api::{
-    STORAGE_API_FLAG_REPLACE, STORAGE_API_MAP_DESCRIPTOR_BYTES, STORAGE_API_MAP_LENGTH_BYTES,
-    STORAGE_API_RESPONSE_DATA_BYTES, STORAGE_API_VERSION, StorageApiError, StorageApiOperation,
-    StorageApiRequest, StorageApiResponse, StorageApiStatus,
+    STORAGE_API_EXTENSION_VERSION, STORAGE_API_FLAG_REPLACE, STORAGE_API_MAP_DESCRIPTOR_BYTES,
+    STORAGE_API_MAP_LENGTH_BYTES, STORAGE_API_RESPONSE_DATA_BYTES, STORAGE_API_VERSION,
+    StorageApiError, StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus,
 };
 
 pub const ABI_VERSION: u16 = 3;
@@ -73,7 +73,7 @@ pub const IPC_CAPABILITY_BASE: usize = STORAGE_CACHE_BASE + STORAGE_CACHE_PAGES 
 pub const MANAGER_CAPABILITY_BASE: usize = IPC_CAPABILITY_BASE + IPC_PAGE_BYTES;
 pub const MANAGER_CAPABILITY_SLOT: usize = 0;
 pub const NETWORK_CONFIG_BASE: usize = SERVICE_IPC_BASE + 0x3a_000;
-pub const MAX_IPC_CAPABILITIES: usize = 8;
+pub const MAX_IPC_CAPABILITIES: usize = 10;
 pub const MAX_MANAGER_SERVICES: usize = 8;
 pub const MAX_SERVICE_NAME_BYTES: usize = 16;
 pub const SERVICE_HEARTBEAT_INTERVAL_TICKS: u64 = 100;
@@ -105,7 +105,7 @@ pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
 
-pub const IPC_ENDPOINT_COUNT: usize = 22;
+pub const IPC_ENDPOINT_COUNT: usize = 24;
 pub const IPC_READ_EVENT_BASE: usize = 0;
 pub const IPC_WRITE_EVENT_BASE: usize = IPC_READ_EVENT_BASE + IPC_ENDPOINT_COUNT;
 pub const KEYBOARD_READ_EVENT: usize = IPC_WRITE_EVENT_BASE + IPC_ENDPOINT_COUNT;
@@ -367,6 +367,38 @@ pub struct StorageResponse {
     pub payload_bytes: u16,
     pub transaction_id: u64,
     pub block_count: u64,
+}
+
+/// Private Storage-to-Core request for a read-only cache mapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct StorageMapRequest {
+    pub operation: u8,
+    pub flags: u8,
+    pub reserved: u16,
+    pub request_id: u32,
+    pub generation: u64,
+    pub client: u16,
+    pub pages: u16,
+    pub source_page: u64,
+    pub target_page: u64,
+    pub window_generation: u32,
+    pub reserved_tail: u32,
+}
+
+/// Private Core-to-Storage result for a read-only cache mapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct StorageMapResponse {
+    pub request_id: u32,
+    pub status: StorageStatus,
+    pub reserved: [u8; 3],
+    pub generation: u64,
+    pub target_page: u64,
+    pub pages: u8,
+    pub reserved_tail: [u8; 7],
+    pub window_generation: u32,
+    pub reserved_end: [u8; 4],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -741,6 +773,8 @@ pub enum IpcEndpointId {
     NetworkToFetch = 19,
     CoreToStoragePackage = 20,
     StoragePackageToCore = 21,
+    StorageMapToCore = 22,
+    CoreToStorageMap = 23,
 }
 
 impl IpcEndpointId {
@@ -774,6 +808,8 @@ impl IpcEndpointId {
             19 => Some(Self::NetworkToFetch),
             20 => Some(Self::CoreToStoragePackage),
             21 => Some(Self::StoragePackageToCore),
+            22 => Some(Self::StorageMapToCore),
+            23 => Some(Self::CoreToStorageMap),
             _ => None,
         }
     }
@@ -791,7 +827,10 @@ impl IpcEndpointId {
             Self::FlowToFetch => ServiceId::Flow,
             Self::FetchToFlow | Self::FetchToStorage | Self::FetchToNetwork => ServiceId::Fetch,
             Self::StorageToFetch => ServiceId::Storage,
-            Self::CoreToStoragePackage | Self::StoragePackageToCore => ServiceId::Storage,
+            Self::CoreToStoragePackage
+            | Self::StoragePackageToCore
+            | Self::StorageMapToCore
+            | Self::CoreToStorageMap => ServiceId::Storage,
             Self::NetworkToFetch => ServiceId::Network,
         }
     }
@@ -804,7 +843,10 @@ impl IpcEndpointId {
             Self::SessionToFlow => ServiceId::Flow,
             Self::StorageToCore | Self::CoreToStorage | Self::FlowToStorage => ServiceId::Storage,
             Self::StorageToFlow => ServiceId::Flow,
-            Self::CoreToStoragePackage | Self::StoragePackageToCore => ServiceId::Storage,
+            Self::CoreToStoragePackage
+            | Self::StoragePackageToCore
+            | Self::StorageMapToCore
+            | Self::CoreToStorageMap => ServiceId::Storage,
             Self::NetworkToCore | Self::CoreToNetwork | Self::FlowToNetwork => ServiceId::Network,
             Self::NetworkToFlow => ServiceId::Flow,
             Self::FlowToFetch | Self::FetchToStorage | Self::FetchToNetwork => ServiceId::Fetch,
@@ -869,6 +911,8 @@ pub const fn ipc_capability_slot(
         (ServiceId::Storage, IpcEndpointId::StorageToFetch, IpcRights::Send) => Some(5),
         (ServiceId::Network, IpcEndpointId::FetchToNetwork, IpcRights::Receive) => Some(4),
         (ServiceId::Network, IpcEndpointId::NetworkToFetch, IpcRights::Send) => Some(5),
+        (ServiceId::Storage, IpcEndpointId::StorageMapToCore, IpcRights::Send) => Some(8),
+        (ServiceId::Storage, IpcEndpointId::CoreToStorageMap, IpcRights::Receive) => Some(9),
         _ => None,
     }
 }
@@ -1144,6 +1188,12 @@ pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
     }
     if endpoint == IpcEndpointId::StoragePackageToCore as usize {
         return Some(core::mem::size_of::<PackageResponse>());
+    }
+    if endpoint == IpcEndpointId::StorageMapToCore as usize {
+        return Some(core::mem::size_of::<StorageMapRequest>());
+    }
+    if endpoint == IpcEndpointId::CoreToStorageMap as usize {
+        return Some(core::mem::size_of::<StorageMapResponse>());
     }
     match ipc_message_type(endpoint) {
         Some(IpcMessageType::Input) => Some(core::mem::size_of::<InputMessage>()),
@@ -2104,7 +2154,7 @@ mod tests {
         let keyboard = keyboard_read_event_mask();
         assert_eq!(all & keyboard, 0);
         all |= keyboard;
-        assert_eq!(EVENT_COUNT, 45);
+        assert_eq!(EVENT_COUNT, 49);
         assert_eq!(all.count_ones(), EVENT_COUNT as u32);
     }
 

@@ -270,6 +270,11 @@ impl CowVolume {
         mut transaction: CowTransaction,
         metadata: CowExtent,
     ) -> Result<u64, CowError> {
+        if self.root.retired_root.get() != 0 {
+            transaction.retire_extent(
+                CowExtent::new(self.root.retired_root, 1).ok_or(CowError::InvalidRequest)?,
+            )?;
+        }
         let retired_root = transaction.write_retired(store)?;
         let mut bitmap = [Block::zero(); COW_MAX_BITMAP_BLOCKS];
         read_bitmap(store, self.root, &mut bitmap)?;

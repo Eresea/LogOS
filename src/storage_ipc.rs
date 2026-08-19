@@ -4,6 +4,11 @@ use logos_abi::{StorageOperation, StorageRequest, StorageResponse, StorageStatus
 
 pub const STORAGE_REQUEST_ENDPOINT: usize = logos_abi::IpcEndpointId::StorageToCore as usize;
 pub const STORAGE_RESPONSE_ENDPOINT: usize = logos_abi::IpcEndpointId::CoreToStorage as usize;
+pub const STORAGE_MAP_REQUEST_ENDPOINT: usize = logos_abi::IpcEndpointId::StorageMapToCore as usize;
+pub const STORAGE_MAP_RESPONSE_ENDPOINT: usize =
+    logos_abi::IpcEndpointId::CoreToStorageMap as usize;
+pub const STORAGE_MAP_OPERATION: u8 = 1;
+pub const STORAGE_UNMAP_OPERATION: u8 = 2;
 pub const PACKAGE_REQUEST_ENDPOINT: usize = logos_abi::IpcEndpointId::CoreToStoragePackage as usize;
 pub const PACKAGE_RESPONSE_ENDPOINT: usize =
     logos_abi::IpcEndpointId::StoragePackageToCore as usize;
@@ -135,6 +140,32 @@ pub fn validate_map_request(
         let existing_end = window.target_page + u64::from(window.pages) * 0x1000;
         request.target_page < existing_end && window.target_page < end
     }) {
+        return Err(StorageStatus::Invalid);
+    }
+    Ok(())
+}
+
+pub fn validate_map_descriptor(
+    generation: u64,
+    client: u16,
+    source_page: u64,
+    pages: u8,
+    flags: u8,
+    expected_generation: u64,
+) -> Result<(), StorageStatus> {
+    if generation != expected_generation {
+        return Err(StorageStatus::Stale);
+    }
+    if storage_map_client_slot(client).is_none() || flags != 0 {
+        return Err(StorageStatus::Unauthorized);
+    }
+    if pages == 0 || u64::from(pages) > STORAGE_MAP_WINDOW_PAGES {
+        return Err(StorageStatus::Invalid);
+    }
+    let Some(end) = source_page.checked_add(u64::from(pages)) else {
+        return Err(StorageStatus::Invalid);
+    };
+    if end > STORAGE_CACHE_START + STORAGE_CACHE_PAGES {
         return Err(StorageStatus::Invalid);
     }
     Ok(())

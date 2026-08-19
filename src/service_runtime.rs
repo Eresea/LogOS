@@ -86,6 +86,7 @@ pub struct ServiceRuntime {
     ipc_generation: u16,
     service_epoch: u64,
     storage_response: Option<logos_abi::StorageResponse>,
+    storage_map_response: Option<logos_abi::StorageMapResponse>,
     package_request: Option<logos_abi::PackageRequest>,
     package_response: Option<logos_abi::PackageResponse>,
     #[allow(dead_code)]
@@ -285,6 +286,7 @@ impl ServiceRuntime {
             ipc_generation: 1,
             service_epoch: 1,
             storage_response: None,
+            storage_map_response: None,
             package_request: None,
             package_response: None,
             package_next_request: 1,
@@ -540,6 +542,20 @@ impl ServiceRuntime {
                 page.capabilities[7] = logos_abi::IpcCapability::new(
                     crate::storage_ipc::PACKAGE_RESPONSE_ENDPOINT,
                     logos_abi::IpcRights::Send,
+                    self.ipc_generation,
+                    self.service_epoch,
+                )
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+                page.capabilities[8] = logos_abi::IpcCapability::new(
+                    crate::storage_ipc::STORAGE_MAP_REQUEST_ENDPOINT,
+                    logos_abi::IpcRights::Send,
+                    self.ipc_generation,
+                    self.service_epoch,
+                )
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+                page.capabilities[9] = logos_abi::IpcCapability::new(
+                    crate::storage_ipc::STORAGE_MAP_RESPONSE_ENDPOINT,
+                    logos_abi::IpcRights::Receive,
                     self.ipc_generation,
                     self.service_epoch,
                 )
@@ -900,6 +916,7 @@ impl ServiceRuntime {
         }
         if service == ServiceId::Storage {
             self.storage_response = None;
+            self.storage_map_response = None;
             self.package_request = None;
             self.package_response = None;
             for frame in self.storage_data_frames.iter().flatten().copied() {
@@ -1417,6 +1434,154 @@ impl ServiceRuntime {
             return outcome;
         }
         if service == ServiceId::Storage
+            && capability.endpoint_index() == Some(crate::storage_ipc::STORAGE_MAP_REQUEST_ENDPOINT)
+        {
+            if capability.rights != logos_abi::IpcRights::Send
+                || capability.generation != self.ipc_generation
+                || capability.service_epoch != self.service_epoch
+            {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Unauthorized,
+                    notified: false,
+                };
+            }
+            if length != core::mem::size_of::<logos_abi::StorageMapRequest>() {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
+            if self.storage_map_response.is_some() {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Full,
+                    notified: false,
+                };
+            }
+            let request = unsafe {
+                core::ptr::read_unaligned(
+                    staging_frame.raw() as usize as *const logos_abi::StorageMapRequest
+                )
+            };
+            let status = if request.operation == crate::storage_ipc::STORAGE_MAP_OPERATION {
+                if request.request_id == 0
+                    || request.reserved != 0
+                    || request.reserved_tail != 0
+                    || request.pages > u8::MAX as u16
+                {
+                    Err(logos_abi::StorageStatus::Invalid)
+                } else {
+                    crate::storage_ipc::validate_map_descriptor(
+                        request.generation,
+                        request.client,
+                        request.source_page,
+                        request.pages as u8,
+                        request.flags,
+                        self.service_epoch,
+                    )
+                }
+            } else if request.operation == crate::storage_ipc::STORAGE_UNMAP_OPERATION {
+                if request.request_id == 0
+                    || request.generation != self.service_epoch
+                    || request.reserved != 0
+                    || request.reserved_tail != 0
+                    || request.pages != 0
+                    || request.source_page != 0
+                {
+                    Err(logos_abi::StorageStatus::Stale)
+                } else if crate::storage_ipc::storage_map_client_slot(request.client).is_none()
+                    || request.flags != 0
+                    || request.target_page == 0
+                    || request.window_generation == 0
+                {
+                    Err(logos_abi::StorageStatus::Unauthorized)
+                } else {
+                    Ok(())
+                }
+            } else {
+                Err(logos_abi::StorageStatus::Invalid)
+            };
+            let response = match status {
+                Ok(()) => {
+                    if request.operation == crate::storage_ipc::STORAGE_UNMAP_OPERATION {
+                        let status = self
+                            .unmap_storage_window(crate::storage_ipc::StorageMapRelease {
+                                generation: request.generation,
+                                client: request.client,
+                                target_page: request.target_page,
+                                window_generation: request.window_generation,
+                            })
+                            .map_or(logos_abi::StorageStatus::Io, |_| logos_abi::StorageStatus::Ok);
+                        logos_abi::StorageMapResponse {
+                            request_id: request.request_id,
+                            status,
+                            reserved: [0; 3],
+                            generation: request.generation,
+                            target_page: 0,
+                            pages: 0,
+                            reserved_tail: [0; 7],
+                            window_generation: 0,
+                            reserved_end: [0; 4],
+                        }
+                    } else {
+                        let mut descriptor = [0u8; logos_abi::STORAGE_API_MAP_DESCRIPTOR_BYTES];
+                        descriptor[..8].copy_from_slice(&request.source_page.to_le_bytes());
+                        descriptor[8] = request.pages as u8;
+                        match self.map_storage_descriptor(
+                            request.generation,
+                            request.client,
+                            &descriptor,
+                        ) {
+                            Ok(mapped) => logos_abi::StorageMapResponse {
+                                request_id: request.request_id,
+                                status: logos_abi::StorageStatus::Ok,
+                                reserved: [0; 3],
+                                generation: mapped.generation,
+                                target_page: mapped.target_page,
+                                pages: mapped.pages,
+                                reserved_tail: [0; 7],
+                                window_generation: mapped.window_generation,
+                                reserved_end: [0; 4],
+                            },
+                            Err(error) => logos_abi::StorageMapResponse {
+                                request_id: request.request_id,
+                                status: if error == PageTableError::Capacity {
+                                    logos_abi::StorageStatus::Full
+                                } else {
+                                    logos_abi::StorageStatus::Io
+                                },
+                                reserved: [0; 3],
+                                generation: request.generation,
+                                target_page: 0,
+                                pages: 0,
+                                reserved_tail: [0; 7],
+                                window_generation: 0,
+                                reserved_end: [0; 4],
+                            },
+                        }
+                    }
+                }
+                Err(status) => logos_abi::StorageMapResponse {
+                    request_id: request.request_id,
+                    status,
+                    reserved: [0; 3],
+                    generation: request.generation,
+                    target_page: 0,
+                    pages: 0,
+                    reserved_tail: [0; 7],
+                    window_generation: 0,
+                    reserved_end: [0; 4],
+                },
+            };
+            self.storage_map_response = Some(response);
+            crate::arch::signal_events(logos_abi::ipc_write_event_mask(
+                crate::storage_ipc::STORAGE_MAP_RESPONSE_ENDPOINT,
+            ));
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Ok,
+                notified: true,
+            };
+        }
+        if service == ServiceId::Storage
             && capability.endpoint_index() == Some(crate::storage_ipc::STORAGE_REQUEST_ENDPOINT)
         {
             if capability.rights != logos_abi::IpcRights::Send
@@ -1692,6 +1857,41 @@ impl ServiceRuntime {
                 unsafe {
                     core::ptr::write_unaligned(
                         staging_frame.raw() as usize as *mut logos_abi::StorageResponse,
+                        response,
+                    );
+                }
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Ok,
+                    notified: false,
+                };
+            }
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        }
+        if service == ServiceId::Storage
+            && index == crate::storage_ipc::STORAGE_MAP_RESPONSE_ENDPOINT
+        {
+            if capability.rights != logos_abi::IpcRights::Receive
+                || capability.generation != self.ipc_generation
+                || capability.service_epoch != self.service_epoch
+            {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Unauthorized,
+                    notified: false,
+                };
+            }
+            let Some(response) = self.storage_map_response.take() else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Empty,
+                    notified: false,
+                };
+            };
+            if let Some(staging_frame) = self.ipc_staging_frames[service.index()] {
+                unsafe {
+                    core::ptr::write_unaligned(
+                        staging_frame.raw() as usize as *mut logos_abi::StorageMapResponse,
                         response,
                     );
                 }
@@ -2101,7 +2301,6 @@ impl ServiceRuntime {
     }
 
     /// Map Storage-owned cache pages read-only into an authorized Flow/Fetch window.
-    #[allow(dead_code)]
     pub(crate) fn map_storage_window(
         &mut self,
         request: crate::storage_ipc::StorageMapRequest,
@@ -2220,7 +2419,6 @@ impl ServiceRuntime {
     }
 
     /// Select a Core-owned target window for a Storage map descriptor.
-    #[allow(dead_code)]
     pub(crate) fn map_storage_descriptor(
         &mut self,
         generation: u64,
@@ -2247,7 +2445,6 @@ impl ServiceRuntime {
     }
 
     /// Unmap a previously granted Storage window and reject stale generations.
-    #[allow(dead_code)]
     pub(crate) fn unmap_storage_window(
         &mut self,
         request: crate::storage_ipc::StorageMapRelease,
@@ -2547,6 +2744,7 @@ impl ServiceRuntime {
         }
         self.ipc = None;
         self.storage_response = None;
+        self.storage_map_response = None;
         self.package_request = None;
         self.package_response = None;
         self.network_packet_response = None;
