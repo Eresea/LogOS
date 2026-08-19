@@ -449,9 +449,28 @@ const fn azerty_code(byte: u8) -> KeyCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use logos_abi::{
+        Cell, CompletionResponse, CompletionStatus, DEFAULT_COLUMNS, DEFAULT_ROWS, MAX_COLUMNS,
+    };
     use logos_flow::{FlowOperation, FlowService, SystemOperation};
     use logos_session::{MAX_LINE_BYTES, SessionService, ShellOutput};
     use logos_terminal::TerminalService;
+
+    fn drain_screen(
+        terminal: &mut TerminalService,
+        screen: &mut [Cell; DEFAULT_COLUMNS * DEFAULT_ROWS],
+    ) {
+        while let Some(message) = terminal.next_render() {
+            for index in 0..usize::from(message.count) {
+                let position = usize::from(message.positions[index]);
+                let row = position / MAX_COLUMNS;
+                let column = position % MAX_COLUMNS;
+                if row < DEFAULT_ROWS && column < DEFAULT_COLUMNS {
+                    screen[row * DEFAULT_COLUMNS + column] = message.cells[index];
+                }
+            }
+        }
+    }
 
     #[test]
     fn set_two_decodes_key_and_committed_text() {
@@ -653,5 +672,54 @@ mod tests {
         session.command_output(b"LogOS vNext 0.1.0\r\n", &mut output);
         terminal.session_output_bytes(output.as_bytes());
         assert!(terminal.next_render().is_some());
+    }
+
+    #[test]
+    fn completion_rows_are_erased_from_the_terminal_surface_after_dismissal() {
+        let mut terminal = TerminalService::new();
+        let mut session = SessionService::new();
+        let mut command = [0; MAX_LINE_BYTES];
+        let mut output = ShellOutput::new();
+        session.prompt(&mut output);
+        terminal.session_output_bytes(output.as_bytes());
+
+        let mut screen = [Cell {
+            codepoint: b' ' as u32,
+            foreground: 0,
+            background: 0,
+            attributes: 0,
+            width: 1,
+            reserved: 0,
+        }; DEFAULT_COLUMNS * DEFAULT_ROWS];
+        drain_screen(&mut terminal, &mut screen);
+
+        output = ShellOutput::new();
+        session.input_for_command(b"net.", &mut command, &mut output);
+        terminal.session_output_bytes(output.as_bytes());
+        let request = session.take_completion_request().unwrap();
+        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
+        response.line_revision = request.line_revision;
+        response.replace_start = 4;
+        response.replace_end = 4;
+        assert!(response.push_candidate(b"status"));
+        assert!(response.push_candidate(b"ping()"));
+
+        output = ShellOutput::new();
+        session.apply_completion_response(response, &mut output);
+        terminal.session_output_bytes(output.as_bytes());
+        drain_screen(&mut terminal, &mut screen);
+        assert_eq!(screen[12].codepoint, b's' as u32);
+        assert_eq!(screen[DEFAULT_COLUMNS + 12].codepoint, b'p' as u32);
+
+        output = ShellOutput::new();
+        session.input_for_command(b"x", &mut command, &mut output);
+        terminal.session_output_bytes(output.as_bytes());
+        drain_screen(&mut terminal, &mut screen);
+        assert_eq!(screen[12].codepoint, b'x' as u32);
+        let stale = screen[DEFAULT_COLUMNS..2 * DEFAULT_COLUMNS]
+            .iter()
+            .enumerate()
+            .find(|(_, cell)| cell.codepoint != b' ' as u32);
+        assert_eq!(stale, None, "stale completion cell");
     }
 }
