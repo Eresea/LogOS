@@ -261,6 +261,14 @@ pub(crate) fn flush_storage_device() -> Result<(), DeviceError> {
     with_device_mut(VirtioBlockDevice::flush)
 }
 
+pub(crate) fn prepare_power_control() -> Result<(), DeviceError> {
+    with_device_mut(|device| {
+        device.flush()?;
+        // Device reset drains the backend before the platform reset is requested.
+        device.reset()
+    })
+}
+
 pub(crate) fn storage_block_count() -> Result<u64, DeviceError> {
     with_device_mut(|device| device.capacity_blocks())
 }
@@ -501,7 +509,12 @@ impl VirtioBlockDevice {
         self.queue.available_ring[slot] = first as u16;
         self.requests[slot] = Some(chain.request_id);
         fence(Ordering::Release);
-        self.queue.available_index = available.wrapping_add(1);
+        unsafe {
+            write_volatile(
+                core::ptr::addr_of_mut!(self.queue.available_index),
+                available.wrapping_add(1),
+            );
+        }
         let notify_offset = unsafe { self.common.read_u16(0x1e)? } as u64;
         let notify_delta = notify_offset
             .checked_mul(self.notify_multiplier as u64)
@@ -517,6 +530,7 @@ impl VirtioBlockDevice {
         if used == self.used_index {
             return Ok(None);
         }
+        fence(Ordering::Acquire);
         if used.wrapping_sub(self.used_index) as usize > QUEUE_SIZE {
             return Err(DeviceError::InvalidCompletion);
         }
@@ -535,7 +549,7 @@ impl VirtioBlockDevice {
             .get_mut(queue_slot)
             .and_then(Option::take)
             .ok_or(DeviceError::StaleCompletion)?;
-        let status = self.queue.statuses[queue_slot];
+        let status = unsafe { read_volatile(self.queue.statuses.as_ptr().add(queue_slot)) };
         Ok(Some(DeviceCompletion { request_id, status, bytes_written: element.length }))
     }
 

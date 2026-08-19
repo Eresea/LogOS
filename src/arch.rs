@@ -27,6 +27,10 @@ pub(crate) fn flush_storage_device() -> Result<(), logos_abi::StorageStatus> {
     virtio_device::flush_storage_device().map_err(storage_error_status)
 }
 
+pub(crate) fn prepare_storage_power_control() -> Result<(), logos_abi::StorageStatus> {
+    virtio_device::prepare_power_control().map_err(storage_error_status)
+}
+
 pub(crate) fn storage_block_count() -> Result<u64, logos_abi::StorageStatus> {
     virtio_device::storage_block_count().map_err(storage_error_status)
 }
@@ -1256,11 +1260,11 @@ pub(crate) fn power_control(process: ProcessHandle, action: usize) -> bool {
         if !authorized {
             return false;
         }
-        if matches!(action, logos_abi::POWER_SHUTDOWN | logos_abi::POWER_REBOOT)
-            && flush_storage_device().is_err()
-        {
-            debug_line(b"LogOS vNext: power flush failed");
-            return false;
+        if matches!(action, logos_abi::POWER_SHUTDOWN | logos_abi::POWER_REBOOT) {
+            if prepare_storage_power_control().is_err() {
+                debug_line(b"LogOS vNext: power flush failed");
+                return false;
+            }
         }
         match action {
             logos_abi::POWER_SHUTDOWN => shutdown_qemu(),
@@ -1285,6 +1289,8 @@ fn shutdown_qemu() -> ! {
 #[cfg(target_os = "uefi")]
 fn reboot_qemu() -> ! {
     debug_line(b"LogOS vNext: reboot requested");
+    unsafe { out_port(RESET_CONTROL_PORT, 0x02) };
+    unsafe { io_wait() };
     unsafe { out_port(RESET_CONTROL_PORT, 0x06) };
     fatal(b"LogOS vNext: reboot returned")
 }

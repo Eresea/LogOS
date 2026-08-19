@@ -6,8 +6,8 @@ mod common;
 
 use logos_abi::{
     IpcBytes, IpcCapability, IpcEndpointId, IpcStatus, MessageKind, PackageOperation,
-    PackageRequest, PackageResponse, PackageStatus, StorageApiOperation, StorageApiRequest,
-    StorageApiStatus, StorageOperation, StorageRequest, StorageResponse, StorageStatus,
+    PackageRequest, PackageResponse, PackageStatus, StorageApiStatus, StorageOperation,
+    StorageRequest, StorageResponse, StorageStatus,
 };
 use logos_storage::Block;
 use logos_storage_service::{
@@ -170,6 +170,11 @@ fn package_status(error: NamespaceError) -> PackageStatus {
         | NamespaceError::Package(logos_storage_service::PackageCatalogError::Unsupported) => {
             PackageStatus::Unsupported
         }
+        NamespaceError::Package(
+            logos_storage_service::PackageCatalogError::VersionConflict
+            | logos_storage_service::PackageCatalogError::MissingDependency
+            | logos_storage_service::PackageCatalogError::DependencyConflict,
+        ) => PackageStatus::Invalid,
         NamespaceError::NotFound => PackageStatus::NotFound,
         NamespaceError::Stale
         | NamespaceError::Package(logos_storage_service::PackageCatalogError::Stale) => {
@@ -381,22 +386,7 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
                 }
             };
             if received == IpcStatus::Ok {
-                let stage_from_flow = client == Client::Flow
-                    && StorageApiRequest::decode(&request).is_ok_and(|request| {
-                        matches!(
-                            request.operation,
-                            StorageApiOperation::StageWriteBegin
-                                | StorageApiOperation::StageWriteChunk
-                                | StorageApiOperation::StageWriteCommit
-                                | StorageApiOperation::StageWriteAbort
-                        )
-                    });
-                pending_response = if stage_from_flow {
-                    error_response(&request, StorageApiStatus::Invalid)
-                } else {
-                    api.handle(&request)
-                }
-                .map(|response| (client, response));
+                pending_response = api.handle(&request).map(|response| (client, response));
                 progressed = true;
             }
         }
