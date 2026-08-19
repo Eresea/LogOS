@@ -324,6 +324,16 @@ impl AddressSpaceTable {
         address_space.mappings.get(index).copied().flatten()
     }
 
+    pub fn unmap(
+        &mut self,
+        handle: AddressSpaceHandle,
+        index: usize,
+    ) -> Result<VirtualMapping, ProcessError> {
+        let address_space = self.current_mut(handle)?;
+        let slot = address_space.mappings.get_mut(index).ok_or(ProcessError::AddressSpace)?;
+        slot.take().ok_or(ProcessError::AddressSpace)
+    }
+
     pub fn root(&self, handle: AddressSpaceHandle) -> Option<AddressSpaceRoot> {
         let address_space = self.slots.get(handle.slot as usize)?;
         (address_space.generation == handle.generation
@@ -477,6 +487,19 @@ impl ProcessTable {
     pub fn mapping(&self, handle: ProcessHandle, index: usize) -> Option<VirtualMapping> {
         let address_space = self.address_space(handle)?;
         self.address_spaces.mapping(address_space, index)
+    }
+
+    pub fn unmap(
+        &mut self,
+        handle: ProcessHandle,
+        index: usize,
+    ) -> Result<VirtualMapping, ProcessError> {
+        let process = self.current_mut(handle)?;
+        if process.state != ProcessState::Running {
+            return Err(ProcessError::NotRunning);
+        }
+        let address_space = process.address_space.ok_or(ProcessError::AddressSpace)?;
+        self.address_spaces.unmap(address_space, index)
     }
 
     pub fn exit(&mut self, handle: ProcessHandle, status: u8) -> Result<(), ProcessError> {

@@ -67,7 +67,7 @@ pub struct ServiceRuntime {
     ipc: Option<ServiceIpcGraph>,
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
     ipc_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
-    storage_data_frame: Option<FrameAddress>,
+    storage_data_frames: [Option<FrameAddress>; logos_abi::STORAGE_DATA_PAGES],
     network_config: logos_abi::NetworkConfig,
     network_config_frame: Option<FrameAddress>,
     network_packet_frames: [Option<FrameAddress>; logos_abi::NETWORK_PACKET_PAGE_COUNT],
@@ -80,6 +80,9 @@ pub struct ServiceRuntime {
     manager_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
     manager_generation: u32,
     pending_restart: Option<([ServiceId; crate::service_manager::MAX_SERVICE_SLOTS], usize)>,
+    storage_map_windows: [[Option<crate::storage_ipc::StorageMapWindow>;
+        crate::storage_ipc::STORAGE_MAP_WINDOWS_PER_CLIENT];
+        crate::storage_ipc::STORAGE_MAP_CLIENTS],
     ipc_generation: u16,
     service_epoch: u64,
     storage_response: Option<logos_abi::StorageResponse>,
@@ -264,7 +267,7 @@ impl ServiceRuntime {
             ipc: None,
             ipc_staging_frames: [None; SERVICE_COUNT],
             ipc_capability_frames: [None; SERVICE_COUNT],
-            storage_data_frame: None,
+            storage_data_frames: [None; logos_abi::STORAGE_DATA_PAGES],
             network_config: logos_abi::NetworkConfig::disabled(),
             network_config_frame: None,
             network_packet_frames: [None; logos_abi::NETWORK_PACKET_PAGE_COUNT],
@@ -277,6 +280,8 @@ impl ServiceRuntime {
             manager_capability_frames: [None; SERVICE_COUNT],
             manager_generation: 1,
             pending_restart: None,
+            storage_map_windows: [[None; crate::storage_ipc::STORAGE_MAP_WINDOWS_PER_CLIENT];
+                crate::storage_ipc::STORAGE_MAP_CLIENTS],
             ipc_generation: 1,
             service_epoch: 1,
             storage_response: None,
@@ -463,16 +468,18 @@ impl ServiceRuntime {
                 MappingFlags::DATA,
             )?;
             if service == ServiceId::Storage {
-                let data =
-                    self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
-                self.storage_data_frame = Some(data);
-                memory.clear(data).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
-                self.map_ipc_private_page(
-                    process,
-                    data,
-                    logos_abi::STORAGE_DATA_BASE,
-                    MappingFlags::DATA,
-                )?;
+                for page in 0..logos_abi::STORAGE_DATA_PAGES {
+                    let data =
+                        self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+                    self.storage_data_frames[page] = Some(data);
+                    memory.clear(data).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+                    let address = logos_abi::STORAGE_DATA_BASE
+                        .checked_add(page * crate::loader::PAGE_SIZE)
+                        .ok_or(ServiceRuntimeError::IpcPrivateMapping(
+                            PageTableError::InvalidVirtualAddress,
+                        ))?;
+                    self.map_ipc_private_page(process, data, address, MappingFlags::DATA)?;
+                }
             }
             if service == ServiceId::Network && self.network_config.is_enabled() {
                 let config =
@@ -895,7 +902,7 @@ impl ServiceRuntime {
             self.storage_response = None;
             self.package_request = None;
             self.package_response = None;
-            if let Some(frame) = self.storage_data_frame {
+            for frame in self.storage_data_frames.iter().flatten().copied() {
                 memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
             }
         }
@@ -1018,7 +1025,7 @@ impl ServiceRuntime {
                     if amount > output.len() {
                         return Err(ProcessError::ReadFailure);
                     }
-                    let Some(frame) = self.storage_data_frame else {
+                    let Some(frame) = self.storage_data_frames[0] else {
                         return Err(ProcessError::ReadFailure);
                     };
                     unsafe {
@@ -1060,52 +1067,53 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::Image);
         }
 
-        let mut raw_reader = RuntimePackageReader::new(
-            self,
-            runtime_guard,
-            service,
-            package_generation,
-            0,
-            package_bytes,
-        );
-        let mut package_scratch = [0; crate::loader::PAGE_SIZE];
-        let mut prefix = [0; 10];
-        logos_package::PackageReader::read(&mut raw_reader, 0, &mut prefix)
-            .map_err(|_| ServiceRuntimeError::Image)?;
-        let format_version = u16::from_le_bytes([prefix[8], prefix[9]]);
-        let (payload_offset, payload_length) = if format_version
-            == logos_package::PACKAGE_FORMAT_VERSION_V2
-        {
-            let header = logos_package::validate_package_v2(&mut raw_reader, &mut package_scratch)
-                .map_err(|_| ServiceRuntimeError::Image)?;
-            if header.manifest.kind != logos_package::PackageKind::Service
-                || header.manifest.target != logos_package::PackageTarget::Service(service)
-            {
-                return Err(ServiceRuntimeError::Image);
-            }
-            (logos_package::PACKAGE_HEADER_V2_BYTES, header.payload_length as usize)
-        } else {
-            let header = logos_package::validate_package(
-                &mut raw_reader,
+        let (payload_offset, payload_length) = {
+            let mut raw_reader = RuntimePackageReader::new(
+                self,
+                runtime_guard,
                 service,
-                logos_abi::ABI_VERSION,
-                &mut package_scratch,
-            )
-            .map_err(|_| ServiceRuntimeError::Image)?;
-            (logos_package::PACKAGE_HEADER_BYTES, header.payload_length as usize)
+                package_generation,
+                0,
+                package_bytes,
+            );
+            let mut package_scratch = [0; crate::loader::PAGE_SIZE];
+            let mut prefix = [0; 10];
+            logos_package::PackageReader::read(&mut raw_reader, 0, &mut prefix)
+                .map_err(|_| ServiceRuntimeError::Image)?;
+            let format_version = u16::from_le_bytes([prefix[8], prefix[9]]);
+            if format_version == logos_package::PACKAGE_FORMAT_VERSION_V2 {
+                let header =
+                    logos_package::validate_package_v2(&mut raw_reader, &mut package_scratch)
+                        .map_err(|_| ServiceRuntimeError::Image)?;
+                if header.manifest.kind != logos_package::PackageKind::Service
+                    || header.manifest.target != logos_package::PackageTarget::Service(service)
+                {
+                    return Err(ServiceRuntimeError::Image);
+                }
+                (logos_package::PACKAGE_HEADER_V2_BYTES, header.payload_length as usize)
+            } else {
+                let header = logos_package::validate_package(
+                    &mut raw_reader,
+                    service,
+                    logos_abi::ABI_VERSION,
+                    &mut package_scratch,
+                )
+                .map_err(|_| ServiceRuntimeError::Image)?;
+                (logos_package::PACKAGE_HEADER_BYTES, header.payload_length as usize)
+            }
         };
-        drop(raw_reader);
-        let mut payload_reader = RuntimePackageReader::new(
-            self,
-            runtime_guard,
-            service,
-            package_generation,
-            payload_offset,
-            payload_length,
-        );
-        let plan = crate::process::ElfLoadPlan::parse_reader(&mut payload_reader)
-            .map_err(|_| ServiceRuntimeError::Image)?;
-        drop(payload_reader);
+        let plan = {
+            let mut payload_reader = RuntimePackageReader::new(
+                self,
+                runtime_guard,
+                service,
+                package_generation,
+                payload_offset,
+                payload_length,
+            );
+            crate::process::ElfLoadPlan::parse_reader(&mut payload_reader)
+                .map_err(|_| ServiceRuntimeError::Image)?
+        };
         let stack_pages = match service {
             ServiceId::Storage => crate::process::STORAGE_STACK_PAGES,
             ServiceId::Network => crate::process::NETWORK_STACK_PAGES,
@@ -1499,7 +1507,7 @@ impl ServiceRuntime {
                             0,
                             request.transaction_id,
                         )
-                    } else if let Some(data) = self.storage_data_frame {
+                    } else if let Some(data) = self.storage_data_frames[0] {
                         let status =
                             match crate::arch::transfer_storage_block(request, data.raw() as usize)
                             {
@@ -2061,6 +2069,243 @@ impl ServiceRuntime {
         self.processes.fault(process, vector)
     }
 
+    /// Remove a tracked process mapping from its page table and process table.
+    /// The operation is bounded by the mapping's fixed page count.
+    #[allow(dead_code)]
+    pub(crate) fn unmap_process_mapping(
+        &mut self,
+        process: ProcessHandle,
+        mapping_index: usize,
+    ) -> Result<VirtualMapping, ServiceRuntimeError> {
+        let mapping = self
+            .processes
+            .mapping(process, mapping_index)
+            .ok_or(ServiceRuntimeError::Process(ProcessError::AddressSpace))?;
+        let service = self
+            .service_for_process(process)
+            .ok_or(ServiceRuntimeError::Process(ProcessError::InvalidHandle))?;
+        let index = service.index();
+        if !self.table_ready[index] {
+            return Err(ServiceRuntimeError::Process(ProcessError::AddressSpace));
+        }
+        let tables = unsafe { self.tables[index].assume_init_mut() };
+        let mut memory = IdentityPageTableMemory;
+        for page in 0..mapping.pages() {
+            let address = mapping
+                .virtual_address()
+                .checked_add(page * crate::loader::PAGE_SIZE)
+                .ok_or(ServiceRuntimeError::PageTableMap(PageTableError::InvalidMapping))?;
+            tables.unmap_page(address, &mut memory).map_err(ServiceRuntimeError::PageTableMap)?;
+        }
+        self.processes.unmap(process, mapping_index).map_err(ServiceRuntimeError::Process)
+    }
+
+    /// Map Storage-owned cache pages read-only into an authorized Flow/Fetch window.
+    #[allow(dead_code)]
+    pub(crate) fn map_storage_window(
+        &mut self,
+        request: crate::storage_ipc::StorageMapRequest,
+        cache_start: u64,
+    ) -> Result<crate::storage_ipc::StorageMapResponse, PageTableError> {
+        let client_slot = crate::storage_ipc::storage_map_client_slot(request.client)
+            .ok_or(PageTableError::InvalidMapping)?;
+        let windows = self.storage_map_windows[client_slot];
+        crate::storage_ipc::validate_map_request(
+            request,
+            self.service_epoch,
+            request.client,
+            cache_start,
+            &windows,
+        )
+        .map_err(|_| PageTableError::InvalidMapping)?;
+        let window_slot =
+            windows.iter().position(Option::is_none).ok_or(PageTableError::Capacity)?;
+        let service = match client_slot {
+            0 => ServiceId::Flow,
+            1 => ServiceId::Fetch,
+            _ => return Err(PageTableError::InvalidMapping),
+        };
+        let process = self
+            .launch(service)
+            .map(|(process, _)| process)
+            .ok_or(PageTableError::InvalidMapping)?;
+        let source_slot =
+            request.source_page.checked_sub(cache_start).ok_or(PageTableError::InvalidFrame)?
+                as usize;
+        let last_slot =
+            source_slot.checked_add(request.pages as usize).ok_or(PageTableError::InvalidFrame)?;
+        if last_slot > logos_abi::STORAGE_CACHE_PAGES {
+            return Err(PageTableError::InvalidFrame);
+        }
+        if !self.table_ready[service.index()] {
+            return Err(PageTableError::InvalidMapping);
+        }
+        let tables = unsafe { self.tables[service.index()].assume_init_mut() };
+        let mut memory = IdentityPageTableMemory;
+        for page in 0..request.pages as usize {
+            let virtual_address = request.target_page as usize + page * crate::loader::PAGE_SIZE;
+            let frame = self.storage_data_frames[1 + source_slot + page]
+                .ok_or(PageTableError::InvalidFrame)?;
+            if let Err(error) = tables.map_raw_page(
+                virtual_address,
+                frame,
+                MappingFlags::READ_ONLY_DATA,
+                &mut self.frame_pool,
+                &mut memory,
+            ) {
+                for rollback in 0..page {
+                    let address =
+                        request.target_page as usize + rollback * crate::loader::PAGE_SIZE;
+                    let _ = tables.unmap_page(address, &mut memory);
+                }
+                for index in 0..crate::process::MAX_MAPPINGS_PER_ADDRESS_SPACE {
+                    if self.processes.mapping(process, index).is_some_and(|mapping| {
+                        mapping.virtual_address() >= request.target_page as usize
+                            && mapping.virtual_address()
+                                < request.target_page as usize
+                                    + request.pages as usize * crate::loader::PAGE_SIZE
+                    }) {
+                        let _ = self.processes.unmap(process, index);
+                    }
+                }
+                return Err(error);
+            }
+            let mapping = match VirtualMapping::new(
+                virtual_address,
+                frame.raw() as usize,
+                1,
+                MappingFlags::READ_ONLY_DATA,
+            ) {
+                Some(mapping) => mapping,
+                None => {
+                    let _ = tables.unmap_page(virtual_address, &mut memory);
+                    for rollback in 0..page {
+                        let address =
+                            request.target_page as usize + rollback * crate::loader::PAGE_SIZE;
+                        let _ = tables.unmap_page(address, &mut memory);
+                    }
+                    return Err(PageTableError::InvalidMapping);
+                }
+            };
+            if let Err(error) = self.processes.map(process, mapping) {
+                let _ = tables.unmap_page(virtual_address, &mut memory);
+                for rollback in 0..page {
+                    let address =
+                        request.target_page as usize + rollback * crate::loader::PAGE_SIZE;
+                    let _ = tables.unmap_page(address, &mut memory);
+                }
+                for index in 0..crate::process::MAX_MAPPINGS_PER_ADDRESS_SPACE {
+                    if self.processes.mapping(process, index).is_some_and(|mapping| {
+                        mapping.virtual_address() >= request.target_page as usize
+                            && mapping.virtual_address()
+                                < request.target_page as usize
+                                    + request.pages as usize * crate::loader::PAGE_SIZE
+                    }) {
+                        let _ = self.processes.unmap(process, index);
+                    }
+                }
+                return Err(match error {
+                    ProcessError::Capacity => PageTableError::Capacity,
+                    _ => PageTableError::InvalidMapping,
+                });
+            }
+        }
+        self.storage_map_windows[client_slot][window_slot] =
+            Some(crate::storage_ipc::StorageMapWindow {
+                target_page: request.target_page,
+                pages: request.pages,
+                generation: request.window_generation,
+            });
+        Ok(crate::storage_ipc::StorageMapResponse::accepted(request))
+    }
+
+    /// Select a Core-owned target window for a Storage map descriptor.
+    #[allow(dead_code)]
+    pub(crate) fn map_storage_descriptor(
+        &mut self,
+        generation: u64,
+        client: u16,
+        descriptor: &[u8],
+    ) -> Result<crate::storage_ipc::StorageMapResponse, PageTableError> {
+        let client_slot = crate::storage_ipc::storage_map_client_slot(client)
+            .ok_or(PageTableError::InvalidMapping)?;
+        let window_slot = self.storage_map_windows[client_slot]
+            .iter()
+            .position(Option::is_none)
+            .ok_or(PageTableError::Capacity)?;
+        let target_page = crate::storage_ipc::storage_map_target(client_slot, window_slot)
+            .ok_or(PageTableError::InvalidMapping)?;
+        let request = crate::storage_ipc::map_request_from_descriptor(
+            generation,
+            client,
+            target_page,
+            (window_slot as u32).saturating_add(1),
+            descriptor,
+        )
+        .ok_or(PageTableError::InvalidMapping)?;
+        self.map_storage_window(request, crate::storage_ipc::STORAGE_CACHE_START)
+    }
+
+    /// Unmap a previously granted Storage window and reject stale generations.
+    #[allow(dead_code)]
+    pub(crate) fn unmap_storage_window(
+        &mut self,
+        request: crate::storage_ipc::StorageMapRelease,
+    ) -> Result<(), PageTableError> {
+        let client_slot = crate::storage_ipc::storage_map_client_slot(request.client)
+            .ok_or(PageTableError::InvalidMapping)?;
+        if request.generation != self.service_epoch || request.window_generation == 0 {
+            return Err(PageTableError::InvalidMapping);
+        }
+        let Some((window_slot, window)) =
+            self.storage_map_windows[client_slot].iter().enumerate().find_map(|(slot, window)| {
+                window.and_then(|window| {
+                    (window.target_page == request.target_page
+                        && window.generation == request.window_generation)
+                        .then_some((slot, window))
+                })
+            })
+        else {
+            return Err(PageTableError::InvalidMapping);
+        };
+        let service = if client_slot == 0 { ServiceId::Flow } else { ServiceId::Fetch };
+        let process = self
+            .launch(service)
+            .map(|(process, _)| process)
+            .ok_or(PageTableError::InvalidMapping)?;
+        for page in 0..window.pages as usize {
+            let virtual_address = window.target_page as usize + page * crate::loader::PAGE_SIZE;
+            let mapping_index = (0..crate::process::MAX_MAPPINGS_PER_ADDRESS_SPACE)
+                .find(|index| {
+                    self.processes.mapping(process, *index).is_some_and(|mapping| {
+                        mapping.virtual_address() == virtual_address
+                            && mapping.pages() == 1
+                            && mapping.flags() == MappingFlags::READ_ONLY_DATA
+                    })
+                })
+                .ok_or(PageTableError::InvalidMapping)?;
+            self.unmap_process_mapping(process, mapping_index)
+                .map_err(|_| PageTableError::InvalidMapping)?;
+        }
+        self.storage_map_windows[client_slot][window_slot] = None;
+        Ok(())
+    }
+
+    /// Release a Core-selected window returned by `map_storage_descriptor`.
+    #[allow(dead_code)]
+    pub(crate) fn unmap_storage_response(
+        &mut self,
+        client: u16,
+        response: crate::storage_ipc::StorageMapResponse,
+    ) -> Result<(), PageTableError> {
+        self.unmap_storage_window(crate::storage_ipc::StorageMapRelease {
+            generation: response.generation,
+            client,
+            target_page: response.target_page,
+            window_generation: response.window_generation,
+        })
+    }
+
     /// Stop every service task at a scheduler boundary before reclaiming any
     /// process frames or page-table roots.
     fn restart(
@@ -2294,6 +2539,8 @@ impl ServiceRuntime {
     }
 
     fn reclaim_resources(&mut self) -> Result<(), ServiceRuntimeError> {
+        self.storage_map_windows = [[None; crate::storage_ipc::STORAGE_MAP_WINDOWS_PER_CLIENT];
+            crate::storage_ipc::STORAGE_MAP_CLIENTS];
         if let Some(graph) = self.ipc.as_mut() {
             graph.disconnect();
             graph.reclaim(&mut self.frame_pool).map_err(ServiceRuntimeError::Ipc)?;
@@ -2304,9 +2551,10 @@ impl ServiceRuntime {
         self.package_response = None;
         self.network_packet_response = None;
         self.network_packet_sequence = self.network_packet_sequence.wrapping_add(1).max(1);
-        if let Some(frame) = self.storage_data_frame {
-            self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.storage_data_frame = None;
+        for frame in &mut self.storage_data_frames {
+            if let Some(frame) = frame.take() {
+                self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+            }
         }
         if let Some(frame) = self.network_config_frame {
             self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
