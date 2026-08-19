@@ -55,7 +55,15 @@ deferred. Global `fetch(url)` is deferred; use `net.fetch(url)`.
 Type failures include a bounded diagnostic and source span. The failed expression does not cancel
 unrelated promise slots. Ctrl-C cancels the foreground evaluation; `promise.cancel()` cancels that
 promise explicitly. Completion is owned by Flow and is generated from the same typed registry.
-Late completion replies are discarded by request ID and line revision.
+After typing a completion point such as `fs.open("/notes").`, matching candidates are requested
+proactively. The typed prefix remains in the command line while the first visible candidate suffix
+is shown as the active inline ghost and the following candidates appear on aligned rows below it.
+The list is bounded and shows `... more` when additional candidates exist. Up/Down rotates the
+visible list, Tab accepts the active ghost, Enter executes the typed line, and Escape or edits
+dismiss and refresh the suggestions. Late completion replies are discarded by request ID and line
+revision. Accepted call templates retain their argument delimiters and place the cursor in the
+first empty string, array, or brace placeholder; when earlier arguments are populated, placement
+advances to the next empty placeholder.
 
 Paths are root-relative when written without `/`. Mutating Storage operations use one bounded
 Begin → operation → Commit transaction. `net.fetch(url, destination)` stages and atomically

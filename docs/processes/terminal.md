@@ -16,8 +16,9 @@ flowchart LR
     T --> D[Display]
 ```
 
-Session owns line editing, history, completion requests, and prompt state. Flow owns source spans,
-typed operation lookup, fixed variables, promise slots, cancellation, diagnostics, and dispatch.
+Session owns line editing, history, proactive completion requests, the bounded rotating inline
+completion window, active ghost acceptance, and prompt state. Flow owns source spans, typed operation
+lookup, fixed variables, promise slots, cancellation, diagnostics, and dispatch.
 Storage, Network, Supervisor, and Fetch retain ownership of their state and expose only bounded IPC
 operations.
 

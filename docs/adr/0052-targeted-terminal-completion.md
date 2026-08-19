@@ -4,7 +4,7 @@ Status: Accepted
 
 ## Decision
 
-Completion is an optional Commands-owned sub-service exposed through the existing Session↔Commands
+Completion is an optional Flow-owned sub-service exposed through the existing Session↔Flow
 IPC queues. It is enabled by default by the Session constructor and adds no ring-3 service, endpoint,
 or dependency. Requests and responses use fixed-size ABI records with bounded line contents,
 replacement ranges, candidate counts, and candidate bytes.
@@ -20,5 +20,9 @@ a completion-only failure and follows the existing graph-restart policy.
 
 ## Consequences
 
-Session owns the bounded inline-ghost interaction and stale-response checks. No scrolling or general
-popup framework is added.
+Session owns the bounded inline-ghost window, active-candidate rotation, acceptance, and stale-
+response checks. Candidate suffixes share the replacement cursor position; the active first row is
+rendered on the command line and subsequent rows use bounded cursor save/restore movement. The
+visible window is capped and reports additional results with an indicator. No scrolling or general
+popup framework is added. Accepted candidates retain empty argument delimiters and carry a bounded
+cursor offset for the first empty string, array, or brace placeholder.
