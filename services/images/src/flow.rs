@@ -1582,12 +1582,13 @@ struct StorageProof {
     step: u8,
     active: bool,
     recovery: bool,
+    shutdown_attempted: bool,
 }
 
 #[cfg(feature = "storage-proof")]
 impl StorageProof {
     const fn new() -> Self {
-        Self { step: 0, active: false, recovery: false }
+        Self { step: 0, active: false, recovery: false, shutdown_attempted: false }
     }
 
     fn active(&self) -> bool {
@@ -1681,6 +1682,14 @@ impl StorageProof {
             self.active = true;
         }
         started
+    }
+
+    fn request_shutdown(&mut self) -> bool {
+        if self.step != u8::MAX || self.shutdown_attempted {
+            return false;
+        }
+        self.shutdown_attempted = true;
+        common::power(logos_flow::FlowAction::Shutdown as usize) != 0
     }
 }
 
@@ -2312,6 +2321,10 @@ pub extern "C" fn _start() -> ! {
         }
         #[cfg(feature = "storage-proof")]
         if proof.start_next(storage, pending) {
+            progressed = true;
+        }
+        #[cfg(feature = "storage-proof")]
+        if proof.request_shutdown() {
             progressed = true;
         }
         let mut message = IpcBytes::empty(MessageKind::SessionInput);

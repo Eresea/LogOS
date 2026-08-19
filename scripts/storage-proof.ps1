@@ -116,8 +116,8 @@ function Invoke-StorageBoot {
                     }
                 }
                 if ($allMarkersFound) {
-                    Start-Sleep -Milliseconds 500
-                    return $true
+                    $process.WaitForExit(10000) | Out-Null
+                    return $process.HasExited
                 }
                 if ($text -match '(?i)(?:FATAL|QEMU proof FAIL|panic)') { return $false }
             }
@@ -139,7 +139,8 @@ function Invoke-StorageBoot {
 if (-not (Invoke-StorageBoot -ExpectedMarkers @(
         'LogOS vNext: storage proof PASS',
         'LogOS vNext: storage command API PASS',
-        'LogOS vNext: storage command API cleanup PASS'
+        'LogOS vNext: storage command API cleanup PASS',
+        'LogOS vNext: shutdown requested'
     ))) {
     throw "Storage format/write/flush proof failed. Log: $log"
 }
@@ -151,7 +152,8 @@ Corrupt-InactiveCowSuperblock $disk
 if (-not (Invoke-StorageBoot -ExpectedMarkers @(
         'LogOS vNext: storage recovery PASS',
         'LogOS vNext: storage command API recovery PASS',
-        'LogOS vNext: storage command API cleanup PASS'
+        'LogOS vNext: storage command API cleanup PASS',
+        'LogOS vNext: shutdown requested'
     ))) {
     throw "Storage reboot/recovery proof failed. Log: $log"
 }
