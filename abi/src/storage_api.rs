@@ -1,10 +1,14 @@
 use super::{IPC_FLAG_MORE, IpcBytes, MAX_IPC_BYTES, MessageKind};
 
 pub const STORAGE_API_VERSION: u8 = 2;
+pub const STORAGE_API_EXTENSION_VERSION: u8 = 3;
+const _: () = assert!(STORAGE_API_EXTENSION_VERSION == STORAGE_API_VERSION + 1);
 pub const STORAGE_API_FLAG_REPLACE: u8 = 1;
 const REQUEST_HEADER_BYTES: usize = 26;
 const RESPONSE_HEADER_BYTES: usize = 18;
 pub const STORAGE_API_RESPONSE_DATA_BYTES: usize = MAX_IPC_BYTES - RESPONSE_HEADER_BYTES;
+pub const STORAGE_API_MAP_LENGTH_BYTES: usize = 4;
+pub const STORAGE_API_MAP_DESCRIPTOR_BYTES: usize = 9;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -25,6 +29,15 @@ pub enum StorageApiOperation {
     PackageList = 14,
     PackageInfo = 15,
     PackageInstall = 16,
+    Open = 17,
+    Close = 18,
+    Stat = 19,
+    Mkdir = 20,
+    HandleRead = 21,
+    HandleWrite = 22,
+    Fsync = 23,
+    MapRead = 24,
+    UnmapRead = 25,
 }
 
 impl StorageApiOperation {
@@ -46,6 +59,15 @@ impl StorageApiOperation {
             14 => Some(Self::PackageList),
             15 => Some(Self::PackageInfo),
             16 => Some(Self::PackageInstall),
+            17 => Some(Self::Open),
+            18 => Some(Self::Close),
+            19 => Some(Self::Stat),
+            20 => Some(Self::Mkdir),
+            21 => Some(Self::HandleRead),
+            22 => Some(Self::HandleWrite),
+            23 => Some(Self::Fsync),
+            24 => Some(Self::MapRead),
+            25 => Some(Self::UnmapRead),
             _ => None,
         }
     }
@@ -253,6 +275,23 @@ fn request_shape_is_valid(
         }
         StorageApiOperation::PackageInstall => {
             !path.is_empty() && secondary_path.is_empty() && data.is_empty()
+        }
+        StorageApiOperation::Open | StorageApiOperation::Stat | StorageApiOperation::Mkdir => {
+            !path.is_empty() && secondary_path.is_empty() && data.is_empty()
+        }
+        StorageApiOperation::Close
+        | StorageApiOperation::HandleRead
+        | StorageApiOperation::UnmapRead => {
+            path.is_empty() && secondary_path.is_empty() && data.is_empty()
+        }
+        StorageApiOperation::MapRead => {
+            path.is_empty()
+                && secondary_path.is_empty()
+                && data.len() == STORAGE_API_MAP_LENGTH_BYTES
+        }
+        StorageApiOperation::HandleWrite => path.is_empty() && secondary_path.is_empty(),
+        StorageApiOperation::Fsync => {
+            path.is_empty() && secondary_path.is_empty() && data.is_empty()
         }
     }
 }

@@ -25,8 +25,9 @@ pub use service_manager::{
     ServiceManagerRecord,
 };
 pub use storage_api::{
-    STORAGE_API_FLAG_REPLACE, STORAGE_API_RESPONSE_DATA_BYTES, STORAGE_API_VERSION,
-    StorageApiError, StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus,
+    STORAGE_API_FLAG_REPLACE, STORAGE_API_MAP_DESCRIPTOR_BYTES, STORAGE_API_MAP_LENGTH_BYTES,
+    STORAGE_API_RESPONSE_DATA_BYTES, STORAGE_API_VERSION, StorageApiError, StorageApiOperation,
+    StorageApiRequest, StorageApiResponse, StorageApiStatus,
 };
 
 pub const ABI_VERSION: u16 = 3;
@@ -65,10 +66,13 @@ pub const RENDER_FLAG_MORE: u8 = IPC_FLAG_MORE;
 pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
 pub const IPC_STAGING_BASE: usize = SERVICE_IPC_BASE + 0x14_000;
 pub const STORAGE_DATA_BASE: usize = SERVICE_IPC_BASE + 0x15_000;
-pub const IPC_CAPABILITY_BASE: usize = SERVICE_IPC_BASE + 0x16_000;
+pub const STORAGE_CACHE_PAGES: usize = 32;
+pub const STORAGE_CACHE_BASE: usize = STORAGE_DATA_BASE + IPC_PAGE_BYTES;
+pub const STORAGE_DATA_PAGES: usize = STORAGE_CACHE_PAGES + 1;
+pub const IPC_CAPABILITY_BASE: usize = STORAGE_CACHE_BASE + STORAGE_CACHE_PAGES * IPC_PAGE_BYTES;
 pub const MANAGER_CAPABILITY_BASE: usize = IPC_CAPABILITY_BASE + IPC_PAGE_BYTES;
 pub const MANAGER_CAPABILITY_SLOT: usize = 0;
-pub const NETWORK_CONFIG_BASE: usize = SERVICE_IPC_BASE + 0x1a_000;
+pub const NETWORK_CONFIG_BASE: usize = SERVICE_IPC_BASE + 0x3a_000;
 pub const MAX_IPC_CAPABILITIES: usize = 8;
 pub const MAX_MANAGER_SERVICES: usize = 8;
 pub const MAX_SERVICE_NAME_BYTES: usize = 16;
@@ -86,7 +90,7 @@ pub const NETWORK_PACKET_PAGE_COUNT: usize = 32;
 pub const NETWORK_PACKET_PAGE_BYTES: usize = NETWORK_DMA_BUFFER_BYTES;
 pub const NETWORK_RX_PACKET_PAGES: usize = 16;
 pub const NETWORK_TX_PACKET_PAGES: usize = 16;
-pub const NETWORK_PACKET_BASE: usize = SERVICE_IPC_BASE + 0x1b_000;
+pub const NETWORK_PACKET_BASE: usize = SERVICE_IPC_BASE + 0x3b_000;
 pub const NETWORK_GATEWAY_ARP_DEADLINE_TICKS: u32 = 5_000;
 pub const NETWORK_DHCP_DEADLINE_TICKS: u32 = 10_000;
 // Keep interactive network probes below the bounded Flow receive budget.
@@ -1973,6 +1977,8 @@ mod tests {
         assert!(core::mem::size_of::<ManagerRequest>() <= IPC_PAGE_BYTES);
         assert!(core::mem::size_of::<ManagerResponse>() <= IPC_PAGE_BYTES);
         assert_eq!(MANAGER_CAPABILITY_BASE, IPC_CAPABILITY_BASE + IPC_PAGE_BYTES);
+        assert_eq!(STORAGE_CACHE_BASE, STORAGE_DATA_BASE + IPC_PAGE_BYTES);
+        assert_eq!(STORAGE_DATA_PAGES, STORAGE_CACHE_PAGES + 1);
     }
 
     #[test]

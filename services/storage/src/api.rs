@@ -3,11 +3,17 @@ use logos_abi::{
     StorageApiRequest, StorageApiResponse, StorageApiStatus,
 };
 use logos_storage::BlockStore;
+use logos_storage::ReadMap;
 
-use crate::{DurableNamespace, MAX_FILE_BYTES, NamespaceError, NamespaceTransaction};
+use crate::{
+    DurableNamespace, MAX_FILE_BYTES, NamespaceError, NamespaceTransaction, ObjectNamespace,
+};
 
 const STAGE_CHUNK_BYTES: usize = 192;
 const STAGE_PATH_BYTES: usize = logos_abi::MAX_IPC_BYTES - 26;
+const MAX_HANDLES: usize = 8;
+const MAX_READ_MAPS: usize = 4;
+const STAT_WIRE_BYTES: usize = 19;
 
 pub fn error_response(message: &IpcBytes, status: StorageApiStatus) -> Option<IpcBytes> {
     let request = match StorageApiRequest::decode(message) {
@@ -50,12 +56,35 @@ struct StagedWrite {
     len: usize,
 }
 
+#[derive(Clone, Copy)]
+struct FileHandle {
+    generation: u32,
+    object: Option<crate::ObjectId>,
+}
+
+#[derive(Clone, Copy)]
+struct ReadMapping {
+    generation: u32,
+    object: Option<crate::ObjectId>,
+    mapping: Option<ReadMap>,
+}
+
+impl ReadMapping {
+    const EMPTY: Self = Self { generation: 1, object: None, mapping: None };
+}
+
+impl FileHandle {
+    const EMPTY: Self = Self { generation: 1, object: None };
+}
+
 pub struct StorageApi<B> {
     namespace: DurableNamespace<B>,
     active: Option<ActiveTransaction>,
     next_transaction: u64,
     next_stage: u64,
     staged: Option<StagedWrite>,
+    handles: [FileHandle; MAX_HANDLES],
+    maps: [ReadMapping; MAX_READ_MAPS],
     failed: bool,
 }
 
@@ -67,6 +96,8 @@ impl<B: BlockStore> StorageApi<B> {
             next_transaction: 1,
             next_stage: 1,
             staged: None,
+            handles: [FileHandle::EMPTY; MAX_HANDLES],
+            maps: [ReadMapping::EMPTY; MAX_READ_MAPS],
             failed: false,
         }
     }
@@ -121,6 +152,15 @@ impl<B: BlockStore> StorageApi<B> {
             StorageApiOperation::PackageList => self.package_list(&request),
             StorageApiOperation::PackageInfo => self.package_info(&request),
             StorageApiOperation::PackageInstall => self.package_install(&request),
+            StorageApiOperation::Open => self.open(&request),
+            StorageApiOperation::Close => self.close(&request),
+            StorageApiOperation::Stat => self.stat(&request),
+            StorageApiOperation::HandleRead => self.handle_read(&request),
+            StorageApiOperation::HandleWrite => self.handle_write(&request),
+            StorageApiOperation::MapRead => self.map_read(&request),
+            StorageApiOperation::UnmapRead => self.unmap_read(&request),
+            StorageApiOperation::Fsync => self.fsync(&request),
+            StorageApiOperation::Mkdir => self.mkdir(&request),
         };
         Self::encode(request.request_id, response)
     }
@@ -161,7 +201,7 @@ impl<B: BlockStore> StorageApi<B> {
         match active.transaction.commit(&mut self.namespace) {
             Ok(_) => ResponsePayload::empty(StorageApiStatus::Ok, id),
             Err(error) => {
-                if error == NamespaceError::Recovery {
+                if latches_storage_error(error) {
                     self.failed = true;
                 }
                 ResponsePayload::empty(map_error(error), id)
@@ -191,14 +231,18 @@ impl<B: BlockStore> StorageApi<B> {
         Ok(&active.transaction)
     }
 
-    fn transaction_mut(&mut self, id: u64) -> Result<&mut NamespaceTransaction, StorageApiStatus> {
+    fn transaction_mut_with_base(
+        &mut self,
+        id: u64,
+    ) -> Result<(&ObjectNamespace, &mut NamespaceTransaction), StorageApiStatus> {
+        let base = self.namespace.transaction_base();
         let Some(active) = &mut self.active else {
             return Err(StorageApiStatus::NoTransaction);
         };
         if id == 0 || active.id != id {
             return Err(StorageApiStatus::Stale);
         }
-        Ok(&mut active.transaction)
+        Ok((base, &mut active.transaction))
     }
 
     fn list(&self, request: &StorageApiRequest<'_>) -> ResponsePayload {
@@ -218,7 +262,9 @@ impl<B: BlockStore> StorageApi<B> {
             }
         } else {
             match self.transaction(request.transaction_id) {
-                Ok(transaction) => match transaction.list(request.path) {
+                Ok(transaction) => match transaction
+                    .list(self.namespace.transaction_base(), request.path)
+                {
                     Ok(list) => list,
                     Err(error) => {
                         return ResponsePayload::empty(map_error(error), request.transaction_id);
@@ -239,7 +285,8 @@ impl<B: BlockStore> StorageApi<B> {
             }
         } else {
             match self.transaction(request.transaction_id) {
-                Ok(transaction) => match transaction.stat_id(id) {
+                Ok(transaction) => match transaction.stat_id(self.namespace.transaction_base(), id)
+                {
                     Ok(info) => info,
                     Err(error) => {
                         return ResponsePayload::empty(map_error(error), request.transaction_id);
@@ -305,9 +352,177 @@ impl<B: BlockStore> StorageApi<B> {
         response
     }
 
+    fn open(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        if request.transaction_id != 0 {
+            return ResponsePayload::empty(StorageApiStatus::Invalid, request.transaction_id);
+        }
+        let object = match self.namespace.open_file(request.path) {
+            Ok(object) => object,
+            Err(error) => return ResponsePayload::empty(map_error(error), 0),
+        };
+        let Some((slot, handle)) =
+            self.handles.iter_mut().enumerate().find(|(_, handle)| handle.object.is_none())
+        else {
+            return ResponsePayload::empty(StorageApiStatus::Capacity, 0);
+        };
+        handle.object = Some(object);
+        ResponsePayload::empty(StorageApiStatus::Ok, encode_handle(slot, handle.generation))
+    }
+
+    fn close(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        let (slot, generation) = match decode_handle(request.transaction_id) {
+            Some(handle) => handle,
+            None => return ResponsePayload::empty(StorageApiStatus::Stale, request.transaction_id),
+        };
+        let handle = &mut self.handles[slot];
+        if handle.object.is_none() || handle.generation != generation {
+            return ResponsePayload::empty(StorageApiStatus::Stale, request.transaction_id);
+        }
+        if self.maps.iter().any(|map| map.object == handle.object) {
+            return ResponsePayload::empty(StorageApiStatus::Busy, request.transaction_id);
+        }
+        handle.object = None;
+        handle.generation = handle.generation.wrapping_add(1).max(1);
+        ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id)
+    }
+
+    fn object_for_handle(&self, token: u64) -> Result<crate::ObjectId, StorageApiStatus> {
+        let (slot, generation) = decode_handle(token).ok_or(StorageApiStatus::Stale)?;
+        let handle = &self.handles[slot];
+        if handle.generation != generation {
+            return Err(StorageApiStatus::Stale);
+        }
+        handle.object.ok_or(StorageApiStatus::Stale)
+    }
+
+    fn stat(&self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        let object = match self.namespace.resolve_path(request.path) {
+            Ok(object) => object,
+            Err(error) => return ResponsePayload::empty(map_error(error), 0),
+        };
+        let info = match self.namespace.stat(object) {
+            Ok(info) => info,
+            Err(error) => return ResponsePayload::empty(map_error(error), 0),
+        };
+        let mut response = ResponsePayload::empty(StorageApiStatus::Ok, 0);
+        response.data[0..2].copy_from_slice(&info.id.slot().to_le_bytes());
+        response.data[2..6].copy_from_slice(&info.id.generation().to_le_bytes());
+        response.data[6..8].copy_from_slice(&info.parent.slot().to_le_bytes());
+        response.data[8..12].copy_from_slice(&info.parent.generation().to_le_bytes());
+        response.data[12] = info.kind as u8;
+        response.data[13..17].copy_from_slice(&info.length.to_le_bytes());
+        response.data[17..19].copy_from_slice(&info.name_length.to_le_bytes());
+        response.len = STAT_WIRE_BYTES;
+        response
+    }
+
+    fn handle_read(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        let object = match self.object_for_handle(request.transaction_id) {
+            Ok(object) => object,
+            Err(status) => return ResponsePayload::empty(status, request.transaction_id),
+        };
+        let info = match self.namespace.stat(object) {
+            Ok(info) => info,
+            Err(error) => return ResponsePayload::empty(map_error(error), request.transaction_id),
+        };
+        let mut response = ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id);
+        let count =
+            match self.namespace.read_handle(object, request.offset as usize, &mut response.data) {
+                Ok(count) => count,
+                Err(error) => {
+                    return ResponsePayload::empty(map_error(error), request.transaction_id);
+                }
+            };
+        response.len = count;
+        response.more = request.offset as usize + count < info.length as usize;
+        response
+    }
+
+    fn handle_write(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        let object = match self.object_for_handle(request.transaction_id) {
+            Ok(object) => object,
+            Err(status) => return ResponsePayload::empty(status, request.transaction_id),
+        };
+        if self.maps.iter().any(|map| map.object == Some(object)) {
+            return ResponsePayload::empty(StorageApiStatus::Busy, request.transaction_id);
+        }
+        match self.namespace.write_handle(object, request.offset as usize, request.data) {
+            Ok(count) => {
+                let mut response =
+                    ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id);
+                response.data[..4].copy_from_slice(&(count as u32).to_le_bytes());
+                response.len = 4;
+                response
+            }
+            Err(error) => {
+                if latches_storage_error(error) {
+                    self.failed = true;
+                }
+                ResponsePayload::empty(map_error(error), request.transaction_id)
+            }
+        }
+    }
+
+    fn fsync(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        match self.namespace.flush() {
+            Ok(()) => ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id),
+            Err(error) => ResponsePayload::empty(map_error(error), request.transaction_id),
+        }
+    }
+
+    fn map_read(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        let object = match self.object_for_handle(request.transaction_id) {
+            Ok(object) => object,
+            Err(status) => return ResponsePayload::empty(status, request.transaction_id),
+        };
+        let length = u32::from_le_bytes(request.data.try_into().unwrap()) as usize;
+        let Some(slot) = self.maps.iter().position(|map| map.mapping.is_none()) else {
+            return ResponsePayload::empty(StorageApiStatus::Capacity, request.transaction_id);
+        };
+        let generation = self.maps[slot].generation;
+        let mapping = match self.namespace.map_read(object, request.offset as usize, length) {
+            Ok(mapping) => mapping,
+            Err(error) => return ResponsePayload::empty(map_error(error), request.transaction_id),
+        };
+        self.maps[slot].object = Some(object);
+        self.maps[slot].mapping = Some(mapping);
+        let token = encode_map_handle(slot, generation);
+        let mut response = ResponsePayload::empty(StorageApiStatus::Ok, token);
+        response.data[..8].copy_from_slice(&mapping.source_page.to_le_bytes());
+        response.data[8] = mapping.pages;
+        response.len = logos_abi::STORAGE_API_MAP_DESCRIPTOR_BYTES;
+        response
+    }
+
+    fn unmap_read(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        let (slot, generation) = match decode_map_handle(request.transaction_id) {
+            Some(handle) => handle,
+            None => return ResponsePayload::empty(StorageApiStatus::Stale, request.transaction_id),
+        };
+        let map = self.maps[slot];
+        if map.generation != generation || map.mapping.is_none() {
+            return ResponsePayload::empty(StorageApiStatus::Stale, request.transaction_id);
+        }
+        let mapping = map.mapping.expect("checked above");
+        if let Err(error) = self.namespace.unmap_read(mapping) {
+            return ResponsePayload::empty(map_error(error), request.transaction_id);
+        }
+        self.maps[slot].object = None;
+        self.maps[slot].mapping = None;
+        self.maps[slot].generation = self.maps[slot].generation.wrapping_add(1).max(1);
+        ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id)
+    }
+
+    fn mkdir(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        match self.namespace.mkdir_path(request.path) {
+            Ok(_) => ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id),
+            Err(error) => ResponsePayload::empty(map_error(error), request.transaction_id),
+        }
+    }
+
     fn create_file(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
-        match self.transaction_mut(request.transaction_id) {
-            Ok(transaction) => match transaction.create_file(request.path) {
+        match self.transaction_mut_with_base(request.transaction_id) {
+            Ok((base, transaction)) => match transaction.create_file(base, request.path) {
                 Ok(_) => ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id),
                 Err(error) => ResponsePayload::empty(map_error(error), request.transaction_id),
             },
@@ -315,7 +530,7 @@ impl<B: BlockStore> StorageApi<B> {
         }
     }
 
-    fn read(&self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+    fn read(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
         let mut response = ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id);
         if request.transaction_id == 0 {
             let id = match self.namespace.resolve_path(request.path) {
@@ -337,19 +552,23 @@ impl<B: BlockStore> StorageApi<B> {
                 Ok(transaction) => transaction,
                 Err(status) => return ResponsePayload::empty(status, request.transaction_id),
             };
-            let info = match transaction.stat(request.path) {
+            let info = match transaction.stat(self.namespace.transaction_base(), request.path) {
                 Ok(info) => info,
                 Err(error) => {
                     return ResponsePayload::empty(map_error(error), request.transaction_id);
                 }
             };
-            let count =
-                match transaction.read(request.path, request.offset as usize, &mut response.data) {
-                    Ok(count) => count,
-                    Err(error) => {
-                        return ResponsePayload::empty(map_error(error), request.transaction_id);
-                    }
-                };
+            let count = match transaction.read(
+                self.namespace.transaction_base(),
+                request.path,
+                request.offset as usize,
+                &mut response.data,
+            ) {
+                Ok(count) => count,
+                Err(error) => {
+                    return ResponsePayload::empty(map_error(error), request.transaction_id);
+                }
+            };
             response.more = request.offset as usize + count < info.length as usize;
             response.len = count;
         }
@@ -357,8 +576,17 @@ impl<B: BlockStore> StorageApi<B> {
     }
 
     fn write(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
-        match self.transaction_mut(request.transaction_id) {
-            Ok(transaction) => match transaction.write(
+        if self
+            .namespace
+            .resolve_path(request.path)
+            .ok()
+            .is_some_and(|object| self.maps.iter().any(|map| map.object == Some(object)))
+        {
+            return ResponsePayload::empty(StorageApiStatus::Busy, request.transaction_id);
+        }
+        match self.transaction_mut_with_base(request.transaction_id) {
+            Ok((base, transaction)) => match transaction.write(
+                base,
                 request.path,
                 request.offset as usize,
                 request.data,
@@ -372,8 +600,8 @@ impl<B: BlockStore> StorageApi<B> {
     }
 
     fn remove(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
-        match self.transaction_mut(request.transaction_id) {
-            Ok(transaction) => match transaction.remove(request.path) {
+        match self.transaction_mut_with_base(request.transaction_id) {
+            Ok((base, transaction)) => match transaction.remove(base, request.path) {
                 Ok(()) => ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id),
                 Err(error) => ResponsePayload::empty(map_error(error), request.transaction_id),
             },
@@ -382,11 +610,13 @@ impl<B: BlockStore> StorageApi<B> {
     }
 
     fn rename(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
-        match self.transaction_mut(request.transaction_id) {
-            Ok(transaction) => match transaction.rename(request.path, request.secondary_path) {
-                Ok(()) => ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id),
-                Err(error) => ResponsePayload::empty(map_error(error), request.transaction_id),
-            },
+        match self.transaction_mut_with_base(request.transaction_id) {
+            Ok((base, transaction)) => {
+                match transaction.rename(base, request.path, request.secondary_path) {
+                    Ok(()) => ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id),
+                    Err(error) => ResponsePayload::empty(map_error(error), request.transaction_id),
+                }
+            }
             Err(status) => ResponsePayload::empty(status, request.transaction_id),
         }
     }
@@ -438,10 +668,11 @@ impl<B: BlockStore> StorageApi<B> {
         }
         let path = &stage.path[..stage.path_len];
         let mut transaction = self.namespace.begin_transaction();
-        let result = match transaction.stat(path) {
-            Ok(_) => transaction.write(path, 0, &stage.data[..stage.len], true).map(|_| ()),
-            Err(NamespaceError::NotFound) => transaction.create_file(path).and_then(|_| {
-                transaction.write(path, 0, &stage.data[..stage.len], true).map(|_| ())
+        let base = self.namespace.transaction_base();
+        let result = match transaction.stat(base, path) {
+            Ok(_) => transaction.write(base, path, 0, &stage.data[..stage.len], true).map(|_| ()),
+            Err(NamespaceError::NotFound) => transaction.create_file(base, path).and_then(|_| {
+                transaction.write(base, path, 0, &stage.data[..stage.len], true).map(|_| ())
             }),
             Err(error) => Err(error),
         };
@@ -449,7 +680,7 @@ impl<B: BlockStore> StorageApi<B> {
             Ok(()) => match transaction.commit(&mut self.namespace) {
                 Ok(_) => ResponsePayload::empty(StorageApiStatus::Ok, stage.handle),
                 Err(error) => {
-                    if error == NamespaceError::Recovery {
+                    if latches_storage_error(error) {
                         self.failed = true;
                     }
                     ResponsePayload::empty(map_error(error), stage.handle)
@@ -472,6 +703,26 @@ impl<B: BlockStore> StorageApi<B> {
         }
         ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id)
     }
+}
+
+fn encode_handle(slot: usize, generation: u32) -> u64 {
+    ((generation as u64) << 32) | (slot as u64 + 1)
+}
+
+fn decode_handle(token: u64) -> Option<(usize, u32)> {
+    let slot = (token as u32).checked_sub(1)? as usize;
+    let generation = (token >> 32) as u32;
+    if slot >= MAX_HANDLES || generation == 0 { None } else { Some((slot, generation)) }
+}
+
+fn encode_map_handle(slot: usize, generation: u32) -> u64 {
+    ((generation as u64) << 32) | (slot as u64 + 1)
+}
+
+fn decode_map_handle(token: u64) -> Option<(usize, u32)> {
+    let slot = (token as u32).checked_sub(1)? as usize;
+    let generation = (token >> 32) as u32;
+    if slot >= MAX_READ_MAPS || generation == 0 { None } else { Some((slot, generation)) }
 }
 
 fn format_package_info(
@@ -599,6 +850,10 @@ fn map_error(error: NamespaceError) -> StorageApiStatus {
     }
 }
 
+fn latches_storage_error(error: NamespaceError) -> bool {
+    matches!(error, NamespaceError::Recovery | NamespaceError::Format(_) | NamespaceError::Block(_))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,7 +863,7 @@ mod tests {
         PACKAGE_HEADER_BYTES, PackageManifest, PackageName, SemanticVersion, ServicePackageHeader,
         crc32c,
     };
-    use logos_storage::{Block, BlockError, BlockIndex, BlockStore, MemoryBlockStore};
+    use logos_storage::{Block, BlockError, BlockIndex, BlockStore, MemoryBlockStore, ReadMap};
     use std::boxed::Box;
 
     struct HeapStore(Box<MemoryBlockStore<96>>);
@@ -628,6 +883,21 @@ mod tests {
 
         fn flush(&mut self) -> Result<(), BlockError> {
             self.0.flush()
+        }
+
+        fn map_read_blocks(
+            &mut self,
+            _start: BlockIndex,
+            blocks: u32,
+        ) -> Result<ReadMap, BlockError> {
+            if blocks == 0 || blocks > 16 {
+                return Err(BlockError::InvalidRequest);
+            }
+            Ok(ReadMap { source_page: 4, pages: blocks as u8 })
+        }
+
+        fn unmap_read(&mut self, _mapping: ReadMap) -> Result<(), BlockError> {
+            Ok(())
         }
     }
 
@@ -682,12 +952,26 @@ mod tests {
         flags: u8,
         request_id: u32,
     ) -> IpcBytes {
+        request_at(operation, transaction_id, 0, path, secondary_path, data, flags, request_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn request_at(
+        operation: StorageApiOperation,
+        transaction_id: u64,
+        offset: u32,
+        path: &[u8],
+        secondary_path: &[u8],
+        data: &[u8],
+        flags: u8,
+        request_id: u32,
+    ) -> IpcBytes {
         StorageApiRequest::encode(
             operation,
             flags,
             request_id,
             transaction_id,
-            0,
+            offset,
             path,
             secondary_path,
             data,
@@ -720,6 +1004,18 @@ mod tests {
         let response = error_response(&message, StorageApiStatus::Io).unwrap();
         assert_eq!(status(&response).status, StorageApiStatus::Invalid);
         assert_eq!(status(&response).request_id, 7);
+    }
+
+    #[test]
+    fn api_lists_the_root_on_a_fresh_v4_namespace() {
+        let namespace = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
+        let mut api = StorageApi::new(namespace);
+        let response =
+            api.handle(&request(StorageApiOperation::List, 0, b"/", b"", b"", 0, 1)).unwrap();
+        let response = status(&response);
+        assert_eq!(response.status, StorageApiStatus::Ok);
+        assert!(response.data.is_empty());
+        assert!(!response.more);
     }
 
     #[test]
@@ -779,6 +1075,255 @@ mod tests {
             api.handle(&request(StorageApiOperation::Read, 0, b"/proof", b"", b"", 0, 5)).unwrap();
         let read = status(&read_message);
         assert_eq!(read.data, b"durable");
+    }
+
+    #[test]
+    fn versioned_handles_are_durable_and_stale_after_close() {
+        let mut namespace = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
+        namespace.create_file(namespace.root(), b"handle").unwrap();
+        let mut api = StorageApi::new(namespace);
+
+        let opened_message =
+            api.handle(&request(StorageApiOperation::Open, 0, b"/handle", b"", b"", 0, 1)).unwrap();
+        let opened = status(&opened_message);
+        assert_eq!(opened.status, StorageApiStatus::Ok);
+        let handle = opened.transaction_id;
+
+        let written_message = api
+            .handle(&request(
+                StorageApiOperation::HandleWrite,
+                handle,
+                b"",
+                b"",
+                b"durable handle",
+                0,
+                2,
+            ))
+            .unwrap();
+        let written = status(&written_message);
+        assert_eq!(written.status, StorageApiStatus::Ok);
+        assert_eq!(u32::from_le_bytes(written.data.try_into().unwrap()), 14);
+
+        let read_message = api
+            .handle(&request(StorageApiOperation::HandleRead, handle, b"", b"", b"", 0, 3))
+            .unwrap();
+        let read = status(&read_message);
+        assert_eq!(read.status, StorageApiStatus::Ok);
+        assert_eq!(read.data, b"durable handle");
+
+        let stat_message =
+            api.handle(&request(StorageApiOperation::Stat, 0, b"/handle", b"", b"", 0, 4)).unwrap();
+        let stat = status(&stat_message);
+        assert_eq!(stat.status, StorageApiStatus::Ok);
+        assert_eq!(u32::from_le_bytes(stat.data[13..17].try_into().unwrap()), 14);
+
+        assert_eq!(
+            status(
+                &api.handle(&request(StorageApiOperation::Close, handle, b"", b"", b"", 0, 5))
+                    .unwrap()
+            )
+            .status,
+            StorageApiStatus::Ok
+        );
+        assert_eq!(
+            status(
+                &api.handle(
+                    &request(StorageApiOperation::HandleRead, handle, b"", b"", b"", 0, 6,)
+                )
+                .unwrap()
+            )
+            .status,
+            StorageApiStatus::Stale
+        );
+    }
+
+    #[test]
+    fn versioned_handle_overwrite_replaces_existing_file_contents() {
+        let mut namespace = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
+        namespace.create_file(namespace.root(), b"test").unwrap();
+        let mut api = StorageApi::new(namespace);
+        let opened =
+            api.handle(&request(StorageApiOperation::Open, 0, b"/test", b"", b"", 0, 1)).unwrap();
+        let handle = status(&opened).transaction_id;
+        assert_eq!(
+            status(
+                &api.handle(&request(
+                    StorageApiOperation::HandleWrite,
+                    handle,
+                    b"",
+                    b"",
+                    b"old",
+                    0,
+                    2,
+                ))
+                .unwrap()
+            )
+            .status,
+            StorageApiStatus::Ok
+        );
+        assert_eq!(
+            status(
+                &api.handle(&request(
+                    StorageApiOperation::HandleWrite,
+                    handle,
+                    b"",
+                    b"",
+                    b"123",
+                    0,
+                    3,
+                ))
+                .unwrap()
+            )
+            .status,
+            StorageApiStatus::Ok
+        );
+        let read =
+            api.handle(&request(StorageApiOperation::Read, 0, b"/test", b"", b"", 0, 4)).unwrap();
+        assert_eq!(status(&read).data, b"123");
+
+        let namespace = api.into_namespace();
+        let store = namespace.into_store();
+        let mut api = StorageApi::new(DurableNamespace::open(store).unwrap());
+        let read =
+            api.handle(&request(StorageApiOperation::Read, 0, b"/test", b"", b"", 0, 5)).unwrap();
+        assert_eq!(status(&read).data, b"123");
+    }
+
+    #[test]
+    fn map_read_pins_single_extent_and_rejects_stale_or_busy_handles() {
+        let mut namespace =
+            DurableNamespace::format(HeapStore(Box::new(MemoryBlockStore::<96>::new()))).unwrap();
+        let object = namespace.create_file(namespace.root(), b"mapped").unwrap();
+        let payload = std::vec![0x5a; 12 * logos_storage::BLOCK_BYTES];
+        namespace.write_handle(object, 0, &payload).unwrap();
+        let mut api = StorageApi::new(namespace);
+        let opened_message =
+            api.handle(&request(StorageApiOperation::Open, 0, b"/mapped", b"", b"", 0, 1)).unwrap();
+        let opened = status(&opened_message);
+        let file_handle = opened.transaction_id;
+        let length = (12 * logos_storage::BLOCK_BYTES as u32).to_le_bytes();
+        let mapped_message = api
+            .handle(&request_at(
+                StorageApiOperation::MapRead,
+                file_handle,
+                0,
+                b"",
+                b"",
+                &length,
+                0,
+                2,
+            ))
+            .unwrap();
+        let mapped = status(&mapped_message);
+        assert_eq!(mapped.status, StorageApiStatus::Ok);
+        assert_eq!(mapped.data.len(), logos_abi::STORAGE_API_MAP_DESCRIPTOR_BYTES);
+        assert_eq!(mapped.data[8], 12);
+        let map_handle = mapped.transaction_id;
+
+        assert_eq!(
+            status(
+                &api.handle(&request(StorageApiOperation::Close, file_handle, b"", b"", b"", 0, 3))
+                    .unwrap()
+            )
+            .status,
+            StorageApiStatus::Busy
+        );
+        assert_eq!(
+            status(
+                &api.handle(&request(
+                    StorageApiOperation::UnmapRead,
+                    map_handle,
+                    b"",
+                    b"",
+                    b"",
+                    0,
+                    4
+                ))
+                .unwrap()
+            )
+            .status,
+            StorageApiStatus::Ok
+        );
+        assert_eq!(
+            status(
+                &api.handle(&request(
+                    StorageApiOperation::UnmapRead,
+                    map_handle,
+                    b"",
+                    b"",
+                    b"",
+                    0,
+                    5
+                ))
+                .unwrap()
+            )
+            .status,
+            StorageApiStatus::Stale
+        );
+        assert_eq!(
+            status(
+                &api.handle(&request(StorageApiOperation::Close, file_handle, b"", b"", b"", 0, 6))
+                    .unwrap()
+            )
+            .status,
+            StorageApiStatus::Ok
+        );
+    }
+
+    #[test]
+    fn handle_stream_writes_cross_the_inline_cache_and_reopen() {
+        let mut namespace =
+            DurableNamespace::format(HeapStore(Box::new(MemoryBlockStore::<96>::new()))).unwrap();
+        namespace.create_file(namespace.root(), b"large").unwrap();
+        let mut api = StorageApi::new(namespace);
+        let opened =
+            api.handle(&request(StorageApiOperation::Open, 0, b"/large", b"", b"", 0, 1)).unwrap();
+        let handle = status(&opened).transaction_id;
+        let chunk = [0x5a; 192];
+        for index in 0..48u32 {
+            let response = api
+                .handle(&request_at(
+                    StorageApiOperation::HandleWrite,
+                    handle,
+                    index * chunk.len() as u32,
+                    b"",
+                    b"",
+                    &chunk,
+                    0,
+                    index + 2,
+                ))
+                .unwrap();
+            assert_eq!(status(&response).status, StorageApiStatus::Ok);
+        }
+        let stat = api
+            .handle(&request(StorageApiOperation::Stat, 0, b"/large", b"", b"", 0, 100))
+            .unwrap();
+        assert_eq!(status(&stat).status, StorageApiStatus::Ok);
+        assert_eq!(u32::from_le_bytes(status(&stat).data[13..17].try_into().unwrap()), 9216);
+
+        let namespace = api.into_namespace();
+        let store = namespace.into_store();
+        let namespace = DurableNamespace::open(store).unwrap();
+        let mut api = StorageApi::new(namespace);
+        let opened = api
+            .handle(&request(StorageApiOperation::Open, 0, b"/large", b"", b"", 0, 101))
+            .unwrap();
+        let handle = status(&opened).transaction_id;
+        let response = api
+            .handle(&request_at(
+                StorageApiOperation::HandleRead,
+                handle,
+                8800,
+                b"",
+                b"",
+                b"",
+                0,
+                102,
+            ))
+            .unwrap();
+        let response = status(&response);
+        assert_eq!(response.status, StorageApiStatus::Ok);
+        assert_eq!(response.data, &[0x5a; 238]);
     }
 
     #[test]
@@ -1007,7 +1552,7 @@ mod tests {
         assert_eq!(
             status(
                 &api.handle(&request(
-                    StorageApiOperation::StageWriteAbort,
+                    StorageApiOperation::StageWriteCommit,
                     replacement,
                     b"",
                     b"",
@@ -1023,7 +1568,48 @@ mod tests {
         let read_message =
             api.handle(&request(StorageApiOperation::Read, 0, b"/stage", b"", b"", 0, 10)).unwrap();
         let read = status(&read_message);
-        assert_eq!(read.data, b"hello world");
+        assert_eq!(read.data, b"new");
+
+        let replacement_message = api
+            .handle(&request(StorageApiOperation::StageWriteBegin, 0, b"/stage", b"", b"", 0, 11))
+            .unwrap();
+        let replacement = status(&replacement_message).transaction_id;
+        assert_eq!(
+            status(
+                &api.handle(&request(
+                    StorageApiOperation::StageWriteChunk,
+                    replacement,
+                    b"",
+                    b"",
+                    b"new",
+                    0,
+                    12
+                ))
+                .unwrap()
+            )
+            .status,
+            StorageApiStatus::Ok
+        );
+        assert_eq!(
+            status(
+                &api.handle(&request(
+                    StorageApiOperation::StageWriteAbort,
+                    replacement,
+                    b"",
+                    b"",
+                    b"",
+                    0,
+                    13
+                ))
+                .unwrap()
+            )
+            .status,
+            StorageApiStatus::Ok
+        );
+        let read_message =
+            api.handle(&request(StorageApiOperation::Read, 0, b"/stage", b"", b"", 0, 14)).unwrap();
+        let read = status(&read_message);
+        assert_eq!(read.data, b"new");
     }
 
     #[test]
