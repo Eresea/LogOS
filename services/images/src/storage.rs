@@ -6,9 +6,9 @@ mod common;
 
 use logos_abi::{
     IpcBytes, IpcCapability, IpcEndpointId, IpcStatus, MessageKind, PackageOperation,
-    PackageRequest, PackageResponse, PackageStatus, StorageApiOperation, StorageApiStatus,
-    StorageMapRequest, StorageMapResponse, StorageOperation, StorageRequest, StorageResponse,
-    StorageStatus,
+    PackageRequest, PackageResponse, PackageStatus, PackageTargetKind, StorageApiOperation,
+    StorageApiStatus, StorageMapRequest, StorageMapResponse, StorageOperation, StorageRequest,
+    StorageResponse, StorageStatus,
 };
 use logos_storage::Block;
 use logos_storage_service::{
@@ -280,7 +280,7 @@ fn handle_package_request<B: logos_storage::BlockStore>(
     let Some(capability) = common::capability(PACKAGE_RECEIVE_CAPABILITY) else {
         return PackageResponse::new(request, PackageStatus::Invalid);
     };
-    let service = match request.validate(
+    let target = match request.validate_target(
         PACKAGE_RECEIVE_CAPABILITY,
         capability.generation,
         capability.service_epoch,
@@ -289,18 +289,46 @@ fn handle_package_request<B: logos_storage::BlockStore>(
         Err(status) => return PackageResponse::new(request, status),
     };
     match request.operation {
-        PackageOperation::Lookup => match filesystem.lookup_package(service) {
-            Ok(info) => PackageResponse::new(request, PackageStatus::Ok).with_package(
-                info.handle.generation,
-                info.bytes,
-                info.package_version,
-                info.crc32c,
-            ),
-            Err(error) => PackageResponse::new(request, package_status(error)),
-        },
+        PackageOperation::Lookup => {
+            let result = match target.kind {
+                PackageTargetKind::Service => {
+                    let Some(service) =
+                        logos_abi::ServiceId::from_index(target.service.saturating_sub(1) as usize)
+                    else {
+                        return PackageResponse::new(request, PackageStatus::Invalid);
+                    };
+                    filesystem.lookup_package(service)
+                }
+                PackageTargetKind::Program => {
+                    filesystem.lookup_package_name(&target.name[..target.name_len as usize])
+                }
+            };
+            match result {
+                Ok(info) => PackageResponse::new(request, PackageStatus::Ok).with_package(
+                    info.handle.generation,
+                    info.bytes,
+                    info.package_version,
+                    info.crc32c,
+                ),
+                Err(error) => PackageResponse::new(request, package_status(error)),
+            }
+        }
         PackageOperation::Read => {
+            let target = match target.kind {
+                PackageTargetKind::Service => {
+                    logos_abi::ServiceId::from_index(target.service.saturating_sub(1) as usize)
+                        .map(logos_storage_service::PackageKey::Service)
+                }
+                PackageTargetKind::Program => filesystem
+                    .lookup_package_name(&target.name[..target.name_len as usize])
+                    .ok()
+                    .map(|info| info.handle.target),
+            };
+            let Some(target) = target else {
+                return PackageResponse::new(request, PackageStatus::Invalid);
+            };
             let handle = logos_storage_service::PackageHandle {
-                service,
+                target,
                 generation: request.package_generation,
             };
             let mut block = logos_storage::Block::zero();

@@ -1,8 +1,8 @@
 use logos_abi::ServiceId;
 use logos_package::{
     MAX_PACKAGE_BYTES_V2, PACKAGE_FORMAT_VERSION_V2, PACKAGE_HEADER_BYTES, PACKAGE_HEADER_V2_BYTES,
-    PackageError as FormatPackageError, PackageManifest, PackageReader, PackageTarget,
-    validate_package, validate_package_v2,
+    PackageError as FormatPackageError, PackageKind, PackageManifest, PackageName, PackageReader,
+    PackageTarget, validate_package, validate_package_v2,
 };
 use logos_storage::{BLOCK_BYTES, Block, BlockError};
 
@@ -10,12 +10,14 @@ pub const MAX_PACKAGE_RECORDS: usize = 16;
 pub const MAX_PACKAGE_EXTENTS: usize = 8;
 pub const MAX_PACKAGE_BLOCKS: usize = MAX_PACKAGE_BYTES_V2.div_ceil(BLOCK_BYTES);
 pub const PACKAGE_INSTALL_KIND: u16 = 0x0100;
-pub const PACKAGE_RECORD_BYTES: usize = 152;
+pub const PACKAGE_RECORD_BYTES: usize = 156;
 pub const PACKAGE_SNAPSHOT_BYTES: usize = 2 + MAX_PACKAGE_RECORDS * PACKAGE_RECORD_BYTES;
 
 const _: () = assert!(PACKAGE_SNAPSHOT_BYTES <= logos_storage::CHECKPOINT_PAYLOAD_BYTES);
-const LEGACY_PACKAGE_RECORD_BYTES: usize = PACKAGE_RECORD_BYTES;
+const LEGACY_PACKAGE_RECORD_BYTES: usize = 152;
 const LEGACY_PACKAGE_RECORDS: usize = 8;
+const LEGACY_PACKAGE_SNAPSHOT_BYTES: usize = 2 + MAX_PACKAGE_RECORDS * LEGACY_PACKAGE_RECORD_BYTES;
+const PACKAGE_SNAPSHOT_VERSION: u8 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PackageCatalogError {
@@ -51,8 +53,32 @@ impl PackageExtent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackageKey {
+    Service(ServiceId),
+    Program(PackageName),
+}
+
+impl PackageKey {
+    pub const fn service(service: ServiceId) -> Self {
+        Self::Service(service)
+    }
+
+    pub const fn program(name: PackageName) -> Self {
+        Self::Program(name)
+    }
+
+    pub fn from_manifest(manifest: PackageManifest) -> Result<Self, PackageCatalogError> {
+        match (manifest.kind, manifest.target) {
+            (PackageKind::Service, PackageTarget::Service(service)) => Ok(Self::Service(service)),
+            (PackageKind::Program, PackageTarget::None) => Ok(Self::Program(manifest.name)),
+            _ => Err(PackageCatalogError::InvalidRecord),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackageHandle {
-    pub service: ServiceId,
+    pub target: PackageKey,
     pub generation: u32,
 }
 
@@ -70,7 +96,7 @@ pub struct PackageInfo {
 #[derive(Clone, Copy)]
 struct PackageRecord {
     alive: bool,
-    service: ServiceId,
+    target: PackageKey,
     generation: u32,
     package_version: u32,
     bytes: u32,
@@ -82,7 +108,7 @@ struct PackageRecord {
 impl PackageRecord {
     const EMPTY: Self = Self {
         alive: false,
-        service: ServiceId::Input,
+        target: PackageKey::Service(ServiceId::Input),
         generation: 0,
         package_version: 0,
         bytes: 0,
@@ -93,7 +119,7 @@ impl PackageRecord {
 
     const fn info(self) -> PackageInfo {
         PackageInfo {
-            handle: PackageHandle { service: self.service, generation: self.generation },
+            handle: PackageHandle { target: self.target, generation: self.generation },
             package_version: self.package_version,
             manifest: None,
             bytes: self.bytes,
@@ -128,23 +154,23 @@ impl PackageCatalog {
         count
     }
 
-    pub fn lookup(&self, service: ServiceId) -> Option<PackageInfo> {
+    pub fn lookup(&self, target: PackageKey) -> Option<PackageInfo> {
         self.records
             .iter()
-            .find(|record| record.alive && record.service == service)
+            .find(|record| record.alive && record.target == target)
             .copied()
             .map(PackageRecord::info)
     }
 
-    pub(crate) fn service_at(&self, index: usize) -> Option<ServiceId> {
-        self.records.iter().filter(|record| record.alive).nth(index).map(|record| record.service)
+    pub(crate) fn target_at(&self, index: usize) -> Option<PackageKey> {
+        self.records.iter().filter(|record| record.alive).nth(index).map(|record| record.target)
     }
 
     pub fn validate_handle(
         &self,
         handle: PackageHandle,
     ) -> Result<PackageInfo, PackageCatalogError> {
-        let Some(info) = self.lookup(handle.service) else {
+        let Some(info) = self.lookup(handle.target) else {
             return Err(PackageCatalogError::Stale);
         };
         if info.handle != handle {
@@ -153,8 +179,8 @@ impl PackageCatalog {
         Ok(info)
     }
 
-    pub(crate) fn next_generation(&self, service: ServiceId) -> Result<u32, PackageCatalogError> {
-        self.lookup(service).map_or(Ok(1), |info| {
+    pub(crate) fn next_generation(&self, target: PackageKey) -> Result<u32, PackageCatalogError> {
+        self.lookup(target).map_or(Ok(1), |info| {
             info.handle.generation.checked_add(1).ok_or(PackageCatalogError::InvalidRequest)
         })
     }
@@ -162,7 +188,7 @@ impl PackageCatalog {
     pub(crate) fn validate_install_policy<B: logos_storage::BlockStore>(
         &self,
         store: &mut B,
-        service: ServiceId,
+        target: PackageKey,
         package: ValidatedPackage,
         scratch: &mut [u8],
     ) -> Result<(), PackageCatalogError> {
@@ -170,10 +196,10 @@ impl PackageCatalog {
             let mut current = None;
             for record in self.records.iter().filter(|record| record.alive) {
                 let installed = self.manifest_with_store(store, record, scratch)?;
-                if record.service == service {
+                if record.target == target {
                     current = installed;
                 }
-                if record.service != service
+                if record.target != target
                     && installed.is_some_and(|installed| installed.name == manifest.name)
                 {
                     return Err(PackageCatalogError::DependencyConflict);
@@ -192,7 +218,7 @@ impl PackageCatalog {
                 }
                 let mut provider = None;
                 for record in self.records.iter().filter(|record| record.alive) {
-                    if record.service == service {
+                    if record.target == target {
                         continue;
                     }
                     if let Some(installed) = self.manifest_with_store(store, record, scratch)? {
@@ -213,7 +239,7 @@ impl PackageCatalog {
                 }
             }
             for record in self.records.iter().filter(|record| record.alive) {
-                if record.service == service {
+                if record.target == target {
                     continue;
                 }
                 let Some(installed) = self.manifest_with_store(store, record, scratch)? else {
@@ -231,11 +257,11 @@ impl PackageCatalog {
                     }
                 }
             }
-        } else if let Some(current) = self.lookup(service) {
+        } else if let Some(current) = self.lookup(target) {
             let current_is_v2 = self
                 .records
                 .iter()
-                .find(|record| record.alive && record.service == service)
+                .find(|record| record.alive && record.target == target)
                 .map(|record| self.manifest_with_store(store, record, scratch))
                 .transpose()?
                 .flatten()
@@ -253,19 +279,19 @@ impl PackageCatalog {
     pub fn plan_install(
         &self,
         arena: (u64, u64),
-        service: ServiceId,
+        target: PackageKey,
         bytes: usize,
     ) -> Result<PackageInstall, PackageCatalogError> {
         if !(PACKAGE_HEADER_BYTES..=MAX_PACKAGE_BYTES_V2).contains(&bytes) {
             return Err(PackageCatalogError::TooLarge);
         }
-        if self.lookup(service).is_none() && !self.records.iter().any(|record| !record.alive) {
+        if self.lookup(target).is_none() && !self.records.iter().any(|record| !record.alive) {
             return Err(PackageCatalogError::Capacity);
         }
         let blocks = bytes.div_ceil(BLOCK_BYTES);
         let mut install = PackageInstall {
             install_id: 0,
-            service,
+            target,
             bytes: bytes as u32,
             blocks: blocks as u32,
             extents: [PackageExtent::EMPTY; MAX_PACKAGE_EXTENTS],
@@ -325,7 +351,7 @@ impl PackageCatalog {
         let slot = self
             .records
             .iter()
-            .position(|current| current.alive && current.service == record.service)
+            .position(|current| current.alive && current.target == record.target)
             .or_else(|| self.records.iter().position(|current| !current.alive))
             .ok_or(PackageCatalogError::Capacity)?;
         let arena = arena.ok_or(PackageCatalogError::Unsupported)?;
@@ -337,13 +363,13 @@ impl PackageCatalog {
     pub(crate) fn lookup_with_store<B: logos_storage::BlockStore>(
         &mut self,
         store: &mut B,
-        service: ServiceId,
+        target: PackageKey,
     ) -> Result<PackageInfo, PackageCatalogError> {
-        let mut info = self.lookup(service).ok_or(PackageCatalogError::Stale)?;
+        let mut info = self.lookup(target).ok_or(PackageCatalogError::Stale)?;
         let record = self
             .records
             .iter()
-            .find(|record| record.alive && record.service == service)
+            .find(|record| record.alive && record.target == target)
             .ok_or(PackageCatalogError::Stale)?;
         let mut reader = RecordReader { store, record };
         if reader.len() < 10 {
@@ -357,8 +383,7 @@ impl PackageCatalog {
         let mut scratch = [0; BLOCK_BYTES];
         let header =
             validate_package_v2(&mut reader, &mut scratch).map_err(PackageCatalogError::Format)?;
-        if header.manifest.kind != logos_package::PackageKind::Service
-            || header.manifest.target != PackageTarget::Service(service)
+        if PackageKey::from_manifest(header.manifest).ok() != Some(target)
             || reader.len() != PACKAGE_HEADER_V2_BYTES + header.payload_length as usize
         {
             return Err(PackageCatalogError::InvalidRecord);
@@ -384,8 +409,7 @@ impl PackageCatalog {
         }
         let header =
             validate_package_v2(&mut reader, scratch).map_err(PackageCatalogError::Format)?;
-        if header.manifest.kind != logos_package::PackageKind::Service
-            || header.manifest.target != PackageTarget::Service(record.service)
+        if PackageKey::from_manifest(header.manifest).ok() != Some(record.target)
             || reader.len() != PACKAGE_HEADER_V2_BYTES + header.payload_length as usize
         {
             return Err(PackageCatalogError::InvalidRecord);
@@ -398,7 +422,7 @@ impl PackageCatalog {
             return Err(PackageCatalogError::InvalidRequest);
         }
         output[..PACKAGE_SNAPSHOT_BYTES].fill(0);
-        output[0] = 2;
+        output[0] = PACKAGE_SNAPSHOT_VERSION;
         output[1] = MAX_PACKAGE_RECORDS as u8;
         for (index, record) in self.records.iter().enumerate() {
             encode_record(record, &mut output[2 + index * PACKAGE_RECORD_BYTES..]);
@@ -411,18 +435,29 @@ impl PackageCatalog {
         input: &[u8],
         arena: Option<(u64, u64)>,
     ) -> Result<(), PackageCatalogError> {
-        if input.len() != PACKAGE_SNAPSHOT_BYTES {
-            return Err(PackageCatalogError::InvalidRecord);
-        }
         let mut records = [PackageRecord::EMPTY; MAX_PACKAGE_RECORDS];
-        if input[0] == 1 && input[1] as usize == LEGACY_PACKAGE_RECORDS {
+        if input.len() == 2 + LEGACY_PACKAGE_RECORDS * LEGACY_PACKAGE_RECORD_BYTES
+            && input[0] == 1
+            && input[1] as usize == LEGACY_PACKAGE_RECORDS
+        {
             for (index, record) in records.iter_mut().take(LEGACY_PACKAGE_RECORDS).enumerate() {
                 let start = 2 + index * LEGACY_PACKAGE_RECORD_BYTES;
                 *record = decode_legacy_record(&input[start..start + LEGACY_PACKAGE_RECORD_BYTES])?;
             }
-        } else if input[0] == 2 && input[1] as usize == MAX_PACKAGE_RECORDS {
+        } else if input.len() == PACKAGE_SNAPSHOT_BYTES
+            && input[0] == PACKAGE_SNAPSHOT_VERSION
+            && input[1] as usize == MAX_PACKAGE_RECORDS
+        {
             for (index, record) in records.iter_mut().enumerate() {
                 *record = decode_record(&input[2 + index * PACKAGE_RECORD_BYTES..])?;
+            }
+        } else if input.len() == LEGACY_PACKAGE_SNAPSHOT_BYTES
+            && input[0] == 2
+            && input[1] as usize == MAX_PACKAGE_RECORDS
+        {
+            for (index, record) in records.iter_mut().enumerate() {
+                let start = 2 + index * LEGACY_PACKAGE_RECORD_BYTES;
+                *record = decode_legacy_record(&input[start..start + LEGACY_PACKAGE_RECORD_BYTES])?;
             }
         } else {
             return Err(PackageCatalogError::InvalidRecord);
@@ -430,9 +465,7 @@ impl PackageCatalog {
         for (index, record) in records.iter().enumerate() {
             if record.alive {
                 let arena = arena.ok_or(PackageCatalogError::Unsupported)?;
-                if records[..index]
-                    .iter()
-                    .any(|other| other.alive && other.service == record.service)
+                if records[..index].iter().any(|other| other.alive && other.target == record.target)
                 {
                     return Err(PackageCatalogError::InvalidRecord);
                 }
@@ -453,7 +486,7 @@ impl Default for PackageCatalog {
 #[derive(Clone, Copy)]
 pub struct PackageInstall {
     pub(crate) install_id: u32,
-    pub(crate) service: ServiceId,
+    pub(crate) target: PackageKey,
     pub(crate) bytes: u32,
     pub(crate) blocks: u32,
     pub(crate) extents: [PackageExtent; MAX_PACKAGE_EXTENTS],
@@ -463,7 +496,10 @@ pub struct PackageInstall {
 
 impl PackageInstall {
     pub fn service(&self) -> ServiceId {
-        self.service
+        match self.target {
+            PackageKey::Service(service) => service,
+            PackageKey::Program(_) => ServiceId::Flow,
+        }
     }
 
     pub fn bytes(&self) -> usize {
@@ -488,7 +524,7 @@ impl PackageInstall {
     fn record(&self, package: ValidatedPackage) -> PackageRecord {
         PackageRecord {
             alive: true,
-            service: self.service,
+            target: self.target,
             generation: 0,
             package_version: package.package_version,
             bytes: self.bytes,
@@ -558,7 +594,7 @@ pub(crate) struct ValidatedPackage {
 
 pub(crate) fn validate_install<R: PackageReader>(
     reader: &mut R,
-    service: ServiceId,
+    target: PackageKey,
     scratch: &mut [u8],
 ) -> Result<ValidatedPackage, PackageCatalogError> {
     if reader.len() < 10 {
@@ -571,9 +607,7 @@ pub(crate) fn validate_install<R: PackageReader>(
             return Err(PackageCatalogError::Format(FormatPackageError::HeaderTooSmall));
         }
         let header = validate_package_v2(reader, scratch).map_err(PackageCatalogError::Format)?;
-        if header.manifest.kind != logos_package::PackageKind::Service
-            || header.manifest.target != PackageTarget::Service(service)
-        {
+        if PackageKey::from_manifest(header.manifest).ok() != Some(target) {
             return Err(PackageCatalogError::Unsupported);
         }
         return Ok(ValidatedPackage {
@@ -584,6 +618,9 @@ pub(crate) fn validate_install<R: PackageReader>(
             manifest: Some(header.manifest),
         });
     }
+    let PackageKey::Service(service) = target else {
+        return Err(PackageCatalogError::Unsupported);
+    };
     let header = validate_package(reader, service, logos_abi::ABI_VERSION, scratch)
         .map_err(PackageCatalogError::Format)?;
     Ok(ValidatedPackage {
@@ -598,14 +635,26 @@ pub(crate) fn validate_install<R: PackageReader>(
 fn encode_record(record: &PackageRecord, output: &mut [u8]) {
     output[..PACKAGE_RECORD_BYTES].fill(0);
     output[0] = u8::from(record.alive);
-    output[1] = record.service as u8;
-    put_u32(output, 4, record.generation);
-    put_u32(output, 8, record.package_version);
-    put_u32(output, 12, record.bytes);
-    put_u32(output, 16, record.crc32c);
-    output[20] = record.extent_count;
+    if record.alive {
+        match record.target {
+            PackageKey::Service(service) => {
+                output[1] = 1;
+                output[2] = service.index() as u8 + 1;
+            }
+            PackageKey::Program(name) => {
+                output[1] = 2;
+                output[3] = name.as_bytes().len() as u8;
+                output[4..4 + name.as_bytes().len()].copy_from_slice(name.as_bytes());
+            }
+        }
+    }
+    put_u32(output, 40, record.generation);
+    put_u32(output, 44, record.package_version);
+    put_u32(output, 48, record.bytes);
+    put_u32(output, 52, record.crc32c);
+    output[56] = record.extent_count;
     for (index, extent) in record.extents.iter().enumerate() {
-        let offset = 24 + index * 16;
+        let offset = 60 + index * 12;
         put_u64(output, offset, extent.start);
         put_u32(output, offset + 8, extent.blocks);
     }
@@ -615,17 +664,41 @@ fn decode_record(input: &[u8]) -> Result<PackageRecord, PackageCatalogError> {
     if input.len() < PACKAGE_RECORD_BYTES || input[0] > 1 {
         return Err(PackageCatalogError::InvalidRecord);
     }
-    let service = input[1]
-        .checked_sub(1)
-        .and_then(|raw| ServiceId::from_index(raw as usize))
-        .ok_or(PackageCatalogError::InvalidRecord)?;
-    let extent_count = input[20] as usize;
+    if input[0] == 0 {
+        if input[1..].iter().any(|byte| *byte != 0) {
+            return Err(PackageCatalogError::InvalidRecord);
+        }
+        return Ok(PackageRecord::EMPTY);
+    }
+    let target = match input[1] {
+        1 => PackageKey::Service(
+            input[2]
+                .checked_sub(1)
+                .and_then(|raw| ServiceId::from_index(raw as usize))
+                .ok_or(PackageCatalogError::InvalidRecord)?,
+        ),
+        2 => {
+            let length = input[3] as usize;
+            if length == 0
+                || length > logos_package::MAX_PACKAGE_NAME_BYTES
+                || input[4 + length..36].iter().any(|byte| *byte != 0)
+            {
+                return Err(PackageCatalogError::InvalidRecord);
+            }
+            PackageKey::Program(
+                PackageName::parse(&input[4..4 + length])
+                    .map_err(|_| PackageCatalogError::InvalidRecord)?,
+            )
+        }
+        _ => return Err(PackageCatalogError::InvalidRecord),
+    };
+    let extent_count = input[56] as usize;
     if extent_count > MAX_PACKAGE_EXTENTS {
         return Err(PackageCatalogError::InvalidRecord);
     }
     let mut extents = [PackageExtent::EMPTY; MAX_PACKAGE_EXTENTS];
     for (index, extent) in extents.iter_mut().enumerate() {
-        let offset = 24 + index * 16;
+        let offset = 60 + index * 12;
         *extent =
             PackageExtent { start: get_u64(input, offset), blocks: get_u32(input, offset + 8) };
         if index >= extent_count && *extent != PackageExtent::EMPTY {
@@ -635,8 +708,8 @@ fn decode_record(input: &[u8]) -> Result<PackageRecord, PackageCatalogError> {
             return Err(PackageCatalogError::InvalidRecord);
         }
     }
-    let generation = get_u32(input, 4);
-    let bytes = get_u32(input, 12);
+    let generation = get_u32(input, 40);
+    let bytes = get_u32(input, 48);
     if input[0] != 0
         && (generation == 0
             || !(PACKAGE_HEADER_BYTES..=MAX_PACKAGE_BYTES_V2).contains(&(bytes as usize)))
@@ -646,7 +719,7 @@ fn decode_record(input: &[u8]) -> Result<PackageRecord, PackageCatalogError> {
     if input[0] == 0
         && (generation != 0
             || bytes != 0
-            || get_u32(input, 16) != 0
+            || get_u32(input, 52) != 0
             || extent_count != 0
             || extents.iter().any(|extent| *extent != PackageExtent::EMPTY))
     {
@@ -654,11 +727,11 @@ fn decode_record(input: &[u8]) -> Result<PackageRecord, PackageCatalogError> {
     }
     Ok(PackageRecord {
         alive: input[0] != 0,
-        service,
+        target,
         generation,
-        package_version: get_u32(input, 8),
+        package_version: get_u32(input, 44),
         bytes,
-        crc32c: get_u32(input, 16),
+        crc32c: get_u32(input, 52),
         extents,
         extent_count: extent_count as u8,
     })
@@ -668,6 +741,12 @@ fn decode_legacy_record(input: &[u8]) -> Result<PackageRecord, PackageCatalogErr
     if input.len() < LEGACY_PACKAGE_RECORD_BYTES || input[0] > 1 {
         return Err(PackageCatalogError::InvalidRecord);
     }
+    if input[0] == 0 {
+        if input[1..].iter().any(|byte| *byte != 0) {
+            return Err(PackageCatalogError::InvalidRecord);
+        }
+        return Ok(PackageRecord::EMPTY);
+    }
     let service = input[1]
         .checked_sub(1)
         .and_then(|raw| ServiceId::from_index(raw as usize))
@@ -707,7 +786,7 @@ fn decode_legacy_record(input: &[u8]) -> Result<PackageRecord, PackageCatalogErr
     }
     Ok(PackageRecord {
         alive: input[0] != 0,
-        service,
+        target: PackageKey::Service(service),
         generation,
         package_version: get_u32(input, 8),
         bytes,
@@ -845,7 +924,7 @@ pub(crate) fn validate_install_on_store<B: logos_storage::BlockStore>(
     scratch: &mut [u8],
 ) -> Result<ValidatedPackage, PackageCatalogError> {
     let mut reader = InstallReader { store, install };
-    validate_install(&mut reader, install.service, scratch)
+    validate_install(&mut reader, install.target, scratch)
 }
 
 fn read_package_exact<R: PackageReader>(
@@ -898,7 +977,7 @@ mod tests {
     fn record(start: u64, blocks: u32, bytes: u32) -> PackageRecord {
         let mut record = PackageRecord::EMPTY;
         record.alive = true;
-        record.service = ServiceId::Input;
+        record.target = PackageKey::Service(ServiceId::Input);
         record.generation = 1;
         record.bytes = bytes;
         record.extent_count = 1;

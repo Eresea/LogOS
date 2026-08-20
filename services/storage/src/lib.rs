@@ -16,7 +16,7 @@ pub use namespace::{
 pub use packages::{
     MAX_PACKAGE_EXTENTS, MAX_PACKAGE_RECORDS, PACKAGE_INSTALL_KIND, PACKAGE_RECORD_BYTES,
     PACKAGE_SNAPSHOT_BYTES, PackageCatalogError, PackageExtent, PackageHandle, PackageInfo,
-    PackageInstall,
+    PackageInstall, PackageKey,
 };
 
 use logos_abi::{

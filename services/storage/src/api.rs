@@ -829,7 +829,14 @@ fn format_package_info(
             }
         }
     } else {
-        append_bytes(output, &mut length, service_name(info.handle.service));
+        match info.handle.target {
+            crate::packages::PackageKey::Service(service) => {
+                append_bytes(output, &mut length, service_name(service));
+            }
+            crate::packages::PackageKey::Program(name) => {
+                append_bytes(output, &mut length, name.as_bytes());
+            }
+        }
         append_bytes(output, &mut length, b" legacy-");
         append_u32(output, &mut length, info.package_version);
     }
@@ -1769,7 +1776,10 @@ mod tests {
             ServiceId::Flow,
         );
         let info = PackageInfo {
-            handle: PackageHandle { service: ServiceId::Flow, generation: 1 },
+            handle: PackageHandle {
+                target: crate::packages::PackageKey::Service(ServiceId::Flow),
+                generation: 1,
+            },
             package_version: 0,
             manifest: Some(manifest),
             bytes: 1,

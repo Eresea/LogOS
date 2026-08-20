@@ -10,7 +10,8 @@ use std::{
 
 use logos_abi::ServiceId;
 use logos_package::{
-    PACKAGE_HEADER_V2_BYTES, PackageHeaderV2, PackageManifest, PackageName, SemanticVersion, crc32c,
+    PACKAGE_HEADER_V2_BYTES, PackageHeaderV2, PackageKind, PackageManifest, PackageName,
+    SemanticVersion, crc32c,
 };
 use logos_storage::{BLOCK_BYTES, Block, BlockError, BlockIndex, BlockStore};
 use logos_storage_service::{DurableNamespace, PackageHandle, PackageInfo};
@@ -81,6 +82,20 @@ fn package(service: ServiceId, payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
+fn program(payload: &[u8]) -> Vec<u8> {
+    let manifest = PackageManifest::new(
+        PackageName::parse(b"demo").expect("package name"),
+        SemanticVersion::new(1, 0, 0),
+        PackageKind::Program,
+    );
+    let header =
+        PackageHeaderV2::new(manifest, payload.len(), crc32c(payload)).expect("package size");
+    let mut bytes = vec![0; PACKAGE_HEADER_V2_BYTES + payload.len()];
+    header.encode(&mut bytes).expect("package header");
+    bytes[PACKAGE_HEADER_V2_BYTES..].copy_from_slice(payload);
+    bytes
+}
+
 fn install(
     filesystem: &mut DurableNamespace<FileBlockStore>,
     service: ServiceId,
@@ -95,6 +110,23 @@ fn install(
     }
     filesystem.commit_package_install(install).expect("commit package");
     filesystem.lookup_package(service).expect("package catalog")
+}
+
+fn install_program(
+    filesystem: &mut DurableNamespace<FileBlockStore>,
+    bytes: &[u8],
+) -> logos_storage_service::PackageInfo {
+    let name = PackageName::parse(b"demo").expect("package name");
+    let mut install = filesystem
+        .begin_package_install_target(logos_storage_service::PackageKey::Program(name), bytes.len())
+        .expect("begin program package");
+    for (offset, chunk) in bytes.chunks(BLOCK_BYTES).enumerate() {
+        filesystem
+            .write_package_chunk(&mut install, offset * BLOCK_BYTES, chunk)
+            .expect("write program package");
+    }
+    filesystem.commit_package_install(install).expect("commit program package");
+    filesystem.lookup_package_name(b"demo").expect("program catalog")
 }
 
 fn corrupt(filesystem: &mut DurableNamespace<FileBlockStore>, info: PackageInfo) {
@@ -129,10 +161,15 @@ fn main() {
     let input_info = install(&mut filesystem, ServiceId::Input, &input);
     let session = package(ServiceId::Session, &payload);
     install(&mut filesystem, ServiceId::Session, &session);
+    let demo = program(&payload);
+    let _ = install_program(&mut filesystem, &demo);
     let mut round_trip = vec![0; input.len()];
     let bytes_read = filesystem
         .read_package(
-            PackageHandle { service: ServiceId::Input, generation: input_info.handle.generation },
+            PackageHandle {
+                target: logos_storage_service::PackageKey::Service(ServiceId::Input),
+                generation: input_info.handle.generation,
+            },
             0,
             &mut round_trip,
         )
@@ -142,5 +179,8 @@ fn main() {
     let display = package(ServiceId::Display, &payload);
     let display_info = install(&mut filesystem, ServiceId::Display, &display);
     corrupt(&mut filesystem, display_info);
-    println!("seeded v3 service package ({} bytes) and corrupt rollback fixture", input.len());
+    println!(
+        "seeded v3 service and program packages ({} bytes) and corrupt rollback fixture",
+        input.len()
+    );
 }

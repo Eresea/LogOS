@@ -1,12 +1,12 @@
 use crate::packages::{
     MAX_PACKAGE_EXTENTS, MAX_PACKAGE_RECORDS, PACKAGE_INSTALL_KIND, PACKAGE_RECORD_BYTES,
     PACKAGE_SNAPSHOT_BYTES, PackageCatalog, PackageCatalogError, PackageExtent, PackageHandle,
-    PackageInfo, PackageInstall, encode_install_record, validate_install_on_store,
+    PackageInfo, PackageInstall, PackageKey, encode_install_record, validate_install_on_store,
 };
 use logos_abi::ServiceId;
 use logos_package::{
     PACKAGE_FORMAT_VERSION_V2, PACKAGE_HEADER_BYTES, PACKAGE_HEADER_V2_BYTES, PackageHeaderV2,
-    PackageTarget, ServicePackageHeader,
+    ServicePackageHeader,
 };
 use logos_storage::{
     BLOCK_BYTES, Block, BlockError, BlockIndex, BlockStore, CHECKPOINT_PAYLOAD_BYTES, CowError,
@@ -1729,17 +1729,24 @@ impl<B: BlockStore> DurableNamespace<B> {
     }
 
     pub fn lookup_package(&mut self, service: ServiceId) -> Result<PackageInfo, NamespaceError> {
-        match self.packages.lookup_with_store(&mut self.store, service) {
+        self.lookup_package_target(PackageKey::Service(service))
+    }
+
+    pub fn lookup_package_target(
+        &mut self,
+        target: PackageKey,
+    ) -> Result<PackageInfo, NamespaceError> {
+        match self.packages.lookup_with_store(&mut self.store, target) {
             Err(PackageCatalogError::Stale) => Err(NamespaceError::NotFound),
             result => result.map_err(NamespaceError::Package),
         }
     }
 
     pub fn package_at(&mut self, index: usize) -> Result<Option<PackageInfo>, NamespaceError> {
-        let Some(service) = self.packages.service_at(index) else {
+        let Some(target) = self.packages.target_at(index) else {
             return Ok(None);
         };
-        self.lookup_package(service).map(Some)
+        self.lookup_package_target(target).map(Some)
     }
 
     pub fn lookup_package_name(&mut self, name: &[u8]) -> Result<PackageInfo, NamespaceError> {
@@ -1768,27 +1775,26 @@ impl<B: BlockStore> DurableNamespace<B> {
         if self.namespace.read(id, 0, &mut prefix)? != prefix.len() {
             return Err(NamespaceError::InvalidRecord);
         }
-        let service = if u16::from_le_bytes([prefix[8], prefix[9]]) == PACKAGE_FORMAT_VERSION_V2 {
+        let target = if u16::from_le_bytes([prefix[8], prefix[9]]) == PACKAGE_FORMAT_VERSION_V2 {
             let mut header = [0; PACKAGE_HEADER_V2_BYTES];
             if self.namespace.read(id, 0, &mut header)? != header.len() {
                 return Err(NamespaceError::InvalidRecord);
             }
             let header =
                 PackageHeaderV2::decode(&header).map_err(|_| NamespaceError::InvalidRecord)?;
-            match header.manifest.target {
-                PackageTarget::Service(service) => service,
-                PackageTarget::None => return Err(NamespaceError::InvalidRecord),
-            }
+            PackageKey::from_manifest(header.manifest).map_err(|_| NamespaceError::InvalidRecord)?
         } else {
             let mut header = [0; PACKAGE_HEADER_BYTES];
             if self.namespace.read(id, 0, &mut header)? != header.len() {
                 return Err(NamespaceError::InvalidRecord);
             }
-            ServicePackageHeader::decode(&header)
-                .map_err(|_| NamespaceError::InvalidRecord)?
-                .service
+            PackageKey::Service(
+                ServicePackageHeader::decode(&header)
+                    .map_err(|_| NamespaceError::InvalidRecord)?
+                    .service,
+            )
         };
-        let mut install = self.begin_package_install(service, length)?;
+        let mut install = self.begin_package_install_target(target, length)?;
         let result = (|| {
             for offset in (0..length).step_by(BLOCK_BYTES) {
                 let amount = (length - offset).min(BLOCK_BYTES);
@@ -1811,6 +1817,14 @@ impl<B: BlockStore> DurableNamespace<B> {
         service: ServiceId,
         bytes: usize,
     ) -> Result<PackageInstall, NamespaceError> {
+        self.begin_package_install_target(PackageKey::Service(service), bytes)
+    }
+
+    pub fn begin_package_install_target(
+        &mut self,
+        target: PackageKey,
+        bytes: usize,
+    ) -> Result<PackageInstall, NamespaceError> {
         if self.active_package_install.is_some() {
             return Err(NamespaceError::Package(PackageCatalogError::Busy));
         }
@@ -1820,7 +1834,7 @@ impl<B: BlockStore> DurableNamespace<B> {
             .next_package_install
             .checked_add(1)
             .ok_or(NamespaceError::Package(PackageCatalogError::InvalidRequest))?;
-        let mut install = self.packages.plan_install(arena, service, bytes)?;
+        let mut install = self.packages.plan_install(arena, target, bytes)?;
         install.install_id = install_id;
         self.active_package_install = Some(install_id);
         Ok(install)
@@ -1883,14 +1897,14 @@ impl<B: BlockStore> DurableNamespace<B> {
         }
         self.packages.validate_install_policy(
             &mut self.store,
-            install.service,
+            install.target,
             package,
             &mut scratch,
         )?;
-        let generation = self.packages.next_generation(install.service)?;
+        let generation = self.packages.next_generation(install.target)?;
         let mut payload = [0; PACKAGE_RECORD_BYTES];
         encode_install_record(&install, package, generation, &mut payload)?;
-        let old_package = self.packages.lookup(install.service);
+        let old_package = self.packages.lookup(install.target);
         self.packages.apply_record(PACKAGE_INSTALL_KIND, &payload, Some(arena))?;
         if let Some(old_package) = old_package {
             let mut retired = [CowExtent::EMPTY; MAX_PACKAGE_EXTENTS];
@@ -1909,7 +1923,7 @@ impl<B: BlockStore> DurableNamespace<B> {
                 Err(recovery) => recovery,
             });
         }
-        Ok(PackageHandle { service: install.service, generation })
+        Ok(PackageHandle { target: install.target, generation })
     }
 
     pub fn read_package(
@@ -2996,6 +3010,31 @@ mod tests {
             fs.lookup_package(ServiceId::Flow).unwrap().manifest.map(|manifest| manifest.name),
             Some(PackageName::parse(b"flow-managed").unwrap())
         );
+    }
+
+    #[test]
+    fn program_package_is_persistent_and_name_keyed() {
+        let mut fs = DurableNamespace::format(heap_store()).unwrap();
+        let name = PackageName::parse(b"demo").unwrap();
+        let manifest = PackageManifest::new(
+            name,
+            SemanticVersion::new(1, 0, 0),
+            logos_package::PackageKind::Program,
+        );
+        let payload = b"program-elf";
+        let header = PackageHeaderV2::new(manifest, payload.len(), crc32c(payload)).unwrap();
+        let mut package = vec![0; PACKAGE_HEADER_V2_BYTES + payload.len()];
+        header.encode(&mut package).unwrap();
+        package[PACKAGE_HEADER_V2_BYTES..].copy_from_slice(payload);
+        let mut transaction =
+            fs.begin_package_install_target(PackageKey::program(name), package.len()).unwrap();
+        for (offset, chunk) in package.chunks(BLOCK_BYTES).enumerate() {
+            fs.write_package_chunk(&mut transaction, offset * BLOCK_BYTES, chunk).unwrap();
+        }
+        let handle = fs.commit_package_install(transaction).unwrap();
+        assert_eq!(fs.lookup_package_target(PackageKey::program(name)).unwrap().handle, handle);
+        fs.reopen().unwrap();
+        assert_eq!(fs.lookup_package_name(b"demo").unwrap().handle, handle);
     }
 
     #[test]
