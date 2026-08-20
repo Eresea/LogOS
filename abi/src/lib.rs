@@ -107,7 +107,7 @@ pub const NETWORK_PACKET_PAGE_COUNT: usize = 32;
 pub const NETWORK_PACKET_PAGE_BYTES: usize = NETWORK_DMA_BUFFER_BYTES;
 pub const NETWORK_RX_PACKET_PAGES: usize = 16;
 pub const NETWORK_TX_PACKET_PAGES: usize = 16;
-pub const NETWORK_PACKET_BASE: usize = SERVICE_IPC_BASE + 0x3b_000;
+pub const NETWORK_PACKET_BASE: usize = MANAGER_CAPABILITY_BASE + IPC_PAGE_BYTES;
 pub const NETWORK_GATEWAY_ARP_DEADLINE_TICKS: u32 = 5_000;
 pub const NETWORK_DHCP_DEADLINE_TICKS: u32 = 10_000;
 // Keep interactive network probes below the bounded Flow receive budget.
@@ -2120,6 +2120,8 @@ mod tests {
         assert_eq!(MANAGER_CAPABILITY_BASE, IPC_CAPABILITY_BASE + IPC_PAGE_BYTES);
         assert_eq!(STORAGE_CACHE_BASE, STORAGE_DATA_BASE + IPC_PAGE_BYTES);
         assert_eq!(STORAGE_DATA_PAGES, STORAGE_CACHE_PAGES + 1);
+        assert_eq!(NETWORK_PACKET_BASE, MANAGER_CAPABILITY_BASE + IPC_PAGE_BYTES);
+        assert!(NETWORK_PACKET_BASE > MANAGER_CAPABILITY_BASE);
     }
 
     #[test]
