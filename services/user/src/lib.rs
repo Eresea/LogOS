@@ -6,7 +6,7 @@ extern crate std;
 #[cfg(feature = "password-kdf")]
 use argon2::{Algorithm, Argon2, Params, Version};
 use logos_abi::{
-    CapabilityHandle, NamespaceRights, NamespaceRoot, RoleId, SessionHandle,
+    NamespaceCapabilityHandle, NamespaceRights, NamespaceRoot, RoleId, SessionHandle,
     USER_ARGON2_OUTPUT_BYTES, USER_ARGON2_SALT_BYTES, USER_MAX_PASSWORD_BYTES,
     USER_MAX_ROLE_NAME_BYTES, USER_MAX_USER_NAME_BYTES, UserId, UserOperation, UserRequest,
     UserResponse, UserStatus,
@@ -209,7 +209,7 @@ struct UserRecord {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CapabilityRecord {
-    handle: CapabilityHandle,
+    handle: NamespaceCapabilityHandle,
     root: NamespaceRoot,
     rights: NamespaceRights,
     lineage: u64,
@@ -690,10 +690,10 @@ impl UserCatalog {
     pub fn derive(
         &mut self,
         session: SessionHandle,
-        parent: CapabilityHandle,
+        parent: NamespaceCapabilityHandle,
         root: NamespaceRoot,
         rights: NamespaceRights,
-    ) -> Result<CapabilityHandle, UserError> {
+    ) -> Result<NamespaceCapabilityHandle, UserError> {
         if !rights.is_valid() {
             return Err(UserError::Unauthorized);
         }
@@ -715,7 +715,8 @@ impl UserCatalog {
         let slot =
             record.capabilities.iter().position(Option::is_none).ok_or(UserError::Capacity)?;
         let generation = record.capability_generations[slot];
-        let handle = CapabilityHandle::new(slot as u32, generation).ok_or(UserError::Corrupt)?;
+        let handle =
+            NamespaceCapabilityHandle::new(slot as u32, generation).ok_or(UserError::Corrupt)?;
         record.capabilities[slot] = Some(CapabilityRecord {
             handle,
             root,
@@ -730,7 +731,7 @@ impl UserCatalog {
     pub fn revoke_capability(
         &mut self,
         session: SessionHandle,
-        capability: CapabilityHandle,
+        capability: NamespaceCapabilityHandle,
     ) -> Result<(), UserError> {
         let record = self.session_mut(session)?;
         let target = record
@@ -769,7 +770,7 @@ impl UserCatalog {
         session: SessionHandle,
         root: NamespaceRoot,
         rights: NamespaceRights,
-    ) -> Result<CapabilityHandle, UserError> {
+    ) -> Result<NamespaceCapabilityHandle, UserError> {
         if !rights.is_valid() {
             return Err(UserError::Unauthorized);
         }
@@ -778,7 +779,8 @@ impl UserCatalog {
         let slot =
             record.capabilities.iter().position(Option::is_none).ok_or(UserError::Capacity)?;
         let generation = record.capability_generations[slot];
-        let handle = CapabilityHandle::new(slot as u32, generation).ok_or(UserError::Corrupt)?;
+        let handle =
+            NamespaceCapabilityHandle::new(slot as u32, generation).ok_or(UserError::Corrupt)?;
         record.capabilities[slot] = Some(CapabilityRecord {
             handle,
             root,
@@ -793,7 +795,7 @@ impl UserCatalog {
     pub fn capability(
         &self,
         session: SessionHandle,
-        capability: CapabilityHandle,
+        capability: NamespaceCapabilityHandle,
     ) -> Result<(NamespaceRoot, NamespaceRights), UserError> {
         let record = self.session(session)?;
         let entry = record
@@ -811,7 +813,7 @@ impl UserCatalog {
     pub fn first_capability(
         &self,
         session: SessionHandle,
-    ) -> Result<(CapabilityHandle, NamespaceRoot, NamespaceRights), UserError> {
+    ) -> Result<(NamespaceCapabilityHandle, NamespaceRoot, NamespaceRights), UserError> {
         let record = self.session(session)?;
         let capability = record.capabilities.iter().flatten().next().ok_or(UserError::NotFound)?;
         if capability.revoked || record.revoked {
@@ -1204,7 +1206,10 @@ mod tests {
         assert!(catalog.login(b"admin", b"correct horse").is_ok());
         assert_eq!(catalog.login(b"admin", b"wrong"), Err(UserError::BadCredentials));
         catalog.logout(session).unwrap();
-        assert_eq!(catalog.capability(session, CapabilityHandle::EMPTY), Err(UserError::Revoked));
+        assert_eq!(
+            catalog.capability(session, NamespaceCapabilityHandle::EMPTY),
+            Err(UserError::Revoked)
+        );
     }
 
     #[test]
@@ -1239,7 +1244,10 @@ mod tests {
         restored.restore_snapshot(&snapshot[..length]).unwrap();
         assert!(restored.is_claimed());
         assert!(restored.login(b"admin", b"password").is_ok());
-        assert_eq!(restored.capability(session, CapabilityHandle::EMPTY), Err(UserError::Stale));
+        assert_eq!(
+            restored.capability(session, NamespaceCapabilityHandle::EMPTY),
+            Err(UserError::Stale)
+        );
     }
 
     #[test]

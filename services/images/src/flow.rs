@@ -1318,7 +1318,7 @@ struct UserClient {
     request: UserRequest,
     session: logos_abi::SessionHandle,
     user: logos_abi::UserId,
-    capability: logos_abi::CapabilityHandle,
+    capability: logos_abi::NamespaceCapabilityHandle,
     root: logos_abi::NamespaceRoot,
     rights: logos_abi::NamespaceRights,
     result: [u8; logos_flow::MAX_OUTPUT_BYTES],
@@ -1334,7 +1334,7 @@ impl UserClient {
             request: UserRequest::new(UserOperation::Login, 1),
             session: logos_abi::SessionHandle::EMPTY,
             user: logos_abi::UserId::EMPTY,
-            capability: logos_abi::CapabilityHandle::EMPTY,
+            capability: logos_abi::NamespaceCapabilityHandle::EMPTY,
             root: logos_abi::NamespaceRoot::EMPTY,
             rights: logos_abi::NamespaceRights::NONE,
             result: [0; logos_flow::MAX_OUTPUT_BYTES],
@@ -1450,11 +1450,11 @@ impl UserClient {
             } else if self.request.operation == UserOperation::Logout {
                 self.session = logos_abi::SessionHandle::EMPTY;
                 self.user = logos_abi::UserId::EMPTY;
-                self.capability = logos_abi::CapabilityHandle::EMPTY;
+                self.capability = logos_abi::NamespaceCapabilityHandle::EMPTY;
                 self.root = logos_abi::NamespaceRoot::EMPTY;
                 self.rights = logos_abi::NamespaceRights::NONE;
             } else if self.request.operation == UserOperation::RevokeCapability {
-                self.capability = logos_abi::CapabilityHandle::EMPTY;
+                self.capability = logos_abi::NamespaceCapabilityHandle::EMPTY;
             } else if self.request.operation == UserOperation::Derive {
                 self.capability = response.capability;
                 self.root = response.root;
