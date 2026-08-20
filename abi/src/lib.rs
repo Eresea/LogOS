@@ -13,6 +13,7 @@ use core::{
 
 mod device_api;
 mod package_ipc;
+mod runtime_abi;
 mod service_manager;
 mod storage_api;
 mod user_api;
@@ -26,6 +27,12 @@ pub use package_ipc::{
     MAX_PACKAGE_NAME_BYTES, PACKAGE_ABI_VERSION, PACKAGE_TRANSFER_BYTES, PackageOperation,
     PackageRequest, PackageResponse, PackageStatus, PackageTarget, PackageTargetKind,
 };
+pub use runtime_abi::{
+    CapabilityHandle, DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE, DirectoryOperation,
+    DirectoryRecord, DirectoryRecordKind, DirectoryRequest, DirectoryResponse, DirectoryStatus,
+    EndpointHandle, EventHandle, EventSetHandle, RUNTIME_ABI_VERSION, ServiceBootstrapPage,
+    ServiceHandle,
+};
 pub use service_manager::{
     MANAGER_ABI_VERSION, ManagerCapability, ManagerCapabilityPage, ManagerOperation,
     ManagerRequest, ManagerResponse, ManagerRights, ManagerState, ManagerStatus, ManagerTargetKind,
@@ -37,16 +44,16 @@ pub use storage_api::{
     StorageApiError, StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus,
 };
 pub use user_api::{
-    CapabilityHandle, NamespaceCapability, NamespaceRights, NamespaceRoot, RoleId, SessionHandle,
-    USER_ABI_VERSION, USER_ARGON2_OUTPUT_BYTES, USER_ARGON2_SALT_BYTES, USER_KDF_WORKSPACE_BASE,
-    USER_KDF_WORKSPACE_BYTES, USER_KDF_WORKSPACE_PAGES, USER_MAX_PASSWORD_BYTES,
-    USER_MAX_ROLE_NAME_BYTES, USER_MAX_USER_NAME_BYTES, USER_STORAGE_CHUNK_BYTES,
-    USER_STORAGE_FLAG_BEGIN, USER_STORAGE_FLAG_END, UserAdminCapability, UserId, UserOperation,
-    UserRequest, UserResponse, UserStatus, UserStorageOperation, UserStorageRequest,
-    UserStorageResponse, UserStorageStatus,
+    NamespaceCapability, NamespaceCapabilityHandle, NamespaceRights, NamespaceRoot, RoleId,
+    SessionHandle, USER_ABI_VERSION, USER_ARGON2_OUTPUT_BYTES, USER_ARGON2_SALT_BYTES,
+    USER_KDF_WORKSPACE_BASE, USER_KDF_WORKSPACE_BYTES, USER_KDF_WORKSPACE_PAGES,
+    USER_MAX_PASSWORD_BYTES, USER_MAX_ROLE_NAME_BYTES, USER_MAX_USER_NAME_BYTES,
+    USER_STORAGE_CHUNK_BYTES, USER_STORAGE_FLAG_BEGIN, USER_STORAGE_FLAG_END, UserAdminCapability,
+    UserId, UserOperation, UserRequest, UserResponse, UserStatus, UserStorageOperation,
+    UserStorageRequest, UserStorageResponse, UserStorageStatus,
 };
 
-pub const ABI_VERSION: u16 = 4;
+pub const ABI_VERSION: u16 = 5;
 pub const MAX_TEXT_BYTES: usize = 64;
 pub const MAX_RENDER_CELLS: usize = 128;
 pub const MAX_COLUMNS: usize = 160;
@@ -2121,7 +2128,6 @@ mod tests {
         assert_eq!(STORAGE_CACHE_BASE, STORAGE_DATA_BASE + IPC_PAGE_BYTES);
         assert_eq!(STORAGE_DATA_PAGES, STORAGE_CACHE_PAGES + 1);
         assert_eq!(NETWORK_PACKET_BASE, MANAGER_CAPABILITY_BASE + IPC_PAGE_BYTES);
-        assert!(NETWORK_PACKET_BASE > MANAGER_CAPABILITY_BASE);
     }
 
     #[test]

@@ -70,7 +70,7 @@ impl SessionHandle {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
-pub struct CapabilityHandle {
+pub struct NamespaceCapabilityHandle {
     pub slot: u32,
     pub generation: u32,
 }
@@ -107,7 +107,7 @@ impl NamespaceCapability {
     }
 }
 
-impl CapabilityHandle {
+impl NamespaceCapabilityHandle {
     pub const EMPTY: Self = Self { slot: u32::MAX, generation: 0 };
 
     pub const fn new(slot: u32, generation: u32) -> Option<Self> {
@@ -325,7 +325,7 @@ pub struct UserRequest {
     pub user: UserId,
     pub role: RoleId,
     pub session: SessionHandle,
-    pub capability: CapabilityHandle,
+    pub capability: NamespaceCapabilityHandle,
     pub root: NamespaceRoot,
     pub rights: NamespaceRights,
     pub name_len: u8,
@@ -342,7 +342,7 @@ impl UserRequest {
             user: UserId::EMPTY,
             role: RoleId::EMPTY,
             session: SessionHandle::EMPTY,
-            capability: CapabilityHandle::EMPTY,
+            capability: NamespaceCapabilityHandle::EMPTY,
             root: NamespaceRoot::EMPTY,
             rights: NamespaceRights::NONE,
             name_len: 0,
@@ -389,7 +389,7 @@ pub struct UserResponse {
     pub user: UserId,
     pub role: RoleId,
     pub session: SessionHandle,
-    pub capability: CapabilityHandle,
+    pub capability: NamespaceCapabilityHandle,
     pub root: NamespaceRoot,
     pub rights: NamespaceRights,
 }
@@ -403,7 +403,7 @@ impl UserResponse {
             user: UserId::EMPTY,
             role: RoleId::EMPTY,
             session: SessionHandle::EMPTY,
-            capability: CapabilityHandle::EMPTY,
+            capability: NamespaceCapabilityHandle::EMPTY,
             root: NamespaceRoot::EMPTY,
             rights: NamespaceRights::NONE,
         }

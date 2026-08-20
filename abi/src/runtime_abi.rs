@@ -1,0 +1,316 @@
+use crate::{ABI_VERSION, IPC_PAGE_BYTES, MAX_SERVICE_NAME_BYTES};
+
+pub const RUNTIME_ABI_VERSION: u16 = ABI_VERSION;
+pub const DIRECTORY_FLAG_MORE: u8 = 1 << 0;
+pub const DIRECTORY_RECORDS_PER_PAGE: usize = 32;
+
+macro_rules! define_handle {
+    ($name:ident) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        #[repr(transparent)]
+        pub struct $name(u64);
+
+        impl $name {
+            pub const EMPTY: Self = Self(0);
+
+            pub const fn new(index: u32, generation: u32) -> Option<Self> {
+                if generation == 0 {
+                    None
+                } else {
+                    Some(Self(((generation as u64) << 32) | index as u64))
+                }
+            }
+
+            pub const fn from_raw(raw: u64) -> Option<Self> {
+                if raw >> 32 == 0 { None } else { Some(Self(raw)) }
+            }
+
+            pub const fn raw(self) -> u64 {
+                self.0
+            }
+
+            pub const fn index(self) -> u32 {
+                self.0 as u32
+            }
+
+            pub const fn generation(self) -> u32 {
+                (self.0 >> 32) as u32
+            }
+
+            pub const fn is_valid(self) -> bool {
+                self.generation() != 0
+            }
+        }
+    };
+}
+
+define_handle!(ServiceHandle);
+define_handle!(EndpointHandle);
+define_handle!(CapabilityHandle);
+define_handle!(EventHandle);
+define_handle!(EventSetHandle);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C, align(16))]
+pub struct ServiceBootstrapPage {
+    pub abi_version: u16,
+    pub flags: u16,
+    pub service: ServiceHandle,
+    pub control: CapabilityHandle,
+    pub directory: CapabilityHandle,
+    pub heap: CapabilityHandle,
+}
+
+impl ServiceBootstrapPage {
+    pub const fn empty() -> Self {
+        Self {
+            abi_version: RUNTIME_ABI_VERSION,
+            flags: 0,
+            service: ServiceHandle::EMPTY,
+            control: CapabilityHandle::EMPTY,
+            directory: CapabilityHandle::EMPTY,
+            heap: CapabilityHandle::EMPTY,
+        }
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.abi_version == RUNTIME_ABI_VERSION
+            && self.flags == 0
+            && self.service.is_valid()
+            && self.control.is_valid()
+            && self.directory.is_valid()
+            && self.heap.is_valid()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum DirectoryOperation {
+    Services = 1,
+    Capabilities = 2,
+    Endpoints = 3,
+}
+
+impl DirectoryOperation {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Services),
+            2 => Some(Self::Capabilities),
+            3 => Some(Self::Endpoints),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum DirectoryStatus {
+    Ok = 0,
+    Malformed = 1,
+    Unauthorized = 2,
+    Stale = 3,
+    NotFound = 4,
+    Capacity = 5,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum DirectoryRecordKind {
+    Empty = 0,
+    Service = 1,
+    Capability = 2,
+    Endpoint = 3,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct DirectoryRequest {
+    pub abi_version: u16,
+    pub operation: DirectoryOperation,
+    pub reserved: u8,
+    pub request_id: u32,
+    pub cursor: u64,
+    pub subject: ServiceHandle,
+}
+
+impl DirectoryRequest {
+    pub const fn new(operation: DirectoryOperation, request_id: u32) -> Self {
+        Self {
+            abi_version: RUNTIME_ABI_VERSION,
+            operation,
+            reserved: 0,
+            request_id,
+            cursor: 0,
+            subject: ServiceHandle::EMPTY,
+        }
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.abi_version == RUNTIME_ABI_VERSION
+            && DirectoryOperation::from_raw(self.operation as u8).is_some()
+            && self.reserved == 0
+            && self.request_id != 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct DirectoryRecord {
+    pub kind: DirectoryRecordKind,
+    pub rights: u8,
+    pub flags: u16,
+    pub handle: u64,
+    pub peer: ServiceHandle,
+    pub message_bytes: u16,
+    pub queue_capacity: u16,
+    pub name_len: u8,
+    pub reserved: [u8; 3],
+    pub name: [u8; MAX_SERVICE_NAME_BYTES],
+}
+
+impl DirectoryRecord {
+    pub const EMPTY: Self = Self {
+        kind: DirectoryRecordKind::Empty,
+        rights: 0,
+        flags: 0,
+        handle: 0,
+        peer: ServiceHandle::EMPTY,
+        message_bytes: 0,
+        queue_capacity: 0,
+        name_len: 0,
+        reserved: [0; 3],
+        name: [0; MAX_SERVICE_NAME_BYTES],
+    };
+
+    pub fn service(handle: ServiceHandle, name: &[u8]) -> Option<Self> {
+        if !handle.is_valid() || name.is_empty() || name.len() > MAX_SERVICE_NAME_BYTES {
+            return None;
+        }
+        let mut record = Self::EMPTY;
+        record.kind = DirectoryRecordKind::Service;
+        record.handle = handle.raw();
+        record.name_len = name.len() as u8;
+        record.name[..name.len()].copy_from_slice(name);
+        Some(record)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        matches!(self.kind, DirectoryRecordKind::Empty)
+    }
+
+    pub fn is_valid(self) -> bool {
+        if self.is_empty() {
+            return self == Self::EMPTY;
+        }
+        self.reserved == [0; 3]
+            && self.handle != 0
+            && self.name_len as usize <= self.name.len()
+            && self.name[self.name_len as usize..].iter().all(|byte| *byte == 0)
+    }
+
+    pub fn name(&self) -> &[u8] {
+        &self.name[..self.name_len as usize]
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C, align(16))]
+pub struct DirectoryResponse {
+    pub abi_version: u16,
+    pub operation: DirectoryOperation,
+    pub status: DirectoryStatus,
+    pub request_id: u32,
+    pub cursor: u64,
+    pub count: u8,
+    pub flags: u8,
+    pub reserved: [u8; 2],
+    pub records: [DirectoryRecord; DIRECTORY_RECORDS_PER_PAGE],
+}
+
+impl DirectoryResponse {
+    pub const fn empty(
+        operation: DirectoryOperation,
+        status: DirectoryStatus,
+        request_id: u32,
+    ) -> Self {
+        Self {
+            abi_version: RUNTIME_ABI_VERSION,
+            operation,
+            status,
+            request_id,
+            cursor: 0,
+            count: 0,
+            flags: 0,
+            reserved: [0; 2],
+            records: [DirectoryRecord::EMPTY; DIRECTORY_RECORDS_PER_PAGE],
+        }
+    }
+
+    pub fn is_valid_for(self, request: DirectoryRequest) -> bool {
+        self.abi_version == RUNTIME_ABI_VERSION
+            && self.operation == request.operation
+            && request.is_valid()
+            && self.request_id == request.request_id
+            && self.flags & !DIRECTORY_FLAG_MORE == 0
+            && (self.flags & DIRECTORY_FLAG_MORE == 0 || self.cursor != 0)
+            && self.reserved == [0; 2]
+            && usize::from(self.count) <= DIRECTORY_RECORDS_PER_PAGE
+            && self.records[..self.count as usize].iter().all(|record| record.is_valid())
+            && self.records[self.count as usize..].iter().all(|record| record.is_empty())
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<ServiceBootstrapPage>() <= IPC_PAGE_BYTES);
+const _: () = assert!(core::mem::size_of::<DirectoryRequest>() <= IPC_PAGE_BYTES);
+const _: () = assert!(core::mem::size_of::<DirectoryResponse>() <= IPC_PAGE_BYTES);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handles_encode_generation_and_reject_empty_generation() {
+        let handle = ServiceHandle::new(7, 3).unwrap();
+        assert_eq!(handle.index(), 7);
+        assert_eq!(handle.generation(), 3);
+        assert_eq!(ServiceHandle::from_raw(handle.raw()), Some(handle));
+        assert!(ServiceHandle::new(7, 0).is_none());
+        assert!(ServiceHandle::from_raw(7).is_none());
+        assert!(!ServiceHandle::EMPTY.is_valid());
+    }
+
+    #[test]
+    fn bootstrap_requires_all_runtime_grants() {
+        let mut page = ServiceBootstrapPage::empty();
+        assert!(!page.is_valid());
+        page.service = ServiceHandle::new(1, 1).unwrap();
+        page.control = CapabilityHandle::new(2, 1).unwrap();
+        page.directory = CapabilityHandle::new(3, 1).unwrap();
+        page.heap = CapabilityHandle::new(4, 1).unwrap();
+        assert!(page.is_valid());
+        page.flags = 1;
+        assert!(!page.is_valid());
+    }
+
+    #[test]
+    fn directory_response_is_bounded_and_cursored() {
+        let request = DirectoryRequest::new(DirectoryOperation::Services, 9);
+        let service = DirectoryRecord::service(ServiceHandle::new(4, 2).unwrap(), b"flow").unwrap();
+        let mut response = DirectoryResponse::empty(
+            DirectoryOperation::Services,
+            DirectoryStatus::Ok,
+            request.request_id,
+        );
+        response.records[0] = service;
+        response.count = 1;
+        assert!(response.is_valid_for(request));
+        response.flags = DIRECTORY_FLAG_MORE;
+        response.cursor = 11;
+        assert!(response.is_valid_for(request));
+        response.cursor = 0;
+        assert!(!response.is_valid_for(request));
+        response.flags = 0;
+        response.count = (DIRECTORY_RECORDS_PER_PAGE + 1) as u8;
+        assert!(!response.is_valid_for(request));
+    }
+}
