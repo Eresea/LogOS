@@ -14,7 +14,7 @@ use logos_package::{
     SemanticVersion, crc32c,
 };
 use logos_storage::{BLOCK_BYTES, Block, BlockError, BlockIndex, BlockStore};
-use logos_storage_service::{DurableNamespace, PackageHandle, PackageInfo};
+use logos_storage_service::{DurableNamespaceV5, PackageHandle, PackageInfo};
 
 const DISK_BLOCKS: u64 = 16 * 1024;
 
@@ -97,7 +97,7 @@ fn program(payload: &[u8]) -> Vec<u8> {
 }
 
 fn install(
-    filesystem: &mut DurableNamespace<FileBlockStore>,
+    filesystem: &mut DurableNamespaceV5<FileBlockStore>,
     service: ServiceId,
     bytes: &[u8],
 ) -> logos_storage_service::PackageInfo {
@@ -113,7 +113,7 @@ fn install(
 }
 
 fn install_program(
-    filesystem: &mut DurableNamespace<FileBlockStore>,
+    filesystem: &mut DurableNamespaceV5<FileBlockStore>,
     bytes: &[u8],
 ) -> logos_storage_service::PackageInfo {
     let name = PackageName::parse(b"demo").expect("package name");
@@ -129,7 +129,7 @@ fn install_program(
     filesystem.lookup_package_name(b"demo").expect("program catalog")
 }
 
-fn corrupt(filesystem: &mut DurableNamespace<FileBlockStore>, info: PackageInfo) {
+fn corrupt(filesystem: &mut DurableNamespaceV5<FileBlockStore>, info: PackageInfo) {
     let extent = info.extents[0];
     let mut block = Block::zero();
     let store = filesystem.block_store_mut();
@@ -154,9 +154,10 @@ fn main() {
         eprintln!("service ELF must exceed the ordinary-file limit");
         process::exit(1);
     }
-    let mut filesystem =
-        DurableNamespace::format(FileBlockStore::create(Path::new(&disk)).expect("create disk"))
-            .expect("format v3 disk");
+    let mut filesystem = DurableNamespaceV5::format_v5(
+        FileBlockStore::create(Path::new(&disk)).expect("create disk"),
+    )
+    .expect("format v5 disk");
     let input = package(ServiceId::Input, &payload);
     let input_info = install(&mut filesystem, ServiceId::Input, &input);
     let session = package(ServiceId::Session, &payload);

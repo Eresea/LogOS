@@ -9,3 +9,4 @@ license = "MIT"
 logos-abi = { path = "../../abi" }
 logos-package = { path = "../../package" }
 logos-storage = { path = "../../storage" }
+logos-user = { path = "../user", default-features = false }

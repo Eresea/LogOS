@@ -9,10 +9,11 @@ use logos_package::{
     ServicePackageHeader,
 };
 use logos_storage::{
-    BLOCK_BYTES, Block, BlockError, BlockIndex, BlockStore, CHECKPOINT_PAYLOAD_BYTES, CowError,
-    CowExtent, CowTransaction, CowVolume, FormatError, JournalRecord, MAX_RECORD_PAYLOAD_BYTES,
-    ReadMap,
+    BLOCK_BYTES, Block, BlockError, BlockIndex, BlockStore, CHECKPOINT_PAYLOAD_BYTES, CatalogError,
+    CowError, CowExtent, CowTransaction, CowVolume, FormatError, JournalRecord,
+    MAX_RECORD_PAYLOAD_BYTES, ReadMap, SystemCatalogTransaction, SystemCatalogVolume,
 };
+use logos_user::{UserCatalogStore, UserError};
 
 pub const MAX_OBJECTS: usize = 4;
 pub const MAX_COMPONENT_BYTES: usize = 255;
@@ -121,6 +122,284 @@ impl From<BlockError> for NamespaceError {
 impl From<PackageCatalogError> for NamespaceError {
     fn from(error: PackageCatalogError) -> Self {
         Self::Package(error)
+    }
+}
+
+pub trait PersistentTransaction {
+    fn allocate_blocks<B: BlockStore>(
+        &mut self,
+        store: &mut B,
+        blocks: u32,
+    ) -> Result<CowExtent, CowError>;
+
+    fn allocate_metadata_blocks<B: BlockStore>(
+        &mut self,
+        store: &mut B,
+        blocks: u32,
+    ) -> Result<CowExtent, CowError> {
+        self.allocate_blocks(store, blocks)
+    }
+
+    fn reserve_extent(&mut self, extent: CowExtent) -> Result<(), CowError>;
+    fn retire_extent(&mut self, extent: CowExtent) -> Result<(), CowError>;
+    fn write_block<B: BlockStore>(
+        &self,
+        store: &mut B,
+        index: BlockIndex,
+        block: &Block,
+    ) -> Result<(), CowError>;
+}
+
+pub trait NamespaceVolume: Sized {
+    type Transaction: PersistentTransaction;
+
+    fn format<B: BlockStore>(store: &mut B) -> Result<Self, NamespaceError>;
+    fn format_provisioned<B: BlockStore>(store: &mut B) -> Result<Self, NamespaceError>;
+    fn open<B: BlockStore>(store: &mut B) -> Result<Self, NamespaceError>;
+    fn begin<B: BlockStore>(&self, store: &mut B) -> Result<Self::Transaction, CowError>;
+    fn commit<B: BlockStore>(
+        &mut self,
+        store: &mut B,
+        transaction: Self::Transaction,
+        metadata: CowExtent,
+        metadata_bytes: usize,
+    ) -> Result<u64, CowError>;
+    fn metadata_extent(&self) -> CowExtent;
+    fn generation(&self) -> u64;
+    fn read_metadata_block<B: BlockStore>(
+        &self,
+        store: &mut B,
+        offset: u32,
+        output: &mut Block,
+    ) -> Result<(), CowError>;
+    fn metadata_blocks(&self) -> u32;
+    fn data_arena(&self) -> (u64, u64);
+    fn package_arena(&self) -> Option<(u64, u64)>;
+}
+
+fn map_catalog_error(error: CatalogError) -> NamespaceError {
+    match error {
+        CatalogError::Block(error) => NamespaceError::Block(error),
+        CatalogError::OutOfSpace => NamespaceError::Capacity,
+        CatalogError::InvalidRequest => NamespaceError::InvalidRecord,
+        CatalogError::GenerationExhausted => NamespaceError::GenerationExhausted,
+        CatalogError::TooLarge => NamespaceError::TooLarge,
+        CatalogError::NotBlank => NamespaceError::Format(FormatError::NotBlank),
+        CatalogError::Unformatted => NamespaceError::Format(FormatError::Unformatted),
+        CatalogError::ProvisionedBlank => NamespaceError::Format(FormatError::ProvisionedBlank),
+        CatalogError::UnsupportedVersion => NamespaceError::Format(FormatError::UnsupportedVersion),
+        CatalogError::Corrupt => NamespaceError::Format(FormatError::Corrupt),
+        CatalogError::TooSmall => NamespaceError::Format(FormatError::TooSmall),
+    }
+}
+
+fn map_user_catalog_error(error: CatalogError) -> UserError {
+    match error {
+        CatalogError::Unformatted => UserError::NotFound,
+        CatalogError::OutOfSpace => UserError::Capacity,
+        CatalogError::InvalidRequest => UserError::Persistence,
+        CatalogError::Block(_)
+        | CatalogError::NotBlank
+        | CatalogError::ProvisionedBlank
+        | CatalogError::UnsupportedVersion
+        | CatalogError::Corrupt
+        | CatalogError::TooSmall
+        | CatalogError::TooLarge
+        | CatalogError::GenerationExhausted => UserError::Persistence,
+    }
+}
+
+impl PersistentTransaction for CowTransaction {
+    fn allocate_blocks<B: BlockStore>(
+        &mut self,
+        store: &mut B,
+        blocks: u32,
+    ) -> Result<CowExtent, CowError> {
+        CowTransaction::allocate_blocks(self, store, blocks)
+    }
+
+    fn reserve_extent(&mut self, extent: CowExtent) -> Result<(), CowError> {
+        CowTransaction::reserve_extent(self, extent)
+    }
+
+    fn retire_extent(&mut self, extent: CowExtent) -> Result<(), CowError> {
+        CowTransaction::retire_extent(self, extent)
+    }
+
+    fn write_block<B: BlockStore>(
+        &self,
+        store: &mut B,
+        index: BlockIndex,
+        block: &Block,
+    ) -> Result<(), CowError> {
+        CowTransaction::write_block(self, store, index, block)
+    }
+}
+
+impl NamespaceVolume for CowVolume {
+    type Transaction = CowTransaction;
+
+    fn format<B: BlockStore>(store: &mut B) -> Result<Self, NamespaceError> {
+        CowVolume::format(store).map_err(NamespaceError::from)
+    }
+
+    fn format_provisioned<B: BlockStore>(store: &mut B) -> Result<Self, NamespaceError> {
+        CowVolume::format_provisioned(store).map_err(NamespaceError::from)
+    }
+
+    fn open<B: BlockStore>(store: &mut B) -> Result<Self, NamespaceError> {
+        CowVolume::open(store).map_err(NamespaceError::from)
+    }
+
+    fn begin<B: BlockStore>(&self, store: &mut B) -> Result<Self::Transaction, CowError> {
+        CowVolume::begin(self, store)
+    }
+
+    fn commit<B: BlockStore>(
+        &mut self,
+        store: &mut B,
+        transaction: Self::Transaction,
+        metadata: CowExtent,
+        _metadata_bytes: usize,
+    ) -> Result<u64, CowError> {
+        CowVolume::commit(self, store, transaction, metadata)
+    }
+
+    fn metadata_extent(&self) -> CowExtent {
+        CowExtent::new(self.root().metadata_root, self.root().metadata_blocks)
+            .unwrap_or(CowExtent::EMPTY)
+    }
+
+    fn generation(&self) -> u64 {
+        self.root().generation
+    }
+
+    fn read_metadata_block<B: BlockStore>(
+        &self,
+        store: &mut B,
+        offset: u32,
+        output: &mut Block,
+    ) -> Result<(), CowError> {
+        CowVolume::read_metadata_block(self, store, offset, output)
+    }
+
+    fn metadata_blocks(&self) -> u32 {
+        self.root().metadata_blocks
+    }
+
+    fn data_arena(&self) -> (u64, u64) {
+        CowVolume::data_arena(self)
+    }
+
+    fn package_arena(&self) -> Option<(u64, u64)> {
+        CowVolume::package_arena(self)
+    }
+}
+
+impl PersistentTransaction for SystemCatalogTransaction {
+    fn allocate_blocks<B: BlockStore>(
+        &mut self,
+        store: &mut B,
+        blocks: u32,
+    ) -> Result<CowExtent, CowError> {
+        SystemCatalogTransaction::allocate_blocks(self, store, blocks)
+    }
+
+    fn allocate_metadata_blocks<B: BlockStore>(
+        &mut self,
+        store: &mut B,
+        blocks: u32,
+    ) -> Result<CowExtent, CowError> {
+        SystemCatalogTransaction::allocate_metadata_blocks(self, store, blocks)
+    }
+
+    fn reserve_extent(&mut self, extent: CowExtent) -> Result<(), CowError> {
+        SystemCatalogTransaction::reserve_extent(self, extent)
+    }
+
+    fn retire_extent(&mut self, extent: CowExtent) -> Result<(), CowError> {
+        SystemCatalogTransaction::retire_extent(self, extent)
+    }
+
+    fn write_block<B: BlockStore>(
+        &self,
+        store: &mut B,
+        index: BlockIndex,
+        block: &Block,
+    ) -> Result<(), CowError> {
+        SystemCatalogTransaction::write_block(self, store, index, block)
+    }
+}
+
+impl NamespaceVolume for SystemCatalogVolume {
+    type Transaction = SystemCatalogTransaction;
+
+    fn format<B: BlockStore>(store: &mut B) -> Result<Self, NamespaceError> {
+        let blocks = store.block_count();
+        let system_blocks = blocks / 3;
+        let package_start = blocks * 3 / 4;
+        SystemCatalogVolume::format(store, system_blocks, package_start).map_err(map_catalog_error)
+    }
+
+    fn format_provisioned<B: BlockStore>(store: &mut B) -> Result<Self, NamespaceError> {
+        let blocks = store.block_count();
+        let system_blocks = blocks / 3;
+        let package_start = blocks * 3 / 4;
+        SystemCatalogVolume::format_provisioned(store, system_blocks, package_start)
+            .map_err(map_catalog_error)
+    }
+
+    fn open<B: BlockStore>(store: &mut B) -> Result<Self, NamespaceError> {
+        SystemCatalogVolume::open(store).map_err(map_catalog_error)
+    }
+
+    fn begin<B: BlockStore>(&self, store: &mut B) -> Result<Self::Transaction, CowError> {
+        SystemCatalogVolume::begin(self, store)
+    }
+
+    fn commit<B: BlockStore>(
+        &mut self,
+        store: &mut B,
+        transaction: Self::Transaction,
+        metadata: CowExtent,
+        metadata_bytes: usize,
+    ) -> Result<u64, CowError> {
+        SystemCatalogVolume::commit(self, store, transaction, metadata, metadata_bytes)
+    }
+
+    fn metadata_extent(&self) -> CowExtent {
+        CowExtent::new(self.root().metadata_start, self.root().metadata_blocks)
+            .unwrap_or(CowExtent::EMPTY)
+    }
+
+    fn generation(&self) -> u64 {
+        self.root().generation
+    }
+
+    fn read_metadata_block<B: BlockStore>(
+        &self,
+        store: &mut B,
+        offset: u32,
+        output: &mut Block,
+    ) -> Result<(), CowError> {
+        if offset >= self.root().metadata_blocks {
+            return Err(CowError::InvalidRequest);
+        }
+        store
+            .read_block(BlockIndex::new(self.root().metadata_start.get() + offset as u64), output)
+            .map_err(CowError::Block)
+    }
+
+    fn metadata_blocks(&self) -> u32 {
+        self.root().metadata_blocks
+    }
+
+    fn data_arena(&self) -> (u64, u64) {
+        SystemCatalogVolume::user_arena(self)
+    }
+
+    fn package_arena(&self) -> Option<(u64, u64)> {
+        Some(SystemCatalogVolume::package_arena(self))
     }
 }
 
@@ -619,9 +898,9 @@ impl Default for ObjectNamespace {
     }
 }
 
-pub struct DurableNamespace<B> {
+pub struct DurableNamespace<B, V = CowVolume> {
     store: B,
-    volume: CowVolume,
+    volume: V,
     namespace: ObjectNamespace,
     packages: PackageCatalog,
     retired_file_extents: [CowExtent; MAX_OBJECTS * MAX_FILE_EXTENTS],
@@ -631,6 +910,8 @@ pub struct DurableNamespace<B> {
     active_package_install: Option<u32>,
     next_package_install: u32,
 }
+
+pub type DurableNamespaceV5<B> = DurableNamespace<B, SystemCatalogVolume>;
 
 struct SnapshotSource<'a> {
     namespace: &'a ObjectNamespace,
@@ -724,8 +1005,8 @@ fn encoded_snapshot_length(source: &mut SnapshotSource<'_>) -> usize {
     output_length
 }
 
-struct SnapshotWriter<'a, B: BlockStore> {
-    transaction: &'a CowTransaction,
+struct SnapshotWriter<'a, B: BlockStore, T: PersistentTransaction> {
+    transaction: &'a T,
     store: &'a mut B,
     extent: CowExtent,
     block: Block,
@@ -734,8 +1015,8 @@ struct SnapshotWriter<'a, B: BlockStore> {
     total: usize,
 }
 
-impl<'a, B: BlockStore> SnapshotWriter<'a, B> {
-    fn new(transaction: &'a CowTransaction, store: &'a mut B, extent: CowExtent) -> Self {
+impl<'a, B: BlockStore, T: PersistentTransaction> SnapshotWriter<'a, B, T> {
+    fn new(transaction: &'a T, store: &'a mut B, extent: CowExtent) -> Self {
         Self {
             transaction,
             store,
@@ -789,8 +1070,8 @@ impl<'a, B: BlockStore> SnapshotWriter<'a, B> {
     }
 }
 
-fn write_snapshot_stream<B: BlockStore>(
-    transaction: &CowTransaction,
+fn write_snapshot_stream<B: BlockStore, T: PersistentTransaction>(
+    transaction: &T,
     store: &mut B,
     extent: CowExtent,
     source: &mut SnapshotSource<'_>,
@@ -817,8 +1098,8 @@ fn write_snapshot_stream<B: BlockStore>(
     Ok(())
 }
 
-struct SnapshotReader<'a, B: BlockStore> {
-    volume: &'a CowVolume,
+struct SnapshotReader<'a, B: BlockStore, V: NamespaceVolume> {
+    volume: &'a V,
     store: &'a mut B,
     blocks: u32,
     block: Block,
@@ -826,9 +1107,9 @@ struct SnapshotReader<'a, B: BlockStore> {
     offset: usize,
 }
 
-impl<'a, B: BlockStore> SnapshotReader<'a, B> {
-    fn new(volume: &'a CowVolume, store: &'a mut B) -> Result<Self, NamespaceError> {
-        let blocks = volume.root().metadata_blocks;
+impl<'a, B: BlockStore, V: NamespaceVolume> SnapshotReader<'a, B, V> {
+    fn new(volume: &'a V, store: &'a mut B) -> Result<Self, NamespaceError> {
+        let blocks = volume.metadata_blocks();
         if blocks == 0 || blocks as usize > STORAGE_SNAPSHOT_MAX_BLOCKS {
             return Err(NamespaceError::Recovery);
         }
@@ -864,8 +1145,8 @@ impl<'a, B: BlockStore> SnapshotReader<'a, B> {
     }
 }
 
-struct SnapshotDecoder<'a, B: BlockStore> {
-    reader: SnapshotReader<'a, B>,
+struct SnapshotDecoder<'a, B: BlockStore, V: NamespaceVolume> {
+    reader: SnapshotReader<'a, B, V>,
     encoded_length: usize,
     consumed: usize,
     output_offset: usize,
@@ -873,8 +1154,8 @@ struct SnapshotDecoder<'a, B: BlockStore> {
     run_literal: bool,
 }
 
-impl<'a, B: BlockStore> SnapshotDecoder<'a, B> {
-    fn new(volume: &'a CowVolume, store: &'a mut B) -> Result<Self, NamespaceError> {
+impl<'a, B: BlockStore, V: NamespaceVolume> SnapshotDecoder<'a, B, V> {
+    fn new(volume: &'a V, store: &'a mut B) -> Result<Self, NamespaceError> {
         let mut reader = SnapshotReader::new(volume, store)?;
         let mut header = [0; 8];
         reader.read_bytes(&mut header)?;
@@ -882,7 +1163,7 @@ impl<'a, B: BlockStore> SnapshotDecoder<'a, B> {
         let encoded_length = u32::from_le_bytes(header[4..].try_into().unwrap()) as usize;
         if original_length != STORAGE_SNAPSHOT_BYTES
             || encoded_length < 8
-            || encoded_length > volume.root().metadata_blocks as usize * BLOCK_BYTES
+            || encoded_length > volume.metadata_blocks() as usize * BLOCK_BYTES
         {
             return Err(NamespaceError::InvalidRecord);
         }
@@ -943,8 +1224,8 @@ impl<'a, B: BlockStore> SnapshotDecoder<'a, B> {
     }
 }
 
-fn restore_record_from_decoder<B: BlockStore>(
-    decoder: &mut SnapshotDecoder<'_, B>,
+fn restore_record_from_decoder<B: BlockStore, V: NamespaceVolume>(
+    decoder: &mut SnapshotDecoder<'_, B, V>,
     record: &mut ObjectRecord,
 ) -> Result<(), NamespaceError> {
     let mut bytes = [0; 4];
@@ -1013,20 +1294,20 @@ fn restore_record_from_decoder<B: BlockStore>(
     Ok(())
 }
 
-fn restore_snapshot_from_store<B: BlockStore>(
-    volume: &CowVolume,
+fn restore_snapshot_from_store<B: BlockStore, V: NamespaceVolume>(
+    volume: &V,
     store: &mut B,
     namespace: &mut ObjectNamespace,
     packages: &mut PackageCatalog,
 ) -> Result<(), NamespaceError> {
-    if volume.root().metadata_blocks == 0 {
+    if volume.metadata_blocks() == 0 {
         return Ok(());
     }
-    if volume.root().metadata_blocks == 1 {
+    if volume.metadata_blocks() == 1 {
         let mut block = Block::zero();
-        volume.read_metadata_root(store, &mut block)?;
+        volume.read_metadata_block(store, 0, &mut block)?;
         if block.as_bytes()[..8].iter().all(|byte| *byte == 0) {
-            if volume.root().generation == 1 {
+            if volume.generation() == 1 {
                 return Ok(());
             }
             return Err(NamespaceError::InvalidRecord);
@@ -1147,10 +1428,27 @@ fn restore_snapshot_from_store<B: BlockStore>(
     Ok(())
 }
 
-impl<B: BlockStore> DurableNamespace<B> {
+#[inline(never)]
+fn new_namespace<B, V>(store: B, volume: V) -> DurableNamespace<B, V> {
+    DurableNamespace {
+        store,
+        volume,
+        namespace: ObjectNamespace::new(),
+        packages: PackageCatalog::new(),
+        retired_file_extents: [CowExtent::EMPTY; MAX_OBJECTS * MAX_FILE_EXTENTS],
+        retired_file_extent_count: 0,
+        retired_package_extents: [CowExtent::EMPTY; MAX_PACKAGE_EXTENTS],
+        retired_package_extent_count: 0,
+        active_package_install: None,
+        next_package_install: 1,
+    }
+}
+
+impl<B: BlockStore> DurableNamespace<B, CowVolume> {
+    #[inline(never)]
     pub fn format(mut store: B) -> Result<Self, NamespaceError> {
         let volume = CowVolume::format(&mut store)?;
-        let filesystem = Self {
+        Ok(Self {
             store,
             volume,
             namespace: ObjectNamespace::new(),
@@ -1161,13 +1459,13 @@ impl<B: BlockStore> DurableNamespace<B> {
             retired_package_extent_count: 0,
             active_package_install: None,
             next_package_install: 1,
-        };
-        Ok(filesystem)
+        })
     }
 
+    #[inline(never)]
     pub fn format_provisioned(mut store: B) -> Result<Self, NamespaceError> {
         let volume = CowVolume::format_provisioned(&mut store)?;
-        let filesystem = Self {
+        Ok(Self {
             store,
             volume,
             namespace: ObjectNamespace::new(),
@@ -1178,12 +1476,53 @@ impl<B: BlockStore> DurableNamespace<B> {
             retired_package_extent_count: 0,
             active_package_install: None,
             next_package_install: 1,
-        };
-        Ok(filesystem)
+        })
     }
 
+    #[inline(never)]
+    pub fn open(mut store: B) -> Result<Self, NamespaceError> {
+        let volume = CowVolume::open(&mut store)?;
+        let mut filesystem = new_namespace(store, volume);
+        filesystem.reopen()?;
+        Ok(filesystem)
+    }
+}
+
+impl<B: BlockStore> DurableNamespace<B, SystemCatalogVolume> {
+    pub fn format_v5(mut store: B) -> Result<Self, NamespaceError> {
+        let volume = <SystemCatalogVolume as NamespaceVolume>::format(&mut store)?;
+        Ok(new_namespace(store, volume))
+    }
+
+    pub fn format_v5_provisioned(mut store: B) -> Result<Self, NamespaceError> {
+        let volume = <SystemCatalogVolume as NamespaceVolume>::format_provisioned(&mut store)?;
+        Ok(new_namespace(store, volume))
+    }
+
+    pub fn open_v5(mut store: B) -> Result<Self, NamespaceError> {
+        let volume = <SystemCatalogVolume as NamespaceVolume>::open(&mut store)?;
+        let mut filesystem = new_namespace(store, volume);
+        filesystem.reopen()?;
+        Ok(filesystem)
+    }
+}
+
+impl<B: BlockStore> UserCatalogStore for DurableNamespaceV5<B> {
+    fn load(&mut self, output: &mut [u8]) -> Result<usize, UserError> {
+        self.volume.read_catalog(&mut self.store, output).map_err(map_user_catalog_error)
+    }
+
+    fn save(&mut self, snapshot: &[u8]) -> Result<(), UserError> {
+        self.volume
+            .replace_catalog(&mut self.store, snapshot)
+            .map(|_| ())
+            .map_err(map_user_catalog_error)
+    }
+}
+
+impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
     fn reopen(&mut self) -> Result<(), NamespaceError> {
-        let volume = CowVolume::open(&mut self.store)?;
+        let volume = V::open(&mut self.store)?;
         let mut namespace = ObjectNamespace::new();
         let mut packages = PackageCatalog::new();
         restore_snapshot_from_store(&volume, &mut self.store, &mut namespace, &mut packages)?;
@@ -1194,25 +1533,6 @@ impl<B: BlockStore> DurableNamespace<B> {
         self.retired_package_extent_count = 0;
         self.active_package_install = None;
         Ok(())
-    }
-
-    pub fn open(mut store: B) -> Result<Self, NamespaceError> {
-        let volume = CowVolume::open(&mut store)?;
-        let mut namespace = ObjectNamespace::new();
-        let mut packages = PackageCatalog::new();
-        restore_snapshot_from_store(&volume, &mut store, &mut namespace, &mut packages)?;
-        Ok(Self {
-            store,
-            volume,
-            namespace,
-            packages,
-            retired_file_extents: [CowExtent::EMPTY; MAX_OBJECTS * MAX_FILE_EXTENTS],
-            retired_file_extent_count: 0,
-            retired_package_extents: [CowExtent::EMPTY; MAX_PACKAGE_EXTENTS],
-            retired_package_extent_count: 0,
-            active_package_install: None,
-            next_package_install: 1,
-        })
     }
 
     pub fn root(&self) -> ObjectId {
@@ -1395,14 +1715,16 @@ impl<B: BlockStore> DurableNamespace<B> {
         Ok(())
     }
 
+    #[inline(never)]
     fn persist_snapshot(&mut self) -> Result<u64, NamespaceError> {
         let transaction = self.volume.begin(&mut self.store)?;
         self.persist_snapshot_with(transaction)
     }
 
+    #[inline(never)]
     fn persist_snapshot_with(
         &mut self,
-        mut transaction: CowTransaction,
+        mut transaction: V::Transaction,
     ) -> Result<u64, NamespaceError> {
         let mut package_snapshot = [0; PACKAGE_SNAPSHOT_BYTES];
         self.packages.encode_snapshot(&mut package_snapshot)?;
@@ -1423,7 +1745,8 @@ impl<B: BlockStore> DurableNamespace<B> {
                 )?;
             }
         }
-        let extent = transaction.allocate_blocks(&mut self.store, metadata_blocks as u32)?;
+        let extent =
+            transaction.allocate_metadata_blocks(&mut self.store, metadata_blocks as u32)?;
         let mut source = SnapshotSource::new(&self.namespace, &package_snapshot);
         write_snapshot_stream(
             &transaction,
@@ -1432,18 +1755,18 @@ impl<B: BlockStore> DurableNamespace<B> {
             &mut source,
             compressed_length,
         )?;
-        let previous = self.volume.root();
         for extent in self.retired_file_extents[..self.retired_file_extent_count].iter() {
             transaction.retire_extent(*extent)?;
         }
         for extent in self.retired_package_extents[..self.retired_package_extent_count].iter() {
             transaction.retire_extent(*extent)?;
         }
-        transaction.retire_extent(
-            CowExtent::new(previous.metadata_root, previous.metadata_blocks)
-                .ok_or(NamespaceError::Recovery)?,
-        )?;
-        let generation = self.volume.commit(&mut self.store, transaction, extent)?;
+        let previous = self.volume.metadata_extent();
+        if previous != CowExtent::EMPTY {
+            transaction.retire_extent(previous)?;
+        }
+        let generation =
+            self.volume.commit(&mut self.store, transaction, extent, compressed_length)?;
         self.retired_file_extent_count = 0;
         self.retired_package_extent_count = 0;
         Ok(generation)
@@ -2570,9 +2893,10 @@ impl NamespaceTransaction {
         self.push_record(base, RENAME_KIND, &payload)
     }
 
-    pub fn commit<B: BlockStore>(
+    #[inline(never)]
+    pub fn commit<B: BlockStore, V: NamespaceVolume>(
         self,
-        namespace: &mut DurableNamespace<B>,
+        namespace: &mut DurableNamespace<B, V>,
     ) -> Result<u64, NamespaceError> {
         for slot in 0..MAX_OBJECTS {
             if let Some(record) = self.changes[slot] {
@@ -2618,6 +2942,7 @@ mod tests {
         PackageManifest, PackageName, SemanticVersion, ServicePackageHeader, crc32c,
     };
     use logos_storage::{Block, BlockError, BlockIndex, BlockStore, MemoryBlockStore};
+    use logos_user::{USER_SNAPSHOT_BYTES, UserCatalog};
     use std::boxed::Box;
     use std::vec;
 
@@ -2733,6 +3058,57 @@ mod tests {
         let store = reopened.into_store();
         let reopened = DurableNamespace::open(store).unwrap();
         assert_eq!(reopened.resolve_path(b"/new"), Err(NamespaceError::NotFound));
+    }
+
+    #[test]
+    fn v5_namespace_uses_system_metadata_and_user_content_pools() {
+        let mut fs =
+            DurableNamespace::<HeapStore, SystemCatalogVolume>::format_v5(heap_store()).unwrap();
+        let file = fs.create_file(fs.root(), b"v5").unwrap();
+        let input = [0x5a; BLOCK_BYTES * 3];
+        fs.write_handle(file, 0, &input).unwrap();
+        let store = fs.into_store();
+        let mut reopened =
+            DurableNamespace::<HeapStore, SystemCatalogVolume>::open_v5(store).unwrap();
+        let file = reopened.resolve_path(b"/v5").unwrap();
+        let mut output = [0; BLOCK_BYTES * 3];
+        assert_eq!(reopened.read_handle(file, 0, &mut output).unwrap(), input.len());
+        assert_eq!(output, input);
+        let root = reopened.volume.root();
+        assert!(root.metadata_start.get() >= root.system_start.get());
+        assert!(root.metadata_start.get() + root.metadata_blocks as u64 <= root.system_end.get());
+        assert!(root.user_start.get() <= root.user_end.get());
+    }
+
+    #[test]
+    fn v5_namespace_and_user_catalog_share_one_persistent_root() {
+        let mut fs = DurableNamespaceV5::format_v5(heap_store()).unwrap();
+        let file = fs.create_file(fs.root(), b"proof").unwrap();
+        fs.write_handle(file, 0, b"namespace").unwrap();
+
+        let catalog = Box::new(UserCatalog::new());
+        let mut buffer = [0; USER_SNAPSHOT_BYTES];
+        catalog.save_to(&mut fs, &mut buffer).unwrap();
+        let root = fs.volume.root();
+        assert!(root.catalog_blocks > 0);
+        assert!(root.catalog_start.get() >= root.system_start.get());
+        assert!(root.catalog_start.get() + root.catalog_blocks as u64 <= root.system_end.get());
+
+        let store = fs.into_store();
+        let mut reopened = DurableNamespaceV5::open_v5(store).unwrap();
+        let file = reopened.resolve_path(b"/proof").unwrap();
+        let mut output = [0; 9];
+        assert_eq!(reopened.read_handle(file, 0, &mut output).unwrap(), output.len());
+        assert_eq!(&output, b"namespace");
+
+        let mut restored = Box::new(UserCatalog::new());
+        restored.load_from(&mut reopened, &mut buffer).unwrap();
+        assert!(!restored.is_claimed());
+
+        reopened.create_file(reopened.root(), b"after").unwrap();
+        let mut restored_after_namespace_commit = Box::new(UserCatalog::new());
+        restored_after_namespace_commit.load_from(&mut reopened, &mut buffer).unwrap();
+        assert!(!restored_after_namespace_commit.is_claimed());
     }
 
     #[test]
@@ -2866,8 +3242,7 @@ mod tests {
 
     #[test]
     fn transaction_supports_read_your_writes_and_atomic_reopen() {
-        let store = MemoryBlockStore::<32>::new();
-        let mut fs = DurableNamespace::format(store).unwrap();
+        let mut fs: DurableNamespace<HeapStore> = DurableNamespace::format(heap_store()).unwrap();
         let mut transaction = fs.begin_transaction();
         transaction.create_file(fs.transaction_base(), b"/proof").unwrap();
         transaction.write(fs.transaction_base(), b"/proof", 0, b"durable", true).unwrap();

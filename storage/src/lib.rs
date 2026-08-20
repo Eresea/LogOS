@@ -3,6 +3,7 @@
 #[cfg(test)]
 extern crate std;
 
+mod catalog;
 mod cow;
 mod journal;
 mod pci;
@@ -10,10 +11,14 @@ mod request;
 mod transport;
 mod virtio;
 
+pub use catalog::{
+    CatalogError, SYSTEM_CATALOG_FORMAT_VERSION, SYSTEM_CATALOG_MAX_BLOCKS,
+    SYSTEM_CATALOG_MAX_BYTES, SystemCatalogRoot, SystemCatalogTransaction, SystemCatalogVolume,
+};
 pub use cow::{
     COW_COMMIT_SLOTS, COW_FORMAT_VERSION, COW_MAX_BITMAP_BLOCKS, COW_MAX_RETIRED_EXTENTS,
-    COW_PROVISIONED_BLANK_MAGIC, COW_SUPERBLOCK_MAGIC, CowError, CowExtent, CowRoot,
-    CowTransaction, CowVolume,
+    COW_MAX_TRANSACTION_EXTENTS, COW_PROVISIONED_BLANK_MAGIC, COW_SUPERBLOCK_MAGIC, CowError,
+    CowExtent, CowRoot, CowTransaction, CowVolume,
 };
 pub use journal::{
     CHECKPOINT_PAYLOAD_BYTES, FORMAT_VERSION, FormatError, JOURNAL_COMMIT_KIND, JournalRecord,

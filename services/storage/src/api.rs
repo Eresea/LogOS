@@ -6,7 +6,8 @@ use logos_storage::BlockStore;
 use logos_storage::ReadMap;
 
 use crate::{
-    DurableNamespace, MAX_FILE_BYTES, NamespaceError, NamespaceTransaction, ObjectNamespace,
+    DurableNamespace, MAX_FILE_BYTES, NamespaceError, NamespaceTransaction, NamespaceVolume,
+    ObjectNamespace,
 };
 
 const STAGE_CHUNK_BYTES: usize = 192;
@@ -85,8 +86,8 @@ impl FileHandle {
     const EMPTY: Self = Self { generation: 1, object: None };
 }
 
-pub struct StorageApi<B> {
-    namespace: DurableNamespace<B>,
+pub struct StorageApi<B, V = logos_storage::CowVolume> {
+    namespace: DurableNamespace<B, V>,
     active: Option<ActiveTransaction>,
     next_transaction: u64,
     next_stage: u64,
@@ -96,8 +97,10 @@ pub struct StorageApi<B> {
     failed: bool,
 }
 
-impl<B: BlockStore> StorageApi<B> {
-    pub fn new(namespace: DurableNamespace<B>) -> Self {
+pub type StorageApiV5<B> = StorageApi<B, logos_storage::SystemCatalogVolume>;
+
+impl<B: BlockStore, V: NamespaceVolume> StorageApi<B, V> {
+    pub fn new(namespace: DurableNamespace<B, V>) -> Self {
         Self {
             namespace,
             active: None,
@@ -110,11 +113,11 @@ impl<B: BlockStore> StorageApi<B> {
         }
     }
 
-    pub fn into_namespace(self) -> DurableNamespace<B> {
+    pub fn into_namespace(self) -> DurableNamespace<B, V> {
         self.namespace
     }
 
-    pub fn namespace_mut(&mut self) -> &mut DurableNamespace<B> {
+    pub fn namespace_mut(&mut self) -> &mut DurableNamespace<B, V> {
         &mut self.namespace
     }
 
@@ -895,6 +898,7 @@ fn service_name(service: logos_abi::ServiceId) -> &'static [u8] {
         logos_abi::ServiceId::Network => b"network",
         logos_abi::ServiceId::Fetch => b"fetch",
         logos_abi::ServiceId::Device => b"device",
+        logos_abi::ServiceId::User => b"user",
     }
 }
 
