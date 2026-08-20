@@ -25,6 +25,7 @@ pub enum CompletionTarget {
     FilesystemMember,
     PackageMember,
     ProgramMember,
+    DeviceMember,
     FileHandleOpen,
     FileHandleOpenMember,
     FileHandleTouch,
@@ -70,6 +71,7 @@ pub const FILE_TOUCH_MEMBER_COMPLETION: [&[u8]; 2] = [b"create()", b"write(\"\")
 pub const FILE_TOUCH_MEMBER_OFFSETS: [u8; 2] = [8, 7];
 pub const PACKAGE_COMPLETION_MEMBERS: [&[u8]; 3] = [b"list()", b"info(\"\")", b"install(\"\")"];
 pub const PROGRAM_COMPLETION_MEMBERS: [&[u8]; 3] = [b"start(\"\")", b"status(\"\")", b"stop(\"\")"];
+pub const DEVICE_COMPLETION_MEMBERS: [&[u8]; 1] = [b"list()"];
 
 /// Return the cursor position for the first empty argument placeholder.
 pub const fn completion_cursor_offset(candidate: &[u8]) -> usize {
@@ -94,6 +96,7 @@ pub enum FlowKind {
     Network,
     Package,
     Program,
+    Device,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,7 +116,7 @@ pub struct FlowSpec {
     pub manual: &'static [u8],
 }
 
-pub const FLOW_SPECS: [FlowSpec; 6] = [
+pub const FLOW_SPECS: [FlowSpec; 7] = [
     FlowSpec {
         name: b"sys",
         kind: FlowKind::System,
@@ -155,6 +158,13 @@ pub const FLOW_SPECS: [FlowSpec; 6] = [
         usage: b"program.start(\"name\") / program.status(\"name\") / program.stop(\"name\")",
         summary: b"manage persistent programs",
         manual: b"Starts, inspects, or stops a capability-free persistent program.",
+    },
+    FlowSpec {
+        name: b"device",
+        kind: FlowKind::Device,
+        usage: b"device.list()",
+        summary: b"inspect physical devices",
+        manual: b"Lists the bounded physical device inventory, including disks.",
     },
 ];
 
@@ -271,6 +281,15 @@ pub fn completion_context<'a>(
             replace_start: 8,
             replace_end: cursor,
             prefix: &before[8..],
+        }));
+    }
+
+    if before.starts_with(b"device.") && before[7..].iter().all(|byte| is_member_byte(*byte)) {
+        return Ok(Some(CompletionContext {
+            target: CompletionTarget::DeviceMember,
+            replace_start: 7,
+            replace_end: cursor,
+            prefix: &before[7..],
         }));
     }
 
@@ -440,6 +459,11 @@ pub enum ProgramCommand<'a> {
     Stop { name: &'a [u8] },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeviceCommand {
+    List,
+}
+
 const MAX_CALL_ARGS: usize = 3;
 const MAX_EXPRESSION_PARTS: usize = 3;
 
@@ -510,6 +534,7 @@ pub enum FlowOperation<'a> {
     Network(NetworkCommand<'a>),
     Package(PackageCommand<'a>),
     Program(ProgramCommand<'a>),
+    Device(DeviceCommand),
     System(SystemOperation),
     CancelPromise {
         name: &'a [u8],
@@ -757,6 +782,9 @@ fn parse_flow_operation_unchecked<'a>(
         .map_err(|_| FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?
     {
         return Ok(Some(FlowOperation::Network(command)));
+    }
+    if expression == b"device.list()" {
+        return Ok(Some(FlowOperation::Device(DeviceCommand::List)));
     }
     if expression == b"pkg.list()" {
         return Ok(Some(FlowOperation::Package(PackageCommand::List)));
@@ -1589,6 +1617,10 @@ mod tests {
             CompletionTarget::PackageMember
         );
         assert_eq!(
+            completion_context(b"device.", 7).unwrap().unwrap().target,
+            CompletionTarget::DeviceMember
+        );
+        assert_eq!(
             completion_context(b"fs.open(\"test\")", 15).unwrap(),
             Some(CompletionContext {
                 target: CompletionTarget::FileHandleOpen,
@@ -1736,6 +1768,11 @@ mod tests {
             parse_flow_operation(b"pkg.list()").unwrap(),
             Some(FlowOperation::Package(PackageCommand::List))
         );
+        assert_eq!(
+            parse_flow_operation(b"device.list()").unwrap(),
+            Some(FlowOperation::Device(DeviceCommand::List))
+        );
+        assert!(matches!(parse_flow_operation(b"device.list(1)"), Err(FlowDiagnostic::Type(_))));
         assert_eq!(
             parse_flow_operation(br#"pkg.info("flow")"#).unwrap(),
             Some(FlowOperation::Package(PackageCommand::Info { name: b"flow" }))
@@ -1887,8 +1924,15 @@ mod tests {
                 .map(|signature| signature.argument_count),
             Some(0)
         );
+        assert_eq!(
+            OperationRegistry::lookup(NamespaceKind::Device, b"list")
+                .map(|signature| signature.argument_count),
+            Some(0)
+        );
         assert!(OperationRegistry::lookup(NamespaceKind::Supervisor, b"restart").is_some());
         assert!(OperationRegistry::lookup(NamespaceKind::Filesystem, b"create").is_none());
+        let mut service = FlowService::new();
+        assert!(service.validate(b"device.list()").is_ok());
     }
 
     #[test]

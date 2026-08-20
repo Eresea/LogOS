@@ -57,6 +57,7 @@ pub enum NamespaceKind {
     Supervisor,
     Package,
     Program,
+    Device,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,6 +131,13 @@ impl OperationRegistry {
                 [FlowType::String, FlowType::Void, FlowType::Void],
                 1,
                 PromiseType::Void.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::Device,
+                b"list",
+                [FlowType::Void, FlowType::Void, FlowType::Void],
+                0,
+                PromiseType::String.flow_type(),
             ),
             OperationSignature::new(
                 NamespaceKind::Filesystem,
@@ -1288,6 +1296,7 @@ impl<'a, 'p> TypeChecker<'a, 'p> {
                 None if name == b"service" => Ok(FlowType::Namespace(NamespaceKind::Supervisor)),
                 None if name == b"pkg" => Ok(FlowType::Namespace(NamespaceKind::Package)),
                 None if name == b"program" => Ok(FlowType::Namespace(NamespaceKind::Program)),
+                None if name == b"device" => Ok(FlowType::Namespace(NamespaceKind::Device)),
                 None => Err(FlowTypeError::UnknownVariable(node.span)),
             },
             ExprKind::Index { base, key } => {
@@ -1440,6 +1449,10 @@ impl<'a, 'p> TypeChecker<'a, 'p> {
                 (FlowType::Namespace(NamespaceKind::Program), b"start" | b"status" | b"stop") => {
                     Self::require_arity(args, 1, span)?;
                     Self::require_type(self.expr_type(args[0])?, FlowType::String, span)?;
+                    Ok(PromiseType::String.flow_type())
+                }
+                (FlowType::Namespace(NamespaceKind::Device), b"list") => {
+                    Self::require_arity(args, 0, span)?;
                     Ok(PromiseType::String.flow_type())
                 }
                 (FlowType::FileHandle, b"create") => {

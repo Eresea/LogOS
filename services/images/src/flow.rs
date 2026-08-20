@@ -11,11 +11,11 @@ mod common;
 
 use logos_abi::{
     COMPLETION_FLAG_TRUNCATED, CompletionRequest, CompletionResponse, CompletionStatus,
-    FetchBodyChunk, FetchControl, FetchPhase, FetchRequest, FetchResponse, FetchStatus,
-    FlowControl, IPC_FLAG_MORE, IpcBytes, IpcStatus, MAX_COMPLETION_ITEM_BYTES, MessageKind,
-    NetworkOperation, NetworkRequest, NetworkResponse, NetworkResult, NetworkState,
-    STORAGE_API_FLAG_REPLACE, StorageApiOperation, StorageApiRequest, StorageApiResponse,
-    StorageApiStatus,
+    DeviceOperation, DeviceRequest, DeviceResponse, DeviceStatus, FetchBodyChunk, FetchControl,
+    FetchPhase, FetchRequest, FetchResponse, FetchStatus, FlowControl, IPC_FLAG_MORE, IpcBytes,
+    IpcStatus, MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation, NetworkRequest,
+    NetworkResponse, NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE, StorageApiOperation,
+    StorageApiRequest, StorageApiResponse, StorageApiStatus,
 };
 
 const INPUT_CAPABILITY: usize = common::capability_slot(
@@ -58,9 +58,20 @@ const FETCH_RECEIVE_CAPABILITY: usize = common::capability_slot(
     logos_abi::IpcEndpointId::FetchToFlow,
     logos_abi::IpcRights::Receive,
 );
+const DEVICE_SEND_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Flow,
+    logos_abi::IpcEndpointId::FlowToDevice,
+    logos_abi::IpcRights::Send,
+);
+const DEVICE_RECEIVE_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Flow,
+    logos_abi::IpcEndpointId::DeviceToFlow,
+    logos_abi::IpcRights::Receive,
+);
 
 static NEXT_MANAGER_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_NETWORK_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
+static NEXT_DEVICE_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 
 fn next_manager_request_id() -> u32 {
     loop {
@@ -80,6 +91,19 @@ fn next_network_request_id() -> u32 {
         let current = NEXT_NETWORK_REQUEST_ID.load(Ordering::Relaxed);
         let next = current.wrapping_add(1).max(1);
         if NEXT_NETWORK_REQUEST_ID
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return current;
+        }
+    }
+}
+
+fn next_device_request_id() -> u32 {
+    loop {
+        let current = NEXT_DEVICE_REQUEST_ID.load(Ordering::Relaxed);
+        let next = current.wrapping_add(1).max(1);
+        if NEXT_DEVICE_REQUEST_ID
             .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
@@ -622,6 +646,7 @@ impl CompletionService {
                         logos_flow::FlowKind::System => b".".as_slice(),
                         logos_flow::FlowKind::Package => b".".as_slice(),
                         logos_flow::FlowKind::Program => b".".as_slice(),
+                        logos_flow::FlowKind::Device => b".".as_slice(),
                     };
                     let mut candidate = [0; MAX_COMPLETION_ITEM_BYTES];
                     let Some(length) = copy_candidate(&mut candidate, spec.name, punctuation)
@@ -710,6 +735,19 @@ impl CompletionService {
             }
             logos_flow::CompletionTarget::ProgramMember => {
                 for candidate in logos_flow::PROGRAM_COMPLETION_MEMBERS {
+                    if candidate.starts_with(context.prefix)
+                        && !response.push_candidate_with_cursor(
+                            candidate,
+                            logos_flow::completion_cursor_offset(candidate),
+                        )
+                    {
+                        response.flags |= COMPLETION_FLAG_TRUNCATED;
+                        break;
+                    }
+                }
+            }
+            logos_flow::CompletionTarget::DeviceMember => {
+                for candidate in logos_flow::DEVICE_COMPLETION_MEMBERS {
                     if candidate.starts_with(context.prefix)
                         && !response.push_candidate_with_cursor(
                             candidate,
@@ -1142,6 +1180,100 @@ impl PackageClient {
     }
 
     fn succeed(&mut self) {
+        self.active = false;
+        self.done = true;
+    }
+
+    fn take_result(&mut self, pending: &mut PendingOutput) {
+        if self.done {
+            pending.stage(&self.result[..self.result_len]);
+            self.done = false;
+        }
+    }
+}
+
+struct DeviceClient {
+    active: bool,
+    done: bool,
+    sent: bool,
+    request_id: u32,
+    result: [u8; logos_flow::MAX_OUTPUT_BYTES],
+    result_len: usize,
+}
+
+impl DeviceClient {
+    const fn new() -> Self {
+        Self {
+            active: false,
+            done: false,
+            sent: false,
+            request_id: 1,
+            result: [0; logos_flow::MAX_OUTPUT_BYTES],
+            result_len: 0,
+        }
+    }
+
+    fn start(&mut self, command: logos_flow::DeviceCommand) -> bool {
+        if self.active || self.done || command != logos_flow::DeviceCommand::List {
+            return false;
+        }
+        self.active = true;
+        self.sent = false;
+        self.result_len = 0;
+        self.request_id = next_device_request_id();
+        true
+    }
+
+    fn active(&self) -> bool {
+        self.active
+    }
+
+    fn drive(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        let request = DeviceRequest::new(DeviceOperation::List, self.request_id);
+        if !self.sent {
+            match common::ipc_send(DEVICE_SEND_CAPABILITY, &request) {
+                IpcStatus::Ok => {
+                    self.sent = true;
+                }
+                IpcStatus::Full => return false,
+                _ => self.fail(b"device manager unavailable\r\n"),
+            }
+            return true;
+        }
+        let mut response = DeviceResponse::new(request, DeviceStatus::Invalid, 1, 1);
+        match common::ipc_receive(DEVICE_RECEIVE_CAPABILITY, &mut response) {
+            IpcStatus::Ok => {}
+            IpcStatus::Empty => return false,
+            _ => {
+                self.fail(b"device manager unavailable\r\n");
+                return true;
+            }
+        }
+        if !response.is_valid_for(request) {
+            self.fail(b"device inventory malformed\r\n");
+            return true;
+        }
+        if response.status != DeviceStatus::Ok {
+            self.fail(b"device inventory unavailable\r\n");
+            return true;
+        }
+        let mut manager = logos_device::DeviceManager::new();
+        if manager.publish(response).is_err() {
+            self.fail(b"device inventory malformed\r\n");
+            return true;
+        }
+        self.result_len = manager.format_list(&mut self.result);
+        self.active = false;
+        self.done = true;
+        true
+    }
+
+    fn fail(&mut self, message: &[u8]) {
+        self.result_len = message.len().min(self.result.len());
+        self.result[..self.result_len].copy_from_slice(&message[..self.result_len]);
         self.active = false;
         self.done = true;
     }
@@ -2227,6 +2359,7 @@ static mut FLOW: logos_flow::FlowService = logos_flow::FlowService::new();
 static mut PENDING: PendingOutput = PendingOutput::new();
 static mut STORAGE: StorageClient = StorageClient::new();
 static mut PACKAGE: PackageClient = PackageClient::new();
+static mut DEVICE: DeviceClient = DeviceClient::new();
 static mut NETWORK: NetworkClient = NetworkClient::new();
 static mut FETCH: FetchClient = FetchClient::new();
 static mut COMPLETION: CompletionService = CompletionService::new();
@@ -2238,6 +2371,7 @@ pub extern "C" fn _start() -> ! {
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
     let package = unsafe { &mut *core::ptr::addr_of_mut!(PACKAGE) };
+    let device = unsafe { &mut *core::ptr::addr_of_mut!(DEVICE) };
     let network = unsafe { &mut *core::ptr::addr_of_mut!(NETWORK) };
     let fetch = unsafe { &mut *core::ptr::addr_of_mut!(FETCH) };
     let completion = unsafe { &mut *core::ptr::addr_of_mut!(COMPLETION) };
@@ -2256,7 +2390,11 @@ pub extern "C" fn _start() -> ! {
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Flow);
         let mut progressed = pending.flush(OUTPUT_CAPABILITY);
-        if storage.active() || package.active() || (fetch.active() && fetch.foreground()) {
+        if storage.active()
+            || package.active()
+            || device.active()
+            || (fetch.active() && fetch.foreground())
+        {
             let mut control = IpcBytes::empty(MessageKind::FlowControl);
             if common::ipc_receive(INPUT_CAPABILITY, &mut control) == IpcStatus::Ok {
                 if fetch.active() {
@@ -2269,7 +2407,7 @@ pub extern "C" fn _start() -> ! {
                     if value.is_valid() {
                         if storage.active() {
                             storage.cancel();
-                        } else {
+                        } else if package.active() {
                             package.cancel();
                         }
                         progressed = true;
@@ -2356,6 +2494,24 @@ pub extern "C" fn _start() -> ! {
                     common::wait(
                         common::ipc_read_event(logos_abi::IpcEndpointId::StorageToFlow)
                             | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToStorage)
+                            | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
+                        logos_abi::ServiceId::Flow,
+                    );
+                }
+                continue;
+            }
+        }
+        if device.active() {
+            progressed |= device.drive();
+            if device.done {
+                device.take_result(pending);
+                progressed = true;
+            }
+            if device.active() {
+                if !progressed {
+                    common::wait(
+                        common::ipc_read_event(logos_abi::IpcEndpointId::DeviceToFlow)
+                            | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToDevice)
                             | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
                         logos_abi::ServiceId::Flow,
                     );
@@ -2490,6 +2646,11 @@ pub extern "C" fn _start() -> ! {
                         Ok(Some(logos_flow::FlowOperation::Package(command))) => {
                             if !package.start(command) {
                                 pending.stage(b"package request too large\r\n");
+                            }
+                        }
+                        Ok(Some(logos_flow::FlowOperation::Device(command))) => {
+                            if !device.start(command) {
+                                pending.stage(b"device request busy or too large\r\n");
                             }
                         }
                         Ok(Some(logos_flow::FlowOperation::Program(command))) => {
