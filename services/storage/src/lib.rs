@@ -6,6 +6,7 @@ extern crate std;
 mod api;
 mod namespace;
 mod packages;
+mod system_pool;
 
 pub use api::{StorageApi, error_response};
 pub use namespace::{
@@ -18,6 +19,7 @@ pub use packages::{
     PACKAGE_SNAPSHOT_BYTES, PackageCatalogError, PackageExtent, PackageHandle, PackageInfo,
     PackageInstall, PackageKey,
 };
+pub use system_pool::{StoragePoolError, StoragePoolLayout};
 
 use logos_abi::{
     IpcCapability, IpcStatus, StorageOperation, StorageRequest, StorageResponse, StorageStatus,
