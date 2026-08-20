@@ -1,5 +1,8 @@
 #![no_std]
 
+#[cfg(not(target_os = "uefi"))]
+extern crate alloc;
+
 #[cfg(test)]
 extern crate std;
 
@@ -20,6 +23,12 @@ pub use scheduler::{
 };
 pub mod health;
 pub mod runtime;
+#[cfg(not(target_os = "uefi"))]
+pub mod runtime_events;
+#[cfg(not(target_os = "uefi"))]
+pub mod runtime_ipc;
+#[cfg(not(target_os = "uefi"))]
+pub mod runtime_services;
 pub mod service_images;
 pub mod service_ipc;
 pub mod service_lifecycle;
