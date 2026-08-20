@@ -1146,6 +1146,11 @@ pub(crate) fn fault_service_process(process: crate::process::ProcessHandle, vect
     }
 }
 
+pub(crate) fn exit_process(process: crate::process::ProcessHandle, code: u8) -> bool {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe { (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).exit_process(process, code).is_ok() }
+}
+
 #[allow(dead_code)]
 pub(crate) fn enter_user_launch(launch: crate::process::UserLaunch) -> ! {
     unsafe {

@@ -1,13 +1,14 @@
 //! Fixed Core-owned service lifecycle state and control-plane validation.
 
 use logos_abi::{
-    MAX_MANAGER_SERVICES, MAX_SERVICE_NAME_BYTES, ManagerOperation, ManagerRequest, ManagerRights,
-    ManagerState, ManagerStatus, ServiceManagerRecord,
+    MAX_MANAGER_SERVICES, MAX_PACKAGE_NAME_BYTES, ManagerOperation, ManagerRequest, ManagerRights,
+    ManagerState, ManagerStatus, ManagerTargetKind, ServiceManagerRecord,
 };
 
 use crate::service_images::SERVICE_IMAGES;
 
 pub const MAX_SERVICE_SLOTS: usize = MAX_MANAGER_SERVICES;
+pub const MAX_PROGRAM_SLOTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceImageSource {
@@ -44,6 +45,8 @@ pub enum ManagerAction {
     Start(logos_abi::ServiceId),
     Stop(logos_abi::ServiceId),
     Restart([logos_abi::ServiceId; MAX_SERVICE_SLOTS], usize),
+    ProgramStart(usize),
+    ProgramStop(usize),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,7 +58,7 @@ pub struct ManagerDecision {
 #[derive(Clone, Copy)]
 struct Slot {
     service: Option<logos_abi::ServiceId>,
-    name: [u8; MAX_SERVICE_NAME_BYTES],
+    name: [u8; MAX_PACKAGE_NAME_BYTES],
     name_len: u8,
     dependencies: u8,
     generation: u32,
@@ -63,10 +66,40 @@ struct Slot {
     restarts: u8,
 }
 
+#[derive(Clone, Copy)]
+struct ProgramSlot {
+    name: [u8; MAX_PACKAGE_NAME_BYTES],
+    name_len: u8,
+    generation: u32,
+    state: ManagerState,
+}
+
+impl ProgramSlot {
+    const EMPTY: Self = Self {
+        name: [0; MAX_PACKAGE_NAME_BYTES],
+        name_len: 0,
+        generation: 1,
+        state: ManagerState::Vacant,
+    };
+
+    const fn record(self, slot: usize) -> ServiceManagerRecord {
+        ServiceManagerRecord {
+            slot: slot as u8,
+            state: self.state,
+            restarts: 0,
+            name_len: self.name_len,
+            generation: self.generation,
+            dependencies: 0,
+            reserved: [0; 3],
+            name: self.name,
+        }
+    }
+}
+
 impl Slot {
     const EMPTY: Self = Self {
         service: None,
-        name: [0; MAX_SERVICE_NAME_BYTES],
+        name: [0; MAX_PACKAGE_NAME_BYTES],
         name_len: 0,
         dependencies: 0,
         generation: 1,
@@ -91,6 +124,7 @@ impl Slot {
 pub struct ServiceManager {
     slots: [Slot; MAX_SERVICE_SLOTS],
     image_sources: [ServiceImageSource; MAX_SERVICE_SLOTS],
+    programs: [ProgramSlot; MAX_PROGRAM_SLOTS],
 }
 
 impl ServiceManager {
@@ -98,6 +132,7 @@ impl ServiceManager {
         let mut manager = Self {
             slots: [Slot::EMPTY; MAX_SERVICE_SLOTS],
             image_sources: [ServiceImageSource::Predeclared; MAX_SERVICE_SLOTS],
+            programs: [ProgramSlot::EMPTY; MAX_PROGRAM_SLOTS],
         };
         manager.install_profiles();
         manager
@@ -109,7 +144,7 @@ impl ServiceManager {
             let spec = SERVICE_IMAGES[index];
             let service = spec.service();
             let name = spec.name();
-            let mut bytes = [0; MAX_SERVICE_NAME_BYTES];
+            let mut bytes = [0; MAX_PACKAGE_NAME_BYTES];
             let mut name_index = 0;
             while name_index < name.len() {
                 bytes[name_index] = name[name_index];
@@ -152,6 +187,69 @@ impl ServiceManager {
             return None;
         }
         Some(self.slots[slot].record(slot))
+    }
+
+    pub fn program_record(&self, slot: usize) -> Option<ServiceManagerRecord> {
+        if slot >= self.programs.len() || self.programs[slot].state == ManagerState::Vacant {
+            None
+        } else {
+            Some(self.programs[slot].record(slot))
+        }
+    }
+
+    pub fn mark_program_running(&mut self, slot: usize, generation: u32) -> bool {
+        let Some(program) = self.programs.get_mut(slot) else { return false };
+        if program.generation != generation || program.state != ManagerState::Starting {
+            return false;
+        }
+        program.state = ManagerState::Running;
+        true
+    }
+
+    pub fn mark_program_stopping(&mut self, slot: usize, generation: u32) -> bool {
+        let Some(program) = self.programs.get_mut(slot) else { return false };
+        if program.generation != generation || program.state != ManagerState::Running {
+            return false;
+        }
+        program.state = ManagerState::Stopping;
+        true
+    }
+
+    pub fn mark_program_terminal(
+        &mut self,
+        slot: usize,
+        generation: u32,
+        state: ManagerState,
+    ) -> bool {
+        let Some(program) = self.programs.get_mut(slot) else { return false };
+        if program.generation != generation
+            || !matches!(program.state, ManagerState::Running | ManagerState::Stopping)
+        {
+            return false;
+        }
+        program.state = state;
+        true
+    }
+
+    pub fn mark_program_failed(&mut self, slot: usize, generation: u32) -> bool {
+        let Some(program) = self.programs.get_mut(slot) else { return false };
+        if program.generation != generation || program.state != ManagerState::Starting {
+            return false;
+        }
+        program.state = ManagerState::Faulted;
+        true
+    }
+
+    pub fn mark_program_stopped(&mut self, slot: usize, generation: u32) -> bool {
+        let Some(program) = self.programs.get_mut(slot) else { return false };
+        if program.generation != generation
+            || !matches!(program.state, ManagerState::Stopping | ManagerState::Running)
+        {
+            return false;
+        }
+        program.state = ManagerState::Stopped;
+        program.generation = program.generation.wrapping_add(1).max(1);
+        true
     }
 
     pub const fn service(&self, slot: usize) -> Option<logos_abi::ServiceId> {
@@ -262,7 +360,13 @@ impl ServiceManager {
         if request.abi_version != logos_abi::MANAGER_ABI_VERSION {
             return ManagerDecision { response, action: ManagerAction::None };
         }
-        if request.reserved != 0 || request.reserved_tail != [0; 2] {
+        if ManagerTargetKind::from_raw(request.target_kind as u8).is_none()
+            || request.reserved_tail != 0
+            || request.name_len as usize > request.name.len()
+            || request.name[request.name_len as usize..].iter().any(|byte| *byte != 0)
+            || (request.target_kind == ManagerTargetKind::Program
+                && logos_abi::PackageTarget::program(request.name()).is_none())
+        {
             return ManagerDecision { response, action: ManagerAction::None };
         }
         if request.request_id == 0 {
@@ -277,7 +381,22 @@ impl ServiceManager {
             ManagerOperation::Status
             | ManagerOperation::Start
             | ManagerOperation::Stop
-            | ManagerOperation::Restart => request.slot != u8::MAX && request.cursor == 0,
+            | ManagerOperation::Restart => {
+                request.target_kind == ManagerTargetKind::Service
+                    && request.slot != u8::MAX
+                    && request.cursor == 0
+            }
+            ManagerOperation::ProgramStart => {
+                request.target_kind == ManagerTargetKind::Program
+                    && request.slot == u8::MAX
+                    && request.generation == 0
+                    && request.cursor == 0
+            }
+            ManagerOperation::ProgramStatus | ManagerOperation::ProgramStop => {
+                request.target_kind == ManagerTargetKind::Program
+                    && (request.slot != u8::MAX || request.generation == 0)
+                    && request.cursor == 0
+            }
         };
         if !shape_valid {
             return ManagerDecision { response, action: ManagerAction::None };
@@ -383,6 +502,74 @@ impl ServiceManager {
                     };
                 }
             }
+            ManagerOperation::ProgramStart => {
+                let slot = match self.find_program(request.name()) {
+                    Some(slot) => slot,
+                    None => {
+                        let Some(slot) = self
+                            .programs
+                            .iter()
+                            .position(|program| program.state == ManagerState::Vacant)
+                        else {
+                            response.status = ManagerStatus::Capacity;
+                            return ManagerDecision { response, action: ManagerAction::None };
+                        };
+                        self.programs[slot].name[..request.name_len as usize]
+                            .copy_from_slice(request.name());
+                        self.programs[slot].name_len = request.name_len;
+                        slot
+                    }
+                };
+                if !matches!(
+                    self.programs[slot].state,
+                    ManagerState::Vacant
+                        | ManagerState::Stopped
+                        | ManagerState::Exited
+                        | ManagerState::Faulted
+                ) {
+                    response.status = ManagerStatus::InvalidState;
+                } else {
+                    if matches!(
+                        self.programs[slot].state,
+                        ManagerState::Exited | ManagerState::Faulted
+                    ) {
+                        self.programs[slot].generation =
+                            self.programs[slot].generation.wrapping_add(1).max(1);
+                    }
+                    self.programs[slot].state = ManagerState::Starting;
+                    response.status = ManagerStatus::Accepted;
+                    response.record = self.programs[slot].record(slot);
+                    return ManagerDecision { response, action: ManagerAction::ProgramStart(slot) };
+                }
+            }
+            ManagerOperation::ProgramStatus => {
+                let index = match self.valid_program_index(&request) {
+                    Ok(index) => index,
+                    Err(status) => {
+                        response.status = status;
+                        return ManagerDecision { response, action: ManagerAction::None };
+                    }
+                };
+                response.status = ManagerStatus::Ok;
+                response.record = self.programs[index].record(index);
+            }
+            ManagerOperation::ProgramStop => {
+                let index = match self.valid_program_index(&request) {
+                    Ok(index) => index,
+                    Err(status) => {
+                        response.status = status;
+                        return ManagerDecision { response, action: ManagerAction::None };
+                    }
+                };
+                if self.programs[index].state != ManagerState::Running {
+                    response.status = ManagerStatus::InvalidState;
+                } else {
+                    self.programs[index].state = ManagerState::Stopping;
+                    response.status = ManagerStatus::Accepted;
+                    response.record = self.programs[index].record(index);
+                    return ManagerDecision { response, action: ManagerAction::ProgramStop(index) };
+                }
+            }
         }
         if response.status == ManagerStatus::Malformed {
             response.status = ManagerStatus::InvalidState;
@@ -395,6 +582,33 @@ impl ServiceManager {
         if index >= self.slots.len() || self.slots[index].service.is_none() {
             Err(ManagerStatus::Unsupported)
         } else if self.slots[index].generation != request.generation {
+            Err(ManagerStatus::Stale)
+        } else {
+            Ok(index)
+        }
+    }
+
+    fn find_program(&self, name: &[u8]) -> Option<usize> {
+        self.programs.iter().position(|program| {
+            program.state != ManagerState::Vacant
+                && &program.name[..program.name_len as usize] == name
+        })
+    }
+
+    fn valid_program_index(&self, request: &ManagerRequest) -> Result<usize, ManagerStatus> {
+        if request.slot == u8::MAX {
+            return self.find_program(request.name()).ok_or(ManagerStatus::NotFound);
+        }
+        let index = request.slot as usize;
+        let Some(program) = self.programs.get(index) else {
+            return Err(ManagerStatus::NotFound);
+        };
+        if program.state == ManagerState::Vacant
+            || program.name_len != request.name_len
+            || &program.name[..program.name_len as usize] != request.name()
+        {
+            Err(ManagerStatus::NotFound)
+        } else if program.generation != request.generation {
             Err(ManagerStatus::Stale)
         } else {
             Ok(index)
@@ -614,7 +828,7 @@ mod tests {
     fn malformed_requests_and_unsupported_images_are_rejected() {
         let mut manager = manager();
         let mut malformed = ManagerRequest::new(ManagerOperation::List, 1);
-        malformed.reserved = 1;
+        malformed.reserved_tail = 1;
         assert_eq!(
             manager.request(malformed, ManagerRights::INSPECT).response.status,
             ManagerStatus::Malformed
@@ -645,6 +859,34 @@ mod tests {
             ManagerStatus::Unsupported
         );
         assert_eq!(manager.image_source(ServiceId::Input), Some(ServiceImageSource::Predeclared));
+    }
+
+    #[test]
+    fn program_handles_are_generation_safe_and_name_bound() {
+        let mut manager = manager();
+        let request = ManagerRequest::new(ManagerOperation::ProgramStart, 7)
+            .with_program_name(b"demo")
+            .unwrap();
+        let decision = manager.request(request, ManagerRights::ALL);
+        assert_eq!(decision.response.status, ManagerStatus::Accepted);
+        assert_eq!(decision.response.record.state, ManagerState::Starting);
+        let record = decision.response.record;
+        assert!(manager.mark_program_running(record.slot as usize, record.generation));
+
+        let mut status = ManagerRequest::new(ManagerOperation::ProgramStatus, 8)
+            .with_program_name(b"demo")
+            .unwrap();
+        status.slot = record.slot;
+        status.generation = record.generation;
+        assert_eq!(
+            manager.request(status, ManagerRights::INSPECT).response.status,
+            ManagerStatus::Ok
+        );
+        status.generation = status.generation.wrapping_add(1);
+        assert_eq!(
+            manager.request(status, ManagerRights::INSPECT).response.status,
+            ManagerStatus::Stale
+        );
     }
 
     #[test]

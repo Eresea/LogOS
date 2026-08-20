@@ -21,6 +21,7 @@ const SYSCALL_NOTIFY: usize = 3;
 const SYSCALL_IPC_SEND: usize = logos_abi::IPC_SYSCALL_SEND;
 const SYSCALL_IPC_RECEIVE: usize = logos_abi::IPC_SYSCALL_RECEIVE;
 const SYSCALL_MANAGER: usize = logos_abi::MANAGER_SYSCALL;
+const SYSCALL_EXIT: usize = logos_abi::PROGRAM_EXIT_SYSCALL;
 const SYSCALL_POWER: usize = logos_abi::POWER_SYSCALL;
 const SYSCALL_HEARTBEAT: usize = 10;
 
@@ -231,6 +232,19 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
         };
         let action = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) };
         let status = if crate::arch::power_control(launch.process(), action) { 0 } else { 1 };
+        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status) };
+        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
+    if number == SYSCALL_EXIT {
+        let Some(launch) = SCHEDULER.user_launch(handle) else {
+            return false;
+        };
+        let code = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) } as u8;
+        let status = if crate::arch::exit_process(launch.process(), code) { 0 } else { 1 };
+        if status == 0 {
+            let _ = SCHEDULER.request_stop(handle);
+        }
         unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status) };
         USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
         return true;

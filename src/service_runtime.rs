@@ -24,6 +24,7 @@ use crate::{
 };
 
 const SERVICE_COUNT: usize = SERVICE_IMAGES.len();
+const MAX_PROGRAMS: usize = crate::service_manager::MAX_PROGRAM_SLOTS;
 const MAX_ACTIVE_PAGE_TABLE_FRAMES: usize = 4096;
 // Package activation remains an internal hook until package-manager policy exists.
 #[allow(dead_code)]
@@ -93,6 +94,8 @@ pub struct ServiceRuntime {
     package_next_request: u32,
     prepared_packages: [Option<PreparedServiceImage>; SERVICE_COUNT],
     active_packages: [Option<ActivePackageImage>; SERVICE_COUNT],
+    programs: [ProgramRuntime; MAX_PROGRAMS],
+    pending_program_start: Option<(usize, logos_abi::ServiceManagerRecord)>,
     network_packet_response: Option<logos_abi::NetworkPacketDescriptor>,
     network_packet_sequence: u32,
     suppressed_heartbeats: [AtomicBool; SERVICE_COUNT],
@@ -113,11 +116,39 @@ struct ActivePackageImage {
     plan: crate::process::ElfLoadPlan,
 }
 
+struct ProgramRuntime {
+    manager_slot: u8,
+    generation: u32,
+    name: [u8; logos_abi::MAX_PACKAGE_NAME_BYTES],
+    name_len: u8,
+    process: Option<ProcessHandle>,
+    task: Option<crate::TaskHandle>,
+    image: LoadedImage,
+    table: MaybeUninit<PageTableBuilder>,
+    table_ready: bool,
+}
+
+impl ProgramRuntime {
+    const fn empty() -> Self {
+        Self {
+            manager_slot: u8::MAX,
+            generation: 0,
+            name: [0; logos_abi::MAX_PACKAGE_NAME_BYTES],
+            name_len: 0,
+            process: None,
+            task: None,
+            image: LoadedImage::empty(),
+            table: MaybeUninit::uninit(),
+            table_ready: false,
+        }
+    }
+}
+
 #[allow(dead_code)]
 struct RuntimePackageReader<'a, 'b> {
     runtime: &'a mut ServiceRuntime,
     runtime_guard: &'b mut crate::arch::ServiceRuntimeGuard,
-    service: ServiceId,
+    target: logos_abi::PackageTarget,
     generation: u32,
     base: usize,
     bytes: usize,
@@ -131,7 +162,7 @@ impl<'a, 'b> RuntimePackageReader<'a, 'b> {
     fn new(
         runtime: &'a mut ServiceRuntime,
         runtime_guard: &'b mut crate::arch::ServiceRuntimeGuard,
-        service: ServiceId,
+        target: logos_abi::PackageTarget,
         generation: u32,
         base: usize,
         bytes: usize,
@@ -139,7 +170,7 @@ impl<'a, 'b> RuntimePackageReader<'a, 'b> {
         Self {
             runtime,
             runtime_guard,
-            service,
+            target,
             generation,
             base,
             bytes,
@@ -176,9 +207,9 @@ impl<'a, 'b> RuntimePackageReader<'a, 'b> {
                     return Err(ProcessError::ReadFailure);
                 }
                 let amount = block_end - block;
-                let request = self.runtime.next_package_request(
+                let request = self.runtime.next_package_request_target(
                     logos_abi::PackageOperation::Read,
-                    self.service,
+                    self.target,
                     self.generation,
                     block,
                     amount,
@@ -292,6 +323,8 @@ impl ServiceRuntime {
             package_next_request: 1,
             prepared_packages: [const { None }; SERVICE_COUNT],
             active_packages: [None; SERVICE_COUNT],
+            programs: [const { ProgramRuntime::empty() }; MAX_PROGRAMS],
+            pending_program_start: None,
             network_packet_response: None,
             network_packet_sequence: 1,
             suppressed_heartbeats: [const { AtomicBool::new(false) }; SERVICE_COUNT],
@@ -956,22 +989,53 @@ impl ServiceRuntime {
         offset: usize,
         length: usize,
     ) -> Result<logos_abi::PackageRequest, ProcessError> {
-        let request_id = self.package_next_request;
-        self.package_next_request = self.package_next_request.wrapping_add(1).max(1);
-        let offset = u32::try_from(offset).map_err(|_| ProcessError::InvalidImage)?;
-        let length = u16::try_from(length).map_err(|_| ProcessError::InvalidImage)?;
-        logos_abi::PackageRequest::new(
+        self.next_package_request_target(
             operation,
-            service,
-            request_id,
-            self.ipc_generation,
-            crate::storage_ipc::PACKAGE_REQUEST_CAPABILITY_SLOT as u16,
-            self.service_epoch,
+            logos_abi::PackageTarget::service(service),
             package_generation,
             offset,
             length,
         )
-        .ok_or(ProcessError::InvalidImage)
+    }
+
+    fn next_package_request_target(
+        &mut self,
+        operation: logos_abi::PackageOperation,
+        target: logos_abi::PackageTarget,
+        package_generation: u32,
+        offset: usize,
+        length: usize,
+    ) -> Result<logos_abi::PackageRequest, ProcessError> {
+        let request_id = self.package_next_request;
+        self.package_next_request = self.package_next_request.wrapping_add(1).max(1);
+        let offset = u32::try_from(offset).map_err(|_| ProcessError::InvalidImage)?;
+        let length = u16::try_from(length).map_err(|_| ProcessError::InvalidImage)?;
+        let request = match target.kind {
+            logos_abi::PackageTargetKind::Service => logos_abi::PackageRequest::new(
+                operation,
+                ServiceId::from_index(target.service.saturating_sub(1) as usize)
+                    .ok_or(ProcessError::InvalidImage)?,
+                request_id,
+                self.ipc_generation,
+                crate::storage_ipc::PACKAGE_REQUEST_CAPABILITY_SLOT as u16,
+                self.service_epoch,
+                package_generation,
+                offset,
+                length,
+            ),
+            logos_abi::PackageTargetKind::Program => logos_abi::PackageRequest::new_program(
+                operation,
+                &target.name[..target.name_len as usize],
+                request_id,
+                self.ipc_generation,
+                crate::storage_ipc::PACKAGE_REQUEST_CAPABILITY_SLOT as u16,
+                self.service_epoch,
+                package_generation,
+                offset,
+                length,
+            ),
+        };
+        request.ok_or(ProcessError::InvalidImage)
     }
 
     #[inline]
@@ -1088,7 +1152,7 @@ impl ServiceRuntime {
             let mut raw_reader = RuntimePackageReader::new(
                 self,
                 runtime_guard,
-                service,
+                logos_abi::PackageTarget::service(service),
                 package_generation,
                 0,
                 package_bytes,
@@ -1123,7 +1187,7 @@ impl ServiceRuntime {
             let mut payload_reader = RuntimePackageReader::new(
                 self,
                 runtime_guard,
-                service,
+                logos_abi::PackageTarget::service(service),
                 package_generation,
                 payload_offset,
                 payload_length,
@@ -1148,7 +1212,7 @@ impl ServiceRuntime {
         let mut payload_reader = RuntimePackageReader::new(
             self,
             runtime_guard,
-            service,
+            logos_abi::PackageTarget::service(service),
             package_generation,
             payload_offset,
             payload_length,
@@ -2161,6 +2225,18 @@ impl ServiceRuntime {
                     }
                 }
             }
+            ManagerAction::ProgramStart(slot) => {
+                if self.pending_program_start.is_some() {
+                    decision.response.status = logos_abi::ManagerStatus::Busy;
+                } else {
+                    self.pending_program_start = Some((slot, decision.response.record));
+                }
+            }
+            ManagerAction::ProgramStop(slot) => {
+                if self.request_stop_program(slot).is_err() {
+                    decision.response.status = logos_abi::ManagerStatus::Busy;
+                }
+            }
         }
         unsafe {
             core::ptr::write_unaligned(
@@ -2267,6 +2343,14 @@ impl ServiceRuntime {
         vector: u8,
     ) -> Result<(), crate::process::ProcessError> {
         self.processes.fault(process, vector)
+    }
+
+    pub(crate) fn exit_process(
+        &mut self,
+        process: ProcessHandle,
+        code: u8,
+    ) -> Result<(), ProcessError> {
+        self.processes.exit(process, code)
     }
 
     /// Remove a tracked process mapping from its page table and process table.
@@ -2610,6 +2694,63 @@ impl ServiceRuntime {
         now: u64,
         runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
     ) -> Result<bool, ServiceRuntimeError> {
+        if let Some((slot, record)) = self.pending_program_start.take() {
+            if self.start_program(slot, record, runtime_guard).is_err() {
+                let _ = self.manager.mark_program_failed(slot, record.generation);
+            }
+            return Ok(true);
+        }
+        for slot in 0..MAX_PROGRAMS {
+            let Some(task) = self.programs[slot].task else { continue };
+            if crate::SCHEDULER.state(task) != Some(crate::TaskState::Completed) {
+                continue;
+            }
+            if !crate::SCHEDULER.reclaim_completed(task) {
+                return Err(ServiceRuntimeError::TaskStop);
+            }
+            let generation = self.programs[slot].generation;
+            let Some(process) = self.programs[slot].process.take() else {
+                let _ = self.manager.mark_program_stopped(slot, generation);
+                continue;
+            };
+            let state = self
+                .processes
+                .state(process)
+                .unwrap_or(crate::process::ProcessState::Faulted(0xff));
+            let forced_stop = matches!(state, crate::process::ProcessState::Running);
+            if forced_stop {
+                let _ = self.processes.exit(process, 0xff);
+            }
+            let terminal = self
+                .processes
+                .state(process)
+                .unwrap_or(crate::process::ProcessState::Faulted(0xff));
+            let _ = self.processes.reclaim(process);
+            if matches!(terminal, crate::process::ProcessState::Exited(_)) && !forced_stop {
+                let _ = self.manager.mark_program_terminal(
+                    slot,
+                    generation,
+                    logos_abi::ManagerState::Exited,
+                );
+            } else if matches!(terminal, crate::process::ProcessState::Faulted(_)) {
+                let _ = self.manager.mark_program_terminal(
+                    slot,
+                    generation,
+                    logos_abi::ManagerState::Faulted,
+                );
+            } else {
+                let _ = self.manager.mark_program_stopped(slot, generation);
+            }
+            if self.programs[slot].table_ready {
+                let mut memory = IdentityPageTableMemory;
+                unsafe { self.programs[slot].table.assume_init_mut() }
+                    .reclaim(&mut self.frame_pool, &mut memory);
+                self.programs[slot].table_ready = false;
+            }
+            self.programs[slot].image.reclaim(&mut self.frame_pool);
+            self.programs[slot].task = None;
+            self.programs[slot].manager_slot = u8::MAX;
+        }
         for spec in SERVICE_IMAGES {
             let service = spec.service();
             let index = service.index();
@@ -2707,6 +2848,168 @@ impl ServiceRuntime {
         Ok(false)
     }
 
+    fn request_stop_program(&mut self, slot: usize) -> Result<(), ServiceRuntimeError> {
+        let program = self.programs.get(slot).ok_or(ServiceRuntimeError::TaskStop)?;
+        let task = program.task.ok_or(ServiceRuntimeError::TaskStop)?;
+        if crate::SCHEDULER.request_stop(task) {
+            Ok(())
+        } else {
+            Err(ServiceRuntimeError::TaskStop)
+        }
+    }
+
+    fn start_program(
+        &mut self,
+        slot: usize,
+        record: logos_abi::ServiceManagerRecord,
+        runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
+    ) -> Result<(), ServiceRuntimeError> {
+        if slot >= MAX_PROGRAMS || self.programs[slot].task.is_some() {
+            return Err(ServiceRuntimeError::TaskCapacity);
+        }
+        let target = logos_abi::PackageTarget::program(&record.name[..record.name_len as usize])
+            .ok_or(ServiceRuntimeError::Image)?;
+        let request = self
+            .next_package_request_target(logos_abi::PackageOperation::Lookup, target, 0, 0, 0)
+            .map_err(ServiceRuntimeError::Process)?;
+        let response = self
+            .package_exchange(request, &mut [], runtime_guard)
+            .map_err(ServiceRuntimeError::Process)?;
+        if response.status != logos_abi::PackageStatus::Ok {
+            return Err(ServiceRuntimeError::Image);
+        }
+        let package_bytes = response.package_bytes as usize;
+        let package_generation = response.package_generation;
+        let (payload_offset, payload_length) = {
+            let mut reader = RuntimePackageReader::new(
+                self,
+                runtime_guard,
+                target,
+                package_generation,
+                0,
+                package_bytes,
+            );
+            let mut scratch = [0; crate::loader::PAGE_SIZE];
+            let header = logos_package::validate_package_v2(&mut reader, &mut scratch)
+                .map_err(|_| ServiceRuntimeError::Image)?;
+            if header.manifest.kind != logos_package::PackageKind::Program
+                || header.manifest.target != logos_package::PackageTarget::None
+                || header.manifest.name.as_bytes() != &record.name[..record.name_len as usize]
+            {
+                return Err(ServiceRuntimeError::Image);
+            }
+            (logos_package::PACKAGE_HEADER_V2_BYTES, header.payload_length as usize)
+        };
+        let plan = {
+            let mut reader = RuntimePackageReader::new(
+                self,
+                runtime_guard,
+                target,
+                package_generation,
+                payload_offset,
+                payload_length,
+            );
+            crate::process::ElfLoadPlan::parse_reader(&mut reader)
+                .map_err(|_| ServiceRuntimeError::Image)?
+        };
+        let owner = OwnerId::new(100 + slot as u16).ok_or(ServiceRuntimeError::Resources)?;
+        let mut image = LoadedImage::load_with_stack_pages_for_owner(
+            plan,
+            &mut self.frame_pool,
+            crate::process::USER_STACK_PAGES,
+            owner,
+        )
+        .map_err(ServiceRuntimeError::Load)?;
+        let mut reader = RuntimePackageReader::new(
+            self,
+            runtime_guard,
+            target,
+            package_generation,
+            payload_offset,
+            payload_length,
+        );
+        let mut scratch = [0; crate::loader::PAGE_SIZE];
+        let mut memory = IdentityPageTableMemory;
+        if let Err(error) = image.populate_reader(plan, &mut reader, &mut scratch, &mut memory) {
+            image.reclaim(&mut self.frame_pool);
+            return Err(ServiceRuntimeError::Populate(error));
+        }
+        let mut tables = PageTableBuilder::new_for_owner(&mut self.frame_pool, &mut memory, owner)
+            .map_err(ServiceRuntimeError::PageTableRoot)?;
+        if let Err(error) = tables.map_image(&image, &mut self.frame_pool, &mut memory) {
+            tables.reclaim(&mut self.frame_pool, &mut memory);
+            image.reclaim(&mut self.frame_pool);
+            return Err(ServiceRuntimeError::PageTableMap(error));
+        }
+        let process = match self.processes.start_plan(plan) {
+            Ok(process) => process,
+            Err(error) => {
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+                image.reclaim(&mut self.frame_pool);
+                return Err(ServiceRuntimeError::Process(error));
+            }
+        };
+        let Some(root) = AddressSpaceRoot::new(tables.root().raw() as usize) else {
+            let _ = self.processes.exit(process, 1);
+            let _ = self.processes.reclaim(process);
+            tables.reclaim(&mut self.frame_pool, &mut memory);
+            image.reclaim(&mut self.frame_pool);
+            return Err(ServiceRuntimeError::Process(ProcessError::AddressSpace));
+        };
+        self.processes.bind_address_space_root(process, root).map_err(|error| {
+            let _ = self.processes.exit(process, 1);
+            let _ = self.processes.reclaim(process);
+            tables.reclaim(&mut self.frame_pool, &mut memory);
+            image.reclaim(&mut self.frame_pool);
+            ServiceRuntimeError::Process(error)
+        })?;
+        if let Err(error) = map_loaded_pages(&mut self.processes, process, &image) {
+            let _ = self.processes.exit(process, 1);
+            let _ = self.processes.reclaim(process);
+            tables.reclaim(&mut self.frame_pool, &mut memory);
+            image.reclaim(&mut self.frame_pool);
+            return Err(ServiceRuntimeError::Process(error));
+        }
+        let launch = match self.processes.user_launch(process, image.entry(), image.stack_top()) {
+            Ok(launch) => launch,
+            Err(error) => {
+                let _ = self.processes.exit(process, 1);
+                let _ = self.processes.reclaim(process);
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+                image.reclaim(&mut self.frame_pool);
+                return Err(ServiceRuntimeError::Process(error));
+            }
+        };
+        let task = match crate::SCHEDULER.spawn_user(service_task_entry, process, launch) {
+            Ok(task) => task,
+            Err(error) => {
+                let _ = self.processes.exit(process, 1);
+                let _ = self.processes.reclaim(process);
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+                image.reclaim(&mut self.frame_pool);
+                return Err(match error {
+                    crate::SpawnError::Capacity => ServiceRuntimeError::TaskCapacity,
+                    crate::SpawnError::AddressSpace => ServiceRuntimeError::TaskAddressSpace,
+                    crate::SpawnError::UserLaunch => ServiceRuntimeError::TaskLaunch,
+                });
+            }
+        };
+        let program = &mut self.programs[slot];
+        program.manager_slot = record.slot;
+        program.generation = record.generation;
+        program.name = record.name;
+        program.name_len = record.name_len;
+        program.process = Some(process);
+        program.task = Some(task);
+        program.image = image;
+        program.table.write(tables);
+        program.table_ready = true;
+        if !self.manager.mark_program_running(slot, record.generation) {
+            return Err(ServiceRuntimeError::StaleGeneration);
+        }
+        Ok(())
+    }
+
     fn stop_tasks(
         &mut self,
         runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
@@ -2732,6 +3035,41 @@ impl ServiceRuntime {
             }
         }
         self.tasks.fill(None);
+        for slot in 0..MAX_PROGRAMS {
+            let Some(task) = self.programs[slot].task else { continue };
+            if !crate::SCHEDULER.request_stop(task) {
+                return Err(ServiceRuntimeError::TaskStop);
+            }
+            let mut waited = 0;
+            while crate::SCHEDULER.state(task) != Some(crate::TaskState::Completed) {
+                if waited == 1024 {
+                    return Err(ServiceRuntimeError::TaskStop);
+                }
+                runtime_guard.pause();
+                crate::sleep_current_for(1);
+                runtime_guard.resume();
+                waited += 1;
+            }
+            if !crate::SCHEDULER.reclaim_completed(task) {
+                return Err(ServiceRuntimeError::TaskStop);
+            }
+            if let Some(process) = self.programs[slot].process.take() {
+                if self.processes.state(process) == Some(crate::process::ProcessState::Running) {
+                    self.processes.exit(process, 0xff).map_err(ServiceRuntimeError::Process)?;
+                }
+                self.processes.reclaim(process).map_err(ServiceRuntimeError::Process)?;
+            }
+            if self.programs[slot].table_ready {
+                let mut memory = IdentityPageTableMemory;
+                unsafe { self.programs[slot].table.assume_init_mut() }
+                    .reclaim(&mut self.frame_pool, &mut memory);
+                self.programs[slot].table_ready = false;
+            }
+            self.programs[slot].image.reclaim(&mut self.frame_pool);
+            self.programs[slot].task = None;
+            let generation = self.programs[slot].generation;
+            let _ = self.manager.mark_program_stopped(slot, generation);
+        }
         Ok(())
     }
 
@@ -2803,6 +3141,24 @@ impl ServiceRuntime {
             }
             self.images[index].reclaim(&mut self.frame_pool);
         }
+        for program in &mut self.programs {
+            if let Some(process) = program.process.take() {
+                if self.processes.state(process) == Some(crate::process::ProcessState::Running) {
+                    let _ = self.processes.exit(process, 0xff);
+                }
+                let _ = self.processes.reclaim(process);
+            }
+            if program.table_ready {
+                let mut memory = IdentityPageTableMemory;
+                unsafe { program.table.assume_init_mut() }
+                    .reclaim(&mut self.frame_pool, &mut memory);
+                program.table_ready = false;
+            }
+            program.image.reclaim(&mut self.frame_pool);
+            program.task = None;
+            program.manager_slot = u8::MAX;
+        }
+        self.pending_program_start = None;
         self.startup = ServiceStartup::new();
         Ok(())
     }
