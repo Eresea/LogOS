@@ -106,10 +106,11 @@ validation.
 
 The User policy core is host-tested independently of the current v4 namespace. Its snapshot format
 persists identities, verifiers, roles, and namespace-root descriptors but deliberately omits sessions
-and live capability handles. The planned Storage integration must move this snapshot into a reserved
-system allocation class before User is exposed through Flow; the post-v4 storage layout validator
-defines disjoint system, user-content, and package ranges while v4 remains unchanged. Ordinary path
-operations are not treated as a user authorization boundary.
+and live capability handles. `UserCatalogStore` is the explicit persistence seam: Storage must back it
+from the reserved system allocation class before User is exposed through Flow. The post-v4 storage
+layout validator and arena-scoped COW allocator define disjoint system, user-content, and package
+ranges while v4 remains unchanged. Ordinary path operations are not treated as a user authorization
+boundary.
 
 Package-backed services are deliberately excluded from targeted manager image resets: Start and
 Restart return `Unsupported` until a bounded durable reload path exists. Supervisor failures route

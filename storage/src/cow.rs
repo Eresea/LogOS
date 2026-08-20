@@ -400,14 +400,39 @@ impl CowTransaction {
         store: &mut B,
         blocks: u32,
     ) -> Result<CowExtent, CowError> {
+        self.allocate_blocks_in_arena(
+            store,
+            blocks,
+            (self.root.data_start.get(), self.root.data_end.get()),
+        )
+    }
+
+    /// Allocate only from the caller-provided half-open block range.
+    ///
+    /// The range must be inside the current data arena. The v4 convenience
+    /// method above still scans the complete data arena; format-specific
+    /// callers use this method to keep system, user, and package pools apart.
+    pub fn allocate_blocks_in_arena<B: BlockStore>(
+        &mut self,
+        store: &mut B,
+        blocks: u32,
+        arena: (u64, u64),
+    ) -> Result<CowExtent, CowError> {
         if blocks == 0 {
+            return Err(CowError::InvalidRequest);
+        }
+        let (arena_start, arena_end) = arena;
+        if arena_start < self.root.data_start.get()
+            || arena_start >= arena_end
+            || arena_end > self.root.data_end.get()
+        {
             return Err(CowError::InvalidRequest);
         }
         let mut bitmap = [Block::zero(); COW_MAX_BITMAP_BLOCKS];
         read_bitmap(store, self.root, &mut bitmap)?;
         let mut run_start = None;
         let mut run_length = 0u32;
-        for index in self.root.data_start.get()..self.root.data_end.get() {
+        for index in arena_start..arena_end {
             let released = self.released[..self.released_count].iter().any(|extent| {
                 index >= extent.start.get() && index < extent.start.get() + extent.blocks as u64
             });
@@ -463,9 +488,23 @@ impl CowTransaction {
     }
 
     pub fn reserve_extent(&mut self, extent: CowExtent) -> Result<(), CowError> {
+        self.reserve_extent_in_arena(extent, (self.root.data_start.get(), self.root.data_end.get()))
+    }
+
+    pub fn reserve_extent_in_arena(
+        &mut self,
+        extent: CowExtent,
+        arena: (u64, u64),
+    ) -> Result<(), CowError> {
+        let (arena_start, arena_end) = arena;
         if extent.start.get() < self.root.data_start.get()
             || extent.start.get().checked_add(extent.blocks as u64).is_none()
             || extent.start.get() + extent.blocks as u64 > self.root.data_end.get()
+            || arena_start < self.root.data_start.get()
+            || arena_start >= arena_end
+            || arena_end > self.root.data_end.get()
+            || extent.start.get() < arena_start
+            || extent.start.get() + extent.blocks as u64 > arena_end
             || self.allocated_count == COW_MAX_TRANSACTION_EXTENTS
         {
             return Err(CowError::InvalidRequest);
@@ -1076,6 +1115,35 @@ mod tests {
             after_blocker.start.get() + after_blocker.blocks as u64 <= blocker.start.get()
                 || after_blocker.start.get() >= blocker.start.get() + blocker.blocks as u64,
             "first={first:?} blocker={blocker:?} reused={reused:?} after={after_blocker:?}"
+        );
+    }
+
+    #[test]
+    fn arena_scoped_allocation_keeps_pools_disjoint_and_reports_exhaustion() {
+        let mut store = MemoryBlockStore::<128>::new();
+        let volume = CowVolume::format(&mut store).unwrap();
+        let mut transaction = volume.begin(&mut store).unwrap();
+        let system = (volume.root().data_start.get() + 1, volume.root().data_start.get() + 3);
+        let user = (system.1, system.1 + 3);
+
+        let system_extent = transaction.allocate_blocks_in_arena(&mut store, 2, system).unwrap();
+        assert_eq!(system_extent.start.get(), system.0);
+        assert_eq!(
+            transaction.allocate_blocks_in_arena(&mut store, 1, system),
+            Err(CowError::OutOfSpace)
+        );
+
+        let user_extent = transaction.allocate_blocks_in_arena(&mut store, 2, user).unwrap();
+        assert_eq!(user_extent.start.get(), user.0);
+        assert!(system_extent.start.get() + system_extent.blocks as u64 <= user_extent.start.get());
+        assert_eq!(
+            transaction.allocate_blocks_in_arena(&mut store, 1, (user.1, user.1)),
+            Err(CowError::InvalidRequest)
+        );
+        assert_eq!(
+            transaction
+                .reserve_extent_in_arena(CowExtent::new(BlockIndex::new(user.1), 1).unwrap(), user),
+            Err(CowError::InvalidRequest)
         );
     }
 

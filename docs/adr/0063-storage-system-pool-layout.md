@@ -23,10 +23,10 @@ range for user content, and the format-selected package boundary for package pay
 Zero-sized system or user pools are rejected. Allocation exhaustion in the user or
 package pool must not make the system pool unavailable for recovery metadata.
 
-This milestone adds only the no-allocator layout validator and host proof. v4 roots,
-allocation scanning, and on-disk format versioning remain unchanged until the complete
-filesystem upgrade is implemented. v4 media therefore continues to open or reject under
-the existing rules and is never reinterpreted as the new layout.
+This milestone adds the no-allocator layout validator plus an arena-scoped COW allocation
+seam and host proof. v4 roots and on-disk format versioning remain unchanged until the
+complete filesystem upgrade is implemented. v4 media therefore continues to open or reject
+under the existing rules and is never reinterpreted as the new layout.
 
 ## Consequences
 

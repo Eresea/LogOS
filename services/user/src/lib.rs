@@ -41,6 +41,7 @@ pub enum UserError {
     Corrupt,
     Crypto,
     Entropy,
+    Persistence,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -156,6 +157,15 @@ impl PasswordVerifier {
 
 pub trait EntropySource {
     fn fill(&mut self, output: &mut [u8]) -> Result<(), UserError>;
+}
+
+/// Storage-owned persistence boundary for the durable User catalog.
+///
+/// Implementations own the path, system-pool allocation, and atomic commit.
+/// User only supplies and consumes the bounded canonical snapshot.
+pub trait UserCatalogStore {
+    fn load(&mut self, output: &mut [u8]) -> Result<usize, UserError>;
+    fn save(&mut self, snapshot: &[u8]) -> Result<(), UserError>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -347,7 +357,8 @@ fn map_error(error: UserError) -> UserStatus {
         UserError::InvalidName
         | UserError::InvalidPassword
         | UserError::Crypto
-        | UserError::Entropy => UserStatus::Invalid,
+        | UserError::Entropy
+        | UserError::Persistence => UserStatus::Invalid,
     }
 }
 
@@ -608,6 +619,34 @@ impl UserCatalog {
         self.roles = restored.roles;
         self.sessions = [None; MAX_SESSIONS];
         Ok(())
+    }
+
+    pub fn load_from<S: UserCatalogStore>(
+        &mut self,
+        store: &mut S,
+        buffer: &mut [u8],
+    ) -> Result<(), UserError> {
+        let length = match store.load(buffer) {
+            Ok(length) => length,
+            Err(UserError::NotFound) => {
+                *self = Self::new();
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if length > buffer.len() {
+            return Err(UserError::Persistence);
+        }
+        self.restore_snapshot(&buffer[..length])
+    }
+
+    pub fn save_to<S: UserCatalogStore>(
+        &self,
+        store: &mut S,
+        buffer: &mut [u8],
+    ) -> Result<(), UserError> {
+        let length = self.encode_snapshot(buffer)?;
+        store.save(&buffer[..length])
     }
 
     pub fn logout(&mut self, session: SessionHandle) -> Result<(), UserError> {
@@ -1068,6 +1107,41 @@ mod tests {
         }
     }
 
+    struct CatalogStore {
+        data: [u8; USER_SNAPSHOT_BYTES],
+        length: usize,
+        present: bool,
+    }
+
+    impl CatalogStore {
+        const fn new() -> Self {
+            Self { data: [0; USER_SNAPSHOT_BYTES], length: 0, present: false }
+        }
+    }
+
+    impl UserCatalogStore for CatalogStore {
+        fn load(&mut self, output: &mut [u8]) -> Result<usize, UserError> {
+            if !self.present {
+                return Err(UserError::NotFound);
+            }
+            if self.length > output.len() {
+                return Err(UserError::Persistence);
+            }
+            output[..self.length].copy_from_slice(&self.data[..self.length]);
+            Ok(self.length)
+        }
+
+        fn save(&mut self, snapshot: &[u8]) -> Result<(), UserError> {
+            if snapshot.len() > self.data.len() {
+                return Err(UserError::Persistence);
+            }
+            self.data[..snapshot.len()].copy_from_slice(snapshot);
+            self.length = snapshot.len();
+            self.present = true;
+            Ok(())
+        }
+    }
+
     fn root(value: u64) -> NamespaceRoot {
         NamespaceRoot::new(value, 1).unwrap()
     }
@@ -1122,6 +1196,25 @@ mod tests {
         assert!(restored.is_claimed());
         assert!(restored.login(b"admin", b"password").is_ok());
         assert_eq!(restored.capability(session, CapabilityHandle::EMPTY), Err(UserError::Stale));
+    }
+
+    #[test]
+    fn catalog_storage_boundary_round_trips_and_missing_is_first_boot() {
+        let mut catalog = UserCatalog::new();
+        let mut entropy = Entropy(13);
+        catalog.claim(b"admin", b"password", root(6), &mut entropy).unwrap();
+        let mut store = CatalogStore::new();
+        let mut buffer = [0; USER_SNAPSHOT_BYTES];
+        catalog.save_to(&mut store, &mut buffer).unwrap();
+
+        let mut restored = UserCatalog::new();
+        restored.load_from(&mut store, &mut buffer).unwrap();
+        assert!(restored.is_claimed());
+        assert!(restored.login(b"admin", b"password").is_ok());
+
+        let mut missing = CatalogStore::new();
+        restored.load_from(&mut missing, &mut buffer).unwrap();
+        assert!(!restored.is_claimed());
     }
 
     #[test]

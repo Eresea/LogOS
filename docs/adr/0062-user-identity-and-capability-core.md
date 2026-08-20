@@ -24,9 +24,11 @@ must be independently testable before it is admitted into ring-3 IPC or persiste
 ## Consequences
 
 The policy is capability-based and has no UID/GID mode checks or ambient path authority. The current
-implementation is a host-tested `logos-user` core. A follow-up cross-ring change must add the User
-IPC endpoint, Storage system-reserve/catalog transaction, first-boot bootstrap grant, and service
-admission before claiming a bootable User service.
+implementation is a host-tested `logos-user` core. `UserCatalogStore` is the explicit persistence
+seam: Storage supplies the system-pool-backed load/save implementation and User only exchanges a
+bounded snapshot. A follow-up cross-ring change must add the User IPC endpoint, Storage
+system-reserve/catalog transaction, first-boot bootstrap grant, and service admission before claiming
+a bootable User service.
 
 ## Verification
 
