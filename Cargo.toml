@@ -12,6 +12,8 @@ members = [
     "network",
     "storage",
     "services/flow",
+    "services/device",
+    "services/user",
     "services/display",
     "services/input",
     "services/session",
