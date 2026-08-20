@@ -65,3 +65,5 @@
 | [0062](0062-user-identity-and-capability-core.md) | Accepted | User identity policy uses Argon2id verifiers, volatile sessions, role templates, typed namespace capabilities, and lineage revocation |
 | [0063](0063-storage-system-pool-layout.md) | Accepted | The post-v4 storage format separates reserved system metadata, user content, and package allocation ranges |
 | [0064](0064-user-ipc-flow-storage.md) | Accepted | User reaches Flow and v5 Storage through bounded typed IPC and chunked catalog transport |
+| [0065](0065-runtime-allocation-ownership.md) | Accepted | UEFI-reserved runtime allocation metadata, Core GlobalAlloc, and private quota-controlled service heaps |
+| [0066](0066-dynamic-ipc-topology.md) | Accepted | Versioned generation-safe runtime service, endpoint, capability, and event handles |
