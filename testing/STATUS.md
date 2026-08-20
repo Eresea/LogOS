@@ -9,7 +9,12 @@ Status: active preemptive SMP Core milestone.
   concurrent claims, ABI edge notifications, and the host-only service restart contract pass.
 - `cargo fmt --check`, workspace tests, and host clippy with warnings denied pass.
 - UEFI debug build and `qemu-proof` build pass for `x86_64-unknown-uefi`.
-- QEMU proof reaches `LogOS vNext: QEMU proof PASS` with `-smp 1`, `-smp 2`, and `-smp 8`.
+- QEMU proof reaches `LogOS vNext: QEMU proof PASS` with debug `-smp 1` and `-smp 8`, and
+  release `-smp 2`. Debug `-smp 2` remains blocked: repeated runs exit after `boot resources
+  ready`, before `service address spaces ready`. A QEMU `-d int,cpu_reset,guest_errors` trace
+  shows CPU 1 still using the firmware GDT/IDT, then taking a protection fault on its firmware
+  stack followed by a double fault and triple fault. This is an early UEFI/MP handoff race, not
+  a Core AP scheduler fault; leave it as a follow-up before claiming the full SMP matrix.
   The proof exercises the root-task handoff, repeated cancellable timer waits, two non-yielding
   CPU-bound tasks, GPR/flags/XMM preservation, per-CPU timer ticks, repeated preemption, a bounded
   Runtime timeout/completion/cancel lifecycle with generation-safe slot reuse, event-driven service
