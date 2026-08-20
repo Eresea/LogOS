@@ -1,8 +1,96 @@
 use super::{ABI_VERSION, IPC_PAGE_BYTES, MAX_SERVICE_IMAGE_BYTES, ServiceId};
 
 pub const PACKAGE_TRANSFER_BYTES: usize = IPC_PAGE_BYTES;
-const PACKAGE_HEADER_BYTES: usize = 32;
+pub const MAX_PACKAGE_NAME_BYTES: usize = 32;
+const MIN_PACKAGE_HEADER_BYTES: usize = 32;
+const PACKAGE_HEADER_BYTES: usize = 404;
 const MAX_PACKAGE_BYTES: usize = PACKAGE_HEADER_BYTES + MAX_SERVICE_IMAGE_BYTES;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PackageTargetKind {
+    Service = 1,
+    Program = 2,
+}
+
+impl PackageTargetKind {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Service),
+            2 => Some(Self::Program),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct PackageTarget {
+    pub kind: PackageTargetKind,
+    pub service: u8,
+    pub name_len: u8,
+    pub reserved: u8,
+    pub name: [u8; MAX_PACKAGE_NAME_BYTES],
+}
+
+impl PackageTarget {
+    pub const EMPTY: Self = Self {
+        kind: PackageTargetKind::Service,
+        service: 0,
+        name_len: 0,
+        reserved: 0,
+        name: [0; MAX_PACKAGE_NAME_BYTES],
+    };
+
+    pub const fn service(service: ServiceId) -> Self {
+        Self { kind: PackageTargetKind::Service, service: service as u8, ..Self::EMPTY }
+    }
+
+    pub fn program(name: &[u8]) -> Option<Self> {
+        if name.is_empty()
+            || name.len() > MAX_PACKAGE_NAME_BYTES
+            || name[0] == b'-'
+            || name[name.len() - 1] == b'-'
+            || name.iter().any(|byte| !matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+        {
+            return None;
+        }
+        let mut target = Self {
+            kind: PackageTargetKind::Program,
+            service: 0,
+            name_len: name.len() as u8,
+            reserved: 0,
+            name: [0; MAX_PACKAGE_NAME_BYTES],
+        };
+        target.name[..name.len()].copy_from_slice(name);
+        Some(target)
+    }
+
+    pub fn validate(self) -> Result<(), PackageStatus> {
+        if self.reserved != 0 || self.name_len as usize > MAX_PACKAGE_NAME_BYTES {
+            return Err(PackageStatus::Invalid);
+        }
+        match self.kind {
+            PackageTargetKind::Service => {
+                if ServiceId::from_index(self.service.saturating_sub(1) as usize).is_none()
+                    || self.name_len != 0
+                    || self.name.iter().any(|byte| *byte != 0)
+                {
+                    return Err(PackageStatus::Invalid);
+                }
+            }
+            PackageTargetKind::Program => {
+                if self.service != 0
+                    || self.name_len == 0
+                    || self.name[self.name_len as usize..].iter().any(|byte| *byte != 0)
+                {
+                    return Err(PackageStatus::Invalid);
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -53,8 +141,7 @@ impl PackageStatus {
 pub struct PackageRequest {
     pub operation: PackageOperation,
     pub flags: u8,
-    pub service: u8,
-    pub reserved: u8,
+    pub target: PackageTarget,
     pub request_id: u32,
     pub generation: u16,
     pub capability_slot: u16,
@@ -93,8 +180,7 @@ impl PackageRequest {
         Some(Self {
             operation,
             flags: 0,
-            service: service as u8,
-            reserved: 0,
+            target: PackageTarget::service(service),
             request_id,
             generation,
             capability_slot,
@@ -106,42 +192,66 @@ impl PackageRequest {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_program(
+        operation: PackageOperation,
+        name: &[u8],
+        request_id: u32,
+        generation: u16,
+        capability_slot: u16,
+        service_epoch: u64,
+        package_generation: u32,
+        offset: u32,
+        length: u16,
+    ) -> Option<Self> {
+        let mut request = Self::new(
+            operation,
+            ServiceId::Storage,
+            request_id,
+            generation,
+            capability_slot,
+            service_epoch,
+            package_generation,
+            offset,
+            length,
+        )?;
+        request.target = PackageTarget::program(name)?;
+        Some(request)
+    }
+
     pub fn validate(
         self,
         capability_slot: usize,
         generation: u16,
         service_epoch: u64,
     ) -> Result<ServiceId, PackageStatus> {
+        let target = self.validate_target(capability_slot, generation, service_epoch)?;
+        match target.kind {
+            PackageTargetKind::Service => {
+                ServiceId::from_index(target.service.saturating_sub(1) as usize)
+                    .ok_or(PackageStatus::Invalid)
+            }
+            PackageTargetKind::Program => Err(PackageStatus::Unsupported),
+        }
+    }
+
+    pub fn validate_target(
+        self,
+        capability_slot: usize,
+        generation: u16,
+        service_epoch: u64,
+    ) -> Result<PackageTarget, PackageStatus> {
         if self.capability_slot as usize != capability_slot {
             return Err(PackageStatus::Invalid);
         }
         if self.generation != generation || self.service_epoch != service_epoch {
             return Err(PackageStatus::Stale);
         }
-        if self.flags != 0 || self.reserved != 0 || self.reserved2 != 0 || self.request_id == 0 {
+        if self.flags != 0 || self.reserved2 != 0 || self.request_id == 0 {
             return Err(PackageStatus::Invalid);
         }
-        let service = self
-            .service
-            .checked_sub(1)
-            .and_then(|raw| ServiceId::from_index(raw as usize))
-            .ok_or(PackageStatus::Invalid)?;
-        if Self::new(
-            self.operation,
-            service,
-            self.request_id,
-            self.generation,
-            self.capability_slot,
-            self.service_epoch,
-            self.package_generation,
-            self.offset,
-            self.length,
-        )
-        .is_none()
-        {
-            return Err(PackageStatus::Invalid);
-        }
-        Ok(service)
+        self.target.validate()?;
+        Ok(self.target)
     }
 }
 
@@ -150,8 +260,7 @@ impl PackageRequest {
 pub struct PackageResponse {
     pub operation: PackageOperation,
     pub status: PackageStatus,
-    pub service: u8,
-    pub reserved: u8,
+    pub target: PackageTarget,
     pub request_id: u32,
     pub generation: u16,
     pub reserved2: u16,
@@ -170,8 +279,7 @@ impl PackageResponse {
         Self {
             operation: request.operation,
             status,
-            service: request.service,
-            reserved: 0,
+            target: request.target,
             request_id: request.request_id,
             generation: request.generation,
             reserved2: 0,
@@ -215,8 +323,7 @@ impl PackageResponse {
             || self.request_id != request.request_id
             || self.generation != generation
             || self.service_epoch != service_epoch
-            || self.service != request.service
-            || self.reserved != 0
+            || self.target != request.target
             || self.reserved2 != 0
             || self.reserved3 != 0
             || PackageStatus::from_raw(self.status as u8).is_none()
@@ -228,7 +335,7 @@ impl PackageResponse {
             match request.operation {
                 PackageOperation::Lookup
                     if self.package_generation == 0
-                        || self.package_bytes < PACKAGE_HEADER_BYTES as u32
+                        || self.package_bytes < MIN_PACKAGE_HEADER_BYTES as u32
                         || self.package_bytes as usize > MAX_PACKAGE_BYTES
                         || self.offset != 0
                         || self.bytes != 0 =>
@@ -321,6 +428,17 @@ mod tests {
         let invalid_lookup =
             PackageResponse::new(lookup(), PackageStatus::Ok).with_package(0, 64, 1, 0);
         assert_eq!(invalid_lookup.validate_for(lookup(), 3, 9), Err(PackageStatus::Invalid));
+    }
+
+    #[test]
+    fn program_target_roundtrips_without_service_aliasing() {
+        let request =
+            PackageRequest::new_program(PackageOperation::Lookup, b"demo", 9, 3, 6, 11, 0, 0, 0)
+                .unwrap();
+        assert_eq!(request.validate_target(6, 3, 11).unwrap().kind, PackageTargetKind::Program);
+        assert_eq!(request.validate(6, 3, 11), Err(PackageStatus::Unsupported));
+        let response = PackageResponse::new(request, PackageStatus::Ok).with_package(1, 404, 0, 0);
+        assert_eq!(response.validate_for(request, 3, 11), Ok(()));
     }
 
     #[test]

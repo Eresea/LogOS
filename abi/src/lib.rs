@@ -16,12 +16,12 @@ mod service_manager;
 mod storage_api;
 
 pub use package_ipc::{
-    PACKAGE_ABI_VERSION, PACKAGE_TRANSFER_BYTES, PackageOperation, PackageRequest, PackageResponse,
-    PackageStatus,
+    MAX_PACKAGE_NAME_BYTES, PACKAGE_ABI_VERSION, PACKAGE_TRANSFER_BYTES, PackageOperation,
+    PackageRequest, PackageResponse, PackageStatus, PackageTarget, PackageTargetKind,
 };
 pub use service_manager::{
     MANAGER_ABI_VERSION, ManagerCapability, ManagerCapabilityPage, ManagerOperation,
-    ManagerRequest, ManagerResponse, ManagerRights, ManagerState, ManagerStatus,
+    ManagerRequest, ManagerResponse, ManagerRights, ManagerState, ManagerStatus, ManagerTargetKind,
     ServiceManagerRecord,
 };
 pub use storage_api::{
@@ -101,6 +101,7 @@ pub const NETWORK_REQUEST_FLAG_LISTENER: u8 = 1 << 0;
 pub const IPC_SYSCALL_SEND: usize = 4;
 pub const IPC_SYSCALL_RECEIVE: usize = 5;
 pub const MANAGER_SYSCALL: usize = 12;
+pub const PROGRAM_EXIT_SYSCALL: usize = 14;
 pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;

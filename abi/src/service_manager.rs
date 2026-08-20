@@ -1,6 +1,23 @@
-use crate::{MAX_MANAGER_SERVICES, MAX_SERVICE_NAME_BYTES};
+use crate::{MAX_MANAGER_SERVICES, MAX_PACKAGE_NAME_BYTES};
 
-pub const MANAGER_ABI_VERSION: u16 = 2;
+pub const MANAGER_ABI_VERSION: u16 = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ManagerTargetKind {
+    Service = 0,
+    Program = 1,
+}
+
+impl ManagerTargetKind {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Service),
+            1 => Some(Self::Program),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -10,6 +27,9 @@ pub enum ManagerOperation {
     Start = 3,
     Stop = 4,
     Restart = 5,
+    ProgramStart = 6,
+    ProgramStatus = 7,
+    ProgramStop = 8,
 }
 
 impl ManagerOperation {
@@ -20,12 +40,15 @@ impl ManagerOperation {
             3 => Some(Self::Start),
             4 => Some(Self::Stop),
             5 => Some(Self::Restart),
+            6 => Some(Self::ProgramStart),
+            7 => Some(Self::ProgramStatus),
+            8 => Some(Self::ProgramStop),
             _ => None,
         }
     }
 
     pub const fn requires_lifecycle(self) -> bool {
-        !matches!(self, Self::List | Self::Status)
+        !matches!(self, Self::List | Self::Status | Self::ProgramStatus)
     }
 }
 
@@ -55,6 +78,8 @@ pub enum ManagerState {
     Running = 4,
     Stopping = 5,
     Failed = 6,
+    Exited = 7,
+    Faulted = 8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,12 +142,14 @@ impl ManagerCapabilityPage {
 pub struct ManagerRequest {
     pub abi_version: u16,
     pub operation: ManagerOperation,
-    pub reserved: u8,
+    pub target_kind: ManagerTargetKind,
     pub request_id: u32,
     pub slot: u8,
     pub cursor: u8,
-    pub reserved_tail: [u8; 2],
+    pub name_len: u8,
+    pub reserved_tail: u8,
     pub generation: u32,
+    pub name: [u8; MAX_PACKAGE_NAME_BYTES],
 }
 
 impl ManagerRequest {
@@ -130,13 +157,31 @@ impl ManagerRequest {
         Self {
             abi_version: MANAGER_ABI_VERSION,
             operation,
-            reserved: 0,
+            target_kind: ManagerTargetKind::Service,
             request_id,
             slot: u8::MAX,
             cursor: 0,
-            reserved_tail: [0; 2],
+            name_len: 0,
+            reserved_tail: 0,
             generation: 0,
+            name: [0; MAX_PACKAGE_NAME_BYTES],
         }
+    }
+
+    pub fn with_program_name(mut self, name: &[u8]) -> Option<Self> {
+        crate::PackageTarget::program(name)?;
+        self.target_kind = ManagerTargetKind::Program;
+        self.name_len = name.len() as u8;
+        self.name[..name.len()].copy_from_slice(name);
+        Some(self)
+    }
+
+    pub const fn program_target(self) -> bool {
+        matches!(self.target_kind, ManagerTargetKind::Program)
+    }
+
+    pub fn name(&self) -> &[u8] {
+        &self.name[..self.name_len as usize]
     }
 }
 
@@ -150,7 +195,7 @@ pub struct ServiceManagerRecord {
     pub generation: u32,
     pub dependencies: u8,
     pub reserved: [u8; 3],
-    pub name: [u8; MAX_SERVICE_NAME_BYTES],
+    pub name: [u8; MAX_PACKAGE_NAME_BYTES],
 }
 
 impl ServiceManagerRecord {
@@ -162,7 +207,7 @@ impl ServiceManagerRecord {
         generation: 0,
         dependencies: 0,
         reserved: [0; 3],
-        name: [0; MAX_SERVICE_NAME_BYTES],
+        name: [0; MAX_PACKAGE_NAME_BYTES],
     };
 }
 
@@ -199,12 +244,21 @@ impl ManagerResponse {
             ManagerOperation::Status
             | ManagerOperation::Start
             | ManagerOperation::Stop
-            | ManagerOperation::Restart => self.cursor == 0,
+            | ManagerOperation::Restart
+            | ManagerOperation::ProgramStatus
+            | ManagerOperation::ProgramStart
+            | ManagerOperation::ProgramStop => self.cursor == 0,
         };
         self.abi_version == MANAGER_ABI_VERSION
             && self.operation == request.operation
             && request.request_id != 0
             && self.request_id == request.request_id
+            && ManagerTargetKind::from_raw(request.target_kind as u8).is_some()
+            && request.reserved_tail == 0
+            && (request.target_kind == ManagerTargetKind::Service
+                || crate::PackageTarget::program(request.name()).is_some())
+            && request.name_len as usize <= request.name.len()
+            && request.name[request.name_len as usize..].iter().all(|byte| *byte == 0)
             && self.reserved == [0; 3]
             && self.record.reserved == [0; 3]
             && usize::from(self.record.name_len) <= self.record.name.len()
@@ -222,17 +276,17 @@ const _: () = assert!(core::mem::offset_of!(ManagerCapability, service_epoch) ==
 const _: () = assert!(core::mem::size_of::<ManagerCapabilityPage>() == 16);
 const _: () = assert!(core::mem::align_of::<ManagerCapabilityPage>() == 16);
 const _: () = assert!(core::mem::offset_of!(ManagerCapabilityPage, capability) == 0);
-const _: () = assert!(core::mem::size_of::<ManagerRequest>() == 16);
+const _: () = assert!(core::mem::size_of::<ManagerRequest>() <= crate::IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::align_of::<ManagerRequest>() == 4);
 const _: () = assert!(core::mem::offset_of!(ManagerRequest, abi_version) == 0);
 const _: () = assert!(core::mem::offset_of!(ManagerRequest, operation) == 2);
-const _: () = assert!(core::mem::offset_of!(ManagerRequest, reserved) == 3);
+const _: () = assert!(core::mem::offset_of!(ManagerRequest, target_kind) == 3);
 const _: () = assert!(core::mem::offset_of!(ManagerRequest, request_id) == 4);
 const _: () = assert!(core::mem::offset_of!(ManagerRequest, slot) == 8);
 const _: () = assert!(core::mem::offset_of!(ManagerRequest, cursor) == 9);
-const _: () = assert!(core::mem::offset_of!(ManagerRequest, reserved_tail) == 10);
+const _: () = assert!(core::mem::offset_of!(ManagerRequest, reserved_tail) == 11);
 const _: () = assert!(core::mem::offset_of!(ManagerRequest, generation) == 12);
-const _: () = assert!(core::mem::size_of::<ServiceManagerRecord>() == 28);
+const _: () = assert!(core::mem::size_of::<ServiceManagerRecord>() == 44);
 const _: () = assert!(core::mem::align_of::<ServiceManagerRecord>() == 4);
 const _: () = assert!(core::mem::offset_of!(ServiceManagerRecord, slot) == 0);
 const _: () = assert!(core::mem::offset_of!(ServiceManagerRecord, state) == 1);
@@ -242,7 +296,7 @@ const _: () = assert!(core::mem::offset_of!(ServiceManagerRecord, generation) ==
 const _: () = assert!(core::mem::offset_of!(ServiceManagerRecord, dependencies) == 8);
 const _: () = assert!(core::mem::offset_of!(ServiceManagerRecord, reserved) == 9);
 const _: () = assert!(core::mem::offset_of!(ServiceManagerRecord, name) == 12);
-const _: () = assert!(core::mem::size_of::<ManagerResponse>() == 40);
+const _: () = assert!(core::mem::size_of::<ManagerResponse>() == 56);
 const _: () = assert!(core::mem::align_of::<ManagerResponse>() == 4);
 const _: () = assert!(core::mem::offset_of!(ManagerResponse, abi_version) == 0);
 const _: () = assert!(core::mem::offset_of!(ManagerResponse, operation) == 2);
