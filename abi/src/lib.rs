@@ -11,9 +11,16 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
 };
 
+mod device_api;
 mod package_ipc;
 mod service_manager;
 mod storage_api;
+mod user_api;
+
+pub use device_api::{
+    DEVICE_ABI_VERSION, DeviceKind, DeviceOperation, DeviceRecord, DeviceRequest, DeviceResponse,
+    DeviceState, DeviceStatus, MAX_DEVICES,
+};
 
 pub use package_ipc::{
     MAX_PACKAGE_NAME_BYTES, PACKAGE_ABI_VERSION, PACKAGE_TRANSFER_BYTES, PackageOperation,
@@ -28,6 +35,12 @@ pub use storage_api::{
     STORAGE_API_EXTENSION_VERSION, STORAGE_API_FLAG_REPLACE, STORAGE_API_MAP_DESCRIPTOR_BYTES,
     STORAGE_API_MAP_LENGTH_BYTES, STORAGE_API_RESPONSE_DATA_BYTES, STORAGE_API_VERSION,
     StorageApiError, StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus,
+};
+pub use user_api::{
+    CapabilityHandle, NamespaceCapability, NamespaceRights, NamespaceRoot, RoleId, SessionHandle,
+    USER_ABI_VERSION, USER_ARGON2_OUTPUT_BYTES, USER_ARGON2_SALT_BYTES, USER_MAX_PASSWORD_BYTES,
+    USER_MAX_ROLE_NAME_BYTES, USER_MAX_USER_NAME_BYTES, UserAdminCapability, UserId, UserOperation,
+    UserRequest, UserResponse, UserStatus,
 };
 
 pub const ABI_VERSION: u16 = 3;
@@ -57,6 +70,7 @@ pub const INPUT_KEYBOARD_RING_BASE: usize = 0x0000_0100_1100_0000;
 pub const KEYBOARD_RING_CAPACITY: usize = 256;
 pub const IPC_PAGE_BYTES: usize = 4096;
 pub const MAX_IPC_BYTES: usize = 256;
+pub const MAX_DEVICE_NAME_BYTES: usize = 16;
 pub const COMPLETION_ABI_VERSION: u8 = 1;
 pub const MAX_COMPLETION_LINE_BYTES: usize = 248;
 pub const MAX_COMPLETION_CANDIDATES: usize = 8;
@@ -74,7 +88,7 @@ pub const MANAGER_CAPABILITY_BASE: usize = IPC_CAPABILITY_BASE + IPC_PAGE_BYTES;
 pub const MANAGER_CAPABILITY_SLOT: usize = 0;
 pub const NETWORK_CONFIG_BASE: usize = SERVICE_IPC_BASE + 0x3a_000;
 pub const MAX_IPC_CAPABILITIES: usize = 10;
-pub const MAX_MANAGER_SERVICES: usize = 8;
+pub const MAX_MANAGER_SERVICES: usize = 9;
 pub const MAX_SERVICE_NAME_BYTES: usize = 16;
 pub const SERVICE_HEARTBEAT_INTERVAL_TICKS: u64 = 100;
 pub const STORAGE_BLOCK_BYTES: u16 = 4096;
@@ -106,7 +120,7 @@ pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
 
-pub const IPC_ENDPOINT_COUNT: usize = 24;
+pub const IPC_ENDPOINT_COUNT: usize = 28;
 pub const IPC_READ_EVENT_BASE: usize = 0;
 pub const IPC_WRITE_EVENT_BASE: usize = IPC_READ_EVENT_BASE + IPC_ENDPOINT_COUNT;
 pub const KEYBOARD_READ_EVENT: usize = IPC_WRITE_EVENT_BASE + IPC_ENDPOINT_COUNT;
@@ -164,6 +178,7 @@ pub enum ServiceId {
     Storage = 6,
     Network = 7,
     Fetch = 8,
+    Device = 9,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -731,6 +746,7 @@ impl ServiceId {
             Self::Storage => 5,
             Self::Network => 6,
             Self::Fetch => 7,
+            Self::Device => 8,
         }
     }
 
@@ -744,6 +760,7 @@ impl ServiceId {
             5 => Some(Self::Storage),
             6 => Some(Self::Network),
             7 => Some(Self::Fetch),
+            8 => Some(Self::Device),
             _ => None,
         }
     }
@@ -776,6 +793,10 @@ pub enum IpcEndpointId {
     StoragePackageToCore = 21,
     StorageMapToCore = 22,
     CoreToStorageMap = 23,
+    FlowToDevice = 24,
+    DeviceToFlow = 25,
+    DeviceToCore = 26,
+    CoreToDevice = 27,
 }
 
 impl IpcEndpointId {
@@ -811,6 +832,10 @@ impl IpcEndpointId {
             21 => Some(Self::StoragePackageToCore),
             22 => Some(Self::StorageMapToCore),
             23 => Some(Self::CoreToStorageMap),
+            24 => Some(Self::FlowToDevice),
+            25 => Some(Self::DeviceToFlow),
+            26 => Some(Self::DeviceToCore),
+            27 => Some(Self::CoreToDevice),
             _ => None,
         }
     }
@@ -833,6 +858,8 @@ impl IpcEndpointId {
             | Self::StorageMapToCore
             | Self::CoreToStorageMap => ServiceId::Storage,
             Self::NetworkToFetch => ServiceId::Network,
+            Self::FlowToDevice => ServiceId::Flow,
+            Self::DeviceToFlow | Self::DeviceToCore | Self::CoreToDevice => ServiceId::Device,
         }
     }
 
@@ -853,6 +880,8 @@ impl IpcEndpointId {
             Self::FlowToFetch | Self::FetchToStorage | Self::FetchToNetwork => ServiceId::Fetch,
             Self::FetchToFlow => ServiceId::Flow,
             Self::StorageToFetch | Self::NetworkToFetch => ServiceId::Fetch,
+            Self::DeviceToFlow => ServiceId::Flow,
+            Self::FlowToDevice | Self::DeviceToCore | Self::CoreToDevice => ServiceId::Device,
         }
     }
 
@@ -914,6 +943,12 @@ pub const fn ipc_capability_slot(
         (ServiceId::Network, IpcEndpointId::NetworkToFetch, IpcRights::Send) => Some(5),
         (ServiceId::Storage, IpcEndpointId::StorageMapToCore, IpcRights::Send) => Some(8),
         (ServiceId::Storage, IpcEndpointId::CoreToStorageMap, IpcRights::Receive) => Some(9),
+        (ServiceId::Flow, IpcEndpointId::FlowToDevice, IpcRights::Send) => Some(8),
+        (ServiceId::Flow, IpcEndpointId::DeviceToFlow, IpcRights::Receive) => Some(9),
+        (ServiceId::Device, IpcEndpointId::FlowToDevice, IpcRights::Receive) => Some(2),
+        (ServiceId::Device, IpcEndpointId::DeviceToFlow, IpcRights::Send) => Some(3),
+        (ServiceId::Device, IpcEndpointId::DeviceToCore, IpcRights::Send) => Some(0),
+        (ServiceId::Device, IpcEndpointId::CoreToDevice, IpcRights::Receive) => Some(1),
         _ => None,
     }
 }
@@ -940,6 +975,8 @@ pub enum MessageKind {
     FlowProgress = 17,
     FlowControl = 18,
     FetchBodyChunk = 19,
+    DeviceRequest = 20,
+    DeviceResponse = 21,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1171,7 +1208,7 @@ pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
     match endpoint {
         0 => Some(IpcMessageType::Input),
         1 => Some(IpcMessageType::Render),
-        2..=5 | 8..=9 | 12..=19 => Some(IpcMessageType::Bytes),
+        2..=5 | 8..=9 | 12..=19 | 24..=25 => Some(IpcMessageType::Bytes),
         10..=11 => Some(IpcMessageType::Packet),
         _ => None,
     }
@@ -1195,6 +1232,16 @@ pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
     }
     if endpoint == IpcEndpointId::CoreToStorageMap as usize {
         return Some(core::mem::size_of::<StorageMapResponse>());
+    }
+    if endpoint == IpcEndpointId::DeviceToCore as usize
+        || endpoint == IpcEndpointId::FlowToDevice as usize
+    {
+        return Some(core::mem::size_of::<DeviceRequest>());
+    }
+    if endpoint == IpcEndpointId::CoreToDevice as usize
+        || endpoint == IpcEndpointId::DeviceToFlow as usize
+    {
+        return Some(core::mem::size_of::<DeviceResponse>());
     }
     match ipc_message_type(endpoint) {
         Some(IpcMessageType::Input) => Some(core::mem::size_of::<InputMessage>()),
@@ -2155,7 +2202,7 @@ mod tests {
         let keyboard = keyboard_read_event_mask();
         assert_eq!(all & keyboard, 0);
         all |= keyboard;
-        assert_eq!(EVENT_COUNT, 49);
+        assert_eq!(EVENT_COUNT, 57);
         assert_eq!(all.count_ones(), EVENT_COUNT as u32);
     }
 
