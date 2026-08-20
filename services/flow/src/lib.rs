@@ -472,7 +472,7 @@ pub enum UserCommand<'a> {
     Logout,
     Rename { name: &'a [u8] },
     SetPassword { password: &'a [u8] },
-    Derive,
+    Derive { rights: logos_abi::NamespaceRights },
     RevokeCapability,
 }
 
@@ -1459,8 +1459,27 @@ pub fn parse_user_command(line: &[u8]) -> Result<Option<UserCommand<'_>>, UserCo
         b"password" if args.len() == 1 => {
             Ok(Some(UserCommand::SetPassword { password: string(0)? }))
         }
-        b"derive" if args.is_empty() => Ok(Some(UserCommand::Derive)),
+        b"derive" if args.len() == 1 => {
+            Ok(Some(UserCommand::Derive { rights: parse_user_rights(string(0)?)? }))
+        }
         b"revoke" if args.is_empty() => Ok(Some(UserCommand::RevokeCapability)),
+        _ => Err(UserCommandError::Usage),
+    }
+}
+
+fn parse_user_rights(value: &[u8]) -> Result<logos_abi::NamespaceRights, UserCommandError> {
+    match value {
+        b"read" => Ok(logos_abi::NamespaceRights::READ),
+        b"write" => Ok(logos_abi::NamespaceRights::WRITE),
+        b"derive" => Ok(logos_abi::NamespaceRights::DERIVE),
+        b"read+write" => Ok(logos_abi::NamespaceRights::READ | logos_abi::NamespaceRights::WRITE),
+        b"read+derive" => Ok(logos_abi::NamespaceRights::READ | logos_abi::NamespaceRights::DERIVE),
+        b"write+derive" => {
+            Ok(logos_abi::NamespaceRights::WRITE | logos_abi::NamespaceRights::DERIVE)
+        }
+        b"read+write+derive" => Ok(logos_abi::NamespaceRights::READ
+            | logos_abi::NamespaceRights::WRITE
+            | logos_abi::NamespaceRights::DERIVE),
         _ => Err(UserCommandError::Usage),
     }
 }
@@ -2087,7 +2106,15 @@ mod tests {
             parse_flow_operation(b"user.logout()").unwrap(),
             Some(FlowOperation::User(UserCommand::Logout))
         );
+        assert_eq!(
+            parse_flow_operation(b"user.derive(\"read+derive\")").unwrap(),
+            Some(FlowOperation::User(UserCommand::Derive {
+                rights: logos_abi::NamespaceRights::READ | logos_abi::NamespaceRights::DERIVE,
+            }))
+        );
         assert!(parse_flow_operation(b"user.claim(\"admin\")").is_err());
+        assert!(parse_flow_operation(b"user.derive()").is_err());
+        assert!(parse_flow_operation(b"user.derive(\"read+unknown\")").is_err());
         assert!(parse_flow_operation(b"user.unknown()").is_err());
     }
 }

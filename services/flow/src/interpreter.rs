@@ -185,8 +185,8 @@ impl OperationRegistry {
             OperationSignature::new(
                 NamespaceKind::User,
                 b"derive",
-                [FlowType::Void, FlowType::Void, FlowType::Void],
-                0,
+                [FlowType::String, FlowType::Void, FlowType::Void],
+                1,
                 PromiseType::String.flow_type(),
             ),
             OperationSignature::new(

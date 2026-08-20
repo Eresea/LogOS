@@ -1353,7 +1353,7 @@ impl UserClient {
             logos_flow::UserCommand::Logout => UserOperation::Logout,
             logos_flow::UserCommand::Rename { .. } => UserOperation::Rename,
             logos_flow::UserCommand::SetPassword { .. } => UserOperation::SetPassword,
-            logos_flow::UserCommand::Derive => UserOperation::Derive,
+            logos_flow::UserCommand::Derive { .. } => UserOperation::Derive,
             logos_flow::UserCommand::RevokeCapability => UserOperation::RevokeCapability,
         };
         let mut request = UserRequest::new(operation, next_user_request_id());
@@ -1380,9 +1380,10 @@ impl UserClient {
                     return false;
                 }
             }
-            logos_flow::UserCommand::Logout
-            | logos_flow::UserCommand::Derive
-            | logos_flow::UserCommand::RevokeCapability => {}
+            logos_flow::UserCommand::Logout | logos_flow::UserCommand::RevokeCapability => {}
+            logos_flow::UserCommand::Derive { rights } => {
+                request.rights = rights;
+            }
         }
         self.request = request;
         self.active = true;
