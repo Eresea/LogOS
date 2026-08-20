@@ -6,6 +6,10 @@ pub const USER_MAX_ROLE_NAME_BYTES: usize = 32;
 pub const USER_MAX_PASSWORD_BYTES: usize = 128;
 pub const USER_ARGON2_SALT_BYTES: usize = 16;
 pub const USER_ARGON2_OUTPUT_BYTES: usize = 32;
+pub const USER_STORAGE_CHUNK_BYTES: usize = 224;
+pub const USER_KDF_WORKSPACE_BYTES: usize = 64 * 1024 * 1024 + 64;
+pub const USER_KDF_WORKSPACE_PAGES: usize = USER_KDF_WORKSPACE_BYTES.div_ceil(4096);
+pub const USER_KDF_WORKSPACE_BASE: usize = 0x0000_0200_0000_0000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -218,6 +222,102 @@ pub enum UserStatus {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum UserStorageOperation {
+    Load = 1,
+    Save = 2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum UserStorageStatus {
+    Ok = 0,
+    NotFound = 1,
+    Invalid = 2,
+    Io = 3,
+    Capacity = 4,
+}
+
+pub const USER_STORAGE_FLAG_BEGIN: u8 = 1 << 0;
+pub const USER_STORAGE_FLAG_END: u8 = 1 << 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct UserStorageRequest {
+    pub operation: UserStorageOperation,
+    pub flags: u8,
+    pub reserved: u16,
+    pub request_id: u32,
+    pub offset: u32,
+    pub total_len: u32,
+    pub data_len: u16,
+    pub data: [u8; USER_STORAGE_CHUNK_BYTES],
+}
+
+impl UserStorageRequest {
+    pub const fn new(operation: UserStorageOperation, request_id: u32, offset: u32) -> Self {
+        Self {
+            operation,
+            flags: 0,
+            reserved: 0,
+            request_id,
+            offset,
+            total_len: 0,
+            data_len: 0,
+            data: [0; USER_STORAGE_CHUNK_BYTES],
+        }
+    }
+
+    pub fn set_data(&mut self, data: &[u8]) -> bool {
+        if data.len() > self.data.len() {
+            return false;
+        }
+        self.data = [0; USER_STORAGE_CHUNK_BYTES];
+        self.data[..data.len()].copy_from_slice(data);
+        self.data_len = data.len() as u16;
+        true
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.request_id != 0
+            && self.data_len as usize <= USER_STORAGE_CHUNK_BYTES
+            && self.flags & !(USER_STORAGE_FLAG_BEGIN | USER_STORAGE_FLAG_END) == 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct UserStorageResponse {
+    pub operation: UserStorageOperation,
+    pub status: UserStorageStatus,
+    pub reserved: u16,
+    pub request_id: u32,
+    pub offset: u32,
+    pub total_len: u32,
+    pub data_len: u16,
+    pub data: [u8; USER_STORAGE_CHUNK_BYTES],
+}
+
+impl UserStorageResponse {
+    pub const fn invalid(request: UserStorageRequest) -> Self {
+        Self {
+            operation: request.operation,
+            status: UserStorageStatus::Invalid,
+            reserved: 0,
+            request_id: request.request_id,
+            offset: request.offset,
+            total_len: 0,
+            data_len: 0,
+            data: [0; USER_STORAGE_CHUNK_BYTES],
+        }
+    }
+
+    pub const fn is_valid_for(self, request: UserStorageRequest) -> bool {
+        self.operation as u8 == request.operation as u8 && self.request_id == request.request_id
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct UserRequest {
     pub operation: UserOperation,
@@ -316,3 +416,5 @@ impl UserResponse {
 
 const _: () = assert!(core::mem::size_of::<UserRequest>() <= MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<UserResponse>() <= MAX_IPC_BYTES);
+const _: () = assert!(core::mem::size_of::<UserStorageRequest>() <= MAX_IPC_BYTES);
+const _: () = assert!(core::mem::size_of::<UserStorageResponse>() <= MAX_IPC_BYTES);

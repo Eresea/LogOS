@@ -211,6 +211,7 @@ dependencies = [
  "logos-storage",
  "logos-storage-service",
  "logos-terminal",
+ "logos-user",
 ]
 
 [[package]]
@@ -231,6 +232,7 @@ dependencies = [
  "logos-abi",
  "logos-package",
  "logos-storage",
+ "logos-user",
 ]
 
 [[package]]

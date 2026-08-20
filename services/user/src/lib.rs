@@ -3,6 +3,7 @@
 #[cfg(test)]
 extern crate std;
 
+#[cfg(feature = "password-kdf")]
 use argon2::{Algorithm, Argon2, Params, Version};
 use logos_abi::{
     CapabilityHandle, NamespaceRights, NamespaceRoot, RoleId, SessionHandle,
@@ -21,8 +22,11 @@ pub const USER_SNAPSHOT_BYTES: usize = 12 * 1024;
 const SNAPSHOT_MAGIC: [u8; 8] = *b"LOGUSR01";
 const SNAPSHOT_VERSION: u16 = 1;
 
+#[cfg(feature = "password-kdf")]
 const ARGON2_MEMORY_KIB: u32 = 64 * 1024;
+#[cfg(feature = "password-kdf")]
 const ARGON2_TIME_COST: u32 = 3;
+#[cfg(feature = "password-kdf")]
 const ARGON2_LANES: u32 = 1;
 const ARGON2_VERSION: u8 = 1;
 
@@ -120,23 +124,32 @@ pub struct PasswordVerifier {
 }
 
 impl PasswordVerifier {
+    #[allow(clippy::needless_return)]
     pub fn create(password: &[u8], salt: [u8; USER_ARGON2_SALT_BYTES]) -> Result<Self, UserError> {
         if password.is_empty() || password.len() > USER_MAX_PASSWORD_BYTES {
             return Err(UserError::InvalidPassword);
         }
-        let params = Params::new(
-            ARGON2_MEMORY_KIB,
-            ARGON2_TIME_COST,
-            ARGON2_LANES,
-            Some(USER_ARGON2_OUTPUT_BYTES),
-        )
-        .map_err(|_| UserError::Crypto)?;
-        let algorithm = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-        let mut output = [0; USER_ARGON2_OUTPUT_BYTES];
-        algorithm
-            .hash_password_into(password, &salt, &mut output)
+        #[cfg(not(feature = "password-kdf"))]
+        {
+            let _ = salt;
+            return Err(UserError::Crypto);
+        }
+        #[cfg(feature = "password-kdf")]
+        {
+            let params = Params::new(
+                ARGON2_MEMORY_KIB,
+                ARGON2_TIME_COST,
+                ARGON2_LANES,
+                Some(USER_ARGON2_OUTPUT_BYTES),
+            )
             .map_err(|_| UserError::Crypto)?;
-        Ok(Self { version: ARGON2_VERSION, salt, output })
+            let algorithm = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+            let mut output = [0; USER_ARGON2_OUTPUT_BYTES];
+            algorithm
+                .hash_password_into(password, &salt, &mut output)
+                .map_err(|_| UserError::Crypto)?;
+            Ok(Self { version: ARGON2_VERSION, salt, output })
+        }
     }
 
     pub fn verify(self, password: &[u8]) -> Result<(), UserError> {
@@ -230,7 +243,7 @@ pub struct UserService<E> {
 }
 
 impl<E: EntropySource> UserService<E> {
-    pub fn new(entropy: E) -> Self {
+    pub const fn new(entropy: E) -> Self {
         Self { catalog: UserCatalog::new(), entropy }
     }
 
@@ -243,6 +256,11 @@ impl<E: EntropySource> UserService<E> {
     }
 
     pub fn handle(&mut self, mut request: UserRequest) -> UserResponse {
+        if request.root == NamespaceRoot::EMPTY
+            && matches!(request.operation, UserOperation::Claim | UserOperation::Create)
+        {
+            request.root = self.catalog.default_home_root();
+        }
         let mut response = UserResponse::new(request, UserStatus::Invalid);
         let result = if request.is_valid() {
             match request.operation {
@@ -339,6 +357,16 @@ impl<E: EntropySource> UserService<E> {
             Ok(()) => UserStatus::Ok,
             Err(error) => map_error(error),
         };
+        if response.status == UserStatus::Ok
+            && matches!(response.operation, UserOperation::Claim | UserOperation::Login)
+        {
+            if let Ok((capability, root, rights)) = self.catalog.first_capability(response.session)
+            {
+                response.capability = capability;
+                response.root = root;
+                response.rights = rights;
+            }
+        }
         response
     }
 }
@@ -377,6 +405,10 @@ impl UserCatalog {
 
     pub const fn is_claimed(&self) -> bool {
         self.claimed
+    }
+
+    pub const fn default_home_root(&self) -> NamespaceRoot {
+        NamespaceRoot::new(0x1000 + self.next_user, 1).unwrap()
     }
 
     pub fn claim<E: EntropySource>(
@@ -774,6 +806,18 @@ impl UserCatalog {
             return Err(UserError::Revoked);
         }
         Ok((entry.root, entry.rights))
+    }
+
+    pub fn first_capability(
+        &self,
+        session: SessionHandle,
+    ) -> Result<(CapabilityHandle, NamespaceRoot, NamespaceRights), UserError> {
+        let record = self.session(session)?;
+        let capability = record.capabilities.iter().flatten().next().ok_or(UserError::NotFound)?;
+        if capability.revoked || record.revoked {
+            return Err(UserError::Revoked);
+        }
+        Ok((capability.handle, capability.root, capability.rights))
     }
 
     fn create_record<E: EntropySource>(

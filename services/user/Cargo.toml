@@ -9,6 +9,10 @@ license = "MIT"
 test = true
 bench = false
 
+[features]
+default = ["password-kdf"]
+password-kdf = ["argon2/alloc"]
+
 [dependencies]
-argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.5.3", default-features = false }
 logos-abi = { path = "../../abi" }
