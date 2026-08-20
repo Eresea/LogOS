@@ -977,10 +977,10 @@ pub(crate) fn restart_critical_section<R>(operation: impl FnOnce() -> R) -> R {
 }
 
 pub(crate) fn start_services() {
-    // Tasks are published before this function returns. Runtime entry points
-    // remain closed behind READY until all startup-owned state is complete, so
-    // the post-boot runtime lock does not need to span task publication.
-    unsafe {
+    // Tasks are published before this function returns. Keep interrupts off
+    // until READY is visible so a just-published service cannot enter through
+    // an intentionally closed runtime boundary.
+    restart_critical_section(|| unsafe {
         reset_events();
         let runtime = &mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME);
         runtime.start_tasks().unwrap_or_else(|error| match error {
@@ -1003,7 +1003,7 @@ pub(crate) fn start_services() {
         publish_keyboard_ring(ring);
         enable_keyboard_irq();
         finish_service_runtime_transition();
-    }
+    });
     proof_line(b"LogOS vNext: service tasks started");
 }
 
