@@ -11,10 +11,16 @@ Status: active preemptive SMP Core milestone.
 - UEFI debug build and `qemu-proof` build pass for `x86_64-unknown-uefi`.
 - QEMU proof reaches `LogOS vNext: QEMU proof PASS` with debug `-smp 1` and `-smp 8`, and
   release `-smp 2`. Debug `-smp 2` remains blocked: repeated runs exit after `boot resources
-  ready`, before `service address spaces ready`. A QEMU `-d int,cpu_reset,guest_errors` trace
-  shows CPU 1 still using the firmware GDT/IDT, then taking a protection fault on its firmware
-  stack followed by a double fault and triple fault. This is an early UEFI/MP handoff race, not
-  a Core AP scheduler fault; leave it as a follow-up before claiming the full SMP matrix.
+  ready`, before `service address spaces ready`. A bounded QEMU `-d
+  int,cpu_reset,guest_errors` trace from the baseline handoff shows the current GS points to BSP
+  CPU 0 while the firmware GDT/IDT and firmware stack are still active; the BSP then takes a
+  protection fault (`vector 0e`, error `0003`) followed by a double fault and triple fault. CPU 1
+  reset records are firmware MP state, not evidence that the AP scheduler is executing. Early AP
+  table setup and parked-AP experiments did not pass and were reverted. Moving BSP tables before
+  runtime startup did not clear the service-start page fault. Pivoting to the existing scheduler
+  stack reached runtime but produced an invalid-instruction loop in Rust startup and was also
+  reverted. The remaining issue is an unresolved UEFI runtime-startup stack/handoff fault, not a
+  committed feature change.
   The proof exercises the root-task handoff, repeated cancellable timer waits, two non-yielding
   CPU-bound tasks, GPR/flags/XMM preservation, per-CPU timer ticks, repeated preemption, a bounded
   Runtime timeout/completion/cancel lifecycle with generation-safe slot reuse, event-driven service
