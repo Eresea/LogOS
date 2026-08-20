@@ -34,10 +34,11 @@ Status: active preemptive SMP Core milestone.
   mapping, list/status, unauthorized caller rejection, and manager-driven restart completion.
   Hostile-peer coverage rejects forged process access, wrong-direction capabilities, stale and
   oversized operations, disconnected queues, and legacy endpoint mappings.
-- The fresh-disk storage proof reaches `Storage persistent-disk proof PASS` after proving durable
-  command API writes, reboot reopen, aborted and removed files, and torn-root recovery. Host tests
-  cover the versioned API, malformed requests, transaction ownership, bounded namespace operations,
-  command parsing, committed/staged visibility, and prepared checkpoint recovery.
+- The fresh-disk v5 storage proof reaches `Storage persistent-disk proof PASS` after proving the
+  live Storage image formats the v5 root, materializes the `LOGUSR01` User catalog inside the
+  reserved system pool, reopens it after reboot, and recovers from a torn inactive root. Host
+  tests cover the versioned API, malformed requests, transaction ownership, bounded namespace
+  operations, command parsing, committed/staged visibility, and prepared checkpoint recovery.
 - Network v2 host coverage passes for bounded configuration parsing and fail-closed Disabled mode,
   inline payload validation, multi-client request routing, smoltcp packet-device copying, IPv4 checksums, static-to-DHCP fallback,
   fixed socket/listener capacities, listener accept pairing, stale socket generations, modern VirtIO
