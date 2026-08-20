@@ -61,6 +61,7 @@ Terminal → Session → Flow → typed system API registry
 | Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all eight staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
 | Service supervisor | `supervisor::LiveSupervisor` + `service_runtime` | live heartbeat polling, graph-wide quiesce, generation-bumped IPC rebuild, bounded process/page-table/frame reclamation, and restart limits |
 | Service manager | `service_manager` + `service_runtime` | eight fixed service slots, generation-safe handles, dependency-aware list/status/start/stop/restart, one Flow-only manager capability page, and an internal package activation hook; package-manager policy remains outside this boundary |
+| Program lifecycle | `service_manager` + `service_runtime` + `process` + `scheduler` | eight fixed name-keyed program slots reuse the service manager ABI and Core resource owner; program ELF images receive only private code/data/stack mappings, Exit is the sole program syscall, and stop waits for scheduler completion before reclaiming process, page-table, and image frames |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
 | Runtime handoff | `handoff_to_runtime` | registers one root `TaskEntry`; the scheduler starts it through the normal context path |
@@ -112,5 +113,6 @@ recovery, generation-safe file handles, bounded multi-extent COW-backed streamed
 single-extent read-only MapRead/UnmapRead pins, page-table unmap/TLB invalidation hooks, bounded Storage cache-window grants for Flow/Fetch, variable-sized
 service packages, reader-based ELF streaming, graph-wide package activation, read-only Flow package
 inventory/info queries, and bounded package-file import/update. Repository
-resolution, signatures, boot preference, program packages, and program installation remain deferred.
+resolution, signatures, boot preference, terminal attachment, program IPC, capabilities, and automatic boot remain deferred.
+Persistent program packages now use the same manifest, catalog, and manager transport.
 Arbitrary runtime IPC topology also remains deferred.

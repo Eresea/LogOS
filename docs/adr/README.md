@@ -60,3 +60,4 @@
 | [0057](0057-read-only-package-inventory-ipc.md) | Accepted | Flow reads bounded package inventory and manifest summaries through Storage without receiving package payload write authority |
 | [0058](0058-bounded-package-file-import.md) | Accepted | Flow requests Storage-owned package-file import; Storage streams the existing file into the package arena and reuses validation/update policy |
 | [0059](0059-v4-copy-on-write-storage-boundary.md) | Accepted | v4 uses immutable extents, persistent allocation metadata, flushed commit records, atomic root publication, and fail-closed legacy media handling |
+| [0060](0060-bounded-program-lifecycle.md) | Accepted | Persistent capability-free program packages reuse the service ABI, fixed Storage catalog, Core resource owner, process loader, and scheduler-safe reclamation |
