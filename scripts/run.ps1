@@ -82,7 +82,7 @@ if ($networkEnabled) {
 $espPath = ((Resolve-Path $esp).Path).Replace('\', '/')
 $display = if ($interactiveMode) { 'gtk' } else { 'none' }
 $qemuArgs = @(
-    '-machine', 'q35', '-m', '128M', '-smp', $Cpus,
+    '-machine', 'q35', '-m', '256M', '-smp', $Cpus,
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
     '-drive', "format=raw,file=fat:rw:$espPath",
     '-drive', "if=none,id=storage-disk,format=raw,file=$disk,cache=writethrough",

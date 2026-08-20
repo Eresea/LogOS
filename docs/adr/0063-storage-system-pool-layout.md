@@ -23,14 +23,19 @@ range for user content, and the format-selected package boundary for package pay
 Zero-sized system or user pools are rejected. Allocation exhaustion in the user or
 package pool must not make the system pool unavailable for recovery metadata.
 
-This milestone adds the no-allocator layout validator plus an arena-scoped COW allocation
-seam and host proof. v4 roots and on-disk format versioning remain unchanged until the
-complete filesystem upgrade is implemented. v4 media therefore continues to open or reject
-under the existing rules and is never reinterpreted as the new layout.
+The v5 system-catalog root persists the three ranges, uses dual-superblock publication
+and commit records, and stores namespace metadata and the User snapshot as bounded extents
+inside the system pool. Namespace file content is allocated only from the user pool, while
+package payloads remain in the package pool.
+The live v5 namespace implements `UserCatalogStore`, so namespace metadata and User catalog
+updates share one root publication boundary; User does not receive a path or raw block handle.
+The catalog and v5 namespace openers reject v4 roots. The v4 namespace opener
+remains available for legacy host proofs until the service boot path is switched to the v5 alias.
 
 ## Consequences
 
 - Storage owns pool boundaries; User never receives path-based or raw block authority.
-- A future COW root can persist the three ranges without changing capability semantics.
-- The system pool requires explicit capacity accounting and exhaustion tests before User
-  persistence is wired into the service.
+- COW publication and torn-superblock recovery protect the catalog root.
+- System-pool exhaustion is explicit and cannot fall through into user or package blocks.
+- The v5 namespace backend is present; service-image boot selection and signed-package trust remain
+  separate follow-up slices.

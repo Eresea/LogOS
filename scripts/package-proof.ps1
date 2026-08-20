@@ -44,7 +44,7 @@ function Invoke-PackageBoot {
 
     Remove-Item $log -Force -ErrorAction SilentlyContinue
     $args = @(
-        '-machine', 'q35', '-m', '128M', '-smp', '1',
+        '-machine', 'q35', '-m', '256M', '-smp', '1',
         '-drive', "if=pflash,format=raw,readonly=on,file=$ovmfPath",
         '-drive', "format=raw,file=fat:rw:$espPath",
         '-drive', "if=none,id=storage-disk,format=raw,file=$disk,cache=writethrough",

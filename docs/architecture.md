@@ -1,7 +1,7 @@
 # LogOS vNext Core architecture
 
 The package has two targets and no allocator: the UEFI binary in `src/main.rs` calls `boot()` in
-`src/lib.rs`. Core owns mechanisms only; Runtime and the nine fixed services execute through
+`src/lib.rs`. Core owns mechanisms only; Runtime and the ten fixed services execute through
 fixed service boundaries.
 
 ```text
@@ -22,14 +22,14 @@ Terminal → Session → Flow → typed system API registry
 | Control plane | `process` + `user_mode` | admission-time fixed service mappings plus bounded Wait/Notify, IpcSend, IpcReceive, and ServiceManager calls with process-bound capability checks |
 | ELF page admission | `loader` | maps validated segments and fixed user stacks to owned frames, then populates them through a page-local sink with bounded reclamation; Storage receives a fixed 128-page stack for bounded snapshot decoding and transaction state |
 | User page tables | `page_table` | builds four-level user mappings with fixed root/intermediate-frame bounds, W^X/NX flags, conflict rejection, and grouped reclamation |
-| Service address spaces | `service_runtime` | loads nine retained ELFs into owned frames and retains one isolated root per service before scheduler admission |
+| Service address spaces | `service_runtime` | loads ten retained ELFs into owned frames and retains one isolated root per service before scheduler admission |
 | Service process admission | `service_runtime` + `process` | binds each service root, coalesced mappings, and validated user launch metadata without entering service RIPs prematurely |
 | User launch transition | `arch` + `scheduler` | selects the task root before restore and provides the fixed-selector `iretq` path for service entry |
-| Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Storage → Device → Flow → Fetch dependencies; Network is independent and Fetch depends on it |
-| Service IPC boundary | `service_ipc` + `service_runtime` | keeps fixed terminal queues and adds Flow↔Fetch, Flow↔Device, Fetch↔Storage, and Fetch↔Network edges plus dedicated Core storage/network/device capabilities; no queue, MMIO, or DMA frame is mapped into a service root |
+| Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Storage → User/Device → Flow → Fetch dependencies; Network is independent and Fetch depends on it |
+| Service IPC boundary | `service_ipc` + `service_runtime` | keeps fixed terminal queues and adds Flow↔Fetch, Flow↔Device, Flow↔User, User↔Storage, Fetch↔Storage, and Fetch↔Network edges plus dedicated Core storage/network/device capabilities; no queue, MMIO, or DMA frame is mapped into a service root |
 | Network IPC extension | `service_ipc` + `service_runtime` | adds Flow/Fetch client routing with ABI v2 inline payloads capped at 192 bytes; Core-owned packet descriptors/pages remain private to Network |
-| Storage boundary | Core VirtIO block adapter + `logos-storage` v4 COW store + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, MSI-X interrupt delivery, reset, timeouts, and flush; Storage owns dual roots, immutable pages/extents, persistent allocation metadata, flushed commit records, recovery, durable object publication, object IDs, namespace resolution, and bounded file operations; Flow reaches Storage through versioned messages over private staging pages; legacy media fails closed and is never silently reformatted; one active writer remains bounded while generation-safe handles, bounded multi-extent streamed files, and map/unmap validation are active |
-| User policy core | `services/user` + `logos-abi` User types | User owns canonical identities, Argon2id password verifiers, role capability templates, volatile session handles, attenuating namespace capabilities, and lineage revocation; no UID/GID mode bits or ambient path authority; snapshot encoding excludes sessions and live capabilities; Storage IPC and ring-3 admission remain the next integration boundary |
+| Storage boundary | Core VirtIO block adapter + `logos-storage` v5 COW root + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, MSI-X interrupt delivery, reset, timeouts, and flush; Storage owns dual roots, immutable extents, disjoint system/user/package pools, persistent allocation metadata, flushed commit records, recovery, durable object publication, object IDs, namespace resolution, and bounded file operations; Flow reaches Storage through versioned messages over private staging pages; v4 media fails closed at the v5 opener and is never silently reformatted; one active writer remains bounded while generation-safe handles, bounded multi-extent streamed files, and map/unmap validation are active |
+| User service | `services/images/src/user` + `services/user` | User owns canonical identities, Argon2id password verifiers, role capability templates, volatile session/capability handles, and lineage revocation; Flow reaches User through typed IPC, while User exchanges only chunked snapshots with Storage; no UID/GID mode bits or ambient path authority |
 | Filesystem package boundary | `logos-package` + Storage v3 + `storage_ipc` + `service_runtime` | The legacy service envelope remains readable while the v2 service envelope carries a bounded manifest and streamed CRC validation; v3 keeps ordinary files capped at 8 KiB and stores up to sixteen generation-safe package records in a disk-derived extent arena; Storage reads v2 manifests from package extents on lookup and rejects non-newer updates or broken dependent ranges, while Core↔Storage package Lookup/Read retains one outstanding request and one reused 4 KiB frame with request, generation, offset, length, and service-epoch validation |
 | Package memory budget | `loader` + `frame_pool` + `memory` | Package extents allocate only the blocks required by the package; prepared ELF images allocate exact code/data/BSS/stack/page-table frames under the selected service owner, and every failed prepare or restart path reclaims them before the old graph is discarded |
 | Network boundary | Core VirtIO-net adapter + Network service + versioned Network IPC | Core owns optional PCI discovery, one fixed 64-entry RX/TX pair, 2 KiB DMA buffers, interrupts, reset, and deadlines; Network owns smoltcp Ethernet/ARP/IPv4/ICMP/UDP/DHCPv4/TCP state, eight sockets, two listeners, and private packet pages; Flow and Fetch receive routed inline payload responses; HTTP remains outside Network |
@@ -55,15 +55,16 @@ Terminal → Session → Flow → typed system API registry
 | Flow service | `services/images/src/flow` + `logos-flow::FlowService` | receives bounded Session source, lexes/parses/type-checks/evaluates fixed Flow programs, owns eight variables and four promise slots, routes typed registry operations to Storage/Network/Device/Supervisor/Fetch, provides stale-safe completion, and returns backpressured output over its reverse IPC ring |
 | Device service | `services/images/src/device` + `logos-device` | owns a bounded physical inventory view, currently exposing the Core-owned block disk through `device.list()`; format and filesystem recreation remain a later capability |
 | Fetch service | `services/images/src/fetch` + `logos-fetch` | owns one bounded HTTP operation, split-frame response parsing, progress/cancellation, and staged Storage publication; only numeric IPv4 `http://` 2xx downloads are accepted |
+| User service | `services/images/src/user` + `logos-user` | owns persistent identities, verifiers, roles, and authorization lineage; loads/saves only the User catalog through typed Storage IPC, receives a Core-mapped fixed Argon2id workspace, and exposes volatile sessions/capabilities to Flow |
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 64 validated mappings per process, and exit/fault/reclaim outcomes |
 | User launch contract | `process::UserLaunch` + `Scheduler::spawn_user` | a running process with a bound root publishes entry RIP, aligned stack top, root, and process generation before its task becomes runnable |
 | Ring-3 CPU migration | `scheduler::claim_next` + `arch::context` | published ring-3 tasks may migrate after a context boundary; the target loads CR3 and its TSS `RSP0` before restore, while live mappings remain immutable |
-| Service image manifest | `service_images::SERVICE_IMAGES` | nine fixed ESP paths and bounded ELF admission; `SERVICE_START_ORDER` launches them topologically |
-| Retained service images | `service_loader::ServiceImageBundle` | nine validated ELF records with page-aligned retained addresses, loaded before `ExitBootServices`, and no filesystem lifetime after UEFI exit |
-| Service ELF packaging | `services/images` + `scripts/build-services.ps1` | nine independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
-| Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all nine staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
+| Service image manifest | `service_images::SERVICE_IMAGES` | ten fixed ESP paths and bounded ELF admission; `SERVICE_START_ORDER` launches them topologically |
+| Retained service images | `service_loader::ServiceImageBundle` | ten validated ELF records with page-aligned retained addresses, loaded before `ExitBootServices`, and no filesystem lifetime after UEFI exit |
+| Service ELF packaging | `services/images` + `scripts/build-services.ps1` | ten independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
+| Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all ten staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
 | Service supervisor | `supervisor::LiveSupervisor` + `service_runtime` | live heartbeat polling, graph-wide quiesce, generation-bumped IPC rebuild, bounded process/page-table/frame reclamation, and restart limits |
-| Service manager | `service_manager` + `service_runtime` | nine fixed service slots, generation-safe handles, dependency-aware list/status/start/stop/restart, one Flow-only manager capability page, and an internal package activation hook; package-manager policy remains outside this boundary |
+| Service manager | `service_manager` + `service_runtime` | ten fixed service slots, generation-safe handles, dependency-aware list/status/start/stop/restart, one Flow-only manager capability page, and an internal package activation hook; package-manager policy remains outside this boundary |
 | Program lifecycle | `service_manager` + `service_runtime` + `process` + `scheduler` | eight fixed name-keyed program slots reuse the service manager ABI and Core resource owner; program ELF images receive only private code/data/stack mappings, Exit is the sole program syscall, and stop waits for scheduler completion before reclaiming process, page-table, and image frames |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
@@ -81,7 +82,7 @@ allocators, affinity, priorities, and AVX/XSAVE are not part of this milestone.
 
 The handoff registers one root task. That task owns the first fixed Runtime operation table; Core does
 not inspect, schedule, or orchestrate Runtime state. Runtime operations use the scheduler's sleep and
-wake primitives but retain their own deadlines, terminal states, and slot generations. The nine service
+wake primitives but retain their own deadlines, terminal states, and slot generations. The ten service
 ELFs are loaded before `ExitBootServices`, receive isolated roots and explicit mappings, and enter
 through the normal scheduler path. QEMU exercises the live service images and supervisor-driven restart.
 The fixed scheduler task stack is 64 KiB with a 256-byte canary so bounded interrupt
@@ -94,23 +95,26 @@ and syscall depth cannot silently overwrite adjacent CPU metadata.
 Live supervisor restart rebuilds volatile state and abandons in-flight work. Durable state is introduced
 through the bounded storage boundary in ADR-0059, with explicit ownership, immutable roots, recovery,
 durability, and idempotency proofs. The host-tested `logos-storage` and `logos-storage-service`
-packages provide the v4 format, namespace, file API, and IPC adapter. The boot image is admitted independently;
+packages provide the v4 compatibility format, the v5 system-catalog root, the v5 namespace backend,
+the file API, and the User catalog boundary. The boot image is admitted independently;
 the kernel-mediated storage endpoint is identity-checked; requests reach the bounded VirtIO adapter,
 and the fresh-disk QEMU proof covers format, flush, reopen, and torn-root recovery.
 
-Storage compatibility is fail-closed. The replacement format is v4; legacy v1/v2/v3 media returns
-`UnsupportedVersion` and is never silently reformatted. The COW store writes data, allocation
-metadata, a commit record, and an alternate root in order, flushing each publication boundary.
-Package payloads use an arena outside the metadata allocation prefix and are catalogued only after
-validation.
+Storage compatibility is fail-closed. The v5 namespace and User system-catalog openers return
+`UnsupportedVersion` for v4 roots and never silently reformat them. The v4 opener remains only for
+legacy host proofs. Both roots write allocation metadata, a commit
+record, and an alternate root in order, flushing each publication boundary. Package payloads use an
+arena outside the metadata allocation prefix and are catalogued only after validation.
 
-The User policy core is host-tested independently of the current v4 namespace. Its snapshot format
+The User policy core is host-tested against the v5 system-catalog boundary, and the live User image
+loads/saves that snapshot through the typed User↔Storage chunk protocol. Its snapshot format
 persists identities, verifiers, roles, and namespace-root descriptors but deliberately omits sessions
-and live capability handles. `UserCatalogStore` is the explicit persistence seam: Storage must back it
-from the reserved system allocation class before User is exposed through Flow. The post-v4 storage
-layout validator and arena-scoped COW allocator define disjoint system, user-content, and package
-ranges while v4 remains unchanged. Ordinary path operations are not treated as a user authorization
-boundary.
+and live capability handles. The live `DurableNamespaceV5` implements `UserCatalogStore`, so User
+catalog updates and namespace commits publish through the same v5 root and reserved system
+allocation class; Flow exposes bounded `user.*` commands through User. The post-v4 storage layout
+validator and arena-scoped COW allocator define disjoint system, user-content, and package ranges,
+while the v5 namespace routes file content through the user pool. Ordinary path operations are not treated as a user
+authorization boundary.
 
 Package-backed services are deliberately excluded from targeted manager image resets: Start and
 Restart return `Unsupported` until a bounded durable reload path exists. Supervisor failures route

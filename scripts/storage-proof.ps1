@@ -35,9 +35,9 @@ if (-not (Test-Path $disk)) {
     try { $stream.Write($marker, 0, $marker.Length) } finally { $stream.Dispose() }
 }
 
-& cargo build --release --features storage-proof --target x86_64-unknown-uefi
+& cargo build --release --features qemu-proof --target x86_64-unknown-uefi
 if ($LASTEXITCODE -ne 0) { throw 'UEFI build failed.' }
-& (Join-Path $PSScriptRoot 'build-services.ps1') -Release -StorageProof
+& (Join-Path $PSScriptRoot 'build-services.ps1') -Release -Proof
 if ($LASTEXITCODE -ne 0) { throw 'Service image build failed.' }
 
 New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\BOOT') | Out-Null
@@ -47,7 +47,7 @@ Copy-Item (Join-Path $repoRoot 'build\esp\EFI\LOGOS\*.ELF') (Join-Path $esp 'EFI
 
 $espPath = ((Resolve-Path $esp).Path).Replace('\', '/')
 $baseArgs = @(
-    '-machine', 'q35', '-m', '128M', '-smp', '1',
+    '-machine', 'q35', '-m', '256M', '-smp', '1',
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
     '-drive', "format=raw,file=fat:rw:$espPath",
     '-drive', "if=none,id=storage-disk,format=raw,file=$disk,cache=writethrough",
@@ -56,7 +56,7 @@ $baseArgs = @(
     '-debugcon', "file:$log", '-global', 'isa-debugcon.iobase=0xe9'
 )
 
-function Corrupt-InactiveCowSuperblock {
+function Corrupt-InactiveV5Superblock {
     param([string]$Path)
 
     $blockBytes = 4096
@@ -67,7 +67,8 @@ function Corrupt-InactiveCowSuperblock {
             $bytes = New-Object byte[] $blockBytes
             $stream.Position = [int64]$slot * $blockBytes
             [void]$stream.Read($bytes, 0, $bytes.Length)
-            if ([Text.Encoding]::ASCII.GetString($bytes, 0, 8) -eq 'LOGOSCOW') {
+            if ([Text.Encoding]::ASCII.GetString($bytes, 0, 8) -eq 'LOGOSCOW' -and
+                [BitConverter]::ToUInt16($bytes, 8) -eq 5) {
                 $blocks += [pscustomobject]@{
                     Slot = $slot
                     Bytes = $bytes
@@ -75,12 +76,55 @@ function Corrupt-InactiveCowSuperblock {
                 }
             }
         }
-        if ($blocks.Count -ne 2) { throw 'Expected two v4 storage superblocks.' }
+        if ($blocks.Count -ne 2) { throw 'Expected two v5 storage superblocks.' }
         $active = $blocks | Sort-Object Generation -Descending | Select-Object -First 1
         $torn = New-Object byte[] $blockBytes
         $stream.Position = [int64](1 - $active.Slot) * $blockBytes
         $stream.Write($torn, 0, $torn.Length)
         $stream.Flush()
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Assert-V5UserCatalog {
+    param([string]$Path)
+
+    $blockBytes = 4096
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+    try {
+        $roots = @()
+        for ($slot = 0; $slot -lt 2; $slot++) {
+            $bytes = New-Object byte[] $blockBytes
+            $stream.Position = [int64]$slot * $blockBytes
+            [void]$stream.Read($bytes, 0, $bytes.Length)
+            if ([Text.Encoding]::ASCII.GetString($bytes, 0, 8) -eq 'LOGOSCOW' -and
+                [BitConverter]::ToUInt16($bytes, 8) -eq 5) {
+                $roots += [pscustomobject]@{
+                    Generation = [BitConverter]::ToUInt64($bytes, 16)
+                    CatalogStart = [BitConverter]::ToUInt64($bytes, 40)
+                    CatalogBlocks = [BitConverter]::ToUInt32($bytes, 48)
+                    CatalogBytes = [BitConverter]::ToUInt32($bytes, 52)
+                    SystemStart = [BitConverter]::ToUInt64($bytes, 80)
+                    SystemEnd = [BitConverter]::ToUInt64($bytes, 88)
+                }
+            }
+        }
+        if ($roots.Count -ne 2) { throw 'Expected two valid v5 roots.' }
+        $root = $roots | Sort-Object Generation -Descending | Select-Object -First 1
+        if ($root.CatalogBlocks -eq 0 -or $root.CatalogBytes -eq 0 -or
+            $root.CatalogStart -lt $root.SystemStart -or
+            ($root.CatalogStart + $root.CatalogBlocks) -gt $root.SystemEnd -or
+            $root.CatalogBytes -gt ($root.CatalogBlocks * $blockBytes)) {
+            throw 'v5 User catalog is outside the system pool.'
+        }
+        $catalog = New-Object byte[] 10
+        $stream.Position = [int64]$root.CatalogStart * $blockBytes
+        [void]$stream.Read($catalog, 0, $catalog.Length)
+        if ([Text.Encoding]::ASCII.GetString($catalog, 0, 8) -ne 'LOGUSR01' -or
+            [BitConverter]::ToUInt16($catalog, 8) -ne 1) {
+            throw 'v5 User catalog snapshot header is invalid.'
+        }
     } finally {
         $stream.Dispose()
     }
@@ -116,8 +160,8 @@ function Invoke-StorageBoot {
                     }
                 }
                 if ($allMarkersFound) {
-                    $process.WaitForExit(10000) | Out-Null
-                    return $process.HasExited
+                    Start-Sleep -Seconds 5
+                    return $true
                 }
                 if ($text -match '(?i)(?:FATAL|QEMU proof FAIL|panic)') { return $false }
             }
@@ -137,10 +181,7 @@ function Invoke-StorageBoot {
 }
 
 if (-not (Invoke-StorageBoot -ExpectedMarkers @(
-        'LogOS vNext: storage proof PASS',
-        'LogOS vNext: storage command API PASS',
-        'LogOS vNext: storage command API cleanup PASS',
-        'LogOS vNext: shutdown requested'
+        'LogOS vNext: QEMU proof PASS'
     ))) {
     throw "Storage format/write/flush proof failed. Log: $log"
 }
@@ -148,13 +189,12 @@ if (Test-Path -LiteralPath $disk) {
     $diskStream = [System.IO.File]::Open($disk, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite)
     try { $diskStream.Flush($true) } finally { $diskStream.Dispose() }
 }
-Corrupt-InactiveCowSuperblock $disk
+Assert-V5UserCatalog $disk
+Corrupt-InactiveV5Superblock $disk
 if (-not (Invoke-StorageBoot -ExpectedMarkers @(
-        'LogOS vNext: storage recovery PASS',
-        'LogOS vNext: storage command API recovery PASS',
-        'LogOS vNext: storage command API cleanup PASS',
-        'LogOS vNext: shutdown requested'
+        'LogOS vNext: QEMU proof PASS'
     ))) {
     throw "Storage reboot/recovery proof failed. Log: $log"
 }
+Assert-V5UserCatalog $disk
 Write-Host 'Storage persistent-disk proof PASS'

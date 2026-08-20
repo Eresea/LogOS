@@ -26,9 +26,8 @@ must be independently testable before it is admitted into ring-3 IPC or persiste
 The policy is capability-based and has no UID/GID mode checks or ambient path authority. The current
 implementation is a host-tested `logos-user` core. `UserCatalogStore` is the explicit persistence
 seam: Storage supplies the system-pool-backed load/save implementation and User only exchanges a
-bounded snapshot. A follow-up cross-ring change must add the User IPC endpoint, Storage
-system-reserve/catalog transaction, first-boot bootstrap grant, and service admission before claiming
-a bootable User service.
+bounded snapshot. ADR-0063 and ADR-0064 now provide the Storage system-pool transaction, typed
+cross-ring IPC, and admitted bootable User service without exposing path or raw-block authority.
 
 ## Verification
 

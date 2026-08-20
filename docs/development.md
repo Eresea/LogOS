@@ -50,3 +50,10 @@ internal Core hook, checks corrupt-package rollback, and boots again to prove pa
 
 Each offline package boot has a ten-second maximum; the broader scheduler proof remains a
 separate gate.
+
+The v5 storage proof attaches a fresh VirtIO disk, validates the live v5 root and User catalog
+system-pool placement, corrupts the inactive root, and boots again to prove torn-root recovery:
+
+```powershell
+.\scripts\storage-proof.ps1 -ResetDisk
+```
