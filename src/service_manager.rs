@@ -442,7 +442,7 @@ impl ServiceManager {
                 };
                 if self.slots[index].state != ManagerState::Stopped {
                     response.status = ManagerStatus::InvalidState;
-                } else if !self.dependencies_running(self.slots[index].dependencies) {
+                } else if !self.dependencies_running(self.slots[index].service.unwrap()) {
                     response.status = ManagerStatus::Dependency;
                 } else {
                     self.slots[index].state = ManagerState::Starting;
@@ -621,16 +621,18 @@ impl ServiceManager {
         })
     }
 
-    fn dependencies_running(&self, dependencies: u8) -> bool {
+    fn dependencies_running(&self, service: logos_abi::ServiceId) -> bool {
+        let dependencies = crate::service_images::service_dependencies(service);
         (0..SERVICE_IMAGES.len()).all(|index| {
-            dependencies & (1 << index) == 0 || self.slots[index].state == ManagerState::Running
+            dependencies & (1u16 << index) == 0 || self.slots[index].state == ManagerState::Running
         })
     }
 
     fn has_active_dependents(&self, index: usize) -> bool {
+        let bit = 1u16 << index;
         self.slots.iter().any(|slot| {
             slot.service.is_some()
-                && slot.dependencies & (1 << index) != 0
+                && crate::service_images::service_dependencies(slot.service.unwrap()) & bit != 0
                 && matches!(
                     slot.state,
                     ManagerState::Starting | ManagerState::Running | ManagerState::Stopping
@@ -639,7 +641,7 @@ impl ServiceManager {
     }
 
     fn has_transitional_dependents(&self, index: usize) -> bool {
-        let mut included = 1u8 << index;
+        let mut included = 1u16 << index;
         let mut changed = true;
         while changed {
             changed = false;
@@ -647,8 +649,10 @@ impl ServiceManager {
                 let Some(service) = slot.service else {
                     continue;
                 };
-                let bit = 1 << service.index();
-                if included & bit == 0 && slot.dependencies & included != 0 {
+                let bit = 1u16 << service.index();
+                if included & bit == 0
+                    && crate::service_images::service_dependencies(service) & included != 0
+                {
                     if matches!(slot.state, ManagerState::Starting | ManagerState::Stopping) {
                         return true;
                     }
@@ -665,19 +669,19 @@ impl ServiceManager {
         index: usize,
         output: &mut [logos_abi::ServiceId; MAX_SERVICE_SLOTS],
     ) -> Option<usize> {
-        let mut included = 0u8;
+        let mut included = 0u16;
         let mut count = 0;
         let mut changed = true;
-        included |= 1 << index;
+        included |= 1u16 << index;
         while changed {
             changed = false;
             for slot in &self.slots[..SERVICE_IMAGES.len()] {
                 if let Some(service) = slot.service {
                     if slot.state == ManagerState::Running
-                        && slot.dependencies & included != 0
-                        && included & (1 << service.index()) == 0
+                        && crate::service_images::service_dependencies(service) & included != 0
+                        && included & (1u16 << service.index()) == 0
                     {
-                        included |= 1 << service.index();
+                        included |= 1u16 << service.index();
                         changed = true;
                     }
                 }
@@ -690,8 +694,10 @@ impl ServiceManager {
             let mut advanced = false;
             for spec in SERVICE_IMAGES {
                 let service = spec.service();
-                let bit = 1 << service.index();
-                if remaining & bit != 0 && spec.dependencies() & remaining == 0 {
+                let bit = 1u16 << service.index();
+                if remaining & bit != 0
+                    && crate::service_images::service_dependencies(service) & remaining == 0
+                {
                     order[order_count] = service;
                     order_count += 1;
                     remaining &= !bit;
@@ -792,6 +798,19 @@ mod tests {
     }
 
     #[test]
+    fn stop_rejects_running_device_dependents() {
+        let mut manager = manager();
+        let handle = manager.handle(ServiceId::Device.index()).unwrap();
+        let response = manager
+            .request(
+                request(ManagerOperation::Stop, handle.slot(), handle.generation()),
+                ManagerRights::ALL,
+            )
+            .response;
+        assert_eq!(response.status, ManagerStatus::Dependency);
+    }
+
+    #[test]
     fn stop_rejects_transitional_dependents() {
         let mut manager = manager();
         manager.mark_starting(ServiceId::Flow);
@@ -853,7 +872,7 @@ mod tests {
         );
         assert_eq!(
             manager
-                .request(request(ManagerOperation::Start, 8, 1), ManagerRights::ALL)
+                .request(request(ManagerOperation::Start, 9, 1), ManagerRights::ALL)
                 .response
                 .status,
             ManagerStatus::Unsupported
@@ -919,6 +938,35 @@ mod tests {
                     ServiceId::Fetch,
                     ServiceId::Flow,
                     ServiceId::Session,
+                    ServiceId::Input,
+                    ServiceId::Input,
+                    ServiceId::Input,
+                    ServiceId::Input,
+                    ServiceId::Input,
+                    ServiceId::Input,
+                ],
+                3,
+            )
+        );
+    }
+
+    #[test]
+    fn restart_device_includes_flow() {
+        let mut manager = manager();
+        let handle = manager.handle(ServiceId::Device.index()).unwrap();
+        let decision = manager.request(
+            request(ManagerOperation::Restart, handle.slot(), handle.generation()),
+            ManagerRights::ALL,
+        );
+        assert_eq!(decision.response.status, ManagerStatus::Accepted);
+        assert_eq!(
+            decision.action,
+            ManagerAction::Restart(
+                [
+                    ServiceId::Fetch,
+                    ServiceId::Flow,
+                    ServiceId::Device,
+                    ServiceId::Input,
                     ServiceId::Input,
                     ServiceId::Input,
                     ServiceId::Input,

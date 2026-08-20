@@ -51,7 +51,7 @@ pub enum ServiceImageError {
     InvalidElf(ProcessError),
 }
 
-pub const SERVICE_IMAGES: [ServiceImageSpec; 8] = [
+pub const SERVICE_IMAGES: [ServiceImageSpec; 9] = [
     ServiceImageSpec::new(ServiceId::Input, b"input", b"\\EFI\\LOGOS\\INPUT.ELF", 0),
     ServiceImageSpec::new(ServiceId::Display, b"display", b"\\EFI\\LOGOS\\DISPLAY.ELF", 0),
     ServiceImageSpec::new(
@@ -82,14 +82,16 @@ pub const SERVICE_IMAGES: [ServiceImageSpec; 8] = [
             | (1 << ServiceId::Storage.index())
             | (1 << ServiceId::Network.index()),
     ),
+    ServiceImageSpec::new(ServiceId::Device, b"device", b"\\EFI\\LOGOS\\DEVICE.ELF", 0),
 ];
 
-pub const SERVICE_START_ORDER: [ServiceId; 8] = [
+pub const SERVICE_START_ORDER: [ServiceId; 9] = [
     ServiceId::Input,
     ServiceId::Display,
     ServiceId::Terminal,
     ServiceId::Session,
     ServiceId::Storage,
+    ServiceId::Device,
     ServiceId::Flow,
     ServiceId::Network,
     ServiceId::Fetch,
@@ -97,6 +99,14 @@ pub const SERVICE_START_ORDER: [ServiceId; 8] = [
 
 pub const fn service_image(service: ServiceId) -> ServiceImageSpec {
     SERVICE_IMAGES[service.index()]
+}
+
+pub fn service_dependencies(service: ServiceId) -> u16 {
+    let mut dependencies = u16::from(service_image(service).dependencies());
+    if service == ServiceId::Flow {
+        dependencies |= 1u16 << ServiceId::Device.index();
+    }
+    dependencies
 }
 
 const fn manifest_is_indexed() -> bool {
@@ -153,7 +163,7 @@ mod tests {
 
     #[test]
     fn manifest_is_fixed_and_dependencies_are_valid() {
-        assert_eq!(SERVICE_IMAGES.len(), 8);
+        assert_eq!(SERVICE_IMAGES.len(), 9);
         assert_eq!(SERVICE_IMAGES[0].service(), ServiceId::Input);
         assert_eq!(SERVICE_IMAGES[1].service(), ServiceId::Display);
         assert_eq!(SERVICE_IMAGES[2].service(), ServiceId::Terminal);
@@ -166,7 +176,9 @@ mod tests {
         assert_eq!(SERVICE_IMAGES[5].name(), b"storage");
         assert_eq!(SERVICE_IMAGES[6].service(), ServiceId::Network);
         assert_eq!(SERVICE_IMAGES[7].service(), ServiceId::Fetch);
+        assert_eq!(SERVICE_IMAGES[8].service(), ServiceId::Device);
         assert_eq!(service_image(ServiceId::Display).path(), b"\\EFI\\LOGOS\\DISPLAY.ELF");
+        assert_ne!(service_dependencies(ServiceId::Flow) & (1 << ServiceId::Device.index()), 0);
     }
 
     #[test]

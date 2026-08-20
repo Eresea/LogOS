@@ -35,6 +35,39 @@ pub(crate) fn storage_block_count() -> Result<u64, logos_abi::StorageStatus> {
     virtio_device::storage_block_count().map_err(storage_error_status)
 }
 
+pub(crate) fn device_list_response(
+    request: logos_abi::DeviceRequest,
+    generation: u16,
+    service_epoch: u64,
+) -> logos_abi::DeviceResponse {
+    match storage_block_count() {
+        Ok(block_count) => {
+            let record = logos_abi::DeviceRecord::disk(0, block_count, b"disk0");
+            match record {
+                Some(record) => logos_abi::DeviceResponse::new(
+                    request,
+                    logos_abi::DeviceStatus::Ok,
+                    generation,
+                    service_epoch,
+                )
+                .with_record(record),
+                None => logos_abi::DeviceResponse::new(
+                    request,
+                    logos_abi::DeviceStatus::Invalid,
+                    generation,
+                    service_epoch,
+                ),
+            }
+        }
+        Err(_) => logos_abi::DeviceResponse::new(
+            request,
+            logos_abi::DeviceStatus::Io,
+            generation,
+            service_epoch,
+        ),
+    }
+}
+
 pub(crate) fn transfer_storage_block(
     request: logos_abi::StorageRequest,
     data_address: usize,

@@ -11,7 +11,7 @@ use crate::{
     page_table::PageTableMemory,
 };
 
-const ENDPOINTS: [logos_abi::IpcEndpointId; 16] = [
+const ENDPOINTS: [logos_abi::IpcEndpointId; 18] = [
     logos_abi::IpcEndpointId::InputToTerminal,
     logos_abi::IpcEndpointId::TerminalToDisplay,
     logos_abi::IpcEndpointId::TerminalToSession,
@@ -28,6 +28,8 @@ const ENDPOINTS: [logos_abi::IpcEndpointId; 16] = [
     logos_abi::IpcEndpointId::StorageToFetch,
     logos_abi::IpcEndpointId::FetchToNetwork,
     logos_abi::IpcEndpointId::NetworkToFetch,
+    logos_abi::IpcEndpointId::FlowToDevice,
+    logos_abi::IpcEndpointId::DeviceToFlow,
 ];
 pub const MAX_ENDPOINTS: usize = ENDPOINTS.len();
 pub const SERVICE_EPOCH: u64 = 1;
@@ -296,6 +298,12 @@ unsafe fn send_bytes(
     identity: logos_abi::MessageIdentity,
     bytes: &[u8],
 ) -> Result<Notify, IpcStatus> {
+    if index == logos_abi::IpcEndpointId::FlowToDevice as usize {
+        return unsafe { send_typed::<logos_abi::DeviceRequest, 8>(frame, identity, bytes) };
+    }
+    if index == logos_abi::IpcEndpointId::DeviceToFlow as usize {
+        return unsafe { send_typed::<logos_abi::DeviceResponse, 8>(frame, identity, bytes) };
+    }
     match logos_abi::ipc_message_type(index) {
         Some(logos_abi::IpcMessageType::Input) => unsafe {
             send_typed::<logos_abi::InputMessage, 32>(frame, identity, bytes)
@@ -317,6 +325,12 @@ unsafe fn receive_bytes(
     identity: logos_abi::MessageIdentity,
     bytes: &mut [u8],
 ) -> Result<Notify, IpcStatus> {
+    if index == logos_abi::IpcEndpointId::FlowToDevice as usize {
+        return unsafe { receive_typed::<logos_abi::DeviceRequest, 8>(frame, identity, bytes) };
+    }
+    if index == logos_abi::IpcEndpointId::DeviceToFlow as usize {
+        return unsafe { receive_typed::<logos_abi::DeviceResponse, 8>(frame, identity, bytes) };
+    }
     match logos_abi::ipc_message_type(index) {
         Some(logos_abi::IpcMessageType::Input) => unsafe {
             receive_typed::<logos_abi::InputMessage, 32>(frame, identity, bytes)
@@ -397,6 +411,12 @@ fn disconnect_ipc_page(endpoint: IpcEndpoint) {
             | logos_abi::IpcEndpointId::NetworkToFetch => {
                 (*(frame as *const logos_abi::StreamIpc)).disconnect()
             }
+            logos_abi::IpcEndpointId::FlowToDevice => {
+                (*(frame as *const logos_abi::SharedIpc<logos_abi::DeviceRequest, 8>)).disconnect()
+            }
+            logos_abi::IpcEndpointId::DeviceToFlow => {
+                (*(frame as *const logos_abi::SharedIpc<logos_abi::DeviceResponse, 8>)).disconnect()
+            }
             _ => {}
         }
     }
@@ -436,7 +456,7 @@ mod tests {
         let graph =
             ServiceIpcGraph::allocate_with_identity(&mut pool, &mut memory, 1, SERVICE_EPOCH)
                 .unwrap();
-        assert_eq!(graph.count(), 16);
+        assert_eq!(graph.count(), 18);
         assert_eq!(graph.endpoint(0).unwrap().producer(), ServiceId::Input);
         assert_eq!(graph.endpoint(0).unwrap().consumer(), ServiceId::Terminal);
         assert_eq!(graph.endpoint(5).unwrap().producer(), ServiceId::Flow);
@@ -447,6 +467,8 @@ mod tests {
         assert_eq!(graph.endpoint(9).unwrap().id(), logos_abi::IpcEndpointId::NetworkToFlow);
         assert_eq!(graph.endpoint(10).unwrap().id(), logos_abi::IpcEndpointId::FlowToFetch);
         assert_eq!(graph.endpoint(15).unwrap().id(), logos_abi::IpcEndpointId::NetworkToFetch);
+        assert_eq!(graph.endpoint(16).unwrap().id(), logos_abi::IpcEndpointId::FlowToDevice);
+        assert_eq!(graph.endpoint(17).unwrap().id(), logos_abi::IpcEndpointId::DeviceToFlow);
         assert_eq!(graph.endpoint(5).unwrap().generation(), 1);
         let terminal = graph.capabilities(ServiceId::Terminal).unwrap();
         assert_eq!(terminal.get(0).unwrap().rights, IpcRights::Receive);
@@ -465,6 +487,9 @@ mod tests {
         let network = graph.capabilities(ServiceId::Network).unwrap();
         assert_eq!(network.get(2).unwrap().endpoint_index(), Some(12));
         assert_eq!(network.get(3).unwrap().endpoint_index(), Some(13));
+        let device = graph.capabilities(ServiceId::Device).unwrap();
+        assert_eq!(device.get(2).unwrap().endpoint_index(), Some(24));
+        assert_eq!(device.get(3).unwrap().endpoint_index(), Some(25));
     }
 
     #[test]

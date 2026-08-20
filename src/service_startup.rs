@@ -9,7 +9,7 @@ pub enum StartupError {
 }
 
 pub struct ServiceStartup {
-    started: u8,
+    started: u16,
     launch_ready: bool,
 }
 
@@ -23,7 +23,7 @@ impl ServiceStartup {
     }
 
     pub fn start(&mut self, service: ServiceId) -> Result<(), StartupError> {
-        let bit = 1 << service.index();
+        let bit = 1u16 << service.index();
         if !self.launch_ready || self.started & bit != 0 {
             return Err(StartupError::InvalidTransition);
         }
@@ -45,8 +45,8 @@ impl Default for ServiceStartup {
     }
 }
 
-fn dependencies_started(service: ServiceId, started: u8) -> bool {
-    let dependencies = crate::service_images::service_image(service).dependencies();
+fn dependencies_started(service: ServiceId, started: u16) -> bool {
+    let dependencies = crate::service_images::service_dependencies(service);
     started & dependencies == dependencies
 }
 
@@ -65,7 +65,7 @@ mod tests {
 
     #[test]
     fn graph_starts_in_dependency_order() {
-        let all_services = u8::MAX;
+        let all_services = (1u16 << crate::service_images::SERVICE_IMAGES.len()) - 1;
         let mut startup = ServiceStartup::new();
         startup.mark_launch_ready();
         assert!(startup.all_launch_ready());
@@ -74,6 +74,7 @@ mod tests {
         startup.start(ServiceId::Terminal).unwrap();
         startup.start(ServiceId::Session).unwrap();
         startup.start(ServiceId::Storage).unwrap();
+        startup.start(ServiceId::Device).unwrap();
         startup.start(ServiceId::Flow).unwrap();
         startup.start(ServiceId::Network).unwrap();
         startup.start(ServiceId::Fetch).unwrap();

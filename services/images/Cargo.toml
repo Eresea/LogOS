@@ -14,6 +14,7 @@ fetch-proof = []
 [dependencies]
 logos-abi = { path = "../../abi" }
 logos-flow = { path = "../flow" }
+logos-device = { path = "../device" }
 logos-display = { path = "../display" }
 logos-input = { path = "../input" }
 logos-session = { path = "../session" }
@@ -68,5 +69,11 @@ bench = false
 [[bin]]
 name = "logos-fetch"
 path = "src/fetch.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "logos-device"
+path = "src/device.rs"
 test = false
 bench = false

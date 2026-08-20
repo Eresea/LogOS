@@ -87,6 +87,7 @@ pub struct ServiceRuntime {
     ipc_generation: u16,
     service_epoch: u64,
     storage_response: Option<logos_abi::StorageResponse>,
+    device_response: Option<logos_abi::DeviceResponse>,
     storage_map_response: Option<logos_abi::StorageMapResponse>,
     package_request: Option<logos_abi::PackageRequest>,
     package_response: Option<logos_abi::PackageResponse>,
@@ -281,16 +282,7 @@ impl ServiceRuntime {
     pub const fn new() -> Self {
         Self {
             frame_pool: FramePool::empty(),
-            images: [
-                LoadedImage::empty(),
-                LoadedImage::empty(),
-                LoadedImage::empty(),
-                LoadedImage::empty(),
-                LoadedImage::empty(),
-                LoadedImage::empty(),
-                LoadedImage::empty(),
-                LoadedImage::empty(),
-            ],
+            images: [const { LoadedImage::empty() }; SERVICE_COUNT],
             tables: [const { MaybeUninit::uninit() }; SERVICE_COUNT],
             table_ready: [false; SERVICE_COUNT],
             processes: crate::process::ProcessTable::new(),
@@ -317,6 +309,7 @@ impl ServiceRuntime {
             ipc_generation: 1,
             service_epoch: 1,
             storage_response: None,
+            device_response: None,
             storage_map_response: None,
             package_request: None,
             package_response: None,
@@ -588,6 +581,28 @@ impl ServiceRuntime {
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
                 page.capabilities[9] = logos_abi::IpcCapability::new(
                     crate::storage_ipc::STORAGE_MAP_RESPONSE_ENDPOINT,
+                    logos_abi::IpcRights::Receive,
+                    self.ipc_generation,
+                    self.service_epoch,
+                )
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+                page
+            } else if service == ServiceId::Device {
+                let mut page = self
+                    .ipc
+                    .as_ref()
+                    .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?
+                    .capabilities(service)
+                    .map_err(ServiceRuntimeError::Ipc)?;
+                page.capabilities[0] = logos_abi::IpcCapability::new(
+                    crate::device_ipc::DEVICE_REQUEST_ENDPOINT,
+                    logos_abi::IpcRights::Send,
+                    self.ipc_generation,
+                    self.service_epoch,
+                )
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+                page.capabilities[1] = logos_abi::IpcCapability::new(
+                    crate::device_ipc::DEVICE_RESPONSE_ENDPOINT,
                     logos_abi::IpcRights::Receive,
                     self.ipc_generation,
                     self.service_epoch,
@@ -955,6 +970,9 @@ impl ServiceRuntime {
             for frame in self.storage_data_frames.iter().flatten().copied() {
                 memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
             }
+        }
+        if service == ServiceId::Device {
+            self.device_response = None;
         }
         if service == ServiceId::Network {
             if let Some(frame) = self.network_config_frame {
@@ -1789,6 +1807,64 @@ impl ServiceRuntime {
                 notified: true,
             };
         }
+        if service == ServiceId::Device
+            && capability.endpoint_index() == Some(crate::device_ipc::DEVICE_REQUEST_ENDPOINT)
+        {
+            if capability.rights != logos_abi::IpcRights::Send
+                || capability.generation != self.ipc_generation
+                || capability.service_epoch != self.service_epoch
+            {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Unauthorized,
+                    notified: false,
+                };
+            }
+            if length != core::mem::size_of::<logos_abi::DeviceRequest>() {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
+            if self.device_response.is_some() {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Full,
+                    notified: false,
+                };
+            }
+            let request = unsafe {
+                core::ptr::read_unaligned(
+                    staging_frame.raw() as usize as *const logos_abi::DeviceRequest
+                )
+            };
+            if crate::device_ipc::validate_request(
+                request,
+                capability_slot,
+                self.ipc_generation,
+                self.service_epoch,
+            )
+            .is_err()
+            {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
+            let response = match request.operation {
+                logos_abi::DeviceOperation::List => crate::arch::device_list_response(
+                    request,
+                    self.ipc_generation,
+                    self.service_epoch,
+                ),
+            };
+            self.device_response = Some(response);
+            crate::arch::signal_events(logos_abi::ipc_write_event_mask(
+                crate::device_ipc::DEVICE_RESPONSE_ENDPOINT,
+            ));
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Ok,
+                notified: true,
+            };
+        }
         if service == ServiceId::Storage
             && capability.endpoint_index() == Some(crate::storage_ipc::PACKAGE_RESPONSE_ENDPOINT)
         {
@@ -1901,6 +1977,39 @@ impl ServiceRuntime {
                 notified: false,
             };
         };
+        if service == ServiceId::Device && index == crate::device_ipc::DEVICE_RESPONSE_ENDPOINT {
+            if capability.rights != logos_abi::IpcRights::Receive
+                || capability.generation != self.ipc_generation
+                || capability.service_epoch != self.service_epoch
+            {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Unauthorized,
+                    notified: false,
+                };
+            }
+            let Some(response) = self.device_response.take() else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Empty,
+                    notified: false,
+                };
+            };
+            if let Some(staging_frame) = self.ipc_staging_frames[service.index()] {
+                unsafe {
+                    core::ptr::write_unaligned(
+                        staging_frame.raw() as usize as *mut logos_abi::DeviceResponse,
+                        response,
+                    );
+                }
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Ok,
+                    notified: false,
+                };
+            }
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        }
         if service == ServiceId::Storage && index == crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT {
             if capability.rights != logos_abi::IpcRights::Receive
                 || capability.generation != self.ipc_generation
@@ -3082,6 +3191,7 @@ impl ServiceRuntime {
         }
         self.ipc = None;
         self.storage_response = None;
+        self.device_response = None;
         self.storage_map_response = None;
         self.package_request = None;
         self.package_response = None;
@@ -3214,6 +3324,12 @@ fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint) {
             | logos_abi::IpcEndpointId::FetchToNetwork
             | logos_abi::IpcEndpointId::NetworkToFetch => (frame as *mut logos_abi::StreamIpc)
                 .write(logos_abi::StreamIpc::new(endpoint.header())),
+            logos_abi::IpcEndpointId::FlowToDevice => (frame
+                as *mut logos_abi::SharedIpc<logos_abi::DeviceRequest, 8>)
+                .write(logos_abi::SharedIpc::new(endpoint.header())),
+            logos_abi::IpcEndpointId::DeviceToFlow => (frame
+                as *mut logos_abi::SharedIpc<logos_abi::DeviceResponse, 8>)
+                .write(logos_abi::SharedIpc::new(endpoint.header())),
             _ => {}
         }
     }

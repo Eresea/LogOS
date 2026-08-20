@@ -894,6 +894,7 @@ fn service_name(service: logos_abi::ServiceId) -> &'static [u8] {
         logos_abi::ServiceId::Storage => b"storage",
         logos_abi::ServiceId::Network => b"network",
         logos_abi::ServiceId::Fetch => b"fetch",
+        logos_abi::ServiceId::Device => b"device",
     }
 }
 
