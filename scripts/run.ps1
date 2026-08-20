@@ -31,7 +31,7 @@ $interactiveMode = $Interactive -or (-not $Headless -and -not $Proof)
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $target = Join-Path $repoRoot 'target'
 $disk = if ($DiskImage) { [System.IO.Path]::GetFullPath($DiskImage) } else {
-    Join-Path $target 'runtime-storage-v4.raw'
+    Join-Path $target 'runtime-storage-v5.raw'
 }
 $profile = if ($Release) { 'release' } else { 'debug' }
 $efi = Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-vnext.efi"
@@ -60,8 +60,10 @@ if ($Proof) {
 }
 if ($Release) { $buildArgs += '--release' }
 cargo @buildArgs
+if ($LASTEXITCODE -ne 0) { throw "Kernel build failed with exit code $LASTEXITCODE." }
 
 & (Join-Path $PSScriptRoot 'build-services.ps1') -Release -Proof:$Proof -FetchProof:$FetchProof
+if ($LASTEXITCODE -ne 0) { throw "Service image build failed with exit code $LASTEXITCODE." }
 
 New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\BOOT') | Out-Null
 Copy-Item $efi (Join-Path $esp 'EFI\BOOT\BOOTX64.EFI') -Force

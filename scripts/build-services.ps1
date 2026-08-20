@@ -27,12 +27,14 @@ if ($Release) { $buildArgs += '--release' }
 
 $env:CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS = '-C relocation-model=static -C code-model=large -C link-arg=--image-base=0x10000000000 -C link-arg=--no-pie'
 cargo @buildArgs
+if ($LASTEXITCODE -ne 0) { throw "Service image build failed with exit code $LASTEXITCODE." }
 $userBuildArgs = @(
     'build', '--target', 'x86_64-unknown-none', '-p', 'logos-service-images', '--bin', 'logos-user',
     '--features', 'user-kdf'
 )
 if ($Release) { $userBuildArgs += '--release' }
 cargo @userBuildArgs
+if ($LASTEXITCODE -ne 0) { throw "User service image build failed with exit code $LASTEXITCODE." }
 
 $profile = if ($Release) { 'release' } else { 'debug' }
 $output = Join-Path $PSScriptRoot '..\build\esp\EFI\LOGOS'
