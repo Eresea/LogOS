@@ -61,3 +61,6 @@
 | [0058](0058-bounded-package-file-import.md) | Accepted | Flow requests Storage-owned package-file import; Storage streams the existing file into the package arena and reuses validation/update policy |
 | [0059](0059-v4-copy-on-write-storage-boundary.md) | Accepted | v4 uses immutable extents, persistent allocation metadata, flushed commit records, atomic root publication, and fail-closed legacy media handling |
 | [0060](0060-bounded-program-lifecycle.md) | Accepted | Persistent capability-free program packages reuse the service ABI, fixed Storage catalog, Core resource owner, process loader, and scheduler-safe reclamation |
+| [0061](0061-device-manager-service.md) | Accepted | A bounded Device service exposes Core-owned physical inventory through Flow while destructive format/recreate authority remains deferred |
+| [0062](0062-user-identity-and-capability-core.md) | Accepted | User identity policy uses Argon2id verifiers, volatile sessions, role templates, typed namespace capabilities, and lineage revocation |
+| [0063](0063-storage-system-pool-layout.md) | Accepted | The post-v4 storage format separates reserved system metadata, user content, and package allocation ranges |
