@@ -6,6 +6,7 @@ use core::{
 use uefi::{
     boot,
     mem::memory_map::MemoryMap as UefiMemoryMap,
+    mem::memory_map::MemoryType,
     prelude::*,
     proto::{
         console::gop::{GraphicsOutput, PixelFormat as UefiPixelFormat},
@@ -456,8 +457,9 @@ pub fn boot() -> Status {
         },
     };
     proof_line(b"LogOS vNext: service images ready");
+    let frame_metadata = reserve_frame_metadata();
     let memory_map = unsafe { boot::exit_boot_services(None) };
-    publish_boot_resources(memory_map, framebuffer);
+    publish_boot_resources(memory_map, framebuffer, frame_metadata);
     unsafe {
         let _runtime_guard = ServiceRuntimeGuard::acquire();
         SERVICE_IMAGES = Some(service_images);
@@ -640,7 +642,29 @@ fn capture_gop() -> FramebufferInfo {
     .unwrap_or_else(|| fatal(b"LogOS vNext: GOP metadata"))
 }
 
-fn publish_boot_resources(memory_map: impl UefiMemoryMap, framebuffer: FramebufferInfo) {
+fn reserve_frame_metadata() -> crate::boot_resources::FrameMetadataReservation {
+    let available_pages = boot::memory_map(MemoryType::LOADER_DATA)
+        .unwrap_or_else(|_| fatal(b"LogOS vNext: metadata memory map"))
+        .entries()
+        .filter(|descriptor| descriptor.ty == MemoryType::CONVENTIONAL)
+        .map(|descriptor| descriptor.page_count)
+        .try_fold(0u64, u64::checked_add)
+        .unwrap_or_else(|| fatal(b"LogOS vNext: metadata size"));
+    let pages = crate::memory::frame_metadata_pages_for_frames(available_pages)
+        .and_then(|pages| usize::try_from(pages).ok())
+        .filter(|pages| *pages != 0)
+        .unwrap_or_else(|| fatal(b"LogOS vNext: metadata size"));
+    let base = boot::allocate_pages(boot::AllocateType::AnyPages, MemoryType::LOADER_DATA, pages)
+        .unwrap_or_else(|_| fatal(b"LogOS vNext: metadata allocation"));
+    crate::boot_resources::FrameMetadataReservation::new(base.as_ptr() as u64, pages as u64)
+        .unwrap_or_else(|| fatal(b"LogOS vNext: metadata reservation"))
+}
+
+fn publish_boot_resources(
+    memory_map: impl UefiMemoryMap,
+    framebuffer: FramebufferInfo,
+    frame_metadata: crate::boot_resources::FrameMetadataReservation,
+) {
     let mut copied = MemoryMap::new();
     for descriptor in memory_map.entries() {
         let entry = MemoryDescriptor::new(
@@ -653,6 +677,7 @@ fn publish_boot_resources(memory_map: impl UefiMemoryMap, framebuffer: Framebuff
     }
     let mut resources = BootResources::new(copied, crate::boot_resources::KeyboardResource::PS2);
     resources.publish_framebuffer(framebuffer);
+    resources.publish_frame_metadata(frame_metadata);
     unsafe {
         BOOT_RESOURCES = Some(resources);
     }

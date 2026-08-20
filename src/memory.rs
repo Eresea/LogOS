@@ -7,8 +7,10 @@
 use core::{
     cell::UnsafeCell,
     future::Future,
+    mem::{align_of, size_of},
     ops::{Deref, DerefMut},
     pin::Pin,
+    slice,
     sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     task::{Context, Poll, Waker},
 };
@@ -16,9 +18,14 @@ use core::{
 use crate::boot_resources::{MemoryDescriptor, MemoryMap, PAGE_SIZE};
 
 pub const MAX_MEMORY_RUNS: usize = logos_abi::MAX_MEMORY_DESCRIPTORS;
+#[cfg(test)]
 pub const MAX_MANAGED_FRAMES: usize = logos_abi::MAX_MANAGED_FRAMES;
+#[cfg(test)]
 pub const FRAME_WORDS: usize = MAX_MANAGED_FRAMES.div_ceil(64);
+#[cfg(test)]
 pub const FRAME_SUMMARY_WORDS: usize = FRAME_WORDS.div_ceil(64);
+#[cfg(test)]
+const TEST_MAX_MANAGED_FRAMES: usize = 4096;
 pub const MAX_FRAME_SHARDS: usize = 4;
 pub const MAX_MEMORY_CPUS: usize = 8;
 pub const FRAME_CACHE_CAPACITY: usize = 16;
@@ -453,6 +460,101 @@ struct FrameRecord {
     state: u8,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameMetadataLayout {
+    records_offset: usize,
+    records_len: usize,
+    free_offset: usize,
+    free_len: usize,
+    summary_offset: usize,
+    summary_len: usize,
+    bytes: usize,
+}
+
+impl FrameMetadataLayout {
+    pub fn for_frames(frame_count: usize) -> Option<Self> {
+        let records_offset = align_up(0, align_of::<FrameRecord>())?;
+        let records_bytes = frame_count.checked_mul(size_of::<FrameRecord>())?;
+        let free_len = frame_count.div_ceil(64);
+        let free_offset = align_up(records_offset.checked_add(records_bytes)?, align_of::<u64>())?;
+        let free_bytes = free_len.checked_mul(size_of::<u64>())?;
+        let summary_len = free_len.div_ceil(64);
+        let summary_offset = align_up(free_offset.checked_add(free_bytes)?, align_of::<u64>())?;
+        let summary_bytes = summary_len.checked_mul(size_of::<u64>())?;
+        let bytes = summary_offset.checked_add(summary_bytes)?;
+        Some(Self {
+            records_offset,
+            records_len: frame_count,
+            free_offset,
+            free_len,
+            summary_offset,
+            summary_len,
+            bytes,
+        })
+    }
+
+    pub const fn bytes(self) -> usize {
+        self.bytes
+    }
+
+    pub const fn records_len(self) -> usize {
+        self.records_len
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameMetadataRegion {
+    base: u64,
+    bytes: u64,
+}
+
+impl FrameMetadataRegion {
+    pub fn new(base: u64, bytes: u64) -> Option<Self> {
+        if base == 0 || base % PAGE_SIZE != 0 || bytes < PAGE_SIZE || bytes % PAGE_SIZE != 0 {
+            return None;
+        }
+        base.checked_add(bytes).map(|_| Self { base, bytes })
+    }
+
+    pub const fn base(self) -> u64 {
+        self.base
+    }
+
+    pub const fn bytes(self) -> u64 {
+        self.bytes
+    }
+
+    pub fn capacity(self) -> Option<usize> {
+        let bytes = usize::try_from(self.bytes).ok()?;
+        let mut low = 0usize;
+        let mut high = bytes / size_of::<FrameRecord>();
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if FrameMetadataLayout::for_frames(middle)?.bytes() <= bytes {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        Some(low)
+    }
+
+    pub fn layout(self, frame_count: usize) -> Option<FrameMetadataLayout> {
+        let layout = FrameMetadataLayout::for_frames(frame_count)?;
+        (layout.bytes() <= usize::try_from(self.bytes).ok()?).then_some(layout)
+    }
+}
+
+pub fn frame_metadata_pages_for_frames(frame_count: u64) -> Option<u64> {
+    let frame_count = usize::try_from(frame_count).ok()?;
+    let bytes = FrameMetadataLayout::for_frames(frame_count)?.bytes() as u64;
+    bytes.checked_add(PAGE_SIZE - 1).map(|bytes| bytes / PAGE_SIZE)
+}
+
+fn align_up(value: usize, alignment: usize) -> Option<usize> {
+    value.checked_add(alignment - 1).map(|value| value / alignment * alignment)
+}
+
 impl FrameRecord {
     const EMPTY: Self =
         Self { generation: INITIAL_FRAME_GENERATION, owner: OwnerId(0), state: FREE };
@@ -469,16 +571,123 @@ impl RunMetadata {
     const EMPTY: Self = Self { run: PhysicalRun { start: 0, pages: 0 }, first_slot: 0, pages: 0 };
 }
 
+struct FrameMetadata {
+    records: *mut FrameRecord,
+    records_len: usize,
+    free: *mut u64,
+    free_len: usize,
+    summary: *mut u64,
+    summary_len: usize,
+}
+
+unsafe impl Send for FrameMetadata {}
+
+impl FrameMetadata {
+    const EMPTY: Self = Self {
+        records: core::ptr::null_mut(),
+        records_len: 0,
+        free: core::ptr::null_mut(),
+        free_len: 0,
+        summary: core::ptr::null_mut(),
+        summary_len: 0,
+    };
+
+    fn configure(
+        &mut self,
+        region: FrameMetadataRegion,
+        frame_count: usize,
+    ) -> Result<(), FrameError> {
+        let layout = region.layout(frame_count).ok_or(FrameError::Capacity)?;
+        let base = region.base() as *mut u8;
+        // SAFETY: the region is page-aligned, sized by `layout`, and reserved
+        // exclusively for allocator metadata before publication.
+        unsafe {
+            self.records = base.add(layout.records_offset).cast();
+            self.free = base.add(layout.free_offset).cast();
+            self.summary = base.add(layout.summary_offset).cast();
+        }
+        self.records_len = layout.records_len;
+        self.free_len = layout.free_len;
+        self.summary_len = layout.summary_len;
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        // SAFETY: all slices were established by `configure`.
+        unsafe {
+            slice::from_raw_parts_mut(self.records, self.records_len).fill(FrameRecord::EMPTY);
+            slice::from_raw_parts_mut(self.free, self.free_len).fill(0);
+            slice::from_raw_parts_mut(self.summary, self.summary_len).fill(0);
+        }
+    }
+
+    fn records(&self) -> &[FrameRecord] {
+        // SAFETY: all slices were established by `configure`.
+        unsafe { slice::from_raw_parts(self.records, self.records_len) }
+    }
+
+    fn records_mut(&mut self) -> &mut [FrameRecord] {
+        // SAFETY: all slices were established by `configure`.
+        unsafe { slice::from_raw_parts_mut(self.records, self.records_len) }
+    }
+
+    fn free(&self) -> &[u64] {
+        // SAFETY: all slices were established by `configure`.
+        unsafe { slice::from_raw_parts(self.free, self.free_len) }
+    }
+
+    fn free_mut(&mut self) -> &mut [u64] {
+        // SAFETY: all slices were established by `configure`.
+        unsafe { slice::from_raw_parts_mut(self.free, self.free_len) }
+    }
+
+    fn summary(&self) -> &[u64] {
+        // SAFETY: all slices were established by `configure`.
+        unsafe { slice::from_raw_parts(self.summary, self.summary_len) }
+    }
+
+    fn summary_mut(&mut self) -> &mut [u64] {
+        // SAFETY: all slices were established by `configure`.
+        unsafe { slice::from_raw_parts_mut(self.summary, self.summary_len) }
+    }
+}
+
+#[cfg(test)]
+const TEST_METADATA_BYTES: usize = {
+    let records_bytes = TEST_MAX_MANAGED_FRAMES * size_of::<FrameRecord>();
+    let free_len = TEST_MAX_MANAGED_FRAMES.div_ceil(64);
+    let free_offset = records_bytes.div_ceil(8) * 8;
+    let summary_offset = (free_offset + free_len * size_of::<u64>()).div_ceil(8) * 8;
+    let bytes = summary_offset + free_len.div_ceil(64) * size_of::<u64>();
+    bytes.div_ceil(PAGE_SIZE as usize) * PAGE_SIZE as usize
+};
+
+#[cfg(test)]
+#[repr(align(4096))]
+struct TestFrameMetadata {
+    bytes: [u8; TEST_METADATA_BYTES],
+}
+
+#[cfg(test)]
+impl TestFrameMetadata {
+    const fn empty() -> Self {
+        Self { bytes: [0; TEST_METADATA_BYTES] }
+    }
+
+    fn region(&mut self) -> FrameMetadataRegion {
+        FrameMetadataRegion::new(self.bytes.as_mut_ptr() as u64, self.bytes.len() as u64).unwrap()
+    }
+}
+
 /// Dense per-frame state backed by hierarchical free-word metadata.
 pub struct PhysicalFrameManager {
     runs: [RunMetadata; MAX_MEMORY_RUNS],
     run_count: usize,
     frame_count: usize,
-    free: [u64; FRAME_WORDS],
-    summary: [u64; FRAME_SUMMARY_WORDS],
-    summary_summary: u64,
-    records: [FrameRecord; MAX_MANAGED_FRAMES],
+    metadata: FrameMetadata,
     owner_live: [u32; MAX_QUOTAS],
+    #[cfg(test)]
+    test_metadata: TestFrameMetadata,
 }
 
 impl PhysicalFrameManager {
@@ -487,22 +696,38 @@ impl PhysicalFrameManager {
             runs: [RunMetadata::EMPTY; MAX_MEMORY_RUNS],
             run_count: 0,
             frame_count: 0,
-            free: [0; FRAME_WORDS],
-            summary: [0; FRAME_SUMMARY_WORDS],
-            summary_summary: 0,
-            records: [FrameRecord::EMPTY; MAX_MANAGED_FRAMES],
+            metadata: FrameMetadata::EMPTY,
             owner_live: [0; MAX_QUOTAS],
+            #[cfg(test)]
+            test_metadata: TestFrameMetadata::empty(),
         }
     }
 
     pub fn initialize(&mut self, map: &NormalizedMemoryMap) -> Result<(), FrameError> {
+        #[cfg(test)]
+        {
+            let region = self.test_metadata.region();
+            self.initialize_with_region(map, region)
+        }
+        #[cfg(not(test))]
+        {
+            let _ = map;
+            Err(FrameError::Capacity)
+        }
+    }
+
+    pub fn initialize_with_region(
+        &mut self,
+        map: &NormalizedMemoryMap,
+        region: FrameMetadataRegion,
+    ) -> Result<(), FrameError> {
+        let frame_capacity =
+            usize::try_from(map.total_pages()).map_err(|_| FrameError::Capacity)?;
+        self.metadata.configure(region, frame_capacity)?;
         self.runs.fill(RunMetadata::EMPTY);
         self.run_count = 0;
         self.frame_count = 0;
-        self.free.fill(0);
-        self.summary.fill(0);
-        self.summary_summary = 0;
-        self.records.fill(FrameRecord::EMPTY);
+        self.metadata.clear();
         self.owner_live.fill(0);
         for run_index in 0..map.len() {
             let Some(run) = map.get(run_index) else {
@@ -514,18 +739,14 @@ impl PhysicalFrameManager {
                 start = PAGE_SIZE;
                 pages = pages.saturating_sub(1);
             }
-            if pages == 0
-                || self.run_count == MAX_MEMORY_RUNS
-                || self.frame_count == MAX_MANAGED_FRAMES
-            {
+            if pages == 0 || self.run_count == MAX_MEMORY_RUNS {
                 continue;
             }
-            let pages = pages.min(MAX_MANAGED_FRAMES - self.frame_count);
             let bounded = PhysicalRun::new(start, pages as u64).ok_or(FrameError::InvalidMap)?;
             self.runs[self.run_count] =
                 RunMetadata { run: bounded, first_slot: self.frame_count, pages };
             for slot in self.frame_count..self.frame_count + pages {
-                self.records[slot] = FrameRecord::EMPTY;
+                self.metadata.records_mut()[slot] = FrameRecord::EMPTY;
                 self.set_free(slot);
             }
             self.frame_count += pages;
@@ -547,7 +768,7 @@ impl PhysicalFrameManager {
     }
 
     pub fn available(&self) -> usize {
-        self.free[..self.frame_count.div_ceil(64)]
+        self.metadata.free()[..self.frame_count.div_ceil(64)]
             .iter()
             .map(|word| word.count_ones() as usize)
             .sum()
@@ -616,7 +837,7 @@ impl PhysicalFrameManager {
     fn refresh(&mut self, lease: FrameLease) -> Result<FrameLease, FrameError> {
         let slot = self.validate_lease(lease)?;
         let generation = {
-            let record = &mut self.records[slot];
+            let record = &mut self.metadata.records_mut()[slot];
             record.generation = next_frame_generation(record.generation);
             record.generation
         };
@@ -631,7 +852,7 @@ impl PhysicalFrameManager {
             .or_else(|| self.id_for_address(address.raw))
             .ok_or(FrameError::InvalidFrame)?;
         let slot = self.slot_for_id(id).ok_or(FrameError::InvalidFrame)?;
-        let record = self.records[slot];
+        let record = self.metadata.records()[slot];
         if record.state == FREE {
             return Err(FrameError::StaleHandle);
         }
@@ -718,7 +939,7 @@ impl PhysicalFrameManager {
         let run = self.runs.get(id.run())?;
         let offset = id.offset() as u64;
         let raw = run.run.start.checked_add(offset.checked_mul(PAGE_SIZE)?)?;
-        Some(FrameAddress::from_parts(raw, id, self.records[slot].generation))
+        Some(FrameAddress::from_parts(raw, id, self.metadata.records()[slot].generation))
     }
 
     pub fn id_for_address(&self, raw: u64) -> Option<FrameId> {
@@ -744,7 +965,7 @@ impl PhysicalFrameManager {
 
     pub fn state(&self, id: FrameId) -> Option<FrameState> {
         let slot = self.slot_for_id(id)?;
-        let record = self.records[slot];
+        let record = self.metadata.records()[slot];
         match record.state {
             FREE => None,
             ACTIVE => Some(FrameState::Dirty),
@@ -790,7 +1011,7 @@ impl PhysicalFrameManager {
         state: FrameState,
     ) -> Result<FrameLease, FrameError> {
         let generation = {
-            let record = &mut self.records[slot];
+            let record = &mut self.metadata.records_mut()[slot];
             record.generation = next_frame_generation(record.generation);
             record.owner = owner;
             record.state = match state {
@@ -810,7 +1031,7 @@ impl PhysicalFrameManager {
     }
 
     fn release_slot(&mut self, slot: usize, owner: OwnerId) {
-        let record = &mut self.records[slot];
+        let record = &mut self.metadata.records_mut()[slot];
         record.owner = OwnerId(0);
         record.state = FREE;
         if let Some(live) = self.owner_live.get_mut(owner.raw() as usize) {
@@ -821,7 +1042,7 @@ impl PhysicalFrameManager {
 
     fn validate_lease(&self, lease: FrameLease) -> Result<usize, FrameError> {
         let slot = usize::try_from(lease.slot).map_err(|_| FrameError::InvalidFrame)?;
-        let Some(record) = self.records.get(slot).copied() else {
+        let Some(record) = self.metadata.records().get(slot).copied() else {
             return Err(FrameError::InvalidFrame);
         };
         if record.state == FREE {
@@ -876,7 +1097,7 @@ impl PhysicalFrameManager {
         let first_summary = first_word / 64;
         let last_summary = last_word / 64;
         for summary_index in first_summary..=last_summary {
-            let mut words = self.summary[summary_index];
+            let mut words = self.metadata.summary()[summary_index];
             if summary_index == first_summary {
                 words &= u64::MAX << (first_word % 64);
             }
@@ -885,7 +1106,7 @@ impl PhysicalFrameManager {
             }
             while words != 0 {
                 let word_index = summary_index * 64 + words.trailing_zeros() as usize;
-                let mut bits = self.free[word_index];
+                let mut bits = self.metadata.free()[word_index];
                 if word_index == first_word {
                     bits &= u64::MAX << (first % 64);
                 }
@@ -902,24 +1123,20 @@ impl PhysicalFrameManager {
     }
 
     fn is_free(&self, slot: usize) -> bool {
-        self.free[slot / 64] & (1u64 << (slot % 64)) != 0
+        self.metadata.free()[slot / 64] & (1u64 << (slot % 64)) != 0
     }
 
     fn set_free(&mut self, slot: usize) {
         let word = slot / 64;
-        self.free[word] |= 1u64 << (slot % 64);
-        self.summary[word / 64] |= 1u64 << (word % 64);
-        self.summary_summary |= 1u64 << (word / 64);
+        self.metadata.free_mut()[word] |= 1u64 << (slot % 64);
+        self.metadata.summary_mut()[word / 64] |= 1u64 << (word % 64);
     }
 
     fn clear_free(&mut self, slot: usize) {
         let word = slot / 64;
-        self.free[word] &= !(1u64 << (slot % 64));
-        if self.free[word] == 0 {
-            self.summary[word / 64] &= !(1u64 << (word % 64));
-            if self.summary[word / 64] == 0 {
-                self.summary_summary &= !(1u64 << (word / 64));
-            }
+        self.metadata.free_mut()[word] &= !(1u64 << (slot % 64));
+        if self.metadata.free()[word] == 0 {
+            self.metadata.summary_mut()[word / 64] &= !(1u64 << (word % 64));
         }
     }
 }
@@ -1323,6 +1540,20 @@ impl SmpFrameAllocator {
     pub fn initialize(&mut self, map: &NormalizedMemoryMap) -> Result<(), FrameError> {
         // SAFETY: initialization is exclusively borrowed and precedes publication.
         unsafe { &mut *self.manager.get() }.initialize(map)?;
+        self.finish_initialize()
+    }
+
+    pub fn initialize_with_region(
+        &mut self,
+        map: &NormalizedMemoryMap,
+        metadata: FrameMetadataRegion,
+    ) -> Result<(), FrameError> {
+        // SAFETY: initialization is exclusively borrowed and precedes publication.
+        unsafe { &mut *self.manager.get() }.initialize_with_region(map, metadata)?;
+        self.finish_initialize()
+    }
+
+    fn finish_initialize(&mut self) -> Result<(), FrameError> {
         let count = unsafe { (&*self.manager.get()).frame_count() };
         for shard in 0..MAX_FRAME_SHARDS {
             let first = (count * shard).div_ceil(MAX_FRAME_SHARDS);
@@ -2755,6 +2986,22 @@ mod tests {
         assert_eq!(normalized.get(0), PhysicalRun::new(0x1000, 1));
         assert_eq!(normalized.get(1), PhysicalRun::new(0x3000, 2));
         assert_eq!(normalized.get(2), PhysicalRun::new(0x7000, 5));
+    }
+
+    #[test]
+    fn metadata_sizing_is_page_rounded_and_capacity_checked() {
+        let pages = frame_metadata_pages_for_frames(128).unwrap();
+        assert!(pages > 0);
+        let bytes = pages * PAGE_SIZE;
+        let region = FrameMetadataRegion::new(0x20_0000, bytes).unwrap();
+        assert!(region.capacity().unwrap() >= 128);
+        assert!(region.layout(128).unwrap().bytes() <= bytes as usize);
+        assert!(FrameMetadataRegion::new(u64::MAX - PAGE_SIZE + 1, PAGE_SIZE).is_none());
+    }
+
+    #[test]
+    fn metadata_sizing_rejects_unrepresentable_frame_counts() {
+        assert!(frame_metadata_pages_for_frames(u64::MAX).is_none());
     }
 
     #[test]

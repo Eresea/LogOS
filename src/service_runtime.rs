@@ -349,6 +349,22 @@ impl ServiceRuntime {
         self.manager.set_network_enabled(self.network_config.is_enabled());
         let resources = crate::arch::boot_resources().ok_or(ServiceRuntimeError::Resources)?;
         if !self.frame_pool_ready {
+            let metadata_reservation =
+                resources.frame_metadata().ok_or(ServiceRuntimeError::Resources)?;
+            let metadata = crate::memory::FrameMetadataRegion::new(
+                metadata_reservation.base(),
+                metadata_reservation
+                    .pages()
+                    .checked_mul(crate::boot_resources::PAGE_SIZE)
+                    .ok_or(ServiceRuntimeError::Resources)?,
+            )
+            .ok_or(ServiceRuntimeError::Resources)?;
+            let metadata_exclusion = MemoryExclusion::new(
+                metadata_reservation.base(),
+                metadata_reservation.pages(),
+                ExclusionKind::Reserved,
+            )
+            .ok_or(ServiceRuntimeError::Resources)?;
             if let Some(framebuffer) = resources.framebuffer() {
                 let pages = framebuffer
                     .bytes()
@@ -359,11 +375,19 @@ impl ServiceRuntime {
                     MemoryExclusion::new(framebuffer.base(), pages, ExclusionKind::Framebuffer)
                         .ok_or(ServiceRuntimeError::Resources)?;
                 self.frame_pool
-                    .initialize_with_exclusions(resources.memory_map(), &[exclusion])
+                    .initialize_with_metadata(
+                        resources.memory_map(),
+                        &[metadata_exclusion, exclusion],
+                        metadata,
+                    )
                     .map_err(|_| ServiceRuntimeError::Resources)?;
             } else {
                 self.frame_pool
-                    .initialize(resources.memory_map())
+                    .initialize_with_metadata(
+                        resources.memory_map(),
+                        &[metadata_exclusion],
+                        metadata,
+                    )
                     .map_err(|_| ServiceRuntimeError::Resources)?;
             }
             if !reserve_active_page_tables(&mut self.frame_pool, crate::arch::current_cr3()) {

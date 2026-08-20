@@ -81,6 +81,30 @@ pub struct MemoryDescriptor {
     pub available: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameMetadataReservation {
+    base: u64,
+    pages: u64,
+}
+
+impl FrameMetadataReservation {
+    pub fn new(base: u64, pages: u64) -> Option<Self> {
+        if base == 0 || base % PAGE_SIZE != 0 || pages == 0 {
+            return None;
+        }
+        pages.checked_mul(PAGE_SIZE).and_then(|bytes| base.checked_add(bytes))?;
+        Some(Self { base, pages })
+    }
+
+    pub const fn base(self) -> u64 {
+        self.base
+    }
+
+    pub const fn pages(self) -> u64 {
+        self.pages
+    }
+}
+
 impl MemoryDescriptor {
     pub const fn new(physical_start: u64, pages: u64, available: bool) -> Option<Self> {
         if physical_start % PAGE_SIZE != 0 || pages == 0 {
@@ -173,16 +197,21 @@ impl KeyboardResource {
 pub struct BootResources {
     memory_map: MemoryMap,
     framebuffer: Option<FramebufferInfo>,
+    frame_metadata: Option<FrameMetadataReservation>,
     keyboard: KeyboardResource,
 }
 
 impl BootResources {
     pub const fn new(memory_map: MemoryMap, keyboard: KeyboardResource) -> Self {
-        Self { memory_map, framebuffer: None, keyboard }
+        Self { memory_map, framebuffer: None, frame_metadata: None, keyboard }
     }
 
     pub fn publish_framebuffer(&mut self, framebuffer: FramebufferInfo) {
         self.framebuffer = Some(framebuffer);
+    }
+
+    pub fn publish_frame_metadata(&mut self, reservation: FrameMetadataReservation) {
+        self.frame_metadata = Some(reservation);
     }
 
     pub const fn memory_map(&self) -> &MemoryMap {
@@ -191,6 +220,10 @@ impl BootResources {
 
     pub const fn framebuffer(&self) -> Option<FramebufferInfo> {
         self.framebuffer
+    }
+
+    pub const fn frame_metadata(&self) -> Option<FrameMetadataReservation> {
+        self.frame_metadata
     }
 
     pub const fn keyboard(&self) -> KeyboardResource {

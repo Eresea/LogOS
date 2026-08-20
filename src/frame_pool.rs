@@ -4,13 +4,11 @@
 //! `FramePool` interfaces while the implementation uses normalized runs,
 //! indexed bitmap metadata, and generation-safe leases.
 
-use logos_abi::MAX_MANAGED_FRAMES;
-
 use crate::{
     boot_resources::MemoryMap,
     memory::{
-        FrameBatch, FrameError, FrameLease, FrameState, MemoryExclusion, NormalizedMemoryMap,
-        OwnerId, PhysicalFrameManager, normalize_memory_map,
+        FrameBatch, FrameError, FrameLease, FrameMetadataRegion, FrameState, MemoryExclusion,
+        NormalizedMemoryMap, OwnerId, PhysicalFrameManager, normalize_memory_map,
     },
 };
 
@@ -50,6 +48,17 @@ impl FramePool {
         normalized: &NormalizedMemoryMap,
     ) -> Result<(), FramePoolError> {
         self.manager.initialize(normalized).map_err(map_error)
+    }
+
+    pub fn initialize_with_metadata(
+        &mut self,
+        memory_map: &MemoryMap,
+        exclusions: &[MemoryExclusion],
+        metadata: FrameMetadataRegion,
+    ) -> Result<(), FramePoolError> {
+        let normalized =
+            normalize_memory_map(memory_map, exclusions).map_err(|_| FramePoolError::InvalidMap)?;
+        self.manager.initialize_with_region(&normalized, metadata).map_err(map_error)
     }
 
     pub const fn capacity(&self) -> usize {
@@ -140,5 +149,3 @@ fn map_error(error: FrameError) -> FramePoolError {
         FrameError::BatchCapacity => FramePoolError::Exhausted,
     }
 }
-
-const _: usize = MAX_MANAGED_FRAMES;
