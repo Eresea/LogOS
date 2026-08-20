@@ -281,6 +281,7 @@ fn service_id(raw: usize) -> Option<logos_abi::ServiceId> {
         7 => Some(logos_abi::ServiceId::Network),
         8 => Some(logos_abi::ServiceId::Fetch),
         9 => Some(logos_abi::ServiceId::Device),
+        10 => Some(logos_abi::ServiceId::User),
         _ => None,
     }
 }

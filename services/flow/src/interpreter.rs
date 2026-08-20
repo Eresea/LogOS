@@ -58,6 +58,7 @@ pub enum NamespaceKind {
     Package,
     Program,
     Device,
+    User,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,6 +136,62 @@ impl OperationRegistry {
             OperationSignature::new(
                 NamespaceKind::Device,
                 b"list",
+                [FlowType::Void, FlowType::Void, FlowType::Void],
+                0,
+                PromiseType::String.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::User,
+                b"claim",
+                [FlowType::String, FlowType::String, FlowType::Void],
+                2,
+                PromiseType::String.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::User,
+                b"create",
+                [FlowType::String, FlowType::String, FlowType::Void],
+                2,
+                PromiseType::String.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::User,
+                b"login",
+                [FlowType::String, FlowType::String, FlowType::Void],
+                2,
+                PromiseType::String.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::User,
+                b"logout",
+                [FlowType::Void, FlowType::Void, FlowType::Void],
+                0,
+                PromiseType::String.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::User,
+                b"rename",
+                [FlowType::String, FlowType::Void, FlowType::Void],
+                1,
+                PromiseType::String.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::User,
+                b"password",
+                [FlowType::String, FlowType::Void, FlowType::Void],
+                1,
+                PromiseType::String.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::User,
+                b"derive",
+                [FlowType::Void, FlowType::Void, FlowType::Void],
+                0,
+                PromiseType::String.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::User,
+                b"revoke",
                 [FlowType::Void, FlowType::Void, FlowType::Void],
                 0,
                 PromiseType::String.flow_type(),
@@ -1297,6 +1354,7 @@ impl<'a, 'p> TypeChecker<'a, 'p> {
                 None if name == b"pkg" => Ok(FlowType::Namespace(NamespaceKind::Package)),
                 None if name == b"program" => Ok(FlowType::Namespace(NamespaceKind::Program)),
                 None if name == b"device" => Ok(FlowType::Namespace(NamespaceKind::Device)),
+                None if name == b"user" => Ok(FlowType::Namespace(NamespaceKind::User)),
                 None => Err(FlowTypeError::UnknownVariable(node.span)),
             },
             ExprKind::Index { base, key } => {
@@ -1454,6 +1512,23 @@ impl<'a, 'p> TypeChecker<'a, 'p> {
                 (FlowType::Namespace(NamespaceKind::Device), b"list") => {
                     Self::require_arity(args, 0, span)?;
                     Ok(PromiseType::String.flow_type())
+                }
+                (FlowType::Namespace(NamespaceKind::User), name) => {
+                    let signature = OperationRegistry::lookup(NamespaceKind::User, name)
+                        .ok_or(FlowTypeError::UnknownMember(span))?;
+                    if args.len() < usize::from(signature.minimum_argument_count)
+                        || args.len() > usize::from(signature.argument_count)
+                    {
+                        return Err(FlowTypeError::WrongArity(span));
+                    }
+                    for (index, argument) in args.iter().enumerate() {
+                        Self::require_type(
+                            self.expr_type(*argument)?,
+                            signature.arguments[index],
+                            span,
+                        )?;
+                    }
+                    Ok(signature.result)
                 }
                 (FlowType::FileHandle, b"create") => {
                     Self::require_arity(args, 0, span)?;

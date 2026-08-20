@@ -464,6 +464,23 @@ pub enum DeviceCommand {
     List,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UserCommand<'a> {
+    Claim { name: &'a [u8], password: &'a [u8] },
+    Create { name: &'a [u8], password: &'a [u8] },
+    Login { name: &'a [u8], password: &'a [u8] },
+    Logout,
+    Rename { name: &'a [u8] },
+    SetPassword { password: &'a [u8] },
+    Derive,
+    RevokeCapability,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UserCommandError {
+    Usage,
+}
+
 const MAX_CALL_ARGS: usize = 3;
 const MAX_EXPRESSION_PARTS: usize = 3;
 
@@ -535,6 +552,7 @@ pub enum FlowOperation<'a> {
     Package(PackageCommand<'a>),
     Program(ProgramCommand<'a>),
     Device(DeviceCommand),
+    User(UserCommand<'a>),
     System(SystemOperation),
     CancelPromise {
         name: &'a [u8],
@@ -772,6 +790,11 @@ fn parse_flow_operation_unchecked<'a>(
         let path = quoted_after(expression, b"fs.touch(")
             .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
         return Ok(Some(FlowOperation::Storage(StorageCommand::Touch { path })));
+    }
+    if let Some(command) = parse_user_command(expression)
+        .map_err(|_| FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?
+    {
+        return Ok(Some(FlowOperation::User(command)));
     }
     if let Some(command) = parse_service_command(expression)
         .map_err(|_| FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?
@@ -1402,6 +1425,46 @@ pub fn parse_service_command(
     }
 }
 
+pub fn parse_user_command(line: &[u8]) -> Result<Option<UserCommand<'_>>, UserCommandError> {
+    let Some(expression) = scoped_expression(line, b"user").map_err(|_| UserCommandError::Usage)?
+    else {
+        return Ok(None);
+    };
+    if expression.part_count != 1 {
+        return Err(UserCommandError::Usage);
+    }
+    let ExpressionPart::Member(member) = expression.parts[0] else {
+        return Err(UserCommandError::Usage);
+    };
+    let call = expression.call.ok_or(UserCommandError::Usage)?;
+    let args = &call.args[..call.arg_count];
+    let string = |index: usize| {
+        args.get(index)
+            .filter(|value| value.quoted && !value.bytes.is_empty())
+            .map(|value| value.bytes)
+            .ok_or(UserCommandError::Usage)
+    };
+    match member {
+        b"claim" if args.len() == 2 => {
+            Ok(Some(UserCommand::Claim { name: string(0)?, password: string(1)? }))
+        }
+        b"create" if args.len() == 2 => {
+            Ok(Some(UserCommand::Create { name: string(0)?, password: string(1)? }))
+        }
+        b"login" if args.len() == 2 => {
+            Ok(Some(UserCommand::Login { name: string(0)?, password: string(1)? }))
+        }
+        b"logout" if args.is_empty() => Ok(Some(UserCommand::Logout)),
+        b"rename" if args.len() == 1 => Ok(Some(UserCommand::Rename { name: string(0)? })),
+        b"password" if args.len() == 1 => {
+            Ok(Some(UserCommand::SetPassword { password: string(0)? }))
+        }
+        b"derive" if args.is_empty() => Ok(Some(UserCommand::Derive)),
+        b"revoke" if args.is_empty() => Ok(Some(UserCommand::RevokeCapability)),
+        _ => Err(UserCommandError::Usage),
+    }
+}
+
 pub fn parse_storage_command(
     line: &[u8],
 ) -> Result<Option<StorageCommand<'_>>, StorageCommandError> {
@@ -2012,5 +2075,19 @@ mod tests {
             })
             .unwrap();
         assert_eq!(worker.join().unwrap(), Some(FlowOperation::Help { topic: None }));
+    }
+
+    #[test]
+    fn user_commands_are_typed_and_bounded() {
+        assert_eq!(
+            parse_flow_operation(b"user.claim(\"admin\",\"secret\")").unwrap(),
+            Some(FlowOperation::User(UserCommand::Claim { name: b"admin", password: b"secret" }))
+        );
+        assert_eq!(
+            parse_flow_operation(b"user.logout()").unwrap(),
+            Some(FlowOperation::User(UserCommand::Logout))
+        );
+        assert!(parse_flow_operation(b"user.claim(\"admin\")").is_err());
+        assert!(parse_flow_operation(b"user.unknown()").is_err());
     }
 }

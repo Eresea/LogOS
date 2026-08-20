@@ -875,7 +875,7 @@ mod tests {
                 .request(request(ManagerOperation::Start, 9, 1), ManagerRights::ALL)
                 .response
                 .status,
-            ManagerStatus::Unsupported
+            ManagerStatus::InvalidState
         );
         assert_eq!(manager.image_source(ServiceId::Input), Some(ServiceImageSource::Predeclared));
     }
@@ -944,6 +944,7 @@ mod tests {
                     ServiceId::Input,
                     ServiceId::Input,
                     ServiceId::Input,
+                    ServiceId::Input,
                 ],
                 3,
             )
@@ -966,6 +967,7 @@ mod tests {
                     ServiceId::Fetch,
                     ServiceId::Flow,
                     ServiceId::Device,
+                    ServiceId::Input,
                     ServiceId::Input,
                     ServiceId::Input,
                     ServiceId::Input,

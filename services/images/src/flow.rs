@@ -15,7 +15,8 @@ use logos_abi::{
     FetchPhase, FetchRequest, FetchResponse, FetchStatus, FlowControl, IPC_FLAG_MORE, IpcBytes,
     IpcStatus, MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation, NetworkRequest,
     NetworkResponse, NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE, StorageApiOperation,
-    StorageApiRequest, StorageApiResponse, StorageApiStatus,
+    StorageApiRequest, StorageApiResponse, StorageApiStatus, UserOperation, UserRequest,
+    UserResponse, UserStatus,
 };
 
 const INPUT_CAPABILITY: usize = common::capability_slot(
@@ -68,10 +69,21 @@ const DEVICE_RECEIVE_CAPABILITY: usize = common::capability_slot(
     logos_abi::IpcEndpointId::DeviceToFlow,
     logos_abi::IpcRights::Receive,
 );
+const USER_SEND_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Flow,
+    logos_abi::IpcEndpointId::FlowToUser,
+    logos_abi::IpcRights::Send,
+);
+const USER_RECEIVE_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Flow,
+    logos_abi::IpcEndpointId::UserToFlow,
+    logos_abi::IpcRights::Receive,
+);
 
 static NEXT_MANAGER_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_NETWORK_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_DEVICE_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
+static NEXT_USER_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 
 fn next_manager_request_id() -> u32 {
     loop {
@@ -104,6 +116,19 @@ fn next_device_request_id() -> u32 {
         let current = NEXT_DEVICE_REQUEST_ID.load(Ordering::Relaxed);
         let next = current.wrapping_add(1).max(1);
         if NEXT_DEVICE_REQUEST_ID
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return current;
+        }
+    }
+}
+
+fn next_user_request_id() -> u32 {
+    loop {
+        let current = NEXT_USER_REQUEST_ID.load(Ordering::Relaxed);
+        let next = current.wrapping_add(1).max(1);
+        if NEXT_USER_REQUEST_ID
             .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
@@ -1286,6 +1311,195 @@ impl DeviceClient {
     }
 }
 
+struct UserClient {
+    active: bool,
+    done: bool,
+    sent: bool,
+    request: UserRequest,
+    session: logos_abi::SessionHandle,
+    user: logos_abi::UserId,
+    capability: logos_abi::CapabilityHandle,
+    root: logos_abi::NamespaceRoot,
+    rights: logos_abi::NamespaceRights,
+    result: [u8; logos_flow::MAX_OUTPUT_BYTES],
+    result_len: usize,
+}
+
+impl UserClient {
+    const fn new() -> Self {
+        Self {
+            active: false,
+            done: false,
+            sent: false,
+            request: UserRequest::new(UserOperation::Login, 1),
+            session: logos_abi::SessionHandle::EMPTY,
+            user: logos_abi::UserId::EMPTY,
+            capability: logos_abi::CapabilityHandle::EMPTY,
+            root: logos_abi::NamespaceRoot::EMPTY,
+            rights: logos_abi::NamespaceRights::NONE,
+            result: [0; logos_flow::MAX_OUTPUT_BYTES],
+            result_len: 0,
+        }
+    }
+
+    fn start(&mut self, command: logos_flow::UserCommand<'_>) -> bool {
+        if self.active || self.done {
+            return false;
+        }
+        let operation = match command {
+            logos_flow::UserCommand::Claim { .. } => UserOperation::Claim,
+            logos_flow::UserCommand::Create { .. } => UserOperation::Create,
+            logos_flow::UserCommand::Login { .. } => UserOperation::Login,
+            logos_flow::UserCommand::Logout => UserOperation::Logout,
+            logos_flow::UserCommand::Rename { .. } => UserOperation::Rename,
+            logos_flow::UserCommand::SetPassword { .. } => UserOperation::SetPassword,
+            logos_flow::UserCommand::Derive => UserOperation::Derive,
+            logos_flow::UserCommand::RevokeCapability => UserOperation::RevokeCapability,
+        };
+        let mut request = UserRequest::new(operation, next_user_request_id());
+        request.session = self.session;
+        request.user = self.user;
+        request.capability = self.capability;
+        request.root = self.root;
+        request.rights = self.rights;
+        match command {
+            logos_flow::UserCommand::Claim { name, password }
+            | logos_flow::UserCommand::Create { name, password }
+            | logos_flow::UserCommand::Login { name, password } => {
+                if !request.set_name(name) || !request.set_password(password) {
+                    return false;
+                }
+            }
+            logos_flow::UserCommand::Rename { name } => {
+                if !request.set_name(name) {
+                    return false;
+                }
+            }
+            logos_flow::UserCommand::SetPassword { password } => {
+                if !request.set_password(password) {
+                    return false;
+                }
+            }
+            logos_flow::UserCommand::Logout
+            | logos_flow::UserCommand::Derive
+            | logos_flow::UserCommand::RevokeCapability => {}
+        }
+        self.request = request;
+        self.active = true;
+        self.sent = false;
+        self.result_len = 0;
+        true
+    }
+
+    fn active(&self) -> bool {
+        self.active
+    }
+
+    fn drive(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        if !self.sent {
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    (&self.request as *const UserRequest).cast::<u8>(),
+                    core::mem::size_of::<UserRequest>(),
+                )
+            };
+            let Some(message) = IpcBytes::from_bytes(MessageKind::UserRequest, bytes) else {
+                self.fail(b"user request too large\r\n");
+                return true;
+            };
+            match common::ipc_send(USER_SEND_CAPABILITY, &message) {
+                IpcStatus::Ok => self.sent = true,
+                IpcStatus::Full => return false,
+                _ => self.fail(b"user service unavailable\r\n"),
+            }
+            return true;
+        }
+        let mut message = IpcBytes::empty(MessageKind::UserResponse);
+        match common::ipc_receive(USER_RECEIVE_CAPABILITY, &mut message) {
+            IpcStatus::Ok => {}
+            IpcStatus::Empty => return false,
+            _ => {
+                self.fail(b"user service unavailable\r\n");
+                return true;
+            }
+        }
+        let Some(bytes) = message.as_bytes() else {
+            self.fail(b"user response malformed\r\n");
+            return true;
+        };
+        if bytes.len() != core::mem::size_of::<UserResponse>() {
+            self.fail(b"user response malformed\r\n");
+            return true;
+        }
+        let response: UserResponse = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast()) };
+        if !response.is_valid_for(self.request) {
+            self.fail(b"user response stale\r\n");
+            return true;
+        }
+        if response.status == UserStatus::Ok {
+            if matches!(self.request.operation, UserOperation::Claim | UserOperation::Login) {
+                self.session = response.session;
+                self.user = response.user;
+                self.capability = response.capability;
+                self.root = response.root;
+                self.rights = response.rights;
+            } else if self.request.operation == UserOperation::Logout {
+                self.session = logos_abi::SessionHandle::EMPTY;
+                self.user = logos_abi::UserId::EMPTY;
+                self.capability = logos_abi::CapabilityHandle::EMPTY;
+                self.root = logos_abi::NamespaceRoot::EMPTY;
+                self.rights = logos_abi::NamespaceRights::NONE;
+            } else if self.request.operation == UserOperation::RevokeCapability {
+                self.capability = logos_abi::CapabilityHandle::EMPTY;
+            } else if self.request.operation == UserOperation::Derive {
+                self.capability = response.capability;
+                self.root = response.root;
+                self.rights = response.rights;
+            }
+            self.finish(b"user: ok\r\n");
+        } else {
+            self.finish(user_status_text(response.status));
+        }
+        true
+    }
+
+    fn finish(&mut self, message: &[u8]) {
+        self.result_len = message.len().min(self.result.len());
+        self.result[..self.result_len].copy_from_slice(&message[..self.result_len]);
+        self.active = false;
+        self.done = true;
+    }
+
+    fn fail(&mut self, message: &[u8]) {
+        self.finish(message);
+    }
+
+    fn take_result(&mut self, pending: &mut PendingOutput) {
+        if self.done {
+            pending.stage(&self.result[..self.result_len]);
+            self.done = false;
+        }
+    }
+}
+
+fn user_status_text(status: UserStatus) -> &'static [u8] {
+    match status {
+        UserStatus::Unclaimed => b"user: system is unclaimed\r\n",
+        UserStatus::AlreadyClaimed => b"user: already claimed\r\n",
+        UserStatus::NotFound => b"user: user not found\r\n",
+        UserStatus::Unauthorized => b"user: unauthorized\r\n",
+        UserStatus::BadCredentials => b"user: bad credentials\r\n",
+        UserStatus::Stale => b"user: stale handle\r\n",
+        UserStatus::Revoked => b"user: revoked\r\n",
+        UserStatus::Capacity => b"user: capacity exhausted\r\n",
+        UserStatus::Corrupt | UserStatus::Invalid => b"user: invalid\r\n",
+        UserStatus::Ok => b"user: ok\r\n",
+    }
+}
+
 impl StorageClient {
     const fn new() -> Self {
         Self {
@@ -2360,6 +2574,7 @@ static mut PENDING: PendingOutput = PendingOutput::new();
 static mut STORAGE: StorageClient = StorageClient::new();
 static mut PACKAGE: PackageClient = PackageClient::new();
 static mut DEVICE: DeviceClient = DeviceClient::new();
+static mut USER: UserClient = UserClient::new();
 static mut NETWORK: NetworkClient = NetworkClient::new();
 static mut FETCH: FetchClient = FetchClient::new();
 static mut COMPLETION: CompletionService = CompletionService::new();
@@ -2372,6 +2587,7 @@ pub extern "C" fn _start() -> ! {
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
     let package = unsafe { &mut *core::ptr::addr_of_mut!(PACKAGE) };
     let device = unsafe { &mut *core::ptr::addr_of_mut!(DEVICE) };
+    let user = unsafe { &mut *core::ptr::addr_of_mut!(USER) };
     let network = unsafe { &mut *core::ptr::addr_of_mut!(NETWORK) };
     let fetch = unsafe { &mut *core::ptr::addr_of_mut!(FETCH) };
     let completion = unsafe { &mut *core::ptr::addr_of_mut!(COMPLETION) };
@@ -2393,6 +2609,7 @@ pub extern "C" fn _start() -> ! {
         if storage.active()
             || package.active()
             || device.active()
+            || user.active()
             || (fetch.active() && fetch.foreground())
         {
             let mut control = IpcBytes::empty(MessageKind::FlowControl);
@@ -2512,6 +2729,24 @@ pub extern "C" fn _start() -> ! {
                     common::wait(
                         common::ipc_read_event(logos_abi::IpcEndpointId::DeviceToFlow)
                             | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToDevice)
+                            | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
+                        logos_abi::ServiceId::Flow,
+                    );
+                }
+                continue;
+            }
+        }
+        if user.active() {
+            progressed |= user.drive();
+            if user.done {
+                user.take_result(pending);
+                progressed = true;
+            }
+            if user.active() {
+                if !progressed {
+                    common::wait(
+                        common::ipc_read_event(logos_abi::IpcEndpointId::UserToFlow)
+                            | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToUser)
                             | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
                         logos_abi::ServiceId::Flow,
                     );
@@ -2651,6 +2886,11 @@ pub extern "C" fn _start() -> ! {
                         Ok(Some(logos_flow::FlowOperation::Device(command))) => {
                             if !device.start(command) {
                                 pending.stage(b"device request busy or too large\r\n");
+                            }
+                        }
+                        Ok(Some(logos_flow::FlowOperation::User(command))) => {
+                            if !user.start(command) {
+                                pending.stage(b"user request busy or too large\r\n");
                             }
                         }
                         Ok(Some(logos_flow::FlowOperation::Program(command))) => {

@@ -11,7 +11,7 @@ use crate::{
     page_table::PageTableMemory,
 };
 
-const ENDPOINTS: [logos_abi::IpcEndpointId; 18] = [
+const ENDPOINTS: [logos_abi::IpcEndpointId; 22] = [
     logos_abi::IpcEndpointId::InputToTerminal,
     logos_abi::IpcEndpointId::TerminalToDisplay,
     logos_abi::IpcEndpointId::TerminalToSession,
@@ -30,6 +30,10 @@ const ENDPOINTS: [logos_abi::IpcEndpointId; 18] = [
     logos_abi::IpcEndpointId::NetworkToFetch,
     logos_abi::IpcEndpointId::FlowToDevice,
     logos_abi::IpcEndpointId::DeviceToFlow,
+    logos_abi::IpcEndpointId::FlowToUser,
+    logos_abi::IpcEndpointId::UserToFlow,
+    logos_abi::IpcEndpointId::UserToStorage,
+    logos_abi::IpcEndpointId::StorageToUser,
 ];
 pub const MAX_ENDPOINTS: usize = ENDPOINTS.len();
 pub const SERVICE_EPOCH: u64 = 1;
@@ -414,6 +418,12 @@ fn disconnect_ipc_page(endpoint: IpcEndpoint) {
             logos_abi::IpcEndpointId::FlowToDevice => {
                 (*(frame as *const logos_abi::SharedIpc<logos_abi::DeviceRequest, 8>)).disconnect()
             }
+            logos_abi::IpcEndpointId::FlowToUser
+            | logos_abi::IpcEndpointId::UserToFlow
+            | logos_abi::IpcEndpointId::UserToStorage
+            | logos_abi::IpcEndpointId::StorageToUser => {
+                (*(frame as *const logos_abi::StreamIpc)).disconnect()
+            }
             logos_abi::IpcEndpointId::DeviceToFlow => {
                 (*(frame as *const logos_abi::SharedIpc<logos_abi::DeviceResponse, 8>)).disconnect()
             }
@@ -456,7 +466,7 @@ mod tests {
         let graph =
             ServiceIpcGraph::allocate_with_identity(&mut pool, &mut memory, 1, SERVICE_EPOCH)
                 .unwrap();
-        assert_eq!(graph.count(), 18);
+        assert_eq!(graph.count(), 22);
         assert_eq!(graph.endpoint(0).unwrap().producer(), ServiceId::Input);
         assert_eq!(graph.endpoint(0).unwrap().consumer(), ServiceId::Terminal);
         assert_eq!(graph.endpoint(5).unwrap().producer(), ServiceId::Flow);
@@ -469,6 +479,10 @@ mod tests {
         assert_eq!(graph.endpoint(15).unwrap().id(), logos_abi::IpcEndpointId::NetworkToFetch);
         assert_eq!(graph.endpoint(16).unwrap().id(), logos_abi::IpcEndpointId::FlowToDevice);
         assert_eq!(graph.endpoint(17).unwrap().id(), logos_abi::IpcEndpointId::DeviceToFlow);
+        assert_eq!(graph.endpoint(18).unwrap().id(), logos_abi::IpcEndpointId::FlowToUser);
+        assert_eq!(graph.endpoint(19).unwrap().id(), logos_abi::IpcEndpointId::UserToFlow);
+        assert_eq!(graph.endpoint(20).unwrap().id(), logos_abi::IpcEndpointId::UserToStorage);
+        assert_eq!(graph.endpoint(21).unwrap().id(), logos_abi::IpcEndpointId::StorageToUser);
         assert_eq!(graph.endpoint(5).unwrap().generation(), 1);
         let terminal = graph.capabilities(ServiceId::Terminal).unwrap();
         assert_eq!(terminal.get(0).unwrap().rights, IpcRights::Receive);

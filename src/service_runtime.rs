@@ -68,6 +68,7 @@ pub struct ServiceRuntime {
     ipc: Option<ServiceIpcGraph>,
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
     ipc_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
+    user_kdf_workspace: [u64; logos_abi::USER_KDF_WORKSPACE_PAGES],
     storage_data_frames: [Option<FrameAddress>; logos_abi::STORAGE_DATA_PAGES],
     network_config: logos_abi::NetworkConfig,
     network_config_frame: Option<FrameAddress>,
@@ -291,6 +292,7 @@ impl ServiceRuntime {
             ipc: None,
             ipc_staging_frames: [None; SERVICE_COUNT],
             ipc_capability_frames: [None; SERVICE_COUNT],
+            user_kdf_workspace: [0; logos_abi::USER_KDF_WORKSPACE_PAGES],
             storage_data_frames: [None; logos_abi::STORAGE_DATA_PAGES],
             network_config: logos_abi::NetworkConfig::disabled(),
             network_config_frame: None,
@@ -448,6 +450,36 @@ impl ServiceRuntime {
                 tables.reclaim(&mut self.frame_pool, &mut memory);
                 loaded.reclaim(&mut self.frame_pool);
                 return Err(ServiceRuntimeError::Process(error));
+            }
+            if service == ServiceId::User {
+                let pages = logos_abi::USER_KDF_WORKSPACE_PAGES;
+                for page in 0..pages {
+                    let frame = self
+                        .frame_pool
+                        .allocate_for(OwnerId::service(service))
+                        .map_err(|_| ServiceRuntimeError::Resources)?;
+                    self.user_kdf_workspace[page] = frame.raw();
+                    memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+                    tables
+                        .map_raw_page(
+                            logos_abi::USER_KDF_WORKSPACE_BASE + page * crate::loader::PAGE_SIZE,
+                            frame,
+                            MappingFlags::DATA,
+                            &mut self.frame_pool,
+                            &mut memory,
+                        )
+                        .map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+                }
+                let mapping = VirtualMapping::new_service_workspace(
+                    logos_abi::USER_KDF_WORKSPACE_BASE,
+                    self.user_kdf_workspace[0] as usize,
+                    pages,
+                    MappingFlags::DATA,
+                )
+                .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::AddressSpace))?;
+                self.processes
+                    .map(process, mapping)
+                    .map_err(ServiceRuntimeError::IpcPrivateProcess)?;
             }
             let launch =
                 match self.processes.user_launch(process, loaded.entry(), loaded.stack_top()) {
@@ -3231,6 +3263,13 @@ impl ServiceRuntime {
                 self.ipc_capability_frames[index] = None;
             }
         }
+        for frame in &mut self.user_kdf_workspace {
+            if *frame != 0 {
+                let address = FrameAddress::from_raw(*frame);
+                *frame = 0;
+                self.frame_pool.release(address).map_err(|_| ServiceRuntimeError::Resources)?;
+            }
+        }
         for frame in &mut self.manager_capability_frames {
             if let Some(frame) = frame.take() {
                 self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
@@ -3322,6 +3361,10 @@ fn initialize_ipc_page(endpoint: crate::service_ipc::IpcEndpoint) {
             | logos_abi::IpcEndpointId::FetchToStorage
             | logos_abi::IpcEndpointId::StorageToFetch
             | logos_abi::IpcEndpointId::FetchToNetwork
+            | logos_abi::IpcEndpointId::FlowToUser
+            | logos_abi::IpcEndpointId::UserToFlow
+            | logos_abi::IpcEndpointId::UserToStorage
+            | logos_abi::IpcEndpointId::StorageToUser
             | logos_abi::IpcEndpointId::NetworkToFetch => (frame as *mut logos_abi::StreamIpc)
                 .write(logos_abi::StreamIpc::new(endpoint.header())),
             logos_abi::IpcEndpointId::FlowToDevice => (frame

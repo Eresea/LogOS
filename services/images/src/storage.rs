@@ -8,12 +8,15 @@ use logos_abi::{
     IpcBytes, IpcCapability, IpcEndpointId, IpcStatus, MessageKind, PackageOperation,
     PackageRequest, PackageResponse, PackageStatus, PackageTargetKind, StorageApiOperation,
     StorageApiStatus, StorageMapRequest, StorageMapResponse, StorageOperation, StorageRequest,
-    StorageResponse, StorageStatus,
+    StorageResponse, StorageStatus, USER_STORAGE_FLAG_BEGIN, USER_STORAGE_FLAG_END,
+    UserStorageOperation, UserStorageRequest, UserStorageResponse, UserStorageStatus,
 };
 use logos_storage::Block;
 use logos_storage_service::{
-    DurableNamespace, IpcBlockStore, KernelStorageIpc, NamespaceError, StorageApi, error_response,
+    DurableNamespaceV5, IpcBlockStore, KernelStorageIpc, NamespaceError, StorageApiV5,
+    error_response,
 };
+use logos_user::{USER_SNAPSHOT_BYTES, UserCatalog, UserCatalogStore};
 
 const REQUEST_CAPABILITY: usize = common::capability_slot(
     logos_abi::ServiceId::Storage,
@@ -65,11 +68,29 @@ const MAP_RESPONSE_CAPABILITY: usize = common::capability_slot(
     IpcEndpointId::CoreToStorageMap,
     logos_abi::IpcRights::Receive,
 );
+const USER_RECEIVE_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Storage,
+    IpcEndpointId::UserToStorage,
+    logos_abi::IpcRights::Receive,
+);
+const USER_SEND_CAPABILITY: usize = common::capability_slot(
+    logos_abi::ServiceId::Storage,
+    IpcEndpointId::StorageToUser,
+    logos_abi::IpcRights::Send,
+);
+
+static mut USER_CATALOG: UserCatalog = UserCatalog::new();
+static mut USER_CATALOG_BUFFER: [u8; USER_SNAPSHOT_BYTES] = [0; USER_SNAPSHOT_BYTES];
+static mut USER_CATALOG_LENGTH: usize = 0;
+static mut USER_SAVE_BUFFER: [u8; USER_SNAPSHOT_BYTES] = [0; USER_SNAPSHOT_BYTES];
+static mut USER_SAVE_LENGTH: usize = 0;
+static mut USER_SAVE_ACTIVE: bool = false;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Client {
     Flow,
     Fetch,
+    User,
 }
 
 struct PendingMap {
@@ -86,6 +107,7 @@ fn send_response(client: Client, response: &IpcBytes) -> IpcStatus {
     match client {
         Client::Flow => common::ipc_send(FLOW_SEND_CAPABILITY, response),
         Client::Fetch => common::ipc_send(FETCH_SEND_CAPABILITY, response),
+        Client::User => common::ipc_send(USER_SEND_CAPABILITY, response),
     }
 }
 
@@ -148,6 +170,7 @@ fn unmap_request(
         client: match client {
             Client::Flow => logos_abi::ServiceId::Flow as u16,
             Client::Fetch => logos_abi::ServiceId::Fetch as u16,
+            Client::User => logos_abi::ServiceId::User as u16,
         },
         pages: 0,
         source_page: 0,
@@ -237,12 +260,21 @@ fn discover(capability: IpcCapability) -> Option<u64> {
         return None;
     }
     let mut response = StorageResponse::new(1, StorageStatus::Invalid, 1, 0, 0, 0);
-    if transport.receive(capability, &mut response, &mut staging) != IpcStatus::Ok
-        || response.status != StorageStatus::Ok
-    {
-        return None;
+    for _ in 0..64 {
+        match transport.receive(capability, &mut response, &mut staging) {
+            IpcStatus::Ok => {
+                return (response.status == StorageStatus::Ok)
+                    .then_some(response.block_count)
+                    .filter(|blocks| *blocks > 2);
+            }
+            IpcStatus::Empty => common::wait(
+                common::ipc_read_event(IpcEndpointId::CoreToStorage),
+                logos_abi::ServiceId::Storage,
+            ),
+            _ => return None,
+        }
     }
-    (response.block_count > 2).then_some(response.block_count)
+    None
 }
 
 fn storage_error_status(error: NamespaceError) -> StorageApiStatus {
@@ -275,7 +307,7 @@ fn package_status(error: NamespaceError) -> PackageStatus {
 
 fn handle_package_request<B: logos_storage::BlockStore>(
     request: PackageRequest,
-    filesystem: &mut DurableNamespace<B>,
+    filesystem: &mut DurableNamespaceV5<B>,
 ) -> PackageResponse {
     let Some(capability) = common::capability(PACKAGE_RECEIVE_CAPABILITY) else {
         return PackageResponse::new(request, PackageStatus::Invalid);
@@ -365,6 +397,127 @@ fn receive_package_request() -> Option<PackageRequest> {
         .then_some(request)
 }
 
+fn ensure_user_catalog(
+    filesystem: &mut DurableNamespaceV5<IpcBlockStore<StorageTransport>>,
+) -> bool {
+    let catalog = unsafe { &mut *core::ptr::addr_of_mut!(USER_CATALOG) };
+    let buffer = unsafe { &mut *core::ptr::addr_of_mut!(USER_CATALOG_BUFFER) };
+    match UserCatalogStore::load(filesystem, buffer) {
+        Ok(length) if length != 0 => {
+            if catalog.load_from(filesystem, buffer).is_err()
+                || catalog.save_to(filesystem, buffer).is_err()
+            {
+                return false;
+            }
+            unsafe {
+                USER_CATALOG_LENGTH = catalog.encode_snapshot(buffer).ok().unwrap_or(length);
+            }
+            true
+        }
+        Err(logos_user::UserError::NotFound) => {
+            if catalog.save_to(filesystem, buffer).is_err() {
+                return false;
+            }
+            unsafe {
+                USER_CATALOG_LENGTH = catalog.encode_snapshot(buffer).ok().unwrap_or(0);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn user_storage_message(response: UserStorageResponse) -> IpcBytes {
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&response as *const UserStorageResponse).cast::<u8>(),
+            core::mem::size_of::<UserStorageResponse>(),
+        )
+    };
+    IpcBytes::from_bytes(MessageKind::UserStorageResponse, bytes)
+        .unwrap_or_else(|| IpcBytes::empty(MessageKind::UserStorageResponse))
+}
+
+fn handle_user_storage_request(
+    message: &IpcBytes,
+    filesystem: &mut DurableNamespaceV5<IpcBlockStore<StorageTransport>>,
+) -> Option<IpcBytes> {
+    if message.kind != MessageKind::UserStorageRequest {
+        return None;
+    }
+    let bytes = message.as_bytes()?;
+    if bytes.len() != core::mem::size_of::<UserStorageRequest>() {
+        return None;
+    }
+    let request = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast()) };
+    let mut response = UserStorageResponse::invalid(request);
+    if !request.is_valid() {
+        return Some(user_storage_message(response));
+    }
+    match request.operation {
+        UserStorageOperation::Load => {
+            let length = unsafe { USER_CATALOG_LENGTH };
+            let offset = request.offset as usize;
+            let data_length = length.saturating_sub(offset).min(response.data.len());
+            if offset >= length || data_length == 0 {
+                response.status = UserStorageStatus::Invalid;
+            } else {
+                response.status = UserStorageStatus::Ok;
+                response.total_len = length as u32;
+                response.data_len = data_length as u16;
+                let source = unsafe { &*core::ptr::addr_of!(USER_CATALOG_BUFFER) };
+                response.data[..data_length].copy_from_slice(&source[offset..offset + data_length]);
+            }
+        }
+        UserStorageOperation::Save => {
+            let offset = request.offset as usize;
+            let total = request.total_len as usize;
+            let data_length = request.data_len as usize;
+            let valid = total != 0
+                && total <= USER_SNAPSHOT_BYTES
+                && offset.checked_add(data_length).is_some_and(|end| end <= total)
+                && ((request.flags & USER_STORAGE_FLAG_BEGIN != 0) == (offset == 0));
+            if !valid {
+                unsafe {
+                    USER_SAVE_ACTIVE = false;
+                }
+            } else {
+                unsafe {
+                    if request.flags & USER_STORAGE_FLAG_BEGIN != 0 {
+                        USER_SAVE_ACTIVE = true;
+                        USER_SAVE_LENGTH = total;
+                    }
+                    let active = USER_SAVE_ACTIVE && USER_SAVE_LENGTH == total;
+                    if active && (offset == 0 || offset < USER_SAVE_LENGTH) {
+                        USER_SAVE_BUFFER[offset..offset + data_length]
+                            .copy_from_slice(&request.data[..data_length]);
+                    } else {
+                        USER_SAVE_ACTIVE = false;
+                    }
+                    if USER_SAVE_ACTIVE && request.flags & USER_STORAGE_FLAG_END != 0 {
+                        let snapshot = &USER_SAVE_BUFFER[..USER_SAVE_LENGTH];
+                        if offset + data_length != USER_SAVE_LENGTH
+                            || UserCatalogStore::save(filesystem, snapshot).is_err()
+                            || filesystem.flush().is_err()
+                        {
+                            USER_SAVE_ACTIVE = false;
+                        } else {
+                            let target = &mut *core::ptr::addr_of_mut!(USER_CATALOG_BUFFER);
+                            target[..USER_SAVE_LENGTH].copy_from_slice(snapshot);
+                            USER_CATALOG_LENGTH = USER_SAVE_LENGTH;
+                            USER_SAVE_ACTIVE = false;
+                            response.status = UserStorageStatus::Ok;
+                        }
+                    } else if USER_SAVE_ACTIVE {
+                        response.status = UserStorageStatus::Ok;
+                    }
+                }
+            }
+        }
+    }
+    Some(user_storage_message(response))
+}
+
 fn send_package_response(pending: &mut Option<PackageResponse>) -> bool {
     let Some(response) = *pending else {
         return false;
@@ -412,24 +565,46 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
             }
         }
         if pending_response.is_none() && pending_package.is_none() {
-            let mut request = IpcBytes::empty(MessageKind::StorageRequest);
-            let mut client = Client::Flow;
-            let status_from_client =
-                match common::ipc_receive(FLOW_RECEIVE_CAPABILITY, &mut request) {
-                    IpcStatus::Ok => IpcStatus::Ok,
-                    _ => {
-                        client = Client::Fetch;
-                        common::ipc_receive(FETCH_RECEIVE_CAPABILITY, &mut request)
-                    }
+            let mut user_request = IpcBytes::empty(MessageKind::UserStorageRequest);
+            if common::ipc_receive(USER_RECEIVE_CAPABILITY, &mut user_request) == IpcStatus::Ok {
+                let mut response = UserStorageResponse {
+                    operation: UserStorageOperation::Load,
+                    status: UserStorageStatus::Io,
+                    reserved: 0,
+                    request_id: 1,
+                    offset: 0,
+                    total_len: 0,
+                    data_len: 0,
+                    data: [0; logos_abi::USER_STORAGE_CHUNK_BYTES],
                 };
-            match status_from_client {
-                IpcStatus::Ok => {
-                    pending_response =
-                        error_response(&request, status).map(|response| (client, response));
-                    progressed = true;
+                if let Some(bytes) = user_request.as_bytes() {
+                    if bytes.len() == core::mem::size_of::<UserStorageRequest>() {
+                        let request = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast()) };
+                        response = UserStorageResponse::invalid(request);
+                    }
                 }
-                IpcStatus::Empty => {}
-                _ => progressed = true,
+                pending_response = Some((Client::User, user_storage_message(response)));
+                progressed = true;
+            } else {
+                let mut request = IpcBytes::empty(MessageKind::StorageRequest);
+                let mut client = Client::Flow;
+                let status_from_client =
+                    match common::ipc_receive(FLOW_RECEIVE_CAPABILITY, &mut request) {
+                        IpcStatus::Ok => IpcStatus::Ok,
+                        _ => {
+                            client = Client::Fetch;
+                            common::ipc_receive(FETCH_RECEIVE_CAPABILITY, &mut request)
+                        }
+                    };
+                match status_from_client {
+                    IpcStatus::Ok => {
+                        pending_response =
+                            error_response(&request, status).map(|response| (client, response));
+                        progressed = true;
+                    }
+                    IpcStatus::Empty => {}
+                    _ => progressed = true,
+                }
             }
         }
         if !progressed {
@@ -438,6 +613,8 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
                     | common::ipc_write_event(IpcEndpointId::StorageToFlow)
                     | common::ipc_read_event(IpcEndpointId::FetchToStorage)
                     | common::ipc_write_event(IpcEndpointId::StorageToFetch)
+                    | common::ipc_read_event(IpcEndpointId::UserToStorage)
+                    | common::ipc_write_event(IpcEndpointId::StorageToUser)
                     | common::ipc_read_event(IpcEndpointId::CoreToStoragePackage)
                     | common::ipc_write_event(IpcEndpointId::StoragePackageToCore),
                 logos_abi::ServiceId::Storage,
@@ -450,27 +627,30 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
     let Some(store) = new_store(capability, blocks) else {
         serve_storage_error(StorageApiStatus::Io);
     };
-    let mut filesystem = match DurableNamespace::open(store) {
+    let mut filesystem = match DurableNamespaceV5::open_v5(store) {
         Ok(filesystem) => filesystem,
         Err(NamespaceError::Format(logos_storage::FormatError::Unformatted)) => {
             let Some(store) = new_store(capability, blocks) else {
                 serve_storage_error(StorageApiStatus::Io);
             };
-            DurableNamespace::format(store)
+            DurableNamespaceV5::format_v5(store)
                 .unwrap_or_else(|error| serve_storage_error(storage_error_status(error)))
         }
         Err(NamespaceError::Format(logos_storage::FormatError::ProvisionedBlank)) => {
             let Some(store) = new_store(capability, blocks) else {
                 serve_storage_error(StorageApiStatus::Io);
             };
-            DurableNamespace::format_provisioned(store)
+            DurableNamespaceV5::format_v5_provisioned(store)
                 .unwrap_or_else(|error| serve_storage_error(storage_error_status(error)))
         }
         Err(error) => serve_storage_error(storage_error_status(error)),
     };
     filesystem.flush().unwrap_or_else(|error| serve_storage_error(storage_error_status(error)));
+    if !ensure_user_catalog(&mut filesystem) {
+        serve_storage_error(StorageApiStatus::Io);
+    }
 
-    let mut api = StorageApi::new(filesystem);
+    let mut api = StorageApiV5::new(filesystem);
     let mut pending_response: Option<(Client, IpcBytes)> = None;
     let mut pending_package: Option<PackageResponse> = None;
     let mut pending_map: Option<PendingMap> = None;
@@ -560,56 +740,69 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
             }
         }
         if pending_response.is_none() && pending_package.is_none() && pending_map.is_none() {
-            let mut request = IpcBytes::empty(MessageKind::StorageRequest);
-            let mut client = Client::Flow;
-            let received = match common::ipc_receive(FLOW_RECEIVE_CAPABILITY, &mut request) {
-                IpcStatus::Ok => IpcStatus::Ok,
-                _ => {
-                    client = Client::Fetch;
-                    common::ipc_receive(FETCH_RECEIVE_CAPABILITY, &mut request)
-                }
-            };
-            if received == IpcStatus::Ok {
-                let operation = logos_abi::StorageApiRequest::decode(&request).ok();
-                if let Some(operation) = operation {
-                    if operation.operation == StorageApiOperation::UnmapRead {
-                        if let Some(mapping) = api.map_release(operation.transaction_id) {
-                            pending_map = Some(PendingMap {
-                                client,
-                                request,
-                                handle: operation.transaction_id,
-                                response: IpcBytes::empty(MessageKind::StorageResponse),
-                                map_request: unmap_request(operation.request_id, client, mapping),
-                                sent: false,
-                                unmap: true,
-                            });
-                        } else {
-                            pending_response = api.handle(&request).map(|value| (client, value));
-                        }
-                    } else if let Some(response) = api.handle(&request) {
-                        if operation.operation == StorageApiOperation::MapRead {
-                            if let Some(map_request) = api.map_request(
-                                &response,
-                                capability.service_epoch,
-                                match client {
-                                    Client::Flow => logos_abi::ServiceId::Flow,
-                                    Client::Fetch => logos_abi::ServiceId::Fetch,
-                                },
-                            ) {
+            let mut user_request = IpcBytes::empty(MessageKind::UserStorageRequest);
+            if common::ipc_receive(USER_RECEIVE_CAPABILITY, &mut user_request) == IpcStatus::Ok {
+                pending_response = handle_user_storage_request(&user_request, api.namespace_mut())
+                    .map(|response| (Client::User, response));
+                progressed = true;
+            } else {
+                let mut request = IpcBytes::empty(MessageKind::StorageRequest);
+                let mut client = Client::Flow;
+                let received = match common::ipc_receive(FLOW_RECEIVE_CAPABILITY, &mut request) {
+                    IpcStatus::Ok => IpcStatus::Ok,
+                    _ => {
+                        client = Client::Fetch;
+                        common::ipc_receive(FETCH_RECEIVE_CAPABILITY, &mut request)
+                    }
+                };
+                if received == IpcStatus::Ok {
+                    let operation = logos_abi::StorageApiRequest::decode(&request).ok();
+                    if let Some(operation) = operation {
+                        if operation.operation == StorageApiOperation::UnmapRead {
+                            if let Some(mapping) = api.map_release(operation.transaction_id) {
                                 pending_map = Some(PendingMap {
                                     client,
                                     request,
-                                    handle: response_handle(&response),
-                                    response,
-                                    map_request,
+                                    handle: operation.transaction_id,
+                                    response: IpcBytes::empty(MessageKind::StorageResponse),
+                                    map_request: unmap_request(
+                                        operation.request_id,
+                                        client,
+                                        mapping,
+                                    ),
                                     sent: false,
-                                    unmap: false,
+                                    unmap: true,
                                 });
+                            } else {
+                                pending_response =
+                                    api.handle(&request).map(|value| (client, value));
+                            }
+                        } else if let Some(response) = api.handle(&request) {
+                            if operation.operation == StorageApiOperation::MapRead {
+                                if let Some(map_request) = api.map_request(
+                                    &response,
+                                    capability.service_epoch,
+                                    match client {
+                                        Client::Flow => logos_abi::ServiceId::Flow,
+                                        Client::Fetch => logos_abi::ServiceId::Fetch,
+                                        Client::User => logos_abi::ServiceId::User,
+                                    },
+                                ) {
+                                    pending_map = Some(PendingMap {
+                                        client,
+                                        request,
+                                        handle: response_handle(&response),
+                                        response,
+                                        map_request,
+                                        sent: false,
+                                        unmap: false,
+                                    });
+                                } else {
+                                    pending_response = Some((client, response));
+                                }
                             } else {
                                 pending_response = Some((client, response));
                             }
-                        } else {
-                            pending_response = Some((client, response));
                         }
                     }
                 }
@@ -624,6 +817,8 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
                     | common::ipc_write_event(IpcEndpointId::StorageToFetch)
                     | common::ipc_read_event(IpcEndpointId::CoreToStorageMap)
                     | common::ipc_write_event(IpcEndpointId::StorageMapToCore)
+                    | common::ipc_read_event(IpcEndpointId::UserToStorage)
+                    | common::ipc_write_event(IpcEndpointId::StorageToUser)
                     | common::ipc_read_event(IpcEndpointId::CoreToStoragePackage)
                     | common::ipc_write_event(IpcEndpointId::StoragePackageToCore),
                 logos_abi::ServiceId::Storage,

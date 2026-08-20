@@ -74,6 +74,7 @@ mod tests {
         startup.start(ServiceId::Terminal).unwrap();
         startup.start(ServiceId::Session).unwrap();
         startup.start(ServiceId::Storage).unwrap();
+        startup.start(ServiceId::User).unwrap();
         startup.start(ServiceId::Device).unwrap();
         startup.start(ServiceId::Flow).unwrap();
         startup.start(ServiceId::Network).unwrap();

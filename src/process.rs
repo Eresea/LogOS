@@ -181,6 +181,24 @@ impl VirtualMapping {
         )
     }
 
+    /// Track a bounded virtual span for a Core-provisioned service workspace.
+    /// The page table maps each page separately, so `physical_address` is the
+    /// first backing frame and is retained only for the existing mapping ABI.
+    pub const fn new_service_workspace(
+        virtual_address: usize,
+        physical_address: usize,
+        pages: usize,
+        flags: MappingFlags,
+    ) -> Option<Self> {
+        Self::new_with_limit(
+            virtual_address,
+            physical_address,
+            pages,
+            flags,
+            logos_abi::USER_KDF_WORKSPACE_PAGES,
+        )
+    }
+
     const fn new_with_limit(
         virtual_address: usize,
         physical_address: usize,

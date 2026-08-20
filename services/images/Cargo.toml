@@ -10,6 +10,7 @@ qemu-proof = []
 package-proof = []
 storage-proof = []
 fetch-proof = []
+user-kdf = ["logos-user/password-kdf"]
 
 [dependencies]
 logos-abi = { path = "../../abi" }
@@ -20,6 +21,7 @@ logos-input = { path = "../input" }
 logos-session = { path = "../session" }
 logos-storage = { path = "../../storage" }
 logos-storage-service = { path = "../storage" }
+logos-user = { path = "../user", default-features = false }
 logos-terminal = { path = "../terminal" }
 logos-network = { path = "../../network" }
 logos-fetch = { path = "../fetch" }
@@ -75,5 +77,11 @@ bench = false
 [[bin]]
 name = "logos-device"
 path = "src/device.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "logos-user"
+path = "src/user.rs"
 test = false
 bench = false

@@ -51,7 +51,7 @@ pub enum ServiceImageError {
     InvalidElf(ProcessError),
 }
 
-pub const SERVICE_IMAGES: [ServiceImageSpec; 9] = [
+pub const SERVICE_IMAGES: [ServiceImageSpec; 10] = [
     ServiceImageSpec::new(ServiceId::Input, b"input", b"\\EFI\\LOGOS\\INPUT.ELF", 0),
     ServiceImageSpec::new(ServiceId::Display, b"display", b"\\EFI\\LOGOS\\DISPLAY.ELF", 0),
     ServiceImageSpec::new(
@@ -83,14 +83,21 @@ pub const SERVICE_IMAGES: [ServiceImageSpec; 9] = [
             | (1 << ServiceId::Network.index()),
     ),
     ServiceImageSpec::new(ServiceId::Device, b"device", b"\\EFI\\LOGOS\\DEVICE.ELF", 0),
+    ServiceImageSpec::new(
+        ServiceId::User,
+        b"user",
+        b"\\EFI\\LOGOS\\USER.ELF",
+        1 << ServiceId::Storage.index(),
+    ),
 ];
 
-pub const SERVICE_START_ORDER: [ServiceId; 9] = [
+pub const SERVICE_START_ORDER: [ServiceId; 10] = [
     ServiceId::Input,
     ServiceId::Display,
     ServiceId::Terminal,
     ServiceId::Session,
     ServiceId::Storage,
+    ServiceId::User,
     ServiceId::Device,
     ServiceId::Flow,
     ServiceId::Network,
@@ -163,7 +170,7 @@ mod tests {
 
     #[test]
     fn manifest_is_fixed_and_dependencies_are_valid() {
-        assert_eq!(SERVICE_IMAGES.len(), 9);
+        assert_eq!(SERVICE_IMAGES.len(), 10);
         assert_eq!(SERVICE_IMAGES[0].service(), ServiceId::Input);
         assert_eq!(SERVICE_IMAGES[1].service(), ServiceId::Display);
         assert_eq!(SERVICE_IMAGES[2].service(), ServiceId::Terminal);
@@ -177,6 +184,8 @@ mod tests {
         assert_eq!(SERVICE_IMAGES[6].service(), ServiceId::Network);
         assert_eq!(SERVICE_IMAGES[7].service(), ServiceId::Fetch);
         assert_eq!(SERVICE_IMAGES[8].service(), ServiceId::Device);
+        assert_eq!(SERVICE_IMAGES[9].service(), ServiceId::User);
+        assert_eq!(SERVICE_IMAGES[9].dependencies(), 1 << ServiceId::Storage.index());
         assert_eq!(service_image(ServiceId::Display).path(), b"\\EFI\\LOGOS\\DISPLAY.ELF");
         assert_ne!(service_dependencies(ServiceId::Flow) & (1 << ServiceId::Device.index()), 0);
     }
