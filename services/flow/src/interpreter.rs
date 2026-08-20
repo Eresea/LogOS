@@ -56,6 +56,7 @@ pub enum NamespaceKind {
     System,
     Supervisor,
     Package,
+    Program,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -253,6 +254,27 @@ impl OperationRegistry {
             OperationSignature::new(
                 NamespaceKind::Package,
                 b"install",
+                [FlowType::String, FlowType::Void, FlowType::Void],
+                1,
+                PromiseType::String.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::Program,
+                b"start",
+                [FlowType::String, FlowType::Void, FlowType::Void],
+                1,
+                PromiseType::String.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::Program,
+                b"status",
+                [FlowType::String, FlowType::Void, FlowType::Void],
+                1,
+                PromiseType::String.flow_type(),
+            ),
+            OperationSignature::new(
+                NamespaceKind::Program,
+                b"stop",
                 [FlowType::String, FlowType::Void, FlowType::Void],
                 1,
                 PromiseType::String.flow_type(),
@@ -1265,6 +1287,7 @@ impl<'a, 'p> TypeChecker<'a, 'p> {
                 None if name == b"sys" => Ok(FlowType::Namespace(NamespaceKind::System)),
                 None if name == b"service" => Ok(FlowType::Namespace(NamespaceKind::Supervisor)),
                 None if name == b"pkg" => Ok(FlowType::Namespace(NamespaceKind::Package)),
+                None if name == b"program" => Ok(FlowType::Namespace(NamespaceKind::Program)),
                 None => Err(FlowTypeError::UnknownVariable(node.span)),
             },
             ExprKind::Index { base, key } => {
@@ -1410,6 +1433,11 @@ impl<'a, 'p> TypeChecker<'a, 'p> {
                     Ok(PromiseType::String.flow_type())
                 }
                 (FlowType::Namespace(NamespaceKind::Package), b"install") => {
+                    Self::require_arity(args, 1, span)?;
+                    Self::require_type(self.expr_type(args[0])?, FlowType::String, span)?;
+                    Ok(PromiseType::String.flow_type())
+                }
+                (FlowType::Namespace(NamespaceKind::Program), b"start" | b"status" | b"stop") => {
                     Self::require_arity(args, 1, span)?;
                     Self::require_type(self.expr_type(args[0])?, FlowType::String, span)?;
                     Ok(PromiseType::String.flow_type())

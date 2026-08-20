@@ -24,6 +24,7 @@ pub enum CompletionTarget {
     SystemMember,
     FilesystemMember,
     PackageMember,
+    ProgramMember,
     FileHandleOpen,
     FileHandleOpenMember,
     FileHandleTouch,
@@ -68,6 +69,7 @@ pub const FILE_TOUCH_COMPLETION_OFFSETS: [u8; 2] = [9, 8];
 pub const FILE_TOUCH_MEMBER_COMPLETION: [&[u8]; 2] = [b"create()", b"write(\"\")"];
 pub const FILE_TOUCH_MEMBER_OFFSETS: [u8; 2] = [8, 7];
 pub const PACKAGE_COMPLETION_MEMBERS: [&[u8]; 3] = [b"list()", b"info(\"\")", b"install(\"\")"];
+pub const PROGRAM_COMPLETION_MEMBERS: [&[u8]; 3] = [b"start(\"\")", b"status(\"\")", b"stop(\"\")"];
 
 /// Return the cursor position for the first empty argument placeholder.
 pub const fn completion_cursor_offset(candidate: &[u8]) -> usize {
@@ -91,6 +93,7 @@ pub enum FlowKind {
     Service,
     Network,
     Package,
+    Program,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,7 +113,7 @@ pub struct FlowSpec {
     pub manual: &'static [u8],
 }
 
-pub const FLOW_SPECS: [FlowSpec; 5] = [
+pub const FLOW_SPECS: [FlowSpec; 6] = [
     FlowSpec {
         name: b"sys",
         kind: FlowKind::System,
@@ -145,6 +148,13 @@ pub const FLOW_SPECS: [FlowSpec; 5] = [
         usage: b"pkg.list() / pkg.info(\"name\")",
         summary: b"inspect installed packages",
         manual: b"Lists installed packages or shows one package manifest summary.",
+    },
+    FlowSpec {
+        name: b"program",
+        kind: FlowKind::Program,
+        usage: b"program.start(\"name\") / program.status(\"name\") / program.stop(\"name\")",
+        summary: b"manage persistent programs",
+        manual: b"Starts, inspects, or stops a capability-free persistent program.",
     },
 ];
 
@@ -252,6 +262,15 @@ pub fn completion_context<'a>(
             replace_start: 4,
             replace_end: cursor,
             prefix: &before[4..],
+        }));
+    }
+
+    if before.starts_with(b"program.") && before[8..].iter().all(|byte| is_member_byte(*byte)) {
+        return Ok(Some(CompletionContext {
+            target: CompletionTarget::ProgramMember,
+            replace_start: 8,
+            replace_end: cursor,
+            prefix: &before[8..],
         }));
     }
 
@@ -414,6 +433,13 @@ pub enum PackageCommand<'a> {
     Install { path: &'a [u8] },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProgramCommand<'a> {
+    Start { name: &'a [u8] },
+    Status { name: &'a [u8] },
+    Stop { name: &'a [u8] },
+}
+
 const MAX_CALL_ARGS: usize = 3;
 const MAX_EXPRESSION_PARTS: usize = 3;
 
@@ -483,6 +509,7 @@ pub enum FlowOperation<'a> {
     Service(ServiceCommand<'a>),
     Network(NetworkCommand<'a>),
     Package(PackageCommand<'a>),
+    Program(ProgramCommand<'a>),
     System(SystemOperation),
     CancelPromise {
         name: &'a [u8],
@@ -744,6 +771,22 @@ fn parse_flow_operation_unchecked<'a>(
             .ok_or(FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?;
         return Ok(Some(FlowOperation::Package(PackageCommand::Install { path })));
     }
+    for (prefix, command) in [
+        (b"program.start(".as_slice(), 0u8),
+        (b"program.status(".as_slice(), 1u8),
+        (b"program.stop(".as_slice(), 2u8),
+    ] {
+        if expression.starts_with(prefix) {
+            let name = quoted_after(expression, prefix).ok_or(FlowDiagnostic::Type(
+                FlowTypeError::InvalidCall(SpanForDiagnostic::span()),
+            ))?;
+            return Ok(Some(FlowOperation::Program(match command {
+                0 => ProgramCommand::Start { name },
+                1 => ProgramCommand::Status { name },
+                _ => ProgramCommand::Stop { name },
+            })));
+        }
+    }
     if let Some(command) = parse_storage_command(expression)
         .map_err(|_| FlowDiagnostic::Type(FlowTypeError::InvalidCall(SpanForDiagnostic::span())))?
     {
@@ -965,6 +1008,8 @@ pub fn format_service_record(record: &logos_abi::ServiceManagerRecord, output: &
         logos_abi::ManagerState::Running => b"running",
         logos_abi::ManagerState::Stopping => b"stopping",
         logos_abi::ManagerState::Failed => b"failed",
+        logos_abi::ManagerState::Exited => b"exited",
+        logos_abi::ManagerState::Faulted => b"faulted",
     };
     let name_len = usize::from(record.name_len).min(record.name.len());
     let mut length = 0;
@@ -1103,6 +1148,8 @@ fn service_state(state: logos_abi::ManagerState) -> &'static [u8] {
         logos_abi::ManagerState::Running => b"running",
         logos_abi::ManagerState::Stopping => b"stopping",
         logos_abi::ManagerState::Failed => b"failed",
+        logos_abi::ManagerState::Exited => b"exited",
+        logos_abi::ManagerState::Faulted => b"faulted",
     }
 }
 

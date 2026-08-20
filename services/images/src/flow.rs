@@ -621,6 +621,7 @@ impl CompletionService {
                         logos_flow::FlowKind::Network => b".".as_slice(),
                         logos_flow::FlowKind::System => b".".as_slice(),
                         logos_flow::FlowKind::Package => b".".as_slice(),
+                        logos_flow::FlowKind::Program => b".".as_slice(),
                     };
                     let mut candidate = [0; MAX_COMPLETION_ITEM_BYTES];
                     let Some(length) = copy_candidate(&mut candidate, spec.name, punctuation)
@@ -696,6 +697,19 @@ impl CompletionService {
             }
             logos_flow::CompletionTarget::PackageMember => {
                 for candidate in logos_flow::PACKAGE_COMPLETION_MEMBERS {
+                    if candidate.starts_with(context.prefix)
+                        && !response.push_candidate_with_cursor(
+                            candidate,
+                            logos_flow::completion_cursor_offset(candidate),
+                        )
+                    {
+                        response.flags |= COMPLETION_FLAG_TRUNCATED;
+                        break;
+                    }
+                }
+            }
+            logos_flow::CompletionTarget::ProgramMember => {
+                for candidate in logos_flow::PROGRAM_COMPLETION_MEMBERS {
                     if candidate.starts_with(context.prefix)
                         && !response.push_candidate_with_cursor(
                             candidate,
@@ -1768,6 +1782,41 @@ fn manager_error(status: logos_abi::ManagerStatus) -> &'static [u8] {
     }
 }
 
+fn program_command(command: logos_flow::ProgramCommand<'_>, pending: &mut PendingOutput) {
+    let (operation, name) = match command {
+        logos_flow::ProgramCommand::Start { name } => {
+            (logos_abi::ManagerOperation::ProgramStart, name)
+        }
+        logos_flow::ProgramCommand::Status { name } => {
+            (logos_abi::ManagerOperation::ProgramStatus, name)
+        }
+        logos_flow::ProgramCommand::Stop { name } => {
+            (logos_abi::ManagerOperation::ProgramStop, name)
+        }
+    };
+    let request_id = next_manager_request_id();
+    let Some(request) =
+        logos_abi::ManagerRequest::new(operation, request_id).with_program_name(name)
+    else {
+        pending.stage(b"program name is too long\r\n");
+        return;
+    };
+    let mut response =
+        logos_abi::ManagerResponse::new(operation, logos_abi::ManagerStatus::Malformed, request_id);
+    if common::manager_call(&request, &mut response) != IpcStatus::Ok {
+        pending.stage(b"program manager unavailable\r\n");
+    } else if !matches!(
+        response.status,
+        logos_abi::ManagerStatus::Ok | logos_abi::ManagerStatus::Accepted
+    ) {
+        pending.stage(manager_error(response.status));
+    } else {
+        let mut output = [0; logos_flow::MAX_OUTPUT_BYTES];
+        let length = logos_flow::format_service_record(&response.record, &mut output);
+        pending.stage(&output[..length]);
+    }
+}
+
 fn manager_record(name: &[u8]) -> Result<Option<logos_abi::ServiceManagerRecord>, IpcStatus> {
     let mut cursor = 0u8;
     for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
@@ -2442,6 +2491,9 @@ pub extern "C" fn _start() -> ! {
                             if !package.start(command) {
                                 pending.stage(b"package request too large\r\n");
                             }
+                        }
+                        Ok(Some(logos_flow::FlowOperation::Program(command))) => {
+                            program_command(command, pending);
                         }
                         Ok(Some(logos_flow::FlowOperation::System(operation))) => match operation {
                             logos_flow::SystemOperation::Version => {
