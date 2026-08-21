@@ -3064,12 +3064,31 @@ impl<'a> KernelHeap<'a> {
 /// intentionally not installed globally until live reclaim and boot binding
 /// are wired.
 pub struct KernelGlobalAllocator<'a> {
-    heap: TryLock<KernelHeap<'a>>,
+    heap: TryLock<Option<KernelHeap<'a>>>,
 }
 
 impl<'a> KernelGlobalAllocator<'a> {
     pub const fn new(heap: KernelHeap<'a>) -> Self {
-        Self { heap: TryLock::new(heap) }
+        Self { heap: TryLock::new(Some(heap)) }
+    }
+
+    pub const fn empty() -> Self {
+        Self { heap: TryLock::new(None) }
+    }
+
+    pub fn bind(&self, heap: KernelHeap<'a>) -> Result<(), HeapError> {
+        let Some(mut bound) = self.heap.try_lock() else {
+            return Err(HeapError::WouldBlock);
+        };
+        if bound.is_some() {
+            return Err(HeapError::InvalidRequest);
+        }
+        *bound = Some(heap);
+        Ok(())
+    }
+
+    pub fn is_bound(&self) -> bool {
+        self.heap.try_lock().is_some_and(|heap| heap.is_some())
     }
 }
 
@@ -3089,7 +3108,10 @@ unsafe impl GlobalAlloc for KernelGlobalAllocator<'_> {
         if layout.size() == 0 {
             return layout.align() as *mut u8;
         }
-        let Some(mut heap) = self.heap.try_lock() else {
+        let Some(mut bound) = self.heap.try_lock() else {
+            return core::ptr::null_mut();
+        };
+        let Some(heap) = bound.as_mut() else {
             return core::ptr::null_mut();
         };
         heap.alloc(
@@ -3107,8 +3129,10 @@ unsafe impl GlobalAlloc for KernelGlobalAllocator<'_> {
         if pointer.is_null() {
             return;
         }
-        if let Some(mut heap) = self.heap.try_lock() {
-            let _ = heap.free_address(global_allocator_cpu(), pointer as usize);
+        if let Some(mut bound) = self.heap.try_lock() {
+            if let Some(heap) = bound.as_mut() {
+                let _ = heap.free_address(global_allocator_cpu(), pointer as usize);
+            }
         }
     }
 }
@@ -3436,11 +3460,22 @@ mod tests {
         let normalized = normalize_memory_map(&map(&[(0x1000, 16, true)]), &[]).unwrap();
         let mut allocator = SmpFrameAllocator::empty();
         allocator.initialize(&normalized).unwrap();
+        let unbound = KernelGlobalAllocator::empty();
+        let small_layout = Layout::from_size_align(32, 8).unwrap();
+        assert!(!unbound.is_bound());
+        assert!(unsafe { GlobalAlloc::alloc(&unbound, small_layout) }.is_null());
         let mut page_records = [HeapPageRecord::empty(); 2];
         let heap = KernelHeap::new(&allocator, &mut page_records);
-        let global = KernelGlobalAllocator::new(heap);
+        let global = KernelGlobalAllocator::empty();
+        assert!(!global.is_bound());
+        global.bind(heap).unwrap();
+        assert!(global.is_bound());
+        let mut second_records = [HeapPageRecord::empty(); 1];
+        assert_eq!(
+            global.bind(KernelHeap::new(&allocator, &mut second_records)),
+            Err(HeapError::InvalidRequest)
+        );
 
-        let small_layout = Layout::from_size_align(32, 8).unwrap();
         let small = unsafe { GlobalAlloc::alloc(&global, small_layout) };
         assert!(!small.is_null());
         assert_eq!(small as usize % small_layout.align(), 0);
