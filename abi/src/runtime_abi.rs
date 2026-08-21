@@ -1,4 +1,4 @@
-use crate::{ABI_VERSION, IPC_PAGE_BYTES, MAX_SERVICE_NAME_BYTES};
+use crate::{ABI_VERSION, IPC_PAGE_BYTES, MAX_SERVICE_NAME_BYTES, SERVICE_HEAP_MAX_PAGES};
 
 pub const RUNTIME_ABI_VERSION: u16 = ABI_VERSION;
 pub const DIRECTORY_FLAG_MORE: u8 = 1 << 0;
@@ -59,6 +59,9 @@ pub struct ServiceBootstrapPage {
     pub control: CapabilityHandle,
     pub directory: CapabilityHandle,
     pub heap: CapabilityHandle,
+    pub heap_base: u64,
+    pub heap_pages: u32,
+    pub heap_quota_pages: u32,
 }
 
 impl ServiceBootstrapPage {
@@ -70,6 +73,9 @@ impl ServiceBootstrapPage {
             control: CapabilityHandle::EMPTY,
             directory: CapabilityHandle::EMPTY,
             heap: CapabilityHandle::EMPTY,
+            heap_base: 0,
+            heap_pages: 0,
+            heap_quota_pages: 0,
         }
     }
 
@@ -80,6 +86,12 @@ impl ServiceBootstrapPage {
             && self.control.is_valid()
             && self.directory.is_valid()
             && self.heap.is_valid()
+            && self.heap_base != 0
+            && self.heap_base % IPC_PAGE_BYTES as u64 == 0
+            && self.heap_pages != 0
+            && (self.heap_pages as usize) <= SERVICE_HEAP_MAX_PAGES
+            && self.heap_quota_pages >= self.heap_pages
+            && (self.heap_quota_pages as usize) <= SERVICE_HEAP_MAX_PAGES
     }
 }
 
@@ -267,6 +279,7 @@ const _: () = assert!(core::mem::size_of::<DirectoryResponse>() <= IPC_PAGE_BYTE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SERVICE_HEAP_INITIAL_PAGES;
 
     #[test]
     fn handles_encode_generation_and_reject_empty_generation() {
@@ -287,6 +300,9 @@ mod tests {
         page.control = CapabilityHandle::new(2, 1).unwrap();
         page.directory = CapabilityHandle::new(3, 1).unwrap();
         page.heap = CapabilityHandle::new(4, 1).unwrap();
+        page.heap_base = 0x0000_0200_0000_0000;
+        page.heap_pages = SERVICE_HEAP_INITIAL_PAGES as u32;
+        page.heap_quota_pages = SERVICE_HEAP_MAX_PAGES as u32;
         assert!(page.is_valid());
         page.flags = 1;
         assert!(!page.is_valid());
