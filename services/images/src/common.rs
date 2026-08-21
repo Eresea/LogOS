@@ -31,6 +31,7 @@ struct AllocationHeader {
 const HEADER_BYTES: usize = mem::size_of::<AllocationHeader>();
 
 struct AllocatorState {
+    heap_capability: logos_abi::CapabilityHandle,
     base: usize,
     mapped_end: usize,
     quota_end: usize,
@@ -41,6 +42,7 @@ struct AllocatorState {
 
 impl AllocatorState {
     const EMPTY: Self = Self {
+        heap_capability: logos_abi::CapabilityHandle::EMPTY,
         base: 0,
         mapped_end: 0,
         quota_end: 0,
@@ -49,7 +51,13 @@ impl AllocatorState {
         free: [FreeBlock::EMPTY; MAX_FREE_BLOCKS],
     };
 
-    fn initialize(&mut self, base: usize, pages: usize, quota_pages: usize) -> bool {
+    fn initialize(
+        &mut self,
+        capability: logos_abi::CapabilityHandle,
+        base: usize,
+        pages: usize,
+        quota_pages: usize,
+    ) -> bool {
         let Some(mapped_bytes) = pages.checked_mul(SERVICE_PAGE_BYTES) else {
             return false;
         };
@@ -62,16 +70,38 @@ impl AllocatorState {
         let Some(quota_end) = base.checked_add(quota_bytes) else {
             return false;
         };
-        if base == 0 || base & (SERVICE_PAGE_BYTES - 1) != 0 || pages == 0 || quota_end < mapped_end
+        if !capability.is_valid()
+            || base == 0
+            || base & (SERVICE_PAGE_BYTES - 1) != 0
+            || pages == 0
+            || quota_end < mapped_end
         {
             return false;
         }
+        self.heap_capability = capability;
         self.base = base;
         self.mapped_end = mapped_end;
         self.quota_end = quota_end;
         self.used = 0;
         self.free_len = 1;
         self.free[0] = FreeBlock { start: base, bytes: mapped_bytes };
+        true
+    }
+
+    fn extend(&mut self, pages: usize) -> bool {
+        let Some(bytes) = pages.checked_mul(SERVICE_PAGE_BYTES) else {
+            return false;
+        };
+        let Some(end) = self.mapped_end.checked_add(bytes) else {
+            return false;
+        };
+        if pages == 0
+            || end > self.quota_end
+            || !self.insert(FreeBlock { start: self.mapped_end, bytes })
+        {
+            return false;
+        }
+        self.mapped_end = end;
         true
     }
 
@@ -207,9 +237,35 @@ impl ServiceAllocator {
         ServiceAllocatorGuard { allocator: self }
     }
 
-    pub fn initialize(&self, base: usize, pages: usize, quota_pages: usize) -> bool {
+    pub fn initialize(
+        &self,
+        capability: logos_abi::CapabilityHandle,
+        base: usize,
+        pages: usize,
+        quota_pages: usize,
+    ) -> bool {
         let guard = self.lock();
-        unsafe { (&mut *guard.allocator.state.get()).initialize(base, pages, quota_pages) }
+        unsafe {
+            (&mut *guard.allocator.state.get()).initialize(capability, base, pages, quota_pages)
+        }
+    }
+
+    fn allocate_with_growth(&self, layout: Layout) -> *mut u8 {
+        loop {
+            let (pointer, capability) = {
+                let guard = self.lock();
+                let state = unsafe { &mut *guard.allocator.state.get() };
+                let pointer = state.allocate(layout);
+                (pointer, state.heap_capability)
+            };
+            if !pointer.is_null() || !capability.is_valid() || !request_heap_growth(capability) {
+                return pointer;
+            }
+            let guard = self.lock();
+            if !unsafe { (&mut *guard.allocator.state.get()).extend(1) } {
+                return ptr::null_mut();
+            }
+        }
     }
 }
 
@@ -225,8 +281,7 @@ impl Drop for ServiceAllocatorGuard<'_> {
 
 unsafe impl GlobalAlloc for ServiceAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let guard = self.lock();
-        unsafe { (&mut *guard.allocator.state.get()).allocate(layout) }
+        self.allocate_with_growth(layout)
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, _layout: Layout) {
@@ -246,10 +301,33 @@ pub fn init_service_allocator() {
             &*(logos_abi::SERVICE_BOOTSTRAP_BASE as *const logos_abi::ServiceBootstrapPage)
         };
         let _ = SERVICE_GLOBAL_ALLOCATOR.initialize(
+            bootstrap.heap,
             bootstrap.heap_base as usize,
             bootstrap.heap_pages as usize,
             bootstrap.heap_quota_pages as usize,
         );
+    }
+}
+
+fn request_heap_growth(capability: logos_abi::CapabilityHandle) -> bool {
+    #[cfg(target_os = "none")]
+    {
+        let mut raw = logos_abi::SERVICE_HEAP_GROW_SYSCALL;
+        unsafe {
+            asm!(
+                "int 49",
+                inout("rax") raw,
+                in("rdi") capability.raw() as usize,
+                in("rsi") 1usize,
+                options(preserves_flags),
+            );
+        }
+        raw == logos_abi::IpcStatus::Ok as usize
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = capability;
+        false
     }
 }
 

@@ -981,11 +981,58 @@ impl ServiceRuntime {
         let heap_mapping = VirtualMapping::new_service_heap(
             logos_abi::SERVICE_HEAP_BASE,
             self.service_heap_frames[index][0] as usize,
-            logos_abi::SERVICE_HEAP_INITIAL_PAGES,
+            logos_abi::SERVICE_HEAP_MAX_PAGES,
             MappingFlags::DATA,
         )
         .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::AddressSpace))?;
         self.processes.map(process, heap_mapping).map_err(ServiceRuntimeError::IpcPrivateProcess)
+    }
+
+    pub(crate) fn grow_service_heap(
+        &mut self,
+        process: ProcessHandle,
+        capability_raw: u64,
+        pages: usize,
+    ) -> logos_abi::IpcStatus {
+        if pages != 1 {
+            return logos_abi::IpcStatus::Malformed;
+        }
+        let Some(service) = self.service_for_process(process) else {
+            return logos_abi::IpcStatus::Unauthorized;
+        };
+        let generation = (self.service_epoch as u32).max(1);
+        let Some(expected) = logos_abi::CapabilityHandle::new(2, generation) else {
+            return logos_abi::IpcStatus::Stale;
+        };
+        if capability_raw != expected.raw() {
+            return logos_abi::IpcStatus::Unauthorized;
+        }
+        let index = service.index();
+        let page = self.service_heap_pages[index];
+        if page >= logos_abi::SERVICE_HEAP_MAX_PAGES {
+            return logos_abi::IpcStatus::Full;
+        }
+        let frame = match self.frame_pool.allocate_for(OwnerId::service(service)) {
+            Ok(frame) => frame,
+            Err(_) => return logos_abi::IpcStatus::Full,
+        };
+        let mut memory = IdentityPageTableMemory;
+        if memory.clear(frame).is_err() {
+            let _ = self.frame_pool.release(frame);
+            return logos_abi::IpcStatus::Full;
+        }
+        let address = logos_abi::SERVICE_HEAP_BASE + page * crate::loader::PAGE_SIZE;
+        let tables = unsafe { self.tables[index].assume_init_mut() };
+        if tables
+            .map_raw_page(address, frame, MappingFlags::DATA, &mut self.frame_pool, &mut memory)
+            .is_err()
+        {
+            let _ = self.frame_pool.release(frame);
+            return logos_abi::IpcStatus::Full;
+        }
+        self.service_heap_frames[index][page] = frame.raw();
+        self.service_heap_pages[index] = page + 1;
+        logos_abi::IpcStatus::Ok
     }
 
     fn map_framebuffer_config(&mut self, frame: FrameAddress) -> Result<(), ServiceRuntimeError> {
