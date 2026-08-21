@@ -199,6 +199,22 @@ impl VirtualMapping {
         )
     }
 
+    /// Track the private heap span provisioned by Core for one service.
+    pub const fn new_service_heap(
+        virtual_address: usize,
+        physical_address: usize,
+        pages: usize,
+        flags: MappingFlags,
+    ) -> Option<Self> {
+        Self::new_with_limit(
+            virtual_address,
+            physical_address,
+            pages,
+            flags,
+            logos_abi::SERVICE_HEAP_MAX_PAGES,
+        )
+    }
+
     const fn new_with_limit(
         virtual_address: usize,
         physical_address: usize,

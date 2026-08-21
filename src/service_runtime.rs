@@ -68,6 +68,9 @@ pub struct ServiceRuntime {
     ipc: Option<ServiceIpcGraph>,
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
     ipc_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
+    service_bootstrap_frames: [u64; SERVICE_COUNT],
+    service_heap_frames: [[u64; logos_abi::SERVICE_HEAP_MAX_PAGES]; SERVICE_COUNT],
+    service_heap_pages: [usize; SERVICE_COUNT],
     user_kdf_workspace: [u64; logos_abi::USER_KDF_WORKSPACE_PAGES],
     storage_data_frames: [Option<FrameAddress>; logos_abi::STORAGE_DATA_PAGES],
     network_config: logos_abi::NetworkConfig,
@@ -292,6 +295,9 @@ impl ServiceRuntime {
             ipc: None,
             ipc_staging_frames: [None; SERVICE_COUNT],
             ipc_capability_frames: [None; SERVICE_COUNT],
+            service_bootstrap_frames: [0; SERVICE_COUNT],
+            service_heap_frames: [[0; logos_abi::SERVICE_HEAP_MAX_PAGES]; SERVICE_COUNT],
+            service_heap_pages: [0; SERVICE_COUNT],
             user_kdf_workspace: [0; logos_abi::USER_KDF_WORKSPACE_PAGES],
             storage_data_frames: [None; logos_abi::STORAGE_DATA_PAGES],
             network_config: logos_abi::NetworkConfig::disabled(),
@@ -480,6 +486,7 @@ impl ServiceRuntime {
                 loaded.reclaim(&mut self.frame_pool);
                 return Err(ServiceRuntimeError::Process(error));
             }
+            self.map_service_heap(service, process, &mut tables)?;
             if service == ServiceId::User {
                 let pages = logos_abi::USER_KDF_WORKSPACE_PAGES;
                 for page in 0..pages {
@@ -905,6 +912,80 @@ impl ServiceRuntime {
         let mapping = VirtualMapping::new(virtual_address, frame.raw() as usize, 1, flags)
             .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::AddressSpace))?;
         self.processes.map(process, mapping).map_err(ServiceRuntimeError::IpcPrivateProcess)
+    }
+
+    fn map_service_heap(
+        &mut self,
+        service: ServiceId,
+        process: ProcessHandle,
+        tables: &mut PageTableBuilder,
+    ) -> Result<(), ServiceRuntimeError> {
+        let index = service.index();
+        let mut memory = IdentityPageTableMemory;
+        let bootstrap = self
+            .frame_pool
+            .allocate_for(OwnerId::service(service))
+            .map_err(|_| ServiceRuntimeError::Resources)?;
+        self.service_bootstrap_frames[index] = bootstrap.raw();
+        memory.clear(bootstrap).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+        let generation = (self.service_epoch as u32).max(1);
+        let page = logos_abi::ServiceBootstrapPage {
+            abi_version: logos_abi::RUNTIME_ABI_VERSION,
+            flags: 0,
+            service: logos_abi::ServiceHandle::new(index as u32, generation)
+                .ok_or(ServiceRuntimeError::Resources)?,
+            control: logos_abi::CapabilityHandle::new(0, generation)
+                .ok_or(ServiceRuntimeError::Resources)?,
+            directory: logos_abi::CapabilityHandle::new(1, generation)
+                .ok_or(ServiceRuntimeError::Resources)?,
+            heap: logos_abi::CapabilityHandle::new(2, generation)
+                .ok_or(ServiceRuntimeError::Resources)?,
+            heap_base: logos_abi::SERVICE_HEAP_BASE as u64,
+            heap_pages: logos_abi::SERVICE_HEAP_INITIAL_PAGES as u32,
+            heap_quota_pages: logos_abi::SERVICE_HEAP_MAX_PAGES as u32,
+        };
+        unsafe { core::ptr::write_unaligned(bootstrap.raw() as usize as *mut _, page) };
+        tables
+            .map_raw_page(
+                logos_abi::SERVICE_BOOTSTRAP_BASE,
+                bootstrap,
+                MappingFlags::READ_ONLY_DATA,
+                &mut self.frame_pool,
+                &mut memory,
+            )
+            .map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+        let bootstrap_mapping = VirtualMapping::new(
+            logos_abi::SERVICE_BOOTSTRAP_BASE,
+            bootstrap.raw() as usize,
+            1,
+            MappingFlags::READ_ONLY_DATA,
+        )
+        .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::AddressSpace))?;
+        self.processes
+            .map(process, bootstrap_mapping)
+            .map_err(ServiceRuntimeError::IpcPrivateProcess)?;
+
+        for heap_page in 0..logos_abi::SERVICE_HEAP_INITIAL_PAGES {
+            let frame = self
+                .frame_pool
+                .allocate_for(OwnerId::service(service))
+                .map_err(|_| ServiceRuntimeError::Resources)?;
+            self.service_heap_frames[index][heap_page] = frame.raw();
+            memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+            let address = logos_abi::SERVICE_HEAP_BASE + heap_page * crate::loader::PAGE_SIZE;
+            tables
+                .map_raw_page(address, frame, MappingFlags::DATA, &mut self.frame_pool, &mut memory)
+                .map_err(ServiceRuntimeError::IpcPrivateMapping)?;
+        }
+        self.service_heap_pages[index] = logos_abi::SERVICE_HEAP_INITIAL_PAGES;
+        let heap_mapping = VirtualMapping::new_service_heap(
+            logos_abi::SERVICE_HEAP_BASE,
+            self.service_heap_frames[index][0] as usize,
+            logos_abi::SERVICE_HEAP_INITIAL_PAGES,
+            MappingFlags::DATA,
+        )
+        .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::AddressSpace))?;
+        self.processes.map(process, heap_mapping).map_err(ServiceRuntimeError::IpcPrivateProcess)
     }
 
     fn map_framebuffer_config(&mut self, frame: FrameAddress) -> Result<(), ServiceRuntimeError> {
@@ -3290,6 +3371,21 @@ impl ServiceRuntime {
             if let Some(frame) = self.ipc_capability_frames[index] {
                 self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
                 self.ipc_capability_frames[index] = None;
+            }
+        }
+        for index in 0..SERVICE_COUNT {
+            for page in 0..self.service_heap_pages[index] {
+                if self.service_heap_frames[index][page] != 0 {
+                    let frame = FrameAddress::from_raw(self.service_heap_frames[index][page]);
+                    self.service_heap_frames[index][page] = 0;
+                    self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+                }
+            }
+            self.service_heap_pages[index] = 0;
+            if self.service_bootstrap_frames[index] != 0 {
+                let frame = FrameAddress::from_raw(self.service_bootstrap_frames[index]);
+                self.service_bootstrap_frames[index] = 0;
+                self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
             }
         }
         for frame in &mut self.user_kdf_workspace {

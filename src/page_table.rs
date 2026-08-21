@@ -18,7 +18,8 @@ const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 const USER_PML4_INDEX: usize = 2;
 
 /// Maximum table frames needed by one root plus one private path per loaded page.
-pub const MAX_PAGE_TABLE_FRAMES: usize = 1 + MAX_LOAD_PAGES * 3;
+pub const MAX_PAGE_TABLE_FRAMES: usize =
+    1 + (MAX_LOAD_PAGES + logos_abi::SERVICE_HEAP_INITIAL_PAGES + 1) * 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageTableError {
