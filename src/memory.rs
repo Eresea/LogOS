@@ -1239,6 +1239,14 @@ impl CpuCache {
         None
     }
 
+    fn pop(&mut self) -> Option<FrameLease> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        self.frames[self.len].take()
+    }
+
     fn contains(&self, lease: FrameLease) -> bool {
         self.frames[..self.len].contains(&Some(lease))
     }
@@ -1569,6 +1577,82 @@ impl SmpFrameAllocator {
 
     pub fn stats(&self) -> AllocationStatsSnapshot {
         self.stats.snapshot()
+    }
+
+    pub fn capacity(&self) -> usize {
+        // SAFETY: frame-count metadata is immutable after initialization.
+        unsafe { (&*self.manager.get()).frame_count() }
+    }
+
+    pub fn available(&self) -> usize {
+        // SAFETY: callers use this snapshot for capacity reporting only.
+        unsafe { (&*self.manager.get()).available() }
+    }
+
+    /// Flush cached frees into the shared frame metadata.
+    ///
+    /// The synchronous `FramePool` facade uses this to preserve its exact
+    /// availability semantics while the SMP path keeps per-CPU magazines.
+    pub fn flush_cpu_cache(&self, cpu: usize) {
+        if cpu >= MAX_MEMORY_CPUS {
+            return;
+        }
+        loop {
+            let Some(lease) = self.caches[cpu].try_lock().and_then(|mut cache| cache.pop()) else {
+                return;
+            };
+            let Some(shard) = self.shard_for_slot(lease.slot as usize) else {
+                continue;
+            };
+            let Some(_guard) = self.shards[shard].lock.try_lock() else {
+                let _ = self.caches[cpu].try_lock().and_then(|mut cache| cache.push(lease).ok());
+                return;
+            };
+            // SAFETY: the shard owns this frame's metadata.
+            if unsafe { &mut *self.manager.get() }.free(lease).is_err() {
+                let _ = self.caches[cpu].try_lock().and_then(|mut cache| cache.push(lease).ok());
+                return;
+            }
+            self.wake_shard(shard, WakePolicy::One);
+        }
+    }
+
+    pub(crate) fn manager(&self) -> &PhysicalFrameManager {
+        // SAFETY: this shared view matches the pre-existing FramePool manager
+        // inspection API; mutation remains owned by the allocator paths.
+        unsafe { &*self.manager.get() }
+    }
+
+    pub(crate) fn reserve(
+        &mut self,
+        address: FrameAddress,
+        owner: OwnerId,
+    ) -> Result<FrameLease, FrameError> {
+        self.flush_cpu_cache(0);
+        // SAFETY: exclusive access is required for boot/control reservations.
+        unsafe { &mut *self.manager.get() }.reserve(address, owner)
+    }
+
+    pub(crate) fn reserve_batch(
+        &mut self,
+        addresses: &[FrameAddress],
+        owner: OwnerId,
+    ) -> Result<FrameBatch, FrameError> {
+        self.flush_cpu_cache(0);
+        // SAFETY: exclusive access is required for boot/control reservations.
+        unsafe { &mut *self.manager.get() }.reserve_batch(addresses, owner)
+    }
+
+    pub(crate) fn release_reservation(&mut self, lease: FrameLease) -> Result<(), FrameError> {
+        self.flush_cpu_cache(0);
+        // SAFETY: exclusive access is required for boot/control reservations.
+        unsafe { &mut *self.manager.get() }.release_reservation(lease)
+    }
+
+    pub(crate) fn release_address(&mut self, address: FrameAddress) -> Result<(), FrameError> {
+        self.flush_cpu_cache(0);
+        // SAFETY: exclusive access is required for the synchronous release path.
+        unsafe { &mut *self.manager.get() }.release_address(address)
     }
 
     pub fn latency(&self) -> &LatencyHistogram {

@@ -7,8 +7,9 @@
 use crate::{
     boot_resources::MemoryMap,
     memory::{
-        FrameBatch, FrameError, FrameLease, FrameMetadataRegion, FrameState, MemoryExclusion,
-        NormalizedMemoryMap, OwnerId, PhysicalFrameManager, normalize_memory_map,
+        AllocationError, FrameBatch, FrameError, FrameLease, FrameMetadataRegion, FrameState,
+        MemoryExclusion, NormalizedMemoryMap, OwnerId, PhysicalFrameManager, SmpFrameAllocator,
+        normalize_memory_map,
     },
 };
 
@@ -21,12 +22,12 @@ pub enum FramePoolError {
 }
 
 pub struct FramePool {
-    manager: PhysicalFrameManager,
+    allocator: SmpFrameAllocator,
 }
 
 impl FramePool {
     pub const fn empty() -> Self {
-        Self { manager: PhysicalFrameManager::empty() }
+        Self { allocator: SmpFrameAllocator::empty() }
     }
 
     pub fn initialize(&mut self, memory_map: &MemoryMap) -> Result<(), FramePoolError> {
@@ -47,7 +48,7 @@ impl FramePool {
         &mut self,
         normalized: &NormalizedMemoryMap,
     ) -> Result<(), FramePoolError> {
-        self.manager.initialize(normalized).map_err(map_error)
+        self.allocator.initialize(normalized).map_err(map_error)
     }
 
     pub fn initialize_with_metadata(
@@ -58,15 +59,15 @@ impl FramePool {
     ) -> Result<(), FramePoolError> {
         let normalized =
             normalize_memory_map(memory_map, exclusions).map_err(|_| FramePoolError::InvalidMap)?;
-        self.manager.initialize_with_region(&normalized, metadata).map_err(map_error)
+        self.allocator.initialize_with_region(&normalized, metadata).map_err(map_error)
     }
 
-    pub const fn capacity(&self) -> usize {
-        self.manager.frame_count()
+    pub fn capacity(&self) -> usize {
+        self.allocator.capacity()
     }
 
     pub fn available(&self) -> usize {
-        self.manager.available()
+        self.allocator.available()
     }
 
     pub fn allocate(&mut self) -> Result<FrameAddress, FramePoolError> {
@@ -74,10 +75,10 @@ impl FramePool {
     }
 
     pub fn allocate_for(&mut self, owner: OwnerId) -> Result<FrameAddress, FramePoolError> {
-        self.manager
-            .try_alloc(owner, FrameState::Dirty)
+        self.allocator
+            .try_alloc(0, owner, FrameState::Dirty)
             .map(|lease| lease.address())
-            .map_err(map_error)
+            .map_err(map_allocation_error)
     }
 
     pub fn try_alloc(
@@ -85,7 +86,7 @@ impl FramePool {
         owner: OwnerId,
         state: FrameState,
     ) -> Result<FrameLease, FramePoolError> {
-        self.manager.try_alloc(owner, state).map_err(map_error)
+        self.allocator.try_alloc(0, owner, state).map_err(map_allocation_error)
     }
 
     pub fn alloc_batch(
@@ -94,39 +95,43 @@ impl FramePool {
         count: usize,
         state: FrameState,
     ) -> Result<FrameBatch, FramePoolError> {
-        self.manager.alloc_batch(owner, count, state).map_err(map_error)
+        self.allocator.alloc_batch(0, owner, count, state).map_err(map_allocation_error)
     }
 
     pub fn free(&mut self, lease: FrameLease) -> Result<(), FramePoolError> {
-        self.manager.free(lease).map_err(map_error)
+        let result = self.allocator.free(0, lease).map_err(map_allocation_error);
+        self.allocator.flush_cpu_cache(0);
+        result
     }
 
     pub fn free_batch(&mut self, batch: FrameBatch) -> Result<(), FramePoolError> {
-        self.manager.free_batch(batch).map_err(map_error)
+        let result = self.allocator.free_batch(0, batch).map_err(map_allocation_error);
+        self.allocator.flush_cpu_cache(0);
+        result
     }
 
     /// Reserve a boot-owned frame by physical address.
     pub fn reserve(&mut self, frame: FrameAddress) -> bool {
-        self.manager.reserve(frame, OwnerId::KERNEL).is_ok()
+        self.allocator.reserve(frame, OwnerId::KERNEL).is_ok()
     }
 
     pub fn reserve_batch(&mut self, frames: &[FrameAddress]) -> Result<FrameBatch, FramePoolError> {
-        self.manager.reserve_batch(frames, OwnerId::KERNEL).map_err(map_error)
+        self.allocator.reserve_batch(frames, OwnerId::KERNEL).map_err(map_error)
     }
 
     pub fn release_reservation(&mut self, lease: FrameLease) -> Result<(), FramePoolError> {
-        self.manager.release_reservation(lease).map_err(map_error)
+        self.allocator.release_reservation(lease).map_err(map_error)
     }
 
     /// Legacy release accepts a generation-stamped address returned by
     /// `allocate`; raw addresses remain supported for old boot code through a
     /// lookup and current-generation validation inside the manager.
     pub fn release(&mut self, frame: FrameAddress) -> Result<(), FramePoolError> {
-        self.manager.release_address(frame).map_err(map_error)
+        self.allocator.release_address(frame).map_err(map_error)
     }
 
-    pub const fn manager(&self) -> &PhysicalFrameManager {
-        &self.manager
+    pub fn manager(&self) -> &PhysicalFrameManager {
+        self.allocator.manager()
     }
 }
 
@@ -147,5 +152,20 @@ fn map_error(error: FrameError) -> FramePoolError {
         | FrameError::Capacity
         | FrameError::AlreadyUsed => FramePoolError::InvalidMap,
         FrameError::BatchCapacity => FramePoolError::Exhausted,
+    }
+}
+
+fn map_allocation_error(error: AllocationError) -> FramePoolError {
+    match error {
+        AllocationError::WouldBlock
+        | AllocationError::Exhausted
+        | AllocationError::BatchCapacity => FramePoolError::Exhausted,
+        AllocationError::InvalidCpu
+        | AllocationError::InvalidOwner
+        | AllocationError::StaleHandle
+        | AllocationError::WrongOwner
+        | AllocationError::Cancelled
+        | AllocationError::Deadline
+        | AllocationError::InterruptContext => FramePoolError::InvalidMap,
     }
 }
