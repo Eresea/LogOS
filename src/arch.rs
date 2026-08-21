@@ -906,6 +906,18 @@ pub(crate) fn reserve_kernel_frames(pool: &mut crate::frame_pool::FramePool) {
         core::ptr::addr_of!(CPU_TSS) as usize,
         core::mem::size_of::<[TaskStateSegment; MAX_CPUS]>(),
     );
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(crate::memory::KERNEL_GLOBAL_ALLOCATOR) as usize,
+        core::mem::size_of::<crate::memory::KernelGlobalAllocator<'static>>(),
+    );
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(crate::memory::KERNEL_HEAP_PAGE_RECORDS) as usize,
+        core::mem::size_of::<
+            [crate::memory::HeapPageRecord; crate::memory::KERNEL_HEAP_PAGE_RECORD_COUNT],
+        >(),
+    );
     virtio_device::reserve_frames(pool);
     virtio_net::reserve_frames(pool);
     #[cfg(feature = "qemu-proof")]

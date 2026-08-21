@@ -398,6 +398,11 @@ impl ServiceRuntime {
             self.frame_pool_ready = true;
         }
 
+        if !crate::memory::kernel_global_allocator_bound() {
+            crate::memory::bind_kernel_global_allocator(self.frame_pool.allocator())
+                .map_err(|_| ServiceRuntimeError::Resources)?;
+        }
+
         for (index, spec) in SERVICE_IMAGES.iter().enumerate() {
             let service = spec.service();
             let stack_pages = match service {

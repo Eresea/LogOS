@@ -41,6 +41,9 @@ pub const MAX_MEMORY_CLAIMS: usize = 128;
 pub const MAX_HEAP_SLOTS: usize = 256;
 pub const MAX_QUOTAS: usize = 32;
 
+#[cfg(target_os = "uefi")]
+pub(crate) const KERNEL_HEAP_PAGE_RECORD_COUNT: usize = 16;
+
 const NO_DEADLINE: u64 = u64::MAX;
 const INITIAL_GENERATION: u32 = 1;
 const INITIAL_FRAME_GENERATION: u16 = 1;
@@ -3067,6 +3070,15 @@ pub struct KernelGlobalAllocator<'a> {
     heap: TryLock<Option<KernelHeap<'a>>>,
 }
 
+#[cfg(target_os = "uefi")]
+pub(crate) static mut KERNEL_HEAP_PAGE_RECORDS: [HeapPageRecord; KERNEL_HEAP_PAGE_RECORD_COUNT] =
+    [const { HeapPageRecord::empty() }; KERNEL_HEAP_PAGE_RECORD_COUNT];
+
+#[cfg(target_os = "uefi")]
+#[global_allocator]
+pub(crate) static KERNEL_GLOBAL_ALLOCATOR: KernelGlobalAllocator<'static> =
+    KernelGlobalAllocator::empty();
+
 impl<'a> KernelGlobalAllocator<'a> {
     pub const fn new(heap: KernelHeap<'a>) -> Self {
         Self { heap: TryLock::new(Some(heap)) }
@@ -3090,6 +3102,21 @@ impl<'a> KernelGlobalAllocator<'a> {
     pub fn is_bound(&self) -> bool {
         self.heap.try_lock().is_some_and(|heap| heap.is_some())
     }
+}
+
+#[cfg(target_os = "uefi")]
+pub(crate) fn bind_kernel_global_allocator(frames: &SmpFrameAllocator) -> Result<(), HeapError> {
+    let frames: &'static SmpFrameAllocator = unsafe { core::mem::transmute(frames) };
+    let records = unsafe {
+        let pointer = core::ptr::addr_of_mut!(KERNEL_HEAP_PAGE_RECORDS).cast::<HeapPageRecord>();
+        core::slice::from_raw_parts_mut(pointer, KERNEL_HEAP_PAGE_RECORD_COUNT)
+    };
+    KERNEL_GLOBAL_ALLOCATOR.bind(KernelHeap::new(frames, records))
+}
+
+#[cfg(target_os = "uefi")]
+pub(crate) fn kernel_global_allocator_bound() -> bool {
+    KERNEL_GLOBAL_ALLOCATOR.is_bound()
 }
 
 fn global_allocator_cpu() -> usize {

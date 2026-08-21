@@ -133,6 +133,11 @@ impl FramePool {
     pub fn manager(&self) -> &PhysicalFrameManager {
         self.allocator.manager()
     }
+
+    #[cfg(target_os = "uefi")]
+    pub(crate) fn allocator(&self) -> &SmpFrameAllocator {
+        &self.allocator
+    }
 }
 
 impl Default for FramePool {
