@@ -3064,8 +3064,7 @@ impl<'a> KernelHeap<'a> {
 /// `GlobalAlloc` adapter for a caller-owned kernel heap.
 ///
 /// The adapter uses the current CPU on UEFI and CPU zero in host tests. It is
-/// intentionally not installed globally until live reclaim and boot binding
-/// are wired.
+/// installed after the post-UEFI frame allocator has been bound.
 pub struct KernelGlobalAllocator<'a> {
     heap: TryLock<Option<KernelHeap<'a>>>,
     pressure: TryLock<PressureManager>,
@@ -3119,7 +3118,25 @@ pub(crate) fn bind_kernel_global_allocator(frames: &SmpFrameAllocator) -> Result
         let pointer = core::ptr::addr_of_mut!(KERNEL_HEAP_PAGE_RECORDS).cast::<HeapPageRecord>();
         core::slice::from_raw_parts_mut(pointer, KERNEL_HEAP_PAGE_RECORD_COUNT)
     };
+    KERNEL_GLOBAL_ALLOCATOR
+        .register_reclaimer(reclaim_kernel_frame_caches)
+        .map_err(|_| HeapError::InvalidRequest)?;
     KERNEL_GLOBAL_ALLOCATOR.bind(KernelHeap::new(frames, records))
+}
+
+#[cfg(target_os = "uefi")]
+fn reclaim_kernel_frame_caches(_level: PressureLevel) -> usize {
+    let Some(bound) = KERNEL_GLOBAL_ALLOCATOR.heap.try_lock() else {
+        return 0;
+    };
+    let Some(heap) = bound.as_ref() else {
+        return 0;
+    };
+    let before = heap.frames.available();
+    for cpu in 0..MAX_MEMORY_CPUS {
+        heap.frames.flush_cpu_cache(cpu);
+    }
+    heap.frames.available().saturating_sub(before)
 }
 
 #[cfg(target_os = "uefi")]
