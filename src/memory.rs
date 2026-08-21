@@ -3068,6 +3068,7 @@ impl<'a> KernelHeap<'a> {
 /// are wired.
 pub struct KernelGlobalAllocator<'a> {
     heap: TryLock<Option<KernelHeap<'a>>>,
+    pressure: TryLock<PressureManager>,
 }
 
 #[cfg(target_os = "uefi")]
@@ -3081,11 +3082,11 @@ pub(crate) static KERNEL_GLOBAL_ALLOCATOR: KernelGlobalAllocator<'static> =
 
 impl<'a> KernelGlobalAllocator<'a> {
     pub const fn new(heap: KernelHeap<'a>) -> Self {
-        Self { heap: TryLock::new(Some(heap)) }
+        Self { heap: TryLock::new(Some(heap)), pressure: TryLock::new(PressureManager::new()) }
     }
 
     pub const fn empty() -> Self {
-        Self { heap: TryLock::new(None) }
+        Self { heap: TryLock::new(None), pressure: TryLock::new(PressureManager::new()) }
     }
 
     pub fn bind(&self, heap: KernelHeap<'a>) -> Result<(), HeapError> {
@@ -3101,6 +3102,13 @@ impl<'a> KernelGlobalAllocator<'a> {
 
     pub fn is_bound(&self) -> bool {
         self.heap.try_lock().is_some_and(|heap| heap.is_some())
+    }
+
+    pub fn register_reclaimer(&self, callback: ReclaimCallback) -> Result<(), FrameError> {
+        let Some(mut pressure) = self.pressure.try_lock() else {
+            return Err(FrameError::Capacity);
+        };
+        pressure.register_reclaimer(callback)
     }
 }
 
@@ -3132,24 +3140,17 @@ fn global_allocator_cpu() -> usize {
 
 unsafe impl GlobalAlloc for KernelGlobalAllocator<'_> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if layout.size() == 0 {
-            return layout.align() as *mut u8;
+        match self.alloc_layout(layout) {
+            Ok(pointer) => pointer,
+            Err(HeapError::Exhausted) => {
+                let reclaimed = self.notify_reclaim(PressureLevel::Warning);
+                if reclaimed == 0 {
+                    let _ = self.notify_reclaim(PressureLevel::Critical);
+                }
+                self.alloc_layout(layout).unwrap_or(core::ptr::null_mut())
+            }
+            Err(_) => core::ptr::null_mut(),
         }
-        let Some(mut bound) = self.heap.try_lock() else {
-            return core::ptr::null_mut();
-        };
-        let Some(heap) = bound.as_mut() else {
-            return core::ptr::null_mut();
-        };
-        heap.alloc(
-            global_allocator_cpu(),
-            OwnerId::KERNEL,
-            layout.size(),
-            layout.align(),
-            AllocationContext::Thread,
-        )
-        .map(|allocation| allocation.address() as *mut u8)
-        .unwrap_or(core::ptr::null_mut())
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, _layout: Layout) {
@@ -3161,6 +3162,32 @@ unsafe impl GlobalAlloc for KernelGlobalAllocator<'_> {
                 let _ = heap.free_address(global_allocator_cpu(), pointer as usize);
             }
         }
+    }
+}
+
+impl KernelGlobalAllocator<'_> {
+    fn alloc_layout(&self, layout: Layout) -> Result<*mut u8, HeapError> {
+        if layout.size() == 0 {
+            return Ok(layout.align() as *mut u8);
+        }
+        let Some(mut bound) = self.heap.try_lock() else {
+            return Err(HeapError::WouldBlock);
+        };
+        let Some(heap) = bound.as_mut() else {
+            return Err(HeapError::InvalidRequest);
+        };
+        heap.alloc(
+            global_allocator_cpu(),
+            OwnerId::KERNEL,
+            layout.size(),
+            layout.align(),
+            AllocationContext::Thread,
+        )
+        .map(|allocation| allocation.address() as *mut u8)
+    }
+
+    fn notify_reclaim(&self, level: PressureLevel) -> usize {
+        self.pressure.try_lock().map(|pressure| pressure.notify(level)).unwrap_or(0)
     }
 }
 
@@ -3313,6 +3340,13 @@ mod tests {
             map.push(MemoryDescriptor::new(*start, *pages, *available).unwrap()).unwrap();
         }
         map
+    }
+
+    static RECLAIM_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn reclaim_none(_level: PressureLevel) -> usize {
+        RECLAIM_CALLS.fetch_add(1, Ordering::Relaxed);
+        0
     }
 
     fn manager(entries: &[(u64, u64, bool)]) -> PhysicalFrameManager {
@@ -3516,6 +3550,28 @@ mod tests {
 
         let unsupported = Layout::from_size_align(32, (PAGE_SIZE * 2) as usize).unwrap();
         assert!(unsafe { GlobalAlloc::alloc(&global, unsupported) }.is_null());
+    }
+
+    #[test]
+    fn global_allocator_retries_warning_then_critical_reclaim() {
+        let normalized = normalize_memory_map(&map(&[(0x1000, 16, true)]), &[]).unwrap();
+        let mut allocator = SmpFrameAllocator::empty();
+        allocator.initialize(&normalized).unwrap();
+        let mut page_records = [HeapPageRecord::empty(); 2];
+        let global = KernelGlobalAllocator::new(KernelHeap::new(&allocator, &mut page_records));
+        global.register_reclaimer(reclaim_none).unwrap();
+        RECLAIM_CALLS.store(0, Ordering::Relaxed);
+
+        let layout = Layout::from_size_align(8192, PAGE_SIZE as usize).unwrap();
+        let first = unsafe { GlobalAlloc::alloc(&global, layout) };
+        let second = unsafe { GlobalAlloc::alloc(&global, layout) };
+        assert!(!first.is_null() && !second.is_null());
+        assert!(unsafe { GlobalAlloc::alloc(&global, layout) }.is_null());
+        assert_eq!(RECLAIM_CALLS.load(Ordering::Relaxed), 2);
+        unsafe {
+            GlobalAlloc::dealloc(&global, first, layout);
+            GlobalAlloc::dealloc(&global, second, layout);
+        }
     }
 
     #[test]
