@@ -6,31 +6,6 @@ mod common;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-#[cfg(target_os = "none")]
-mod kdf_allocator {
-    use core::{
-        alloc::{GlobalAlloc, Layout},
-        ptr::null_mut,
-    };
-
-    struct Allocator;
-
-    unsafe impl GlobalAlloc for Allocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            if layout.size() <= logos_abi::USER_KDF_WORKSPACE_BYTES && layout.align() <= 64 {
-                logos_abi::USER_KDF_WORKSPACE_BASE as *mut u8
-            } else {
-                null_mut()
-            }
-        }
-
-        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: Allocator = Allocator;
-}
-
 use logos_abi::{
     IpcBytes, IpcEndpointId, IpcStatus, MessageKind, USER_STORAGE_CHUNK_BYTES,
     USER_STORAGE_FLAG_BEGIN, USER_STORAGE_FLAG_END, UserRequest, UserResponse,
@@ -282,6 +257,7 @@ fn durable(operation: logos_abi::UserOperation) -> bool {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    common::init_service_allocator();
     if !load_catalog() {
         common::idle();
     }

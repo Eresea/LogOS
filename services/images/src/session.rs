@@ -167,6 +167,7 @@ fn render_fetch_progress(response: FetchResponse, output: &mut logos_session::Sh
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    common::init_service_allocator();
     let session = unsafe { &mut *core::ptr::addr_of_mut!(SESSION) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let flow_input = unsafe { &mut *core::ptr::addr_of_mut!(FLOW_INPUT) };

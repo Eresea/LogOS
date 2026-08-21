@@ -831,6 +831,7 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
 /// whole raw volume, reopens valid media, or formats only blank media.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    common::init_service_allocator();
     let Some(capability) = common::capability(REQUEST_CAPABILITY) else {
         serve_storage_error(StorageApiStatus::Io)
     };

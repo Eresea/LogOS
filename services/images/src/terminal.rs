@@ -33,6 +33,7 @@ static mut PENDING_SESSION_INPUT: Option<IpcBytes> = None;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    common::init_service_allocator();
     let terminal = unsafe { &mut *core::ptr::addr_of_mut!(TERMINAL) };
     let pending_render = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_RENDER) };
     let pending_session_input = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_SESSION_INPUT) };

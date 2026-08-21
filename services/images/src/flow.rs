@@ -2583,6 +2583,7 @@ static mut PENDING_COMPLETION: Option<IpcBytes> = None;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    common::init_service_allocator();
     let flow = unsafe { &mut *core::ptr::addr_of_mut!(FLOW) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };

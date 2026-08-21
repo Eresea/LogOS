@@ -1,7 +1,257 @@
+use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::{mem, ptr};
 
 use logos_abi::{IpcCapabilityPage, IpcStatus, ServiceId};
+
+const SERVICE_PAGE_BYTES: usize = 4096;
+const MAX_FREE_BLOCKS: usize = 128;
+const ALLOCATION_MAGIC: u64 = 0x4c4f_474f_5348_4541;
+
+#[derive(Clone, Copy)]
+struct FreeBlock {
+    start: usize,
+    bytes: usize,
+}
+
+impl FreeBlock {
+    const EMPTY: Self = Self { start: 0, bytes: 0 };
+}
+
+#[repr(C)]
+struct AllocationHeader {
+    magic: u64,
+    start: usize,
+    span: usize,
+    bytes: usize,
+}
+
+const HEADER_BYTES: usize = mem::size_of::<AllocationHeader>();
+
+struct AllocatorState {
+    base: usize,
+    mapped_end: usize,
+    quota_end: usize,
+    used: usize,
+    free_len: usize,
+    free: [FreeBlock; MAX_FREE_BLOCKS],
+}
+
+impl AllocatorState {
+    const EMPTY: Self = Self {
+        base: 0,
+        mapped_end: 0,
+        quota_end: 0,
+        used: 0,
+        free_len: 0,
+        free: [FreeBlock::EMPTY; MAX_FREE_BLOCKS],
+    };
+
+    fn initialize(&mut self, base: usize, pages: usize, quota_pages: usize) -> bool {
+        let Some(mapped_bytes) = pages.checked_mul(SERVICE_PAGE_BYTES) else {
+            return false;
+        };
+        let Some(quota_bytes) = quota_pages.checked_mul(SERVICE_PAGE_BYTES) else {
+            return false;
+        };
+        let Some(mapped_end) = base.checked_add(mapped_bytes) else {
+            return false;
+        };
+        let Some(quota_end) = base.checked_add(quota_bytes) else {
+            return false;
+        };
+        if base == 0 || base & (SERVICE_PAGE_BYTES - 1) != 0 || pages == 0 || quota_end < mapped_end
+        {
+            return false;
+        }
+        self.base = base;
+        self.mapped_end = mapped_end;
+        self.quota_end = quota_end;
+        self.used = 0;
+        self.free_len = 1;
+        self.free[0] = FreeBlock { start: base, bytes: mapped_bytes };
+        true
+    }
+
+    fn allocate(&mut self, layout: Layout) -> *mut u8 {
+        if layout.size() == 0 || layout.size() > self.quota_end.saturating_sub(self.base) {
+            return ptr::null_mut();
+        }
+        for index in 0..self.free_len {
+            let block = self.free[index];
+            let Some(header_end) = block.start.checked_add(HEADER_BYTES) else {
+                continue;
+            };
+            let Some(pointer) = align_up(header_end, layout.align()) else {
+                continue;
+            };
+            let Some(end) = pointer.checked_add(layout.size()) else {
+                continue;
+            };
+            let Some(block_end) = block.start.checked_add(block.bytes) else {
+                continue;
+            };
+            if end > block_end || self.used > self.quota_end.saturating_sub(layout.size()) {
+                continue;
+            }
+            let prefix = pointer - HEADER_BYTES - block.start;
+            let suffix = block_end - end;
+            let pieces = usize::from(prefix != 0) + usize::from(suffix != 0);
+            if self.free_len - 1 + pieces > MAX_FREE_BLOCKS {
+                return ptr::null_mut();
+            }
+            self.remove(index);
+            if prefix != 0 {
+                self.insert(FreeBlock { start: block.start, bytes: prefix });
+            }
+            if suffix != 0 {
+                self.insert(FreeBlock { start: end, bytes: suffix });
+            }
+            let header = AllocationHeader {
+                magic: ALLOCATION_MAGIC,
+                start: block.start,
+                span: end - block.start,
+                bytes: layout.size(),
+            };
+            unsafe {
+                ptr::write_unaligned((pointer - HEADER_BYTES) as *mut AllocationHeader, header)
+            };
+            self.used = self.used.saturating_add(layout.size());
+            return pointer as *mut u8;
+        }
+        ptr::null_mut()
+    }
+
+    unsafe fn deallocate(&mut self, pointer: *mut u8) {
+        if pointer.is_null() || (pointer as usize) < HEADER_BYTES {
+            return;
+        }
+        let header_pointer = (pointer as usize - HEADER_BYTES) as *const AllocationHeader;
+        let header = unsafe { ptr::read_unaligned(header_pointer) };
+        let Some(end) = header.start.checked_add(header.span) else {
+            return;
+        };
+        if header.magic != ALLOCATION_MAGIC
+            || header.start < self.base
+            || end > self.mapped_end
+            || header.bytes == 0
+            || header.bytes > header.span
+        {
+            return;
+        }
+        if self.insert(FreeBlock { start: header.start, bytes: header.span }) {
+            self.used = self.used.saturating_sub(header.bytes);
+        }
+    }
+
+    fn remove(&mut self, index: usize) {
+        for next in index + 1..self.free_len {
+            self.free[next - 1] = self.free[next];
+        }
+        self.free_len -= 1;
+        self.free[self.free_len] = FreeBlock::EMPTY;
+    }
+
+    fn insert(&mut self, block: FreeBlock) -> bool {
+        if block.bytes == 0 || self.free_len == MAX_FREE_BLOCKS {
+            return block.bytes == 0;
+        }
+        self.free[self.free_len] = block;
+        self.free_len += 1;
+        for index in (1..self.free_len).rev() {
+            if self.free[index - 1].start <= self.free[index].start {
+                break;
+            }
+            self.free.swap(index - 1, index);
+        }
+        let mut index = 0;
+        while index + 1 < self.free_len {
+            let end = self.free[index].start.saturating_add(self.free[index].bytes);
+            if end == self.free[index + 1].start {
+                self.free[index].bytes =
+                    self.free[index].bytes.saturating_add(self.free[index + 1].bytes);
+                self.remove(index + 1);
+            } else {
+                index += 1;
+            }
+        }
+        true
+    }
+}
+
+fn align_up(value: usize, alignment: usize) -> Option<usize> {
+    if alignment == 0 || !alignment.is_power_of_two() {
+        return None;
+    }
+    value.checked_add(alignment - 1).map(|value| value & !(alignment - 1))
+}
+
+pub struct ServiceAllocator {
+    locked: AtomicBool,
+    state: UnsafeCell<AllocatorState>,
+}
+
+unsafe impl Sync for ServiceAllocator {}
+
+impl ServiceAllocator {
+    pub const fn new() -> Self {
+        Self { locked: AtomicBool::new(false), state: UnsafeCell::new(AllocatorState::EMPTY) }
+    }
+
+    fn lock(&self) -> ServiceAllocatorGuard<'_> {
+        while self.locked.swap(true, Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+        ServiceAllocatorGuard { allocator: self }
+    }
+
+    pub fn initialize(&self, base: usize, pages: usize, quota_pages: usize) -> bool {
+        let guard = self.lock();
+        unsafe { (&mut *guard.allocator.state.get()).initialize(base, pages, quota_pages) }
+    }
+}
+
+struct ServiceAllocatorGuard<'a> {
+    allocator: &'a ServiceAllocator,
+}
+
+impl Drop for ServiceAllocatorGuard<'_> {
+    fn drop(&mut self) {
+        self.allocator.locked.store(false, Ordering::Release);
+    }
+}
+
+unsafe impl GlobalAlloc for ServiceAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let guard = self.lock();
+        unsafe { (&mut *guard.allocator.state.get()).allocate(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, _layout: Layout) {
+        let guard = self.lock();
+        unsafe { (&mut *guard.allocator.state.get()).deallocate(pointer) };
+    }
+}
+
+#[cfg(target_os = "none")]
+#[global_allocator]
+static SERVICE_GLOBAL_ALLOCATOR: ServiceAllocator = ServiceAllocator::new();
+
+pub fn init_service_allocator() {
+    #[cfg(target_os = "none")]
+    {
+        let bootstrap = unsafe {
+            &*(logos_abi::SERVICE_BOOTSTRAP_BASE as *const logos_abi::ServiceBootstrapPage)
+        };
+        let _ = SERVICE_GLOBAL_ALLOCATOR.initialize(
+            bootstrap.heap_base as usize,
+            bootstrap.heap_pages as usize,
+            bootstrap.heap_quota_pages as usize,
+        );
+    }
+}
 
 pub fn idle() -> ! {
     loop {

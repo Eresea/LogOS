@@ -15,6 +15,7 @@ const OUTPUT_CAPABILITY: usize = common::capability_slot(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    common::init_service_allocator();
     let keyboard = unsafe { &*(INPUT_KEYBOARD_RING_BASE as *const KeyboardByteRing) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let mut decoder = logos_input::InputDecoder::new();

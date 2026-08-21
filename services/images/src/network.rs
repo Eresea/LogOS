@@ -566,6 +566,7 @@ fn send_network_response(peer: Peer, response: NetworkResponse) {
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    common::init_service_allocator();
     let config = unsafe {
         if logos_abi::NETWORK_CONFIG_BASE == 0 {
             logos_abi::NetworkConfig::disabled()

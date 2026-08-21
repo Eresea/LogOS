@@ -481,6 +481,7 @@ fn handle_storage(
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    common::init_service_allocator();
     let mut operation: Option<Operation> = None;
     let mut ticks = 0u16;
     let mut elapsed = 0u32;
