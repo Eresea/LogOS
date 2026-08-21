@@ -2683,6 +2683,7 @@ pub struct HeapAllocation {
     generation: u32,
     owner: OwnerId,
     bytes: usize,
+    address: usize,
     pages: Option<FrameBatch>,
 }
 
@@ -2693,6 +2694,10 @@ impl HeapAllocation {
 
     pub const fn bytes(self) -> usize {
         self.bytes
+    }
+
+    pub const fn address(self) -> usize {
+        self.address
     }
 
     pub const fn pages(self) -> Option<FrameBatch> {
@@ -2706,11 +2711,19 @@ struct HeapSlot {
     generation: u32,
     owner: OwnerId,
     bytes: usize,
+    address: usize,
+    frame: Option<FrameLease>,
 }
 
 impl HeapSlot {
-    const EMPTY: Self =
-        Self { used: false, generation: INITIAL_GENERATION, owner: OwnerId(0), bytes: 0 };
+    const EMPTY: Self = Self {
+        used: false,
+        generation: INITIAL_GENERATION,
+        owner: OwnerId(0),
+        bytes: 0,
+        address: 0,
+        frame: None,
+    };
 }
 
 struct HeapCentral {
@@ -2762,9 +2775,12 @@ impl Quota {
     const EMPTY: Self = Self { limit: usize::MAX, used: 0 };
 }
 
-/// Fixed size-class slabs for small objects and frame batches for large ones.
-/// It intentionally exposes handles, not a `GlobalAlloc`, until the physical
-/// and virtual contracts are proven in the boot path.
+/// Bounded page-backed heap handles for small and large objects.
+///
+/// Small allocations use one frame-backed slot and large allocations use a
+/// frame batch. The address is the current identity-mapped frame address;
+/// this type intentionally exposes handles, not a `GlobalAlloc`, until the
+/// virtual heap contract is proven in the boot path.
 pub struct KernelHeap<'a> {
     frames: &'a SmpFrameAllocator,
     central: TryLock<HeapCentral>,
@@ -2802,10 +2818,11 @@ impl<'a> KernelHeap<'a> {
         if cpu >= MAX_MEMORY_CPUS || owner.0 == 0 || bytes == 0 || !alignment.is_power_of_two() {
             return Err(HeapError::InvalidRequest);
         }
-        if alignment > bytes {
+        if alignment > bytes || alignment > PAGE_SIZE as usize {
             return Err(HeapError::InvalidRequest);
         }
-        let quota = self.quotas.get_mut(owner.raw() as usize).ok_or(HeapError::InvalidRequest)?;
+        let quota_index = owner.raw() as usize;
+        let quota = self.quotas.get(quota_index).ok_or(HeapError::InvalidRequest)?;
         if quota.used.checked_add(bytes).is_none_or(|used| used > quota.limit) {
             return Err(HeapError::Quota);
         }
@@ -2815,13 +2832,18 @@ impl<'a> KernelHeap<'a> {
                 .frames
                 .alloc_batch(cpu, owner, pages, FrameState::Dirty)
                 .map_err(map_alloc_error)?;
-            quota.used += bytes;
+            let address = batch
+                .get(0)
+                .map(|lease| lease.address().raw() as usize)
+                .ok_or(HeapError::InvalidHandle)?;
+            self.quotas[quota_index].used += bytes;
             return Ok(HeapAllocation {
                 kind: HeapAllocationKind::Pages,
                 index: 0,
                 generation: 0,
                 owner,
                 bytes,
+                address,
                 pages: Some(batch),
             });
         }
@@ -2836,18 +2858,27 @@ impl<'a> KernelHeap<'a> {
         let Some(index) = index else {
             return Err(HeapError::Exhausted);
         };
+        let batch =
+            self.frames.alloc_batch(cpu, owner, 1, FrameState::Dirty).map_err(map_alloc_error)?;
+        let address = batch
+            .get(0)
+            .map(|lease| lease.address().raw() as usize)
+            .ok_or(HeapError::InvalidHandle)?;
         let slot = &mut central.slots[index];
         slot.used = true;
         slot.generation = next_generation(slot.generation);
         slot.owner = owner;
         slot.bytes = bytes;
-        quota.used += bytes;
+        slot.address = address;
+        slot.frame = batch.get(0);
+        self.quotas[quota_index].used += bytes;
         Ok(HeapAllocation {
             kind: HeapAllocationKind::Slab,
             index: index as u16,
             generation: slot.generation,
             owner,
             bytes,
+            address,
             pages: None,
         })
     }
@@ -2875,7 +2906,13 @@ impl<'a> KernelHeap<'a> {
         if slot.owner != allocation.owner {
             return Err(HeapError::WrongOwner);
         }
+        let Some(frame) = slot.frame else {
+            return Err(HeapError::InvalidHandle);
+        };
+        self.frames.free(cpu, frame).map_err(map_alloc_error)?;
         slot.used = false;
+        slot.frame = None;
+        slot.address = 0;
         if let Some(quota) = self.quotas.get_mut(allocation.owner.raw() as usize) {
             quota.used = quota.used.saturating_sub(allocation.bytes);
         }
@@ -3208,9 +3245,13 @@ mod tests {
         );
         let small = heap.alloc(0, owner, 32, 8, AllocationContext::Thread).unwrap();
         assert_eq!(small.kind(), HeapAllocationKind::Slab);
+        assert_ne!(small.address(), 0);
+        assert_eq!(small.address() % PAGE_SIZE as usize, 0);
         heap.free(0, small).unwrap();
         let large = heap.alloc(0, owner, 8192, 4096, AllocationContext::Thread).unwrap();
         assert_eq!(large.kind(), HeapAllocationKind::Pages);
+        assert_ne!(large.address(), 0);
+        assert_eq!(large.address() % PAGE_SIZE as usize, 0);
         heap.free(0, large).unwrap();
     }
 
