@@ -2775,6 +2775,29 @@ impl Quota {
     const EMPTY: Self = Self { limit: usize::MAX, used: 0 };
 }
 
+#[derive(Clone, Copy)]
+pub struct HeapPageRecord {
+    used: bool,
+    generation: u32,
+    owner: OwnerId,
+    bytes: usize,
+    address: usize,
+    pages: FrameBatch,
+}
+
+impl HeapPageRecord {
+    pub const fn empty() -> Self {
+        Self {
+            used: false,
+            generation: INITIAL_GENERATION,
+            owner: OwnerId(0),
+            bytes: 0,
+            address: 0,
+            pages: FrameBatch::empty(),
+        }
+    }
+}
+
 /// Bounded page-backed heap handles for small and large objects.
 ///
 /// Small allocations use one frame-backed slot and large allocations use a
@@ -2783,15 +2806,20 @@ impl Quota {
 /// virtual heap contract is proven in the boot path.
 pub struct KernelHeap<'a> {
     frames: &'a SmpFrameAllocator,
+    page_records: &'a mut [HeapPageRecord],
     central: TryLock<HeapCentral>,
     caches: [TryLock<HeapMagazine>; MAX_MEMORY_CPUS],
     quotas: [Quota; MAX_QUOTAS],
 }
 
 impl<'a> KernelHeap<'a> {
-    pub const fn new(frames: &'a SmpFrameAllocator) -> Self {
+    pub const fn new(
+        frames: &'a SmpFrameAllocator,
+        page_records: &'a mut [HeapPageRecord],
+    ) -> Self {
         Self {
             frames,
+            page_records,
             central: TryLock::new(HeapCentral::empty()),
             caches: [const { TryLock::new(HeapMagazine::empty()) }; MAX_MEMORY_CPUS],
             quotas: [Quota::EMPTY; MAX_QUOTAS],
@@ -2827,6 +2855,11 @@ impl<'a> KernelHeap<'a> {
             return Err(HeapError::Quota);
         }
         if bytes > 512 {
+            let Some((index, record)) =
+                self.page_records.iter_mut().enumerate().find(|(_, record)| !record.used)
+            else {
+                return Err(HeapError::Exhausted);
+            };
             let pages = bytes.div_ceil(PAGE_SIZE as usize);
             let batch = self
                 .frames
@@ -2836,11 +2869,17 @@ impl<'a> KernelHeap<'a> {
                 .get(0)
                 .map(|lease| lease.address().raw() as usize)
                 .ok_or(HeapError::InvalidHandle)?;
+            record.used = true;
+            record.generation = next_generation(record.generation);
+            record.owner = owner;
+            record.bytes = bytes;
+            record.address = address;
+            record.pages = batch;
             self.quotas[quota_index].used += bytes;
             return Ok(HeapAllocation {
                 kind: HeapAllocationKind::Pages,
-                index: 0,
-                generation: 0,
+                index: index as u16,
+                generation: record.generation,
                 owner,
                 bytes,
                 address,
@@ -2885,12 +2924,30 @@ impl<'a> KernelHeap<'a> {
 
     pub fn free(&mut self, cpu: usize, allocation: HeapAllocation) -> Result<(), HeapError> {
         if allocation.kind == HeapAllocationKind::Pages {
-            let Some(batch) = allocation.pages else {
+            let Some(record) = self.page_records.get_mut(allocation.index as usize) else {
                 return Err(HeapError::InvalidHandle);
             };
-            self.frames.free_batch(cpu, batch).map_err(map_alloc_error)?;
+            if !record.used || record.generation != allocation.generation {
+                return Err(HeapError::StaleHandle);
+            }
+            if record.owner != allocation.owner {
+                return Err(HeapError::WrongOwner);
+            }
+            if record.address != allocation.address
+                || record.bytes != allocation.bytes
+                || allocation.pages != Some(record.pages)
+            {
+                return Err(HeapError::InvalidHandle);
+            }
+            let bytes = record.bytes;
+            self.frames.free_batch(cpu, record.pages).map_err(map_alloc_error)?;
+            record.used = false;
+            record.owner = OwnerId(0);
+            record.bytes = 0;
+            record.address = 0;
+            record.pages = FrameBatch::empty();
             if let Some(quota) = self.quotas.get_mut(allocation.owner.raw() as usize) {
-                quota.used = quota.used.saturating_sub(allocation.bytes);
+                quota.used = quota.used.saturating_sub(bytes);
             }
             return Ok(());
         }
@@ -2905,6 +2962,9 @@ impl<'a> KernelHeap<'a> {
         }
         if slot.owner != allocation.owner {
             return Err(HeapError::WrongOwner);
+        }
+        if slot.address != allocation.address || slot.bytes != allocation.bytes {
+            return Err(HeapError::InvalidHandle);
         }
         let Some(frame) = slot.frame else {
             return Err(HeapError::InvalidHandle);
@@ -2930,7 +2990,7 @@ impl<'a> KernelHeap<'a> {
         if address == 0 {
             return Err(HeapError::InvalidHandle);
         }
-        let allocation = {
+        let slab_allocation = {
             let central = self.central.try_lock().ok_or(HeapError::WouldBlock)?;
             central
                 .slots
@@ -2946,9 +3006,28 @@ impl<'a> KernelHeap<'a> {
                     address: slot.address,
                     pages: None,
                 })
-                .ok_or(HeapError::InvalidHandle)?
         };
-        self.free(cpu, allocation)
+        if let Some(allocation) = slab_allocation {
+            return self.free(cpu, allocation);
+        }
+        if let Some((index, record)) = self
+            .page_records
+            .iter()
+            .enumerate()
+            .find(|(_, record)| record.used && record.address == address)
+        {
+            let allocation = HeapAllocation {
+                kind: HeapAllocationKind::Pages,
+                index: index as u16,
+                generation: record.generation,
+                owner: record.owner,
+                bytes: record.bytes,
+                address: record.address,
+                pages: Some(record.pages),
+            };
+            return self.free(cpu, allocation);
+        }
+        Err(HeapError::InvalidHandle)
     }
 
     pub fn live_bytes(&self, owner: OwnerId) -> Option<usize> {
@@ -3266,7 +3345,8 @@ mod tests {
         let mut allocator = SmpFrameAllocator::empty();
         allocator.initialize(&normalized).unwrap();
         let owner = OwnerId::new(2).unwrap();
-        let mut heap = KernelHeap::new(&allocator);
+        let mut page_records = [HeapPageRecord::empty(); 2];
+        let mut heap = KernelHeap::new(&allocator, &mut page_records);
         heap.set_quota(owner, 8192).unwrap();
         assert_eq!(
             heap.alloc(0, owner, 32, 8, AllocationContext::Interrupt),
@@ -3282,7 +3362,8 @@ mod tests {
         assert_eq!(large.kind(), HeapAllocationKind::Pages);
         assert_ne!(large.address(), 0);
         assert_eq!(large.address() % PAGE_SIZE as usize, 0);
-        heap.free(0, large).unwrap();
+        heap.free_address(0, large.address()).unwrap();
+        assert_eq!(heap.free_address(0, large.address()), Err(HeapError::InvalidHandle));
     }
 
     #[test]
