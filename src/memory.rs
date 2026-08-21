@@ -2922,6 +2922,35 @@ impl<'a> KernelHeap<'a> {
         Ok(())
     }
 
+    /// Release a slab-backed allocation by its identity-mapped address.
+    ///
+    /// Large frame-batch allocations remain handle-owned until their pointer
+    /// record is added to the global allocator path.
+    pub fn free_address(&mut self, cpu: usize, address: usize) -> Result<(), HeapError> {
+        if address == 0 {
+            return Err(HeapError::InvalidHandle);
+        }
+        let allocation = {
+            let central = self.central.try_lock().ok_or(HeapError::WouldBlock)?;
+            central
+                .slots
+                .iter()
+                .enumerate()
+                .find(|(_, slot)| slot.used && slot.address == address)
+                .map(|(index, slot)| HeapAllocation {
+                    kind: HeapAllocationKind::Slab,
+                    index: index as u16,
+                    generation: slot.generation,
+                    owner: slot.owner,
+                    bytes: slot.bytes,
+                    address: slot.address,
+                    pages: None,
+                })
+                .ok_or(HeapError::InvalidHandle)?
+        };
+        self.free(cpu, allocation)
+    }
+
     pub fn live_bytes(&self, owner: OwnerId) -> Option<usize> {
         let central = self.central.try_lock()?;
         Some(
@@ -3247,7 +3276,8 @@ mod tests {
         assert_eq!(small.kind(), HeapAllocationKind::Slab);
         assert_ne!(small.address(), 0);
         assert_eq!(small.address() % PAGE_SIZE as usize, 0);
-        heap.free(0, small).unwrap();
+        heap.free_address(0, small.address()).unwrap();
+        assert_eq!(heap.free_address(0, small.address()), Err(HeapError::InvalidHandle));
         let large = heap.alloc(0, owner, 8192, 4096, AllocationContext::Thread).unwrap();
         assert_eq!(large.kind(), HeapAllocationKind::Pages);
         assert_ne!(large.address(), 0);
