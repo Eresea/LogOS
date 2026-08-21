@@ -5,6 +5,7 @@
 //! zeroing; this module owns identity, bounds, ownership, and wakeup contracts.
 
 use core::{
+    alloc::{GlobalAlloc, Layout},
     cell::UnsafeCell,
     future::Future,
     mem::{align_of, size_of},
@@ -3032,19 +3033,83 @@ impl<'a> KernelHeap<'a> {
 
     pub fn live_bytes(&self, owner: OwnerId) -> Option<usize> {
         let central = self.central.try_lock()?;
-        Some(
-            central
-                .slots
-                .iter()
-                .filter(|slot| slot.used && slot.owner == owner)
-                .map(|slot| slot.bytes)
-                .sum(),
-        )
+        let slab_bytes = central
+            .slots
+            .iter()
+            .filter(|slot| slot.used && slot.owner == owner)
+            .map(|slot| slot.bytes)
+            .sum::<usize>();
+        let page_bytes = self
+            .page_records
+            .iter()
+            .filter(|record| record.used && record.owner == owner)
+            .map(|record| record.bytes)
+            .sum::<usize>();
+        Some(slab_bytes.saturating_add(page_bytes))
     }
 
     pub fn live_objects(&self, owner: OwnerId) -> Option<usize> {
         let central = self.central.try_lock()?;
-        Some(central.slots.iter().filter(|slot| slot.used && slot.owner == owner).count())
+        let slab_objects =
+            central.slots.iter().filter(|slot| slot.used && slot.owner == owner).count();
+        let page_objects =
+            self.page_records.iter().filter(|record| record.used && record.owner == owner).count();
+        Some(slab_objects + page_objects)
+    }
+}
+
+/// `GlobalAlloc` adapter for a caller-owned kernel heap.
+///
+/// The adapter uses the current CPU on UEFI and CPU zero in host tests. It is
+/// intentionally not installed globally until live reclaim and boot binding
+/// are wired.
+pub struct KernelGlobalAllocator<'a> {
+    heap: TryLock<KernelHeap<'a>>,
+}
+
+impl<'a> KernelGlobalAllocator<'a> {
+    pub const fn new(heap: KernelHeap<'a>) -> Self {
+        Self { heap: TryLock::new(heap) }
+    }
+}
+
+fn global_allocator_cpu() -> usize {
+    #[cfg(target_os = "uefi")]
+    {
+        crate::current_cpu()
+    }
+    #[cfg(not(target_os = "uefi"))]
+    {
+        0
+    }
+}
+
+unsafe impl GlobalAlloc for KernelGlobalAllocator<'_> {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if layout.size() == 0 {
+            return layout.align() as *mut u8;
+        }
+        let Some(mut heap) = self.heap.try_lock() else {
+            return core::ptr::null_mut();
+        };
+        heap.alloc(
+            global_allocator_cpu(),
+            OwnerId::KERNEL,
+            layout.size(),
+            layout.align(),
+            AllocationContext::Thread,
+        )
+        .map(|allocation| allocation.address() as *mut u8)
+        .unwrap_or(core::ptr::null_mut())
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, _layout: Layout) {
+        if pointer.is_null() {
+            return;
+        }
+        if let Some(mut heap) = self.heap.try_lock() {
+            let _ = heap.free_address(global_allocator_cpu(), pointer as usize);
+        }
     }
 }
 
@@ -3364,6 +3429,31 @@ mod tests {
         assert_eq!(large.address() % PAGE_SIZE as usize, 0);
         heap.free_address(0, large.address()).unwrap();
         assert_eq!(heap.free_address(0, large.address()), Err(HeapError::InvalidHandle));
+    }
+
+    #[test]
+    fn global_allocator_adapter_tracks_layout_addresses() {
+        let normalized = normalize_memory_map(&map(&[(0x1000, 16, true)]), &[]).unwrap();
+        let mut allocator = SmpFrameAllocator::empty();
+        allocator.initialize(&normalized).unwrap();
+        let mut page_records = [HeapPageRecord::empty(); 2];
+        let heap = KernelHeap::new(&allocator, &mut page_records);
+        let global = KernelGlobalAllocator::new(heap);
+
+        let small_layout = Layout::from_size_align(32, 8).unwrap();
+        let small = unsafe { GlobalAlloc::alloc(&global, small_layout) };
+        assert!(!small.is_null());
+        assert_eq!(small as usize % small_layout.align(), 0);
+        unsafe { GlobalAlloc::dealloc(&global, small, small_layout) };
+
+        let large_layout = Layout::from_size_align(8192, PAGE_SIZE as usize).unwrap();
+        let large = unsafe { GlobalAlloc::alloc(&global, large_layout) };
+        assert!(!large.is_null());
+        assert_eq!(large as usize % large_layout.align(), 0);
+        unsafe { GlobalAlloc::dealloc(&global, large, large_layout) };
+
+        let unsupported = Layout::from_size_align(32, (PAGE_SIZE * 2) as usize).unwrap();
+        assert!(unsafe { GlobalAlloc::alloc(&global, unsupported) }.is_null());
     }
 
     #[test]
