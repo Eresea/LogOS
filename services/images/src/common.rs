@@ -624,3 +624,45 @@ fn manager_syscall(number: usize, capability_slot: usize, length: usize) -> IpcS
     }
     IpcStatus::from_raw(raw).unwrap_or(IpcStatus::Malformed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[repr(align(4096))]
+    struct TestHeap([u8; SERVICE_PAGE_BYTES * 3]);
+
+    #[test]
+    fn allocator_state_grows_and_reclaims_tail_pages() {
+        let mut backing = TestHeap([0; SERVICE_PAGE_BYTES * 3]);
+        let capability = logos_abi::CapabilityHandle::new(2, 1).unwrap();
+        let mut state = AllocatorState::EMPTY;
+        assert!(state.initialize(capability, backing.0.as_mut_ptr() as usize, 1, 3));
+        assert!(state.extend(2));
+
+        let layout = Layout::from_size_align(SERVICE_PAGE_BYTES * 2, 64).unwrap();
+        let pointer = state.allocate(layout);
+        assert!(!pointer.is_null());
+        unsafe { state.deallocate(pointer) };
+        assert!(state.can_shrink());
+        assert!(state.shrink(1));
+        assert!(state.shrink(1));
+        assert!(!state.can_shrink());
+        assert_eq!(state.mapped_end - state.base, SERVICE_PAGE_BYTES);
+    }
+
+    #[test]
+    fn allocator_state_enforces_quota() {
+        let mut backing = TestHeap([0; SERVICE_PAGE_BYTES * 3]);
+        let capability = logos_abi::CapabilityHandle::new(2, 1).unwrap();
+        let mut state = AllocatorState::EMPTY;
+        assert!(state.initialize(capability, backing.0.as_mut_ptr() as usize, 1, 2));
+        assert!(state.extend(1));
+        assert!(!state.extend(1));
+
+        let first = Layout::from_size_align(4_000, 64).unwrap();
+        let second = Layout::from_size_align(4_200, 64).unwrap();
+        assert!(!state.allocate(first).is_null());
+        assert!(state.allocate(second).is_null());
+    }
+}
