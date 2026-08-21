@@ -1160,6 +1160,27 @@ pub(crate) fn grow_service_heap(
     }
 }
 
+pub(crate) fn shrink_service_heap(
+    process: crate::process::ProcessHandle,
+    capability_raw: u64,
+    pages: usize,
+) -> logos_abi::IpcStatus {
+    if !service_runtime_ready() {
+        return logos_abi::IpcStatus::Unauthorized;
+    }
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    if service_runtime_restarting() {
+        return logos_abi::IpcStatus::Disconnected;
+    }
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).shrink_service_heap(
+            process,
+            capability_raw,
+            pages,
+        )
+    }
+}
+
 pub(crate) fn manager_call(
     process: crate::process::ProcessHandle,
     capability_slot: usize,

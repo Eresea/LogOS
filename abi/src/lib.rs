@@ -129,6 +129,7 @@ pub const NETWORK_REQUEST_FLAG_LISTENER: u8 = 1 << 0;
 pub const IPC_SYSCALL_SEND: usize = 4;
 pub const IPC_SYSCALL_RECEIVE: usize = 5;
 pub const SERVICE_HEAP_GROW_SYSCALL: usize = 15;
+pub const SERVICE_HEAP_SHRINK_SYSCALL: usize = 16;
 pub const MANAGER_SYSCALL: usize = 12;
 pub const PROGRAM_EXIT_SYSCALL: usize = 14;
 pub const POWER_SYSCALL: usize = 11;

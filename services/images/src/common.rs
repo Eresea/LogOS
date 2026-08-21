@@ -105,6 +105,33 @@ impl AllocatorState {
         true
     }
 
+    fn can_shrink(&self) -> bool {
+        self.mapped_end.saturating_sub(self.base) > SERVICE_PAGE_BYTES
+            && self.free.iter().take(self.free_len).any(|block| {
+                block.start.saturating_add(block.bytes) == self.mapped_end
+                    && block.bytes >= SERVICE_PAGE_BYTES
+            })
+    }
+
+    fn shrink(&mut self, pages: usize) -> bool {
+        if pages != 1 || !self.can_shrink() {
+            return false;
+        }
+        let new_end = self.mapped_end - SERVICE_PAGE_BYTES;
+        let Some(index) = self.free.iter().take(self.free_len).position(|block| {
+            block.start.saturating_add(block.bytes) == self.mapped_end
+                && block.bytes >= SERVICE_PAGE_BYTES
+        }) else {
+            return false;
+        };
+        self.free[index].bytes -= SERVICE_PAGE_BYTES;
+        if self.free[index].bytes == 0 {
+            self.remove(index);
+        }
+        self.mapped_end = new_end;
+        true
+    }
+
     fn allocate(&mut self, layout: Layout) -> *mut u8 {
         if layout.size() == 0 || layout.size() > self.quota_end.saturating_sub(self.base) {
             return ptr::null_mut();
@@ -286,7 +313,11 @@ unsafe impl GlobalAlloc for ServiceAllocator {
 
     unsafe fn dealloc(&self, pointer: *mut u8, _layout: Layout) {
         let guard = self.lock();
-        unsafe { (&mut *guard.allocator.state.get()).deallocate(pointer) };
+        let state = unsafe { &mut *guard.allocator.state.get() };
+        unsafe { state.deallocate(pointer) };
+        if state.can_shrink() && request_heap_shrink(state.heap_capability) {
+            state.shrink(1);
+        }
     }
 }
 
@@ -313,6 +344,28 @@ fn request_heap_growth(capability: logos_abi::CapabilityHandle) -> bool {
     #[cfg(target_os = "none")]
     {
         let mut raw = logos_abi::SERVICE_HEAP_GROW_SYSCALL;
+        unsafe {
+            asm!(
+                "int 49",
+                inout("rax") raw,
+                in("rdi") capability.raw() as usize,
+                in("rsi") 1usize,
+                options(preserves_flags),
+            );
+        }
+        raw == logos_abi::IpcStatus::Ok as usize
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = capability;
+        false
+    }
+}
+
+fn request_heap_shrink(capability: logos_abi::CapabilityHandle) -> bool {
+    #[cfg(target_os = "none")]
+    {
+        let mut raw = logos_abi::SERVICE_HEAP_SHRINK_SYSCALL;
         unsafe {
             asm!(
                 "int 49",

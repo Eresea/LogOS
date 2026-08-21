@@ -1035,6 +1035,45 @@ impl ServiceRuntime {
         logos_abi::IpcStatus::Ok
     }
 
+    pub(crate) fn shrink_service_heap(
+        &mut self,
+        process: ProcessHandle,
+        capability_raw: u64,
+        pages: usize,
+    ) -> logos_abi::IpcStatus {
+        if pages != 1 {
+            return logos_abi::IpcStatus::Malformed;
+        }
+        let Some(service) = self.service_for_process(process) else {
+            return logos_abi::IpcStatus::Unauthorized;
+        };
+        let generation = (self.service_epoch as u32).max(1);
+        let Some(expected) = logos_abi::CapabilityHandle::new(2, generation) else {
+            return logos_abi::IpcStatus::Stale;
+        };
+        if capability_raw != expected.raw() {
+            return logos_abi::IpcStatus::Unauthorized;
+        }
+        let index = service.index();
+        let page = self.service_heap_pages[index];
+        if page <= logos_abi::SERVICE_HEAP_INITIAL_PAGES {
+            return logos_abi::IpcStatus::Full;
+        }
+        let address = logos_abi::SERVICE_HEAP_BASE + (page - 1) * crate::loader::PAGE_SIZE;
+        let tables = unsafe { self.tables[index].assume_init_mut() };
+        let mut memory = IdentityPageTableMemory;
+        let frame = match tables.unmap_page(address, &mut memory) {
+            Ok(frame) => frame,
+            Err(_) => return logos_abi::IpcStatus::Full,
+        };
+        if self.frame_pool.release(frame).is_err() {
+            crate::arch_fatal(b"LogOS vNext: service heap release");
+        }
+        self.service_heap_frames[index][page - 1] = 0;
+        self.service_heap_pages[index] = page - 1;
+        logos_abi::IpcStatus::Ok
+    }
+
     fn map_framebuffer_config(&mut self, frame: FrameAddress) -> Result<(), ServiceRuntimeError> {
         let service = ServiceId::Display;
         let index = service.index();
