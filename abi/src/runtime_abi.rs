@@ -74,6 +74,7 @@ pub enum EventOperation {
     Remove = 5,
     Wait = 6,
     Signal = 7,
+    DestroySet = 8,
 }
 
 impl EventOperation {
@@ -86,6 +87,7 @@ impl EventOperation {
             5 => Some(Self::Remove),
             6 => Some(Self::Wait),
             7 => Some(Self::Signal),
+            8 => Some(Self::DestroySet),
             _ => None,
         }
     }

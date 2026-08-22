@@ -3166,7 +3166,7 @@ impl ServiceRuntime {
                 Err(error) => event_status(error),
             },
             logos_abi::EventOperation::Destroy => events
-                .destroy_event(request.event)
+                .destroy_event(owner, request.event)
                 .map_or_else(event_status, |_| logos_abi::EventStatus::Ok),
             logos_abi::EventOperation::CreateSet => match events.create_set(owner) {
                 Ok(set) => {
@@ -3180,6 +3180,9 @@ impl ServiceRuntime {
                 .map_or_else(event_status, |_| logos_abi::EventStatus::Ok),
             logos_abi::EventOperation::Remove => events
                 .remove(owner, request.event_set, request.event)
+                .map_or_else(event_status, |_| logos_abi::EventStatus::Ok),
+            logos_abi::EventOperation::DestroySet => events
+                .destroy_set(owner, request.event_set)
                 .map_or_else(event_status, |_| logos_abi::EventStatus::Ok),
             logos_abi::EventOperation::Wait => match events.wait_any(
                 owner,

@@ -167,8 +167,15 @@ impl RuntimeEventRegistry {
         }
     }
 
-    pub fn destroy_event(&mut self, event: EventHandle) -> Result<(), EventError> {
+    pub fn destroy_event(
+        &mut self,
+        owner: ServiceHandle,
+        event: EventHandle,
+    ) -> Result<(), EventError> {
         let index = self.event_index(event)?;
+        if self.events[index].value.as_ref().is_some_and(|record| record.owner != owner) {
+            return Err(EventError::Unauthorized);
+        }
         self.events[index].value = None;
         self.events[index].generation = next_generation(self.events[index].generation);
         for set in &mut self.sets {
@@ -179,8 +186,15 @@ impl RuntimeEventRegistry {
         Ok(())
     }
 
-    pub fn destroy_set(&mut self, set: EventSetHandle) -> Result<(), EventError> {
+    pub fn destroy_set(
+        &mut self,
+        owner: ServiceHandle,
+        set: EventSetHandle,
+    ) -> Result<(), EventError> {
         let index = self.set_index(set)?;
+        if self.sets[index].value.as_ref().is_some_and(|record| record.owner != owner) {
+            return Err(EventError::Unauthorized);
+        }
         self.sets[index].value = None;
         self.sets[index].generation = next_generation(self.sets[index].generation);
         Ok(())
@@ -295,10 +309,10 @@ mod tests {
         let set = events.create_set(owner).unwrap();
         events.add(owner, set, event).unwrap();
         assert_eq!(events.wait_any(owner, set, 10, Some(10)), Ok(EventWait::Timeout));
-        events.destroy_event(event).unwrap();
+        events.destroy_event(owner, event).unwrap();
         assert_eq!(events.signal_irq(event), Err(EventError::Stale));
-        assert_eq!(events.destroy_set(set), Ok(()));
-        assert_eq!(events.destroy_set(set), Err(EventError::Stale));
+        assert_eq!(events.destroy_set(owner, set), Ok(()));
+        assert_eq!(events.destroy_set(owner, set), Err(EventError::Stale));
     }
 
     #[test]
@@ -310,5 +324,7 @@ mod tests {
         let set = events.create_set(other).unwrap();
         assert_eq!(events.add(other, set, event), Err(EventError::Unauthorized));
         assert_eq!(events.signal(other, event), Err(EventError::Unauthorized));
+        assert_eq!(events.destroy_event(other, event), Err(EventError::Unauthorized));
+        assert_eq!(events.destroy_set(owner, set), Err(EventError::Unauthorized));
     }
 }
