@@ -185,6 +185,17 @@ impl ManagerRequest {
     pub fn name(&self) -> &[u8] {
         &self.name[..self.name_len as usize]
     }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, operation))
+            .and_then(|raw| ManagerOperation::from_raw(*raw))
+            .is_some()
+            && bytes
+                .get(core::mem::offset_of!(Self, target_kind))
+                .and_then(|raw| ManagerTargetKind::from_raw(*raw))
+                .is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -312,3 +323,19 @@ const _: () = assert!(core::mem::offset_of!(ManagerResponse, record) == 16);
 const _: () = assert!(core::mem::size_of::<ManagerCapabilityPage>() <= crate::IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::size_of::<ManagerRequest>() <= crate::IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::size_of::<ManagerResponse>() <= crate::IPC_PAGE_BYTES);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_enum_bytes_are_validated_before_typed_decoding() {
+        let mut bytes = [0u8; core::mem::size_of::<ManagerRequest>()];
+        bytes[core::mem::offset_of!(ManagerRequest, operation)] = ManagerOperation::List as u8;
+        bytes[core::mem::offset_of!(ManagerRequest, target_kind)] =
+            ManagerTargetKind::Service as u8;
+        assert!(ManagerRequest::wire_enums_valid(&bytes));
+        bytes[core::mem::offset_of!(ManagerRequest, target_kind)] = u8::MAX;
+        assert!(!ManagerRequest::wire_enums_valid(&bytes));
+    }
+}

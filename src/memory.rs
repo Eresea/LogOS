@@ -901,6 +901,39 @@ impl PhysicalFrameManager {
         Ok(batch)
     }
 
+    pub fn alloc_contiguous(
+        &mut self,
+        owner: OwnerId,
+        count: usize,
+        state: FrameState,
+    ) -> Result<FrameBatch, FrameError> {
+        if owner.0 == 0 {
+            return Err(FrameError::InvalidFrame);
+        }
+        if count == 0 || count > MAX_BATCH_FRAMES {
+            return Err(FrameError::BatchCapacity);
+        }
+        for run_index in 0..self.run_count {
+            let run = self.runs[run_index];
+            if run.pages < count {
+                continue;
+            }
+            for offset in 0..=run.pages - count {
+                let first = run.first_slot + offset;
+                if !(first..first + count).all(|slot| self.is_free(slot)) {
+                    continue;
+                }
+                let mut batch = FrameBatch::empty();
+                for slot in first..first + count {
+                    let lease = self.claim(slot, owner, state)?;
+                    batch.push(lease)?;
+                }
+                return Ok(batch);
+            }
+        }
+        Err(FrameError::Exhausted)
+    }
+
     pub fn free(&mut self, lease: FrameLease) -> Result<(), FrameError> {
         let slot = self.validate_lease(lease)?;
         self.release_slot(slot, lease.owner);
@@ -1813,6 +1846,42 @@ impl SmpFrameAllocator {
             batch.push(lease).map_err(|_| AllocationError::BatchCapacity)?;
         }
         Ok(batch)
+    }
+
+    pub fn alloc_contiguous(
+        &self,
+        owner: OwnerId,
+        count: usize,
+        state: FrameState,
+    ) -> Result<FrameBatch, AllocationError> {
+        if owner.0 == 0 {
+            return Err(AllocationError::InvalidOwner);
+        }
+        if !self.initialized.load(Ordering::Acquire) {
+            return Err(AllocationError::Exhausted);
+        }
+        if count == 0 || count > MAX_BATCH_FRAMES {
+            return Err(AllocationError::BatchCapacity);
+        }
+        let mut guards: [Option<TryLockGuard<'_, ShardState>>; MAX_FRAME_SHARDS] =
+            core::array::from_fn(|_| None);
+        for (index, shard) in self.shards.iter().enumerate() {
+            let Some(guard) = shard.lock.try_lock() else {
+                self.stats.contention.fetch_add(1, Ordering::Relaxed);
+                return Err(AllocationError::WouldBlock);
+            };
+            guards[index] = Some(guard);
+        }
+        // SAFETY: every frame shard is held, so the manager bitmap and records
+        // cannot change while the contiguous run is selected and claimed.
+        let result = unsafe { &mut *self.manager.get() }.alloc_contiguous(owner, count, state);
+        drop(guards);
+        result.map_err(|error| match error {
+            FrameError::Exhausted => AllocationError::Exhausted,
+            FrameError::BatchCapacity => AllocationError::BatchCapacity,
+            FrameError::WrongOwner => AllocationError::WrongOwner,
+            _ => AllocationError::StaleHandle,
+        })
     }
 
     pub fn free(&self, cpu: usize, lease: FrameLease) -> Result<(), AllocationError> {
@@ -2970,7 +3039,7 @@ impl<'a> KernelHeap<'a> {
         if cpu >= MAX_MEMORY_CPUS || owner.0 == 0 || bytes == 0 || !alignment.is_power_of_two() {
             return Err(HeapError::InvalidRequest);
         }
-        if alignment > bytes || alignment > PAGE_SIZE as usize {
+        if alignment > PAGE_SIZE as usize {
             return Err(HeapError::InvalidRequest);
         }
         let quota_index = owner.raw() as usize;
@@ -2988,7 +3057,7 @@ impl<'a> KernelHeap<'a> {
             };
             let batch = self
                 .frames
-                .alloc_batch(cpu, owner, pages, FrameState::Dirty)
+                .alloc_contiguous(owner, pages, FrameState::Dirty)
                 .map_err(map_alloc_error)?;
             let address = batch
                 .get(0)
@@ -3069,7 +3138,6 @@ impl<'a> KernelHeap<'a> {
         }
         if layout.size() > 512
             || !layout.align().is_power_of_two()
-            || layout.align() > layout.size()
             || layout.align() > PAGE_SIZE as usize
         {
             return Err(HeapError::WouldBlock);
@@ -3769,8 +3837,19 @@ mod tests {
         assert_eq!(large.kind(), HeapAllocationKind::Pages);
         assert_ne!(large.address(), 0);
         assert_eq!(large.address() % PAGE_SIZE as usize, 0);
+        let pages = large.pages().unwrap();
+        assert_eq!(pages.get(1).unwrap().address().raw(), large.address() as u64 + PAGE_SIZE);
         heap.free_address(0, large.address()).unwrap();
         assert_eq!(heap.free_address(0, large.address()), Err(HeapError::InvalidHandle));
+    }
+
+    #[test]
+    fn contiguous_allocator_rejects_disjoint_free_frames() {
+        let mut manager = manager(&[(0x1000, 1, true), (0x9000, 1, true)]);
+        assert_eq!(
+            manager.alloc_contiguous(OwnerId::KERNEL, 2, FrameState::Dirty),
+            Err(FrameError::Exhausted)
+        );
     }
 
     #[test]
@@ -3864,6 +3943,12 @@ mod tests {
 
         let unsupported = Layout::from_size_align(32, (PAGE_SIZE * 2) as usize).unwrap();
         assert!(unsafe { GlobalAlloc::alloc(&global, unsupported) }.is_null());
+
+        let high_alignment = Layout::from_size_align(1, PAGE_SIZE as usize).unwrap();
+        let aligned = unsafe { GlobalAlloc::alloc(&global, high_alignment) };
+        assert!(!aligned.is_null());
+        assert_eq!(aligned as usize % high_alignment.align(), 0);
+        unsafe { GlobalAlloc::dealloc(&global, aligned, high_alignment) };
     }
 
     #[test]

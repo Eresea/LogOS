@@ -157,6 +157,13 @@ impl EventRequest {
             && self.reserved == 0
             && self.request_id != 0
     }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, operation))
+            .and_then(|raw| EventOperation::from_raw(*raw))
+            .is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -302,6 +309,13 @@ impl DirectoryRequest {
             && DirectoryOperation::from_raw(self.operation as u8).is_some()
             && self.reserved == 0
             && self.request_id != 0
+    }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, operation))
+            .and_then(|raw| DirectoryOperation::from_raw(*raw))
+            .is_some()
     }
 }
 
@@ -485,5 +499,21 @@ mod tests {
             Some(EventStatus::Malformed)
         );
         assert!(EventOperation::from_raw(99).is_none());
+    }
+
+    #[test]
+    fn wire_enum_bytes_are_validated_before_typed_decoding() {
+        let mut directory = [0u8; core::mem::size_of::<DirectoryRequest>()];
+        directory[core::mem::offset_of!(DirectoryRequest, operation)] =
+            DirectoryOperation::Services as u8;
+        assert!(DirectoryRequest::wire_enums_valid(&directory));
+        directory[core::mem::offset_of!(DirectoryRequest, operation)] = u8::MAX;
+        assert!(!DirectoryRequest::wire_enums_valid(&directory));
+
+        let mut event = [0u8; core::mem::size_of::<EventRequest>()];
+        event[core::mem::offset_of!(EventRequest, operation)] = EventOperation::Wait as u8;
+        assert!(EventRequest::wire_enums_valid(&event));
+        event[core::mem::offset_of!(EventRequest, operation)] = u8::MAX;
+        assert!(!EventRequest::wire_enums_valid(&event));
     }
 }

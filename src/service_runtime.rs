@@ -2831,6 +2831,15 @@ impl ServiceRuntime {
         let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
             return logos_abi::DirectoryStatus::Unauthorized;
         };
+        let wire = unsafe {
+            core::slice::from_raw_parts(
+                staging_frame.raw() as usize as *const u8,
+                core::mem::size_of::<logos_abi::DirectoryRequest>(),
+            )
+        };
+        if !logos_abi::DirectoryRequest::wire_enums_valid(wire) {
+            return logos_abi::DirectoryStatus::Malformed;
+        }
         let request = unsafe {
             core::ptr::read_unaligned(
                 staging_frame.raw() as usize as *const logos_abi::DirectoryRequest
@@ -2993,6 +3002,12 @@ impl ServiceRuntime {
         if logos_abi::ManagerOperation::from_raw(operation).is_none() {
             return logos_abi::IpcStatus::Malformed;
         }
+        let wire = unsafe {
+            core::slice::from_raw_parts(bytes, core::mem::size_of::<logos_abi::ManagerRequest>())
+        };
+        if !logos_abi::ManagerRequest::wire_enums_valid(wire) {
+            return logos_abi::IpcStatus::Malformed;
+        }
         let request =
             unsafe { core::ptr::read_unaligned(bytes.cast::<logos_abi::ManagerRequest>()) };
         let mut decision = self.manager.request(request, capability.rights);
@@ -3116,6 +3131,15 @@ impl ServiceRuntime {
         let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
             return logos_abi::EventStatus::Unauthorized;
         };
+        let wire = unsafe {
+            core::slice::from_raw_parts(
+                staging_frame.raw() as usize as *const u8,
+                core::mem::size_of::<logos_abi::EventRequest>(),
+            )
+        };
+        if !logos_abi::EventRequest::wire_enums_valid(wire) {
+            return logos_abi::EventStatus::Malformed;
+        }
         let request = unsafe {
             core::ptr::read_unaligned(staging_frame.raw() as usize as *const logos_abi::EventRequest)
         };
