@@ -49,6 +49,31 @@ const NETWORK_RECEIVE: common::CapabilitySpec = common::capability_contract(
     logos_abi::IpcRights::Receive,
 );
 
+#[derive(Clone, Copy)]
+struct IpcCapabilities {
+    flow_receive: logos_abi::CapabilityHandle,
+    flow_send: logos_abi::CapabilityHandle,
+    storage_send: logos_abi::CapabilityHandle,
+    storage_receive: logos_abi::CapabilityHandle,
+    network_send: logos_abi::CapabilityHandle,
+    network_receive: logos_abi::CapabilityHandle,
+}
+
+static mut IPC_CAPABILITIES: Option<IpcCapabilities> = None;
+
+fn ipc_capabilities() -> IpcCapabilities {
+    unsafe {
+        (*core::ptr::addr_of!(IPC_CAPABILITIES)).unwrap_or(IpcCapabilities {
+            flow_receive: logos_abi::CapabilityHandle::EMPTY,
+            flow_send: logos_abi::CapabilityHandle::EMPTY,
+            storage_send: logos_abi::CapabilityHandle::EMPTY,
+            storage_receive: logos_abi::CapabilityHandle::EMPTY,
+            network_send: logos_abi::CapabilityHandle::EMPTY,
+            network_receive: logos_abi::CapabilityHandle::EMPTY,
+        })
+    }
+}
+
 const MAX_PATH_BYTES: usize = 160;
 const POLL_TIMEOUT_TICKS: u32 = 30_000;
 
@@ -148,7 +173,7 @@ fn bytes_message<T: Copy>(kind: MessageKind, value: &T) -> Option<IpcBytes> {
 
 fn send_progress(operation: &Operation, status: FetchStatus) {
     if let Some(message) = bytes_message(MessageKind::FetchResponse, &operation.response(status)) {
-        let _ = common::ipc_send(FLOW_SEND, &message);
+        let _ = common::ipc_send_handle(ipc_capabilities().flow_send, &message);
     }
 }
 
@@ -168,7 +193,7 @@ fn send_body_chunk(operation: &mut Operation) -> Result<bool, FetchStatus> {
     let Some(message) = bytes_message(MessageKind::FetchBodyChunk, &chunk) else {
         return Err(FetchStatus::Malformed);
     };
-    match common::ipc_send(FLOW_SEND, &message) {
+    match common::ipc_send_handle(ipc_capabilities().flow_send, &message) {
         IpcStatus::Ok => {
             operation.body_offset = end;
             Ok(operation.body_offset == body.len())
@@ -184,7 +209,7 @@ fn send_network(operation: &mut Operation, mut request: NetworkRequest) -> bool 
     let Some(message) = bytes_message(MessageKind::NetworkRequest, &request) else {
         return false;
     };
-    if common::ipc_send(NETWORK_SEND, &message) != IpcStatus::Ok {
+    if common::ipc_send_handle(ipc_capabilities().network_send, &message) != IpcStatus::Ok {
         return false;
     }
     operation.pending = Some((PendingKind::Network, request.request_id));
@@ -214,7 +239,7 @@ fn send_storage(operation: &mut Operation, message: Option<IpcBytes>, request_id
     let Some(message) = message else {
         return false;
     };
-    if common::ipc_send(STORAGE_SEND, &message) != IpcStatus::Ok {
+    if common::ipc_send_handle(ipc_capabilities().storage_send, &message) != IpcStatus::Ok {
         return false;
     }
     operation.pending = Some((PendingKind::Storage, request_id));
@@ -241,7 +266,7 @@ fn cleanup(operation: &mut Operation, abort_stage: bool) {
     if let Some((PendingKind::Network, request_id)) = operation.pending {
         let cancel = NetworkRequest::new(NetworkOperation::Cancel, request_id);
         if let Some(message) = bytes_message(MessageKind::NetworkRequest, &cancel) {
-            let _ = common::ipc_send(NETWORK_SEND, &message);
+            let _ = common::ipc_send_handle(ipc_capabilities().network_send, &message);
         }
     }
     if operation.network_handle != 0 {
@@ -252,7 +277,7 @@ fn cleanup(operation: &mut Operation, abort_stage: bool) {
         close.generation = operation.network_generation;
         close.service_epoch = operation.network_epoch;
         if let Some(message) = bytes_message(MessageKind::NetworkRequest, &close) {
-            let _ = common::ipc_send(NETWORK_SEND, &message);
+            let _ = common::ipc_send_handle(ipc_capabilities().network_send, &message);
         }
     }
     if abort_stage && operation.stage_handle != 0 {
@@ -268,7 +293,7 @@ fn cleanup(operation: &mut Operation, abort_stage: bool) {
             &[],
             &[],
         ) {
-            let _ = common::ipc_send(STORAGE_SEND, &message);
+            let _ = common::ipc_send_handle(ipc_capabilities().storage_send, &message);
         }
     }
 }
@@ -488,6 +513,33 @@ fn handle_storage(
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
+    let capabilities = IpcCapabilities {
+        flow_receive: match common::capability_handle(FLOW_RECEIVE) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        flow_send: match common::capability_handle(FLOW_SEND) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        storage_send: match common::capability_handle(STORAGE_SEND) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        storage_receive: match common::capability_handle(STORAGE_RECEIVE) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        network_send: match common::capability_handle(NETWORK_SEND) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        network_receive: match common::capability_handle(NETWORK_RECEIVE) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+    };
+    unsafe { *core::ptr::addr_of_mut!(IPC_CAPABILITIES) = Some(capabilities) };
     let mut operation: Option<Operation> = None;
     let mut ticks = 0u16;
     let mut elapsed = 0u32;
@@ -495,7 +547,8 @@ pub extern "C" fn _start() -> ! {
         common::heartbeat_tick(&mut ticks, logos_abi::ServiceId::Fetch);
         elapsed = elapsed.saturating_add(1);
         let mut control = IpcBytes::empty(MessageKind::FetchControl);
-        if common::ipc_receive(FLOW_RECEIVE, &mut control) == IpcStatus::Ok
+        if common::ipc_receive_handle(ipc_capabilities().flow_receive, &mut control)
+            == IpcStatus::Ok
             && control.len as usize == mem::size_of::<FetchControl>()
         {
             let value: FetchControl =
@@ -521,7 +574,8 @@ pub extern "C" fn _start() -> ! {
         }
         if operation.is_none() {
             let mut message = IpcBytes::empty(MessageKind::FetchRequest);
-            if common::ipc_receive(FLOW_RECEIVE, &mut message) == IpcStatus::Ok
+            if common::ipc_receive_handle(ipc_capabilities().flow_receive, &mut message)
+                == IpcStatus::Ok
                 && message.len as usize == mem::size_of::<FetchRequest>()
             {
                 let request: FetchRequest =
@@ -549,7 +603,8 @@ pub extern "C" fn _start() -> ! {
                             if let Some(message) =
                                 bytes_message(MessageKind::FetchResponse, &response)
                             {
-                                let _ = common::ipc_send(FLOW_SEND, &message);
+                                let _ =
+                                    common::ipc_send_handle(ipc_capabilities().flow_send, &message);
                             }
                         }
                     }
@@ -560,7 +615,8 @@ pub extern "C" fn _start() -> ! {
             if let Some((kind, _)) = current.pending {
                 if kind == PendingKind::Network {
                     let mut message = IpcBytes::empty(MessageKind::NetworkResponse);
-                    if common::ipc_receive(NETWORK_RECEIVE, &mut message) == IpcStatus::Ok
+                    if common::ipc_receive_handle(ipc_capabilities().network_receive, &mut message)
+                        == IpcStatus::Ok
                         && message.len as usize == mem::size_of::<NetworkResponse>()
                     {
                         let response: NetworkResponse =
@@ -571,7 +627,9 @@ pub extern "C" fn _start() -> ! {
                     }
                 } else if kind == PendingKind::Storage {
                     let mut message = IpcBytes::empty(MessageKind::StorageResponse);
-                    if common::ipc_receive(STORAGE_RECEIVE, &mut message) == IpcStatus::Ok {
+                    if common::ipc_receive_handle(ipc_capabilities().storage_receive, &mut message)
+                        == IpcStatus::Ok
+                    {
                         if let Ok(response) = StorageApiResponse::decode(&message) {
                             if let Some(status) = handle_storage(current, response) {
                                 finish(&mut operation, status);
