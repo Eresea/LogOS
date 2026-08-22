@@ -273,10 +273,11 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
         let Some(launch) = SCHEDULER.user_launch(handle) else {
             return false;
         };
-        let capability_slot = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) };
+        let capability_raw =
+            unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) } as u64;
         let length = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(9)) };
         prepare_kernel();
-        let status = crate::arch::manager_call(launch.process(), capability_slot, length);
+        let status = crate::arch::manager_call(launch.process(), capability_raw, length);
         unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status as usize) };
         #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
         if status == logos_abi::IpcStatus::Ok {

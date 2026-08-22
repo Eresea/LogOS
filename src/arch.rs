@@ -1209,7 +1209,7 @@ pub(crate) fn event_call(
 
 pub(crate) fn manager_call(
     process: crate::process::ProcessHandle,
-    capability_slot: usize,
+    capability_raw: u64,
     length: usize,
 ) -> logos_abi::IpcStatus {
     if !service_runtime_ready() {
@@ -1222,7 +1222,7 @@ pub(crate) fn manager_call(
     unsafe {
         (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).manager_call(
             process,
-            capability_slot,
+            capability_raw,
             length,
         )
     }
@@ -1234,6 +1234,12 @@ pub(crate) fn manager_proof(
 ) -> Option<logos_abi::ManagerResponse> {
     let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe { (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).manager_proof(request) }
+}
+
+#[cfg(feature = "qemu-proof")]
+pub(crate) fn event_proof() -> bool {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe { (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).event_proof() }
 }
 
 #[cfg(feature = "qemu-proof")]
@@ -1806,6 +1812,24 @@ pub(crate) fn prepare_user_wait(
     timeout: u64,
 ) -> Option<bool> {
     context::prepare_wait(handle, mask, timeout)
+}
+
+pub(crate) fn prepare_service_event_wait(
+    task: crate::TaskHandle,
+    mask: u64,
+    deadline: u64,
+) -> Option<bool> {
+    let should_block = SCHEDULER.wait_for_events(task, mask, deadline)?;
+    if should_block {
+        let cpu = current_cpu();
+        unsafe {
+            CPU_LOCALS[cpu].pending_action.store(
+                if deadline == u64::MAX { ACTION_BLOCK } else { ACTION_TIMED_BLOCK },
+                Ordering::Release,
+            );
+        }
+    }
+    Some(should_block)
 }
 
 pub(crate) fn signal_events(mask: u64) -> usize {

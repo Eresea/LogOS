@@ -107,6 +107,7 @@ fn event_status(error: crate::runtime_events::EventError) -> logos_abi::EventSta
         crate::runtime_events::EventError::InvalidDeadline => {
             logos_abi::EventStatus::InvalidDeadline
         }
+        crate::runtime_events::EventError::Busy => logos_abi::EventStatus::Busy,
     }
 }
 
@@ -149,12 +150,13 @@ pub struct ServiceRuntime {
     dynamic_ipc: Option<RuntimeIpcRegistry>,
     dynamic_services: Option<crate::runtime_services::RuntimeServiceRegistry>,
     dynamic_events: Option<crate::runtime_events::RuntimeEventRegistry>,
-    dynamic_endpoints: [logos_abi::EndpointHandle; logos_abi::IPC_ENDPOINT_COUNT],
-    dynamic_capabilities:
-        [[logos_abi::CapabilityHandle; logos_abi::MAX_IPC_CAPABILITIES]; SERVICE_COUNT],
+    dynamic_endpoints: Vec<logos_abi::EndpointHandle>,
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
     ipc_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
     service_bootstrap_frames: [u64; SERVICE_COUNT],
+    bootstrap_control: [logos_abi::CapabilityHandle; SERVICE_COUNT],
+    bootstrap_directory: [logos_abi::CapabilityHandle; SERVICE_COUNT],
+    bootstrap_heap: [logos_abi::CapabilityHandle; SERVICE_COUNT],
     service_heaps: [ServiceHeapState; SERVICE_COUNT],
     user_kdf_workspace: [u64; logos_abi::USER_KDF_WORKSPACE_PAGES],
     storage_data_frames: [Option<FrameAddress>; logos_abi::STORAGE_DATA_PAGES],
@@ -179,6 +181,7 @@ pub struct ServiceRuntime {
     device_response: Option<logos_abi::DeviceResponse>,
     storage_map_response: Option<logos_abi::StorageMapResponse>,
     package_request: Option<logos_abi::PackageRequest>,
+    package_capability: logos_abi::CapabilityHandle,
     package_response: Option<logos_abi::PackageResponse>,
     #[allow(dead_code)]
     package_next_request: u32,
@@ -381,12 +384,13 @@ impl ServiceRuntime {
             dynamic_ipc: None,
             dynamic_services: None,
             dynamic_events: None,
-            dynamic_endpoints: [logos_abi::EndpointHandle::EMPTY; logos_abi::IPC_ENDPOINT_COUNT],
-            dynamic_capabilities: [[logos_abi::CapabilityHandle::EMPTY;
-                logos_abi::MAX_IPC_CAPABILITIES]; SERVICE_COUNT],
+            dynamic_endpoints: Vec::new(),
             ipc_staging_frames: [None; SERVICE_COUNT],
             ipc_capability_frames: [None; SERVICE_COUNT],
             service_bootstrap_frames: [0; SERVICE_COUNT],
+            bootstrap_control: [logos_abi::CapabilityHandle::EMPTY; SERVICE_COUNT],
+            bootstrap_directory: [logos_abi::CapabilityHandle::EMPTY; SERVICE_COUNT],
+            bootstrap_heap: [logos_abi::CapabilityHandle::EMPTY; SERVICE_COUNT],
             service_heaps: [const { ServiceHeapState::empty() }; SERVICE_COUNT],
             user_kdf_workspace: [0; logos_abi::USER_KDF_WORKSPACE_PAGES],
             storage_data_frames: [None; logos_abi::STORAGE_DATA_PAGES],
@@ -410,6 +414,7 @@ impl ServiceRuntime {
             device_response: None,
             storage_map_response: None,
             package_request: None,
+            package_capability: logos_abi::CapabilityHandle::EMPTY,
             package_response: None,
             package_next_request: 1,
             prepared_packages: [const { None }; SERVICE_COUNT],
@@ -493,59 +498,63 @@ impl ServiceRuntime {
 
     fn initialize_dynamic_ipc(&mut self) -> Result<(), ServiceRuntimeError> {
         let generation = (self.service_epoch as u32).max(1);
-        let mut registry = RuntimeIpcRegistry::new();
+        let mut registry = RuntimeIpcRegistry::new_with_generation(generation);
         let mut events =
             crate::runtime_events::RuntimeEventRegistry::new_with_generation(generation);
-        let mut endpoints = [logos_abi::EndpointHandle::EMPTY; logos_abi::IPC_ENDPOINT_COUNT];
-        let mut capabilities =
-            [[logos_abi::CapabilityHandle::EMPTY; logos_abi::MAX_IPC_CAPABILITIES]; SERVICE_COUNT];
-
-        for (raw, endpoint_slot) in endpoints.iter_mut().enumerate() {
+        let mut endpoints = Vec::new();
+        endpoints
+            .try_reserve(logos_abi::IPC_ENDPOINT_COUNT)
+            .map_err(|_| ServiceRuntimeError::Resources)?;
+        for raw in 0..logos_abi::IPC_ENDPOINT_COUNT {
             let endpoint_id = logos_abi::IpcEndpointId::from_index(raw)
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
             let producer = dynamic_endpoint_peer(endpoint_id, true, generation)?;
             let consumer = dynamic_endpoint_peer(endpoint_id, false, generation)?;
             let message_bytes = logos_abi::ipc_message_size(raw)
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-            let message_kind = match logos_abi::ipc_message_type(raw) {
-                Some(logos_abi::IpcMessageType::Input) => 1,
-                Some(logos_abi::IpcMessageType::Render) => 2,
-                Some(logos_abi::IpcMessageType::Bytes) => 3,
-                Some(logos_abi::IpcMessageType::Packet) => 4,
-                None => 0,
-            };
+            // Contract IDs identify the typed payload contract, not the
+            // runtime endpoint. The built-in manifest currently derives them
+            // from its stable bootstrap entry index.
+            let contract_id = u16::try_from(raw + 1)
+                .map_err(|_| ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
             let queue_capacity = ServiceIpcGraph::queue_capacity(raw).max(1);
             let endpoint = registry
                 .create_endpoint(
                     producer,
                     consumer,
-                    message_kind,
+                    contract_id,
                     message_bytes,
                     queue_capacity,
                     self.service_epoch,
                     &mut events,
                 )
                 .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
-            *endpoint_slot = endpoint;
+            endpoints.push(endpoint);
 
             for spec in SERVICE_IMAGES {
                 let service = spec.service();
                 for rights in [logos_abi::IpcRights::Send, logos_abi::IpcRights::Receive] {
-                    let Some(slot) = logos_abi::ipc_capability_slot(service, endpoint_id, rights)
+                    let Some(_slot) = logos_abi::ipc_capability_slot(service, endpoint_id, rights)
                     else {
                         continue;
                     };
                     let grant = registry
                         .grant(dynamic_service_handle(service, generation)?, endpoint, rights)
                         .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
-                    capabilities[service.index()][slot] = grant;
+                    if service == ServiceId::Storage
+                        && endpoint_id == logos_abi::IpcEndpointId::CoreToStoragePackage
+                        && rights == logos_abi::IpcRights::Receive
+                    {
+                        self.package_capability = grant;
+                    }
                 }
             }
         }
         self.dynamic_endpoints = endpoints;
-        self.dynamic_capabilities = capabilities;
         self.dynamic_ipc = Some(registry);
         self.dynamic_events = Some(events);
+        #[cfg(feature = "qemu-proof")]
+        crate::proof::dynamic_ipc_ready();
         Ok(())
     }
 
@@ -1135,17 +1144,24 @@ impl ServiceRuntime {
         self.service_bootstrap_frames[index] = bootstrap.raw();
         memory.clear(bootstrap).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
         let generation = (self.service_epoch as u32).max(1);
+        let control = logos_abi::CapabilityHandle::new(0, generation)
+            .ok_or(ServiceRuntimeError::Resources)?;
+        let directory = logos_abi::CapabilityHandle::new(1, generation)
+            .ok_or(ServiceRuntimeError::Resources)?;
+        let heap = logos_abi::CapabilityHandle::new(2, generation)
+            .ok_or(ServiceRuntimeError::Resources)?;
+        self.bootstrap_control[index] = control;
+        self.bootstrap_directory[index] = directory;
+        self.bootstrap_heap[index] = heap;
         let page = logos_abi::ServiceBootstrapPage {
             abi_version: logos_abi::RUNTIME_ABI_VERSION,
             flags: 0,
+            service_epoch: self.service_epoch,
             service: logos_abi::ServiceHandle::new(index as u32, generation)
                 .ok_or(ServiceRuntimeError::Resources)?,
-            control: logos_abi::CapabilityHandle::new(0, generation)
-                .ok_or(ServiceRuntimeError::Resources)?,
-            directory: logos_abi::CapabilityHandle::new(1, generation)
-                .ok_or(ServiceRuntimeError::Resources)?,
-            heap: logos_abi::CapabilityHandle::new(2, generation)
-                .ok_or(ServiceRuntimeError::Resources)?,
+            control,
+            directory,
+            heap,
             heap_base: logos_abi::SERVICE_HEAP_BASE as u64,
             heap_pages: initial_heap_pages as u32,
             heap_quota_pages: heap_quota_pages as u32,
@@ -1211,13 +1227,14 @@ impl ServiceRuntime {
         let Some(service) = self.service_for_process(process) else {
             return logos_abi::IpcStatus::Unauthorized;
         };
-        let generation = (self.service_epoch as u32).max(1);
-        let Some(expected) = logos_abi::CapabilityHandle::new(2, generation) else {
+        let expected = self.bootstrap_heap[service.index()];
+        if !expected.is_valid() {
             return logos_abi::IpcStatus::Stale;
-        };
+        }
         if capability_raw != expected.raw() {
             return logos_abi::IpcStatus::Unauthorized;
         }
+        let generation = expected.generation();
         let index = service.index();
         let page = self.service_heaps[index].frames.len();
         let quota_pages = self
@@ -1267,10 +1284,10 @@ impl ServiceRuntime {
         let Some(service) = self.service_for_process(process) else {
             return logos_abi::IpcStatus::Unauthorized;
         };
-        let generation = (self.service_epoch as u32).max(1);
-        let Some(expected) = logos_abi::CapabilityHandle::new(2, generation) else {
+        let expected = self.bootstrap_heap[service.index()];
+        if !expected.is_valid() {
             return logos_abi::IpcStatus::Stale;
-        };
+        }
         if capability_raw != expected.raw() {
             return logos_abi::IpcStatus::Unauthorized;
         }
@@ -1509,7 +1526,7 @@ impl ServiceRuntime {
                     .ok_or(ProcessError::InvalidImage)?,
                 request_id,
                 self.ipc_generation,
-                crate::storage_ipc::PACKAGE_REQUEST_CAPABILITY_SLOT as u16,
+                self.package_capability,
                 self.service_epoch,
                 package_generation,
                 offset,
@@ -1520,7 +1537,7 @@ impl ServiceRuntime {
                 &target.name[..target.name_len as usize],
                 request_id,
                 self.ipc_generation,
-                crate::storage_ipc::PACKAGE_REQUEST_CAPABILITY_SLOT as u16,
+                self.package_capability,
                 self.service_epoch,
                 package_generation,
                 offset,
@@ -1808,22 +1825,16 @@ impl ServiceRuntime {
     fn validate_dynamic_capability(
         &self,
         service: ServiceId,
-        capability_slot: usize,
+        capability_raw: u64,
         endpoint_index: usize,
         rights: logos_abi::IpcRights,
         message_bytes: usize,
     ) -> logos_abi::IpcStatus {
-        let Some(registry) = self.dynamic_ipc.as_ref() else {
+        let Some(capability) = logos_abi::CapabilityHandle::from_raw(capability_raw) else {
             return logos_abi::IpcStatus::Ok;
         };
-        let Some(capability) = self
-            .dynamic_capabilities
-            .get(service.index())
-            .and_then(|capabilities| capabilities.get(capability_slot))
-            .copied()
-            .filter(|capability| capability.is_valid())
-        else {
-            return logos_abi::IpcStatus::Unauthorized;
+        let Some(registry) = self.dynamic_ipc.as_ref() else {
+            return logos_abi::IpcStatus::Ok;
         };
         let Some(expected_endpoint) = self.dynamic_endpoints.get(endpoint_index).copied() else {
             return logos_abi::IpcStatus::Stale;
@@ -1852,12 +1863,6 @@ impl ServiceRuntime {
                 .then_some(slot)
                 .ok_or(logos_abi::IpcStatus::Unauthorized);
         };
-        let Some(capabilities) = self.dynamic_capabilities.get(service.index()) else {
-            return Err(logos_abi::IpcStatus::Unauthorized);
-        };
-        let Some(slot) = capabilities.iter().position(|candidate| *candidate == capability) else {
-            return Err(logos_abi::IpcStatus::Stale);
-        };
         let caller = dynamic_service_handle(service, (self.service_epoch as u32).max(1))
             .map_err(|_| logos_abi::IpcStatus::Stale)?;
         let Some(registry) = self.dynamic_ipc.as_ref() else {
@@ -1870,13 +1875,12 @@ impl ServiceRuntime {
                 return Err(logos_abi::IpcStatus::Malformed);
             }
         }
-        let endpoint_index = self
-            .dynamic_endpoints
-            .iter()
-            .position(|candidate| *candidate == endpoint)
+        let endpoint_id = logos_abi::IpcEndpointId::from_index(endpoint.index() as usize)
             .ok_or(logos_abi::IpcStatus::Stale)?;
+        let slot = logos_abi::ipc_capability_slot(service, endpoint_id, rights)
+            .ok_or(logos_abi::IpcStatus::Unauthorized)?;
         match registry.validate_capability(caller, capability, rights, expected_bytes) {
-            Ok(resolved) if resolved == self.dynamic_endpoints[endpoint_index] => Ok(slot),
+            Ok(resolved) if resolved == endpoint => Ok(slot),
             Ok(_) => Err(logos_abi::IpcStatus::Stale),
             Err(status) => Err(status),
         }
@@ -1938,7 +1942,7 @@ impl ServiceRuntime {
         };
         let dynamic_status = self.validate_dynamic_capability(
             service,
-            capability_slot,
+            capability_raw,
             index,
             logos_abi::IpcRights::Send,
             length,
@@ -2595,6 +2599,15 @@ impl ServiceRuntime {
                         {
                             if let Ok((read_event, _)) = registry.endpoint_events(endpoint) {
                                 let _ = events.signal_irq(read_event);
+                                if let Some(index) = self
+                                    .dynamic_endpoints
+                                    .iter()
+                                    .position(|candidate| *candidate == endpoint)
+                                {
+                                    crate::arch::signal_events(logos_abi::ipc_read_event_mask(
+                                        index,
+                                    ));
+                                }
                             }
                         }
                     }
@@ -2813,7 +2826,10 @@ impl ServiceRuntime {
                     notified: false,
                 };
             };
-            if request.validate(capability_slot, self.ipc_generation, self.service_epoch).is_err() {
+            if request
+                .validate(self.package_capability, self.ipc_generation, self.service_epoch)
+                .is_err()
+            {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Malformed,
                     notified: false,
@@ -2943,6 +2959,15 @@ impl ServiceRuntime {
                         {
                             if let Ok((_, write_event)) = registry.endpoint_events(endpoint) {
                                 let _ = events.signal_irq(write_event);
+                                if let Some(index) = self
+                                    .dynamic_endpoints
+                                    .iter()
+                                    .position(|candidate| *candidate == endpoint)
+                                {
+                                    crate::arch::signal_events(logos_abi::ipc_write_event_mask(
+                                        index,
+                                    ));
+                                }
                             }
                         }
                     }
@@ -2970,7 +2995,7 @@ impl ServiceRuntime {
         let length = crate::service_ipc::ServiceIpcGraph::message_size(index);
         let dynamic_status = self.validate_dynamic_capability(
             service,
-            capability_slot,
+            capability_raw,
             index,
             logos_abi::IpcRights::Receive,
             length,
@@ -3082,9 +3107,12 @@ impl ServiceRuntime {
         if !request.is_valid() {
             return logos_abi::DirectoryStatus::Malformed;
         }
-        let generation = (self.service_epoch as u32).max(1);
+        let directory_generation = self.bootstrap_directory[service.index()].generation();
+        if directory_generation == 0 {
+            return logos_abi::DirectoryStatus::Stale;
+        }
         let Some(service_handle) =
-            logos_abi::ServiceHandle::new(service.index() as u32, generation)
+            logos_abi::ServiceHandle::new(service.index() as u32, directory_generation)
         else {
             return logos_abi::DirectoryStatus::Stale;
         };
@@ -3094,100 +3122,40 @@ impl ServiceRuntime {
         let Some(directory) = logos_abi::CapabilityHandle::from_raw(capability_raw) else {
             return logos_abi::DirectoryStatus::Unauthorized;
         };
-        let Some(expected_directory) = logos_abi::CapabilityHandle::new(1, generation) else {
+        let expected_directory = self.bootstrap_directory[service.index()];
+        if !expected_directory.is_valid() {
             return logos_abi::DirectoryStatus::Stale;
-        };
-        if directory.generation() != generation {
+        }
+        if directory.generation() != directory_generation {
             return logos_abi::DirectoryStatus::Stale;
         }
         if directory != expected_directory {
             return logos_abi::DirectoryStatus::Unauthorized;
         }
-        if request.operation != logos_abi::DirectoryOperation::Capabilities {
-            return logos_abi::DirectoryStatus::NotFound;
-        }
-        if let Some(registry) = self.dynamic_ipc.as_ref() {
-            let mut dynamic_request = request;
-            dynamic_request.subject = service_handle;
-            let mut response = logos_abi::DirectoryResponse::empty(
-                logos_abi::DirectoryOperation::Capabilities,
-                logos_abi::DirectoryStatus::Malformed,
-                request.request_id,
-            );
-            let status = registry.directory(dynamic_request, &mut response);
-            if status == logos_abi::DirectoryStatus::Ok {
-                unsafe {
-                    core::ptr::write_unaligned(
-                        staging_frame.raw() as usize as *mut logos_abi::DirectoryResponse,
-                        response,
-                    );
-                }
-            }
-            return status;
-        }
-        if request.cursor > logos_abi::MAX_IPC_CAPABILITIES as u64 {
-            return logos_abi::DirectoryStatus::Malformed;
-        }
-        let Some(graph) = self.ipc.as_ref() else {
-            return logos_abi::DirectoryStatus::Stale;
-        };
-        let Some(capability_frame) = self.ipc_capability_frames[service.index()] else {
-            return logos_abi::DirectoryStatus::Unauthorized;
-        };
-        let page =
-            unsafe { &*(capability_frame.raw() as usize as *const logos_abi::IpcCapabilityPage) };
+        let mut dynamic_request = request;
+        dynamic_request.subject = service_handle;
         let mut response = logos_abi::DirectoryResponse::empty(
-            logos_abi::DirectoryOperation::Capabilities,
-            logos_abi::DirectoryStatus::Ok,
+            request.operation,
+            logos_abi::DirectoryStatus::Malformed,
             request.request_id,
         );
-        let mut scanned = request.cursor as usize;
-        let mut written = 0;
-        while scanned < logos_abi::MAX_IPC_CAPABILITIES
-            && written < logos_abi::DIRECTORY_RECORDS_PER_PAGE
-        {
-            let slot = scanned;
-            scanned += 1;
-            let Some(capability) = page.get(slot) else { continue };
-            if capability.generation != self.ipc_generation
-                || capability.service_epoch != self.service_epoch
-            {
-                return logos_abi::DirectoryStatus::Stale;
-            }
-            let Some(endpoint) = (0..graph.count()).find_map(|index| {
-                graph.endpoint(index).filter(|endpoint| {
-                    endpoint.id().index() == capability.endpoint_index().unwrap_or(usize::MAX)
-                })
-            }) else {
-                continue;
-            };
-            let peer = match capability.rights {
-                logos_abi::IpcRights::Send => endpoint.consumer(),
-                logos_abi::IpcRights::Receive => endpoint.producer(),
-            };
-            let Some(peer_handle) = logos_abi::ServiceHandle::new(peer.index() as u32, generation)
-            else {
-                return logos_abi::DirectoryStatus::Stale;
-            };
-            let Some(handle) = logos_abi::CapabilityHandle::new(slot as u32, generation) else {
-                return logos_abi::DirectoryStatus::Capacity;
-            };
-            let mut record = logos_abi::DirectoryRecord::EMPTY;
-            record.kind = logos_abi::DirectoryRecordKind::Capability;
-            record.rights = capability.rights as u8;
-            record.handle = handle.raw();
-            record.peer = peer_handle;
-            record.message_bytes =
-                crate::service_ipc::ServiceIpcGraph::message_size(endpoint.id().index()) as u16;
-            record.queue_capacity =
-                crate::service_ipc::ServiceIpcGraph::queue_capacity(endpoint.id().index()) as u16;
-            response.records[written] = record;
-            written += 1;
-        }
-        response.count = written as u8;
-        if scanned < logos_abi::MAX_IPC_CAPABILITIES {
-            response.flags |= logos_abi::DIRECTORY_FLAG_MORE;
-            response.cursor = scanned as u64;
+        let status = match request.operation {
+            logos_abi::DirectoryOperation::Capabilities => match self.dynamic_ipc.as_ref() {
+                Some(registry) => registry.directory(dynamic_request, &mut response),
+                None => logos_abi::DirectoryStatus::Stale,
+            },
+            logos_abi::DirectoryOperation::Endpoints => match self.dynamic_ipc.as_ref() {
+                Some(registry) => registry.directory_endpoints(dynamic_request, &mut response),
+                None => logos_abi::DirectoryStatus::Stale,
+            },
+            logos_abi::DirectoryOperation::Services => match self.dynamic_services.as_ref() {
+                Some(registry) => registry.list(request.cursor, &mut response, request.request_id),
+                None => logos_abi::DirectoryStatus::Stale,
+            },
+        };
+        #[cfg(feature = "qemu-proof")]
+        if status == logos_abi::DirectoryStatus::Ok {
+            crate::proof::dynamic_directory_used();
         }
         unsafe {
             core::ptr::write_unaligned(
@@ -3195,19 +3163,23 @@ impl ServiceRuntime {
                 response,
             );
         }
-        logos_abi::DirectoryStatus::Ok
+        status
     }
 
     pub(crate) fn manager_call(
         &mut self,
         process: ProcessHandle,
-        capability_slot: usize,
+        capability_raw: u64,
         length: usize,
     ) -> logos_abi::IpcStatus {
         let Some(service) = self.service_for_process(process) else {
             return logos_abi::IpcStatus::Unauthorized;
         };
-        if capability_slot != logos_abi::MANAGER_CAPABILITY_SLOT {
+        let control = self.bootstrap_control[service.index()];
+        if !control.is_valid() {
+            return logos_abi::IpcStatus::Stale;
+        }
+        if capability_raw != control.raw() {
             return logos_abi::IpcStatus::Unauthorized;
         }
         if length != core::mem::size_of::<logos_abi::ManagerRequest>() {
@@ -3301,6 +3273,13 @@ impl ServiceRuntime {
         ) {
             if let Some(registry) = self.dynamic_services.as_ref() {
                 decision.response = registry.manager_request(request);
+                #[cfg(feature = "qemu-proof")]
+                if matches!(
+                    decision.response.status,
+                    logos_abi::ManagerStatus::Ok | logos_abi::ManagerStatus::Stale
+                ) {
+                    crate::proof::dynamic_manager_used();
+                }
             }
         }
         match decision.action {
@@ -3473,7 +3452,21 @@ impl ServiceRuntime {
                     response.event = event;
                     logos_abi::EventStatus::Ready
                 }
-                Ok(crate::runtime_events::EventWait::Pending) => logos_abi::EventStatus::Pending,
+                Ok(crate::runtime_events::EventWait::Pending) => {
+                    if self
+                        .prepare_dynamic_event_wait(
+                            service,
+                            owner,
+                            request.event_set,
+                            request.deadline,
+                        )
+                        .is_err()
+                    {
+                        logos_abi::EventStatus::Stale
+                    } else {
+                        logos_abi::EventStatus::Pending
+                    }
+                }
                 Ok(crate::runtime_events::EventWait::Timeout) => logos_abi::EventStatus::Timeout,
                 Err(error) => event_status(error),
             },
@@ -3497,6 +3490,43 @@ impl ServiceRuntime {
         }
     }
 
+    fn prepare_dynamic_event_wait(
+        &self,
+        service: ServiceId,
+        owner: logos_abi::ServiceHandle,
+        set: logos_abi::EventSetHandle,
+        deadline: u64,
+    ) -> Result<(), logos_abi::EventStatus> {
+        let events = self.dynamic_events.as_ref().ok_or(logos_abi::EventStatus::Stale)?;
+        let registry = self.dynamic_ipc.as_ref().ok_or(logos_abi::EventStatus::Stale)?;
+        let members = events.members(owner, set).map_err(event_status)?;
+        let mut mask = 0u64;
+        for event in members {
+            let Some(endpoint_index) = self.dynamic_endpoints.iter().position(|endpoint| {
+                registry
+                    .endpoint_events(*endpoint)
+                    .is_ok_and(|(read, write)| read == *event || write == *event)
+            }) else {
+                return Err(logos_abi::EventStatus::Stale);
+            };
+            let (read_event, write_event) = registry
+                .endpoint_events(self.dynamic_endpoints[endpoint_index])
+                .map_err(|_| logos_abi::EventStatus::Stale)?;
+            if *event == read_event {
+                mask |= logos_abi::ipc_read_event_mask(endpoint_index);
+            } else if *event == write_event {
+                mask |= logos_abi::ipc_write_event_mask(endpoint_index);
+            }
+        }
+        let Some(task) = self.tasks[service.index()] else {
+            return Err(logos_abi::EventStatus::Stale);
+        };
+        if crate::arch::prepare_service_event_wait(task, mask, deadline).is_none() {
+            return Err(logos_abi::EventStatus::Stale);
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "qemu-proof")]
     pub(crate) fn manager_proof(
         &mut self,
@@ -3512,7 +3542,7 @@ impl ServiceRuntime {
         }
         if self.manager_call(
             process,
-            logos_abi::MANAGER_CAPABILITY_SLOT,
+            self.bootstrap_control[ServiceId::Flow.index()].raw(),
             core::mem::size_of::<logos_abi::ManagerRequest>(),
         ) != logos_abi::IpcStatus::Ok
         {
@@ -3521,6 +3551,95 @@ impl ServiceRuntime {
         Some(unsafe {
             core::ptr::read_unaligned(frame.raw() as usize as *const logos_abi::ManagerResponse)
         })
+    }
+
+    #[cfg(feature = "qemu-proof")]
+    pub(crate) fn event_proof(&mut self) -> bool {
+        let process = match self.launch(ServiceId::Flow) {
+            Some((process, _)) => process,
+            None => return false,
+        };
+        let event = self
+            .dynamic_ipc
+            .as_ref()
+            .and_then(|registry| {
+                registry
+                    .endpoint_events(
+                        self.dynamic_endpoints[logos_abi::IpcEndpointId::FetchToFlow.index()],
+                    )
+                    .ok()
+            })
+            .map(|(read, _)| read);
+        let Some(event) = event else { return false };
+        let create = logos_abi::EventRequest::new(logos_abi::EventOperation::CreateSet, 0x5001);
+        let Some((status, response)) = self.event_proof_call(process, create) else {
+            return false;
+        };
+        if status != logos_abi::EventStatus::Ok || !response.event_set.is_valid() {
+            return false;
+        }
+        let set = response.event_set;
+        let mut add = logos_abi::EventRequest::new(logos_abi::EventOperation::Add, 0x5002);
+        add.event_set = set;
+        add.event = event;
+        if self
+            .event_proof_call(process, add)
+            .is_none_or(|(status, _)| status != logos_abi::EventStatus::Ok)
+        {
+            return false;
+        }
+        let mut signal = logos_abi::EventRequest::new(logos_abi::EventOperation::Signal, 0x5003);
+        signal.event = event;
+        if self
+            .event_proof_call(process, signal)
+            .is_none_or(|(status, _)| status != logos_abi::EventStatus::Ok)
+        {
+            return false;
+        }
+        let mut wait = logos_abi::EventRequest::new(logos_abi::EventOperation::Wait, 0x5004);
+        wait.event_set = set;
+        if self.event_proof_call(process, wait).is_none_or(|(status, response)| {
+            status != logos_abi::EventStatus::Ready || response.event != event
+        }) {
+            return false;
+        }
+        let mut destroy =
+            logos_abi::EventRequest::new(logos_abi::EventOperation::DestroySet, 0x5005);
+        destroy.event_set = set;
+        if self
+            .event_proof_call(process, destroy)
+            .is_none_or(|(status, _)| status != logos_abi::EventStatus::Ok)
+        {
+            return false;
+        }
+        let stale = self
+            .event_proof_call(process, destroy)
+            .is_some_and(|(status, _)| status == logos_abi::EventStatus::Stale);
+        if stale {
+            crate::proof::dynamic_event_used();
+        }
+        stale
+    }
+
+    #[cfg(feature = "qemu-proof")]
+    fn event_proof_call(
+        &mut self,
+        process: ProcessHandle,
+        request: logos_abi::EventRequest,
+    ) -> Option<(logos_abi::EventStatus, logos_abi::EventResponse)> {
+        let service = self.service_for_process(process)?;
+        let frame = self.ipc_staging_frames[service.index()]?;
+        unsafe {
+            core::ptr::write_unaligned(
+                frame.raw() as usize as *mut logos_abi::EventRequest,
+                request,
+            );
+        }
+        let status = self.event_call(process, core::mem::size_of::<logos_abi::EventRequest>());
+        let response = unsafe {
+            core::ptr::read_unaligned(frame.raw() as usize as *const logos_abi::EventResponse)
+        };
+        response.is_valid_for(request).then_some((status, response))
     }
 
     #[cfg(feature = "qemu-proof")]
@@ -4304,13 +4423,12 @@ impl ServiceRuntime {
         self.dynamic_ipc = None;
         self.dynamic_services = None;
         self.dynamic_events = None;
-        self.dynamic_endpoints = [logos_abi::EndpointHandle::EMPTY; logos_abi::IPC_ENDPOINT_COUNT];
-        self.dynamic_capabilities =
-            [[logos_abi::CapabilityHandle::EMPTY; logos_abi::MAX_IPC_CAPABILITIES]; SERVICE_COUNT];
+        self.dynamic_endpoints.clear();
         self.storage_response = None;
         self.device_response = None;
         self.storage_map_response = None;
         self.package_request = None;
+        self.package_capability = logos_abi::CapabilityHandle::EMPTY;
         self.package_response = None;
         self.network_packet_response = None;
         self.network_packet_sequence = self.network_packet_sequence.wrapping_add(1).max(1);

@@ -30,6 +30,10 @@ static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
 static LIVE_SERVICE_RESTARTED: AtomicBool = AtomicBool::new(false);
 static MANAGER_RESTART_COMPLETED: AtomicBool = AtomicBool::new(false);
 static MANAGER_SYSCALL_SUCCEEDED: AtomicBool = AtomicBool::new(false);
+static DYNAMIC_IPC_READY: AtomicBool = AtomicBool::new(false);
+static DYNAMIC_DIRECTORY_USED: AtomicBool = AtomicBool::new(false);
+static DYNAMIC_MANAGER_USED: AtomicBool = AtomicBool::new(false);
+static DYNAMIC_EVENT_USED: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_HANDLE: AtomicU64 = AtomicU64::new(0);
 static BACKPRESSURE_FULL: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_BLOCKED: AtomicBool = AtomicBool::new(false);
@@ -140,6 +144,10 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
             core::ptr::addr_of!(MANAGER_SYSCALL_SUCCEEDED) as usize,
             core::mem::size_of::<AtomicBool>(),
         ),
+        (core::ptr::addr_of!(DYNAMIC_IPC_READY) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(DYNAMIC_DIRECTORY_USED) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(DYNAMIC_MANAGER_USED) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(DYNAMIC_EVENT_USED) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(PROBE_RING) as usize, core::mem::size_of::<logos_abi::RenderIpc>()),
     ] {
         crate::arch::reserve_storage_frames(pool, address, bytes);
@@ -194,6 +202,30 @@ pub fn manager_syscall_succeeded() {
     MANAGER_SYSCALL_SUCCEEDED.store(true, Ordering::Release);
 }
 
+pub fn dynamic_ipc_ready() {
+    if !DYNAMIC_IPC_READY.swap(true, Ordering::AcqRel) {
+        crate::arch_proof_line(b"LogOS vNext: dynamic IPC registry ready");
+    }
+}
+
+pub fn dynamic_directory_used() {
+    if !DYNAMIC_DIRECTORY_USED.swap(true, Ordering::AcqRel) {
+        crate::arch_proof_line(b"LogOS vNext: dynamic directory discovery");
+    }
+}
+
+pub fn dynamic_manager_used() {
+    if !DYNAMIC_MANAGER_USED.swap(true, Ordering::AcqRel) {
+        crate::arch_proof_line(b"LogOS vNext: dynamic manager registry");
+    }
+}
+
+pub fn dynamic_event_used() {
+    if !DYNAMIC_EVENT_USED.swap(true, Ordering::AcqRel) {
+        crate::arch_proof_line(b"LogOS vNext: dynamic event set");
+    }
+}
+
 #[cfg(feature = "package-proof")]
 pub fn package_activation_complete() {
     if !package_graph_running() {
@@ -223,9 +255,10 @@ fn package_graph_running() -> bool {
     let mut cursor = 0u64;
     let mut terminal_running = false;
     let mut storage_running = false;
-    for request_id in 1..=logos_abi::MAX_MANAGER_SERVICES {
+    let mut request_id = 1u32;
+    loop {
         let mut request =
-            logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, request_id as u32);
+            logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, request_id);
         request.cursor = cursor;
         let Some(response) = crate::arch::manager_proof(request) else {
             return false;
@@ -241,7 +274,11 @@ fn package_graph_running() -> bool {
         if response.cursor == u64::MAX {
             break;
         }
+        if response.cursor <= cursor {
+            return false;
+        }
         cursor = response.cursor;
+        request_id = request_id.wrapping_add(1).max(1);
     }
     terminal_running && storage_running && crate::arch::package_frame_accounting_valid()
 }
@@ -314,6 +351,10 @@ pub fn observe(cpu: usize) {
         && HEALTH_RETRY_COMPLETED.load(Ordering::Acquire)
         && MANAGER_RESTART_COMPLETED.load(Ordering::Acquire)
         && MANAGER_SYSCALL_SUCCEEDED.load(Ordering::Acquire)
+        && DYNAMIC_IPC_READY.load(Ordering::Acquire)
+        && DYNAMIC_DIRECTORY_USED.load(Ordering::Acquire)
+        && DYNAMIC_MANAGER_USED.load(Ordering::Acquire)
+        && DYNAMIC_EVENT_USED.load(Ordering::Acquire)
         && LIVE_SERVICE_RESTARTED.load(Ordering::Acquire)
         && crate::user_mode::syscalls() > 0
         && crate::user_mode::blocked_waits() > 0
@@ -383,11 +424,8 @@ pub(crate) fn verify_service_manager_boundary() {
     {
         crate::arch_fatal(b"LogOS vNext: manager status result");
     }
-    if crate::arch::manager_call(
-        crate::process::ProcessHandle::from_raw(0),
-        logos_abi::MANAGER_CAPABILITY_SLOT,
-        0,
-    ) != logos_abi::IpcStatus::Unauthorized
+    if crate::arch::manager_call(crate::process::ProcessHandle::from_raw(0), 0, 0)
+        != logos_abi::IpcStatus::Unauthorized
     {
         crate::arch_fatal(b"LogOS vNext: manager authorization");
     }

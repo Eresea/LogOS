@@ -13,6 +13,10 @@ pub(crate) fn run() {
     #[cfg(feature = "qemu-proof")]
     proof::verify_service_manager_boundary();
     #[cfg(feature = "qemu-proof")]
+    if !crate::arch::event_proof() {
+        arch_fatal(b"LogOS vNext: dynamic event proof");
+    }
+    #[cfg(feature = "qemu-proof")]
     proof::handoff_started();
     #[cfg(feature = "qemu-proof")]
     if !wait_for_manager_restart() {
