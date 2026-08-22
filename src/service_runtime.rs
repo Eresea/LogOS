@@ -1374,7 +1374,24 @@ impl ServiceRuntime {
         self.heartbeat_ticks[index].store(now, Ordering::Release);
         self.supervisor.register(service, now);
         self.manager.mark_running(service);
+        self.sync_dynamic_service_running(service);
         Ok(())
+    }
+
+    fn sync_dynamic_service_running(&mut self, service: ServiceId) {
+        let generation = (self.service_epoch as u32).max(1);
+        let Ok(handle) = dynamic_service_handle(service, generation) else { return };
+        if let Some(registry) = self.dynamic_services.as_mut() {
+            let _ = registry.start(handle);
+        }
+    }
+
+    fn sync_dynamic_service_stopped(&mut self, service: ServiceId) {
+        let generation = (self.service_epoch as u32).max(1);
+        let Ok(handle) = dynamic_service_handle(service, generation) else { return };
+        if let Some(registry) = self.dynamic_services.as_mut() {
+            let _ = registry.stop(handle);
+        }
     }
 
     fn uses_package_image(&self, service: ServiceId) -> bool {
@@ -1740,6 +1757,7 @@ impl ServiceRuntime {
             self.tasks[index] = None;
             self.supervisor.unregister(service);
             self.manager.mark_stopped(service);
+            self.sync_dynamic_service_stopped(service);
             return Ok(false);
         }
         Err(ServiceRuntimeError::TaskStop)
@@ -3678,6 +3696,7 @@ impl ServiceRuntime {
                     self.manager.mark_failed(service);
                 } else {
                     self.manager.mark_stopped(service);
+                    self.sync_dynamic_service_stopped(service);
                 }
             }
         }
