@@ -20,15 +20,15 @@ use logos_abi::{
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
-    logos_abi::IPC_CONTRACT_INPUT,
+    logos_abi::IPC_CONTRACT_BYTES,
     logos_abi::ServiceId::Session.index() as u32,
-    mem::size_of::<logos_abi::InputMessage>(),
+    mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
 const OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
-    logos_abi::IPC_CONTRACT_RENDER,
+    logos_abi::IPC_CONTRACT_BYTES,
     logos_abi::ServiceId::Session.index() as u32,
-    mem::size_of::<logos_abi::RenderMessage>(),
+    mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
 const STORAGE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(

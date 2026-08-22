@@ -1,6 +1,5 @@
 extern crate alloc;
 
-use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
 use core::cell::UnsafeCell;
@@ -853,14 +852,6 @@ pub const fn capability_contract(
 }
 
 #[allow(dead_code)]
-struct CapabilityCache(UnsafeCell<Option<Vec<(CapabilitySpec, logos_abi::CapabilityHandle)>>>);
-
-unsafe impl Sync for CapabilityCache {}
-
-#[allow(dead_code)]
-static DISCOVERED_CAPABILITIES: CapabilityCache = CapabilityCache(UnsafeCell::new(None));
-
-#[allow(dead_code)]
 struct EventSetCache(UnsafeCell<Option<(logos_abi::EventSetHandle, u64)>>);
 
 unsafe impl Sync for EventSetCache {}
@@ -876,28 +867,19 @@ fn discovered_capability(spec: CapabilitySpec) -> Result<logos_abi::CapabilityHa
         let bootstrap = bootstrap_page();
         let peer = logos_abi::ServiceHandle::new(spec.peer_index, bootstrap.service.generation())
             .ok_or(IpcStatus::Unauthorized)?;
-        unsafe {
-            if let Some(cache) = (&*DISCOVERED_CAPABILITIES.0.get()).as_ref() {
-                if let Some((_, capability)) = cache.iter().find(|(candidate, capability)| {
-                    *candidate == spec && capability.generation() == bootstrap.service.generation()
-                }) {
-                    return Ok(*capability);
-                }
-            }
-        }
         let message_bytes = usize::from(spec.message_bytes);
         if message_bytes == 0 {
             return Err(IpcStatus::Malformed);
         }
-        let capability =
-            discover_capability_contract(peer, spec.rights, spec.contract_id, message_bytes)
-                .map_err(|_| IpcStatus::Unauthorized)?;
-        unsafe {
-            let cache = (&mut *DISCOVERED_CAPABILITIES.0.get()).get_or_insert_with(Vec::new);
-            cache.try_reserve(1).map_err(|_| IpcStatus::Disconnected)?;
-            cache.push((spec, capability));
-        }
-        Ok(capability)
+        discover_capability_contract(peer, spec.rights, spec.contract_id, message_bytes).map_err(
+            |status| match status {
+                logos_abi::DirectoryStatus::Stale => IpcStatus::Stale,
+                logos_abi::DirectoryStatus::Unauthorized => IpcStatus::Unauthorized,
+                logos_abi::DirectoryStatus::Malformed => IpcStatus::Malformed,
+                logos_abi::DirectoryStatus::NotFound => IpcStatus::Disconnected,
+                _ => IpcStatus::Disconnected,
+            },
+        )
     }
     #[cfg(not(target_os = "none"))]
     {
