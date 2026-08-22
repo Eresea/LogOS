@@ -95,7 +95,10 @@ impl EntropySource for Entropy {
     }
 }
 
-struct CatalogTransport;
+struct CatalogTransport {
+    send_capability: logos_abi::CapabilityHandle,
+    receive_capability: logos_abi::CapabilityHandle,
+}
 
 impl CatalogTransport {
     fn exchange(&mut self, request: UserStorageRequest) -> Result<UserStorageResponse, UserError> {
@@ -107,7 +110,7 @@ impl CatalogTransport {
         })
         .ok_or(UserError::Persistence)?;
         loop {
-            match common::ipc_send(STORAGE_SEND_CAPABILITY, &message) {
+            match common::ipc_send_handle(self.send_capability, &message) {
                 IpcStatus::Ok => break,
                 IpcStatus::Full => common::wait(
                     common::ipc_write_event(IpcEndpointId::UserToStorage),
@@ -118,7 +121,7 @@ impl CatalogTransport {
         }
         loop {
             let mut response = IpcBytes::empty(MessageKind::UserStorageResponse);
-            match common::ipc_receive(STORAGE_RECEIVE_CAPABILITY, &mut response) {
+            match common::ipc_receive_handle(self.receive_capability, &mut response) {
                 IpcStatus::Ok => {
                     if response.kind != MessageKind::UserStorageResponse {
                         return Err(UserError::Persistence);
@@ -229,8 +232,14 @@ fn response_message(response: UserResponse) -> IpcBytes {
 static mut SERVICE: UserService<Entropy> = UserService::new(Entropy::new());
 static mut SNAPSHOT: [u8; USER_SNAPSHOT_BYTES] = [0; USER_SNAPSHOT_BYTES];
 
-fn load_catalog() -> bool {
-    let mut transport = CatalogTransport;
+fn load_catalog(
+    storage_send_capability: logos_abi::CapabilityHandle,
+    storage_receive_capability: logos_abi::CapabilityHandle,
+) -> bool {
+    let mut transport = CatalogTransport {
+        send_capability: storage_send_capability,
+        receive_capability: storage_receive_capability,
+    };
     unsafe {
         let service = core::ptr::addr_of_mut!(SERVICE).as_mut().unwrap();
         let buffer = core::ptr::addr_of_mut!(SNAPSHOT).as_mut().unwrap();
@@ -238,8 +247,14 @@ fn load_catalog() -> bool {
     }
 }
 
-fn persist_catalog() -> bool {
-    let mut transport = CatalogTransport;
+fn persist_catalog(
+    storage_send_capability: logos_abi::CapabilityHandle,
+    storage_receive_capability: logos_abi::CapabilityHandle,
+) -> bool {
+    let mut transport = CatalogTransport {
+        send_capability: storage_send_capability,
+        receive_capability: storage_receive_capability,
+    };
     unsafe {
         let service = core::ptr::addr_of_mut!(SERVICE).as_ref().unwrap();
         let buffer = core::ptr::addr_of_mut!(SNAPSHOT).as_mut().unwrap();
@@ -263,7 +278,23 @@ fn durable(operation: logos_abi::UserOperation) -> bool {
 pub extern "C" fn _start() -> ! {
     common::heartbeat(logos_abi::ServiceId::User);
     common::init_service_allocator();
-    while !load_catalog() {
+    let flow_receive_capability = match common::capability_handle(FLOW_RECEIVE_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let flow_send_capability = match common::capability_handle(FLOW_SEND_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let storage_send_capability = match common::capability_handle(STORAGE_SEND_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let storage_receive_capability = match common::capability_handle(STORAGE_RECEIVE_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    while !load_catalog(storage_send_capability, storage_receive_capability) {
         common::heartbeat(logos_abi::ServiceId::User);
         common::wait(0, logos_abi::ServiceId::User);
     }
@@ -271,7 +302,7 @@ pub extern "C" fn _start() -> ! {
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::User);
         let mut request = IpcBytes::empty(MessageKind::UserRequest);
-        match common::ipc_receive(FLOW_RECEIVE_CAPABILITY, &mut request) {
+        match common::ipc_receive_handle(flow_receive_capability, &mut request) {
             IpcStatus::Ok => {
                 let response = request
                     .as_bytes()
@@ -283,7 +314,7 @@ pub extern "C" fn _start() -> ! {
                         };
                         if response.status == logos_abi::UserStatus::Ok
                             && durable(response.operation)
-                            && !persist_catalog()
+                            && !persist_catalog(storage_send_capability, storage_receive_capability)
                         {
                             response.status = logos_abi::UserStatus::Invalid;
                         }
@@ -291,7 +322,7 @@ pub extern "C" fn _start() -> ! {
                     })
                     .unwrap_or_else(|| IpcBytes::empty(MessageKind::UserResponse));
                 loop {
-                    match common::ipc_send(FLOW_SEND_CAPABILITY, &response) {
+                    match common::ipc_send_handle(flow_send_capability, &response) {
                         IpcStatus::Ok => break,
                         IpcStatus::Full => common::wait(
                             common::ipc_write_event(IpcEndpointId::UserToFlow),
