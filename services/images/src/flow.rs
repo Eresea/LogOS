@@ -2501,7 +2501,7 @@ fn manager_command_probe(pending: &mut PendingOutput, network: &mut NetworkClien
         let _ = (pending, network, initial_storage);
         return true;
     }
-    if initial_storage.service.generation() != 1 {
+    if initial_storage.service.generation() != 1 || initial_storage.restarts != 0 {
         return network_proof_probe(network);
     }
     service_command(logos_flow::ServiceCommand::List, pending);

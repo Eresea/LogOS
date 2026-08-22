@@ -1335,6 +1335,7 @@ impl ServiceRuntime {
             self.start_service_task(service)?;
             self.startup.start(service).map_err(ServiceRuntimeError::Startup)?;
         }
+        self.supervisor.clear_startup_grace();
         self.manager.initialize_running();
         self.initialize_dynamic_services()?;
         Ok(())
@@ -1395,6 +1396,14 @@ impl ServiceRuntime {
         let Ok(handle) = dynamic_service_handle(service, generation) else { return };
         if let Some(registry) = self.dynamic_services.as_mut() {
             let _ = registry.stop(handle);
+        }
+    }
+
+    fn sync_dynamic_service_restarted(&mut self, service: ServiceId) {
+        let generation = (self.service_epoch as u32).max(1);
+        let Ok(handle) = dynamic_service_handle(service, generation) else { return };
+        if let Some(registry) = self.dynamic_services.as_mut() {
+            let _ = registry.record_restart(handle);
         }
     }
 
@@ -3514,6 +3523,13 @@ impl ServiceRuntime {
         })
     }
 
+    #[cfg(feature = "qemu-proof")]
+    pub(crate) fn manager_restart_ready(&self, service: ServiceId) -> bool {
+        self.manager.record(service.index()).is_some_and(|record| {
+            record.state == logos_abi::ManagerState::Running && record.restarts != 0
+        })
+    }
+
     pub(crate) fn service_for_process(&self, process: ProcessHandle) -> Option<ServiceId> {
         SERVICE_IMAGES.iter().find_map(|spec| {
             self.launch(spec.service())
@@ -4005,6 +4021,10 @@ impl ServiceRuntime {
                 return Ok(true);
             }
             self.manager.restart_complete(&services[..count]);
+            for service in &services[..count] {
+                self.sync_dynamic_service_restarted(*service);
+            }
+            self.supervisor.clear_startup_grace();
             #[cfg(feature = "qemu-proof")]
             crate::proof::manager_restart_completed();
             return Ok(true);

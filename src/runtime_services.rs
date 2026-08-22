@@ -179,6 +179,14 @@ impl RuntimeServiceRegistry {
         Ok(())
     }
 
+    pub fn record_restart(&mut self, handle: ServiceHandle) -> Result<(), ServiceRegistryError> {
+        let service = self.service_mut(handle)?;
+        service.epoch = next_epoch(service.epoch);
+        service.state = ServiceState::Running;
+        service.restarts = service.restarts.saturating_add(1);
+        Ok(())
+    }
+
     pub fn remove(&mut self, handle: ServiceHandle) -> Result<(), ServiceRegistryError> {
         let index = self.index(handle)?;
         if self
@@ -486,6 +494,22 @@ mod tests {
             registry.register_with_quota(b"zero", b"image", &[], 0),
             Err(ServiceRegistryError::InvalidImage)
         );
+    }
+
+    #[test]
+    fn record_restart_updates_epoch_and_manager_state() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let handle = registry.register(b"service", b"image", &[]).unwrap();
+        registry.start(handle).unwrap();
+        assert_eq!(registry.epoch(handle), Ok(1));
+        registry.record_restart(handle).unwrap();
+        assert_eq!(registry.epoch(handle), Ok(2));
+        let mut request = ManagerRequest::new(ManagerOperation::Status, 1);
+        request.service = handle;
+        let response = registry.manager_request(request);
+        assert_eq!(response.status, ManagerStatus::Ok);
+        assert_eq!(response.record.restarts, 1);
+        assert_eq!(response.record.state, ManagerState::Running);
     }
 
     #[test]

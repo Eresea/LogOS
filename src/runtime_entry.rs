@@ -15,6 +15,10 @@ pub(crate) fn run() {
     #[cfg(feature = "qemu-proof")]
     proof::handoff_started();
     #[cfg(feature = "qemu-proof")]
+    if !wait_for_manager_restart() {
+        arch_fatal(b"LogOS vNext: manager restart proof");
+    }
+    #[cfg(feature = "qemu-proof")]
     crate::suppress_service_heartbeat(logos_abi::ServiceId::Terminal);
 
     #[cfg(feature = "package-proof")]
@@ -166,6 +170,23 @@ pub(crate) fn run() {
         #[cfg(feature = "qemu-proof")]
         proof::runtime_wait_resumed();
     }
+}
+
+#[cfg(feature = "qemu-proof")]
+fn wait_for_manager_restart() -> bool {
+    let deadline = current_ticks().saturating_add(
+        crate::supervisor::HEARTBEAT_INTERVAL * u64::from(crate::supervisor::MISSED_HEARTBEATS),
+    );
+    while current_ticks() < deadline {
+        if crate::arch::manager_restart_ready(logos_abi::ServiceId::Storage) {
+            return true;
+        }
+        if crate::supervise_services() {
+            proof::live_service_restarted();
+        }
+        sleep_current_for(3);
+    }
+    false
 }
 
 fn send_health(health: &mut HealthService, command: HealthCommand) -> HealthResponse {

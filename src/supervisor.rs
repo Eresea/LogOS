@@ -8,6 +8,7 @@ pub const MAX_SERVICES: usize = SERVICE_IMAGES.len();
 pub const HEARTBEAT_INTERVAL: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS;
 pub const MISSED_HEARTBEATS: u8 = 3;
 pub const MAX_RESTARTS: u8 = 3;
+const STARTUP_GRACE_TICKS: u64 = HEARTBEAT_INTERVAL * 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceState {
@@ -29,12 +30,18 @@ struct ServiceRecord {
     last_heartbeat: u64,
     missed_heartbeats: u8,
     restarts: u8,
+    startup_grace_until: u64,
 }
 
 #[allow(dead_code)]
 impl ServiceRecord {
-    const EMPTY: Self =
-        Self { state: ServiceState::Stopped, last_heartbeat: 0, missed_heartbeats: 0, restarts: 0 };
+    const EMPTY: Self = Self {
+        state: ServiceState::Stopped,
+        last_heartbeat: 0,
+        missed_heartbeats: 0,
+        restarts: 0,
+        startup_grace_until: 0,
+    };
 }
 
 /// Runtime supervisor policy for the real service graph.
@@ -45,12 +52,17 @@ impl ServiceRecord {
 pub(crate) struct LiveSupervisor {
     records: [ServiceRecord; MAX_SERVICES],
     recovery: bool,
+    startup_grace_armed: bool,
 }
 
 #[allow(dead_code)]
 impl LiveSupervisor {
     pub const fn new() -> Self {
-        Self { records: [ServiceRecord::EMPTY; MAX_SERVICES], recovery: false }
+        Self {
+            records: [ServiceRecord::EMPTY; MAX_SERVICES],
+            recovery: false,
+            startup_grace_armed: false,
+        }
     }
 
     pub fn register(&mut self, service: ServiceId, now: u64) {
@@ -58,6 +70,8 @@ impl LiveSupervisor {
         record.state = ServiceState::Running;
         record.last_heartbeat = now;
         record.missed_heartbeats = 0;
+        record.startup_grace_until =
+            if self.startup_grace_armed { now.saturating_add(STARTUP_GRACE_TICKS) } else { 0 };
     }
 
     pub fn unregister(&mut self, service: ServiceId) {
@@ -82,6 +96,10 @@ impl LiveSupervisor {
             if heartbeats[index] > record.last_heartbeat {
                 record.last_heartbeat = heartbeats[index];
                 record.missed_heartbeats = 0;
+                record.startup_grace_until = 0;
+            }
+            if now < record.startup_grace_until {
+                continue;
             }
             if now.saturating_sub(record.last_heartbeat) < HEARTBEAT_INTERVAL {
                 continue;
@@ -109,6 +127,7 @@ impl LiveSupervisor {
             record.missed_heartbeats = 0;
             record.restarts += 1;
         }
+        self.startup_grace_armed = true;
         true
     }
 
@@ -122,7 +141,12 @@ impl LiveSupervisor {
         record.last_heartbeat = 0;
         record.missed_heartbeats = 0;
         record.restarts += 1;
+        self.startup_grace_armed = true;
         true
+    }
+
+    pub fn clear_startup_grace(&mut self) {
+        self.startup_grace_armed = false;
     }
 
     #[cfg(test)]
@@ -159,6 +183,30 @@ mod tests {
         assert_eq!(supervisor.state(ServiceId::Terminal), ServiceState::Stopped);
         supervisor.register(ServiceId::Terminal, 20);
         assert_eq!(supervisor.state(ServiceId::Terminal), ServiceState::Running);
+    }
+
+    #[test]
+    fn restarted_service_gets_startup_grace() {
+        let mut supervisor = LiveSupervisor::new();
+        supervisor.register(ServiceId::Storage, 1);
+        assert!(supervisor.prepare_targeted_restart(ServiceId::Storage));
+        supervisor.register(ServiceId::Storage, 20);
+        assert_eq!(
+            supervisor.poll(
+                20 + STARTUP_GRACE_TICKS - 1,
+                [0; MAX_SERVICES],
+                [Some(ProcessState::Running); MAX_SERVICES]
+            ),
+            None
+        );
+        assert_eq!(
+            supervisor.poll(
+                20 + STARTUP_GRACE_TICKS + HEARTBEAT_INTERVAL * u64::from(MISSED_HEARTBEATS) + 1,
+                [0; MAX_SERVICES],
+                [Some(ProcessState::Running); MAX_SERVICES]
+            ),
+            Some(ServiceId::Storage)
+        );
     }
 
     #[test]

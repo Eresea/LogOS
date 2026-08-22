@@ -245,9 +245,11 @@ fn durable(operation: logos_abi::UserOperation) -> bool {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    common::heartbeat(logos_abi::ServiceId::User);
     common::init_service_allocator();
-    if !load_catalog() {
-        common::idle();
+    while !load_catalog() {
+        common::heartbeat(logos_abi::ServiceId::User);
+        common::wait(0, logos_abi::ServiceId::User);
     }
     let mut heartbeat_ticks = 0u16;
     loop {

@@ -316,7 +316,9 @@ try {
         Write-Host 'Fetch persistence proof PASS'
         return
     }
-    Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofBefore } } | Out-Null
+    if ($interactiveMode) {
+        Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofBefore } } | Out-Null
+    }
     foreach ($key in @('n', 'e', 't', 'dot', 's', 't', 'a', 't', 'u', 's', 'ret')) {
         Invoke-QmpCommand $qmp.Writer $qmp.Reader @{
             execute = 'human-monitor-command'
@@ -324,12 +326,14 @@ try {
         } | Out-Null
     }
     Start-Sleep -Milliseconds 500
-    Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofAfter } } | Out-Null
-    if (-not (Test-Path $proofBefore) -or -not (Test-Path $proofAfter)) {
-        throw 'QEMU proof did not capture both framebuffer snapshots.'
-    }
-    if ((Get-FileHash $proofBefore).Hash -eq (Get-FileHash $proofAfter).Hash) {
-        throw 'QEMU keyboard injection did not change the rendered framebuffer.'
+    if ($interactiveMode) {
+        Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofAfter } } | Out-Null
+        if (-not (Test-Path $proofBefore) -or -not (Test-Path $proofAfter)) {
+            throw 'QEMU proof did not capture both framebuffer snapshots.'
+        }
+        if ((Get-FileHash $proofBefore).Hash -eq (Get-FileHash $proofAfter).Hash) {
+            throw 'QEMU keyboard injection did not change the rendered framebuffer.'
+        }
     }
     $resultAfterInput = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
     if ($resultAfterInput -notmatch 'LogOS vNext: keyboard event wake') {

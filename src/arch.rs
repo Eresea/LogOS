@@ -1236,6 +1236,12 @@ pub(crate) fn manager_proof(
     unsafe { (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).manager_proof(request) }
 }
 
+#[cfg(feature = "qemu-proof")]
+pub(crate) fn manager_restart_ready(service: logos_abi::ServiceId) -> bool {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).manager_restart_ready(service) }
+}
+
 // Package activation remains an internal Core hook until package-manager policy exists.
 #[allow(dead_code)]
 pub(crate) fn activate_service_package(

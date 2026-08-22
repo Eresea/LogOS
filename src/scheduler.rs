@@ -384,9 +384,12 @@ impl Scheduler {
     #[cfg_attr(not(target_os = "uefi"), allow(dead_code))]
     pub(crate) fn reset_events(&self) {
         self.event_pending.store(0, Ordering::Release);
-        self.event_signal_mask.store(0, Ordering::Release);
-        self.event_wakes.store(0, Ordering::Release);
-        for slot in &self.tasks {
+        for (index, slot) in self.tasks.iter().enumerate() {
+            let word = slot.state.load(Ordering::Acquire);
+            if state(word) == BLOCKED {
+                let handle = TaskHandle { slot: index as u8, generation: generation(word) };
+                self.wake(handle);
+            }
             slot.wait_mask.store(0, Ordering::Release);
             slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
         }
@@ -908,6 +911,7 @@ mod tests {
         assert!(scheduler.save_context(handle, 0x21d0));
         assert!(scheduler.finish(handle, FinishState::TimedBlocked));
         scheduler.reset_events();
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
         assert_eq!(scheduler.wake_due(20), 0);
         assert_eq!(scheduler.signal_events(event), 0);
     }
