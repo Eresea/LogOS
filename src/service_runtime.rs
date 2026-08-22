@@ -2664,20 +2664,22 @@ impl ServiceRuntime {
                 if backed_by_legacy_frame {
                     let outcome = graph.send(service, capability, bytes);
                     if outcome.status == logos_abi::IpcStatus::Ok {
-                        if let (Some(registry), Some(events)) =
-                            (self.dynamic_ipc.as_ref(), self.dynamic_events.as_mut())
-                        {
-                            if let Ok((read_event, _)) = registry.endpoint_events(endpoint) {
+                        let read_event = self
+                            .dynamic_ipc
+                            .as_ref()
+                            .and_then(|registry| registry.endpoint_events(endpoint).ok())
+                            .map(|(event, _)| event);
+                        if let Some(read_event) = read_event {
+                            if let Some(events) = self.dynamic_events.as_mut() {
                                 let _ = events.signal_irq(read_event);
-                                if let Some(index) = self
-                                    .dynamic_endpoints
-                                    .iter()
-                                    .position(|candidate| *candidate == endpoint)
-                                {
-                                    crate::arch::signal_events(logos_abi::ipc_read_event_mask(
-                                        index,
-                                    ));
-                                }
+                            }
+                            self.signal_dynamic_event_waiters(read_event);
+                            if let Some(index) = self
+                                .dynamic_endpoints
+                                .iter()
+                                .position(|candidate| *candidate == endpoint)
+                            {
+                                crate::arch::signal_events(logos_abi::ipc_read_event_mask(index));
                             }
                         }
                     }
@@ -3072,20 +3074,22 @@ impl ServiceRuntime {
                 if backed_by_legacy_frame {
                     let outcome = graph.receive(service, capability, bytes);
                     if outcome.status == logos_abi::IpcStatus::Ok {
-                        if let (Some(registry), Some(events)) =
-                            (self.dynamic_ipc.as_ref(), self.dynamic_events.as_mut())
-                        {
-                            if let Ok((_, write_event)) = registry.endpoint_events(endpoint) {
+                        let write_event = self
+                            .dynamic_ipc
+                            .as_ref()
+                            .and_then(|registry| registry.endpoint_events(endpoint).ok())
+                            .map(|(_, event)| event);
+                        if let Some(write_event) = write_event {
+                            if let Some(events) = self.dynamic_events.as_mut() {
                                 let _ = events.signal_irq(write_event);
-                                if let Some(index) = self
-                                    .dynamic_endpoints
-                                    .iter()
-                                    .position(|candidate| *candidate == endpoint)
-                                {
-                                    crate::arch::signal_events(logos_abi::ipc_write_event_mask(
-                                        index,
-                                    ));
-                                }
+                            }
+                            self.signal_dynamic_event_waiters(write_event);
+                            if let Some(index) = self
+                                .dynamic_endpoints
+                                .iter()
+                                .position(|candidate| *candidate == endpoint)
+                            {
+                                crate::arch::signal_events(logos_abi::ipc_write_event_mask(index));
                             }
                         }
                     }

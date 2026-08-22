@@ -19,6 +19,7 @@ const SYSCALL_YIELD: usize = 1;
 const SYSCALL_WAIT: usize = 2;
 const SYSCALL_NOTIFY: usize = 3;
 const SYSCALL_EVENT: usize = logos_abi::EVENT_SYSCALL;
+const SYSCALL_CURRENT_TICKS: usize = logos_abi::CURRENT_TICKS_SYSCALL;
 const SYSCALL_SERVICE_HEAP_GROW: usize = logos_abi::SERVICE_HEAP_GROW_SYSCALL;
 const SYSCALL_SERVICE_HEAP_SHRINK: usize = logos_abi::SERVICE_HEAP_SHRINK_SYSCALL;
 const SYSCALL_DIRECTORY: usize = logos_abi::SERVICE_DIRECTORY_SYSCALL;
@@ -190,6 +191,16 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
         unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status as usize) };
         USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
         prepare_address_space(launch.address_space_root());
+        return true;
+    }
+    if number == SYSCALL_CURRENT_TICKS {
+        if SCHEDULER.user_launch(handle).is_none() {
+            return false;
+        }
+        unsafe {
+            core::ptr::write_unaligned((gpr as *mut usize).add(14), crate::current_ticks() as usize)
+        };
+        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
         return true;
     }
     if number == SYSCALL_SERVICE_HEAP_GROW {
