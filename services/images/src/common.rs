@@ -372,6 +372,13 @@ impl ServiceAllocator {
         ServiceAllocatorGuard { allocator: self }
     }
 
+    fn try_lock(&self) -> Option<ServiceAllocatorGuard<'_>> {
+        self.locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+            .then_some(ServiceAllocatorGuard { allocator: self })
+    }
+
     pub fn initialize(
         &self,
         capability: logos_abi::CapabilityHandle,
@@ -401,6 +408,26 @@ impl ServiceAllocator {
                 return ptr::null_mut();
             }
         }
+    }
+
+    /// Nonblocking service allocation for interrupt context.
+    ///
+    /// This path only consumes already-mapped heap spans and never invokes
+    /// heap growth, `GlobalAlloc`, or a syscall.
+    pub fn try_alloc_irq(&self, layout: Layout) -> *mut u8 {
+        let Some(guard) = self.try_lock() else {
+            return ptr::null_mut();
+        };
+        unsafe { (&mut *guard.allocator.state.get()).allocate(layout) }
+    }
+
+    /// Nonblocking service deallocation for interrupt context.
+    pub fn try_dealloc_irq(&self, pointer: *mut u8) -> bool {
+        let Some(guard) = self.try_lock() else {
+            return false;
+        };
+        unsafe { (&mut *guard.allocator.state.get()).deallocate(pointer) };
+        true
     }
 }
 
@@ -443,6 +470,32 @@ pub fn init_service_allocator() {
             bootstrap.heap_pages as usize,
             bootstrap.heap_quota_pages as usize,
         );
+    }
+}
+
+/// Nonblocking allocation entry point for service IRQ code.
+pub fn try_alloc_irq(layout: Layout) -> *mut u8 {
+    #[cfg(target_os = "none")]
+    {
+        SERVICE_GLOBAL_ALLOCATOR.try_alloc_irq(layout)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = layout;
+        ptr::null_mut()
+    }
+}
+
+/// Nonblocking deallocation entry point for service IRQ code.
+pub fn try_dealloc_irq(pointer: *mut u8) -> bool {
+    #[cfg(target_os = "none")]
+    {
+        SERVICE_GLOBAL_ALLOCATOR.try_dealloc_irq(pointer)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = pointer;
+        false
     }
 }
 
@@ -1141,5 +1194,22 @@ mod tests {
 
         assert!(state.free_span_count() > 128);
         assert!(!state.allocate(layout).is_null());
+    }
+
+    #[test]
+    fn irq_allocator_uses_only_existing_heap_pages() {
+        let mut backing = TestHeap([0; SERVICE_PAGE_BYTES * 3]);
+        let allocator = ServiceAllocator::new();
+        let capability = logos_abi::CapabilityHandle::new(2, 1).unwrap();
+        assert!(allocator.initialize(capability, backing.0.as_mut_ptr() as usize, 1, 3));
+
+        let layout = Layout::from_size_align(4000, 8).unwrap();
+        let initial_end = unsafe { (*allocator.state.get()).mapped_end };
+        let first = allocator.try_alloc_irq(layout);
+        assert!(!first.is_null());
+        assert_eq!(unsafe { (*allocator.state.get()).mapped_end }, initial_end);
+        assert!(allocator.try_alloc_irq(layout).is_null());
+        assert!(allocator.try_dealloc_irq(first));
+        assert!(!allocator.try_alloc_irq(layout).is_null());
     }
 }
