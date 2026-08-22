@@ -158,7 +158,6 @@ pub struct ServiceRuntime {
     dynamic_endpoints: Vec<logos_abi::EndpointHandle>,
     dynamic_core_capabilities: [logos_abi::CapabilityHandle; logos_abi::IPC_ENDPOINT_COUNT],
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
-    ipc_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
     service_bootstrap_frames: [u64; SERVICE_COUNT],
     bootstrap_control: [logos_abi::CapabilityHandle; SERVICE_COUNT],
     bootstrap_directory: [logos_abi::CapabilityHandle; SERVICE_COUNT],
@@ -392,7 +391,6 @@ impl ServiceRuntime {
             dynamic_core_capabilities: [logos_abi::CapabilityHandle::EMPTY;
                 logos_abi::IPC_ENDPOINT_COUNT],
             ipc_staging_frames: [None; SERVICE_COUNT],
-            ipc_capability_frames: [None; SERVICE_COUNT],
             service_bootstrap_frames: [0; SERVICE_COUNT],
             bootstrap_control: [logos_abi::CapabilityHandle::EMPTY; SERVICE_COUNT],
             bootstrap_directory: [logos_abi::CapabilityHandle::EMPTY; SERVICE_COUNT],
@@ -830,121 +828,6 @@ impl ServiceRuntime {
                     self.map_ipc_private_page(process, packet, address, MappingFlags::DATA)?;
                 }
             }
-            let capabilities = if service == ServiceId::Storage {
-                let mut page = self
-                    .ipc
-                    .as_ref()
-                    .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?
-                    .capabilities(service)
-                    .map_err(ServiceRuntimeError::Ipc)?;
-                page.capabilities[2] = logos_abi::IpcCapability::new(
-                    crate::storage_ipc::STORAGE_REQUEST_ENDPOINT,
-                    logos_abi::IpcRights::Send,
-                    self.ipc_generation,
-                    self.service_epoch,
-                )
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-                page.capabilities[3] = logos_abi::IpcCapability::new(
-                    crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT,
-                    logos_abi::IpcRights::Receive,
-                    self.ipc_generation,
-                    self.service_epoch,
-                )
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-                page.capabilities[6] = logos_abi::IpcCapability::new(
-                    crate::storage_ipc::PACKAGE_REQUEST_ENDPOINT,
-                    logos_abi::IpcRights::Receive,
-                    self.ipc_generation,
-                    self.service_epoch,
-                )
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-                page.capabilities[7] = logos_abi::IpcCapability::new(
-                    crate::storage_ipc::PACKAGE_RESPONSE_ENDPOINT,
-                    logos_abi::IpcRights::Send,
-                    self.ipc_generation,
-                    self.service_epoch,
-                )
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-                page.capabilities[8] = logos_abi::IpcCapability::new(
-                    crate::storage_ipc::STORAGE_MAP_REQUEST_ENDPOINT,
-                    logos_abi::IpcRights::Send,
-                    self.ipc_generation,
-                    self.service_epoch,
-                )
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-                page.capabilities[9] = logos_abi::IpcCapability::new(
-                    crate::storage_ipc::STORAGE_MAP_RESPONSE_ENDPOINT,
-                    logos_abi::IpcRights::Receive,
-                    self.ipc_generation,
-                    self.service_epoch,
-                )
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-                page
-            } else if service == ServiceId::Device {
-                let mut page = self
-                    .ipc
-                    .as_ref()
-                    .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?
-                    .capabilities(service)
-                    .map_err(ServiceRuntimeError::Ipc)?;
-                page.capabilities[0] = logos_abi::IpcCapability::new(
-                    crate::device_ipc::DEVICE_REQUEST_ENDPOINT,
-                    logos_abi::IpcRights::Send,
-                    self.ipc_generation,
-                    self.service_epoch,
-                )
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-                page.capabilities[1] = logos_abi::IpcCapability::new(
-                    crate::device_ipc::DEVICE_RESPONSE_ENDPOINT,
-                    logos_abi::IpcRights::Receive,
-                    self.ipc_generation,
-                    self.service_epoch,
-                )
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-                page
-            } else if service == ServiceId::Network {
-                let mut page = self
-                    .ipc
-                    .as_ref()
-                    .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?
-                    .capabilities(service)
-                    .map_err(ServiceRuntimeError::Ipc)?;
-                page.capabilities[0] = logos_abi::IpcCapability::new(
-                    logos_abi::IpcEndpointId::NetworkToCore.index(),
-                    logos_abi::IpcRights::Send,
-                    self.ipc_generation,
-                    self.service_epoch,
-                )
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-                page.capabilities[1] = logos_abi::IpcCapability::new(
-                    logos_abi::IpcEndpointId::CoreToNetwork.index(),
-                    logos_abi::IpcRights::Receive,
-                    self.ipc_generation,
-                    self.service_epoch,
-                )
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-                page
-            } else {
-                self.ipc
-                    .as_ref()
-                    .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?
-                    .capabilities(service)
-                    .map_err(ServiceRuntimeError::Ipc)?
-            };
-            let capability_frame =
-                self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
-            self.ipc_capability_frames[index] = Some(capability_frame);
-            memory.clear(capability_frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
-            unsafe {
-                (capability_frame.raw() as usize as *mut logos_abi::IpcCapabilityPage)
-                    .write(capabilities);
-            }
-            self.map_ipc_private_page(
-                process,
-                capability_frame,
-                logos_abi::IPC_CAPABILITY_BASE,
-                MappingFlags::READ_ONLY_DATA,
-            )?;
         }
         let framebuffer = resources.framebuffer().ok_or(ServiceRuntimeError::Resources)?;
         self.map_framebuffer(framebuffer)?;
@@ -4245,7 +4128,6 @@ impl ServiceRuntime {
                 return false;
             };
             let mut staging = false;
-            let mut capabilities = false;
             for mapping_index in 0..crate::process::MAX_MAPPINGS_PER_ADDRESS_SPACE {
                 let Some(mapping) = self.processes.mapping(process, mapping_index) else {
                     continue;
@@ -4264,11 +4146,8 @@ impl ServiceRuntime {
                 if address == logos_abi::IPC_STAGING_BASE {
                     staging = mapping.flags() == MappingFlags::DATA;
                 }
-                if address == logos_abi::IPC_CAPABILITY_BASE {
-                    capabilities = mapping.flags() == MappingFlags::READ_ONLY_DATA;
-                }
             }
-            if !staging || !capabilities {
+            if !staging {
                 return false;
             }
         }
@@ -5025,12 +4904,6 @@ impl ServiceRuntime {
             if let Some(frame) = self.ipc_staging_frames[index] {
                 self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
                 self.ipc_staging_frames[index] = None;
-            }
-        }
-        for index in 0..SERVICE_COUNT {
-            if let Some(frame) = self.ipc_capability_frames[index] {
-                self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
-                self.ipc_capability_frames[index] = None;
             }
         }
         for index in 0..SERVICE_COUNT {
