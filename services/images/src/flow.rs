@@ -92,6 +92,43 @@ const USER_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contr
     logos_abi::IpcRights::Receive,
 );
 
+#[derive(Clone, Copy)]
+struct IpcCapabilities {
+    input: logos_abi::CapabilityHandle,
+    output: logos_abi::CapabilityHandle,
+    storage_send: logos_abi::CapabilityHandle,
+    storage_receive: logos_abi::CapabilityHandle,
+    network_send: logos_abi::CapabilityHandle,
+    network_receive: logos_abi::CapabilityHandle,
+    fetch_send: logos_abi::CapabilityHandle,
+    fetch_receive: logos_abi::CapabilityHandle,
+    device_send: logos_abi::CapabilityHandle,
+    device_receive: logos_abi::CapabilityHandle,
+    user_send: logos_abi::CapabilityHandle,
+    user_receive: logos_abi::CapabilityHandle,
+}
+
+static mut IPC_CAPABILITIES: Option<IpcCapabilities> = None;
+
+fn ipc_capabilities() -> IpcCapabilities {
+    unsafe {
+        (*core::ptr::addr_of!(IPC_CAPABILITIES)).unwrap_or(IpcCapabilities {
+            input: logos_abi::CapabilityHandle::EMPTY,
+            output: logos_abi::CapabilityHandle::EMPTY,
+            storage_send: logos_abi::CapabilityHandle::EMPTY,
+            storage_receive: logos_abi::CapabilityHandle::EMPTY,
+            network_send: logos_abi::CapabilityHandle::EMPTY,
+            network_receive: logos_abi::CapabilityHandle::EMPTY,
+            fetch_send: logos_abi::CapabilityHandle::EMPTY,
+            fetch_receive: logos_abi::CapabilityHandle::EMPTY,
+            device_send: logos_abi::CapabilityHandle::EMPTY,
+            device_receive: logos_abi::CapabilityHandle::EMPTY,
+            user_send: logos_abi::CapabilityHandle::EMPTY,
+            user_receive: logos_abi::CapabilityHandle::EMPTY,
+        })
+    }
+}
+
 static NEXT_MANAGER_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_NETWORK_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_DEVICE_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
@@ -223,7 +260,7 @@ impl FetchClient {
         let Some(message) = IpcBytes::from_bytes(MessageKind::FetchRequest, bytes) else {
             return false;
         };
-        if common::ipc_send(FETCH_SEND_CAPABILITY, &message) != IpcStatus::Ok {
+        if common::ipc_send_handle(ipc_capabilities().fetch_send, &message) != IpcStatus::Ok {
             return false;
         }
         self.active = true;
@@ -341,7 +378,7 @@ impl FetchClient {
             )
         };
         if let Some(message) = IpcBytes::from_bytes(MessageKind::FetchControl, bytes) {
-            return common::ipc_send(FETCH_SEND_CAPABILITY, &message);
+            return common::ipc_send_handle(ipc_capabilities().fetch_send, &message);
         }
         IpcStatus::Malformed
     }
@@ -362,7 +399,7 @@ impl FetchClient {
             }
         }
         let mut message = IpcBytes::empty(MessageKind::FetchResponse);
-        match common::ipc_receive(FETCH_RECEIVE_CAPABILITY, &mut message) {
+        match common::ipc_receive_handle(ipc_capabilities().fetch_receive, &mut message) {
             IpcStatus::Empty => return false,
             IpcStatus::Ok => {}
             IpcStatus::Stale | IpcStatus::Disconnected | IpcStatus::Unauthorized => {
@@ -458,7 +495,7 @@ fn forward_fetch_progress(response: FetchResponse) -> IpcStatus {
     let Some(message) = IpcBytes::from_bytes(MessageKind::FlowProgress, bytes) else {
         return IpcStatus::Malformed;
     };
-    common::ipc_send(OUTPUT_CAPABILITY, &message)
+    common::ipc_send_handle(ipc_capabilities().output, &message)
 }
 
 fn fetch_control(message: &IpcBytes, fetch: &mut FetchClient) -> bool {
@@ -504,7 +541,7 @@ impl NetworkClient {
         };
         let message = IpcBytes::from_bytes(MessageKind::NetworkRequest, request_bytes)
             .ok_or(IpcStatus::Malformed)?;
-        match common::ipc_send(NETWORK_SEND_CAPABILITY, &message) {
+        match common::ipc_send_handle(ipc_capabilities().network_send, &message) {
             IpcStatus::Ok => {}
             status => return Err(status),
         }
@@ -513,7 +550,8 @@ impl NetworkClient {
         for _ in 0..256 {
             if !cancel_requested {
                 let mut control = IpcBytes::empty(MessageKind::FlowControl);
-                if common::ipc_receive(INPUT_CAPABILITY, &mut control) == IpcStatus::Ok
+                if common::ipc_receive_handle(ipc_capabilities().input, &mut control)
+                    == IpcStatus::Ok
                     && control.len as usize == mem::size_of::<FlowControl>()
                 {
                     let value: FlowControl =
@@ -533,7 +571,7 @@ impl NetworkClient {
                 let cancel_message =
                     IpcBytes::from_bytes(MessageKind::NetworkRequest, cancel_bytes)
                         .ok_or(IpcStatus::Malformed)?;
-                match common::ipc_send(NETWORK_SEND_CAPABILITY, &cancel_message) {
+                match common::ipc_send_handle(ipc_capabilities().network_send, &cancel_message) {
                     IpcStatus::Ok => cancel_sent = true,
                     IpcStatus::Full => {
                         common::wait(
@@ -546,7 +584,7 @@ impl NetworkClient {
                 }
             }
             let mut response = IpcBytes::empty(MessageKind::NetworkResponse);
-            match common::ipc_receive(NETWORK_RECEIVE_CAPABILITY, &mut response) {
+            match common::ipc_receive_handle(ipc_capabilities().network_receive, &mut response) {
                 IpcStatus::Ok => {
                     if response.kind != MessageKind::NetworkResponse
                         || response.len as usize != mem::size_of::<NetworkResponse>()
@@ -954,7 +992,7 @@ impl PendingOutput {
         self.pending = true;
     }
 
-    fn flush(&mut self, capability: common::CapabilitySpec) -> bool {
+    fn flush(&mut self, capability: logos_abi::CapabilityHandle) -> bool {
         let mut progressed = false;
         while self.offset < self.len {
             let end = (self.offset + logos_abi::MAX_IPC_BYTES).min(self.len);
@@ -966,7 +1004,7 @@ impl PendingOutput {
             if end < self.len {
                 message.flags = IPC_FLAG_MORE;
             }
-            if common::ipc_send(capability, &message) != IpcStatus::Ok {
+            if common::ipc_send_handle(capability, &message) != IpcStatus::Ok {
                 break;
             }
             self.offset = end;
@@ -974,7 +1012,7 @@ impl PendingOutput {
         }
         if self.pending && self.offset == self.len {
             let message = IpcBytes::empty(MessageKind::SessionOutput);
-            if self.len == 0 && common::ipc_send(capability, &message) == IpcStatus::Ok {
+            if self.len == 0 && common::ipc_send_handle(capability, &message) == IpcStatus::Ok {
                 self.pending = false;
                 progressed = true;
             }
@@ -1144,7 +1182,7 @@ impl PackageClient {
                 self.fail(StorageApiStatus::Invalid);
                 return true;
             };
-            match common::ipc_send(STORAGE_SEND_CAPABILITY, &request) {
+            match common::ipc_send_handle(ipc_capabilities().storage_send, &request) {
                 IpcStatus::Ok => self.sent = true,
                 IpcStatus::Full => return false,
                 status => {
@@ -1155,7 +1193,7 @@ impl PackageClient {
             return true;
         }
         let mut message = IpcBytes::empty(MessageKind::StorageResponse);
-        match common::ipc_receive(STORAGE_RECEIVE_CAPABILITY, &mut message) {
+        match common::ipc_receive_handle(ipc_capabilities().storage_receive, &mut message) {
             IpcStatus::Ok => self.sent = false,
             IpcStatus::Empty => return false,
             status => {
@@ -1274,7 +1312,7 @@ impl DeviceClient {
         }
         let request = DeviceRequest::new(DeviceOperation::List, self.request_id);
         if !self.sent {
-            match common::ipc_send(DEVICE_SEND_CAPABILITY, &request) {
+            match common::ipc_send_handle(ipc_capabilities().device_send, &request) {
                 IpcStatus::Ok => {
                     self.sent = true;
                 }
@@ -1284,7 +1322,7 @@ impl DeviceClient {
             return true;
         }
         let mut response = DeviceResponse::new(request, DeviceStatus::Invalid, 1, 1);
-        match common::ipc_receive(DEVICE_RECEIVE_CAPABILITY, &mut response) {
+        match common::ipc_receive_handle(ipc_capabilities().device_receive, &mut response) {
             IpcStatus::Ok => {}
             IpcStatus::Empty => return false,
             _ => {
@@ -1426,7 +1464,7 @@ impl UserClient {
                 self.fail(b"user request too large\r\n");
                 return true;
             };
-            match common::ipc_send(USER_SEND_CAPABILITY, &message) {
+            match common::ipc_send_handle(ipc_capabilities().user_send, &message) {
                 IpcStatus::Ok => self.sent = true,
                 IpcStatus::Full => return false,
                 _ => self.fail(b"user service unavailable\r\n"),
@@ -1434,7 +1472,7 @@ impl UserClient {
             return true;
         }
         let mut message = IpcBytes::empty(MessageKind::UserResponse);
-        match common::ipc_receive(USER_RECEIVE_CAPABILITY, &mut message) {
+        match common::ipc_receive_handle(ipc_capabilities().user_receive, &mut message) {
             IpcStatus::Ok => {}
             IpcStatus::Empty => return false,
             _ => {
@@ -1770,7 +1808,7 @@ impl StorageClient {
                 self.fail(StorageApiStatus::Invalid);
                 return true;
             };
-            match common::ipc_send(STORAGE_SEND_CAPABILITY, &request) {
+            match common::ipc_send_handle(ipc_capabilities().storage_send, &request) {
                 IpcStatus::Ok => {}
                 IpcStatus::Full => return false,
                 status => {
@@ -1782,7 +1820,7 @@ impl StorageClient {
             return true;
         }
         let mut message = IpcBytes::empty(MessageKind::StorageResponse);
-        match common::ipc_receive(STORAGE_RECEIVE_CAPABILITY, &mut message) {
+        match common::ipc_receive_handle(ipc_capabilities().storage_receive, &mut message) {
             IpcStatus::Ok => {}
             IpcStatus::Empty => return false,
             status => {
@@ -2602,6 +2640,57 @@ static mut PENDING_COMPLETION: Option<IpcBytes> = None;
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
+    let capabilities = IpcCapabilities {
+        input: match common::capability_handle(INPUT_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        output: match common::capability_handle(OUTPUT_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        storage_send: match common::capability_handle(STORAGE_SEND_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        storage_receive: match common::capability_handle(STORAGE_RECEIVE_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        network_send: match common::capability_handle(NETWORK_SEND_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        network_receive: match common::capability_handle(NETWORK_RECEIVE_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        fetch_send: match common::capability_handle(FETCH_SEND_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        fetch_receive: match common::capability_handle(FETCH_RECEIVE_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        device_send: match common::capability_handle(DEVICE_SEND_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        device_receive: match common::capability_handle(DEVICE_RECEIVE_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        user_send: match common::capability_handle(USER_SEND_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+        user_receive: match common::capability_handle(USER_RECEIVE_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        },
+    };
+    unsafe { *core::ptr::addr_of_mut!(IPC_CAPABILITIES) = Some(capabilities) };
     let flow = unsafe { &mut *core::ptr::addr_of_mut!(FLOW) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
@@ -2625,7 +2714,7 @@ pub extern "C" fn _start() -> ! {
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Flow);
-        let mut progressed = pending.flush(OUTPUT_CAPABILITY);
+        let mut progressed = pending.flush(ipc_capabilities().output);
         if storage.active()
             || package.active()
             || device.active()
@@ -2633,7 +2722,7 @@ pub extern "C" fn _start() -> ! {
             || (fetch.active() && fetch.foreground())
         {
             let mut control = IpcBytes::empty(MessageKind::FlowControl);
-            if common::ipc_receive(INPUT_CAPABILITY, &mut control) == IpcStatus::Ok {
+            if common::ipc_receive_handle(ipc_capabilities().input, &mut control) == IpcStatus::Ok {
                 if fetch.active() {
                     progressed |= fetch_control(&control, fetch);
                 } else if control.kind == MessageKind::FlowControl
@@ -2675,7 +2764,7 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
         if let Some(message) = *pending_completion {
-            match common::ipc_send(OUTPUT_CAPABILITY, &message) {
+            match common::ipc_send_handle(ipc_capabilities().output, &message) {
                 IpcStatus::Ok | IpcStatus::Stale | IpcStatus::Disconnected => {
                     *pending_completion = None;
                     if message.kind == MessageKind::CompletionResponse {
@@ -2817,7 +2906,7 @@ pub extern "C" fn _start() -> ! {
             progressed = true;
         }
         let mut message = IpcBytes::empty(MessageKind::SessionInput);
-        if common::ipc_receive(INPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
+        if common::ipc_receive_handle(ipc_capabilities().input, &mut message) == IpcStatus::Ok {
             progressed = true;
             if message.kind == MessageKind::CompletionRequest {
                 if let Some(request) = completion_request(&message) {
