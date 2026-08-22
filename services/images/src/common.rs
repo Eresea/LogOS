@@ -852,58 +852,6 @@ pub const fn capability_contract(
     }
 }
 
-const fn capability_peer_index(
-    endpoint: logos_abi::IpcEndpointId,
-    rights: logos_abi::IpcRights,
-) -> u32 {
-    let core_endpoint = matches!(
-        endpoint,
-        logos_abi::IpcEndpointId::CoreToStorage
-            | logos_abi::IpcEndpointId::StorageToCore
-            | logos_abi::IpcEndpointId::CoreToNetwork
-            | logos_abi::IpcEndpointId::NetworkToCore
-            | logos_abi::IpcEndpointId::CoreToDevice
-            | logos_abi::IpcEndpointId::DeviceToCore
-            | logos_abi::IpcEndpointId::CoreToStoragePackage
-            | logos_abi::IpcEndpointId::StoragePackageToCore
-            | logos_abi::IpcEndpointId::CoreToStorageMap
-            | logos_abi::IpcEndpointId::StorageMapToCore
-    );
-    if core_endpoint {
-        return u32::MAX;
-    }
-    match (endpoint, rights) {
-        (logos_abi::IpcEndpointId::FetchToStorage, logos_abi::IpcRights::Send) => {
-            logos_abi::ServiceId::Storage.index() as u32
-        }
-        (logos_abi::IpcEndpointId::FetchToNetwork, logos_abi::IpcRights::Send) => {
-            logos_abi::ServiceId::Network.index() as u32
-        }
-        (_, logos_abi::IpcRights::Send) => endpoint.consumer().index() as u32,
-        (_, logos_abi::IpcRights::Receive) => endpoint.producer().index() as u32,
-    }
-}
-
-#[allow(dead_code)]
-pub const fn capability_spec(
-    endpoint: logos_abi::IpcEndpointId,
-    rights: logos_abi::IpcRights,
-) -> CapabilitySpec {
-    let message_bytes = match logos_abi::ipc_message_size(endpoint.index()) {
-        Some(bytes) if bytes <= u16::MAX as usize => bytes as u16,
-        _ => 0,
-    };
-    CapabilitySpec {
-        contract_id: match logos_abi::ipc_contract_id(endpoint.index()) {
-            Some(contract_id) => contract_id,
-            None => 0,
-        },
-        peer_index: capability_peer_index(endpoint, rights),
-        message_bytes,
-        rights,
-    }
-}
-
 #[allow(dead_code)]
 struct CapabilityCache(UnsafeCell<Option<Vec<(CapabilitySpec, logos_abi::CapabilityHandle)>>>);
 
