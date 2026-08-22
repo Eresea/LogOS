@@ -30,8 +30,8 @@ pub use package_ipc::{
 pub use runtime_abi::{
     CapabilityHandle, DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE, DirectoryOperation,
     DirectoryRecord, DirectoryRecordKind, DirectoryRequest, DirectoryResponse, DirectoryStatus,
-    EndpointHandle, EventHandle, EventSetHandle, RUNTIME_ABI_VERSION, ServiceBootstrapPage,
-    ServiceHandle,
+    EndpointHandle, EventHandle, EventOperation, EventRequest, EventResponse, EventSetHandle,
+    EventStatus, RUNTIME_ABI_VERSION, ServiceBootstrapPage, ServiceHandle,
 };
 pub use service_manager::{
     MANAGER_ABI_VERSION, ManagerCapability, ManagerCapabilityPage, ManagerOperation,
@@ -131,6 +131,7 @@ pub const IPC_SYSCALL_RECEIVE: usize = 5;
 pub const SERVICE_HEAP_GROW_SYSCALL: usize = 15;
 pub const SERVICE_HEAP_SHRINK_SYSCALL: usize = 16;
 pub const SERVICE_DIRECTORY_SYSCALL: usize = 17;
+pub const EVENT_SYSCALL: usize = 18;
 pub const MANAGER_SYSCALL: usize = 12;
 pub const PROGRAM_EXIT_SYSCALL: usize = 14;
 pub const POWER_SYSCALL: usize = 11;

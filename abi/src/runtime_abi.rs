@@ -64,6 +64,130 @@ pub struct ServiceBootstrapPage {
     pub heap_quota_pages: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum EventOperation {
+    Create = 1,
+    Destroy = 2,
+    CreateSet = 3,
+    Add = 4,
+    Remove = 5,
+    Wait = 6,
+    Signal = 7,
+}
+
+impl EventOperation {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Create),
+            2 => Some(Self::Destroy),
+            3 => Some(Self::CreateSet),
+            4 => Some(Self::Add),
+            5 => Some(Self::Remove),
+            6 => Some(Self::Wait),
+            7 => Some(Self::Signal),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum EventStatus {
+    Ok = 0,
+    Ready = 1,
+    Pending = 2,
+    Timeout = 3,
+    Stale = 4,
+    Unauthorized = 5,
+    Capacity = 6,
+    Duplicate = 7,
+    NotMember = 8,
+    InvalidDeadline = 9,
+    Malformed = 10,
+}
+
+impl EventStatus {
+    pub const fn from_raw(raw: usize) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Ok),
+            1 => Some(Self::Ready),
+            2 => Some(Self::Pending),
+            3 => Some(Self::Timeout),
+            4 => Some(Self::Stale),
+            5 => Some(Self::Unauthorized),
+            6 => Some(Self::Capacity),
+            7 => Some(Self::Duplicate),
+            8 => Some(Self::NotMember),
+            9 => Some(Self::InvalidDeadline),
+            10 => Some(Self::Malformed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C, align(16))]
+pub struct EventRequest {
+    pub abi_version: u16,
+    pub operation: EventOperation,
+    pub reserved: u8,
+    pub request_id: u32,
+    pub event_set: EventSetHandle,
+    pub event: EventHandle,
+    pub deadline: u64,
+}
+
+impl EventRequest {
+    pub const fn new(operation: EventOperation, request_id: u32) -> Self {
+        Self {
+            abi_version: RUNTIME_ABI_VERSION,
+            operation,
+            reserved: 0,
+            request_id,
+            event_set: EventSetHandle::EMPTY,
+            event: EventHandle::EMPTY,
+            deadline: u64::MAX,
+        }
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.abi_version == RUNTIME_ABI_VERSION
+            && EventOperation::from_raw(self.operation as u8).is_some()
+            && self.reserved == 0
+            && self.request_id != 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C, align(16))]
+pub struct EventResponse {
+    pub abi_version: u16,
+    pub status: EventStatus,
+    pub reserved: u8,
+    pub request_id: u32,
+    pub event: EventHandle,
+}
+
+impl EventResponse {
+    pub const fn empty(status: EventStatus, request_id: u32) -> Self {
+        Self {
+            abi_version: RUNTIME_ABI_VERSION,
+            status,
+            reserved: 0,
+            request_id,
+            event: EventHandle::EMPTY,
+        }
+    }
+
+    pub const fn is_valid_for(self, request: EventRequest) -> bool {
+        self.abi_version == RUNTIME_ABI_VERSION
+            && self.reserved == 0
+            && self.request_id == request.request_id
+            && EventStatus::from_raw(self.status as usize).is_some()
+    }
+}
+
 impl ServiceBootstrapPage {
     pub const fn empty() -> Self {
         Self {
@@ -289,6 +413,8 @@ impl DirectoryResponse {
 const _: () = assert!(core::mem::size_of::<ServiceBootstrapPage>() <= IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::size_of::<DirectoryRequest>() <= IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::size_of::<DirectoryResponse>() <= IPC_PAGE_BYTES);
+const _: () = assert!(core::mem::size_of::<EventRequest>() <= IPC_PAGE_BYTES);
+const _: () = assert!(core::mem::size_of::<EventResponse>() <= IPC_PAGE_BYTES);
 
 #[cfg(test)]
 mod tests {
@@ -342,5 +468,20 @@ mod tests {
         response.flags = 0;
         response.count = (DIRECTORY_RECORDS_PER_PAGE + 1) as u8;
         assert!(!response.is_valid_for(request));
+    }
+
+    #[test]
+    fn event_requests_and_responses_are_generation_safe_envelopes() {
+        let request = EventRequest::new(EventOperation::Wait, 11);
+        assert!(request.is_valid());
+        let mut response = EventResponse::empty(EventStatus::Pending, request.request_id);
+        assert!(response.is_valid_for(request));
+        response.request_id = 12;
+        assert!(!response.is_valid_for(request));
+        assert_eq!(
+            EventStatus::from_raw(EventStatus::Malformed as usize),
+            Some(EventStatus::Malformed)
+        );
+        assert!(EventOperation::from_raw(99).is_none());
     }
 }
