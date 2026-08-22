@@ -21,6 +21,9 @@ impl StorageProofObserver {
         if bytes.len() != core::mem::size_of::<logos_abi::IpcBytes>() {
             return;
         }
+        if !logos_abi::IpcBytes::wire_enums_valid(bytes) {
+            return;
+        }
         let message =
             unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<logos_abi::IpcBytes>()) };
         let Ok(request) = logos_abi::StorageApiRequest::decode(&message) else {
@@ -31,6 +34,9 @@ impl StorageProofObserver {
 
     pub fn observe_response(&self, bytes: &[u8]) {
         if bytes.len() != core::mem::size_of::<logos_abi::IpcBytes>() {
+            return;
+        }
+        if !logos_abi::IpcBytes::wire_enums_valid(bytes) {
             return;
         }
         let message =
