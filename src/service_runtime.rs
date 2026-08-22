@@ -1,5 +1,6 @@
 //! Post-UEFI service image and address-space ownership.
 
+use alloc::vec::Vec;
 use core::{
     mem::MaybeUninit,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -29,6 +30,17 @@ const MAX_ACTIVE_PAGE_TABLE_FRAMES: usize = 4096;
 // Package activation remains an internal hook until package-manager policy exists.
 #[allow(dead_code)]
 const PACKAGE_EXCHANGE_POLLS: usize = 1024;
+
+struct ServiceHeapState {
+    frames: Vec<FrameAddress>,
+    quota_pages: usize,
+}
+
+impl ServiceHeapState {
+    const fn empty() -> Self {
+        Self { frames: Vec::new(), quota_pages: 0 }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceRuntimeError {
@@ -69,8 +81,7 @@ pub struct ServiceRuntime {
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
     ipc_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
     service_bootstrap_frames: [u64; SERVICE_COUNT],
-    service_heap_frames: [[u64; logos_abi::SERVICE_HEAP_MAX_PAGES]; SERVICE_COUNT],
-    service_heap_pages: [usize; SERVICE_COUNT],
+    service_heaps: [ServiceHeapState; SERVICE_COUNT],
     user_kdf_workspace: [u64; logos_abi::USER_KDF_WORKSPACE_PAGES],
     storage_data_frames: [Option<FrameAddress>; logos_abi::STORAGE_DATA_PAGES],
     network_config: logos_abi::NetworkConfig,
@@ -296,8 +307,7 @@ impl ServiceRuntime {
             ipc_staging_frames: [None; SERVICE_COUNT],
             ipc_capability_frames: [None; SERVICE_COUNT],
             service_bootstrap_frames: [0; SERVICE_COUNT],
-            service_heap_frames: [[0; logos_abi::SERVICE_HEAP_MAX_PAGES]; SERVICE_COUNT],
-            service_heap_pages: [0; SERVICE_COUNT],
+            service_heaps: [const { ServiceHeapState::empty() }; SERVICE_COUNT],
             user_kdf_workspace: [0; logos_abi::USER_KDF_WORKSPACE_PAGES],
             storage_data_frames: [None; logos_abi::STORAGE_DATA_PAGES],
             network_config: logos_abi::NetworkConfig::disabled(),
@@ -922,6 +932,13 @@ impl ServiceRuntime {
     ) -> Result<(), ServiceRuntimeError> {
         let index = service.index();
         let mut memory = IdentityPageTableMemory;
+        let heap_quota_pages = logos_abi::SERVICE_HEAP_MAX_PAGES;
+        let initial_heap_pages = logos_abi::SERVICE_HEAP_INITIAL_PAGES;
+        self.service_heaps[index].quota_pages = heap_quota_pages;
+        self.service_heaps[index].frames.clear();
+        if self.service_heaps[index].frames.try_reserve_exact(initial_heap_pages).is_err() {
+            return Err(ServiceRuntimeError::Resources);
+        }
         let bootstrap = self
             .frame_pool
             .allocate_for(OwnerId::service(service))
@@ -941,8 +958,8 @@ impl ServiceRuntime {
             heap: logos_abi::CapabilityHandle::new(2, generation)
                 .ok_or(ServiceRuntimeError::Resources)?,
             heap_base: logos_abi::SERVICE_HEAP_BASE as u64,
-            heap_pages: logos_abi::SERVICE_HEAP_INITIAL_PAGES as u32,
-            heap_quota_pages: logos_abi::SERVICE_HEAP_MAX_PAGES as u32,
+            heap_pages: initial_heap_pages as u32,
+            heap_quota_pages: heap_quota_pages as u32,
         };
         unsafe { core::ptr::write_unaligned(bootstrap.raw() as usize as *mut _, page) };
         tables
@@ -965,23 +982,28 @@ impl ServiceRuntime {
             .map(process, bootstrap_mapping)
             .map_err(ServiceRuntimeError::IpcPrivateProcess)?;
 
-        for heap_page in 0..logos_abi::SERVICE_HEAP_INITIAL_PAGES {
+        for heap_page in 0..initial_heap_pages {
             let frame = self
                 .frame_pool
                 .allocate_for(OwnerId::service(service))
                 .map_err(|_| ServiceRuntimeError::Resources)?;
-            self.service_heap_frames[index][heap_page] = frame.raw();
+            self.service_heaps[index].frames.push(frame);
             memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
             let address = logos_abi::SERVICE_HEAP_BASE + heap_page * crate::loader::PAGE_SIZE;
             tables
                 .map_raw_page(address, frame, MappingFlags::DATA, &mut self.frame_pool, &mut memory)
                 .map_err(ServiceRuntimeError::IpcPrivateMapping)?;
         }
-        self.service_heap_pages[index] = logos_abi::SERVICE_HEAP_INITIAL_PAGES;
+        let heap_physical = self.service_heaps[index]
+            .frames
+            .first()
+            .map(|frame| frame.raw() as usize)
+            .ok_or(ServiceRuntimeError::Resources)?;
         let heap_mapping = VirtualMapping::new_service_heap(
             logos_abi::SERVICE_HEAP_BASE,
-            self.service_heap_frames[index][0] as usize,
-            logos_abi::SERVICE_HEAP_MAX_PAGES,
+            heap_physical,
+            initial_heap_pages,
+            heap_quota_pages,
             MappingFlags::DATA,
         )
         .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::AddressSpace))?;
@@ -1008,8 +1030,11 @@ impl ServiceRuntime {
             return logos_abi::IpcStatus::Unauthorized;
         }
         let index = service.index();
-        let page = self.service_heap_pages[index];
-        if page >= logos_abi::SERVICE_HEAP_MAX_PAGES {
+        let page = self.service_heaps[index].frames.len();
+        if page >= self.service_heaps[index].quota_pages {
+            return logos_abi::IpcStatus::Full;
+        }
+        if self.service_heaps[index].frames.try_reserve(1).is_err() {
             return logos_abi::IpcStatus::Full;
         }
         let frame = match self.frame_pool.allocate_for(OwnerId::service(service)) {
@@ -1030,8 +1055,7 @@ impl ServiceRuntime {
             let _ = self.frame_pool.release(frame);
             return logos_abi::IpcStatus::Full;
         }
-        self.service_heap_frames[index][page] = frame.raw();
-        self.service_heap_pages[index] = page + 1;
+        self.service_heaps[index].frames.push(frame);
         logos_abi::IpcStatus::Ok
     }
 
@@ -1055,7 +1079,7 @@ impl ServiceRuntime {
             return logos_abi::IpcStatus::Unauthorized;
         }
         let index = service.index();
-        let page = self.service_heap_pages[index];
+        let page = self.service_heaps[index].frames.len();
         if page <= logos_abi::SERVICE_HEAP_INITIAL_PAGES {
             return logos_abi::IpcStatus::Full;
         }
@@ -1069,8 +1093,7 @@ impl ServiceRuntime {
         if self.frame_pool.release(frame).is_err() {
             crate::arch_fatal(b"LogOS vNext: service heap release");
         }
-        self.service_heap_frames[index][page - 1] = 0;
-        self.service_heap_pages[index] = page - 1;
+        let _ = self.service_heaps[index].frames.pop();
         logos_abi::IpcStatus::Ok
     }
 
@@ -3580,14 +3603,14 @@ impl ServiceRuntime {
             }
         }
         for index in 0..SERVICE_COUNT {
-            for page in 0..self.service_heap_pages[index] {
-                if self.service_heap_frames[index][page] != 0 {
-                    let frame = FrameAddress::from_raw(self.service_heap_frames[index][page]);
-                    self.service_heap_frames[index][page] = 0;
-                    self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+            while let Some(frame) = self.service_heaps[index].frames.pop() {
+                if self.frame_pool.release(frame).is_err() {
+                    self.service_heaps[index].frames.push(frame);
+                    return Err(ServiceRuntimeError::Resources);
                 }
             }
-            self.service_heap_pages[index] = 0;
+            self.service_heaps[index].frames = Vec::new();
+            self.service_heaps[index].quota_pages = 0;
             if self.service_bootstrap_frames[index] != 0 {
                 let frame = FrameAddress::from_raw(self.service_bootstrap_frames[index]);
                 self.service_bootstrap_frames[index] = 0;

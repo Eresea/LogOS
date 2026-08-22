@@ -204,15 +204,10 @@ impl VirtualMapping {
         virtual_address: usize,
         physical_address: usize,
         pages: usize,
+        max_pages: usize,
         flags: MappingFlags,
     ) -> Option<Self> {
-        Self::new_with_limit(
-            virtual_address,
-            physical_address,
-            pages,
-            flags,
-            logos_abi::SERVICE_HEAP_MAX_PAGES,
-        )
+        Self::new_with_limit(virtual_address, physical_address, pages, flags, max_pages)
     }
 
     const fn new_with_limit(
