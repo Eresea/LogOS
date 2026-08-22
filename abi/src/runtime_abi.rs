@@ -167,6 +167,7 @@ pub struct EventResponse {
     pub reserved: u8,
     pub request_id: u32,
     pub event: EventHandle,
+    pub event_set: EventSetHandle,
 }
 
 impl EventResponse {
@@ -177,6 +178,7 @@ impl EventResponse {
             reserved: 0,
             request_id,
             event: EventHandle::EMPTY,
+            event_set: EventSetHandle::EMPTY,
         }
     }
 

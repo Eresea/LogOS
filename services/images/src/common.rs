@@ -844,6 +844,38 @@ pub fn ipc_receive_handle<T: Copy>(
 }
 
 #[inline(always)]
+#[allow(dead_code)]
+pub fn event_call(
+    request: &logos_abi::EventRequest,
+    response: &mut logos_abi::EventResponse,
+) -> logos_abi::EventStatus {
+    unsafe {
+        ptr::write_unaligned(logos_abi::IPC_STAGING_BASE as *mut logos_abi::EventRequest, *request);
+    }
+    let mut raw = logos_abi::EVENT_SYSCALL;
+    unsafe {
+        asm!(
+            "int 49",
+            inout("rax") raw,
+            in("rdi") 0usize,
+            in("rsi") mem::size_of::<logos_abi::EventRequest>(),
+            options(preserves_flags),
+        );
+    }
+    let status = logos_abi::EventStatus::from_raw(raw).unwrap_or(logos_abi::EventStatus::Malformed);
+    if status != logos_abi::EventStatus::Malformed {
+        let received = unsafe {
+            ptr::read_unaligned(logos_abi::IPC_STAGING_BASE as *const logos_abi::EventResponse)
+        };
+        if !received.is_valid_for(*request) {
+            return logos_abi::EventStatus::Malformed;
+        }
+        *response = received;
+    }
+    status
+}
+
+#[inline(always)]
 fn ipc_send_raw<T: Copy>(capability: logos_abi::CapabilityHandle, message: &T) -> IpcStatus {
     let length = mem::size_of::<T>();
     if !capability.is_valid() || length == 0 || length > logos_abi::IPC_PAGE_BYTES {

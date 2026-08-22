@@ -18,6 +18,7 @@ const PROOF_IMAGE_LEN: usize = 0x89;
 const SYSCALL_YIELD: usize = 1;
 const SYSCALL_WAIT: usize = 2;
 const SYSCALL_NOTIFY: usize = 3;
+const SYSCALL_EVENT: usize = logos_abi::EVENT_SYSCALL;
 const SYSCALL_SERVICE_HEAP_GROW: usize = logos_abi::SERVICE_HEAP_GROW_SYSCALL;
 const SYSCALL_SERVICE_HEAP_SHRINK: usize = logos_abi::SERVICE_HEAP_SHRINK_SYSCALL;
 const SYSCALL_DIRECTORY: usize = logos_abi::SERVICE_DIRECTORY_SYSCALL;
@@ -177,6 +178,18 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
         let woken = crate::arch::signal_events(mask);
         unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), woken) };
         USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
+    if number == SYSCALL_EVENT {
+        let Some(launch) = SCHEDULER.user_launch(handle) else {
+            return false;
+        };
+        let length = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(9)) };
+        prepare_kernel();
+        let status = crate::arch::event_call(launch.process(), length);
+        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status as usize) };
+        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+        prepare_address_space(launch.address_space_root());
         return true;
     }
     if number == SYSCALL_SERVICE_HEAP_GROW {

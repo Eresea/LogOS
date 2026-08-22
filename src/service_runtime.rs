@@ -97,6 +97,19 @@ fn dynamic_endpoint_peer(
     }
 }
 
+fn event_status(error: crate::runtime_events::EventError) -> logos_abi::EventStatus {
+    match error {
+        crate::runtime_events::EventError::Stale => logos_abi::EventStatus::Stale,
+        crate::runtime_events::EventError::Unauthorized => logos_abi::EventStatus::Unauthorized,
+        crate::runtime_events::EventError::Capacity => logos_abi::EventStatus::Capacity,
+        crate::runtime_events::EventError::Duplicate => logos_abi::EventStatus::Duplicate,
+        crate::runtime_events::EventError::NotMember => logos_abi::EventStatus::NotMember,
+        crate::runtime_events::EventError::InvalidDeadline => {
+            logos_abi::EventStatus::InvalidDeadline
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceRuntimeError {
     Resources,
@@ -134,6 +147,7 @@ pub struct ServiceRuntime {
     startup: ServiceStartup,
     ipc: Option<ServiceIpcGraph>,
     dynamic_ipc: Option<RuntimeIpcRegistry>,
+    dynamic_events: Option<crate::runtime_events::RuntimeEventRegistry>,
     dynamic_endpoints: [logos_abi::EndpointHandle; logos_abi::IPC_ENDPOINT_COUNT],
     dynamic_capabilities:
         [[logos_abi::CapabilityHandle; logos_abi::MAX_IPC_CAPABILITIES]; SERVICE_COUNT],
@@ -364,6 +378,7 @@ impl ServiceRuntime {
             startup: ServiceStartup::new(),
             ipc: None,
             dynamic_ipc: None,
+            dynamic_events: None,
             dynamic_endpoints: [logos_abi::EndpointHandle::EMPTY; logos_abi::IPC_ENDPOINT_COUNT],
             dynamic_capabilities: [[logos_abi::CapabilityHandle::EMPTY;
                 logos_abi::MAX_IPC_CAPABILITIES]; SERVICE_COUNT],
@@ -2985,6 +3000,89 @@ impl ServiceRuntime {
         logos_abi::IpcStatus::Ok
     }
 
+    pub(crate) fn event_call(
+        &mut self,
+        process: ProcessHandle,
+        length: usize,
+    ) -> logos_abi::EventStatus {
+        let Some(service) = self.service_for_process(process) else {
+            return logos_abi::EventStatus::Unauthorized;
+        };
+        if length != core::mem::size_of::<logos_abi::EventRequest>() {
+            return logos_abi::EventStatus::Malformed;
+        }
+        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+            return logos_abi::EventStatus::Unauthorized;
+        };
+        let request = unsafe {
+            core::ptr::read_unaligned(staging_frame.raw() as usize as *const logos_abi::EventRequest)
+        };
+        if !request.is_valid() {
+            return logos_abi::EventStatus::Malformed;
+        }
+        let owner = match dynamic_service_handle(service, (self.service_epoch as u32).max(1)) {
+            Ok(owner) => owner,
+            Err(_) => return logos_abi::EventStatus::Stale,
+        };
+        let events = self.dynamic_events.get_or_insert_with(|| {
+            crate::runtime_events::RuntimeEventRegistry::new_with_generation(
+                (self.service_epoch as u32).max(1),
+            )
+        });
+        let mut response =
+            logos_abi::EventResponse::empty(logos_abi::EventStatus::Malformed, request.request_id);
+        let status = match request.operation {
+            logos_abi::EventOperation::Create => match events.create_event(owner) {
+                Ok(event) => {
+                    response.event = event;
+                    logos_abi::EventStatus::Ok
+                }
+                Err(error) => event_status(error),
+            },
+            logos_abi::EventOperation::Destroy => events
+                .destroy_event(request.event)
+                .map_or_else(event_status, |_| logos_abi::EventStatus::Ok),
+            logos_abi::EventOperation::CreateSet => match events.create_set(owner) {
+                Ok(set) => {
+                    response.event_set = set;
+                    logos_abi::EventStatus::Ok
+                }
+                Err(error) => event_status(error),
+            },
+            logos_abi::EventOperation::Add => events
+                .add(owner, request.event_set, request.event)
+                .map_or_else(event_status, |_| logos_abi::EventStatus::Ok),
+            logos_abi::EventOperation::Remove => events
+                .remove(owner, request.event_set, request.event)
+                .map_or_else(event_status, |_| logos_abi::EventStatus::Ok),
+            logos_abi::EventOperation::Wait => match events.wait_any(
+                owner,
+                request.event_set,
+                crate::arch::current_ticks(),
+                (request.deadline != u64::MAX).then_some(request.deadline),
+            ) {
+                Ok(crate::runtime_events::EventWait::Ready(event)) => {
+                    response.event = event;
+                    logos_abi::EventStatus::Ready
+                }
+                Ok(crate::runtime_events::EventWait::Pending) => logos_abi::EventStatus::Pending,
+                Ok(crate::runtime_events::EventWait::Timeout) => logos_abi::EventStatus::Timeout,
+                Err(error) => event_status(error),
+            },
+            logos_abi::EventOperation::Signal => events
+                .signal(owner, request.event)
+                .map_or_else(event_status, |_| logos_abi::EventStatus::Ok),
+        };
+        response.status = status;
+        unsafe {
+            core::ptr::write_unaligned(
+                staging_frame.raw() as usize as *mut logos_abi::EventResponse,
+                response,
+            );
+        }
+        status
+    }
+
     fn refresh_manager_response_record(&self, response: &mut logos_abi::ManagerResponse) {
         if let Some(record) = self.manager.record(usize::from(response.record.slot)) {
             response.record = record;
@@ -3820,6 +3918,7 @@ impl ServiceRuntime {
         }
         self.ipc = None;
         self.dynamic_ipc = None;
+        self.dynamic_events = None;
         self.dynamic_endpoints = [logos_abi::EndpointHandle::EMPTY; logos_abi::IPC_ENDPOINT_COUNT];
         self.dynamic_capabilities =
             [[logos_abi::CapabilityHandle::EMPTY; logos_abi::MAX_IPC_CAPABILITIES]; SERVICE_COUNT];

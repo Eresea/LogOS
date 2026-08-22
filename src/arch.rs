@@ -1193,6 +1193,20 @@ pub(crate) fn directory_call(
     }
 }
 
+pub(crate) fn event_call(
+    process: crate::process::ProcessHandle,
+    length: usize,
+) -> logos_abi::EventStatus {
+    if !service_runtime_ready() {
+        return logos_abi::EventStatus::Unauthorized;
+    }
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    if service_runtime_restarting() {
+        return logos_abi::EventStatus::Stale;
+    }
+    unsafe { (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).event_call(process, length) }
+}
+
 pub(crate) fn manager_call(
     process: crate::process::ProcessHandle,
     capability_slot: usize,
