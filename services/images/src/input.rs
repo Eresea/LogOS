@@ -7,15 +7,24 @@ mod common;
 use logos_abi::{INPUT_KEYBOARD_RING_BASE, InputMessage, IpcStatus, KeyboardByteRing};
 
 static mut PENDING: [Option<InputMessage>; 2] = [None, None];
-const OUTPUT_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Input,
-    logos_abi::IpcEndpointId::InputToTerminal,
-    logos_abi::IpcRights::Send,
-);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
+    let bootstrap = common::bootstrap_page();
+    let terminal = logos_abi::ServiceHandle::new(
+        logos_abi::ServiceId::Terminal.index() as u32,
+        bootstrap.service.generation(),
+    )
+    .unwrap_or(logos_abi::ServiceHandle::EMPTY);
+    let output_capability = match common::discover_capability(
+        terminal,
+        logos_abi::IpcRights::Send,
+        core::mem::size_of::<InputMessage>(),
+    ) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
     let keyboard = unsafe { &*(INPUT_KEYBOARD_RING_BASE as *const KeyboardByteRing) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let mut decoder = logos_input::InputDecoder::new();
@@ -23,7 +32,7 @@ pub extern "C" fn _start() -> ! {
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Input);
         if let Some(message) = pending[0] {
-            match common::ipc_send(OUTPUT_CAPABILITY, &message) {
+            match common::ipc_send_handle(output_capability, &message) {
                 IpcStatus::Ok => {
                     pending[0] = pending[1];
                     pending[1] = None;

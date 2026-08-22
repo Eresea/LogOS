@@ -430,15 +430,98 @@ static SERVICE_GLOBAL_ALLOCATOR: ServiceAllocator = ServiceAllocator::new();
 pub fn init_service_allocator() {
     #[cfg(target_os = "none")]
     {
-        let bootstrap = unsafe {
-            &*(logos_abi::SERVICE_BOOTSTRAP_BASE as *const logos_abi::ServiceBootstrapPage)
-        };
+        let bootstrap = bootstrap_page();
         let _ = SERVICE_GLOBAL_ALLOCATOR.initialize(
             bootstrap.heap,
             bootstrap.heap_base as usize,
             bootstrap.heap_pages as usize,
             bootstrap.heap_quota_pages as usize,
         );
+    }
+}
+
+#[inline(always)]
+pub fn bootstrap_page() -> &'static logos_abi::ServiceBootstrapPage {
+    unsafe { &*(logos_abi::SERVICE_BOOTSTRAP_BASE as *const logos_abi::ServiceBootstrapPage) }
+}
+
+#[allow(dead_code)]
+fn capability_record_matches(
+    record: logos_abi::DirectoryRecord,
+    peer: logos_abi::ServiceHandle,
+    rights: logos_abi::IpcRights,
+    message_bytes: usize,
+) -> bool {
+    record.kind == logos_abi::DirectoryRecordKind::Capability
+        && record.peer == peer
+        && record.rights == rights as u8
+        && record.message_bytes as usize == message_bytes
+        && logos_abi::CapabilityHandle::from_raw(record.handle).is_some()
+}
+
+#[allow(dead_code)]
+fn capability_from_response(
+    response: &logos_abi::DirectoryResponse,
+    peer: logos_abi::ServiceHandle,
+    rights: logos_abi::IpcRights,
+    message_bytes: usize,
+) -> Result<Option<logos_abi::CapabilityHandle>, logos_abi::DirectoryStatus> {
+    let mut found = None;
+    for record in &response.records[..response.count as usize] {
+        if !capability_record_matches(*record, peer, rights, message_bytes) {
+            continue;
+        }
+        if found.is_some() {
+            return Err(logos_abi::DirectoryStatus::Malformed);
+        }
+        found = logos_abi::CapabilityHandle::from_raw(record.handle);
+    }
+    Ok(found)
+}
+
+#[allow(dead_code)]
+pub fn discover_capability(
+    peer: logos_abi::ServiceHandle,
+    rights: logos_abi::IpcRights,
+    message_bytes: usize,
+) -> Result<logos_abi::CapabilityHandle, logos_abi::DirectoryStatus> {
+    #[cfg(target_os = "none")]
+    {
+        let bootstrap = bootstrap_page();
+        if !bootstrap.is_valid() || !peer.is_valid() || message_bytes == 0 {
+            return Err(logos_abi::DirectoryStatus::Malformed);
+        }
+        let mut request =
+            logos_abi::DirectoryRequest::new(logos_abi::DirectoryOperation::Capabilities, 1);
+        request.subject = bootstrap.service;
+        loop {
+            let mut response = logos_abi::DirectoryResponse::empty(
+                request.operation,
+                logos_abi::DirectoryStatus::Malformed,
+                request.request_id,
+            );
+            let status = directory_call(bootstrap.directory, &request, &mut response);
+            if status != logos_abi::DirectoryStatus::Ok {
+                return Err(status);
+            }
+            if let Some(capability) =
+                capability_from_response(&response, peer, rights, message_bytes)?
+            {
+                return Ok(capability);
+            }
+            if response.flags & logos_abi::DIRECTORY_FLAG_MORE == 0 {
+                return Err(logos_abi::DirectoryStatus::NotFound);
+            }
+            if response.cursor <= request.cursor {
+                return Err(logos_abi::DirectoryStatus::Malformed);
+            }
+            request.cursor = response.cursor;
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (peer, rights, message_bytes);
+        Err(logos_abi::DirectoryStatus::NotFound)
     }
 }
 
@@ -631,6 +714,36 @@ pub fn ipc_receive<T: Copy>(capability_slot: usize, message: &mut T) -> IpcStatu
 
 #[inline(always)]
 #[allow(dead_code)]
+pub fn ipc_send_handle<T: Copy>(capability: logos_abi::CapabilityHandle, message: &T) -> IpcStatus {
+    let length = mem::size_of::<T>();
+    if !capability.is_valid() || length == 0 || length > logos_abi::IPC_PAGE_BYTES {
+        return IpcStatus::Malformed;
+    }
+    unsafe {
+        ptr::write_unaligned(logos_abi::IPC_STAGING_BASE as *mut T, *message);
+    }
+    ipc_syscall_raw(logos_abi::IPC_SYSCALL_SEND, capability.raw(), length)
+}
+
+#[inline(always)]
+#[allow(dead_code)]
+pub fn ipc_receive_handle<T: Copy>(
+    capability: logos_abi::CapabilityHandle,
+    message: &mut T,
+) -> IpcStatus {
+    let length = mem::size_of::<T>();
+    if !capability.is_valid() || length == 0 || length > logos_abi::IPC_PAGE_BYTES {
+        return IpcStatus::Malformed;
+    }
+    let status = ipc_syscall_raw(logos_abi::IPC_SYSCALL_RECEIVE, capability.raw(), 0);
+    if status == IpcStatus::Ok {
+        *message = unsafe { ptr::read_unaligned(logos_abi::IPC_STAGING_BASE as *const T) };
+    }
+    status
+}
+
+#[inline(always)]
+#[allow(dead_code)]
 pub fn power(action: usize) -> usize {
     let mut raw = logos_abi::POWER_SYSCALL;
     unsafe {
@@ -736,12 +849,17 @@ pub fn capability(slot: usize) -> Option<logos_abi::IpcCapability> {
 
 #[inline(always)]
 fn ipc_syscall(number: usize, capability_slot: usize, length: usize) -> IpcStatus {
+    ipc_syscall_raw(number, capability_slot as u64, length)
+}
+
+#[inline(always)]
+fn ipc_syscall_raw(number: usize, capability_raw: u64, length: usize) -> IpcStatus {
     let mut raw = number;
     unsafe {
         asm!(
             "int 49",
             inout("rax") raw,
-            in("rdi") capability_slot,
+            in("rdi") capability_raw as usize,
             in("rsi") length,
             options(preserves_flags),
         );
@@ -767,6 +885,40 @@ fn manager_syscall(number: usize, capability_slot: usize, length: usize) -> IpcS
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_response_matching_rejects_duplicates_and_wrong_shapes() {
+        let peer = logos_abi::ServiceHandle::new(2, 1).unwrap();
+        let capability = logos_abi::CapabilityHandle::new(7, 3).unwrap();
+        let mut response = logos_abi::DirectoryResponse::empty(
+            logos_abi::DirectoryOperation::Capabilities,
+            logos_abi::DirectoryStatus::Ok,
+            1,
+        );
+        response.records[0] = logos_abi::DirectoryRecord {
+            kind: logos_abi::DirectoryRecordKind::Capability,
+            rights: logos_abi::IpcRights::Send as u8,
+            flags: 0,
+            handle: capability.raw(),
+            peer,
+            message_bytes: 16,
+            queue_capacity: 1,
+            name_len: 0,
+            reserved: [0; 3],
+            name: [0; logos_abi::MAX_SERVICE_NAME_BYTES],
+        };
+        response.count = 1;
+        assert_eq!(
+            capability_from_response(&response, peer, logos_abi::IpcRights::Send, 16),
+            Ok(Some(capability))
+        );
+        response.records[1] = response.records[0];
+        response.count = 2;
+        assert_eq!(
+            capability_from_response(&response, peer, logos_abi::IpcRights::Send, 16),
+            Err(logos_abi::DirectoryStatus::Malformed)
+        );
+    }
 
     #[repr(align(4096))]
     struct TestHeap([u8; SERVICE_PAGE_BYTES * 3]);
