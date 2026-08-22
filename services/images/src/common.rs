@@ -78,15 +78,18 @@ impl AllocatorState {
         {
             return false;
         }
-        self.heap_capability = capability;
-        self.base = base;
-        self.mapped_end = mapped_end;
-        self.quota_end = quota_end;
-        self.used = 0;
-        self.free_head = 0;
-        if !self.insert(base, mapped_bytes) {
+        let mut replacement = Self {
+            heap_capability: capability,
+            base,
+            mapped_end,
+            quota_end,
+            used: 0,
+            free_head: 0,
+        };
+        if !replacement.insert(base, mapped_bytes) {
             return false;
         }
+        *self = replacement;
         true
     }
 
