@@ -1857,22 +1857,8 @@ impl ServiceRuntime {
         rights: logos_abi::IpcRights,
         message_bytes: Option<usize>,
     ) -> Result<(usize, logos_abi::IpcCapability), logos_abi::IpcStatus> {
-        let Some(dynamic_capability) = logos_abi::CapabilityHandle::from_raw(capability_raw) else {
-            let slot =
-                usize::try_from(capability_raw).map_err(|_| logos_abi::IpcStatus::Unauthorized)?;
-            if slot >= logos_abi::MAX_IPC_CAPABILITIES {
-                return Err(logos_abi::IpcStatus::Unauthorized);
-            }
-            let Some(capability_frame) = self.ipc_capability_frames[service.index()] else {
-                return Err(logos_abi::IpcStatus::Unauthorized);
-            };
-            let capability = unsafe {
-                (&*(capability_frame.raw() as usize as *const logos_abi::IpcCapabilityPage))
-                    .get(slot)
-            }
+        let dynamic_capability = logos_abi::CapabilityHandle::from_raw(capability_raw)
             .ok_or(logos_abi::IpcStatus::Unauthorized)?;
-            return Ok((slot, capability));
-        };
         let caller = dynamic_service_handle(service, (self.service_epoch as u32).max(1))
             .map_err(|_| logos_abi::IpcStatus::Stale)?;
         let Some(registry) = self.dynamic_ipc.as_ref() else {
