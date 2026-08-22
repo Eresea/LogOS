@@ -1997,6 +1997,43 @@ impl ServiceRuntime {
         }
     }
 
+    fn dynamic_core_request(
+        &mut self,
+        service: ServiceId,
+        caller: logos_abi::ServiceHandle,
+        capability: logos_abi::CapabilityHandle,
+        endpoint: logos_abi::EndpointHandle,
+        message_bytes: usize,
+    ) -> logos_abi::IpcStatus {
+        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+            return logos_abi::IpcStatus::Unauthorized;
+        };
+        let request = unsafe {
+            core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, message_bytes)
+        };
+        let status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
+            (Some(registry), Some(events)) => registry.send(caller, capability, request, events),
+            _ => logos_abi::IpcStatus::Disconnected,
+        };
+        if status != logos_abi::IpcStatus::Ok {
+            return status;
+        }
+        let core = match dynamic_core_handle((self.service_epoch as u32).max(1)) {
+            Ok(core) => core,
+            Err(_) => return logos_abi::IpcStatus::Stale,
+        };
+        let core_capability = self.dynamic_core_capabilities[endpoint.index() as usize];
+        let request = unsafe {
+            core::slice::from_raw_parts_mut(staging_frame.raw() as usize as *mut u8, message_bytes)
+        };
+        match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
+            (Some(registry), Some(events)) => {
+                registry.receive(core, core_capability, request, events)
+            }
+            _ => logos_abi::IpcStatus::Disconnected,
+        }
+    }
+
     pub(crate) fn ipc_send(
         &mut self,
         process: ProcessHandle,
@@ -2041,6 +2078,20 @@ impl ServiceRuntime {
                     };
                 }
                 return self.dynamic_device_request(service, caller, dynamic_capability);
+            }
+            if endpoint_uses_legacy_special_transport(endpoint)
+                && self.dynamic_core_capabilities[endpoint.index() as usize].is_valid()
+            {
+                let status = self.dynamic_core_request(
+                    service,
+                    caller,
+                    dynamic_capability,
+                    endpoint,
+                    expected_bytes,
+                );
+                if status != logos_abi::IpcStatus::Ok {
+                    return crate::service_ipc::IpcOutcome { status, notified: false };
+                }
             }
             if !endpoint_uses_legacy_special_transport(endpoint) {
                 if length != expected_bytes {
