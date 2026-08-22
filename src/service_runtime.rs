@@ -97,6 +97,11 @@ fn dynamic_endpoint_peer(
     }
 }
 
+fn dynamic_core_handle(generation: u32) -> Result<logos_abi::ServiceHandle, ServiceRuntimeError> {
+    logos_abi::ServiceHandle::new(CORE_SERVICE_HANDLE_INDEX, generation)
+        .ok_or(ServiceRuntimeError::StaleGeneration)
+}
+
 fn event_status(error: crate::runtime_events::EventError) -> logos_abi::EventStatus {
     match error {
         crate::runtime_events::EventError::Stale => logos_abi::EventStatus::Stale,
@@ -151,6 +156,7 @@ pub struct ServiceRuntime {
     dynamic_services: Option<crate::runtime_services::RuntimeServiceRegistry>,
     dynamic_events: Option<crate::runtime_events::RuntimeEventRegistry>,
     dynamic_endpoints: Vec<logos_abi::EndpointHandle>,
+    dynamic_core_capabilities: [logos_abi::CapabilityHandle; logos_abi::IPC_ENDPOINT_COUNT],
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
     ipc_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
     service_bootstrap_frames: [u64; SERVICE_COUNT],
@@ -383,6 +389,8 @@ impl ServiceRuntime {
             dynamic_services: None,
             dynamic_events: None,
             dynamic_endpoints: Vec::new(),
+            dynamic_core_capabilities: [logos_abi::CapabilityHandle::EMPTY;
+                logos_abi::IPC_ENDPOINT_COUNT],
             ipc_staging_frames: [None; SERVICE_COUNT],
             ipc_capability_frames: [None; SERVICE_COUNT],
             service_bootstrap_frames: [0; SERVICE_COUNT],
@@ -523,6 +531,18 @@ impl ServiceRuntime {
                 )
                 .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
             endpoints.push(endpoint);
+
+            let core = dynamic_core_handle(generation)?;
+            if producer == core || consumer == core {
+                let rights = if producer == core {
+                    logos_abi::IpcRights::Send
+                } else {
+                    logos_abi::IpcRights::Receive
+                };
+                self.dynamic_core_capabilities[raw] = registry
+                    .grant(core, endpoint, rights)
+                    .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
+            }
 
             for spec in SERVICE_IMAGES {
                 let service = spec.service();
@@ -1864,6 +1884,119 @@ impl ServiceRuntime {
         }
     }
 
+    fn dynamic_device_request(
+        &mut self,
+        service: ServiceId,
+        caller: logos_abi::ServiceHandle,
+        capability: logos_abi::CapabilityHandle,
+    ) -> crate::service_ipc::IpcOutcome {
+        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
+        let request_bytes = core::mem::size_of::<logos_abi::DeviceRequest>();
+        let request = unsafe {
+            core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, request_bytes)
+        };
+        let request_status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
+            (Some(registry), Some(events)) => registry.send(caller, capability, request, events),
+            _ => logos_abi::IpcStatus::Disconnected,
+        };
+        if request_status != logos_abi::IpcStatus::Ok {
+            return crate::service_ipc::IpcOutcome { status: request_status, notified: false };
+        }
+
+        let core = match dynamic_core_handle((self.service_epoch as u32).max(1)) {
+            Ok(core) => core,
+            Err(_) => {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Stale,
+                    notified: false,
+                };
+            }
+        };
+        let core_capability =
+            self.dynamic_core_capabilities[crate::device_ipc::DEVICE_REQUEST_ENDPOINT];
+        let request = unsafe {
+            core::slice::from_raw_parts_mut(staging_frame.raw() as usize as *mut u8, request_bytes)
+        };
+        let receive_status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
+            (Some(registry), Some(events)) => {
+                registry.receive(core, core_capability, request, events)
+            }
+            _ => logos_abi::IpcStatus::Disconnected,
+        };
+        if receive_status != logos_abi::IpcStatus::Ok {
+            return crate::service_ipc::IpcOutcome { status: receive_status, notified: false };
+        }
+        let wire = unsafe {
+            core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, request_bytes)
+        };
+        let request = unsafe {
+            core::ptr::read_unaligned(
+                staging_frame.raw() as usize as *const logos_abi::DeviceRequest
+            )
+        };
+        if !logos_abi::DeviceRequest::wire_enums_valid(wire)
+            || crate::device_ipc::validate_dynamic_request(
+                request,
+                self.ipc_generation,
+                self.service_epoch,
+            )
+            .is_err()
+        {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Malformed,
+                notified: false,
+            };
+        }
+        let response = match request.operation {
+            logos_abi::DeviceOperation::List => {
+                crate::arch::device_list_response(request, self.ipc_generation, self.service_epoch)
+            }
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                staging_frame.raw() as usize as *mut logos_abi::DeviceResponse,
+                response,
+            );
+        }
+        let response_capability =
+            self.dynamic_core_capabilities[crate::device_ipc::DEVICE_RESPONSE_ENDPOINT];
+        let response_bytes = unsafe {
+            core::slice::from_raw_parts(
+                staging_frame.raw() as usize as *const u8,
+                core::mem::size_of::<logos_abi::DeviceResponse>(),
+            )
+        };
+        let response_status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
+            (Some(registry), Some(events)) => {
+                registry.send(core, response_capability, response_bytes, events)
+            }
+            _ => logos_abi::IpcStatus::Disconnected,
+        };
+        if response_status == logos_abi::IpcStatus::Ok {
+            if let Some((event, _)) = self.dynamic_ipc.as_ref().and_then(|registry| {
+                registry
+                    .endpoint_events(
+                        self.dynamic_endpoints[crate::device_ipc::DEVICE_RESPONSE_ENDPOINT],
+                    )
+                    .ok()
+            }) {
+                self.signal_dynamic_event_waiters(event);
+            }
+            crate::arch::signal_events(logos_abi::ipc_read_event_mask(
+                crate::device_ipc::DEVICE_RESPONSE_ENDPOINT,
+            ));
+        }
+        crate::service_ipc::IpcOutcome {
+            status: response_status,
+            notified: response_status == logos_abi::IpcStatus::Ok,
+        }
+    }
+
     pub(crate) fn ipc_send(
         &mut self,
         process: ProcessHandle,
@@ -1900,6 +2033,15 @@ impl ServiceRuntime {
                 Ok(resolved) => resolved,
                 Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
             };
+            if endpoint.index() as usize == crate::device_ipc::DEVICE_REQUEST_ENDPOINT {
+                if length != expected_bytes {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Malformed,
+                        notified: false,
+                    };
+                }
+                return self.dynamic_device_request(service, caller, dynamic_capability);
+            }
             if !endpoint_uses_legacy_special_transport(endpoint) {
                 if length != expected_bytes {
                     return crate::service_ipc::IpcOutcome {
@@ -2728,6 +2870,30 @@ impl ServiceRuntime {
                 Ok(resolved) => resolved,
                 Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
             };
+            if endpoint.index() as usize == crate::device_ipc::DEVICE_RESPONSE_ENDPOINT {
+                let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Unauthorized,
+                        notified: false,
+                    };
+                };
+                let bytes = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        staging_frame.raw() as usize as *mut u8,
+                        expected_bytes,
+                    )
+                };
+                let status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
+                    (Some(registry), Some(events)) => {
+                        registry.receive(caller, dynamic_capability, bytes, events)
+                    }
+                    _ => logos_abi::IpcStatus::Disconnected,
+                };
+                return crate::service_ipc::IpcOutcome {
+                    status,
+                    notified: status == logos_abi::IpcStatus::Ok,
+                };
+            }
             if !endpoint_uses_legacy_special_transport(endpoint) {
                 let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
                     return crate::service_ipc::IpcOutcome {
