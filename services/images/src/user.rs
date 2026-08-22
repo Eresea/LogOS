@@ -13,14 +13,30 @@ use logos_abi::{
 };
 use logos_user::{EntropySource, USER_SNAPSHOT_BYTES, UserCatalogStore, UserError, UserService};
 
-const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(IpcEndpointId::FlowToUser, logos_abi::IpcRights::Receive);
-const FLOW_SEND_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(IpcEndpointId::UserToFlow, logos_abi::IpcRights::Send);
-const STORAGE_SEND_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(IpcEndpointId::UserToStorage, logos_abi::IpcRights::Send);
-const STORAGE_RECEIVE_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(IpcEndpointId::StorageToUser, logos_abi::IpcRights::Receive);
+const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Flow.index() as u32,
+    core::mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Receive,
+);
+const FLOW_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Flow.index() as u32,
+    core::mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Send,
+);
+const STORAGE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Storage.index() as u32,
+    core::mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Send,
+);
+const STORAGE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Storage.index() as u32,
+    core::mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Receive,
+);
 
 static NEXT_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 
