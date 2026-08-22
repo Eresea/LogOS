@@ -28,10 +28,10 @@ pub use package_ipc::{
     PackageRequest, PackageResponse, PackageStatus, PackageTarget, PackageTargetKind,
 };
 pub use runtime_abi::{
-    CapabilityHandle, DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE, DirectoryOperation,
-    DirectoryRecord, DirectoryRecordKind, DirectoryRequest, DirectoryResponse, DirectoryStatus,
-    EndpointHandle, EventHandle, EventOperation, EventRequest, EventResponse, EventSetHandle,
-    EventStatus, RUNTIME_ABI_VERSION, ServiceBootstrapPage, ServiceHandle,
+    BOOTSTRAP_CAPABILITY_COUNT, CapabilityHandle, DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE,
+    DirectoryOperation, DirectoryRecord, DirectoryRecordKind, DirectoryRequest, DirectoryResponse,
+    DirectoryStatus, EndpointHandle, EventHandle, EventOperation, EventRequest, EventResponse,
+    EventSetHandle, EventStatus, RUNTIME_ABI_VERSION, ServiceBootstrapPage, ServiceHandle,
 };
 pub use service_manager::{
     MANAGER_ABI_VERSION, ManagerCapability, ManagerCapabilityPage, ManagerOperation,

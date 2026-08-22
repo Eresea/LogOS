@@ -222,6 +222,7 @@ impl RuntimeIpcRegistry {
                 capability.generation = next_generation(capability.generation);
             }
         }
+        events.destroy_service(service);
     }
 
     pub fn send(
@@ -411,8 +412,16 @@ impl RuntimeIpcRegistry {
     }
 
     fn allocate_capability_slot(&mut self) -> Result<usize, IpcStatus> {
-        if let Some((index, _)) =
-            self.capabilities.iter().enumerate().find(|(_, slot)| slot.value.is_none())
+        while self.capabilities.len() < logos_abi::BOOTSTRAP_CAPABILITY_COUNT {
+            self.capabilities.try_reserve(1).map_err(|_| IpcStatus::Disconnected)?;
+            self.capabilities.push(Slot::with_generation(self.generation_seed));
+        }
+        if let Some((index, _)) = self
+            .capabilities
+            .iter()
+            .enumerate()
+            .skip(logos_abi::BOOTSTRAP_CAPABILITY_COUNT)
+            .find(|(_, slot)| slot.value.is_none())
         {
             return Ok(index);
         }
@@ -520,6 +529,47 @@ mod tests {
             registry.create_endpoint(producer, consumer, 1, 1, 1, 2, &mut events).unwrap();
         assert_ne!(endpoint, replacement);
         assert_eq!(registry.send(producer, capability, &[1], &mut events), IpcStatus::Stale);
+    }
+
+    #[test]
+    fn dynamic_capabilities_do_not_alias_bootstrap_grants() {
+        let (producer, consumer) = services();
+        let generation = 7;
+        let mut registry = RuntimeIpcRegistry::new_with_generation(generation);
+        let mut events = RuntimeEventRegistry::new_with_generation(generation);
+        let endpoint =
+            registry.create_endpoint(producer, consumer, 1, 1, 1, 1, &mut events).unwrap();
+        let capability = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
+
+        assert!(capability.index() >= logos_abi::BOOTSTRAP_CAPABILITY_COUNT as u32);
+        for index in 0..logos_abi::BOOTSTRAP_CAPABILITY_COUNT as u32 {
+            assert_ne!(capability, CapabilityHandle::new(index, generation).unwrap());
+        }
+    }
+
+    #[test]
+    fn destroying_service_invalidates_owned_ipc_and_event_handles() {
+        let (producer, consumer) = services();
+        let mut registry = RuntimeIpcRegistry::new();
+        let mut events = RuntimeEventRegistry::new();
+        let endpoint =
+            registry.create_endpoint(producer, consumer, 1, 1, 1, 1, &mut events).unwrap();
+        let capability = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
+        let event = events.create_event(producer).unwrap();
+        let set = events.create_set(producer).unwrap();
+        events.add(producer, set, event).unwrap();
+
+        registry.destroy_service(producer, &mut events);
+
+        assert_eq!(
+            registry.capability_endpoint(producer, capability, IpcRights::Send),
+            Err(IpcStatus::Stale)
+        );
+        assert_eq!(events.signal_irq(event), Err(crate::runtime_events::EventError::Stale));
+        assert_eq!(
+            events.destroy_set(producer, set),
+            Err(crate::runtime_events::EventError::Stale)
+        );
     }
 
     #[test]

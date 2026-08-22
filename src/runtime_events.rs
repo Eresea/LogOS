@@ -225,6 +225,34 @@ impl RuntimeEventRegistry {
         Ok(())
     }
 
+    pub fn destroy_service(&mut self, owner: ServiceHandle) {
+        let events: Vec<_> = self
+            .events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let event = slot.value.as_ref()?;
+                (event.owner == owner).then(|| EventHandle::new(index as u32, slot.generation))?
+            })
+            .collect();
+        for event in events {
+            let _ = self.destroy_event(owner, event);
+        }
+
+        let sets: Vec<_> = self
+            .sets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let set = slot.value.as_ref()?;
+                (set.owner == owner).then(|| EventSetHandle::new(index as u32, slot.generation))?
+            })
+            .collect();
+        for set in sets {
+            let _ = self.destroy_set(owner, set);
+        }
+    }
+
     fn allocate_event_slot(&mut self) -> Result<usize, EventError> {
         if let Some((index, _)) =
             self.events.iter().enumerate().find(|(_, slot)| slot.value.is_none())
@@ -367,5 +395,19 @@ mod tests {
         events.signal_irq(first).unwrap();
         assert_eq!(events.wait_any(owner, set, 2, Some(10)), Ok(EventWait::Ready(first)));
         assert_eq!(events.remove(owner, set, first), Ok(()));
+    }
+
+    #[test]
+    fn destroying_service_invalidates_owned_events_and_sets() {
+        let owner = owner();
+        let mut events = RuntimeEventRegistry::new();
+        let event = events.create_event(owner).unwrap();
+        let set = events.create_set(owner).unwrap();
+        events.add(owner, set, event).unwrap();
+
+        events.destroy_service(owner);
+
+        assert_eq!(events.signal_irq(event), Err(EventError::Stale));
+        assert_eq!(events.destroy_set(owner, set), Err(EventError::Stale));
     }
 }

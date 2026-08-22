@@ -3,6 +3,7 @@ use crate::{ABI_VERSION, IPC_PAGE_BYTES, MAX_SERVICE_NAME_BYTES, SERVICE_HEAP_MA
 pub const RUNTIME_ABI_VERSION: u16 = ABI_VERSION;
 pub const DIRECTORY_FLAG_MORE: u8 = 1 << 0;
 pub const DIRECTORY_RECORDS_PER_PAGE: usize = 32;
+pub const BOOTSTRAP_CAPABILITY_COUNT: usize = 3;
 
 macro_rules! define_handle {
     ($name:ident) => {
