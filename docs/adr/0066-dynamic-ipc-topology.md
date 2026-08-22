@@ -14,7 +14,8 @@ Core owns endpoint queues and capability records. Queue frames remain private to
 Core, while message types and payload sizes remain bounded typed contracts. A
 read-only service bootstrap page provides the service identity and bootstrap
 control grants; a paginated directory operation discovers only capabilities
-already granted by Core.
+already granted by Core. Each capability directory record carries a stable typed
+contract ID, exact payload metadata, and the event handle for its direction.
 
 Dynamic service registration and endpoint creation are policy-controlled Core
 operations. Services do not receive arbitrary capability delegation authority.
@@ -26,4 +27,12 @@ fixed ABI in the live service image set.
 - Runtime topology can grow and shrink within physical-memory and owner quotas.
 - Restart invalidates service, endpoint, capability, and event generations.
 - Event waiting must move from endpoint-derived `u64` masks to runtime event sets.
+- Contract IDs describe typed message agreements and never identify runtime
+  endpoint slots; endpoint and event generations remain independently stale-safe.
 - Fixed wire-size and queue backpressure validation remain part of the hostile-peer proof.
+
+## Implementation status
+
+The Core registries, v5 directory records, generation checks, and event-set syscall operations
+are live and QEMU-proven. Built-in queue transport, mask-based service waits, and lifecycle
+actions remain transitional until their ownership migration is completed.

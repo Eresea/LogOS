@@ -8,9 +8,10 @@ the compatibility baseline until the live service images switch together.
 The `runtime_ipc`, `runtime_events`, and `runtime_services` modules define the v5 record and
 validation model and now compile for UEFI; live service traffic remains on the compatibility graph
 until the live service images switch together.
-The capability directory syscall now exposes the v5 cursored records from each service's
-Core-owned compatibility grant page; handle-based IPC operations still use the legacy slot ABI
-until their migration slice lands.
+The capability directory syscall exposes v5 cursored records with a stable typed contract ID and
+direction-specific event handle. Service images resolve their private IPC descriptors to opaque
+capability handles; the live queue transport still retains a compatibility bridge while Core-owned
+producers and their wake paths are migrated.
 
 ```text
 Terminal → Session → Flow → typed system API registry
@@ -55,7 +56,7 @@ Terminal → Session → Flow → typed system API registry
 | Service restart contract | `service_lifecycle::ServiceLifecycle` | fixed owner-held operation slots become explicitly `Restarted`; late completions are rejected and retries remain owner policy |
 | Health service | `health::HealthService` | one in-process fixed command/response mailbox for `Ping`; restart rejects the old completion and caller explicitly retries |
 | Terminal ABI | `logos-abi` | fixed semantic input, session stream, cell-diff render, endpoint identity, and service identities |
-| IPC mechanics | `service_ipc` + `logos-abi::SharedIpc` + `scheduler::Scheduler` | migration replaces fixed endpoint slots and `u64` event masks with runtime endpoint handles and event sets while preserving exact typed copies, private staging, queue backpressure, and hostile-peer validation |
+| IPC mechanics | `runtime_ipc` + `service_ipc` + `scheduler::Scheduler` | v5 runtime handles, directory discovery, capability validation, queue backpressure, and event-set operations are live; legacy queue transport and mask waits remain transitional for built-in service traffic |
 | Input service | `services/images/src/input` + `logos-input::InputDecoder` | consumes the Input-only PS/2 byte mapping, produces semantic key/text messages on the Input→Terminal ring, and owns modifier/layout state |
 | Terminal service | `services/images/src/terminal` + `logos-terminal::TerminalState` | ring-3 owns a bounded fixed 80×25 live surface, consumes Input and Session rings, and emits compact Session input and dirty-cell Display messages |
 | Display service | `services/images/src/display` + `logos-display` | ring-3 validates cell diffs and endpoint generations, then rasterizes dirty cells through embedded glyphs into its mapped GOP framebuffer |
@@ -72,7 +73,7 @@ Terminal → Session → Flow → typed system API registry
 | Service ELF packaging | `services/images` + `scripts/build-services.ps1` | ten independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
 | Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all ten staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
 | Service supervisor | `supervisor::LiveSupervisor` + `service_runtime` | live heartbeat polling, graph-wide quiesce, generation-bumped IPC rebuild, bounded process/page-table/frame reclamation, and restart limits |
-| Service manager | `service_manager` + `service_runtime` | migration replaces ten fixed slots and dependency bitmasks with quota-backed service records, generation-safe handles, allocated dependency lists, opaque list cursors, and restart reclamation across heap, IPC, events, processes, and images |
+| Service manager | `runtime_services` + `service_manager` + `service_runtime` | dynamic records, generation-safe handles, allocated dependencies, opaque list cursors, and dynamic status discovery are live; lifecycle actions still use the bounded bootstrap manager during migration |
 | Program lifecycle | `service_manager` + `service_runtime` + `process` + `scheduler` | eight fixed name-keyed program slots reuse the service manager ABI and Core resource owner; program ELF images receive only private code/data/stack mappings, Exit is the sole program syscall, and stop waits for scheduler completion before reclaiming process, page-table, and image frames |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
@@ -83,6 +84,11 @@ The process-to-scheduler handoff is now explicit: a running process with a bound
 validated `UserLaunch`, and the scheduler publishes its entry, stack, root, and process generation
 before marking the task runnable. Hardware page-table construction, ring-3 entry, and safe live
 replacement are part of the service path.
+
+The ABI v5 dynamic-resource migration is staged. Core initializes runtime endpoint, capability,
+service, and event registries and proves directory, manager, and event-set operations in the UEFI
+proof. Built-in service payloads and legacy mask waits still use compatibility paths until queue
+transport, scheduler waits, and service lifecycle ownership are migrated together.
 
 AP startup is deliberately narrow: xAPIC IDs, low-memory trampoline, current CR3, NXE, fixed
 stacks, and sequential INIT/SIPI/SIPI. x2APIC IDs, malformed topology, more than eight CPUs,
