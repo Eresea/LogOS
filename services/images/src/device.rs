@@ -9,29 +9,22 @@ use logos_abi::{
     ServiceId,
 };
 
-const FLOW_RECEIVE_CAPABILITY: usize = common::capability_slot(
-    ServiceId::Device,
-    IpcEndpointId::FlowToDevice,
-    logos_abi::IpcRights::Receive,
-);
-const FLOW_SEND_CAPABILITY: usize = common::capability_slot(
-    ServiceId::Device,
-    IpcEndpointId::DeviceToFlow,
-    logos_abi::IpcRights::Send,
-);
-const CORE_SEND_CAPABILITY: usize = common::capability_slot(
+const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::FlowToDevice, logos_abi::IpcRights::Receive);
+const FLOW_SEND_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::DeviceToFlow, logos_abi::IpcRights::Send);
+const CORE_SEND_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::DeviceToCore, logos_abi::IpcRights::Send);
+const CORE_RECEIVE_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::CoreToDevice, logos_abi::IpcRights::Receive);
+const CORE_SEND_SLOT: usize = common::capability_slot(
     ServiceId::Device,
     IpcEndpointId::DeviceToCore,
     logos_abi::IpcRights::Send,
 );
-const CORE_RECEIVE_CAPABILITY: usize = common::capability_slot(
-    ServiceId::Device,
-    IpcEndpointId::CoreToDevice,
-    logos_abi::IpcRights::Receive,
-);
 
 fn identity() -> (u16, u64) {
-    common::capability(CORE_SEND_CAPABILITY)
+    common::capability(CORE_SEND_SLOT)
         .map(|capability| (capability.generation, capability.service_epoch))
         .unwrap_or((1, 1))
 }

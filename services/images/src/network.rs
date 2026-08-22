@@ -7,36 +7,20 @@ mod common;
 use core::{mem, ptr};
 use logos_abi::{IpcBytes, IpcStatus, MessageKind, NetworkRequest, NetworkResponse, ServiceId};
 
-const FLOW_RECEIVE: usize = common::capability_slot(
-    ServiceId::Network,
-    logos_abi::IpcEndpointId::FlowToNetwork,
-    logos_abi::IpcRights::Receive,
-);
-const FLOW_SEND: usize = common::capability_slot(
-    ServiceId::Network,
-    logos_abi::IpcEndpointId::NetworkToFlow,
-    logos_abi::IpcRights::Send,
-);
-const FETCH_RECEIVE: usize = common::capability_slot(
-    ServiceId::Network,
+const FLOW_RECEIVE: common::CapabilitySpec =
+    common::capability_spec(logos_abi::IpcEndpointId::FlowToNetwork, logos_abi::IpcRights::Receive);
+const FLOW_SEND: common::CapabilitySpec =
+    common::capability_spec(logos_abi::IpcEndpointId::NetworkToFlow, logos_abi::IpcRights::Send);
+const FETCH_RECEIVE: common::CapabilitySpec = common::capability_spec(
     logos_abi::IpcEndpointId::FetchToNetwork,
     logos_abi::IpcRights::Receive,
 );
-const FETCH_SEND: usize = common::capability_slot(
-    ServiceId::Network,
-    logos_abi::IpcEndpointId::NetworkToFetch,
-    logos_abi::IpcRights::Send,
-);
-const CORE_RECEIVE: usize = common::capability_slot(
-    ServiceId::Network,
-    logos_abi::IpcEndpointId::CoreToNetwork,
-    logos_abi::IpcRights::Receive,
-);
-const CORE_SEND: usize = common::capability_slot(
-    ServiceId::Network,
-    logos_abi::IpcEndpointId::NetworkToCore,
-    logos_abi::IpcRights::Send,
-);
+const FETCH_SEND: common::CapabilitySpec =
+    common::capability_spec(logos_abi::IpcEndpointId::NetworkToFetch, logos_abi::IpcRights::Send);
+const CORE_RECEIVE: common::CapabilitySpec =
+    common::capability_spec(logos_abi::IpcEndpointId::CoreToNetwork, logos_abi::IpcRights::Receive);
+const CORE_SEND: common::CapabilitySpec =
+    common::capability_spec(logos_abi::IpcEndpointId::NetworkToCore, logos_abi::IpcRights::Send);
 
 #[cfg(target_os = "none")]
 mod stack {
