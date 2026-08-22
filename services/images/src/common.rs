@@ -372,6 +372,7 @@ impl ServiceAllocator {
         ServiceAllocatorGuard { allocator: self }
     }
 
+    #[allow(dead_code)]
     fn try_lock(&self) -> Option<ServiceAllocatorGuard<'_>> {
         self.locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -414,6 +415,7 @@ impl ServiceAllocator {
     ///
     /// This path only consumes already-mapped heap spans and never invokes
     /// heap growth, `GlobalAlloc`, or a syscall.
+    #[allow(dead_code)]
     pub fn try_alloc_irq(&self, layout: Layout) -> *mut u8 {
         let Some(guard) = self.try_lock() else {
             return ptr::null_mut();
@@ -422,6 +424,7 @@ impl ServiceAllocator {
     }
 
     /// Nonblocking service deallocation for interrupt context.
+    #[allow(dead_code)]
     pub fn try_dealloc_irq(&self, pointer: *mut u8) -> bool {
         let Some(guard) = self.try_lock() else {
             return false;
@@ -474,6 +477,7 @@ pub fn init_service_allocator() {
 }
 
 /// Nonblocking allocation entry point for service IRQ code.
+#[allow(dead_code)]
 pub fn try_alloc_irq(layout: Layout) -> *mut u8 {
     #[cfg(target_os = "none")]
     {
@@ -487,6 +491,7 @@ pub fn try_alloc_irq(layout: Layout) -> *mut u8 {
 }
 
 /// Nonblocking deallocation entry point for service IRQ code.
+#[allow(dead_code)]
 pub fn try_dealloc_irq(pointer: *mut u8) -> bool {
     #[cfg(target_os = "none")]
     {
