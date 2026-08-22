@@ -18,66 +18,40 @@ use logos_storage_service::{
 };
 use logos_user::{USER_SNAPSHOT_BYTES, UserCatalog, UserCatalogStore};
 
-const REQUEST_CAPABILITY: usize = common::capability_slot(
+const REQUEST_CAPABILITY_SLOT: usize = common::capability_slot(
     logos_abi::ServiceId::Storage,
     logos_abi::IpcEndpointId::StorageToCore,
     logos_abi::IpcRights::Send,
 );
-const RESPONSE_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Storage,
-    logos_abi::IpcEndpointId::CoreToStorage,
-    logos_abi::IpcRights::Receive,
-);
-const FLOW_RECEIVE_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Storage,
-    IpcEndpointId::FlowToStorage,
-    logos_abi::IpcRights::Receive,
-);
-const FLOW_SEND_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Storage,
-    IpcEndpointId::StorageToFlow,
-    logos_abi::IpcRights::Send,
-);
-const FETCH_RECEIVE_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Storage,
-    IpcEndpointId::FetchToStorage,
-    logos_abi::IpcRights::Receive,
-);
-const FETCH_SEND_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Storage,
-    IpcEndpointId::StorageToFetch,
-    logos_abi::IpcRights::Send,
-);
-const PACKAGE_RECEIVE_CAPABILITY: usize = common::capability_slot(
+const REQUEST_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(logos_abi::IpcEndpointId::StorageToCore, logos_abi::IpcRights::Send);
+const RESPONSE_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(logos_abi::IpcEndpointId::CoreToStorage, logos_abi::IpcRights::Receive);
+const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::FlowToStorage, logos_abi::IpcRights::Receive);
+const FLOW_SEND_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::StorageToFlow, logos_abi::IpcRights::Send);
+const FETCH_RECEIVE_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::FetchToStorage, logos_abi::IpcRights::Receive);
+const FETCH_SEND_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::StorageToFetch, logos_abi::IpcRights::Send);
+const PACKAGE_RECEIVE_CAPABILITY_SLOT: usize = common::capability_slot(
     logos_abi::ServiceId::Storage,
     IpcEndpointId::CoreToStoragePackage,
     logos_abi::IpcRights::Receive,
 );
-const PACKAGE_SEND_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Storage,
-    IpcEndpointId::StoragePackageToCore,
-    logos_abi::IpcRights::Send,
-);
-const MAP_REQUEST_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Storage,
-    IpcEndpointId::StorageMapToCore,
-    logos_abi::IpcRights::Send,
-);
-const MAP_RESPONSE_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Storage,
-    IpcEndpointId::CoreToStorageMap,
-    logos_abi::IpcRights::Receive,
-);
-const USER_RECEIVE_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Storage,
-    IpcEndpointId::UserToStorage,
-    logos_abi::IpcRights::Receive,
-);
-const USER_SEND_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Storage,
-    IpcEndpointId::StorageToUser,
-    logos_abi::IpcRights::Send,
-);
+const PACKAGE_RECEIVE_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::CoreToStoragePackage, logos_abi::IpcRights::Receive);
+const PACKAGE_SEND_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::StoragePackageToCore, logos_abi::IpcRights::Send);
+const MAP_REQUEST_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::StorageMapToCore, logos_abi::IpcRights::Send);
+const MAP_RESPONSE_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::CoreToStorageMap, logos_abi::IpcRights::Receive);
+const USER_RECEIVE_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::UserToStorage, logos_abi::IpcRights::Receive);
+const USER_SEND_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(IpcEndpointId::StorageToUser, logos_abi::IpcRights::Send);
 
 static mut USER_CATALOG: UserCatalog = UserCatalog::new();
 static mut USER_CATALOG_BUFFER: [u8; USER_SNAPSHOT_BYTES] = [0; USER_SNAPSHOT_BYTES];
@@ -202,7 +176,7 @@ impl KernelStorageIpc for StorageTransport {
         staging: &mut Block,
     ) -> IpcStatus {
         self.heartbeat();
-        if common::capability(REQUEST_CAPABILITY) != Some(capability) {
+        if common::capability(REQUEST_CAPABILITY_SLOT) != Some(capability) {
             return IpcStatus::Unauthorized;
         }
         self.operation = Some(request.operation);
@@ -219,7 +193,7 @@ impl KernelStorageIpc for StorageTransport {
         staging: &mut Block,
     ) -> IpcStatus {
         self.heartbeat();
-        if common::capability(REQUEST_CAPABILITY) != Some(capability) {
+        if common::capability(REQUEST_CAPABILITY_SLOT) != Some(capability) {
             return IpcStatus::Unauthorized;
         }
         let status = common::ipc_receive(RESPONSE_CAPABILITY, response);
@@ -234,7 +208,7 @@ fn new_store(capability: IpcCapability, blocks: u64) -> Option<IpcBlockStore<Sto
     IpcBlockStore::new_with_slot(
         StorageTransport::new(),
         capability,
-        REQUEST_CAPABILITY as u16,
+        REQUEST_CAPABILITY_SLOT as u16,
         capability.generation,
         capability.service_epoch,
         blocks,
@@ -247,7 +221,7 @@ fn discover(capability: IpcCapability) -> Option<u64> {
         StorageOperation::Reopen,
         1,
         capability.generation,
-        REQUEST_CAPABILITY as u16,
+        REQUEST_CAPABILITY_SLOT as u16,
         capability.service_epoch,
         0,
         0,
@@ -309,11 +283,11 @@ fn handle_package_request<B: logos_storage::BlockStore>(
     request: PackageRequest,
     filesystem: &mut DurableNamespaceV5<B>,
 ) -> PackageResponse {
-    let Some(capability) = common::capability(PACKAGE_RECEIVE_CAPABILITY) else {
+    let Some(capability) = common::capability(PACKAGE_RECEIVE_CAPABILITY_SLOT) else {
         return PackageResponse::new(request, PackageStatus::Invalid);
     };
     let target = match request.validate_target(
-        PACKAGE_RECEIVE_CAPABILITY,
+        PACKAGE_RECEIVE_CAPABILITY_SLOT,
         capability.generation,
         capability.service_epoch,
     ) {
@@ -384,10 +358,10 @@ fn receive_package_request() -> Option<PackageRequest> {
         PackageOperation::Lookup,
         logos_abi::ServiceId::Storage,
         1,
-        common::capability(PACKAGE_RECEIVE_CAPABILITY)
+        common::capability(PACKAGE_RECEIVE_CAPABILITY_SLOT)
             .map_or(1, |capability| capability.generation),
-        PACKAGE_RECEIVE_CAPABILITY as u16,
-        common::capability(PACKAGE_RECEIVE_CAPABILITY)
+        PACKAGE_RECEIVE_CAPABILITY_SLOT as u16,
+        common::capability(PACKAGE_RECEIVE_CAPABILITY_SLOT)
             .map_or(1, |capability| capability.service_epoch),
         0,
         0,
@@ -832,7 +806,7 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
-    let Some(capability) = common::capability(REQUEST_CAPABILITY) else {
+    let Some(capability) = common::capability(REQUEST_CAPABILITY_SLOT) else {
         serve_storage_error(StorageApiStatus::Io)
     };
     let Some(blocks) = discover(capability) else { serve_storage_error(StorageApiStatus::Io) };
