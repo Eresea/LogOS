@@ -2461,6 +2461,126 @@ impl ServiceRuntime {
         outcome
     }
 
+    pub(crate) fn directory_call(
+        &mut self,
+        process: ProcessHandle,
+        capability_raw: u64,
+        length: usize,
+    ) -> logos_abi::DirectoryStatus {
+        let Some(service) = self.service_for_process(process) else {
+            return logos_abi::DirectoryStatus::Unauthorized;
+        };
+        if length != core::mem::size_of::<logos_abi::DirectoryRequest>() {
+            return logos_abi::DirectoryStatus::Malformed;
+        }
+        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+            return logos_abi::DirectoryStatus::Unauthorized;
+        };
+        let request = unsafe {
+            core::ptr::read_unaligned(
+                staging_frame.raw() as usize as *const logos_abi::DirectoryRequest
+            )
+        };
+        if !request.is_valid() {
+            return logos_abi::DirectoryStatus::Malformed;
+        }
+        let generation = (self.service_epoch as u32).max(1);
+        let Some(service_handle) =
+            logos_abi::ServiceHandle::new(service.index() as u32, generation)
+        else {
+            return logos_abi::DirectoryStatus::Stale;
+        };
+        if request.subject != logos_abi::ServiceHandle::EMPTY && request.subject != service_handle {
+            return logos_abi::DirectoryStatus::Unauthorized;
+        }
+        let Some(directory) = logos_abi::CapabilityHandle::from_raw(capability_raw) else {
+            return logos_abi::DirectoryStatus::Unauthorized;
+        };
+        let Some(expected_directory) = logos_abi::CapabilityHandle::new(1, generation) else {
+            return logos_abi::DirectoryStatus::Stale;
+        };
+        if directory.generation() != generation {
+            return logos_abi::DirectoryStatus::Stale;
+        }
+        if directory != expected_directory {
+            return logos_abi::DirectoryStatus::Unauthorized;
+        }
+        if request.operation != logos_abi::DirectoryOperation::Capabilities {
+            return logos_abi::DirectoryStatus::NotFound;
+        }
+        if request.cursor > logos_abi::MAX_IPC_CAPABILITIES as u64 {
+            return logos_abi::DirectoryStatus::Malformed;
+        }
+        let Some(graph) = self.ipc.as_ref() else {
+            return logos_abi::DirectoryStatus::Stale;
+        };
+        let Some(capability_frame) = self.ipc_capability_frames[service.index()] else {
+            return logos_abi::DirectoryStatus::Unauthorized;
+        };
+        let page =
+            unsafe { &*(capability_frame.raw() as usize as *const logos_abi::IpcCapabilityPage) };
+        let mut response = logos_abi::DirectoryResponse::empty(
+            logos_abi::DirectoryOperation::Capabilities,
+            logos_abi::DirectoryStatus::Ok,
+            request.request_id,
+        );
+        let mut scanned = request.cursor as usize;
+        let mut written = 0;
+        while scanned < logos_abi::MAX_IPC_CAPABILITIES
+            && written < logos_abi::DIRECTORY_RECORDS_PER_PAGE
+        {
+            let slot = scanned;
+            scanned += 1;
+            let Some(capability) = page.get(slot) else { continue };
+            if capability.generation != self.ipc_generation
+                || capability.service_epoch != self.service_epoch
+            {
+                return logos_abi::DirectoryStatus::Stale;
+            }
+            let Some(endpoint) = (0..graph.count()).find_map(|index| {
+                graph.endpoint(index).filter(|endpoint| {
+                    endpoint.id().index() == capability.endpoint_index().unwrap_or(usize::MAX)
+                })
+            }) else {
+                continue;
+            };
+            let peer = match capability.rights {
+                logos_abi::IpcRights::Send => endpoint.consumer(),
+                logos_abi::IpcRights::Receive => endpoint.producer(),
+            };
+            let Some(peer_handle) = logos_abi::ServiceHandle::new(peer.index() as u32, generation)
+            else {
+                return logos_abi::DirectoryStatus::Stale;
+            };
+            let Some(handle) = logos_abi::CapabilityHandle::new(slot as u32, generation) else {
+                return logos_abi::DirectoryStatus::Capacity;
+            };
+            let mut record = logos_abi::DirectoryRecord::EMPTY;
+            record.kind = logos_abi::DirectoryRecordKind::Capability;
+            record.rights = capability.rights as u8;
+            record.handle = handle.raw();
+            record.peer = peer_handle;
+            record.message_bytes =
+                crate::service_ipc::ServiceIpcGraph::message_size(endpoint.id().index()) as u16;
+            record.queue_capacity =
+                crate::service_ipc::ServiceIpcGraph::queue_capacity(endpoint.id().index()) as u16;
+            response.records[written] = record;
+            written += 1;
+        }
+        response.count = written as u8;
+        if scanned < logos_abi::MAX_IPC_CAPABILITIES {
+            response.flags |= logos_abi::DIRECTORY_FLAG_MORE;
+            response.cursor = scanned as u64;
+        }
+        unsafe {
+            core::ptr::write_unaligned(
+                staging_frame.raw() as usize as *mut logos_abi::DirectoryResponse,
+                response,
+            );
+        }
+        logos_abi::DirectoryStatus::Ok
+    }
+
     pub(crate) fn manager_call(
         &mut self,
         process: ProcessHandle,

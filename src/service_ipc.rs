@@ -290,6 +290,21 @@ impl ServiceIpcGraph {
     pub fn message_size(index: usize) -> usize {
         logos_abi::ipc_message_size(index).unwrap_or(0)
     }
+
+    pub fn queue_capacity(index: usize) -> usize {
+        if index == logos_abi::IpcEndpointId::FlowToDevice.index()
+            || index == logos_abi::IpcEndpointId::DeviceToFlow.index()
+        {
+            8
+        } else {
+            match logos_abi::ipc_message_type(index) {
+                Some(logos_abi::IpcMessageType::Input) => 32,
+                Some(logos_abi::IpcMessageType::Render) => 1,
+                Some(logos_abi::IpcMessageType::Bytes) => 8,
+                _ => 0,
+            }
+        }
+    }
 }
 
 fn capability_identity(capability: IpcCapability) -> logos_abi::MessageIdentity {

@@ -7,7 +7,10 @@ generation-safe service/IPC handles. The migration is staged; the current boot g
 the compatibility baseline until the live service images switch together.
 The `runtime_ipc`, `runtime_events`, and `runtime_services` modules define the v5 record and
 validation model and now compile for UEFI; live service traffic remains on the compatibility graph
-until the directory and handle syscalls are wired.
+until the live service images switch together.
+The capability directory syscall now exposes the v5 cursored records from each service's
+Core-owned compatibility grant page; handle-based IPC operations still use the legacy slot ABI
+until their migration slice lands.
 
 ```text
 Terminal → Session → Flow → typed system API registry

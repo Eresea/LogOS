@@ -20,6 +20,7 @@ const SYSCALL_WAIT: usize = 2;
 const SYSCALL_NOTIFY: usize = 3;
 const SYSCALL_SERVICE_HEAP_GROW: usize = logos_abi::SERVICE_HEAP_GROW_SYSCALL;
 const SYSCALL_SERVICE_HEAP_SHRINK: usize = logos_abi::SERVICE_HEAP_SHRINK_SYSCALL;
+const SYSCALL_DIRECTORY: usize = logos_abi::SERVICE_DIRECTORY_SYSCALL;
 const SYSCALL_IPC_SEND: usize = logos_abi::IPC_SYSCALL_SEND;
 const SYSCALL_IPC_RECEIVE: usize = logos_abi::IPC_SYSCALL_RECEIVE;
 const SYSCALL_MANAGER: usize = logos_abi::MANAGER_SYSCALL;
@@ -219,6 +220,20 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
         if outcome.status == logos_abi::IpcStatus::Unauthorized {
             crate::proof::hostile_ipc_syscall_rejected();
         }
+        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+        prepare_address_space(launch.address_space_root());
+        return true;
+    }
+    if number == SYSCALL_DIRECTORY {
+        let Some(launch) = SCHEDULER.user_launch(handle) else {
+            return false;
+        };
+        let capability_raw =
+            unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) } as u64;
+        let length = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(9)) };
+        prepare_kernel();
+        let status = crate::arch::directory_call(launch.process(), capability_raw, length);
+        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status as usize) };
         USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
         prepare_address_space(launch.address_space_root());
         return true;

@@ -1181,6 +1181,27 @@ pub(crate) fn shrink_service_heap(
     }
 }
 
+pub(crate) fn directory_call(
+    process: crate::process::ProcessHandle,
+    capability_raw: u64,
+    length: usize,
+) -> logos_abi::DirectoryStatus {
+    if !service_runtime_ready() {
+        return logos_abi::DirectoryStatus::Unauthorized;
+    }
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    if service_runtime_restarting() {
+        return logos_abi::DirectoryStatus::Stale;
+    }
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).directory_call(
+            process,
+            capability_raw,
+            length,
+        )
+    }
+}
+
 pub(crate) fn manager_call(
     process: crate::process::ProcessHandle,
     capability_slot: usize,

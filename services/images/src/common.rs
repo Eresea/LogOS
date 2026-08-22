@@ -574,6 +574,43 @@ pub fn manager_call(
     status
 }
 
+#[inline(always)]
+#[allow(dead_code)]
+pub fn directory_call(
+    capability: logos_abi::CapabilityHandle,
+    request: &logos_abi::DirectoryRequest,
+    response: &mut logos_abi::DirectoryResponse,
+) -> logos_abi::DirectoryStatus {
+    unsafe {
+        ptr::write_unaligned(
+            logos_abi::IPC_STAGING_BASE as *mut logos_abi::DirectoryRequest,
+            *request,
+        );
+    }
+    let mut raw = logos_abi::SERVICE_DIRECTORY_SYSCALL;
+    unsafe {
+        asm!(
+            "int 49",
+            inout("rax") raw,
+            in("rdi") capability.raw() as usize,
+            in("rsi") mem::size_of::<logos_abi::DirectoryRequest>(),
+            options(preserves_flags),
+        );
+    }
+    let status =
+        logos_abi::DirectoryStatus::from_raw(raw).unwrap_or(logos_abi::DirectoryStatus::Malformed);
+    if status == logos_abi::DirectoryStatus::Ok {
+        let received = unsafe {
+            ptr::read_unaligned(logos_abi::IPC_STAGING_BASE as *const logos_abi::DirectoryResponse)
+        };
+        if !received.is_valid_for(*request) {
+            return logos_abi::DirectoryStatus::Malformed;
+        }
+        *response = received;
+    }
+    status
+}
+
 fn endpoint_message_size(endpoint: Option<usize>) -> Option<usize> {
     endpoint.and_then(logos_abi::ipc_message_size)
 }

@@ -125,6 +125,20 @@ pub enum DirectoryStatus {
     Capacity = 5,
 }
 
+impl DirectoryStatus {
+    pub const fn from_raw(raw: usize) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Ok),
+            1 => Some(Self::Malformed),
+            2 => Some(Self::Unauthorized),
+            3 => Some(Self::Stale),
+            4 => Some(Self::NotFound),
+            5 => Some(Self::Capacity),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum DirectoryRecordKind {
