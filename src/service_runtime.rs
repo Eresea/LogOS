@@ -3143,6 +3143,75 @@ impl ServiceRuntime {
                     notified: status == logos_abi::IpcStatus::Ok,
                 };
             }
+            if endpoint.index() as usize == logos_abi::IpcEndpointId::CoreToNetwork.index() {
+                let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Unauthorized,
+                        notified: false,
+                    };
+                };
+                let response = if let Some(response) = self.network_packet_response.take() {
+                    #[cfg(feature = "qemu-proof")]
+                    crate::arch_proof_line(b"LogOS vNext: network link delivered");
+                    response
+                } else {
+                    let Some(frame) = self.network_packet_frames.first().and_then(|frame| *frame)
+                    else {
+                        return crate::service_ipc::IpcOutcome {
+                            status: logos_abi::IpcStatus::Unauthorized,
+                            notified: false,
+                        };
+                    };
+                    let Some(length) = crate::arch::take_network_frame(frame.raw() as usize) else {
+                        return crate::service_ipc::IpcOutcome {
+                            status: logos_abi::IpcStatus::Empty,
+                            notified: false,
+                        };
+                    };
+                    let mut response = logos_abi::NetworkPacketDescriptor::new(
+                        logos_abi::NetworkPacketOperation::RecycleRx,
+                        0,
+                        self.network_packet_sequence,
+                    );
+                    response.length = length as u16;
+                    response.generation = self.ipc_generation;
+                    response.service_epoch = self.service_epoch;
+                    self.network_packet_sequence =
+                        self.network_packet_sequence.wrapping_add(1).max(1);
+                    response
+                };
+                unsafe {
+                    core::ptr::write_unaligned(
+                        staging_frame.raw() as usize as *mut logos_abi::NetworkPacketDescriptor,
+                        response,
+                    );
+                }
+                let status = self.queue_dynamic_core_response(
+                    service,
+                    endpoint,
+                    core::mem::size_of::<logos_abi::NetworkPacketDescriptor>(),
+                );
+                if status != logos_abi::IpcStatus::Ok {
+                    self.network_packet_response = Some(response);
+                    return crate::service_ipc::IpcOutcome { status, notified: false };
+                }
+                let bytes = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        staging_frame.raw() as usize as *mut u8,
+                        expected_bytes,
+                    )
+                };
+                let status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
+                    (Some(registry), Some(events)) => {
+                        registry.receive(caller, dynamic_capability, bytes, events)
+                    }
+                    _ => logos_abi::IpcStatus::Disconnected,
+                };
+                return crate::service_ipc::IpcOutcome {
+                    status,
+                    notified: status == logos_abi::IpcStatus::Ok,
+                };
+            }
             if !endpoint_uses_legacy_special_transport(endpoint) {
                 let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
                     return crate::service_ipc::IpcOutcome {
