@@ -796,8 +796,8 @@ fn event_set_for_mask(mask: u64) -> Option<logos_abi::EventSetHandle> {
                 logos_abi::IpcRights::Send
             };
             let message_bytes = logos_abi::ipc_message_size(endpoint)?;
-            let Ok(event) = discover_event_contract(rights, endpoint as u16 + 1, message_bytes)
-            else {
+            let contract_id = logos_abi::ipc_contract_id(endpoint)?;
+            let Ok(event) = discover_event_contract(rights, contract_id, message_bytes) else {
                 return None;
             };
             let mut request = logos_abi::EventRequest::new(
@@ -888,7 +888,10 @@ pub const fn capability_spec(
         _ => 0,
     };
     CapabilitySpec {
-        contract_id: endpoint.index() as u16 + 1,
+        contract_id: match logos_abi::ipc_contract_id(endpoint.index()) {
+            Some(contract_id) => contract_id,
+            None => 0,
+        },
         peer_index: capability_peer_index(endpoint, rights),
         message_bytes,
         rights,

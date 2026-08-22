@@ -512,11 +512,8 @@ impl ServiceRuntime {
             let consumer = dynamic_endpoint_peer(endpoint_id, false, generation)?;
             let message_bytes = logos_abi::ipc_message_size(raw)
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-            // Contract IDs identify the typed payload contract, not the
-            // runtime endpoint. The built-in manifest currently derives them
-            // from its stable bootstrap entry index.
-            let contract_id = u16::try_from(raw + 1)
-                .map_err(|_| ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+            let contract_id = logos_abi::ipc_contract_id(raw)
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
             let queue_capacity = ServiceIpcGraph::queue_capacity(raw).max(1);
             let endpoint = registry
                 .create_endpoint(

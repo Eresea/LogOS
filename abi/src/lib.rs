@@ -1301,6 +1301,61 @@ pub enum IpcMessageType {
     Packet,
 }
 
+pub const IPC_CONTRACT_INPUT: u16 = 1;
+pub const IPC_CONTRACT_RENDER: u16 = 2;
+pub const IPC_CONTRACT_BYTES: u16 = 3;
+pub const IPC_CONTRACT_PACKET: u16 = 4;
+pub const IPC_CONTRACT_STORAGE_REQUEST: u16 = 5;
+pub const IPC_CONTRACT_STORAGE_RESPONSE: u16 = 6;
+pub const IPC_CONTRACT_PACKAGE_REQUEST: u16 = 7;
+pub const IPC_CONTRACT_PACKAGE_RESPONSE: u16 = 8;
+pub const IPC_CONTRACT_STORAGE_MAP_REQUEST: u16 = 9;
+pub const IPC_CONTRACT_STORAGE_MAP_RESPONSE: u16 = 10;
+pub const IPC_CONTRACT_DEVICE_REQUEST: u16 = 11;
+pub const IPC_CONTRACT_DEVICE_RESPONSE: u16 = 12;
+
+/// Stable typed contract identifier for an endpoint's wire payload.
+///
+/// This deliberately does not encode the endpoint index: endpoints are
+/// runtime identities, while contracts remain stable across topology changes.
+pub const fn ipc_contract_id(endpoint: usize) -> Option<u16> {
+    if endpoint == IpcEndpointId::StorageToCore as usize {
+        return Some(IPC_CONTRACT_STORAGE_REQUEST);
+    }
+    if endpoint == IpcEndpointId::CoreToStorage as usize {
+        return Some(IPC_CONTRACT_STORAGE_RESPONSE);
+    }
+    if endpoint == IpcEndpointId::CoreToStoragePackage as usize {
+        return Some(IPC_CONTRACT_PACKAGE_REQUEST);
+    }
+    if endpoint == IpcEndpointId::StoragePackageToCore as usize {
+        return Some(IPC_CONTRACT_PACKAGE_RESPONSE);
+    }
+    if endpoint == IpcEndpointId::StorageMapToCore as usize {
+        return Some(IPC_CONTRACT_STORAGE_MAP_REQUEST);
+    }
+    if endpoint == IpcEndpointId::CoreToStorageMap as usize {
+        return Some(IPC_CONTRACT_STORAGE_MAP_RESPONSE);
+    }
+    if endpoint == IpcEndpointId::DeviceToCore as usize
+        || endpoint == IpcEndpointId::FlowToDevice as usize
+    {
+        return Some(IPC_CONTRACT_DEVICE_REQUEST);
+    }
+    if endpoint == IpcEndpointId::CoreToDevice as usize
+        || endpoint == IpcEndpointId::DeviceToFlow as usize
+    {
+        return Some(IPC_CONTRACT_DEVICE_RESPONSE);
+    }
+    match ipc_message_type(endpoint) {
+        Some(IpcMessageType::Input) => Some(IPC_CONTRACT_INPUT),
+        Some(IpcMessageType::Render) => Some(IPC_CONTRACT_RENDER),
+        Some(IpcMessageType::Bytes) => Some(IPC_CONTRACT_BYTES),
+        Some(IpcMessageType::Packet) => Some(IPC_CONTRACT_PACKET),
+        None => None,
+    }
+}
+
 pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
     match endpoint {
         0 => Some(IpcMessageType::Input),
@@ -2127,6 +2182,21 @@ mod tests {
         assert_eq!(ipc_message_size(0), Some(core::mem::size_of::<InputMessage>()));
         assert_eq!(ipc_message_size(1), Some(core::mem::size_of::<RenderMessage>()));
         assert_eq!(ipc_message_size(5), Some(core::mem::size_of::<IpcBytes>()));
+        assert_eq!(ipc_contract_id(0), Some(IPC_CONTRACT_INPUT));
+        assert_eq!(ipc_contract_id(2), Some(IPC_CONTRACT_BYTES));
+        assert_eq!(ipc_contract_id(8), Some(IPC_CONTRACT_BYTES));
+        assert_eq!(ipc_contract_id(10), Some(IPC_CONTRACT_PACKET));
+        assert_eq!(
+            ipc_contract_id(IpcEndpointId::StorageToCore as usize),
+            Some(IPC_CONTRACT_STORAGE_REQUEST)
+        );
+        assert_eq!(
+            ipc_contract_id(IpcEndpointId::CoreToStorage as usize),
+            Some(IPC_CONTRACT_STORAGE_RESPONSE)
+        );
+        assert_eq!(ipc_contract_id(6), Some(IPC_CONTRACT_STORAGE_REQUEST));
+        assert_eq!(ipc_contract_id(7), Some(IPC_CONTRACT_STORAGE_RESPONSE));
+        assert_eq!(ipc_contract_id(32), None);
         assert_eq!(
             ipc_capability_slot(
                 ServiceId::Terminal,
