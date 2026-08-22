@@ -161,6 +161,12 @@ impl DeviceRequest {
             && self.reserved == 0
             && self.reserved_tail.iter().all(|byte| *byte == 0)
     }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, operation))
+            .is_some_and(|raw| *raw == DeviceOperation::List as u8)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -226,3 +232,17 @@ impl DeviceResponse {
 
 const _: () = assert!(core::mem::size_of::<DeviceRequest>() <= crate::IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::size_of::<DeviceResponse>() <= crate::IPC_PAGE_BYTES);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_wire_operation_is_checked_before_decoding() {
+        let mut bytes = [0u8; core::mem::size_of::<DeviceRequest>()];
+        bytes[core::mem::offset_of!(DeviceRequest, operation)] = DeviceOperation::List as u8;
+        assert!(DeviceRequest::wire_enums_valid(&bytes));
+        bytes[core::mem::offset_of!(DeviceRequest, operation)] = u8::MAX;
+        assert!(!DeviceRequest::wire_enums_valid(&bytes));
+    }
+}

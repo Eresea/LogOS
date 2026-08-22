@@ -621,6 +621,12 @@ impl NetworkRequest {
             && self.reserved_tail.iter().all(|byte| *byte == 0)
             && self.payload_len as usize <= NETWORK_INLINE_PAYLOAD_BYTES
     }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes.get(core::mem::offset_of!(Self, operation)).is_some_and(|raw| {
+            *raw >= NetworkOperation::Status as u8 && *raw <= NetworkOperation::Cancel as u8
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -669,6 +675,17 @@ impl NetworkResponse {
             && self.request_id == request.request_id
             && self.reserved == 0
             && self.payload_len as usize <= NETWORK_INLINE_PAYLOAD_BYTES
+    }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes.get(core::mem::offset_of!(Self, operation)).is_some_and(|raw| {
+            *raw >= NetworkOperation::Status as u8 && *raw <= NetworkOperation::Cancel as u8
+        }) && bytes
+            .get(core::mem::offset_of!(Self, result))
+            .is_some_and(|raw| *raw <= NetworkResult::Cancelled as u8)
+            && bytes
+                .get(core::mem::offset_of!(Self, state))
+                .is_some_and(|raw| *raw <= NetworkState::Faulted as u8)
     }
 }
 
@@ -733,6 +750,15 @@ impl NetworkPacketDescriptor {
             && self.length as usize <= NETWORK_PACKET_PAGE_BYTES
             && self.reserved == 0
             && self.reserved_tail.iter().all(|byte| *byte == 0)
+    }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes.get(core::mem::offset_of!(Self, operation)).is_some_and(|raw| {
+            *raw >= NetworkPacketOperation::SubmitTx as u8
+                && *raw <= NetworkPacketOperation::Reset as u8
+        }) && bytes
+            .get(core::mem::offset_of!(Self, result))
+            .is_some_and(|raw| *raw <= NetworkResult::Cancelled as u8)
     }
 }
 
@@ -1036,6 +1062,12 @@ pub enum MessageKind {
     UserStorageResponse = 25,
 }
 
+impl MessageKind {
+    pub const fn raw_is_valid(raw: u8) -> bool {
+        raw >= Self::Key as u8 && raw <= Self::UserStorageResponse as u8
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum KeyState {
@@ -1251,6 +1283,14 @@ pub struct IpcBytes {
     pub flags: u8,
     pub len: u16,
     pub bytes: [u8; MAX_IPC_BYTES],
+}
+
+impl IpcBytes {
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, kind))
+            .is_some_and(|raw| MessageKind::raw_is_valid(*raw))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2182,6 +2222,21 @@ mod tests {
         assert!(request.is_valid());
         request.payload_len += 1;
         assert!(!request.is_valid());
+    }
+
+    #[test]
+    fn ipc_wire_enums_are_checked_before_typed_reads() {
+        let mut bytes = [0u8; core::mem::size_of::<IpcBytes>()];
+        bytes[core::mem::offset_of!(IpcBytes, kind)] = MessageKind::Text as u8;
+        assert!(IpcBytes::wire_enums_valid(&bytes));
+        bytes[core::mem::offset_of!(IpcBytes, kind)] = u8::MAX;
+        assert!(!IpcBytes::wire_enums_valid(&bytes));
+
+        let mut request = [0u8; core::mem::size_of::<NetworkRequest>()];
+        request[core::mem::offset_of!(NetworkRequest, operation)] = NetworkOperation::Status as u8;
+        assert!(NetworkRequest::wire_enums_valid(&request));
+        request[core::mem::offset_of!(NetworkRequest, operation)] = u8::MAX;
+        assert!(!NetworkRequest::wire_enums_valid(&request));
     }
 
     #[test]

@@ -1946,6 +1946,18 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
+            let wire = unsafe {
+                core::slice::from_raw_parts(
+                    staging_frame.raw() as usize as *const u8,
+                    core::mem::size_of::<logos_abi::NetworkPacketDescriptor>(),
+                )
+            };
+            if !logos_abi::NetworkPacketDescriptor::wire_enums_valid(wire) {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
             let descriptor: logos_abi::NetworkPacketDescriptor =
                 unsafe { core::ptr::read_unaligned(staging_frame.raw() as usize as *const _) };
             if !descriptor.is_valid() {
@@ -2010,12 +2022,32 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
+            let wire = unsafe {
+                core::slice::from_raw_parts(
+                    staging_frame.raw() as usize as *const u8,
+                    core::mem::size_of::<logos_abi::IpcBytes>(),
+                )
+            };
+            if !logos_abi::IpcBytes::wire_enums_valid(wire) {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
             let request_message = unsafe {
                 core::ptr::read_unaligned(staging_frame.raw() as usize as *const logos_abi::IpcBytes)
             };
             if request_message.kind != logos_abi::MessageKind::NetworkRequest
                 || request_message.len as usize != core::mem::size_of::<logos_abi::NetworkRequest>()
             {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
+            if !logos_abi::NetworkRequest::wire_enums_valid(
+                &request_message.bytes[..core::mem::size_of::<logos_abi::NetworkRequest>()],
+            ) {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Malformed,
                     notified: false,
@@ -2395,6 +2427,18 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
+            let wire = unsafe {
+                core::slice::from_raw_parts(
+                    staging_frame.raw() as usize as *const u8,
+                    core::mem::size_of::<logos_abi::DeviceRequest>(),
+                )
+            };
+            if !logos_abi::DeviceRequest::wire_enums_valid(wire) {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
             let request = unsafe {
                 core::ptr::read_unaligned(
                     staging_frame.raw() as usize as *const logos_abi::DeviceRequest
@@ -2450,6 +2494,18 @@ impl ServiceRuntime {
             if self.package_response_slot().is_some() {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Full,
+                    notified: false,
+                };
+            }
+            let wire = unsafe {
+                core::slice::from_raw_parts(
+                    staging_frame.raw() as usize as *const u8,
+                    core::mem::size_of::<logos_abi::PackageResponse>(),
+                )
+            };
+            if !logos_abi::PackageResponse::wire_enums_valid(wire) {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
                     notified: false,
                 };
             }
@@ -2888,11 +2944,25 @@ impl ServiceRuntime {
             && service == ServiceId::Flow
             && index == logos_abi::IpcEndpointId::NetworkToFlow.index()
         {
+            if !logos_abi::IpcBytes::wire_enums_valid(bytes) {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
             let message =
                 unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<logos_abi::IpcBytes>()) };
             if message.kind == logos_abi::MessageKind::NetworkResponse
                 && message.len as usize == core::mem::size_of::<logos_abi::NetworkResponse>()
             {
+                if !logos_abi::NetworkResponse::wire_enums_valid(
+                    &message.bytes[..core::mem::size_of::<logos_abi::NetworkResponse>()],
+                ) {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Malformed,
+                        notified: false,
+                    };
+                }
                 let response = unsafe {
                     core::ptr::read_unaligned(
                         message.bytes.as_ptr().cast::<logos_abi::NetworkResponse>(),

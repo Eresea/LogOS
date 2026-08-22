@@ -354,6 +354,17 @@ impl PackageResponse {
         }
         Ok(())
     }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes.get(core::mem::offset_of!(Self, operation)).is_some_and(|raw| {
+            *raw >= PackageOperation::Lookup as u8 && *raw <= PackageOperation::Read as u8
+        }) && bytes
+            .get(core::mem::offset_of!(Self, status))
+            .is_some_and(|raw| *raw <= PackageStatus::Full as u8)
+            && bytes.get(core::mem::offset_of!(Self, target)).is_some_and(|raw| {
+                *raw >= PackageTargetKind::Service as u8 && *raw <= PackageTargetKind::Program as u8
+            })
+    }
 }
 
 pub const PACKAGE_ABI_VERSION: u16 = ABI_VERSION;
@@ -455,5 +466,16 @@ mod tests {
 
         assert_eq!(stale.validate_for(request, 4, 9), Err(PackageStatus::Invalid));
         assert_eq!(current.validate_for(request, 3, 9), Ok(()));
+    }
+
+    #[test]
+    fn response_wire_enums_are_checked_before_decoding() {
+        let mut bytes = [0u8; core::mem::size_of::<PackageResponse>()];
+        bytes[core::mem::offset_of!(PackageResponse, operation)] = PackageOperation::Lookup as u8;
+        bytes[core::mem::offset_of!(PackageResponse, status)] = PackageStatus::Ok as u8;
+        bytes[core::mem::offset_of!(PackageResponse, target)] = PackageTargetKind::Service as u8;
+        assert!(PackageResponse::wire_enums_valid(&bytes));
+        bytes[core::mem::offset_of!(PackageResponse, status)] = u8::MAX;
+        assert!(!PackageResponse::wire_enums_valid(&bytes));
     }
 }
