@@ -24,7 +24,9 @@ impl Slot {
 pub enum ServiceState {
     Disabled,
     Stopped,
+    Starting,
     Running,
+    Stopping,
 }
 
 struct ServiceRecord {
@@ -225,6 +227,67 @@ impl RuntimeServiceRegistry {
         self.service(handle).map(|_| ())
     }
 
+    pub fn lifecycle_status(
+        &self,
+        operation: ManagerOperation,
+        handle: ServiceHandle,
+    ) -> ManagerStatus {
+        let Ok(service) = self.service(handle) else { return ManagerStatus::Stale };
+        match operation {
+            ManagerOperation::Start => {
+                if service.state != ServiceState::Stopped {
+                    return if matches!(
+                        service.state,
+                        ServiceState::Starting | ServiceState::Stopping
+                    ) {
+                        ManagerStatus::Busy
+                    } else {
+                        ManagerStatus::InvalidState
+                    };
+                }
+                if service
+                    .dependencies
+                    .iter()
+                    .any(|dependency| self.state(*dependency) != Ok(ServiceState::Running))
+                {
+                    ManagerStatus::Dependency
+                } else {
+                    ManagerStatus::Ok
+                }
+            }
+            ManagerOperation::Stop => {
+                if service.state != ServiceState::Running {
+                    return if matches!(
+                        service.state,
+                        ServiceState::Starting | ServiceState::Stopping
+                    ) {
+                        ManagerStatus::Busy
+                    } else {
+                        ManagerStatus::InvalidState
+                    };
+                }
+                if self.slots.iter().filter_map(|slot| slot.value.as_ref()).any(|dependent| {
+                    dependent.dependencies.contains(&handle)
+                        && dependent.state != ServiceState::Stopped
+                }) {
+                    ManagerStatus::Dependency
+                } else {
+                    ManagerStatus::Ok
+                }
+            }
+            ManagerOperation::Restart => {
+                if service.state == ServiceState::Running {
+                    ManagerStatus::Ok
+                } else if matches!(service.state, ServiceState::Starting | ServiceState::Stopping) {
+                    ManagerStatus::Busy
+                } else {
+                    ManagerStatus::InvalidState
+                }
+            }
+            _ => ManagerStatus::Unsupported,
+        }
+    }
+
     pub fn manager_request(&self, request: ManagerRequest) -> ManagerResponse {
         let mut response =
             ManagerResponse::new(request.operation, ManagerStatus::Malformed, request.request_id);
@@ -283,7 +346,9 @@ impl RuntimeServiceRegistry {
             record.flags = match service.state {
                 ServiceState::Disabled => 2,
                 ServiceState::Stopped => 0,
+                ServiceState::Starting => 1,
                 ServiceState::Running => 1,
+                ServiceState::Stopping => 0,
             };
             response.records[written] = record;
             written += 1;
@@ -372,7 +437,9 @@ impl RuntimeServiceRegistry {
             state: match service.state {
                 ServiceState::Disabled => ManagerState::Disabled,
                 ServiceState::Stopped => ManagerState::Stopped,
+                ServiceState::Starting => ManagerState::Starting,
                 ServiceState::Running => ManagerState::Running,
+                ServiceState::Stopping => ManagerState::Stopping,
             },
             restarts: service.restarts,
             name_len: name_len as u8,
@@ -483,6 +550,35 @@ mod tests {
         assert_eq!(registry.manager_request(status).status, ManagerStatus::Ok);
         registry.remove(handles[11]).unwrap();
         assert_eq!(registry.manager_request(status).status, ManagerStatus::Stale);
+    }
+
+    #[test]
+    fn lifecycle_status_uses_dynamic_state_and_dependencies() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let dependency = registry.register(b"dep", b"image", &[]).unwrap();
+        let service = registry.register(b"svc", b"image", &[dependency]).unwrap();
+
+        assert_eq!(
+            registry.lifecycle_status(ManagerOperation::Start, service),
+            ManagerStatus::Dependency
+        );
+        registry.start(dependency).unwrap();
+        assert_eq!(registry.lifecycle_status(ManagerOperation::Start, service), ManagerStatus::Ok);
+        registry.start(service).unwrap();
+        assert_eq!(
+            registry.lifecycle_status(ManagerOperation::Start, service),
+            ManagerStatus::InvalidState
+        );
+        assert_eq!(
+            registry.lifecycle_status(ManagerOperation::Stop, dependency),
+            ManagerStatus::Dependency
+        );
+        assert_eq!(registry.lifecycle_status(ManagerOperation::Stop, service), ManagerStatus::Ok);
+        registry.stop(service).unwrap();
+        assert_eq!(
+            registry.lifecycle_status(ManagerOperation::Restart, service),
+            ManagerStatus::InvalidState
+        );
     }
 
     #[test]

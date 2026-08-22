@@ -3351,10 +3351,11 @@ impl ServiceRuntime {
         let mut manager_request = request;
         if service_lifecycle {
             if let Some(registry) = self.dynamic_services.as_ref() {
-                if registry.validate_lifecycle_handle(request.service).is_err() {
+                let status = registry.lifecycle_status(request.operation, request.service);
+                if status != logos_abi::ManagerStatus::Ok {
                     let response = logos_abi::ManagerResponse::new(
                         request.operation,
-                        logos_abi::ManagerStatus::Stale,
+                        status,
                         request.request_id,
                     );
                     unsafe {
