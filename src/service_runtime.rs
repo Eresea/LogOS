@@ -530,13 +530,17 @@ impl ServiceRuntime {
 
             for spec in SERVICE_IMAGES {
                 let service = spec.service();
+                let owner = dynamic_service_handle(service, generation)?;
                 for rights in [logos_abi::IpcRights::Send, logos_abi::IpcRights::Receive] {
-                    let Some(_slot) = logos_abi::ipc_capability_slot(service, endpoint_id, rights)
-                    else {
-                        continue;
+                    let owns_endpoint = match rights {
+                        logos_abi::IpcRights::Send => producer == owner,
+                        logos_abi::IpcRights::Receive => consumer == owner,
                     };
+                    if !owns_endpoint {
+                        continue;
+                    }
                     let grant = registry
-                        .grant(dynamic_service_handle(service, generation)?, endpoint, rights)
+                        .grant(owner, endpoint, rights)
                         .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
                     if service == ServiceId::Storage
                         && endpoint_id == logos_abi::IpcEndpointId::CoreToStoragePackage

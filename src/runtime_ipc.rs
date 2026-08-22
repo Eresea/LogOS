@@ -765,10 +765,13 @@ mod tests {
                 )
                 .unwrap();
             for raw_service in 0..10 {
-                let service = logos_abi::ServiceId::from_index(raw_service).unwrap();
                 let owner = ServiceHandle::new(raw_service as u32, 1).unwrap();
                 for rights in [IpcRights::Send, IpcRights::Receive] {
-                    if logos_abi::ipc_capability_slot(service, endpoint_id, rights).is_some() {
+                    let owns_endpoint = match rights {
+                        IpcRights::Send => producer == owner,
+                        IpcRights::Receive => consumer == owner,
+                    };
+                    if owns_endpoint {
                         registry.grant(owner, endpoint, rights).unwrap();
                     }
                 }
