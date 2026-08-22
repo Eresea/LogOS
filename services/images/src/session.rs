@@ -10,26 +10,18 @@ use logos_abi::{
 };
 use logos_session::MAX_LINE_BYTES;
 
-const INPUT_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Session,
+const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_spec(
     logos_abi::IpcEndpointId::TerminalToSession,
     logos_abi::IpcRights::Receive,
 );
-const OUTPUT_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Session,
+const OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_spec(
     logos_abi::IpcEndpointId::SessionToTerminal,
     logos_abi::IpcRights::Send,
 );
-const FLOW_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Session,
-    logos_abi::IpcEndpointId::SessionToFlow,
-    logos_abi::IpcRights::Send,
-);
-const FLOW_OUTPUT_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Session,
-    logos_abi::IpcEndpointId::FlowToSession,
-    logos_abi::IpcRights::Receive,
-);
+const FLOW_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(logos_abi::IpcEndpointId::SessionToFlow, logos_abi::IpcRights::Send);
+const FLOW_OUTPUT_CAPABILITY: common::CapabilitySpec =
+    common::capability_spec(logos_abi::IpcEndpointId::FlowToSession, logos_abi::IpcRights::Receive);
 
 struct PendingOutput {
     bytes: [u8; logos_session::MAX_OUTPUT_BYTES],
@@ -53,7 +45,7 @@ impl PendingOutput {
         self.offset = 0;
     }
 
-    fn flush(&mut self, capability_slot: usize) -> bool {
+    fn flush(&mut self, capability: common::CapabilitySpec) -> bool {
         let mut progressed = false;
         while self.offset < self.len {
             let end = (self.offset + MAX_IPC_BYTES).min(self.len);
@@ -62,7 +54,7 @@ impl PendingOutput {
             else {
                 break;
             };
-            if common::ipc_send(capability_slot, &message) != IpcStatus::Ok {
+            if common::ipc_send(capability, &message) != IpcStatus::Ok {
                 break;
             }
             self.offset = end;

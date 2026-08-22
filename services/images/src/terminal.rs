@@ -6,23 +6,19 @@ mod common;
 
 use logos_abi::{InputMessage, IpcBytes, IpcStatus, KeyCode, KeyState, MessageKind};
 
-const INPUT_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Terminal,
+const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_spec(
     logos_abi::IpcEndpointId::InputToTerminal,
     logos_abi::IpcRights::Receive,
 );
-const DISPLAY_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Terminal,
+const DISPLAY_CAPABILITY: common::CapabilitySpec = common::capability_spec(
     logos_abi::IpcEndpointId::TerminalToDisplay,
     logos_abi::IpcRights::Send,
 );
-const SESSION_INPUT_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Terminal,
+const SESSION_INPUT_CAPABILITY: common::CapabilitySpec = common::capability_spec(
     logos_abi::IpcEndpointId::TerminalToSession,
     logos_abi::IpcRights::Send,
 );
-const SESSION_OUTPUT_CAPABILITY: usize = common::capability_slot(
-    logos_abi::ServiceId::Terminal,
+const SESSION_OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_spec(
     logos_abi::IpcEndpointId::SessionToTerminal,
     logos_abi::IpcRights::Receive,
 );
