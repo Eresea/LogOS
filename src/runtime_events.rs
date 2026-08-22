@@ -12,8 +12,8 @@ struct Slot<T> {
 }
 
 impl<T> Slot<T> {
-    fn empty() -> Self {
-        Self { generation: 1, value: None }
+    fn with_generation(generation: u32) -> Self {
+        Self { generation: generation.max(1), value: None }
     }
 }
 
@@ -47,11 +47,16 @@ pub enum EventError {
 pub struct RuntimeEventRegistry {
     events: Vec<Slot<EventRecord>>,
     sets: Vec<Slot<EventSetRecord>>,
+    generation_seed: u32,
 }
 
 impl RuntimeEventRegistry {
     pub fn new() -> Self {
-        Self { events: Vec::new(), sets: Vec::new() }
+        Self::new_with_generation(1)
+    }
+
+    pub fn new_with_generation(generation: u32) -> Self {
+        Self { events: Vec::new(), sets: Vec::new(), generation_seed: generation.max(1) }
     }
 
     pub fn create_event(&mut self, owner: ServiceHandle) -> Result<EventHandle, EventError> {
@@ -188,7 +193,7 @@ impl RuntimeEventRegistry {
             return Ok(index);
         }
         self.events.try_reserve(1).map_err(|_| EventError::Capacity)?;
-        self.events.push(Slot::empty());
+        self.events.push(Slot::with_generation(self.generation_seed));
         Ok(self.events.len() - 1)
     }
 
@@ -199,7 +204,7 @@ impl RuntimeEventRegistry {
             return Ok(index);
         }
         self.sets.try_reserve(1).map_err(|_| EventError::Capacity)?;
-        self.sets.push(Slot::empty());
+        self.sets.push(Slot::with_generation(self.generation_seed));
         Ok(self.sets.len() - 1)
     }
 
@@ -270,6 +275,16 @@ mod tests {
         events.signal_irq(event).unwrap();
         assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Ready(event)));
         assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Pending));
+    }
+
+    #[test]
+    fn registry_generation_seed_rejects_handles_from_a_previous_runtime() {
+        let owner = owner();
+        let mut first = RuntimeEventRegistry::new_with_generation(3);
+        let event = first.create_event(owner).unwrap();
+        let mut second = RuntimeEventRegistry::new_with_generation(4);
+        assert_eq!(second.signal_irq(event), Err(EventError::Stale));
+        assert_ne!(event, second.create_event(owner).unwrap());
     }
 
     #[test]
