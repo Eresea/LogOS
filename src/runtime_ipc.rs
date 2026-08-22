@@ -132,6 +132,27 @@ impl RuntimeIpcRegistry {
         Ok(self.endpoint(endpoint)?.message_kind)
     }
 
+    pub fn validate_capability(
+        &self,
+        caller: ServiceHandle,
+        capability: CapabilityHandle,
+        rights: IpcRights,
+        message_bytes: usize,
+    ) -> Result<EndpointHandle, IpcStatus> {
+        let grant = self.capability(capability)?;
+        if grant.owner != caller || grant.rights != rights {
+            return Err(IpcStatus::Unauthorized);
+        }
+        let endpoint = self.endpoint(grant.endpoint)?;
+        if grant.service_epoch != endpoint.service_epoch {
+            return Err(IpcStatus::Stale);
+        }
+        if message_bytes != endpoint.message_bytes {
+            return Err(IpcStatus::Malformed);
+        }
+        Ok(endpoint.handle)
+    }
+
     pub fn destroy_service(&mut self, service: ServiceHandle) {
         let endpoints: Vec<_> = self
             .endpoints
@@ -364,6 +385,27 @@ mod tests {
         let replacement = registry.create_endpoint(producer, consumer, 1, 1, 1, 2).unwrap();
         assert_ne!(endpoint, replacement);
         assert_eq!(registry.send(producer, capability, &[1]), IpcStatus::Stale);
+    }
+
+    #[test]
+    fn capability_validation_checks_owner_rights_and_exact_size() {
+        let (producer, consumer) = services();
+        let mut registry = RuntimeIpcRegistry::new();
+        let endpoint = registry.create_endpoint(producer, consumer, 1, 4, 1, 1).unwrap();
+        let send = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
+        assert_eq!(registry.validate_capability(producer, send, IpcRights::Send, 4), Ok(endpoint));
+        assert_eq!(
+            registry.validate_capability(consumer, send, IpcRights::Send, 4),
+            Err(IpcStatus::Unauthorized)
+        );
+        assert_eq!(
+            registry.validate_capability(producer, send, IpcRights::Receive, 4),
+            Err(IpcStatus::Unauthorized)
+        );
+        assert_eq!(
+            registry.validate_capability(producer, send, IpcRights::Send, 3),
+            Err(IpcStatus::Malformed)
+        );
     }
 
     #[test]

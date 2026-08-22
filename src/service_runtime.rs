@@ -1699,6 +1699,39 @@ impl ServiceRuntime {
         self.heartbeat_ticks[service.index()].load(Ordering::Acquire)
     }
 
+    fn validate_dynamic_capability(
+        &self,
+        service: ServiceId,
+        capability_slot: usize,
+        endpoint_index: usize,
+        rights: logos_abi::IpcRights,
+        message_bytes: usize,
+    ) -> logos_abi::IpcStatus {
+        let Some(registry) = self.dynamic_ipc.as_ref() else {
+            return logos_abi::IpcStatus::Ok;
+        };
+        let Some(capability) = self
+            .dynamic_capabilities
+            .get(service.index())
+            .and_then(|capabilities| capabilities.get(capability_slot))
+            .copied()
+            .filter(|capability| capability.is_valid())
+        else {
+            return logos_abi::IpcStatus::Unauthorized;
+        };
+        let Some(expected_endpoint) = self.dynamic_endpoints.get(endpoint_index).copied() else {
+            return logos_abi::IpcStatus::Stale;
+        };
+        let Ok(caller) = dynamic_service_handle(service, (self.service_epoch as u32).max(1)) else {
+            return logos_abi::IpcStatus::Stale;
+        };
+        match registry.validate_capability(caller, capability, rights, message_bytes) {
+            Ok(endpoint) if endpoint == expected_endpoint => logos_abi::IpcStatus::Ok,
+            Ok(_) => logos_abi::IpcStatus::Stale,
+            Err(status) => status,
+        }
+    }
+
     pub(crate) fn ipc_send(
         &mut self,
         process: ProcessHandle,
@@ -1732,6 +1765,12 @@ impl ServiceRuntime {
                 notified: false,
             };
         };
+        let Some(index) = capability.endpoint_index() else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Unauthorized,
+                notified: false,
+            };
+        };
         if length > crate::loader::PAGE_SIZE {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Malformed,
@@ -1744,6 +1783,16 @@ impl ServiceRuntime {
                 notified: false,
             };
         };
+        let dynamic_status = self.validate_dynamic_capability(
+            service,
+            capability_slot,
+            index,
+            logos_abi::IpcRights::Send,
+            length,
+        );
+        if dynamic_status != logos_abi::IpcStatus::Ok {
+            return crate::service_ipc::IpcOutcome { status: dynamic_status, notified: false };
+        }
         if service == ServiceId::Network
             && capability.endpoint_index() == Some(logos_abi::IpcEndpointId::NetworkToCore.index())
         {
@@ -2550,6 +2599,16 @@ impl ServiceRuntime {
             };
         }
         let length = crate::service_ipc::ServiceIpcGraph::message_size(index);
+        let dynamic_status = self.validate_dynamic_capability(
+            service,
+            capability_slot,
+            index,
+            logos_abi::IpcRights::Receive,
+            length,
+        );
+        if dynamic_status != logos_abi::IpcStatus::Ok {
+            return crate::service_ipc::IpcOutcome { status: dynamic_status, notified: false };
+        }
         let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Unauthorized,
