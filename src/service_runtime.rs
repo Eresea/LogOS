@@ -2572,6 +2572,26 @@ impl ServiceRuntime {
             let bytes = unsafe {
                 core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
             };
+            if let Some(graph) = self.ipc.as_ref() {
+                let backed_by_legacy_frame = (0..graph.count()).any(|graph_index| {
+                    graph
+                        .endpoint(graph_index)
+                        .is_some_and(|record| record.id().index() == endpoint.index() as usize)
+                });
+                if backed_by_legacy_frame {
+                    let outcome = graph.send(service, capability, bytes);
+                    if outcome.status == logos_abi::IpcStatus::Ok {
+                        if let (Some(registry), Some(events)) =
+                            (self.dynamic_ipc.as_ref(), self.dynamic_events.as_mut())
+                        {
+                            if let Ok((read_event, _)) = registry.endpoint_events(endpoint) {
+                                let _ = events.signal_irq(read_event);
+                            }
+                        }
+                    }
+                    return outcome;
+                }
+            }
             let status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
                 (Some(registry), Some(events)) => {
                     registry.send(caller, dynamic_capability, bytes, events)
@@ -2900,6 +2920,26 @@ impl ServiceRuntime {
                     expected_bytes,
                 )
             };
+            if let Some(graph) = self.ipc.as_ref() {
+                let backed_by_legacy_frame = (0..graph.count()).any(|graph_index| {
+                    graph
+                        .endpoint(graph_index)
+                        .is_some_and(|record| record.id().index() == endpoint.index() as usize)
+                });
+                if backed_by_legacy_frame {
+                    let outcome = graph.receive(service, capability, bytes);
+                    if outcome.status == logos_abi::IpcStatus::Ok {
+                        if let (Some(registry), Some(events)) =
+                            (self.dynamic_ipc.as_ref(), self.dynamic_events.as_mut())
+                        {
+                            if let Ok((_, write_event)) = registry.endpoint_events(endpoint) {
+                                let _ = events.signal_irq(write_event);
+                            }
+                        }
+                    }
+                    return outcome;
+                }
+            }
             let status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
                 (Some(registry), Some(events)) => {
                     registry.receive(caller, dynamic_capability, bytes, events)

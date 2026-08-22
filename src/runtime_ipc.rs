@@ -93,12 +93,7 @@ impl RuntimeIpcRegistry {
                 });
             }
         };
-        let mut queue = VecDeque::new();
-        if queue.try_reserve(queue_capacity).is_err() {
-            let _ = events.destroy_event(consumer, read_event);
-            let _ = events.destroy_event(producer, write_event);
-            return Err(IpcStatus::Disconnected);
-        }
+        let queue = VecDeque::new();
         self.endpoints[slot].value = Some(EndpointRecord {
             handle,
             producer,
@@ -256,6 +251,9 @@ impl RuntimeIpcRegistry {
             return IpcStatus::Disconnected;
         }
         message.extend_from_slice(bytes);
+        if endpoint.queue.try_reserve(1).is_err() {
+            return IpcStatus::Disconnected;
+        }
         endpoint.queue.push_back(message);
         let _ = events.signal_irq(endpoint.read_event);
         IpcStatus::Ok
