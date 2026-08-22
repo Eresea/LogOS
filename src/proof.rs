@@ -220,7 +220,7 @@ pub fn package_persistence_restarted() {
 
 #[cfg(feature = "package-proof")]
 fn package_graph_running() -> bool {
-    let mut cursor = 0;
+    let mut cursor = 0u64;
     let mut terminal_running = false;
     let mut storage_running = false;
     for request_id in 1..=logos_abi::MAX_MANAGER_SERVICES {
@@ -238,7 +238,7 @@ fn package_graph_running() -> bool {
             name == b"terminal" && response.record.state == logos_abi::ManagerState::Running;
         storage_running |=
             name == b"storage" && response.record.state == logos_abi::ManagerState::Running;
-        if response.cursor == u8::MAX {
+        if response.cursor == u64::MAX {
             break;
         }
         cursor = response.cursor;
@@ -369,14 +369,13 @@ pub(crate) fn verify_service_manager_boundary() {
     ))
     .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: manager list"));
     if list.status != logos_abi::ManagerStatus::Ok
-        || list.record.slot != 0
+        || list.record.service.index() != 0
         || &list.record.name[..usize::from(list.record.name_len)] != b"input"
     {
         crate::arch_fatal(b"LogOS vNext: manager list result");
     }
     let mut status = logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::Status, 2);
-    status.slot = 0;
-    status.generation = 1;
+    status.service = list.record.service;
     let status = crate::arch::manager_proof(status)
         .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: manager status"));
     if status.status != logos_abi::ManagerStatus::Ok

@@ -555,7 +555,7 @@ fn manager_boot_probe() -> bool {
     );
     if common::manager_call(&request, &mut response) != IpcStatus::Ok
         || response.status != logos_abi::ManagerStatus::Ok
-        || response.record.slot != 0
+        || response.record.service.index() != 0
         || &response.record.name[..usize::from(response.record.name_len)] != b"input"
     {
         return false;
@@ -801,7 +801,7 @@ impl CompletionService {
         prefix: &[u8],
         response: &mut CompletionResponse,
     ) -> Result<(), ()> {
-        let mut cursor = 0u8;
+        let mut cursor = 0u64;
         for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
             let request_id = next_manager_request_id();
             let mut request =
@@ -831,7 +831,7 @@ impl CompletionService {
                     return Ok(());
                 }
             }
-            if manager_response.cursor == u8::MAX {
+            if manager_response.cursor == u64::MAX {
                 break;
             }
             cursor = manager_response.cursor;
@@ -2129,7 +2129,7 @@ fn program_command(command: logos_flow::ProgramCommand<'_>, pending: &mut Pendin
 }
 
 fn manager_record(name: &[u8]) -> Result<Option<logos_abi::ServiceManagerRecord>, IpcStatus> {
-    let mut cursor = 0u8;
+    let mut cursor = 0u64;
     for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
         let request_id = next_manager_request_id();
         let mut request =
@@ -2149,7 +2149,7 @@ fn manager_record(name: &[u8]) -> Result<Option<logos_abi::ServiceManagerRecord>
         if &response.record.name[..name_len] == name {
             return Ok(Some(response.record));
         }
-        if response.cursor == u8::MAX {
+        if response.cursor == u64::MAX {
             return Ok(None);
         }
         cursor = response.cursor;
@@ -2201,14 +2201,13 @@ fn service_command(command: logos_flow::ServiceCommand<'_>, pending: &mut Pendin
     };
     let mut output = [0; logos_flow::MAX_OUTPUT_BYTES];
     let mut output_len = 0;
-    let mut cursor = 0u8;
+    let mut cursor = 0u64;
     for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
         let request_id = next_manager_request_id();
         let mut request = logos_abi::ManagerRequest::new(operation, request_id);
         request.cursor = cursor;
         if let Some(record) = target {
-            request.slot = record.slot;
-            request.generation = record.generation;
+            request.service = record.service;
         }
         let mut response = logos_abi::ManagerResponse::new(
             operation,
@@ -2226,7 +2225,7 @@ fn service_command(command: logos_flow::ServiceCommand<'_>, pending: &mut Pendin
             pending.stage(manager_error(response.status));
             return;
         }
-        if !list || response.cursor != u8::MAX {
+        if !list || response.cursor != u64::MAX {
             let record = response.record;
             output_len += logos_flow::format_service_property(
                 &record,
@@ -2234,7 +2233,7 @@ fn service_command(command: logos_flow::ServiceCommand<'_>, pending: &mut Pendin
                 &mut output[output_len..],
             );
         }
-        if !list || response.cursor == u8::MAX {
+        if !list || response.cursor == u64::MAX {
             break;
         }
         cursor = response.cursor;
@@ -2338,8 +2337,7 @@ fn manager_restart_probe() -> bool {
     let request_id = next_manager_request_id();
     let mut request =
         logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::Restart, request_id);
-    request.slot = record.slot;
-    request.generation = record.generation;
+    request.service = record.service;
     let mut response = logos_abi::ManagerResponse::new(
         logos_abi::ManagerOperation::Restart,
         logos_abi::ManagerStatus::Malformed,
@@ -2484,8 +2482,7 @@ fn manager_restart_network() -> bool {
     let request_id = next_manager_request_id();
     let mut request =
         logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::Restart, request_id);
-    request.slot = record.slot;
-    request.generation = record.generation;
+    request.service = record.service;
     let mut response = logos_abi::ManagerResponse::new(
         logos_abi::ManagerOperation::Restart,
         logos_abi::ManagerStatus::Malformed,
@@ -2504,7 +2501,7 @@ fn manager_command_probe(pending: &mut PendingOutput, network: &mut NetworkClien
         let _ = (pending, network, initial_storage);
         return true;
     }
-    if initial_storage.generation != 1 {
+    if initial_storage.service.generation() != 1 {
         return network_proof_probe(network);
     }
     service_command(logos_flow::ServiceCommand::List, pending);

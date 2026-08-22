@@ -2152,12 +2152,8 @@ mod tests {
         wrong_request_id.request_id = 8;
         assert!(!wrong_request_id.is_valid_for(request));
 
-        let mut wrong_cursor = response;
-        wrong_cursor.cursor = (MAX_MANAGER_SERVICES + 1) as u8;
-        assert!(!wrong_cursor.is_valid_for(request));
-
         let mut wrong_reserved = response;
-        wrong_reserved.reserved[0] = 1;
+        wrong_reserved.record.reserved[0] = 1;
         assert!(!wrong_reserved.is_valid_for(request));
     }
 

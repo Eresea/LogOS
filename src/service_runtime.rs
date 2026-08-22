@@ -3084,7 +3084,7 @@ impl ServiceRuntime {
     }
 
     fn refresh_manager_response_record(&self, response: &mut logos_abi::ManagerResponse) {
-        if let Some(record) = self.manager.record(usize::from(response.record.slot)) {
+        if let Some(record) = self.manager.record(response.record.service.index() as usize) {
             response.record = record;
         }
     }
@@ -3532,7 +3532,7 @@ impl ServiceRuntime {
     ) -> Result<bool, ServiceRuntimeError> {
         if let Some((slot, record)) = self.pending_program_start.take() {
             if self.start_program(slot, record, runtime_guard).is_err() {
-                let _ = self.manager.mark_program_failed(slot, record.generation);
+                let _ = self.manager.mark_program_failed(slot, record.program_generation);
             }
             return Ok(true);
         }
@@ -3831,8 +3831,8 @@ impl ServiceRuntime {
             }
         };
         let program = &mut self.programs[slot];
-        program.manager_slot = record.slot;
-        program.generation = record.generation;
+        program.manager_slot = record.program_slot;
+        program.generation = record.program_generation;
         program.name = record.name;
         program.name_len = record.name_len;
         program.process = Some(process);
@@ -3840,7 +3840,7 @@ impl ServiceRuntime {
         program.image = image;
         program.table.write(tables);
         program.table_ready = true;
-        if !self.manager.mark_program_running(slot, record.generation) {
+        if !self.manager.mark_program_running(slot, program.generation) {
             return Err(ServiceRuntimeError::StaleGeneration);
         }
         Ok(())

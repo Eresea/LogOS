@@ -84,13 +84,15 @@ impl ProgramSlot {
 
     const fn record(self, slot: usize) -> ServiceManagerRecord {
         ServiceManagerRecord {
-            slot: slot as u8,
+            service: logos_abi::ServiceHandle::EMPTY,
             state: self.state,
             restarts: 0,
             name_len: self.name_len,
-            generation: self.generation,
             dependencies: 0,
-            reserved: [0; 3],
+            reserved: [0; 2],
+            program_slot: slot as u8,
+            reserved_program: [0; 3],
+            program_generation: self.generation,
             name: self.name,
         }
     }
@@ -109,13 +111,18 @@ impl Slot {
 
     const fn record(self, slot: usize) -> ServiceManagerRecord {
         ServiceManagerRecord {
-            slot: slot as u8,
+            service: match logos_abi::ServiceHandle::new(slot as u32, self.generation) {
+                Some(handle) => handle,
+                None => logos_abi::ServiceHandle::EMPTY,
+            },
             state: self.state,
             restarts: self.restarts,
             name_len: self.name_len,
-            generation: self.generation,
-            dependencies: self.dependencies,
-            reserved: [0; 3],
+            dependencies: self.dependencies as u16,
+            reserved: [0; 2],
+            program_slot: u8::MAX,
+            reserved_program: [0; 3],
+            program_generation: 0,
             name: self.name,
         }
     }
@@ -361,7 +368,7 @@ impl ServiceManager {
             return ManagerDecision { response, action: ManagerAction::None };
         }
         if ManagerTargetKind::from_raw(request.target_kind as u8).is_none()
-            || request.reserved_tail != 0
+            || request.reserved_tail != [0; 2]
             || request.name_len as usize > request.name.len()
             || request.name[request.name_len as usize..].iter().any(|byte| *byte != 0)
             || (request.target_kind == ManagerTargetKind::Program
@@ -374,27 +381,30 @@ impl ServiceManager {
         }
         let shape_valid = match request.operation {
             ManagerOperation::List => {
-                request.slot == u8::MAX
-                    && request.generation == 0
-                    && usize::from(request.cursor) <= MAX_MANAGER_SERVICES
+                request.service == logos_abi::ServiceHandle::EMPTY
+                    && request.program_generation == 0
             }
             ManagerOperation::Status
             | ManagerOperation::Start
             | ManagerOperation::Stop
             | ManagerOperation::Restart => {
                 request.target_kind == ManagerTargetKind::Service
-                    && request.slot != u8::MAX
+                    && request.service.is_valid()
+                    && request.program_slot == u8::MAX
+                    && request.program_generation == 0
                     && request.cursor == 0
             }
             ManagerOperation::ProgramStart => {
                 request.target_kind == ManagerTargetKind::Program
-                    && request.slot == u8::MAX
-                    && request.generation == 0
+                    && request.service == logos_abi::ServiceHandle::EMPTY
+                    && request.program_slot == u8::MAX
+                    && request.program_generation == 0
                     && request.cursor == 0
             }
             ManagerOperation::ProgramStatus | ManagerOperation::ProgramStop => {
                 request.target_kind == ManagerTargetKind::Program
-                    && (request.slot != u8::MAX || request.generation == 0)
+                    && request.service == logos_abi::ServiceHandle::EMPTY
+                    && (request.program_slot != u8::MAX || request.program_generation == 0)
                     && request.cursor == 0
             }
         };
@@ -414,11 +424,11 @@ impl ServiceManager {
             ManagerOperation::List => {
                 let Some((slot, record)) = self.next_record(request.cursor as usize) else {
                     response.status = ManagerStatus::Ok;
-                    response.cursor = u8::MAX;
+                    response.cursor = u64::MAX;
                     return ManagerDecision { response, action: ManagerAction::None };
                 };
                 response.status = ManagerStatus::Ok;
-                response.cursor = slot.saturating_add(1) as u8;
+                response.cursor = slot.saturating_add(1) as u64;
                 response.record = record;
             }
             ManagerOperation::Status => {
@@ -578,10 +588,10 @@ impl ServiceManager {
     }
 
     fn valid_index(&self, request: &ManagerRequest) -> Result<usize, ManagerStatus> {
-        let index = request.slot as usize;
+        let index = request.service.index() as usize;
         if index >= self.slots.len() || self.slots[index].service.is_none() {
             Err(ManagerStatus::Unsupported)
-        } else if self.slots[index].generation != request.generation {
+        } else if self.slots[index].generation != request.service.generation() {
             Err(ManagerStatus::Stale)
         } else {
             Ok(index)
@@ -596,10 +606,10 @@ impl ServiceManager {
     }
 
     fn valid_program_index(&self, request: &ManagerRequest) -> Result<usize, ManagerStatus> {
-        if request.slot == u8::MAX {
+        if request.program_slot == u8::MAX {
             return self.find_program(request.name()).ok_or(ManagerStatus::NotFound);
         }
-        let index = request.slot as usize;
+        let index = request.program_slot as usize;
         let Some(program) = self.programs.get(index) else {
             return Err(ManagerStatus::NotFound);
         };
@@ -608,7 +618,7 @@ impl ServiceManager {
             || &program.name[..program.name_len as usize] != request.name()
         {
             Err(ManagerStatus::NotFound)
-        } else if program.generation != request.generation {
+        } else if program.generation != request.program_generation {
             Err(ManagerStatus::Stale)
         } else {
             Ok(index)
@@ -737,8 +747,7 @@ mod tests {
 
     fn request(operation: ManagerOperation, slot: usize, generation: u32) -> ManagerRequest {
         let mut request = ManagerRequest::new(operation, 1);
-        request.slot = slot as u8;
-        request.generation = generation;
+        request.service = logos_abi::ServiceHandle::new(slot as u32, generation).unwrap();
         request
     }
 
@@ -847,13 +856,13 @@ mod tests {
     fn malformed_requests_and_unsupported_images_are_rejected() {
         let mut manager = manager();
         let mut malformed = ManagerRequest::new(ManagerOperation::List, 1);
-        malformed.reserved_tail = 1;
+        malformed.reserved_tail = [1, 0];
         assert_eq!(
             manager.request(malformed, ManagerRights::INSPECT).response.status,
             ManagerStatus::Malformed
         );
         malformed = ManagerRequest::new(ManagerOperation::List, 2);
-        malformed.cursor = u8::MAX;
+        malformed.service = logos_abi::ServiceHandle::new(0, 1).unwrap();
         assert_eq!(
             manager.request(malformed, ManagerRights::INSPECT).response.status,
             ManagerStatus::Malformed
@@ -889,19 +898,18 @@ mod tests {
         let decision = manager.request(request, ManagerRights::ALL);
         assert_eq!(decision.response.status, ManagerStatus::Accepted);
         assert_eq!(decision.response.record.state, ManagerState::Starting);
-        let record = decision.response.record;
-        assert!(manager.mark_program_running(record.slot as usize, record.generation));
+        assert!(manager.mark_program_running(0, 1));
 
         let mut status = ManagerRequest::new(ManagerOperation::ProgramStatus, 8)
             .with_program_name(b"demo")
             .unwrap();
-        status.slot = record.slot;
-        status.generation = record.generation;
+        status.program_slot = 0;
+        status.program_generation = 1;
         assert_eq!(
             manager.request(status, ManagerRights::INSPECT).response.status,
             ManagerStatus::Ok
         );
-        status.generation = status.generation.wrapping_add(1);
+        status.program_generation = status.program_generation.wrapping_add(1);
         assert_eq!(
             manager.request(status, ManagerRights::INSPECT).response.status,
             ManagerStatus::Stale
