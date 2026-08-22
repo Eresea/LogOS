@@ -9,14 +9,30 @@ use logos_abi::{
     ServiceId,
 };
 
-const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(IpcEndpointId::FlowToDevice, logos_abi::IpcRights::Receive);
-const FLOW_SEND_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(IpcEndpointId::DeviceToFlow, logos_abi::IpcRights::Send);
-const CORE_SEND_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(IpcEndpointId::DeviceToCore, logos_abi::IpcRights::Send);
-const CORE_RECEIVE_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(IpcEndpointId::CoreToDevice, logos_abi::IpcRights::Receive);
+const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_DEVICE_REQUEST,
+    logos_abi::ServiceId::Flow.index() as u32,
+    core::mem::size_of::<DeviceRequest>(),
+    logos_abi::IpcRights::Receive,
+);
+const FLOW_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_DEVICE_RESPONSE,
+    logos_abi::ServiceId::Flow.index() as u32,
+    core::mem::size_of::<DeviceResponse>(),
+    logos_abi::IpcRights::Send,
+);
+const CORE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_DEVICE_REQUEST,
+    common::CORE_PEER_INDEX,
+    core::mem::size_of::<DeviceRequest>(),
+    logos_abi::IpcRights::Send,
+);
+const CORE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_DEVICE_RESPONSE,
+    common::CORE_PEER_INDEX,
+    core::mem::size_of::<DeviceResponse>(),
+    logos_abi::IpcRights::Receive,
+);
 fn identity() -> (u16, u64) {
     let bootstrap = common::bootstrap_page();
     (bootstrap.service.generation() as u16, bootstrap.service_epoch)
