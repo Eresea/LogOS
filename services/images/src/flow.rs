@@ -19,30 +19,78 @@ use logos_abi::{
     UserResponse, UserStatus,
 };
 
-const INPUT_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::SessionToFlow, logos_abi::IpcRights::Receive);
-const OUTPUT_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::FlowToSession, logos_abi::IpcRights::Send);
-const STORAGE_SEND_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::FlowToStorage, logos_abi::IpcRights::Send);
-const STORAGE_RECEIVE_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::StorageToFlow, logos_abi::IpcRights::Receive);
-const NETWORK_SEND_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::FlowToNetwork, logos_abi::IpcRights::Send);
-const NETWORK_RECEIVE_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::NetworkToFlow, logos_abi::IpcRights::Receive);
-const FETCH_SEND_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::FlowToFetch, logos_abi::IpcRights::Send);
-const FETCH_RECEIVE_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::FetchToFlow, logos_abi::IpcRights::Receive);
-const DEVICE_SEND_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::FlowToDevice, logos_abi::IpcRights::Send);
-const DEVICE_RECEIVE_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::DeviceToFlow, logos_abi::IpcRights::Receive);
-const USER_SEND_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::FlowToUser, logos_abi::IpcRights::Send);
-const USER_RECEIVE_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::UserToFlow, logos_abi::IpcRights::Receive);
+const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_INPUT,
+    logos_abi::ServiceId::Session.index() as u32,
+    mem::size_of::<logos_abi::InputMessage>(),
+    logos_abi::IpcRights::Receive,
+);
+const OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_RENDER,
+    logos_abi::ServiceId::Session.index() as u32,
+    mem::size_of::<logos_abi::RenderMessage>(),
+    logos_abi::IpcRights::Send,
+);
+const STORAGE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Storage.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Send,
+);
+const STORAGE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Storage.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Receive,
+);
+const NETWORK_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Network.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Send,
+);
+const NETWORK_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Network.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Receive,
+);
+const FETCH_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Fetch.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Send,
+);
+const FETCH_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Fetch.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Receive,
+);
+const DEVICE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_DEVICE_REQUEST,
+    logos_abi::ServiceId::Device.index() as u32,
+    mem::size_of::<DeviceRequest>(),
+    logos_abi::IpcRights::Send,
+);
+const DEVICE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_DEVICE_RESPONSE,
+    logos_abi::ServiceId::Device.index() as u32,
+    mem::size_of::<DeviceResponse>(),
+    logos_abi::IpcRights::Receive,
+);
+const USER_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::User.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Send,
+);
+const USER_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::User.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Receive,
+);
 
 static NEXT_MANAGER_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_NETWORK_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
