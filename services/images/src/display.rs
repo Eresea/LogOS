@@ -43,6 +43,10 @@ pub extern "C" fn _start() -> ! {
     let framebuffer = unsafe {
         core::slice::from_raw_parts_mut(DISPLAY_FRAMEBUFFER_BASE as *mut u8, config.bytes as usize)
     };
+    let input_capability = match common::capability_handle(INPUT_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
     #[cfg(feature = "qemu-proof")]
     let _ = common::ipc_probe(logos_abi::IPC_SYSCALL_SEND, 0, 0);
     let mut heartbeat_ticks = 0u16;
@@ -58,7 +62,7 @@ pub extern "C" fn _start() -> ! {
         }
         let mut progressed = false;
         let mut message = RenderMessage::empty(MessageKind::RenderCells);
-        while common::ipc_receive(INPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
+        while common::ipc_receive_handle(input_capability, &mut message) == IpcStatus::Ok {
             progressed = true;
             if display.apply(generation, &message).is_ok() {
                 let more = message.flags & RENDER_FLAG_MORE != 0;
