@@ -1850,19 +1850,28 @@ impl ServiceRuntime {
         }
     }
 
-    fn resolve_capability_slot(
+    fn resolve_ipc_capability(
         &self,
         service: ServiceId,
         capability_raw: u64,
         rights: logos_abi::IpcRights,
         message_bytes: Option<usize>,
-    ) -> Result<usize, logos_abi::IpcStatus> {
-        let Some(capability) = logos_abi::CapabilityHandle::from_raw(capability_raw) else {
+    ) -> Result<(usize, logos_abi::IpcCapability), logos_abi::IpcStatus> {
+        let Some(dynamic_capability) = logos_abi::CapabilityHandle::from_raw(capability_raw) else {
             let slot =
                 usize::try_from(capability_raw).map_err(|_| logos_abi::IpcStatus::Unauthorized)?;
-            return (slot < logos_abi::MAX_IPC_CAPABILITIES)
-                .then_some(slot)
-                .ok_or(logos_abi::IpcStatus::Unauthorized);
+            if slot >= logos_abi::MAX_IPC_CAPABILITIES {
+                return Err(logos_abi::IpcStatus::Unauthorized);
+            }
+            let Some(capability_frame) = self.ipc_capability_frames[service.index()] else {
+                return Err(logos_abi::IpcStatus::Unauthorized);
+            };
+            let capability = unsafe {
+                (&*(capability_frame.raw() as usize as *const logos_abi::IpcCapabilityPage))
+                    .get(slot)
+            }
+            .ok_or(logos_abi::IpcStatus::Unauthorized)?;
+            return Ok((slot, capability));
         };
         let caller = dynamic_service_handle(service, (self.service_epoch as u32).max(1))
             .map_err(|_| logos_abi::IpcStatus::Stale)?;
@@ -1870,7 +1879,7 @@ impl ServiceRuntime {
             return Err(logos_abi::IpcStatus::Disconnected);
         };
         let (endpoint, expected_bytes) =
-            registry.capability_endpoint(caller, capability, rights)?;
+            registry.capability_endpoint(caller, dynamic_capability, rights)?;
         if let Some(message_bytes) = message_bytes {
             if message_bytes != expected_bytes {
                 return Err(logos_abi::IpcStatus::Malformed);
@@ -1880,8 +1889,17 @@ impl ServiceRuntime {
             .ok_or(logos_abi::IpcStatus::Stale)?;
         let slot = logos_abi::ipc_capability_slot(service, endpoint_id, rights)
             .ok_or(logos_abi::IpcStatus::Unauthorized)?;
-        match registry.validate_capability(caller, capability, rights, expected_bytes) {
-            Ok(resolved) if resolved == endpoint => Ok(slot),
+        match registry.validate_capability(caller, dynamic_capability, rights, expected_bytes) {
+            Ok(resolved) if resolved == endpoint => {
+                let capability = logos_abi::IpcCapability::new(
+                    endpoint.index() as usize,
+                    rights,
+                    self.ipc_generation,
+                    self.service_epoch,
+                )
+                .ok_or(logos_abi::IpcStatus::Stale)?;
+                Ok((slot, capability))
+            }
             Ok(_) => Err(logos_abi::IpcStatus::Stale),
             Err(status) => Err(status),
         }
@@ -1965,7 +1983,7 @@ impl ServiceRuntime {
                 };
             }
         }
-        let capability_slot = match self.resolve_capability_slot(
+        let (capability_slot, capability) = match self.resolve_ipc_capability(
             service,
             capability_raw,
             logos_abi::IpcRights::Send,
@@ -1973,21 +1991,6 @@ impl ServiceRuntime {
         ) {
             Ok(slot) => slot,
             Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
-        };
-        let Some(capability_frame) = self.ipc_capability_frames[service.index()] else {
-            return crate::service_ipc::IpcOutcome {
-                status: logos_abi::IpcStatus::Unauthorized,
-                notified: false,
-            };
-        };
-        let Some(capability) = (unsafe {
-            (&*(capability_frame.raw() as usize as *const logos_abi::IpcCapabilityPage))
-                .get(capability_slot)
-        }) else {
-            return crate::service_ipc::IpcOutcome {
-                status: logos_abi::IpcStatus::Unauthorized,
-                notified: false,
-            };
         };
         let Some(index) = capability.endpoint_index() else {
             return crate::service_ipc::IpcOutcome {
@@ -2803,7 +2806,7 @@ impl ServiceRuntime {
                 };
             }
         }
-        let capability_slot = match self.resolve_capability_slot(
+        let (_, capability) = match self.resolve_ipc_capability(
             service,
             capability_raw,
             logos_abi::IpcRights::Receive,
@@ -2811,21 +2814,6 @@ impl ServiceRuntime {
         ) {
             Ok(slot) => slot,
             Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
-        };
-        let Some(capability_frame) = self.ipc_capability_frames[service.index()] else {
-            return crate::service_ipc::IpcOutcome {
-                status: logos_abi::IpcStatus::Unauthorized,
-                notified: false,
-            };
-        };
-        let Some(capability) = (unsafe {
-            (&*(capability_frame.raw() as usize as *const logos_abi::IpcCapabilityPage))
-                .get(capability_slot)
-        }) else {
-            return crate::service_ipc::IpcOutcome {
-                status: logos_abi::IpcStatus::Unauthorized,
-                notified: false,
-            };
         };
         let Some(index) = capability.endpoint_index() else {
             return crate::service_ipc::IpcOutcome {
