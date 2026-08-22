@@ -3195,7 +3195,54 @@ impl ServiceRuntime {
         }
         let request =
             unsafe { core::ptr::read_unaligned(bytes.cast::<logos_abi::ManagerRequest>()) };
-        let mut decision = self.manager.request(request, capability.rights);
+        let service_lifecycle = matches!(
+            request.operation,
+            logos_abi::ManagerOperation::Start
+                | logos_abi::ManagerOperation::Stop
+                | logos_abi::ManagerOperation::Restart
+        );
+        let mut manager_request = request;
+        if service_lifecycle {
+            if let Some(registry) = self.dynamic_services.as_ref() {
+                if registry.validate_lifecycle_handle(request.service).is_err() {
+                    let response = logos_abi::ManagerResponse::new(
+                        request.operation,
+                        logos_abi::ManagerStatus::Stale,
+                        request.request_id,
+                    );
+                    unsafe {
+                        core::ptr::write_unaligned(
+                            staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
+                            response,
+                        );
+                    }
+                    return logos_abi::IpcStatus::Ok;
+                }
+                let Some(legacy_handle) = self.manager.handle(request.service.index() as usize)
+                else {
+                    let response = logos_abi::ManagerResponse::new(
+                        request.operation,
+                        logos_abi::ManagerStatus::Unsupported,
+                        request.request_id,
+                    );
+                    unsafe {
+                        core::ptr::write_unaligned(
+                            staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
+                            response,
+                        );
+                    }
+                    return logos_abi::IpcStatus::Ok;
+                };
+                let Some(translated) = logos_abi::ServiceHandle::new(
+                    request.service.index(),
+                    legacy_handle.generation(),
+                ) else {
+                    return logos_abi::IpcStatus::Malformed;
+                };
+                manager_request.service = translated;
+            }
+        }
+        let mut decision = self.manager.request(manager_request, capability.rights);
         if matches!(
             request.operation,
             logos_abi::ManagerOperation::List | logos_abi::ManagerOperation::Status
@@ -3205,19 +3252,6 @@ impl ServiceRuntime {
         ) {
             if let Some(registry) = self.dynamic_services.as_ref() {
                 decision.response = registry.manager_request(request);
-            }
-        }
-        if matches!(
-            request.operation,
-            logos_abi::ManagerOperation::Start
-                | logos_abi::ManagerOperation::Stop
-                | logos_abi::ManagerOperation::Restart
-        ) {
-            if let Some(registry) = self.dynamic_services.as_ref() {
-                if registry.validate_lifecycle_handle(request.service).is_err() {
-                    decision.response.status = logos_abi::ManagerStatus::Stale;
-                    decision.action = ManagerAction::None;
-                }
             }
         }
         match decision.action {
@@ -3292,6 +3326,17 @@ impl ServiceRuntime {
                     decision.response.status = logos_abi::ManagerStatus::Busy;
                 }
             }
+        }
+        if service_lifecycle
+            && !matches!(
+                decision.response.status,
+                logos_abi::ManagerStatus::Malformed
+                    | logos_abi::ManagerStatus::Unauthorized
+                    | logos_abi::ManagerStatus::Stale
+                    | logos_abi::ManagerStatus::Unsupported
+            )
+        {
+            decision.response.record.service = request.service;
         }
         unsafe {
             core::ptr::write_unaligned(
