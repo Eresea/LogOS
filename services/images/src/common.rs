@@ -7,18 +7,17 @@ use core::{mem, ptr};
 use logos_abi::{IpcCapabilityPage, IpcStatus, ServiceId};
 
 const SERVICE_PAGE_BYTES: usize = 4096;
-const MAX_FREE_BLOCKS: usize = 128;
 const ALLOCATION_MAGIC: u64 = 0x4c4f_474f_5348_4541;
 
+#[repr(C)]
 #[derive(Clone, Copy)]
-struct FreeBlock {
-    start: usize,
+struct FreeSpan {
+    previous: usize,
+    next: usize,
     bytes: usize,
 }
 
-impl FreeBlock {
-    const EMPTY: Self = Self { start: 0, bytes: 0 };
-}
+const FREE_SPAN_BYTES: usize = mem::size_of::<FreeSpan>();
 
 #[repr(C)]
 struct AllocationHeader {
@@ -36,8 +35,7 @@ struct AllocatorState {
     mapped_end: usize,
     quota_end: usize,
     used: usize,
-    free_len: usize,
-    free: [FreeBlock; MAX_FREE_BLOCKS],
+    free_head: usize,
 }
 
 impl AllocatorState {
@@ -47,8 +45,7 @@ impl AllocatorState {
         mapped_end: 0,
         quota_end: 0,
         used: 0,
-        free_len: 0,
-        free: [FreeBlock::EMPTY; MAX_FREE_BLOCKS],
+        free_head: 0,
     };
 
     fn initialize(
@@ -83,8 +80,10 @@ impl AllocatorState {
         self.mapped_end = mapped_end;
         self.quota_end = quota_end;
         self.used = 0;
-        self.free_len = 1;
-        self.free[0] = FreeBlock { start: base, bytes: mapped_bytes };
+        self.free_head = 0;
+        if !self.insert(base, mapped_bytes) {
+            return false;
+        }
         true
     }
 
@@ -95,10 +94,7 @@ impl AllocatorState {
         let Some(end) = self.mapped_end.checked_add(bytes) else {
             return false;
         };
-        if pages == 0
-            || end > self.quota_end
-            || !self.insert(FreeBlock { start: self.mapped_end, bytes })
-        {
+        if pages == 0 || end > self.quota_end || !self.insert(self.mapped_end, bytes) {
             return false;
         }
         self.mapped_end = end;
@@ -106,70 +102,91 @@ impl AllocatorState {
     }
 
     fn can_shrink(&self) -> bool {
-        self.mapped_end.saturating_sub(self.base) > SERVICE_PAGE_BYTES
-            && self.free.iter().take(self.free_len).any(|block| {
-                block.start.saturating_add(block.bytes) == self.mapped_end
-                    && block.bytes >= SERVICE_PAGE_BYTES
-            })
+        if self.mapped_end.saturating_sub(self.base) <= SERVICE_PAGE_BYTES {
+            return false;
+        }
+        let mut address = self.free_head;
+        while address != 0 {
+            let span = self.read_span(address);
+            if address.saturating_add(span.bytes) == self.mapped_end
+                && span.bytes >= SERVICE_PAGE_BYTES
+            {
+                return true;
+            }
+            address = span.next;
+        }
+        false
     }
 
     fn shrink(&mut self, pages: usize) -> bool {
         if pages != 1 || !self.can_shrink() {
             return false;
         }
-        let new_end = self.mapped_end - SERVICE_PAGE_BYTES;
-        let Some(index) = self.free.iter().take(self.free_len).position(|block| {
-            block.start.saturating_add(block.bytes) == self.mapped_end
-                && block.bytes >= SERVICE_PAGE_BYTES
-        }) else {
-            return false;
-        };
-        self.free[index].bytes -= SERVICE_PAGE_BYTES;
-        if self.free[index].bytes == 0 {
-            self.remove(index);
+        let mut address = self.free_head;
+        while address != 0 {
+            let span = self.read_span(address);
+            if address.saturating_add(span.bytes) == self.mapped_end
+                && span.bytes >= SERVICE_PAGE_BYTES
+            {
+                if span.bytes == SERVICE_PAGE_BYTES {
+                    self.remove(address);
+                } else {
+                    self.write_span(
+                        address,
+                        FreeSpan { bytes: span.bytes - SERVICE_PAGE_BYTES, ..span },
+                    );
+                }
+                self.mapped_end -= SERVICE_PAGE_BYTES;
+                return true;
+            }
+            address = span.next;
         }
-        self.mapped_end = new_end;
-        true
+        false
     }
 
     fn allocate(&mut self, layout: Layout) -> *mut u8 {
         if layout.size() == 0 || layout.size() > self.quota_end.saturating_sub(self.base) {
             return ptr::null_mut();
         }
-        for index in 0..self.free_len {
-            let block = self.free[index];
-            let Some(header_end) = block.start.checked_add(HEADER_BYTES) else {
+        let mut address = self.free_head;
+        while address != 0 {
+            let block = self.read_span(address);
+            let Some(header_end) = address.checked_add(HEADER_BYTES) else {
+                address = block.next;
                 continue;
             };
             let Some(pointer) = align_up(header_end, layout.align()) else {
+                address = block.next;
                 continue;
             };
             let Some(end) = pointer.checked_add(layout.size()) else {
+                address = block.next;
                 continue;
             };
-            let Some(block_end) = block.start.checked_add(block.bytes) else {
+            let Some(block_end) = address.checked_add(block.bytes) else {
+                address = block.next;
                 continue;
             };
             if end > block_end || self.used > self.quota_end.saturating_sub(layout.size()) {
+                address = block.next;
                 continue;
             }
-            let prefix = pointer - HEADER_BYTES - block.start;
+            let prefix = pointer - HEADER_BYTES - address;
             let suffix = block_end - end;
-            let pieces = usize::from(prefix != 0) + usize::from(suffix != 0);
-            if self.free_len - 1 + pieces > MAX_FREE_BLOCKS {
-                return ptr::null_mut();
+            let allocation_start =
+                if prefix >= FREE_SPAN_BYTES { pointer - HEADER_BYTES } else { address };
+            let allocation_end = if suffix >= FREE_SPAN_BYTES { end } else { block_end };
+            self.remove(address);
+            if prefix >= FREE_SPAN_BYTES {
+                self.insert(address, prefix);
             }
-            self.remove(index);
-            if prefix != 0 {
-                self.insert(FreeBlock { start: block.start, bytes: prefix });
-            }
-            if suffix != 0 {
-                self.insert(FreeBlock { start: end, bytes: suffix });
+            if suffix >= FREE_SPAN_BYTES {
+                self.insert(end, suffix);
             }
             let header = AllocationHeader {
                 magic: ALLOCATION_MAGIC,
-                start: block.start,
-                span: end - block.start,
+                start: allocation_start,
+                span: allocation_end - allocation_start,
                 bytes: layout.size(),
             };
             unsafe {
@@ -198,43 +215,128 @@ impl AllocatorState {
         {
             return;
         }
-        if self.insert(FreeBlock { start: header.start, bytes: header.span }) {
+        if self.insert(header.start, header.span) {
             self.used = self.used.saturating_sub(header.bytes);
         }
     }
 
-    fn remove(&mut self, index: usize) {
-        for next in index + 1..self.free_len {
-            self.free[next - 1] = self.free[next];
-        }
-        self.free_len -= 1;
-        self.free[self.free_len] = FreeBlock::EMPTY;
+    fn read_span(&self, address: usize) -> FreeSpan {
+        unsafe { ptr::read_unaligned(address as *const FreeSpan) }
     }
 
-    fn insert(&mut self, block: FreeBlock) -> bool {
-        if block.bytes == 0 || self.free_len == MAX_FREE_BLOCKS {
-            return block.bytes == 0;
+    fn write_span(&self, address: usize, span: FreeSpan) {
+        unsafe { ptr::write_unaligned(address as *mut FreeSpan, span) };
+    }
+
+    fn remove(&mut self, address: usize) {
+        let span = self.read_span(address);
+        if span.previous == 0 {
+            self.free_head = span.next;
+        } else {
+            let mut previous = self.read_span(span.previous);
+            previous.next = span.next;
+            self.write_span(span.previous, previous);
         }
-        self.free[self.free_len] = block;
-        self.free_len += 1;
-        for index in (1..self.free_len).rev() {
-            if self.free[index - 1].start <= self.free[index].start {
-                break;
-            }
-            self.free.swap(index - 1, index);
+        if span.next != 0 {
+            let mut next = self.read_span(span.next);
+            next.previous = span.previous;
+            self.write_span(span.next, next);
         }
-        let mut index = 0;
-        while index + 1 < self.free_len {
-            let end = self.free[index].start.saturating_add(self.free[index].bytes);
-            if end == self.free[index + 1].start {
-                self.free[index].bytes =
-                    self.free[index].bytes.saturating_add(self.free[index + 1].bytes);
-                self.remove(index + 1);
-            } else {
-                index += 1;
+    }
+
+    fn insert(&mut self, start: usize, bytes: usize) -> bool {
+        if bytes == 0 {
+            return true;
+        }
+        if bytes < FREE_SPAN_BYTES {
+            return false;
+        }
+        let Some(end) = start.checked_add(bytes) else {
+            return false;
+        };
+
+        let mut previous_address = 0;
+        let mut next_address = self.free_head;
+        while next_address != 0 && next_address < start {
+            previous_address = next_address;
+            next_address = self.read_span(next_address).next;
+        }
+        if previous_address != 0 {
+            let previous = self.read_span(previous_address);
+            let Some(previous_end) = previous_address.checked_add(previous.bytes) else {
+                return false;
+            };
+            if previous_end > start {
+                return false;
             }
+        }
+        if next_address != 0 && end > next_address {
+            return false;
+        }
+
+        let merge_previous = previous_address != 0
+            && previous_address.checked_add(self.read_span(previous_address).bytes) == Some(start);
+        let merge_next = next_address != 0 && end == next_address;
+        let next_after = if merge_next { self.read_span(next_address).next } else { next_address };
+
+        if merge_previous {
+            let mut previous = self.read_span(previous_address);
+            let Some(mut merged_bytes) = previous.bytes.checked_add(bytes) else {
+                return false;
+            };
+            if merge_next {
+                let Some(total) = merged_bytes.checked_add(self.read_span(next_address).bytes)
+                else {
+                    return false;
+                };
+                merged_bytes = total;
+            }
+            previous.bytes = merged_bytes;
+            previous.next = next_after;
+            self.write_span(previous_address, previous);
+            if next_after != 0 {
+                let mut next = self.read_span(next_after);
+                next.previous = previous_address;
+                self.write_span(next_after, next);
+            }
+            return true;
+        }
+
+        let mut merged_bytes = bytes;
+        if merge_next {
+            let Some(total) = merged_bytes.checked_add(self.read_span(next_address).bytes) else {
+                return false;
+            };
+            merged_bytes = total;
+        }
+        self.write_span(
+            start,
+            FreeSpan { previous: previous_address, next: next_after, bytes: merged_bytes },
+        );
+        if previous_address == 0 {
+            self.free_head = start;
+        } else {
+            let mut previous = self.read_span(previous_address);
+            previous.next = start;
+            self.write_span(previous_address, previous);
+        }
+        if next_after != 0 {
+            let mut next = self.read_span(next_after);
+            next.previous = start;
+            self.write_span(next_after, next);
         }
         true
+    }
+
+    #[cfg(test)]
+    fn free_span_count(&self) -> usize {
+        let mut count = 0;
+        let mut address = self.free_head;
+        while address != 0 {
+            count += 1;
+            address = self.read_span(address).next;
+        }
+        count
     }
 }
 
@@ -701,5 +803,29 @@ mod tests {
         let second = Layout::from_size_align(4_200, 64).unwrap();
         assert!(!state.allocate(first).is_null());
         assert!(state.allocate(second).is_null());
+    }
+
+    #[test]
+    fn allocator_state_scales_intrusive_free_spans() {
+        #[repr(align(4096))]
+        struct LargeHeap([u8; SERVICE_PAGE_BYTES * 8]);
+
+        let mut backing = LargeHeap([0; SERVICE_PAGE_BYTES * 8]);
+        let capability = logos_abi::CapabilityHandle::new(2, 1).unwrap();
+        let mut state = AllocatorState::EMPTY;
+        assert!(state.initialize(capability, backing.0.as_mut_ptr() as usize, 8, 8,));
+
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        let mut allocations = [ptr::null_mut(); 260];
+        for allocation in &mut allocations {
+            *allocation = state.allocate(layout);
+            assert!(!allocation.is_null());
+        }
+        for allocation in allocations.iter().step_by(2) {
+            unsafe { state.deallocate(*allocation) };
+        }
+
+        assert!(state.free_span_count() > 128);
+        assert!(!state.allocate(layout).is_null());
     }
 }
