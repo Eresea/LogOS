@@ -8,7 +8,12 @@ use logos_abi::{
     DISPLAY_CONFIG_BASE, DISPLAY_FRAMEBUFFER_BASE, FramebufferConfig, FramebufferFormat, IpcStatus,
     MessageKind, RENDER_FLAG_MORE, RenderMessage,
 };
-const INPUT_CAPABILITY: usize = common::capability_slot(
+const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_spec(
+    logos_abi::IpcEndpointId::TerminalToDisplay,
+    logos_abi::IpcRights::Receive,
+);
+#[cfg(feature = "qemu-proof")]
+const INPUT_CAPABILITY_SLOT: usize = common::capability_slot(
     logos_abi::ServiceId::Display,
     logos_abi::IpcEndpointId::TerminalToDisplay,
     logos_abi::IpcRights::Receive,
@@ -43,15 +48,13 @@ pub extern "C" fn _start() -> ! {
         core::slice::from_raw_parts_mut(DISPLAY_FRAMEBUFFER_BASE as *mut u8, config.bytes as usize)
     };
     #[cfg(feature = "qemu-proof")]
-    let _ = common::ipc_probe(logos_abi::IPC_SYSCALL_SEND, INPUT_CAPABILITY, 0);
+    let _ = common::ipc_probe(logos_abi::IPC_SYSCALL_SEND, INPUT_CAPABILITY_SLOT, 0);
     let mut heartbeat_ticks = 0u16;
     let mut render_pending = false;
     let mut render_complete = false;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Display);
-        let generation = common::capability(INPUT_CAPABILITY)
-            .map(|capability| capability.generation)
-            .unwrap_or(0);
+        let generation = common::bootstrap_page().service.generation() as u16;
         if display.generation() != generation {
             display.replace_generation(generation);
             render_pending = false;

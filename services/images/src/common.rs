@@ -1,3 +1,6 @@
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
 use core::cell::UnsafeCell;
@@ -604,6 +607,123 @@ pub const fn capability_slot(
     }
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CapabilitySpec {
+    pub endpoint: logos_abi::IpcEndpointId,
+    pub rights: logos_abi::IpcRights,
+}
+
+#[allow(dead_code)]
+pub const fn capability_spec(
+    endpoint: logos_abi::IpcEndpointId,
+    rights: logos_abi::IpcRights,
+) -> CapabilitySpec {
+    CapabilitySpec { endpoint, rights }
+}
+
+#[allow(dead_code)]
+struct CapabilityCache(UnsafeCell<Option<Vec<(CapabilitySpec, logos_abi::CapabilityHandle)>>>);
+
+unsafe impl Sync for CapabilityCache {}
+
+#[allow(dead_code)]
+static DISCOVERED_CAPABILITIES: CapabilityCache = CapabilityCache(UnsafeCell::new(None));
+
+#[allow(dead_code)]
+fn capability_peer(spec: CapabilitySpec, generation: u32) -> Option<logos_abi::ServiceHandle> {
+    let core_endpoint = matches!(
+        spec.endpoint,
+        logos_abi::IpcEndpointId::CoreToStorage
+            | logos_abi::IpcEndpointId::StorageToCore
+            | logos_abi::IpcEndpointId::CoreToNetwork
+            | logos_abi::IpcEndpointId::NetworkToCore
+            | logos_abi::IpcEndpointId::CoreToDevice
+            | logos_abi::IpcEndpointId::DeviceToCore
+            | logos_abi::IpcEndpointId::CoreToStoragePackage
+            | logos_abi::IpcEndpointId::StoragePackageToCore
+            | logos_abi::IpcEndpointId::CoreToStorageMap
+            | logos_abi::IpcEndpointId::StorageMapToCore
+    );
+    if core_endpoint {
+        return logos_abi::ServiceHandle::new(u32::MAX, generation);
+    }
+    let service = match (spec.endpoint, spec.rights) {
+        (logos_abi::IpcEndpointId::FetchToStorage, logos_abi::IpcRights::Send) => {
+            logos_abi::ServiceId::Storage
+        }
+        (logos_abi::IpcEndpointId::FetchToNetwork, logos_abi::IpcRights::Send) => {
+            logos_abi::ServiceId::Network
+        }
+        (_, logos_abi::IpcRights::Send) => spec.endpoint.consumer(),
+        (_, logos_abi::IpcRights::Receive) => spec.endpoint.producer(),
+    };
+    logos_abi::ServiceHandle::new(service.index() as u32, generation)
+}
+
+#[allow(dead_code)]
+fn discovered_capability(spec: CapabilitySpec) -> Result<logos_abi::CapabilityHandle, IpcStatus> {
+    #[cfg(target_os = "none")]
+    {
+        let bootstrap = bootstrap_page();
+        let peer =
+            capability_peer(spec, bootstrap.service.generation()).ok_or(IpcStatus::Unauthorized)?;
+        unsafe {
+            if let Some(cache) = (&*DISCOVERED_CAPABILITIES.0.get()).as_ref() {
+                if let Some((_, capability)) =
+                    cache.iter().find(|(candidate, _)| *candidate == spec)
+                {
+                    return Ok(*capability);
+                }
+            }
+        }
+        let message_bytes =
+            logos_abi::ipc_message_size(spec.endpoint.index()).ok_or(IpcStatus::Malformed)?;
+        let capability = discover_capability(peer, spec.rights, message_bytes)
+            .map_err(|_| IpcStatus::Unauthorized)?;
+        unsafe {
+            let cache = (&mut *DISCOVERED_CAPABILITIES.0.get()).get_or_insert_with(Vec::new);
+            cache.try_reserve(1).map_err(|_| IpcStatus::Disconnected)?;
+            cache.push((spec, capability));
+        }
+        Ok(capability)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = spec;
+        Err(IpcStatus::Unauthorized)
+    }
+}
+
+pub trait IpcCapabilityArgument: Copy {
+    fn resolve(self, message_bytes: usize) -> Result<(u64, usize), IpcStatus>;
+}
+
+impl IpcCapabilityArgument for usize {
+    fn resolve(self, message_bytes: usize) -> Result<(u64, usize), IpcStatus> {
+        let Some(capability) = capability(self) else {
+            return Err(IpcStatus::Unauthorized);
+        };
+        let expected =
+            endpoint_message_size(capability.endpoint_index()).ok_or(IpcStatus::Unauthorized)?;
+        if message_bytes != expected {
+            return Err(IpcStatus::Malformed);
+        }
+        Ok((self as u64, expected))
+    }
+}
+
+impl IpcCapabilityArgument for CapabilitySpec {
+    fn resolve(self, message_bytes: usize) -> Result<(u64, usize), IpcStatus> {
+        let expected =
+            logos_abi::ipc_message_size(self.endpoint.index()).ok_or(IpcStatus::Unauthorized)?;
+        if message_bytes != expected {
+            return Err(IpcStatus::Malformed);
+        }
+        Ok((discovered_capability(self)?.raw(), expected))
+    }
+}
+
 #[inline(always)]
 pub fn heartbeat(service: ServiceId) {
     unsafe {
@@ -676,36 +796,32 @@ pub fn notify_edge(mask: u64, notification: logos_abi::Notify) {
 
 #[inline(always)]
 #[allow(dead_code)]
-pub fn ipc_send<T: Copy>(capability_slot: usize, message: &T) -> IpcStatus {
-    let Some(capability) = capability(capability_slot) else {
-        return IpcStatus::Unauthorized;
-    };
-    let Some(expected_length) = endpoint_message_size(capability.endpoint_index()) else {
-        return IpcStatus::Unauthorized;
-    };
+pub fn ipc_send<T: Copy, C: IpcCapabilityArgument>(capability: C, message: &T) -> IpcStatus {
     let length = mem::size_of::<T>();
+    let (capability_raw, expected_length) = match capability.resolve(length) {
+        Ok(resolved) => resolved,
+        Err(status) => return status,
+    };
     if length != expected_length || length > logos_abi::IPC_PAGE_BYTES {
         return IpcStatus::Malformed;
     }
     unsafe {
         ptr::write_unaligned(logos_abi::IPC_STAGING_BASE as *mut T, *message);
     }
-    ipc_syscall(logos_abi::IPC_SYSCALL_SEND, capability_slot, length)
+    ipc_syscall_raw(logos_abi::IPC_SYSCALL_SEND, capability_raw, length)
 }
 
 #[inline(always)]
 #[allow(dead_code)]
-pub fn ipc_receive<T: Copy>(capability_slot: usize, message: &mut T) -> IpcStatus {
-    let Some(capability) = capability(capability_slot) else {
+pub fn ipc_receive<T: Copy, C: IpcCapabilityArgument>(capability: C, message: &mut T) -> IpcStatus {
+    let length = mem::size_of::<T>();
+    let Ok((capability_raw, expected_length)) = capability.resolve(length) else {
         return IpcStatus::Unauthorized;
     };
-    let Some(expected_length) = endpoint_message_size(capability.endpoint_index()) else {
-        return IpcStatus::Unauthorized;
-    };
-    if mem::size_of::<T>() != expected_length || expected_length > logos_abi::IPC_PAGE_BYTES {
+    if length != expected_length || expected_length > logos_abi::IPC_PAGE_BYTES {
         return IpcStatus::Malformed;
     }
-    let status = ipc_syscall(logos_abi::IPC_SYSCALL_RECEIVE, capability_slot, 0);
+    let status = ipc_syscall_raw(logos_abi::IPC_SYSCALL_RECEIVE, capability_raw, 0);
     if status == IpcStatus::Ok {
         *message = unsafe { ptr::read_unaligned(logos_abi::IPC_STAGING_BASE as *const T) };
     }
@@ -715,6 +831,20 @@ pub fn ipc_receive<T: Copy>(capability_slot: usize, message: &mut T) -> IpcStatu
 #[inline(always)]
 #[allow(dead_code)]
 pub fn ipc_send_handle<T: Copy>(capability: logos_abi::CapabilityHandle, message: &T) -> IpcStatus {
+    ipc_send_raw(capability, message)
+}
+
+#[inline(always)]
+#[allow(dead_code)]
+pub fn ipc_receive_handle<T: Copy>(
+    capability: logos_abi::CapabilityHandle,
+    message: &mut T,
+) -> IpcStatus {
+    ipc_receive_raw(capability, message)
+}
+
+#[inline(always)]
+fn ipc_send_raw<T: Copy>(capability: logos_abi::CapabilityHandle, message: &T) -> IpcStatus {
     let length = mem::size_of::<T>();
     if !capability.is_valid() || length == 0 || length > logos_abi::IPC_PAGE_BYTES {
         return IpcStatus::Malformed;
@@ -726,11 +856,7 @@ pub fn ipc_send_handle<T: Copy>(capability: logos_abi::CapabilityHandle, message
 }
 
 #[inline(always)]
-#[allow(dead_code)]
-pub fn ipc_receive_handle<T: Copy>(
-    capability: logos_abi::CapabilityHandle,
-    message: &mut T,
-) -> IpcStatus {
+fn ipc_receive_raw<T: Copy>(capability: logos_abi::CapabilityHandle, message: &mut T) -> IpcStatus {
     let length = mem::size_of::<T>();
     if !capability.is_valid() || length == 0 || length > logos_abi::IPC_PAGE_BYTES {
         return IpcStatus::Malformed;
@@ -848,6 +974,7 @@ pub fn capability(slot: usize) -> Option<logos_abi::IpcCapability> {
 }
 
 #[inline(always)]
+#[allow(dead_code)]
 fn ipc_syscall(number: usize, capability_slot: usize, length: usize) -> IpcStatus {
     ipc_syscall_raw(number, capability_slot as u64, length)
 }
