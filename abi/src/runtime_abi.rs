@@ -55,6 +55,7 @@ define_handle!(EventSetHandle);
 pub struct ServiceBootstrapPage {
     pub abi_version: u16,
     pub flags: u16,
+    pub service_epoch: u64,
     pub service: ServiceHandle,
     pub control: CapabilityHandle,
     pub directory: CapabilityHandle,
@@ -107,6 +108,7 @@ pub enum EventStatus {
     NotMember = 8,
     InvalidDeadline = 9,
     Malformed = 10,
+    Busy = 11,
 }
 
 impl EventStatus {
@@ -123,6 +125,7 @@ impl EventStatus {
             8 => Some(Self::NotMember),
             9 => Some(Self::InvalidDeadline),
             10 => Some(Self::Malformed),
+            11 => Some(Self::Busy),
             _ => None,
         }
     }
@@ -204,6 +207,7 @@ impl ServiceBootstrapPage {
         Self {
             abi_version: RUNTIME_ABI_VERSION,
             flags: 0,
+            service_epoch: 0,
             service: ServiceHandle::EMPTY,
             control: CapabilityHandle::EMPTY,
             directory: CapabilityHandle::EMPTY,
@@ -217,6 +221,7 @@ impl ServiceBootstrapPage {
     pub const fn is_valid(self) -> bool {
         self.abi_version == RUNTIME_ABI_VERSION
             && self.flags == 0
+            && self.service_epoch != 0
             && self.service.is_valid()
             && self.control.is_valid()
             && self.directory.is_valid()
@@ -329,10 +334,12 @@ pub struct DirectoryRecord {
     pub flags: u16,
     pub handle: u64,
     pub peer: ServiceHandle,
+    pub contract_id: u16,
     pub message_bytes: u16,
     pub queue_capacity: u16,
+    pub event: EventHandle,
     pub name_len: u8,
-    pub reserved: [u8; 3],
+    pub reserved: [u8; 1],
     pub name: [u8; MAX_SERVICE_NAME_BYTES],
 }
 
@@ -343,10 +350,12 @@ impl DirectoryRecord {
         flags: 0,
         handle: 0,
         peer: ServiceHandle::EMPTY,
+        contract_id: 0,
         message_bytes: 0,
         queue_capacity: 0,
+        event: EventHandle::EMPTY,
         name_len: 0,
-        reserved: [0; 3],
+        reserved: [0; 1],
         name: [0; MAX_SERVICE_NAME_BYTES],
     };
 
@@ -370,8 +379,10 @@ impl DirectoryRecord {
         if self.is_empty() {
             return self == Self::EMPTY;
         }
-        self.reserved == [0; 3]
+        self.reserved == [0; 1]
             && self.handle != 0
+            && (self.kind != DirectoryRecordKind::Capability
+                || (self.contract_id != 0 && self.peer.is_valid() && self.event.is_valid()))
             && self.name_len as usize <= self.name.len()
             && self.name[self.name_len as usize..].iter().all(|byte| *byte == 0)
     }
@@ -454,6 +465,7 @@ mod tests {
     fn bootstrap_requires_all_runtime_grants() {
         let mut page = ServiceBootstrapPage::empty();
         assert!(!page.is_valid());
+        page.service_epoch = 1;
         page.service = ServiceHandle::new(1, 1).unwrap();
         page.control = CapabilityHandle::new(2, 1).unwrap();
         page.directory = CapabilityHandle::new(3, 1).unwrap();
@@ -486,6 +498,21 @@ mod tests {
         response.flags = 0;
         response.count = (DIRECTORY_RECORDS_PER_PAGE + 1) as u8;
         assert!(!response.is_valid_for(request));
+    }
+
+    #[test]
+    fn capability_directory_records_carry_contract_and_event_identity() {
+        let mut record = DirectoryRecord::EMPTY;
+        record.kind = DirectoryRecordKind::Capability;
+        record.handle = CapabilityHandle::new(3, 2).unwrap().raw();
+        record.peer = ServiceHandle::new(4, 2).unwrap();
+        record.contract_id = 9;
+        record.message_bytes = 16;
+        record.queue_capacity = 2;
+        record.event = EventHandle::new(5, 2).unwrap();
+        assert!(record.is_valid());
+        record.event = EventHandle::EMPTY;
+        assert!(!record.is_valid());
     }
 
     #[test]

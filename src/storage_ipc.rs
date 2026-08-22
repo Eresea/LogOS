@@ -217,11 +217,11 @@ pub const fn unsupported_response(request: StorageRequest) -> StorageResponse {
 
 pub fn validate_package_request(
     request: logos_abi::PackageRequest,
-    capability_slot: usize,
+    capability: logos_abi::CapabilityHandle,
     generation: u16,
     service_epoch: u64,
 ) -> Result<logos_abi::ServiceId, logos_abi::PackageStatus> {
-    request.validate(capability_slot, generation, service_epoch)
+    request.validate(capability, generation, service_epoch)
 }
 
 #[cfg(test)]
@@ -271,16 +271,29 @@ mod tests {
             logos_abi::ServiceId::Storage,
             1,
             7,
-            6,
+            logos_abi::CapabilityHandle::new(6, 1).unwrap(),
             11,
             0,
             0,
             0,
         )
         .unwrap();
-        assert_eq!(validate_package_request(request, 6, 7, 11), Ok(logos_abi::ServiceId::Storage));
         assert_eq!(
-            validate_package_request(request, 6, 8, 11),
+            validate_package_request(
+                request,
+                logos_abi::CapabilityHandle::new(6, 1).unwrap(),
+                7,
+                11,
+            ),
+            Ok(logos_abi::ServiceId::Storage)
+        );
+        assert_eq!(
+            validate_package_request(
+                request,
+                logos_abi::CapabilityHandle::new(6, 1).unwrap(),
+                8,
+                11,
+            ),
             Err(logos_abi::PackageStatus::Stale)
         );
     }

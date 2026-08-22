@@ -1,4 +1,4 @@
-use super::{ABI_VERSION, IPC_PAGE_BYTES, MAX_SERVICE_IMAGE_BYTES, ServiceId};
+use super::{ABI_VERSION, CapabilityHandle, IPC_PAGE_BYTES, MAX_SERVICE_IMAGE_BYTES, ServiceId};
 
 pub const PACKAGE_TRANSFER_BYTES: usize = IPC_PAGE_BYTES;
 pub const MAX_PACKAGE_NAME_BYTES: usize = 32;
@@ -144,7 +144,7 @@ pub struct PackageRequest {
     pub target: PackageTarget,
     pub request_id: u32,
     pub generation: u16,
-    pub capability_slot: u16,
+    pub capability: CapabilityHandle,
     pub service_epoch: u64,
     pub package_generation: u32,
     pub offset: u32,
@@ -159,7 +159,7 @@ impl PackageRequest {
         service: ServiceId,
         request_id: u32,
         generation: u16,
-        capability_slot: u16,
+        capability: CapabilityHandle,
         service_epoch: u64,
         package_generation: u32,
         offset: u32,
@@ -183,7 +183,7 @@ impl PackageRequest {
             target: PackageTarget::service(service),
             request_id,
             generation,
-            capability_slot,
+            capability,
             service_epoch,
             package_generation,
             offset,
@@ -198,7 +198,7 @@ impl PackageRequest {
         name: &[u8],
         request_id: u32,
         generation: u16,
-        capability_slot: u16,
+        capability: CapabilityHandle,
         service_epoch: u64,
         package_generation: u32,
         offset: u32,
@@ -209,7 +209,7 @@ impl PackageRequest {
             ServiceId::Storage,
             request_id,
             generation,
-            capability_slot,
+            capability,
             service_epoch,
             package_generation,
             offset,
@@ -221,11 +221,11 @@ impl PackageRequest {
 
     pub fn validate(
         self,
-        capability_slot: usize,
+        capability: CapabilityHandle,
         generation: u16,
         service_epoch: u64,
     ) -> Result<ServiceId, PackageStatus> {
-        let target = self.validate_target(capability_slot, generation, service_epoch)?;
+        let target = self.validate_target(capability, generation, service_epoch)?;
         match target.kind {
             PackageTargetKind::Service => {
                 ServiceId::from_index(target.service.saturating_sub(1) as usize)
@@ -237,11 +237,11 @@ impl PackageRequest {
 
     pub fn validate_target(
         self,
-        capability_slot: usize,
+        capability: CapabilityHandle,
         generation: u16,
         service_epoch: u64,
     ) -> Result<PackageTarget, PackageStatus> {
-        if self.capability_slot as usize != capability_slot {
+        if self.capability != capability {
             return Err(PackageStatus::Invalid);
         }
         if self.generation != generation || self.service_epoch != service_epoch {
@@ -373,20 +373,37 @@ pub const PACKAGE_ABI_VERSION: u16 = ABI_VERSION;
 mod tests {
     use super::*;
 
+    fn capability() -> CapabilityHandle {
+        CapabilityHandle::new(6, 1).unwrap()
+    }
+
     fn lookup() -> PackageRequest {
-        PackageRequest::new(PackageOperation::Lookup, ServiceId::Storage, 7, 3, 6, 9, 0, 0, 0)
-            .unwrap()
+        PackageRequest::new(
+            PackageOperation::Lookup,
+            ServiceId::Storage,
+            7,
+            3,
+            capability(),
+            9,
+            0,
+            0,
+            0,
+        )
+        .unwrap()
     }
 
     #[test]
     fn request_validation_is_bound_to_identity_and_shape() {
         let request = lookup();
-        assert_eq!(request.validate(6, 3, 9), Ok(ServiceId::Storage));
-        assert_eq!(request.validate(7, 3, 9), Err(PackageStatus::Invalid));
-        assert_eq!(request.validate(6, 4, 9), Err(PackageStatus::Stale));
+        assert_eq!(request.validate(capability(), 3, 9), Ok(ServiceId::Storage));
+        assert_eq!(
+            request.validate(CapabilityHandle::new(7, 1).unwrap(), 3, 9),
+            Err(PackageStatus::Invalid)
+        );
+        assert_eq!(request.validate(capability(), 4, 9), Err(PackageStatus::Stale));
         let mut malformed = request;
         malformed.flags = 1;
-        assert_eq!(malformed.validate(6, 3, 9), Err(PackageStatus::Invalid));
+        assert_eq!(malformed.validate(capability(), 3, 9), Err(PackageStatus::Invalid));
     }
 
     #[test]
@@ -396,7 +413,7 @@ mod tests {
             ServiceId::Storage,
             1,
             3,
-            6,
+            capability(),
             9,
             2,
             4096,
@@ -414,7 +431,7 @@ mod tests {
                 ServiceId::Storage,
                 1,
                 3,
-                6,
+                capability(),
                 9,
                 2,
                 0,
@@ -428,7 +445,7 @@ mod tests {
                 ServiceId::Storage,
                 1,
                 3,
-                6,
+                capability(),
                 9,
                 2,
                 u32::MAX,
@@ -443,20 +460,41 @@ mod tests {
 
     #[test]
     fn program_target_roundtrips_without_service_aliasing() {
-        let request =
-            PackageRequest::new_program(PackageOperation::Lookup, b"demo", 9, 3, 6, 11, 0, 0, 0)
-                .unwrap();
-        assert_eq!(request.validate_target(6, 3, 11).unwrap().kind, PackageTargetKind::Program);
-        assert_eq!(request.validate(6, 3, 11), Err(PackageStatus::Unsupported));
+        let request = PackageRequest::new_program(
+            PackageOperation::Lookup,
+            b"demo",
+            9,
+            3,
+            capability(),
+            11,
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            request.validate_target(capability(), 3, 11).unwrap().kind,
+            PackageTargetKind::Program
+        );
+        assert_eq!(request.validate(capability(), 3, 11), Err(PackageStatus::Unsupported));
         let response = PackageResponse::new(request, PackageStatus::Ok).with_package(1, 404, 0, 0);
         assert_eq!(response.validate_for(request, 3, 11), Ok(()));
     }
 
     #[test]
     fn stale_response_can_be_followed_by_current_response() {
-        let request =
-            PackageRequest::new(PackageOperation::Lookup, ServiceId::Storage, 1, 3, 6, 9, 0, 0, 0)
-                .unwrap();
+        let request = PackageRequest::new(
+            PackageOperation::Lookup,
+            ServiceId::Storage,
+            1,
+            3,
+            capability(),
+            9,
+            0,
+            0,
+            0,
+        )
+        .unwrap();
         let stale = PackageResponse::new(request, PackageStatus::Ok)
             .with_package(1, PACKAGE_HEADER_BYTES as u32, 1, 0)
             .with_bytes(0);
