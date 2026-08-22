@@ -38,7 +38,6 @@ pub const MAX_ADDRESS_SPACES: usize = 16;
 pub const MAX_MAPPINGS_PER_ADDRESS_SPACE: usize = 64;
 pub const MAX_RECLAIMERS: usize = 8;
 pub const MAX_MEMORY_CLAIMS: usize = 128;
-pub const MAX_HEAP_SLOTS: usize = 256;
 pub const MAX_QUOTAS: usize = 32;
 
 const NO_DEADLINE: u64 = u64::MAX;
@@ -469,6 +468,8 @@ pub struct FrameMetadataLayout {
     free_len: usize,
     summary_offset: usize,
     summary_len: usize,
+    heap_slots_offset: usize,
+    heap_slots_len: usize,
     heap_records_offset: usize,
     heap_records_len: usize,
     heap_leases_offset: usize,
@@ -486,9 +487,15 @@ impl FrameMetadataLayout {
         let summary_len = free_len.div_ceil(64);
         let summary_offset = align_up(free_offset.checked_add(free_bytes)?, align_of::<u64>())?;
         let summary_bytes = summary_len.checked_mul(size_of::<u64>())?;
+        let heap_slots_len = frame_count;
+        let heap_slots_offset =
+            align_up(summary_offset.checked_add(summary_bytes)?, align_of::<HeapSlot>())?;
+        let heap_slots_bytes = heap_slots_len.checked_mul(size_of::<HeapSlot>())?;
         let heap_records_len = frame_count;
-        let heap_records_offset =
-            align_up(summary_offset.checked_add(summary_bytes)?, align_of::<HeapPageRecord>())?;
+        let heap_records_offset = align_up(
+            heap_slots_offset.checked_add(heap_slots_bytes)?,
+            align_of::<HeapPageRecord>(),
+        )?;
         let heap_records_bytes = heap_records_len.checked_mul(size_of::<HeapPageRecord>())?;
         let heap_leases_len = frame_count;
         let heap_leases_offset = align_up(
@@ -504,6 +511,8 @@ impl FrameMetadataLayout {
             free_len,
             summary_offset,
             summary_len,
+            heap_slots_offset,
+            heap_slots_len,
             heap_records_offset,
             heap_records_len,
             heap_leases_offset,
@@ -597,6 +606,8 @@ struct FrameMetadata {
     free_len: usize,
     summary: *mut u64,
     summary_len: usize,
+    heap_slots: *mut HeapSlot,
+    heap_slots_len: usize,
     heap_records: *mut HeapPageRecord,
     heap_records_len: usize,
     heap_leases: *mut HeapLeaseRecord,
@@ -613,6 +624,8 @@ impl FrameMetadata {
         free_len: 0,
         summary: core::ptr::null_mut(),
         summary_len: 0,
+        heap_slots: core::ptr::null_mut(),
+        heap_slots_len: 0,
         heap_records: core::ptr::null_mut(),
         heap_records_len: 0,
         heap_leases: core::ptr::null_mut(),
@@ -632,12 +645,14 @@ impl FrameMetadata {
             self.records = base.add(layout.records_offset).cast();
             self.free = base.add(layout.free_offset).cast();
             self.summary = base.add(layout.summary_offset).cast();
+            self.heap_slots = base.add(layout.heap_slots_offset).cast();
             self.heap_records = base.add(layout.heap_records_offset).cast();
             self.heap_leases = base.add(layout.heap_leases_offset).cast();
         }
         self.records_len = layout.records_len;
         self.free_len = layout.free_len;
         self.summary_len = layout.summary_len;
+        self.heap_slots_len = layout.heap_slots_len;
         self.heap_records_len = layout.heap_records_len;
         self.heap_leases_len = layout.heap_leases_len;
         Ok(())
@@ -649,6 +664,7 @@ impl FrameMetadata {
             slice::from_raw_parts_mut(self.records, self.records_len).fill(FrameRecord::EMPTY);
             slice::from_raw_parts_mut(self.free, self.free_len).fill(0);
             slice::from_raw_parts_mut(self.summary, self.summary_len).fill(0);
+            slice::from_raw_parts_mut(self.heap_slots, self.heap_slots_len).fill(HeapSlot::empty());
             slice::from_raw_parts_mut(self.heap_records, self.heap_records_len)
                 .fill(HeapPageRecord::empty());
             slice::from_raw_parts_mut(self.heap_leases, self.heap_leases_len)
@@ -693,7 +709,10 @@ const TEST_METADATA_BYTES: usize = {
     let free_len = TEST_MAX_MANAGED_FRAMES.div_ceil(64);
     let free_offset = records_bytes.div_ceil(8) * 8;
     let summary_offset = (free_offset + free_len * size_of::<u64>()).div_ceil(8) * 8;
-    let heap_records_offset = (summary_offset + free_len.div_ceil(64) * size_of::<u64>())
+    let heap_slots_offset = (summary_offset + free_len.div_ceil(64) * size_of::<u64>())
+        .div_ceil(align_of::<HeapSlot>())
+        * align_of::<HeapSlot>();
+    let heap_records_offset = (heap_slots_offset + TEST_MAX_MANAGED_FRAMES * size_of::<HeapSlot>())
         .div_ceil(align_of::<HeapPageRecord>())
         * align_of::<HeapPageRecord>();
     let heap_leases_offset = (heap_records_offset
@@ -802,14 +821,19 @@ impl PhysicalFrameManager {
     }
 
     #[cfg(target_os = "uefi")]
-    fn heap_metadata(&mut self) -> (&mut [HeapPageRecord], &mut [HeapLeaseRecord]) {
+    fn heap_metadata(
+        &mut self,
+    ) -> (&mut [HeapSlot], &mut [HeapPageRecord], &mut [HeapLeaseRecord]) {
+        let slots = unsafe {
+            slice::from_raw_parts_mut(self.metadata.heap_slots, self.metadata.heap_slots_len)
+        };
         let records = unsafe {
             slice::from_raw_parts_mut(self.metadata.heap_records, self.metadata.heap_records_len)
         };
         let leases = unsafe {
             slice::from_raw_parts_mut(self.metadata.heap_leases, self.metadata.heap_leases_len)
         };
-        (records, leases)
+        (slots, records, leases)
     }
 
     pub const fn run_count(&self) -> usize {
@@ -1644,7 +1668,9 @@ impl SmpFrameAllocator {
 
     #[cfg(target_os = "uefi")]
     #[allow(clippy::mut_from_ref)]
-    pub(crate) fn heap_metadata(&self) -> Option<(&mut [HeapPageRecord], &mut [HeapLeaseRecord])> {
+    pub(crate) fn heap_metadata(
+        &self,
+    ) -> Option<(&mut [HeapSlot], &mut [HeapPageRecord], &mut [HeapLeaseRecord])> {
         if !self.initialized.load(Ordering::Acquire) {
             return None;
         }
@@ -2770,7 +2796,7 @@ impl HeapAllocation {
 }
 
 #[derive(Clone, Copy)]
-struct HeapSlot {
+pub struct HeapSlot {
     used: bool,
     generation: u32,
     owner: OwnerId,
@@ -2780,25 +2806,41 @@ struct HeapSlot {
 }
 
 impl HeapSlot {
-    const EMPTY: Self = Self {
-        used: false,
-        generation: INITIAL_GENERATION,
-        owner: OwnerId(0),
-        bytes: 0,
-        address: 0,
-        frame: None,
-    };
+    const fn empty() -> Self {
+        Self {
+            used: false,
+            generation: INITIAL_GENERATION,
+            owner: OwnerId(0),
+            bytes: 0,
+            address: 0,
+            frame: None,
+        }
+    }
 }
 
 struct HeapCentral {
-    slots: [HeapSlot; MAX_HEAP_SLOTS],
+    slots: *mut HeapSlot,
+    len: usize,
 }
 
 impl HeapCentral {
-    const fn empty() -> Self {
-        Self { slots: [HeapSlot::EMPTY; MAX_HEAP_SLOTS] }
+    fn from_slice(slots: &mut [HeapSlot]) -> Self {
+        Self { slots: slots.as_mut_ptr(), len: slots.len() }
+    }
+
+    fn slots(&self) -> &[HeapSlot] {
+        // SAFETY: the metadata slice outlives the heap and is exclusively
+        // owned by this central allocator after initialization.
+        unsafe { slice::from_raw_parts(self.slots, self.len) }
+    }
+
+    fn slots_mut(&mut self) -> &mut [HeapSlot] {
+        // SAFETY: the central lock serializes mutable access to the metadata.
+        unsafe { slice::from_raw_parts_mut(self.slots, self.len) }
     }
 }
+
+unsafe impl Send for HeapCentral {}
 
 #[derive(Clone, Copy)]
 struct Quota {
@@ -2884,24 +2926,25 @@ impl HeapLeaseRecord {
 /// virtual heap contract is proven in the boot path.
 pub struct KernelHeap<'a> {
     frames: &'a SmpFrameAllocator,
+    central: TryLock<HeapCentral>,
     page_records: &'a mut [HeapPageRecord],
     page_leases: &'a mut [HeapLeaseRecord],
-    central: TryLock<HeapCentral>,
     caches: [TryLock<HeapMagazine>; MAX_MEMORY_CPUS],
     quotas: [Quota; MAX_QUOTAS],
 }
 
 impl<'a> KernelHeap<'a> {
-    pub const fn new(
+    pub fn new(
         frames: &'a SmpFrameAllocator,
+        heap_slots: &'a mut [HeapSlot],
         page_records: &'a mut [HeapPageRecord],
         page_leases: &'a mut [HeapLeaseRecord],
     ) -> Self {
         Self {
             frames,
+            central: TryLock::new(HeapCentral::from_slice(heap_slots)),
             page_records,
             page_leases,
-            central: TryLock::new(HeapCentral::empty()),
             caches: [const { TryLock::new(HeapMagazine::empty()) }; MAX_MEMORY_CPUS],
             quotas: [Quota::EMPTY; MAX_QUOTAS],
         }
@@ -2979,9 +3022,9 @@ impl<'a> KernelHeap<'a> {
         };
         let cached = self.caches[cpu].try_lock().and_then(|mut cache| cache.pop());
         let index = cached
-            .filter(|index| central.slots.get(*index as usize).is_some_and(|slot| !slot.used))
+            .filter(|index| central.slots().get(*index as usize).is_some_and(|slot| !slot.used))
             .map(|index| index as usize)
-            .or_else(|| central.slots.iter().position(|slot| !slot.used));
+            .or_else(|| central.slots().iter().position(|slot| !slot.used));
         let Some(index) = index else {
             return Err(HeapError::Exhausted);
         };
@@ -2991,7 +3034,7 @@ impl<'a> KernelHeap<'a> {
             .get(0)
             .map(|lease| lease.address().raw() as usize)
             .ok_or(HeapError::InvalidHandle)?;
-        let slot = &mut central.slots[index];
+        let slot = &mut central.slots_mut()[index];
         slot.used = true;
         slot.generation = next_generation(slot.generation);
         slot.owner = owner;
@@ -3039,13 +3082,13 @@ impl<'a> KernelHeap<'a> {
         let Some(mut central) = self.central.try_lock() else {
             return Err(HeapError::WouldBlock);
         };
-        let Some(index) = central.slots.iter().position(|slot| !slot.used) else {
+        let Some(index) = central.slots().iter().position(|slot| !slot.used) else {
             return Err(HeapError::Exhausted);
         };
         let frame =
             self.frames.try_alloc_irq(cpu, owner, FrameState::Dirty).map_err(map_alloc_error)?;
         let address = frame.address().raw() as usize;
-        let slot = &mut central.slots[index];
+        let slot = &mut central.slots_mut()[index];
         slot.used = true;
         slot.generation = next_generation(slot.generation);
         slot.owner = owner;
@@ -3102,7 +3145,7 @@ impl<'a> KernelHeap<'a> {
         let Some(mut central) = self.central.try_lock() else {
             return Err(HeapError::WouldBlock);
         };
-        let Some(slot) = central.slots.get_mut(allocation.index as usize) else {
+        let Some(slot) = central.slots_mut().get_mut(allocation.index as usize) else {
             return Err(HeapError::InvalidHandle);
         };
         if !slot.used || slot.generation != allocation.generation {
@@ -3141,7 +3184,7 @@ impl<'a> KernelHeap<'a> {
         let slab_allocation = {
             let central = self.central.try_lock().ok_or(HeapError::WouldBlock)?;
             central
-                .slots
+                .slots()
                 .iter()
                 .enumerate()
                 .find(|(_, slot)| slot.used && slot.address == address)
@@ -3208,7 +3251,7 @@ impl<'a> KernelHeap<'a> {
     pub fn live_bytes(&self, owner: OwnerId) -> Option<usize> {
         let central = self.central.try_lock()?;
         let slab_bytes = central
-            .slots
+            .slots()
             .iter()
             .filter(|slot| slot.used && slot.owner == owner)
             .map(|slot| slot.bytes)
@@ -3225,7 +3268,7 @@ impl<'a> KernelHeap<'a> {
     pub fn live_objects(&self, owner: OwnerId) -> Option<usize> {
         let central = self.central.try_lock()?;
         let slab_objects =
-            central.slots.iter().filter(|slot| slot.used && slot.owner == owner).count();
+            central.slots().iter().filter(|slot| slot.used && slot.owner == owner).count();
         let page_objects =
             self.page_records.iter().filter(|record| record.used && record.owner == owner).count();
         Some(slab_objects + page_objects)
@@ -3281,13 +3324,16 @@ impl<'a> KernelGlobalAllocator<'a> {
 #[cfg(target_os = "uefi")]
 pub(crate) fn bind_kernel_global_allocator(frames: &SmpFrameAllocator) -> Result<(), HeapError> {
     let frames: &'static SmpFrameAllocator = unsafe { core::mem::transmute(frames) };
-    let (records, leases) = frames.heap_metadata().ok_or(HeapError::InvalidRequest)?;
-    let (records, leases): (&'static mut [HeapPageRecord], &'static mut [HeapLeaseRecord]) =
-        unsafe { core::mem::transmute((records, leases)) };
+    let (slots, records, leases) = frames.heap_metadata().ok_or(HeapError::InvalidRequest)?;
+    let (slots, records, leases): (
+        &'static mut [HeapSlot],
+        &'static mut [HeapPageRecord],
+        &'static mut [HeapLeaseRecord],
+    ) = unsafe { core::mem::transmute((slots, records, leases)) };
     KERNEL_GLOBAL_ALLOCATOR
         .register_reclaimer(reclaim_kernel_frame_caches)
         .map_err(|_| HeapError::InvalidRequest)?;
-    KERNEL_GLOBAL_ALLOCATOR.bind(KernelHeap::new(frames, records, leases))
+    KERNEL_GLOBAL_ALLOCATOR.bind(KernelHeap::new(frames, slots, records, leases))
 }
 
 #[cfg(target_os = "uefi")]
@@ -3703,9 +3749,11 @@ mod tests {
         let mut allocator = SmpFrameAllocator::empty();
         allocator.initialize(&normalized).unwrap();
         let owner = OwnerId::new(2).unwrap();
+        let mut heap_slots = [HeapSlot::empty(); 2];
         let mut page_records = [HeapPageRecord::empty(); 2];
         let mut page_leases = [HeapLeaseRecord::empty(); 16];
-        let mut heap = KernelHeap::new(&allocator, &mut page_records, &mut page_leases);
+        let mut heap =
+            KernelHeap::new(&allocator, &mut heap_slots, &mut page_records, &mut page_leases);
         heap.set_quota(owner, 8192).unwrap();
         assert_eq!(
             heap.alloc(0, owner, 32, 8, AllocationContext::Interrupt),
@@ -3734,9 +3782,11 @@ mod tests {
         let cached = allocator.try_alloc(0, owner, FrameState::Dirty).unwrap();
         allocator.free(0, cached).unwrap();
 
+        let mut heap_slots = [HeapSlot::empty(); 2];
         let mut page_records = [HeapPageRecord::empty(); 2];
         let mut page_leases = [HeapLeaseRecord::empty(); 16];
-        let mut heap = KernelHeap::new(&allocator, &mut page_records, &mut page_leases);
+        let mut heap =
+            KernelHeap::new(&allocator, &mut heap_slots, &mut page_records, &mut page_leases);
         heap.set_quota(owner, 8192).unwrap();
         let small = Layout::from_size_align(32, 8).unwrap();
         let allocation = heap.try_alloc_irq(0, owner, small).unwrap();
@@ -3753,9 +3803,11 @@ mod tests {
         let mut allocator = SmpFrameAllocator::empty();
         allocator.initialize(&normalized).unwrap();
         let owner = OwnerId::new(2).unwrap();
+        let mut heap_slots = [HeapSlot::empty(); 17];
         let mut page_records = [HeapPageRecord::empty(); 17];
         let mut page_leases = [HeapLeaseRecord::empty(); 17];
-        let mut heap = KernelHeap::new(&allocator, &mut page_records, &mut page_leases);
+        let mut heap =
+            KernelHeap::new(&allocator, &mut heap_slots, &mut page_records, &mut page_leases);
         heap.set_quota(owner, 17 * 513).unwrap();
         let mut allocations = [None; 17];
         for allocation in &mut allocations {
@@ -3777,17 +3829,25 @@ mod tests {
         let small_layout = Layout::from_size_align(32, 8).unwrap();
         assert!(!unbound.is_bound());
         assert!(unsafe { GlobalAlloc::alloc(&unbound, small_layout) }.is_null());
+        let mut heap_slots = [HeapSlot::empty(); 2];
         let mut page_records = [HeapPageRecord::empty(); 2];
         let mut page_leases = [HeapLeaseRecord::empty(); 16];
-        let heap = KernelHeap::new(&allocator, &mut page_records, &mut page_leases);
+        let heap =
+            KernelHeap::new(&allocator, &mut heap_slots, &mut page_records, &mut page_leases);
         let global = KernelGlobalAllocator::empty();
         assert!(!global.is_bound());
         global.bind(heap).unwrap();
         assert!(global.is_bound());
+        let mut second_slots = [HeapSlot::empty(); 1];
         let mut second_records = [HeapPageRecord::empty(); 1];
         let mut second_leases = [HeapLeaseRecord::empty(); 8];
         assert_eq!(
-            global.bind(KernelHeap::new(&allocator, &mut second_records, &mut second_leases)),
+            global.bind(KernelHeap::new(
+                &allocator,
+                &mut second_slots,
+                &mut second_records,
+                &mut second_leases,
+            )),
             Err(HeapError::InvalidRequest)
         );
 
@@ -3811,10 +3871,12 @@ mod tests {
         let normalized = normalize_memory_map(&map(&[(0x1000, 16, true)]), &[]).unwrap();
         let mut allocator = SmpFrameAllocator::empty();
         allocator.initialize(&normalized).unwrap();
+        let mut heap_slots = [HeapSlot::empty(); 2];
         let mut page_records = [HeapPageRecord::empty(); 2];
         let mut page_leases = [HeapLeaseRecord::empty(); 16];
         let global = KernelGlobalAllocator::new(KernelHeap::new(
             &allocator,
+            &mut heap_slots,
             &mut page_records,
             &mut page_leases,
         ));
