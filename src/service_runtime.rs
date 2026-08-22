@@ -3776,6 +3776,8 @@ impl ServiceRuntime {
             }
             let result = self.start_tasks();
             if result.is_ok() {
+                #[cfg(feature = "qemu-proof")]
+                crate::proof::network_restart_completed();
                 crate::arch::enable_keyboard_irq();
                 crate::arch::finish_service_runtime_transition();
             }
@@ -3785,51 +3787,13 @@ impl ServiceRuntime {
 
     fn restart_network(
         &mut self,
+        bundle: &ServiceImageBundle,
         runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
     ) -> Result<(), ServiceRuntimeError> {
-        let _restart_gate = ServiceRestartGate::acquire();
-        if !self.supervisor.prepare_targeted_restart(ServiceId::Network) {
-            return Err(ServiceRuntimeError::RestartLimit);
-        }
-        crate::arch::begin_service_runtime_transition();
-        self.manager.mark_stopping(ServiceId::Network);
-        self.network_config.service_epoch =
-            self.network_config.service_epoch.wrapping_add(1).max(1);
-        let index = ServiceId::Network.index();
-        if let Some(task) = self.tasks[index] {
-            if crate::SCHEDULER.state(task) != Some(crate::TaskState::Completed)
-                && !crate::SCHEDULER.request_stop(task)
-            {
-                return Err(ServiceRuntimeError::TaskStop);
-            }
-            let mut waited = 0;
-            while crate::SCHEDULER.state(task) != Some(crate::TaskState::Completed) {
-                if waited == 1024 {
-                    return Err(ServiceRuntimeError::TaskStop);
-                }
-                runtime_guard.pause();
-                crate::sleep_current_for(1);
-                runtime_guard.resume();
-                waited += 1;
-            }
-            if !crate::SCHEDULER.reclaim_completed(task) {
-                return Err(ServiceRuntimeError::TaskStop);
-            }
-            self.tasks[index] = None;
-            self.supervisor.unregister(ServiceId::Network);
-        }
-        self.reset_service_image(ServiceId::Network)?;
-        self.queue_network_link();
-        self.start_service_task(ServiceId::Network)?;
-        if self.tasks[ServiceId::Fetch.index()].is_none() {
-            self.reset_service_image(ServiceId::Fetch)?;
-            self.start_service_task(ServiceId::Fetch)?;
-        }
-        self.manager.restart_complete(&[ServiceId::Fetch, ServiceId::Network]);
-        crate::arch::finish_service_runtime_transition();
-        #[cfg(feature = "qemu-proof")]
-        crate::proof::network_restart_completed();
-        Ok(())
+        // Targeted teardown is not yet complete for process, address-space,
+        // heap, IPC, and event ownership. Reuse the graph path so no old
+        // Network or Fetch resources remain reachable after recovery.
+        self.restart(bundle, runtime_guard)
     }
 
     pub fn supervise(
@@ -3933,7 +3897,7 @@ impl ServiceRuntime {
                     && services[0] == ServiceId::Fetch
                     && services[1] == ServiceId::Network)
             {
-                self.restart_network(runtime_guard)?;
+                self.restart_network(bundle, runtime_guard)?;
                 return Ok(true);
             }
             let mut restart_failed = false;
@@ -3962,7 +3926,7 @@ impl ServiceRuntime {
                 && !self.uses_package_image(ServiceId::Network)
                 && !self.uses_package_image(ServiceId::Fetch)
             {
-                self.restart_network(runtime_guard)?;
+                self.restart_network(bundle, runtime_guard)?;
             } else {
                 self.restart(bundle, runtime_guard)?;
             }
@@ -3984,7 +3948,7 @@ impl ServiceRuntime {
                 && !self.uses_package_image(ServiceId::Network)
                 && !self.uses_package_image(ServiceId::Fetch)
             {
-                self.restart_network(runtime_guard)?;
+                self.restart_network(bundle, runtime_guard)?;
             } else {
                 self.restart(bundle, runtime_guard)?;
             }
