@@ -19,8 +19,8 @@ struct Slot<T> {
 }
 
 impl<T> Slot<T> {
-    fn empty() -> Self {
-        Self { generation: 1, value: None }
+    fn with_generation(generation: u32) -> Self {
+        Self { generation: generation.max(1), value: None }
     }
 }
 
@@ -28,7 +28,7 @@ struct EndpointRecord {
     handle: EndpointHandle,
     producer: ServiceHandle,
     consumer: ServiceHandle,
-    message_kind: u8,
+    contract_id: u16,
     message_bytes: usize,
     queue_capacity: usize,
     service_epoch: u64,
@@ -50,11 +50,16 @@ struct CapabilityRecord {
 pub struct RuntimeIpcRegistry {
     endpoints: Vec<Slot<EndpointRecord>>,
     capabilities: Vec<Slot<CapabilityRecord>>,
+    generation_seed: u32,
 }
 
 impl RuntimeIpcRegistry {
     pub fn new() -> Self {
-        Self { endpoints: Vec::new(), capabilities: Vec::new() }
+        Self::new_with_generation(1)
+    }
+
+    pub fn new_with_generation(generation: u32) -> Self {
+        Self { endpoints: Vec::new(), capabilities: Vec::new(), generation_seed: generation.max(1) }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -62,7 +67,7 @@ impl RuntimeIpcRegistry {
         &mut self,
         producer: ServiceHandle,
         consumer: ServiceHandle,
-        message_kind: u8,
+        contract_id: u16,
         message_bytes: usize,
         queue_capacity: usize,
         service_epoch: u64,
@@ -98,7 +103,7 @@ impl RuntimeIpcRegistry {
             handle,
             producer,
             consumer,
-            message_kind,
+            contract_id,
             message_bytes,
             queue_capacity,
             service_epoch,
@@ -155,8 +160,8 @@ impl RuntimeIpcRegistry {
         Ok(())
     }
 
-    pub fn endpoint_message_kind(&self, endpoint: EndpointHandle) -> Result<u8, IpcStatus> {
-        Ok(self.endpoint(endpoint)?.message_kind)
+    pub fn endpoint_contract_id(&self, endpoint: EndpointHandle) -> Result<u16, IpcStatus> {
+        Ok(self.endpoint(endpoint)?.contract_id)
     }
 
     pub fn endpoint_events(
@@ -326,10 +331,62 @@ impl RuntimeIpcRegistry {
                 } else {
                     endpoint.producer
                 },
+                contract_id: endpoint.contract_id,
                 message_bytes: endpoint.message_bytes as u16,
                 queue_capacity: endpoint.queue_capacity as u16,
+                event: if capability.rights == IpcRights::Send {
+                    endpoint.write_event
+                } else {
+                    endpoint.read_event
+                },
                 name_len: 0,
-                reserved: [0; 3],
+                reserved: [0; 1],
+                name: [0; logos_abi::MAX_SERVICE_NAME_BYTES],
+            };
+            written += 1;
+            seen += 1;
+        }
+        response.count = written as u8;
+        if response.flags & DIRECTORY_FLAG_MORE == 0 {
+            response.cursor = request.cursor + written as u64;
+        }
+        DirectoryStatus::Ok
+    }
+
+    pub fn directory_endpoints(
+        &self,
+        request: DirectoryRequest,
+        response: &mut DirectoryResponse,
+    ) -> DirectoryStatus {
+        if !request.is_valid() || request.operation != logos_abi::DirectoryOperation::Endpoints {
+            return DirectoryStatus::Malformed;
+        }
+        *response =
+            DirectoryResponse::empty(request.operation, DirectoryStatus::Ok, request.request_id);
+        let mut seen = 0u64;
+        let mut written = 0usize;
+        for endpoint in self.endpoints.iter().filter_map(|slot| slot.value.as_ref()) {
+            if seen < request.cursor {
+                seen += 1;
+                continue;
+            }
+            if written == DIRECTORY_RECORDS_PER_PAGE {
+                response.flags |= DIRECTORY_FLAG_MORE;
+                response.cursor = request.cursor + written as u64;
+                break;
+            }
+            response.records[written] = logos_abi::DirectoryRecord {
+                kind: DirectoryRecordKind::Endpoint,
+                rights: 0,
+                flags: 0,
+                handle: endpoint.handle.raw(),
+                peer: endpoint.consumer,
+                contract_id: endpoint.contract_id,
+                message_bytes: endpoint.message_bytes as u16,
+                queue_capacity: endpoint.queue_capacity as u16,
+                event: EventHandle::EMPTY,
+                name_len: 0,
+                reserved: [0; 1],
                 name: [0; logos_abi::MAX_SERVICE_NAME_BYTES],
             };
             written += 1;
@@ -349,7 +406,7 @@ impl RuntimeIpcRegistry {
             return Ok(index);
         }
         self.endpoints.try_reserve(1).map_err(|_| IpcStatus::Disconnected)?;
-        self.endpoints.push(Slot::empty());
+        self.endpoints.push(Slot::with_generation(self.generation_seed));
         Ok(self.endpoints.len() - 1)
     }
 
@@ -360,7 +417,7 @@ impl RuntimeIpcRegistry {
             return Ok(index);
         }
         self.capabilities.try_reserve(1).map_err(|_| IpcStatus::Disconnected)?;
-        self.capabilities.push(Slot::empty());
+        self.capabilities.push(Slot::with_generation(self.generation_seed));
         Ok(self.capabilities.len() - 1)
     }
 
@@ -466,6 +523,30 @@ mod tests {
     }
 
     #[test]
+    fn runtime_generation_seed_rejects_handles_from_a_previous_runtime() {
+        let (producer, consumer) = services();
+        let mut old = RuntimeIpcRegistry::new_with_generation(1);
+        let mut old_events = RuntimeEventRegistry::new_with_generation(1);
+        let old_endpoint =
+            old.create_endpoint(producer, consumer, 1, 1, 1, 1, &mut old_events).unwrap();
+        let old_capability = old.grant(producer, old_endpoint, IpcRights::Send).unwrap();
+
+        let mut current = RuntimeIpcRegistry::new_with_generation(2);
+        let mut current_events = RuntimeEventRegistry::new_with_generation(2);
+        let current_endpoint =
+            current.create_endpoint(producer, consumer, 1, 1, 1, 2, &mut current_events).unwrap();
+        let current_capability =
+            current.grant(producer, current_endpoint, IpcRights::Send).unwrap();
+
+        assert_ne!(old_endpoint, current_endpoint);
+        assert_ne!(old_capability, current_capability);
+        assert_eq!(
+            current.send(producer, old_capability, &[1], &mut current_events),
+            IpcStatus::Stale
+        );
+    }
+
+    #[test]
     fn capability_validation_checks_owner_rights_and_exact_size() {
         let (producer, consumer) = services();
         let mut registry = RuntimeIpcRegistry::new();
@@ -506,6 +587,8 @@ mod tests {
         assert_eq!(registry.directory(request, &mut response), DirectoryStatus::Ok);
         assert_eq!(response.count, 1);
         assert!(response.is_valid_for(request));
+        assert_eq!(response.records[0].contract_id, 1);
+        assert_eq!(response.records[0].event, registry.endpoint_events(endpoint).unwrap().1);
     }
 
     #[test]

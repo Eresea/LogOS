@@ -25,6 +25,7 @@ struct EventRecord {
 struct EventSetRecord {
     owner: ServiceHandle,
     members: Vec<EventHandle>,
+    waiting: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +43,7 @@ pub enum EventError {
     Duplicate,
     NotMember,
     InvalidDeadline,
+    Busy,
 }
 
 pub struct RuntimeEventRegistry {
@@ -77,7 +79,8 @@ impl RuntimeEventRegistry {
         let index = self.allocate_set_slot()?;
         let handle = EventSetHandle::new(index as u32, self.sets[index].generation)
             .ok_or(EventError::Capacity)?;
-        self.sets[index].value = Some(EventSetRecord { owner, members: Vec::new() });
+        self.sets[index].value =
+            Some(EventSetRecord { owner, members: Vec::new(), waiting: false });
         Ok(handle)
     }
 
@@ -94,6 +97,9 @@ impl RuntimeEventRegistry {
         let set_record = self.set_mut(set)?;
         if set_record.owner != owner {
             return Err(EventError::Unauthorized);
+        }
+        if set_record.waiting {
+            return Err(EventError::Busy);
         }
         if set_record.members.contains(&event) {
             return Err(EventError::Duplicate);
@@ -112,6 +118,9 @@ impl RuntimeEventRegistry {
         let set_record = self.set_mut(set)?;
         if set_record.owner != owner {
             return Err(EventError::Unauthorized);
+        }
+        if set_record.waiting {
+            return Err(EventError::Busy);
         }
         let Some(index) = set_record.members.iter().position(|member| *member == event) else {
             return Err(EventError::NotMember);
@@ -155,17 +164,32 @@ impl RuntimeEventRegistry {
         };
         for index in 0..member_count {
             let event = self.set(set)?.members.get(index).copied().ok_or(EventError::Stale)?;
-            let record = self.event_mut(event)?;
-            if record.signaled {
-                record.signaled = false;
+            let signaled = self.event(event)?.signaled;
+            if signaled {
+                self.event_mut(event)?.signaled = false;
+                self.set_mut(set)?.waiting = false;
                 return Ok(EventWait::Ready(event));
             }
         }
         if deadline != NO_DEADLINE && now >= deadline {
+            self.set_mut(set)?.waiting = false;
             Ok(EventWait::Timeout)
         } else {
+            self.set_mut(set)?.waiting = true;
             Ok(EventWait::Pending)
         }
+    }
+
+    pub fn members(
+        &self,
+        owner: ServiceHandle,
+        set: EventSetHandle,
+    ) -> Result<&[EventHandle], EventError> {
+        let record = self.set(set)?;
+        if record.owner != owner {
+            return Err(EventError::Unauthorized);
+        }
+        Ok(&record.members)
     }
 
     pub fn destroy_event(
@@ -327,5 +351,21 @@ mod tests {
         assert_eq!(events.signal(other, event), Err(EventError::Unauthorized));
         assert_eq!(events.destroy_event(other, event), Err(EventError::Unauthorized));
         assert_eq!(events.destroy_set(owner, set), Err(EventError::Unauthorized));
+    }
+
+    #[test]
+    fn membership_is_frozen_while_a_waiter_is_published() {
+        let owner = owner();
+        let mut events = RuntimeEventRegistry::new();
+        let first = events.create_event(owner).unwrap();
+        let second = events.create_event(owner).unwrap();
+        let set = events.create_set(owner).unwrap();
+        events.add(owner, set, first).unwrap();
+        assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Pending));
+        assert_eq!(events.add(owner, set, second), Err(EventError::Busy));
+        assert_eq!(events.remove(owner, set, first), Err(EventError::Busy));
+        events.signal_irq(first).unwrap();
+        assert_eq!(events.wait_any(owner, set, 2, Some(10)), Ok(EventWait::Ready(first)));
+        assert_eq!(events.remove(owner, set, first), Ok(()));
     }
 }
