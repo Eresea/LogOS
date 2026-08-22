@@ -446,7 +446,12 @@ impl ServiceRuntime {
         let mut handles = [logos_abi::ServiceHandle::EMPTY; SERVICE_COUNT];
         for spec in SERVICE_IMAGES {
             handles[spec.service().index()] = registry
-                .register(spec.name(), b"builtin", &[])
+                .register_with_quota(
+                    spec.name(),
+                    b"builtin",
+                    &[],
+                    self.service_heaps[spec.service().index()].quota_pages,
+                )
                 .map_err(|_| ServiceRuntimeError::Resources)?;
         }
         for spec in SERVICE_IMAGES {
@@ -1209,7 +1214,14 @@ impl ServiceRuntime {
         }
         let index = service.index();
         let page = self.service_heaps[index].frames.len();
-        if page >= self.service_heaps[index].quota_pages {
+        let quota_pages = self
+            .dynamic_services
+            .as_ref()
+            .and_then(|registry| {
+                registry.heap_quota_pages(dynamic_service_handle(service, generation).ok()?).ok()
+            })
+            .unwrap_or(self.service_heaps[index].quota_pages);
+        if page >= quota_pages {
             return logos_abi::IpcStatus::Full;
         }
         if self.service_heaps[index].frames.try_reserve(1).is_err() {

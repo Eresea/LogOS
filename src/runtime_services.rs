@@ -5,8 +5,8 @@ use alloc::vec::Vec;
 use logos_abi::{
     DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE, DirectoryOperation, DirectoryRecord,
     DirectoryResponse, DirectoryStatus, MAX_PACKAGE_NAME_BYTES, MAX_SERVICE_NAME_BYTES,
-    ManagerOperation, ManagerRequest, ManagerResponse, ManagerState, ManagerStatus, ServiceHandle,
-    ServiceManagerRecord,
+    ManagerOperation, ManagerRequest, ManagerResponse, ManagerState, ManagerStatus,
+    SERVICE_HEAP_MAX_PAGES, ServiceHandle, ServiceManagerRecord,
 };
 
 struct Slot {
@@ -35,6 +35,7 @@ struct ServiceRecord {
     state: ServiceState,
     epoch: u64,
     restarts: u8,
+    heap_quota_pages: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,10 +64,20 @@ impl RuntimeServiceRegistry {
         image: &[u8],
         dependencies: &[ServiceHandle],
     ) -> Result<ServiceHandle, ServiceRegistryError> {
+        self.register_with_quota(name, image, dependencies, SERVICE_HEAP_MAX_PAGES)
+    }
+
+    pub fn register_with_quota(
+        &mut self,
+        name: &[u8],
+        image: &[u8],
+        dependencies: &[ServiceHandle],
+        heap_quota_pages: usize,
+    ) -> Result<ServiceHandle, ServiceRegistryError> {
         if name.is_empty() || name.len() > MAX_SERVICE_NAME_BYTES {
             return Err(ServiceRegistryError::InvalidName);
         }
-        if image.is_empty() {
+        if image.is_empty() || heap_quota_pages == 0 {
             return Err(ServiceRegistryError::InvalidImage);
         }
         for dependency in dependencies {
@@ -94,6 +105,7 @@ impl RuntimeServiceRegistry {
             state: ServiceState::Stopped,
             epoch: 1,
             restarts: 0,
+            heap_quota_pages,
         });
         Ok(handle)
     }
@@ -181,6 +193,10 @@ impl RuntimeServiceRegistry {
 
     pub fn image_len(&self, handle: ServiceHandle) -> Result<usize, ServiceRegistryError> {
         Ok(self.service(handle)?.image.len())
+    }
+
+    pub fn heap_quota_pages(&self, handle: ServiceHandle) -> Result<usize, ServiceRegistryError> {
+        Ok(self.service(handle)?.heap_quota_pages)
     }
 
     pub fn manager_request(&self, request: ManagerRequest) -> ManagerResponse {
@@ -419,6 +435,17 @@ mod tests {
         assert_eq!(registry.manager_request(status).status, ManagerStatus::Ok);
         registry.remove(handles[11]).unwrap();
         assert_eq!(registry.manager_request(status).status, ManagerStatus::Stale);
+    }
+
+    #[test]
+    fn heap_quota_is_recorded_with_the_service_handle() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let handle = registry.register_with_quota(b"quota", b"image", &[], 7).unwrap();
+        assert_eq!(registry.heap_quota_pages(handle), Ok(7));
+        assert_eq!(
+            registry.register_with_quota(b"zero", b"image", &[], 0),
+            Err(ServiceRegistryError::InvalidImage)
+        );
     }
 
     fn format_name(index: usize) -> Vec<u8> {
