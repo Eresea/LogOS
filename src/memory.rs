@@ -3010,6 +3010,60 @@ impl<'a> KernelHeap<'a> {
         })
     }
 
+    /// Allocate a small kernel object without entering the blocking allocator.
+    ///
+    /// This path only consumes a pre-existing physical-frame cache entry and a
+    /// pre-existing heap slot. It never grows metadata, waits, or invokes
+    /// reclaim, so callers may use it from interrupt context.
+    pub fn try_alloc_irq(
+        &mut self,
+        cpu: usize,
+        owner: OwnerId,
+        layout: Layout,
+    ) -> Result<HeapAllocation, HeapError> {
+        if cpu >= MAX_MEMORY_CPUS || owner.0 == 0 || layout.size() == 0 {
+            return Err(HeapError::InvalidRequest);
+        }
+        if layout.size() > 512
+            || !layout.align().is_power_of_two()
+            || layout.align() > layout.size()
+            || layout.align() > PAGE_SIZE as usize
+        {
+            return Err(HeapError::WouldBlock);
+        }
+        let quota_index = owner.raw() as usize;
+        let quota = self.quotas.get(quota_index).ok_or(HeapError::InvalidRequest)?;
+        if quota.used.checked_add(layout.size()).is_none_or(|used| used > quota.limit) {
+            return Err(HeapError::Quota);
+        }
+        let Some(mut central) = self.central.try_lock() else {
+            return Err(HeapError::WouldBlock);
+        };
+        let Some(index) = central.slots.iter().position(|slot| !slot.used) else {
+            return Err(HeapError::Exhausted);
+        };
+        let frame =
+            self.frames.try_alloc_irq(cpu, owner, FrameState::Dirty).map_err(map_alloc_error)?;
+        let address = frame.address().raw() as usize;
+        let slot = &mut central.slots[index];
+        slot.used = true;
+        slot.generation = next_generation(slot.generation);
+        slot.owner = owner;
+        slot.bytes = layout.size();
+        slot.address = address;
+        slot.frame = Some(frame);
+        self.quotas[quota_index].used += layout.size();
+        Ok(HeapAllocation {
+            kind: HeapAllocationKind::Slab,
+            index: index as u32,
+            generation: slot.generation,
+            owner,
+            bytes: layout.size(),
+            address,
+            pages: None,
+        })
+    }
+
     pub fn free(&mut self, cpu: usize, allocation: HeapAllocation) -> Result<(), HeapError> {
         if allocation.kind == HeapAllocationKind::Pages {
             let Some(record) = self.page_records.get(allocation.index as usize).copied() else {
@@ -3304,6 +3358,22 @@ unsafe impl GlobalAlloc for KernelGlobalAllocator<'_> {
 }
 
 impl KernelGlobalAllocator<'_> {
+    /// Nonblocking IRQ allocation. This never calls `GlobalAlloc`, waits, or
+    /// invokes pressure reclaim; callers must handle `WouldBlock`/`Exhausted`.
+    pub fn try_alloc_irq(&self, layout: Layout) -> Result<*mut u8, HeapError> {
+        if layout.size() == 0 {
+            return Ok(layout.align() as *mut u8);
+        }
+        let Some(mut bound) = self.heap.try_lock() else {
+            return Err(HeapError::WouldBlock);
+        };
+        let Some(heap) = bound.as_mut() else {
+            return Err(HeapError::InvalidRequest);
+        };
+        heap.try_alloc_irq(global_allocator_cpu(), OwnerId::KERNEL, layout)
+            .map(|allocation| allocation.address() as *mut u8)
+    }
+
     fn alloc_layout(&self, layout: Layout) -> Result<*mut u8, HeapError> {
         if layout.size() == 0 {
             return Ok(layout.align() as *mut u8);
@@ -3653,6 +3723,28 @@ mod tests {
         assert_eq!(large.address() % PAGE_SIZE as usize, 0);
         heap.free_address(0, large.address()).unwrap();
         assert_eq!(heap.free_address(0, large.address()), Err(HeapError::InvalidHandle));
+    }
+
+    #[test]
+    fn irq_heap_allocation_only_consumes_cached_small_frames() {
+        let normalized = normalize_memory_map(&map(&[(0x1000, 16, true)]), &[]).unwrap();
+        let mut allocator = SmpFrameAllocator::empty();
+        allocator.initialize(&normalized).unwrap();
+        let owner = OwnerId::KERNEL;
+        let cached = allocator.try_alloc(0, owner, FrameState::Dirty).unwrap();
+        allocator.free(0, cached).unwrap();
+
+        let mut page_records = [HeapPageRecord::empty(); 2];
+        let mut page_leases = [HeapLeaseRecord::empty(); 16];
+        let mut heap = KernelHeap::new(&allocator, &mut page_records, &mut page_leases);
+        heap.set_quota(owner, 8192).unwrap();
+        let small = Layout::from_size_align(32, 8).unwrap();
+        let allocation = heap.try_alloc_irq(0, owner, small).unwrap();
+        assert_eq!(allocation.kind(), HeapAllocationKind::Slab);
+        heap.free(0, allocation).unwrap();
+
+        let large = Layout::from_size_align(8192, PAGE_SIZE as usize).unwrap();
+        assert_eq!(heap.try_alloc_irq(0, owner, large), Err(HeapError::WouldBlock));
     }
 
     #[test]
