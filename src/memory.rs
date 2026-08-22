@@ -1959,6 +1959,70 @@ impl SmpFrameAllocator {
         Ok(())
     }
 
+    /// Release a batch allocated directly from the manager without routing
+    /// individual frames through CPU caches or remote-free queues.
+    ///
+    /// Kernel heap page allocations use this path so teardown is atomic: all
+    /// leases are validated while every shard is held before any frame is
+    /// released.
+    fn free_direct_batch(&self, batch: FrameBatch) -> Result<(), AllocationError> {
+        if batch.is_empty() {
+            return Err(AllocationError::BatchCapacity);
+        }
+
+        let mut used_shards = [false; MAX_FRAME_SHARDS];
+        for index in 0..batch.len {
+            let Some(lease) = batch.frames[index] else {
+                return Err(AllocationError::StaleHandle);
+            };
+            let shard =
+                self.shard_for_slot(lease.slot as usize).ok_or(AllocationError::StaleHandle)?;
+            if (0..index).any(|previous| batch.frames[previous] == Some(lease)) {
+                return Err(AllocationError::StaleHandle);
+            }
+            used_shards[shard] = true;
+        }
+
+        let mut guards: [Option<TryLockGuard<'_, ShardState>>; MAX_FRAME_SHARDS] =
+            core::array::from_fn(|_| None);
+        for (index, shard) in self.shards.iter().enumerate() {
+            let Some(guard) = shard.lock.try_lock() else {
+                self.stats.contention.fetch_add(1, Ordering::Relaxed);
+                return Err(AllocationError::WouldBlock);
+            };
+            guards[index] = Some(guard);
+        }
+
+        // SAFETY: every shard is held, so validation and release are atomic
+        // with respect to all allocator paths.
+        let manager = unsafe { &mut *self.manager.get() };
+        for index in 0..batch.len {
+            let lease = batch.frames[index].ok_or(AllocationError::StaleHandle)?;
+            match manager.validate(lease) {
+                Ok(()) => {}
+                Err(FrameError::WrongOwner) => return Err(AllocationError::WrongOwner),
+                Err(FrameError::StaleHandle) => return Err(AllocationError::StaleHandle),
+                Err(_) => return Err(AllocationError::StaleHandle),
+            }
+        }
+        for index in 0..batch.len {
+            let lease = batch.frames[index].ok_or(AllocationError::StaleHandle)?;
+            manager.free(lease).map_err(|error| match error {
+                FrameError::WrongOwner => AllocationError::WrongOwner,
+                _ => AllocationError::StaleHandle,
+            })?;
+        }
+        drop(guards);
+
+        self.stats.frees.fetch_add(batch.len as u64, Ordering::Relaxed);
+        for (shard, used) in used_shards.into_iter().enumerate() {
+            if used {
+                self.wake_shard(shard, WakePolicy::One);
+            }
+        }
+        Ok(())
+    }
+
     pub fn alloc_async(
         &self,
         cpu: usize,
@@ -3194,7 +3258,7 @@ impl<'a> KernelHeap<'a> {
             if allocation.pages != Some(batch) {
                 return Err(HeapError::InvalidHandle);
             }
-            self.frames.free_batch(cpu, batch).map_err(map_alloc_error)?;
+            self.frames.free_direct_batch(batch).map_err(map_alloc_error)?;
             for offset in 0..record.lease_count as usize {
                 self.page_leases[record.lease_start as usize + offset] = HeapLeaseRecord::empty();
             }
@@ -3850,6 +3914,21 @@ mod tests {
             manager.alloc_contiguous(OwnerId::KERNEL, 2, FrameState::Dirty),
             Err(FrameError::Exhausted)
         );
+    }
+
+    #[test]
+    fn direct_batch_release_validates_before_mutating() {
+        let normalized = normalize_memory_map(&map(&[(0x1000, 16, true)]), &[]).unwrap();
+        let mut allocator = SmpFrameAllocator::empty();
+        allocator.initialize(&normalized).unwrap();
+        let owner = OwnerId::KERNEL;
+        let batch = allocator.alloc_contiguous(owner, 4, FrameState::Dirty).unwrap();
+        let mut stale = batch;
+        stale.frames[2] = Some(FrameLease { generation: 0, ..stale.frames[2].unwrap() });
+        assert_eq!(allocator.free_direct_batch(stale), Err(AllocationError::StaleHandle));
+        assert_eq!(allocator.available(), 12);
+        allocator.free_direct_batch(batch).unwrap();
+        assert_eq!(allocator.available(), 16);
     }
 
     #[test]
