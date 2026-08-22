@@ -92,6 +92,43 @@ const USER_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract
     logos_abi::IpcRights::Send,
 );
 
+#[derive(Clone, Copy)]
+struct IpcCapabilities {
+    request: logos_abi::CapabilityHandle,
+    response: logos_abi::CapabilityHandle,
+    flow_receive: logos_abi::CapabilityHandle,
+    flow_send: logos_abi::CapabilityHandle,
+    fetch_receive: logos_abi::CapabilityHandle,
+    fetch_send: logos_abi::CapabilityHandle,
+    package_receive: logos_abi::CapabilityHandle,
+    package_send: logos_abi::CapabilityHandle,
+    map_request: logos_abi::CapabilityHandle,
+    map_response: logos_abi::CapabilityHandle,
+    user_receive: logos_abi::CapabilityHandle,
+    user_send: logos_abi::CapabilityHandle,
+}
+
+static mut IPC_CAPABILITIES: Option<IpcCapabilities> = None;
+
+fn ipc_capabilities() -> IpcCapabilities {
+    unsafe {
+        (*core::ptr::addr_of!(IPC_CAPABILITIES)).unwrap_or(IpcCapabilities {
+            request: logos_abi::CapabilityHandle::EMPTY,
+            response: logos_abi::CapabilityHandle::EMPTY,
+            flow_receive: logos_abi::CapabilityHandle::EMPTY,
+            flow_send: logos_abi::CapabilityHandle::EMPTY,
+            fetch_receive: logos_abi::CapabilityHandle::EMPTY,
+            fetch_send: logos_abi::CapabilityHandle::EMPTY,
+            package_receive: logos_abi::CapabilityHandle::EMPTY,
+            package_send: logos_abi::CapabilityHandle::EMPTY,
+            map_request: logos_abi::CapabilityHandle::EMPTY,
+            map_response: logos_abi::CapabilityHandle::EMPTY,
+            user_receive: logos_abi::CapabilityHandle::EMPTY,
+            user_send: logos_abi::CapabilityHandle::EMPTY,
+        })
+    }
+}
+
 static mut USER_CATALOG: UserCatalog = UserCatalog::new();
 static mut USER_CATALOG_BUFFER: [u8; USER_SNAPSHOT_BYTES] = [0; USER_SNAPSHOT_BYTES];
 static mut USER_CATALOG_LENGTH: usize = 0;
@@ -117,10 +154,11 @@ struct PendingMap {
 }
 
 fn send_response(client: Client, response: &IpcBytes) -> IpcStatus {
+    let capabilities = ipc_capabilities();
     match client {
-        Client::Flow => common::ipc_send(FLOW_SEND_CAPABILITY, response),
-        Client::Fetch => common::ipc_send(FETCH_SEND_CAPABILITY, response),
-        Client::User => common::ipc_send(USER_SEND_CAPABILITY, response),
+        Client::Flow => common::ipc_send_handle(capabilities.flow_send, response),
+        Client::Fetch => common::ipc_send_handle(capabilities.fetch_send, response),
+        Client::User => common::ipc_send_handle(capabilities.user_send, response),
     }
 }
 
@@ -223,7 +261,7 @@ impl KernelStorageIpc for StorageTransport {
         if request.operation == StorageOperation::Write {
             unsafe { *(logos_abi::STORAGE_DATA_BASE as *mut Block) = *staging };
         }
-        common::ipc_send(REQUEST_CAPABILITY, &request)
+        common::ipc_send_handle(ipc_capabilities().request, &request)
     }
 
     fn receive(
@@ -236,7 +274,7 @@ impl KernelStorageIpc for StorageTransport {
         if capability != self.capability {
             return IpcStatus::Unauthorized;
         }
-        let status = common::ipc_receive(RESPONSE_CAPABILITY, response);
+        let status = common::ipc_receive_handle(ipc_capabilities().response, response);
         if status == IpcStatus::Ok && self.operation == Some(StorageOperation::Read) {
             *staging = unsafe { *(logos_abi::STORAGE_DATA_BASE as *const Block) };
         }
@@ -399,7 +437,7 @@ fn handle_package_request<B: logos_storage::BlockStore>(
 }
 
 fn receive_package_request() -> Option<PackageRequest> {
-    let capability = common::capability_handle(PACKAGE_RECEIVE_CAPABILITY).ok()?;
+    let capability = ipc_capabilities().package_receive;
     let bootstrap = common::bootstrap_page();
     let mut request = PackageRequest::new(
         PackageOperation::Lookup,
@@ -412,8 +450,7 @@ fn receive_package_request() -> Option<PackageRequest> {
         0,
         0,
     )?;
-    (common::ipc_receive(PACKAGE_RECEIVE_CAPABILITY, &mut request) == IpcStatus::Ok)
-        .then_some(request)
+    (common::ipc_receive_handle(capability, &mut request) == IpcStatus::Ok).then_some(request)
 }
 
 fn ensure_user_catalog(
@@ -541,7 +578,7 @@ fn send_package_response(pending: &mut Option<PackageResponse>) -> bool {
     let Some(response) = *pending else {
         return false;
     };
-    match common::ipc_send(PACKAGE_SEND_CAPABILITY, &response) {
+    match common::ipc_send_handle(ipc_capabilities().package_send, &response) {
         IpcStatus::Ok => {
             *pending = None;
             true
@@ -586,7 +623,9 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
         }
         if pending_response.is_none() && pending_package.is_none() {
             let mut user_request = IpcBytes::empty(MessageKind::UserStorageRequest);
-            if common::ipc_receive(USER_RECEIVE_CAPABILITY, &mut user_request) == IpcStatus::Ok {
+            if common::ipc_receive_handle(ipc_capabilities().user_receive, &mut user_request)
+                == IpcStatus::Ok
+            {
                 let mut response = UserStorageResponse {
                     operation: UserStorageOperation::Load,
                     status: UserStorageStatus::Io,
@@ -609,11 +648,15 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
                 let mut request = IpcBytes::empty(MessageKind::StorageRequest);
                 let mut client = Client::Flow;
                 let status_from_client =
-                    match common::ipc_receive(FLOW_RECEIVE_CAPABILITY, &mut request) {
+                    match common::ipc_receive_handle(ipc_capabilities().flow_receive, &mut request)
+                    {
                         IpcStatus::Ok => IpcStatus::Ok,
                         _ => {
                             client = Client::Fetch;
-                            common::ipc_receive(FETCH_RECEIVE_CAPABILITY, &mut request)
+                            common::ipc_receive_handle(
+                                ipc_capabilities().fetch_receive,
+                                &mut request,
+                            )
                         }
                     };
                 match status_from_client {
@@ -689,7 +732,7 @@ fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
         }
         if let Some(map) = pending_map.as_mut() {
             if !map.sent {
-                match common::ipc_send(MAP_REQUEST_CAPABILITY, &map.map_request) {
+                match common::ipc_send_handle(ipc_capabilities().map_request, &map.map_request) {
                     IpcStatus::Ok => map.sent = true,
                     IpcStatus::Full => {}
                     _ => {
@@ -716,7 +759,7 @@ fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
                     window_generation: 0,
                     reserved_end: [0; 4],
                 };
-                match common::ipc_receive(MAP_RESPONSE_CAPABILITY, &mut response) {
+                match common::ipc_receive_handle(ipc_capabilities().map_response, &mut response) {
                     IpcStatus::Ok if response.request_id == map.map_request.request_id => {
                         if map.unmap {
                             if response.status == StorageStatus::Ok {
@@ -761,20 +804,27 @@ fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
         }
         if pending_response.is_none() && pending_package.is_none() && pending_map.is_none() {
             let mut user_request = IpcBytes::empty(MessageKind::UserStorageRequest);
-            if common::ipc_receive(USER_RECEIVE_CAPABILITY, &mut user_request) == IpcStatus::Ok {
+            if common::ipc_receive_handle(ipc_capabilities().user_receive, &mut user_request)
+                == IpcStatus::Ok
+            {
                 pending_response = handle_user_storage_request(&user_request, api.namespace_mut())
                     .map(|response| (Client::User, response));
                 progressed = true;
             } else {
                 let mut request = IpcBytes::empty(MessageKind::StorageRequest);
                 let mut client = Client::Flow;
-                let received = match common::ipc_receive(FLOW_RECEIVE_CAPABILITY, &mut request) {
-                    IpcStatus::Ok => IpcStatus::Ok,
-                    _ => {
-                        client = Client::Fetch;
-                        common::ipc_receive(FETCH_RECEIVE_CAPABILITY, &mut request)
-                    }
-                };
+                let received =
+                    match common::ipc_receive_handle(ipc_capabilities().flow_receive, &mut request)
+                    {
+                        IpcStatus::Ok => IpcStatus::Ok,
+                        _ => {
+                            client = Client::Fetch;
+                            common::ipc_receive_handle(
+                                ipc_capabilities().fetch_receive,
+                                &mut request,
+                            )
+                        }
+                    };
                 if received == IpcStatus::Ok {
                     let operation = logos_abi::StorageApiRequest::decode(&request).ok();
                     if let Some(operation) = operation {
@@ -853,9 +903,58 @@ fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
 pub extern "C" fn _start() -> ! {
     common::heartbeat(logos_abi::ServiceId::Storage);
     common::init_service_allocator();
-    let Ok(capability_handle) = common::capability_handle(REQUEST_CAPABILITY) else {
-        serve_storage_error(StorageApiStatus::Io)
+    let capabilities = IpcCapabilities {
+        request: match common::capability_handle(REQUEST_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => serve_storage_error(StorageApiStatus::Io),
+        },
+        response: match common::capability_handle(RESPONSE_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => serve_storage_error(StorageApiStatus::Io),
+        },
+        flow_receive: match common::capability_handle(FLOW_RECEIVE_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => serve_storage_error(StorageApiStatus::Io),
+        },
+        flow_send: match common::capability_handle(FLOW_SEND_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => serve_storage_error(StorageApiStatus::Io),
+        },
+        fetch_receive: match common::capability_handle(FETCH_RECEIVE_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => serve_storage_error(StorageApiStatus::Io),
+        },
+        fetch_send: match common::capability_handle(FETCH_SEND_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => serve_storage_error(StorageApiStatus::Io),
+        },
+        package_receive: match common::capability_handle(PACKAGE_RECEIVE_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => serve_storage_error(StorageApiStatus::Io),
+        },
+        package_send: match common::capability_handle(PACKAGE_SEND_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => serve_storage_error(StorageApiStatus::Io),
+        },
+        map_request: match common::capability_handle(MAP_REQUEST_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => serve_storage_error(StorageApiStatus::Io),
+        },
+        map_response: match common::capability_handle(MAP_RESPONSE_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => serve_storage_error(StorageApiStatus::Io),
+        },
+        user_receive: match common::capability_handle(USER_RECEIVE_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => serve_storage_error(StorageApiStatus::Io),
+        },
+        user_send: match common::capability_handle(USER_SEND_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => serve_storage_error(StorageApiStatus::Io),
+        },
     };
+    unsafe { *core::ptr::addr_of_mut!(IPC_CAPABILITIES) = Some(capabilities) };
+    let capability_handle = capabilities.request;
     let Ok(generation) = u16::try_from(capability_handle.generation()) else {
         serve_storage_error(StorageApiStatus::Io)
     };
