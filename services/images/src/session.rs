@@ -57,7 +57,7 @@ impl PendingOutput {
         self.offset = 0;
     }
 
-    fn flush(&mut self, capability: common::CapabilitySpec) -> bool {
+    fn flush(&mut self, capability: logos_abi::CapabilityHandle) -> bool {
         let mut progressed = false;
         while self.offset < self.len {
             let end = (self.offset + MAX_IPC_BYTES).min(self.len);
@@ -66,7 +66,7 @@ impl PendingOutput {
             else {
                 break;
             };
-            if common::ipc_send(capability, &message) != IpcStatus::Ok {
+            if common::ipc_send_handle(capability, &message) != IpcStatus::Ok {
                 break;
             }
             self.offset = end;
@@ -175,6 +175,22 @@ pub extern "C" fn _start() -> ! {
     let session = unsafe { &mut *core::ptr::addr_of_mut!(SESSION) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let flow_input = unsafe { &mut *core::ptr::addr_of_mut!(FLOW_INPUT) };
+    let input_capability = match common::capability_handle(INPUT_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let output_capability = match common::capability_handle(OUTPUT_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let flow_capability = match common::capability_handle(FLOW_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let flow_output_capability = match common::capability_handle(FLOW_OUTPUT_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
     let mut command_bytes = [0; MAX_LINE_BYTES];
     let mut command_response = [0; logos_session::MAX_OUTPUT_BYTES];
     let mut command_response_len = 0;
@@ -189,7 +205,7 @@ pub extern "C" fn _start() -> ! {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Session);
         if waiting_for_command && pending_control.is_none() {
             let mut terminal_input = IpcBytes::empty(MessageKind::SessionInput);
-            if common::ipc_receive(INPUT_CAPABILITY, &mut terminal_input) == IpcStatus::Ok
+            if common::ipc_receive_handle(input_capability, &mut terminal_input) == IpcStatus::Ok
                 && terminal_input.kind == MessageKind::SessionInput
                 && terminal_input.as_bytes().is_some_and(|bytes| bytes == [0x03])
             {
@@ -197,7 +213,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if let Some(control) = pending_control {
-            match common::ipc_send(FLOW_CAPABILITY, &control) {
+            match common::ipc_send_handle(flow_capability, &control) {
                 IpcStatus::Ok => pending_control = None,
                 IpcStatus::Full => {
                     common::wait(
@@ -213,7 +229,7 @@ pub extern "C" fn _start() -> ! {
                 | IpcStatus::Empty => pending_control = None,
             }
         }
-        let mut progressed = pending.flush(OUTPUT_CAPABILITY);
+        let mut progressed = pending.flush(output_capability);
         if !pending.is_empty() {
             if !progressed {
                 common::wait(
@@ -224,7 +240,7 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
         if let Some(message) = pending_completion {
-            match common::ipc_send(FLOW_CAPABILITY, &message) {
+            match common::ipc_send_handle(flow_capability, &message) {
                 IpcStatus::Ok => {
                     pending_completion = None;
                     progressed = true;
@@ -251,7 +267,7 @@ pub extern "C" fn _start() -> ! {
         }
         if !flow_input.is_empty() {
             if let Some(message) = flow_input.take() {
-                if common::ipc_send(FLOW_CAPABILITY, &message) == IpcStatus::Ok {
+                if common::ipc_send_handle(flow_capability, &message) == IpcStatus::Ok {
                     waiting_for_command = true;
                     progressed = true;
                 } else {
@@ -268,7 +284,7 @@ pub extern "C" fn _start() -> ! {
         }
         if waiting_for_command {
             let mut message = IpcBytes::empty(MessageKind::SessionOutput);
-            if common::ipc_receive(FLOW_OUTPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
+            if common::ipc_receive_handle(flow_output_capability, &mut message) == IpcStatus::Ok {
                 if let Some(response) = completion_response(&message) {
                     let mut edit_output = logos_session::ShellOutput::new();
                     session.apply_completion_response(response, &mut edit_output);
@@ -310,7 +326,9 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
         let mut completion_message = IpcBytes::empty(MessageKind::CompletionResponse);
-        if common::ipc_receive(FLOW_OUTPUT_CAPABILITY, &mut completion_message) == IpcStatus::Ok {
+        if common::ipc_receive_handle(flow_output_capability, &mut completion_message)
+            == IpcStatus::Ok
+        {
             if let Some(response) = completion_response(&completion_message) {
                 let mut edit_output = logos_session::ShellOutput::new();
                 session.apply_completion_response(response, &mut edit_output);
@@ -321,7 +339,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
         let mut message = IpcBytes::empty(MessageKind::SessionInput);
-        while common::ipc_receive(INPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
+        while common::ipc_receive_handle(input_capability, &mut message) == IpcStatus::Ok {
             progressed = true;
             if message.kind != MessageKind::SessionInput {
                 continue;
