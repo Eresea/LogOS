@@ -12,20 +12,40 @@ use logos_abi::{
 };
 use logos_fetch::{ResponseParser, Url};
 
-const FLOW_RECEIVE: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::FlowToFetch, logos_abi::IpcRights::Receive);
-const FLOW_SEND: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::FetchToFlow, logos_abi::IpcRights::Send);
-const STORAGE_SEND: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::FetchToStorage, logos_abi::IpcRights::Send);
-const STORAGE_RECEIVE: common::CapabilitySpec = common::capability_spec(
-    logos_abi::IpcEndpointId::StorageToFetch,
+const FLOW_RECEIVE: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Flow.index() as u32,
+    mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const NETWORK_SEND: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::FetchToNetwork, logos_abi::IpcRights::Send);
-const NETWORK_RECEIVE: common::CapabilitySpec = common::capability_spec(
-    logos_abi::IpcEndpointId::NetworkToFetch,
+const FLOW_SEND: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Flow.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Send,
+);
+const STORAGE_SEND: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Storage.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Send,
+);
+const STORAGE_RECEIVE: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Storage.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Receive,
+);
+const NETWORK_SEND: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Network.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Send,
+);
+const NETWORK_RECEIVE: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Network.index() as u32,
+    mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
 
