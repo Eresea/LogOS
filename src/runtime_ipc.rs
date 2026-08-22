@@ -139,6 +139,19 @@ impl RuntimeIpcRegistry {
         rights: IpcRights,
         message_bytes: usize,
     ) -> Result<EndpointHandle, IpcStatus> {
+        let (endpoint, expected_bytes) = self.capability_endpoint(caller, capability, rights)?;
+        if message_bytes != expected_bytes {
+            return Err(IpcStatus::Malformed);
+        }
+        Ok(endpoint)
+    }
+
+    pub fn capability_endpoint(
+        &self,
+        caller: ServiceHandle,
+        capability: CapabilityHandle,
+        rights: IpcRights,
+    ) -> Result<(EndpointHandle, usize), IpcStatus> {
         let grant = self.capability(capability)?;
         if grant.owner != caller || grant.rights != rights {
             return Err(IpcStatus::Unauthorized);
@@ -147,10 +160,9 @@ impl RuntimeIpcRegistry {
         if grant.service_epoch != endpoint.service_epoch {
             return Err(IpcStatus::Stale);
         }
-        if message_bytes != endpoint.message_bytes {
-            return Err(IpcStatus::Malformed);
-        }
-        Ok(endpoint.handle)
+        let message_bytes = endpoint.message_bytes;
+        let endpoint_handle = endpoint.handle;
+        Ok((endpoint_handle, message_bytes))
     }
 
     pub fn destroy_service(&mut self, service: ServiceHandle) {

@@ -1089,7 +1089,7 @@ pub(crate) fn record_service_heartbeat(
 
 pub(crate) fn ipc_send(
     process: crate::process::ProcessHandle,
-    capability_slot: usize,
+    capability_raw: u64,
     length: usize,
 ) -> crate::service_ipc::IpcOutcome {
     if !service_runtime_ready() {
@@ -1106,13 +1106,13 @@ pub(crate) fn ipc_send(
         };
     }
     unsafe {
-        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).ipc_send(process, capability_slot, length)
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).ipc_send(process, capability_raw, length)
     }
 }
 
 pub(crate) fn ipc_receive(
     process: crate::process::ProcessHandle,
-    capability_slot: usize,
+    capability_raw: u64,
 ) -> crate::service_ipc::IpcOutcome {
     if !service_runtime_ready() {
         return crate::service_ipc::IpcOutcome {
@@ -1127,9 +1127,7 @@ pub(crate) fn ipc_receive(
             notified: false,
         };
     }
-    unsafe {
-        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).ipc_receive(process, capability_slot)
-    }
+    unsafe { (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).ipc_receive(process, capability_raw) }
 }
 
 pub(crate) fn grow_service_heap(
