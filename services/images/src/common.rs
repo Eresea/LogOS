@@ -983,43 +983,6 @@ pub fn notify_edge(mask: u64, notification: logos_abi::Notify) {
 
 #[inline(always)]
 #[allow(dead_code)]
-pub fn ipc_send<T: Copy>(capability: CapabilitySpec, message: &T) -> IpcStatus {
-    let length = mem::size_of::<T>();
-    let expected_length = usize::from(capability.message_bytes);
-    let capability_raw = match discovered_capability(capability) {
-        Ok(capability) => capability.raw(),
-        Err(status) => return status,
-    };
-    if length != expected_length || length > logos_abi::IPC_PAGE_BYTES {
-        return IpcStatus::Malformed;
-    }
-    unsafe {
-        ptr::write_unaligned(logos_abi::IPC_STAGING_BASE as *mut T, *message);
-    }
-    ipc_syscall_raw(logos_abi::IPC_SYSCALL_SEND, capability_raw, length)
-}
-
-#[inline(always)]
-#[allow(dead_code)]
-pub fn ipc_receive<T: Copy>(capability: CapabilitySpec, message: &mut T) -> IpcStatus {
-    let length = mem::size_of::<T>();
-    let expected_length = usize::from(capability.message_bytes);
-    let capability_raw = match discovered_capability(capability) {
-        Ok(capability) => capability.raw(),
-        Err(status) => return status,
-    };
-    if length != expected_length || expected_length > logos_abi::IPC_PAGE_BYTES {
-        return IpcStatus::Malformed;
-    }
-    let status = ipc_syscall_raw(logos_abi::IPC_SYSCALL_RECEIVE, capability_raw, 0);
-    if status == IpcStatus::Ok {
-        *message = unsafe { ptr::read_unaligned(logos_abi::IPC_STAGING_BASE as *const T) };
-    }
-    status
-}
-
-#[inline(always)]
-#[allow(dead_code)]
 pub fn ipc_send_handle<T: Copy>(capability: logos_abi::CapabilityHandle, message: &T) -> IpcStatus {
     ipc_send_raw(capability, message)
 }
@@ -1177,8 +1140,8 @@ pub fn directory_call(
 #[inline(always)]
 #[cfg(feature = "qemu-proof")]
 #[allow(dead_code)]
-pub fn ipc_probe(number: usize, capability_slot: usize, length: usize) -> IpcStatus {
-    ipc_syscall_raw(number, capability_slot as u64, length)
+pub fn ipc_probe(number: usize, capability_raw: u64, length: usize) -> IpcStatus {
+    ipc_syscall_raw(number, capability_raw, length)
 }
 
 #[inline(always)]
