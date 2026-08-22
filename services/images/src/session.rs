@@ -10,18 +10,30 @@ use logos_abi::{
 };
 use logos_session::MAX_LINE_BYTES;
 
-const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_spec(
-    logos_abi::IpcEndpointId::TerminalToSession,
+const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Terminal.index() as u32,
+    core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_spec(
-    logos_abi::IpcEndpointId::SessionToTerminal,
+const OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Terminal.index() as u32,
+    core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const FLOW_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::SessionToFlow, logos_abi::IpcRights::Send);
-const FLOW_OUTPUT_CAPABILITY: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::FlowToSession, logos_abi::IpcRights::Receive);
+const FLOW_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Flow.index() as u32,
+    core::mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Send,
+);
+const FLOW_OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Flow.index() as u32,
+    core::mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Receive,
+);
 
 struct PendingOutput {
     bytes: [u8; logos_session::MAX_OUTPUT_BYTES],

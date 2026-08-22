@@ -6,20 +6,28 @@ mod common;
 
 use logos_abi::{InputMessage, IpcBytes, IpcStatus, KeyCode, KeyState, MessageKind};
 
-const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_spec(
-    logos_abi::IpcEndpointId::InputToTerminal,
+const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_INPUT,
+    logos_abi::ServiceId::Input.index() as u32,
+    core::mem::size_of::<InputMessage>(),
     logos_abi::IpcRights::Receive,
 );
-const DISPLAY_CAPABILITY: common::CapabilitySpec = common::capability_spec(
-    logos_abi::IpcEndpointId::TerminalToDisplay,
+const DISPLAY_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_RENDER,
+    logos_abi::ServiceId::Display.index() as u32,
+    core::mem::size_of::<logos_abi::RenderMessage>(),
     logos_abi::IpcRights::Send,
 );
-const SESSION_INPUT_CAPABILITY: common::CapabilitySpec = common::capability_spec(
-    logos_abi::IpcEndpointId::TerminalToSession,
+const SESSION_INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Session.index() as u32,
+    core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const SESSION_OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_spec(
-    logos_abi::IpcEndpointId::SessionToTerminal,
+const SESSION_OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Session.index() as u32,
+    core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
 
