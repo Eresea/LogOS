@@ -4,7 +4,7 @@
 //! registry is the v5 ownership model: queues are private to Core, grants are
 //! explicit, and every externally visible identity carries a generation.
 
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::vec::Vec;
 
 use crate::runtime_events::RuntimeEventRegistry;
 use logos_abi::{
@@ -34,7 +34,20 @@ struct EndpointRecord {
     service_epoch: u64,
     read_event: EventHandle,
     write_event: EventHandle,
-    queue: VecDeque<Vec<u8>>,
+    queue: Vec<QueueMessage>,
+    queue_head: usize,
+    queue_tail: usize,
+    queue_len: usize,
+}
+
+struct QueueMessage {
+    bytes: [u8; IPC_PAGE_BYTES],
+}
+
+impl QueueMessage {
+    const fn empty() -> Self {
+        Self { bytes: [0; IPC_PAGE_BYTES] }
+    }
 }
 
 struct CapabilityRecord {
@@ -98,7 +111,11 @@ impl RuntimeIpcRegistry {
                 });
             }
         };
-        let queue = VecDeque::new();
+        let mut queue = Vec::new();
+        queue.try_reserve(queue_capacity).map_err(|_| IpcStatus::Disconnected)?;
+        for _ in 0..queue_capacity {
+            queue.push(QueueMessage::empty());
+        }
         self.endpoints[slot].value = Some(EndpointRecord {
             handle,
             producer,
@@ -110,6 +127,9 @@ impl RuntimeIpcRegistry {
             read_event,
             write_event,
             queue,
+            queue_head: 0,
+            queue_tail: 0,
+            queue_len: 0,
         });
         Ok(handle)
     }
@@ -249,18 +269,13 @@ impl RuntimeIpcRegistry {
         if bytes.len() != endpoint.message_bytes {
             return IpcStatus::Malformed;
         }
-        if endpoint.queue.len() >= endpoint.queue_capacity {
+        if endpoint.queue_len >= endpoint.queue_capacity {
             return IpcStatus::Full;
         }
-        let mut message = Vec::new();
-        if message.try_reserve(bytes.len()).is_err() {
-            return IpcStatus::Disconnected;
-        }
-        message.extend_from_slice(bytes);
-        if endpoint.queue.try_reserve(1).is_err() {
-            return IpcStatus::Disconnected;
-        }
-        endpoint.queue.push_back(message);
+        let index = endpoint.queue_tail;
+        endpoint.queue[index].bytes[..bytes.len()].copy_from_slice(bytes);
+        endpoint.queue_tail = (index + 1) % endpoint.queue_capacity;
+        endpoint.queue_len += 1;
         let _ = events.signal_irq(endpoint.read_event);
         IpcStatus::Ok
     }
@@ -289,9 +304,13 @@ impl RuntimeIpcRegistry {
         if bytes.len() != endpoint.message_bytes {
             return IpcStatus::Malformed;
         }
-        let Some(message) = endpoint.queue.front() else { return IpcStatus::Empty };
-        bytes.copy_from_slice(message);
-        endpoint.queue.pop_front();
+        if endpoint.queue_len == 0 {
+            return IpcStatus::Empty;
+        }
+        let index = endpoint.queue_head;
+        bytes.copy_from_slice(&endpoint.queue[index].bytes[..endpoint.message_bytes]);
+        endpoint.queue_head = (index + 1) % endpoint.queue_capacity;
+        endpoint.queue_len -= 1;
         let _ = events.signal_irq(endpoint.write_event);
         IpcStatus::Ok
     }
@@ -509,6 +528,30 @@ mod tests {
             Ok(crate::runtime_events::EventWait::Ready(write_event))
         );
         assert_eq!(registry.receive(consumer, receive, &mut output, &mut events), IpcStatus::Empty);
+    }
+
+    #[test]
+    fn dynamic_queue_wraps_without_allocating_on_send_or_receive() {
+        let (producer, consumer) = services();
+        let mut registry = RuntimeIpcRegistry::new();
+        let mut events = RuntimeEventRegistry::new();
+        let endpoint =
+            registry.create_endpoint(producer, consumer, 1, 1, 2, 1, &mut events).unwrap();
+        let send = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
+        let receive = registry.grant(consumer, endpoint, IpcRights::Receive).unwrap();
+
+        assert_eq!(registry.send(producer, send, &[1], &mut events), IpcStatus::Ok);
+        assert_eq!(registry.send(producer, send, &[2], &mut events), IpcStatus::Ok);
+        assert_eq!(registry.send(producer, send, &[3], &mut events), IpcStatus::Full);
+
+        let mut output = [0];
+        assert_eq!(registry.receive(consumer, receive, &mut output, &mut events), IpcStatus::Ok);
+        assert_eq!(output, [1]);
+        assert_eq!(registry.send(producer, send, &[3], &mut events), IpcStatus::Ok);
+        assert_eq!(registry.receive(consumer, receive, &mut output, &mut events), IpcStatus::Ok);
+        assert_eq!(output, [2]);
+        assert_eq!(registry.receive(consumer, receive, &mut output, &mut events), IpcStatus::Ok);
+        assert_eq!(output, [3]);
     }
 
     #[test]

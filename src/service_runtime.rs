@@ -1898,6 +1898,65 @@ impl ServiceRuntime {
                 notified: false,
             };
         };
+        if let Some(dynamic_capability) = logos_abi::CapabilityHandle::from_raw(capability_raw) {
+            let caller = match dynamic_service_handle(service, (self.service_epoch as u32).max(1)) {
+                Ok(caller) => caller,
+                Err(_) => {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Stale,
+                        notified: false,
+                    };
+                }
+            };
+            let (endpoint, expected_bytes) = match self
+                .dynamic_ipc
+                .as_ref()
+                .ok_or(logos_abi::IpcStatus::Disconnected)
+                .and_then(|registry| {
+                    registry.capability_endpoint(
+                        caller,
+                        dynamic_capability,
+                        logos_abi::IpcRights::Send,
+                    )
+                }) {
+                Ok(resolved) => resolved,
+                Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
+            };
+            if !endpoint_uses_legacy_special_transport(endpoint) {
+                if length != expected_bytes {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Malformed,
+                        notified: false,
+                    };
+                }
+                let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Unauthorized,
+                        notified: false,
+                    };
+                };
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
+                };
+                let endpoint_index =
+                    self.dynamic_endpoints.iter().position(|candidate| *candidate == endpoint);
+                let status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
+                    (Some(registry), Some(events)) => {
+                        registry.send(caller, dynamic_capability, bytes, events)
+                    }
+                    _ => logos_abi::IpcStatus::Disconnected,
+                };
+                if status == logos_abi::IpcStatus::Ok {
+                    if let Some(index) = endpoint_index {
+                        crate::arch::signal_events(logos_abi::ipc_read_event_mask(index));
+                    }
+                }
+                return crate::service_ipc::IpcOutcome {
+                    status,
+                    notified: status == logos_abi::IpcStatus::Ok,
+                };
+            }
+        }
         let capability_slot = match self.resolve_capability_slot(
             service,
             capability_raw,
@@ -2673,6 +2732,62 @@ impl ServiceRuntime {
                 notified: false,
             };
         };
+        if let Some(dynamic_capability) = logos_abi::CapabilityHandle::from_raw(capability_raw) {
+            let caller = match dynamic_service_handle(service, (self.service_epoch as u32).max(1)) {
+                Ok(caller) => caller,
+                Err(_) => {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Stale,
+                        notified: false,
+                    };
+                }
+            };
+            let (endpoint, expected_bytes) = match self
+                .dynamic_ipc
+                .as_ref()
+                .ok_or(logos_abi::IpcStatus::Disconnected)
+                .and_then(|registry| {
+                    registry.capability_endpoint(
+                        caller,
+                        dynamic_capability,
+                        logos_abi::IpcRights::Receive,
+                    )
+                }) {
+                Ok(resolved) => resolved,
+                Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
+            };
+            if !endpoint_uses_legacy_special_transport(endpoint) {
+                let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Unauthorized,
+                        notified: false,
+                    };
+                };
+                let bytes = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        staging_frame.raw() as usize as *mut u8,
+                        expected_bytes,
+                    )
+                };
+                let endpoint_index =
+                    self.dynamic_endpoints.iter().position(|candidate| *candidate == endpoint);
+                let status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
+                    (Some(registry), Some(events)) => {
+                        registry.receive(caller, dynamic_capability, bytes, events)
+                    }
+                    _ => logos_abi::IpcStatus::Disconnected,
+                };
+                if status == logos_abi::IpcStatus::Ok {
+                    if let Some(index) = endpoint_index {
+                        crate::arch::signal_events(logos_abi::ipc_write_event_mask(index));
+                    }
+                }
+                return crate::service_ipc::IpcOutcome {
+                    status,
+                    notified: status == logos_abi::IpcStatus::Ok,
+                };
+            }
+        }
         let capability_slot = match self.resolve_capability_slot(
             service,
             capability_raw,
@@ -4541,6 +4656,27 @@ impl ServiceRuntime {
 
 fn old_identity_matches(identity: EndpointIdentity, header: logos_abi::EndpointHeader) -> bool {
     logos_abi::MessageIdentity::new(identity.generation, identity.service_epoch).accepts(header)
+}
+
+fn endpoint_uses_legacy_special_transport(endpoint: logos_abi::EndpointHandle) -> bool {
+    let Some(endpoint) = logos_abi::IpcEndpointId::from_index(endpoint.index() as usize) else {
+        return true;
+    };
+    matches!(
+        endpoint,
+        logos_abi::IpcEndpointId::StorageToCore
+            | logos_abi::IpcEndpointId::CoreToStorage
+            | logos_abi::IpcEndpointId::NetworkToCore
+            | logos_abi::IpcEndpointId::CoreToNetwork
+            | logos_abi::IpcEndpointId::DeviceToCore
+            | logos_abi::IpcEndpointId::CoreToDevice
+            | logos_abi::IpcEndpointId::CoreToStoragePackage
+            | logos_abi::IpcEndpointId::StoragePackageToCore
+            | logos_abi::IpcEndpointId::StorageMapToCore
+            | logos_abi::IpcEndpointId::CoreToStorageMap
+            | logos_abi::IpcEndpointId::FlowToNetwork
+            | logos_abi::IpcEndpointId::NetworkToFlow
+    )
 }
 
 const fn manager_rights(service: ServiceId) -> logos_abi::ManagerRights {
