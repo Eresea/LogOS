@@ -8,8 +8,8 @@ use alloc::{collections::VecDeque, vec::Vec};
 
 use logos_abi::{
     CapabilityHandle, DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE, DirectoryRecordKind,
-    DirectoryRequest, DirectoryResponse, DirectoryStatus, EndpointHandle, IPC_PAGE_BYTES,
-    IpcRights, IpcStatus, ServiceHandle,
+    DirectoryRequest, DirectoryResponse, DirectoryStatus, EndpointHandle, EventHandle,
+    IPC_PAGE_BYTES, IpcRights, IpcStatus, ServiceHandle,
 };
 
 struct Slot<T> {
@@ -31,6 +31,8 @@ struct EndpointRecord {
     message_bytes: usize,
     queue_capacity: usize,
     service_epoch: u64,
+    read_event: EventHandle,
+    write_event: EventHandle,
     queue: VecDeque<Vec<u8>>,
 }
 
@@ -77,6 +79,17 @@ impl RuntimeIpcRegistry {
         let slot = self.allocate_endpoint_slot()?;
         let handle = EndpointHandle::new(slot as u32, self.endpoints[slot].generation)
             .ok_or(IpcStatus::Malformed)?;
+        let event_index = u32::try_from(slot)
+            .ok()
+            .and_then(|slot| slot.checked_mul(2))
+            .ok_or(IpcStatus::Disconnected)?;
+        let read_event =
+            EventHandle::new(event_index, handle.generation()).ok_or(IpcStatus::Malformed)?;
+        let write_event = EventHandle::new(
+            event_index.checked_add(1).ok_or(IpcStatus::Disconnected)?,
+            handle.generation(),
+        )
+        .ok_or(IpcStatus::Malformed)?;
         self.endpoints[slot].value = Some(EndpointRecord {
             handle,
             producer,
@@ -85,6 +98,8 @@ impl RuntimeIpcRegistry {
             message_bytes,
             queue_capacity,
             service_epoch,
+            read_event,
+            write_event,
             queue: VecDeque::new(),
         });
         Ok(handle)
@@ -130,6 +145,14 @@ impl RuntimeIpcRegistry {
 
     pub fn endpoint_message_kind(&self, endpoint: EndpointHandle) -> Result<u8, IpcStatus> {
         Ok(self.endpoint(endpoint)?.message_kind)
+    }
+
+    pub fn endpoint_events(
+        &self,
+        endpoint: EndpointHandle,
+    ) -> Result<(EventHandle, EventHandle), IpcStatus> {
+        let endpoint = self.endpoint(endpoint)?;
+        Ok((endpoint.read_event, endpoint.write_event))
     }
 
     pub fn validate_capability(
@@ -374,6 +397,10 @@ mod tests {
         let (producer, consumer) = services();
         let mut registry = RuntimeIpcRegistry::new();
         let endpoint = registry.create_endpoint(producer, consumer, 7, 3, 1, 9).unwrap();
+        let (read_event, write_event) = registry.endpoint_events(endpoint).unwrap();
+        assert_ne!(read_event, write_event);
+        assert_eq!(read_event.generation(), endpoint.generation());
+        assert_eq!(write_event.generation(), endpoint.generation());
         let send = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
         let receive = registry.grant(consumer, endpoint, IpcRights::Receive).unwrap();
         assert_eq!(registry.send(producer, send, &[1, 2]), IpcStatus::Malformed);
