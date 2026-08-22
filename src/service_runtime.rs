@@ -3287,6 +3287,36 @@ impl ServiceRuntime {
         }
         let request =
             unsafe { core::ptr::read_unaligned(bytes.cast::<logos_abi::ManagerRequest>()) };
+        if matches!(
+            request.operation,
+            logos_abi::ManagerOperation::List | logos_abi::ManagerOperation::Status
+        ) {
+            let response = self
+                .dynamic_services
+                .as_ref()
+                .map(|registry| registry.manager_request(request))
+                .unwrap_or_else(|| {
+                    logos_abi::ManagerResponse::new(
+                        request.operation,
+                        logos_abi::ManagerStatus::Stale,
+                        request.request_id,
+                    )
+                });
+            #[cfg(feature = "qemu-proof")]
+            if matches!(
+                response.status,
+                logos_abi::ManagerStatus::Ok | logos_abi::ManagerStatus::Stale
+            ) {
+                crate::proof::dynamic_manager_used();
+            }
+            unsafe {
+                core::ptr::write_unaligned(
+                    staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
+                    response,
+                );
+            }
+            return logos_abi::IpcStatus::Ok;
+        }
         let service_lifecycle = matches!(
             request.operation,
             logos_abi::ManagerOperation::Start
@@ -3336,24 +3366,6 @@ impl ServiceRuntime {
             }
         }
         let mut decision = self.manager.request(manager_request, rights);
-        if matches!(
-            request.operation,
-            logos_abi::ManagerOperation::List | logos_abi::ManagerOperation::Status
-        ) && !matches!(
-            decision.response.status,
-            logos_abi::ManagerStatus::Malformed | logos_abi::ManagerStatus::Unauthorized
-        ) {
-            if let Some(registry) = self.dynamic_services.as_ref() {
-                decision.response = registry.manager_request(request);
-                #[cfg(feature = "qemu-proof")]
-                if matches!(
-                    decision.response.status,
-                    logos_abi::ManagerStatus::Ok | logos_abi::ManagerStatus::Stale
-                ) {
-                    crate::proof::dynamic_manager_used();
-                }
-            }
-        }
         if service_lifecycle && decision.response.status == logos_abi::ManagerStatus::Accepted {
             if let Some(registry) = self.dynamic_services.as_mut() {
                 let _ = registry.begin_lifecycle(request.operation, request.service);
