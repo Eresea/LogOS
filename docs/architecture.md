@@ -5,9 +5,9 @@ while independent `x86_64-unknown-none` service images run in isolated roots. Th
 resource migration introduces one production allocator, private service heaps, and dynamic
 generation-safe service/IPC handles. The migration is staged; the current boot graph remains
 the compatibility baseline until the live service images switch together.
-The host-tested `runtime_ipc`, `runtime_events`, and `runtime_services` modules define the v5
-record and validation model; they are intentionally not linked into the UEFI image until the
-allocator-backed bootstrap and syscall transition is complete.
+The `runtime_ipc`, `runtime_events`, and `runtime_services` modules define the v5 record and
+validation model and now compile for UEFI; live service traffic remains on the compatibility graph
+until the directory and handle syscalls are wired.
 
 ```text
 Terminal → Session → Flow → typed system API registry
