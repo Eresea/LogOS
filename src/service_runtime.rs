@@ -2034,6 +2034,40 @@ impl ServiceRuntime {
         }
     }
 
+    fn queue_dynamic_core_response(
+        &mut self,
+        service: ServiceId,
+        endpoint: logos_abi::EndpointHandle,
+        message_bytes: usize,
+    ) -> logos_abi::IpcStatus {
+        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+            return logos_abi::IpcStatus::Unauthorized;
+        };
+        let core = match dynamic_core_handle((self.service_epoch as u32).max(1)) {
+            Ok(core) => core,
+            Err(_) => return logos_abi::IpcStatus::Stale,
+        };
+        let core_capability = self.dynamic_core_capabilities[endpoint.index() as usize];
+        let bytes = unsafe {
+            core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, message_bytes)
+        };
+        let status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
+            (Some(registry), Some(events)) => registry.send(core, core_capability, bytes, events),
+            _ => logos_abi::IpcStatus::Disconnected,
+        };
+        if status == logos_abi::IpcStatus::Ok {
+            if let Some((read_event, _)) = self
+                .dynamic_ipc
+                .as_ref()
+                .and_then(|registry| registry.endpoint_events(endpoint).ok())
+            {
+                self.signal_dynamic_event_waiters(read_event);
+            }
+            crate::arch::signal_events(logos_abi::ipc_read_event_mask(endpoint.index() as usize));
+        }
+        status
+    }
+
     pub(crate) fn ipc_send(
         &mut self,
         process: ProcessHandle,
@@ -2633,6 +2667,27 @@ impl ServiceRuntime {
                 }
                 _ => crate::storage_ipc::unsupported_response(request),
             };
+            let response_endpoint =
+                self.dynamic_endpoints[crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT];
+            let response_capability =
+                self.dynamic_core_capabilities[crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT];
+            if response_capability.is_valid() {
+                unsafe {
+                    core::ptr::write_unaligned(
+                        staging_frame.raw() as usize as *mut logos_abi::StorageResponse,
+                        response,
+                    );
+                }
+                let status = self.queue_dynamic_core_response(
+                    service,
+                    response_endpoint,
+                    core::mem::size_of::<logos_abi::StorageResponse>(),
+                );
+                return crate::service_ipc::IpcOutcome {
+                    status,
+                    notified: status == logos_abi::IpcStatus::Ok,
+                };
+            }
             self.storage_response = Some(response);
             crate::arch::signal_events(logos_abi::ipc_write_event_mask(
                 crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT,
@@ -2922,6 +2977,30 @@ impl ServiceRuntime {
                 Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
             };
             if endpoint.index() as usize == crate::device_ipc::DEVICE_RESPONSE_ENDPOINT {
+                let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Unauthorized,
+                        notified: false,
+                    };
+                };
+                let bytes = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        staging_frame.raw() as usize as *mut u8,
+                        expected_bytes,
+                    )
+                };
+                let status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
+                    (Some(registry), Some(events)) => {
+                        registry.receive(caller, dynamic_capability, bytes, events)
+                    }
+                    _ => logos_abi::IpcStatus::Disconnected,
+                };
+                return crate::service_ipc::IpcOutcome {
+                    status,
+                    notified: status == logos_abi::IpcStatus::Ok,
+                };
+            }
+            if endpoint.index() as usize == crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT {
                 let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
                     return crate::service_ipc::IpcOutcome {
                         status: logos_abi::IpcStatus::Unauthorized,
