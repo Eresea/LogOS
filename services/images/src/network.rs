@@ -554,14 +554,19 @@ enum Peer {
 }
 
 #[cfg(target_os = "none")]
-fn send_network_response(peer: Peer, response: NetworkResponse) {
+fn send_network_response(
+    peer: Peer,
+    flow_send_capability: logos_abi::CapabilityHandle,
+    fetch_send_capability: logos_abi::CapabilityHandle,
+    response: NetworkResponse,
+) {
     let response = response_message(response);
     let (capability, endpoint) = match peer {
-        Peer::Flow => (FLOW_SEND, logos_abi::IpcEndpointId::NetworkToFlow),
-        Peer::Fetch => (FETCH_SEND, logos_abi::IpcEndpointId::NetworkToFetch),
+        Peer::Flow => (flow_send_capability, logos_abi::IpcEndpointId::NetworkToFlow),
+        Peer::Fetch => (fetch_send_capability, logos_abi::IpcEndpointId::NetworkToFetch),
     };
     loop {
-        match common::ipc_send(capability, &response) {
+        match common::ipc_send_handle(capability, &response) {
             IpcStatus::Ok => break,
             IpcStatus::Full => common::wait(common::ipc_write_event(endpoint), ServiceId::Network),
             _ => break,
@@ -573,6 +578,30 @@ fn send_network_response(peer: Peer, response: NetworkResponse) {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
+    let flow_receive_capability = match common::capability_handle(FLOW_RECEIVE) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let flow_send_capability = match common::capability_handle(FLOW_SEND) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let fetch_receive_capability = match common::capability_handle(FETCH_RECEIVE) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let fetch_send_capability = match common::capability_handle(FETCH_SEND) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let core_receive_capability = match common::capability_handle(CORE_RECEIVE) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let core_send_capability = match common::capability_handle(CORE_SEND) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
     let config = unsafe {
         if logos_abi::NETWORK_CONFIG_BASE == 0 {
             logos_abi::NetworkConfig::disabled()
@@ -613,7 +642,7 @@ pub extern "C" fn _start() -> ! {
             0,
             sequence,
         );
-        if common::ipc_receive(CORE_RECEIVE, &mut packet) == IpcStatus::Ok {
+        if common::ipc_receive_handle(core_receive_capability, &mut packet) == IpcStatus::Ok {
             if packet.operation == logos_abi::NetworkPacketOperation::LinkState {
                 if packet.result == logos_abi::NetworkResult::NotFound {
                     service.set_unavailable();
@@ -643,7 +672,7 @@ pub extern "C" fn _start() -> ! {
                     recycle.sequence = sequence;
                     let _ = address;
                     sequence = sequence.wrapping_add(1).max(1);
-                    let _ = common::ipc_send(CORE_SEND, &recycle);
+                    let _ = common::ipc_send_handle(core_send_capability, &recycle);
                 }
             }
         }
@@ -667,16 +696,21 @@ pub extern "C" fn _start() -> ! {
                 } else {
                     logos_abi::NetworkResult::Timeout
                 };
-                send_network_response(pending.peer, response);
+                send_network_response(
+                    pending.peer,
+                    flow_send_capability,
+                    fetch_send_capability,
+                    response,
+                );
                 pending_request = None;
             }
         }
         let mut message = IpcBytes::empty(MessageKind::NetworkRequest);
-        let status = common::ipc_receive(FLOW_RECEIVE, &mut message);
+        let status = common::ipc_receive_handle(flow_receive_capability, &mut message);
         let (command_status, peer) = if status == IpcStatus::Ok {
             (status, Peer::Flow)
         } else {
-            (common::ipc_receive(FETCH_RECEIVE, &mut message), Peer::Fetch)
+            (common::ipc_receive_handle(fetch_receive_capability, &mut message), Peer::Fetch)
         };
         if command_status == IpcStatus::Ok {
             if let Some(request) = request_from_message(&message) {
@@ -698,7 +732,12 @@ pub extern "C" fn _start() -> ! {
                         response.result = logos_abi::NetworkResult::Cancelled;
                     }
                     if peer == Peer::Flow {
-                        send_network_response(peer, response);
+                        send_network_response(
+                            peer,
+                            flow_send_capability,
+                            fetch_send_capability,
+                            response,
+                        );
                     }
                 } else {
                     let mut response = service.handle(request);
@@ -828,12 +867,19 @@ pub extern "C" fn _start() -> ! {
                             peer,
                         });
                     } else {
-                        send_network_response(peer, response);
+                        send_network_response(
+                            peer,
+                            flow_send_capability,
+                            fetch_send_capability,
+                            response,
+                        );
                     }
                 }
             } else {
                 send_network_response(
                     peer,
+                    flow_send_capability,
+                    fetch_send_capability,
                     NetworkResponse::new(
                         logos_abi::NetworkOperation::Status,
                         logos_abi::NetworkResult::Invalid,
@@ -855,7 +901,7 @@ pub extern "C" fn _start() -> ! {
                 packet.generation,
                 packet.service_epoch,
             );
-            if common::ipc_send(CORE_SEND, &descriptor) == IpcStatus::Ok {
+            if common::ipc_send_handle(core_send_capability, &descriptor) == IpcStatus::Ok {
                 pending_tx = false;
                 sequence = sequence.wrapping_add(1).max(1);
             }
