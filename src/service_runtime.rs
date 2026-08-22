@@ -16,6 +16,7 @@ use crate::{
     process::{
         AddressSpaceRoot, MappingFlags, ProcessError, ProcessHandle, UserLaunch, VirtualMapping,
     },
+    runtime_ipc::RuntimeIpcRegistry,
     service_images::SERVICE_IMAGES,
     service_ipc::{IpcError, ServiceIpcGraph},
     service_loader::ServiceImageBundle,
@@ -27,6 +28,7 @@ use crate::{
 const SERVICE_COUNT: usize = SERVICE_IMAGES.len();
 const MAX_PROGRAMS: usize = crate::service_manager::MAX_PROGRAM_SLOTS;
 const MAX_ACTIVE_PAGE_TABLE_FRAMES: usize = 4096;
+const CORE_SERVICE_HANDLE_INDEX: u32 = u32::MAX;
 // Package activation remains an internal hook until package-manager policy exists.
 #[allow(dead_code)]
 const PACKAGE_EXCHANGE_POLLS: usize = 1024;
@@ -39,6 +41,59 @@ struct ServiceHeapState {
 impl ServiceHeapState {
     const fn empty() -> Self {
         Self { frames: Vec::new(), quota_pages: 0 }
+    }
+}
+
+fn dynamic_service_handle(
+    service: ServiceId,
+    generation: u32,
+) -> Result<logos_abi::ServiceHandle, ServiceRuntimeError> {
+    logos_abi::ServiceHandle::new(service.index() as u32, generation)
+        .ok_or(ServiceRuntimeError::StaleGeneration)
+}
+
+fn dynamic_endpoint_peer(
+    endpoint: logos_abi::IpcEndpointId,
+    producer: bool,
+    generation: u32,
+) -> Result<logos_abi::ServiceHandle, ServiceRuntimeError> {
+    let core = || {
+        logos_abi::ServiceHandle::new(CORE_SERVICE_HANDLE_INDEX, generation)
+            .ok_or(ServiceRuntimeError::StaleGeneration)
+    };
+    match endpoint {
+        logos_abi::IpcEndpointId::StorageToCore
+        | logos_abi::IpcEndpointId::NetworkToCore
+        | logos_abi::IpcEndpointId::DeviceToCore
+        | logos_abi::IpcEndpointId::StoragePackageToCore
+        | logos_abi::IpcEndpointId::StorageMapToCore => {
+            if producer {
+                dynamic_service_handle(endpoint.producer(), generation)
+            } else {
+                core()
+            }
+        }
+        logos_abi::IpcEndpointId::CoreToStorage
+        | logos_abi::IpcEndpointId::CoreToNetwork
+        | logos_abi::IpcEndpointId::CoreToDevice
+        | logos_abi::IpcEndpointId::CoreToStoragePackage
+        | logos_abi::IpcEndpointId::CoreToStorageMap => {
+            if producer {
+                core()
+            } else {
+                dynamic_service_handle(endpoint.consumer(), generation)
+            }
+        }
+        logos_abi::IpcEndpointId::FetchToStorage if !producer => {
+            dynamic_service_handle(ServiceId::Storage, generation)
+        }
+        logos_abi::IpcEndpointId::FetchToNetwork if !producer => {
+            dynamic_service_handle(ServiceId::Network, generation)
+        }
+        _ => dynamic_service_handle(
+            if producer { endpoint.producer() } else { endpoint.consumer() },
+            generation,
+        ),
     }
 }
 
@@ -78,6 +133,10 @@ pub struct ServiceRuntime {
     launches: [Option<(ProcessHandle, UserLaunch)>; SERVICE_COUNT],
     startup: ServiceStartup,
     ipc: Option<ServiceIpcGraph>,
+    dynamic_ipc: Option<RuntimeIpcRegistry>,
+    dynamic_endpoints: [logos_abi::EndpointHandle; logos_abi::IPC_ENDPOINT_COUNT],
+    dynamic_capabilities:
+        [[logos_abi::CapabilityHandle; logos_abi::MAX_IPC_CAPABILITIES]; SERVICE_COUNT],
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
     ipc_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
     service_bootstrap_frames: [u64; SERVICE_COUNT],
@@ -304,6 +363,10 @@ impl ServiceRuntime {
             launches: [None; SERVICE_COUNT],
             startup: ServiceStartup::new(),
             ipc: None,
+            dynamic_ipc: None,
+            dynamic_endpoints: [logos_abi::EndpointHandle::EMPTY; logos_abi::IPC_ENDPOINT_COUNT],
+            dynamic_capabilities: [[logos_abi::CapabilityHandle::EMPTY;
+                logos_abi::MAX_IPC_CAPABILITIES]; SERVICE_COUNT],
             ipc_staging_frames: [None; SERVICE_COUNT],
             ipc_capability_frames: [None; SERVICE_COUNT],
             service_bootstrap_frames: [0; SERVICE_COUNT],
@@ -359,6 +422,60 @@ impl ServiceRuntime {
     pub fn configure_network(&mut self, config: logos_abi::NetworkConfig) {
         self.network_config = config;
         self.manager.set_network_enabled(config.is_enabled());
+    }
+
+    fn initialize_dynamic_ipc(&mut self) -> Result<(), ServiceRuntimeError> {
+        let generation = (self.service_epoch as u32).max(1);
+        let mut registry = RuntimeIpcRegistry::new();
+        let mut endpoints = [logos_abi::EndpointHandle::EMPTY; logos_abi::IPC_ENDPOINT_COUNT];
+        let mut capabilities =
+            [[logos_abi::CapabilityHandle::EMPTY; logos_abi::MAX_IPC_CAPABILITIES]; SERVICE_COUNT];
+
+        for (raw, endpoint_slot) in endpoints.iter_mut().enumerate() {
+            let endpoint_id = logos_abi::IpcEndpointId::from_index(raw)
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+            let producer = dynamic_endpoint_peer(endpoint_id, true, generation)?;
+            let consumer = dynamic_endpoint_peer(endpoint_id, false, generation)?;
+            let message_bytes = logos_abi::ipc_message_size(raw)
+                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+            let message_kind = match logos_abi::ipc_message_type(raw) {
+                Some(logos_abi::IpcMessageType::Input) => 1,
+                Some(logos_abi::IpcMessageType::Render) => 2,
+                Some(logos_abi::IpcMessageType::Bytes) => 3,
+                Some(logos_abi::IpcMessageType::Packet) => 4,
+                None => 0,
+            };
+            let queue_capacity = ServiceIpcGraph::queue_capacity(raw).max(1);
+            let endpoint = registry
+                .create_endpoint(
+                    producer,
+                    consumer,
+                    message_kind,
+                    message_bytes,
+                    queue_capacity,
+                    self.service_epoch,
+                )
+                .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
+            *endpoint_slot = endpoint;
+
+            for spec in SERVICE_IMAGES {
+                let service = spec.service();
+                for rights in [logos_abi::IpcRights::Send, logos_abi::IpcRights::Receive] {
+                    let Some(slot) = logos_abi::ipc_capability_slot(service, endpoint_id, rights)
+                    else {
+                        continue;
+                    };
+                    let grant = registry
+                        .grant(dynamic_service_handle(service, generation)?, endpoint, rights)
+                        .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
+                    capabilities[service.index()][slot] = grant;
+                }
+            }
+        }
+        self.dynamic_endpoints = endpoints;
+        self.dynamic_capabilities = capabilities;
+        self.dynamic_ipc = Some(registry);
+        Ok(())
     }
 
     fn start_inner(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
@@ -558,6 +675,7 @@ impl ServiceRuntime {
             initialize_ipc_page(endpoint);
         }
         self.ipc = Some(graph);
+        self.initialize_dynamic_ipc()?;
         for spec in SERVICE_IMAGES {
             let service = spec.service();
             let index = service.index();
@@ -2531,6 +2649,25 @@ impl ServiceRuntime {
         if request.operation != logos_abi::DirectoryOperation::Capabilities {
             return logos_abi::DirectoryStatus::NotFound;
         }
+        if let Some(registry) = self.dynamic_ipc.as_ref() {
+            let mut dynamic_request = request;
+            dynamic_request.subject = service_handle;
+            let mut response = logos_abi::DirectoryResponse::empty(
+                logos_abi::DirectoryOperation::Capabilities,
+                logos_abi::DirectoryStatus::Malformed,
+                request.request_id,
+            );
+            let status = registry.directory(dynamic_request, &mut response);
+            if status == logos_abi::DirectoryStatus::Ok {
+                unsafe {
+                    core::ptr::write_unaligned(
+                        staging_frame.raw() as usize as *mut logos_abi::DirectoryResponse,
+                        response,
+                    );
+                }
+            }
+            return status;
+        }
         if request.cursor > logos_abi::MAX_IPC_CAPABILITIES as u64 {
             return logos_abi::DirectoryStatus::Malformed;
         }
@@ -3561,6 +3698,10 @@ impl ServiceRuntime {
             graph.reclaim(&mut self.frame_pool).map_err(ServiceRuntimeError::Ipc)?;
         }
         self.ipc = None;
+        self.dynamic_ipc = None;
+        self.dynamic_endpoints = [logos_abi::EndpointHandle::EMPTY; logos_abi::IPC_ENDPOINT_COUNT];
+        self.dynamic_capabilities =
+            [[logos_abi::CapabilityHandle::EMPTY; logos_abi::MAX_IPC_CAPABILITIES]; SERVICE_COUNT];
         self.storage_response = None;
         self.device_response = None;
         self.storage_map_response = None;

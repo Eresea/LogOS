@@ -397,4 +397,78 @@ mod tests {
             IpcStatus::Ok
         );
     }
+
+    #[test]
+    fn all_abi_endpoint_payloads_fit_the_dynamic_registry() {
+        let (producer, consumer) = services();
+        let mut registry = RuntimeIpcRegistry::new();
+        for raw in 0..logos_abi::IPC_ENDPOINT_COUNT {
+            let bytes = logos_abi::ipc_message_size(raw).unwrap();
+            registry.create_endpoint(producer, consumer, 0, bytes, 1, 1).unwrap();
+        }
+    }
+
+    #[test]
+    fn built_in_capability_grants_fit_the_dynamic_registry() {
+        let core = ServiceHandle::new(u32::MAX, 1).unwrap();
+        let mut registry = RuntimeIpcRegistry::new();
+        for raw in 0..logos_abi::IPC_ENDPOINT_COUNT {
+            let endpoint_id = logos_abi::IpcEndpointId::from_index(raw).unwrap();
+            let core_producer = matches!(
+                endpoint_id,
+                logos_abi::IpcEndpointId::CoreToStorage
+                    | logos_abi::IpcEndpointId::CoreToNetwork
+                    | logos_abi::IpcEndpointId::CoreToDevice
+                    | logos_abi::IpcEndpointId::CoreToStoragePackage
+                    | logos_abi::IpcEndpointId::CoreToStorageMap
+            );
+            let core_consumer = matches!(
+                endpoint_id,
+                logos_abi::IpcEndpointId::StorageToCore
+                    | logos_abi::IpcEndpointId::NetworkToCore
+                    | logos_abi::IpcEndpointId::DeviceToCore
+                    | logos_abi::IpcEndpointId::StoragePackageToCore
+                    | logos_abi::IpcEndpointId::StorageMapToCore
+            );
+            let producer = if core_producer {
+                core
+            } else {
+                ServiceHandle::new(endpoint_id.producer().index() as u32, 1).unwrap()
+            };
+            let consumer = if core_consumer {
+                core
+            } else if matches!(
+                endpoint_id,
+                logos_abi::IpcEndpointId::FetchToStorage | logos_abi::IpcEndpointId::FetchToNetwork
+            ) {
+                let service = if endpoint_id == logos_abi::IpcEndpointId::FetchToStorage {
+                    logos_abi::ServiceId::Storage
+                } else {
+                    logos_abi::ServiceId::Network
+                };
+                ServiceHandle::new(service.index() as u32, 1).unwrap()
+            } else {
+                ServiceHandle::new(endpoint_id.consumer().index() as u32, 1).unwrap()
+            };
+            let endpoint = registry
+                .create_endpoint(
+                    producer,
+                    consumer,
+                    0,
+                    logos_abi::ipc_message_size(raw).unwrap(),
+                    1,
+                    1,
+                )
+                .unwrap();
+            for raw_service in 0..10 {
+                let service = logos_abi::ServiceId::from_index(raw_service).unwrap();
+                let owner = ServiceHandle::new(raw_service as u32, 1).unwrap();
+                for rights in [IpcRights::Send, IpcRights::Receive] {
+                    if logos_abi::ipc_capability_slot(service, endpoint_id, rights).is_some() {
+                        registry.grant(owner, endpoint, rights).unwrap();
+                    }
+                }
+            }
+        }
+    }
 }
