@@ -12,33 +12,19 @@ use logos_abi::{
 };
 use logos_fetch::{ResponseParser, Url};
 
-const FLOW_RECEIVE: usize = common::capability_slot(
-    logos_abi::ServiceId::Fetch,
-    logos_abi::IpcEndpointId::FlowToFetch,
-    logos_abi::IpcRights::Receive,
-);
-const FLOW_SEND: usize = common::capability_slot(
-    logos_abi::ServiceId::Fetch,
-    logos_abi::IpcEndpointId::FetchToFlow,
-    logos_abi::IpcRights::Send,
-);
-const STORAGE_SEND: usize = common::capability_slot(
-    logos_abi::ServiceId::Fetch,
-    logos_abi::IpcEndpointId::FetchToStorage,
-    logos_abi::IpcRights::Send,
-);
-const STORAGE_RECEIVE: usize = common::capability_slot(
-    logos_abi::ServiceId::Fetch,
+const FLOW_RECEIVE: common::CapabilitySpec =
+    common::capability_spec(logos_abi::IpcEndpointId::FlowToFetch, logos_abi::IpcRights::Receive);
+const FLOW_SEND: common::CapabilitySpec =
+    common::capability_spec(logos_abi::IpcEndpointId::FetchToFlow, logos_abi::IpcRights::Send);
+const STORAGE_SEND: common::CapabilitySpec =
+    common::capability_spec(logos_abi::IpcEndpointId::FetchToStorage, logos_abi::IpcRights::Send);
+const STORAGE_RECEIVE: common::CapabilitySpec = common::capability_spec(
     logos_abi::IpcEndpointId::StorageToFetch,
     logos_abi::IpcRights::Receive,
 );
-const NETWORK_SEND: usize = common::capability_slot(
-    logos_abi::ServiceId::Fetch,
-    logos_abi::IpcEndpointId::FetchToNetwork,
-    logos_abi::IpcRights::Send,
-);
-const NETWORK_RECEIVE: usize = common::capability_slot(
-    logos_abi::ServiceId::Fetch,
+const NETWORK_SEND: common::CapabilitySpec =
+    common::capability_spec(logos_abi::IpcEndpointId::FetchToNetwork, logos_abi::IpcRights::Send);
+const NETWORK_RECEIVE: common::CapabilitySpec = common::capability_spec(
     logos_abi::IpcEndpointId::NetworkToFetch,
     logos_abi::IpcRights::Receive,
 );
