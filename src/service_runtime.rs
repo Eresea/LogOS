@@ -2177,7 +2177,13 @@ impl ServiceRuntime {
                     return crate::service_ipc::IpcOutcome { status, notified: false };
                 }
             }
-            if !endpoint_uses_legacy_special_transport(endpoint) {
+            let flow_network_enabled = self.network_config.is_enabled()
+                && matches!(
+                    endpoint.index() as usize,
+                    index if index == logos_abi::IpcEndpointId::FlowToNetwork.index()
+                        || index == logos_abi::IpcEndpointId::NetworkToFlow.index()
+                );
+            if !endpoint_uses_legacy_special_transport(endpoint) || flow_network_enabled {
                 if length != expected_bytes {
                     return crate::service_ipc::IpcOutcome {
                         status: logos_abi::IpcStatus::Malformed,
@@ -3212,7 +3218,13 @@ impl ServiceRuntime {
                     notified: status == logos_abi::IpcStatus::Ok,
                 };
             }
-            if !endpoint_uses_legacy_special_transport(endpoint) {
+            let flow_network_enabled = self.network_config.is_enabled()
+                && matches!(
+                    endpoint.index() as usize,
+                    index if index == logos_abi::IpcEndpointId::FlowToNetwork.index()
+                        || index == logos_abi::IpcEndpointId::NetworkToFlow.index()
+                );
+            if !endpoint_uses_legacy_special_transport(endpoint) || flow_network_enabled {
                 let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
                     return crate::service_ipc::IpcOutcome {
                         status: logos_abi::IpcStatus::Unauthorized,
