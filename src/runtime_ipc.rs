@@ -6,6 +6,7 @@
 
 use alloc::{collections::VecDeque, vec::Vec};
 
+use crate::runtime_events::RuntimeEventRegistry;
 use logos_abi::{
     CapabilityHandle, DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE, DirectoryRecordKind,
     DirectoryRequest, DirectoryResponse, DirectoryStatus, EndpointHandle, EventHandle,
@@ -56,6 +57,7 @@ impl RuntimeIpcRegistry {
         Self { endpoints: Vec::new(), capabilities: Vec::new() }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_endpoint(
         &mut self,
         producer: ServiceHandle,
@@ -64,6 +66,7 @@ impl RuntimeIpcRegistry {
         message_bytes: usize,
         queue_capacity: usize,
         service_epoch: u64,
+        events: &mut RuntimeEventRegistry,
     ) -> Result<EndpointHandle, IpcStatus> {
         if !producer.is_valid()
             || !consumer.is_valid()
@@ -79,17 +82,17 @@ impl RuntimeIpcRegistry {
         let slot = self.allocate_endpoint_slot()?;
         let handle = EndpointHandle::new(slot as u32, self.endpoints[slot].generation)
             .ok_or(IpcStatus::Malformed)?;
-        let event_index = u32::try_from(slot)
-            .ok()
-            .and_then(|slot| slot.checked_mul(2))
-            .ok_or(IpcStatus::Disconnected)?;
-        let read_event =
-            EventHandle::new(event_index, handle.generation()).ok_or(IpcStatus::Malformed)?;
-        let write_event = EventHandle::new(
-            event_index.checked_add(1).ok_or(IpcStatus::Disconnected)?,
-            handle.generation(),
-        )
-        .ok_or(IpcStatus::Malformed)?;
+        let read_event = events.create_event(consumer).map_err(|_| IpcStatus::Disconnected)?;
+        let write_event = match events.create_event(producer) {
+            Ok(event) => event,
+            Err(error) => {
+                let _ = events.destroy_event(consumer, read_event);
+                return Err(match error {
+                    crate::runtime_events::EventError::Unauthorized => IpcStatus::Unauthorized,
+                    _ => IpcStatus::Disconnected,
+                });
+            }
+        };
         self.endpoints[slot].value = Some(EndpointRecord {
             handle,
             producer,
@@ -130,8 +133,16 @@ impl RuntimeIpcRegistry {
         Ok(handle)
     }
 
-    pub fn destroy_endpoint(&mut self, endpoint: EndpointHandle) -> Result<(), IpcStatus> {
+    pub fn destroy_endpoint(
+        &mut self,
+        endpoint: EndpointHandle,
+        events: &mut RuntimeEventRegistry,
+    ) -> Result<(), IpcStatus> {
         let slot = self.endpoint_slot(endpoint)?;
+        if let Some(record) = self.endpoints[slot].value.as_ref() {
+            let _ = events.destroy_event(record.consumer, record.read_event);
+            let _ = events.destroy_event(record.producer, record.write_event);
+        }
         self.endpoints[slot].value = None;
         self.endpoints[slot].generation = next_generation(self.endpoints[slot].generation);
         for capability in &mut self.capabilities {
@@ -188,7 +199,7 @@ impl RuntimeIpcRegistry {
         Ok((endpoint_handle, message_bytes))
     }
 
-    pub fn destroy_service(&mut self, service: ServiceHandle) {
+    pub fn destroy_service(&mut self, service: ServiceHandle, events: &mut RuntimeEventRegistry) {
         let endpoints: Vec<_> = self
             .endpoints
             .iter()
@@ -197,7 +208,7 @@ impl RuntimeIpcRegistry {
             .map(|endpoint| endpoint.handle)
             .collect();
         for endpoint in endpoints {
-            let _ = self.destroy_endpoint(endpoint);
+            let _ = self.destroy_endpoint(endpoint, events);
         }
         for capability in &mut self.capabilities {
             if capability.value.as_ref().is_some_and(|grant| grant.owner == service) {
@@ -212,6 +223,7 @@ impl RuntimeIpcRegistry {
         caller: ServiceHandle,
         capability: CapabilityHandle,
         bytes: &[u8],
+        events: &mut RuntimeEventRegistry,
     ) -> IpcStatus {
         let (owner, endpoint_handle, rights, service_epoch) = match self.capability(capability) {
             Ok(grant) => (grant.owner, grant.endpoint, grant.rights, grant.service_epoch),
@@ -239,6 +251,7 @@ impl RuntimeIpcRegistry {
         }
         message.extend_from_slice(bytes);
         endpoint.queue.push_back(message);
+        let _ = events.signal_irq(endpoint.read_event);
         IpcStatus::Ok
     }
 
@@ -247,6 +260,7 @@ impl RuntimeIpcRegistry {
         caller: ServiceHandle,
         capability: CapabilityHandle,
         bytes: &mut [u8],
+        events: &mut RuntimeEventRegistry,
     ) -> IpcStatus {
         let (owner, endpoint_handle, rights, service_epoch) = match self.capability(capability) {
             Ok(grant) => (grant.owner, grant.endpoint, grant.rights, grant.service_epoch),
@@ -268,6 +282,7 @@ impl RuntimeIpcRegistry {
         let Some(message) = endpoint.queue.front() else { return IpcStatus::Empty };
         bytes.copy_from_slice(message);
         endpoint.queue.pop_front();
+        let _ = events.signal_irq(endpoint.write_event);
         IpcStatus::Ok
     }
 
@@ -396,41 +411,63 @@ mod tests {
     fn dynamic_endpoint_roundtrip_enforces_exact_size_and_backpressure() {
         let (producer, consumer) = services();
         let mut registry = RuntimeIpcRegistry::new();
-        let endpoint = registry.create_endpoint(producer, consumer, 7, 3, 1, 9).unwrap();
+        let mut events = RuntimeEventRegistry::new();
+        let endpoint =
+            registry.create_endpoint(producer, consumer, 7, 3, 1, 9, &mut events).unwrap();
         let (read_event, write_event) = registry.endpoint_events(endpoint).unwrap();
         assert_ne!(read_event, write_event);
         assert_eq!(read_event.generation(), endpoint.generation());
         assert_eq!(write_event.generation(), endpoint.generation());
+        let read_set = events.create_set(consumer).unwrap();
+        events.add(consumer, read_set, read_event).unwrap();
+        let write_set = events.create_set(producer).unwrap();
+        events.add(producer, write_set, write_event).unwrap();
         let send = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
         let receive = registry.grant(consumer, endpoint, IpcRights::Receive).unwrap();
-        assert_eq!(registry.send(producer, send, &[1, 2]), IpcStatus::Malformed);
-        assert_eq!(registry.send(producer, send, &[1, 2, 3]), IpcStatus::Ok);
-        assert_eq!(registry.send(producer, send, &[4, 5, 6]), IpcStatus::Full);
+        assert_eq!(registry.send(producer, send, &[1, 2], &mut events), IpcStatus::Malformed);
+        assert_eq!(registry.send(producer, send, &[1, 2, 3], &mut events), IpcStatus::Ok);
+        assert_eq!(
+            events.wait_any(consumer, read_set, 1, Some(10)),
+            Ok(crate::runtime_events::EventWait::Ready(read_event))
+        );
+        assert_eq!(registry.send(producer, send, &[4, 5, 6], &mut events), IpcStatus::Full);
         let mut output = [0; 3];
-        assert_eq!(registry.receive(consumer, receive, &mut output), IpcStatus::Ok);
+        assert_eq!(registry.receive(consumer, receive, &mut output, &mut events), IpcStatus::Ok);
         assert_eq!(output, [1, 2, 3]);
-        assert_eq!(registry.receive(consumer, receive, &mut output), IpcStatus::Empty);
+        assert_eq!(
+            events.wait_any(producer, write_set, 1, Some(10)),
+            Ok(crate::runtime_events::EventWait::Ready(write_event))
+        );
+        assert_eq!(registry.receive(consumer, receive, &mut output, &mut events), IpcStatus::Empty);
     }
 
     #[test]
     fn stale_and_forged_capabilities_cannot_access_reused_endpoints() {
         let (producer, consumer) = services();
         let mut registry = RuntimeIpcRegistry::new();
-        let endpoint = registry.create_endpoint(producer, consumer, 1, 1, 1, 1).unwrap();
+        let mut events = RuntimeEventRegistry::new();
+        let endpoint =
+            registry.create_endpoint(producer, consumer, 1, 1, 1, 1, &mut events).unwrap();
         let capability = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
-        assert_eq!(registry.send(consumer, capability, &[1]), IpcStatus::Unauthorized);
-        registry.destroy_endpoint(endpoint).unwrap();
-        assert_eq!(registry.send(producer, capability, &[1]), IpcStatus::Stale);
-        let replacement = registry.create_endpoint(producer, consumer, 1, 1, 1, 2).unwrap();
+        assert_eq!(registry.send(consumer, capability, &[1], &mut events), IpcStatus::Unauthorized);
+        let (read_event, write_event) = registry.endpoint_events(endpoint).unwrap();
+        registry.destroy_endpoint(endpoint, &mut events).unwrap();
+        assert_eq!(events.signal_irq(read_event), Err(crate::runtime_events::EventError::Stale));
+        assert_eq!(events.signal_irq(write_event), Err(crate::runtime_events::EventError::Stale));
+        assert_eq!(registry.send(producer, capability, &[1], &mut events), IpcStatus::Stale);
+        let replacement =
+            registry.create_endpoint(producer, consumer, 1, 1, 1, 2, &mut events).unwrap();
         assert_ne!(endpoint, replacement);
-        assert_eq!(registry.send(producer, capability, &[1]), IpcStatus::Stale);
+        assert_eq!(registry.send(producer, capability, &[1], &mut events), IpcStatus::Stale);
     }
 
     #[test]
     fn capability_validation_checks_owner_rights_and_exact_size() {
         let (producer, consumer) = services();
         let mut registry = RuntimeIpcRegistry::new();
-        let endpoint = registry.create_endpoint(producer, consumer, 1, 4, 1, 1).unwrap();
+        let mut events = RuntimeEventRegistry::new();
+        let endpoint =
+            registry.create_endpoint(producer, consumer, 1, 4, 1, 1, &mut events).unwrap();
         let send = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
         assert_eq!(registry.validate_capability(producer, send, IpcRights::Send, 4), Ok(endpoint));
         assert_eq!(
@@ -451,7 +488,9 @@ mod tests {
     fn capability_directory_is_cursored() {
         let (producer, consumer) = services();
         let mut registry = RuntimeIpcRegistry::new();
-        let endpoint = registry.create_endpoint(producer, consumer, 1, 4, 2, 1).unwrap();
+        let mut events = RuntimeEventRegistry::new();
+        let endpoint =
+            registry.create_endpoint(producer, consumer, 1, 4, 2, 1, &mut events).unwrap();
         let _ = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
         let mut request = DirectoryRequest::new(logos_abi::DirectoryOperation::Capabilities, 17);
         request.subject = producer;
@@ -469,12 +508,13 @@ mod tests {
     fn typed_payload_limit_is_the_ipc_page_not_compact_bytes_limit() {
         let (producer, consumer) = services();
         let mut registry = RuntimeIpcRegistry::new();
+        let mut events = RuntimeEventRegistry::new();
         let endpoint = registry
-            .create_endpoint(producer, consumer, 2, logos_abi::IPC_PAGE_BYTES, 1, 1)
+            .create_endpoint(producer, consumer, 2, logos_abi::IPC_PAGE_BYTES, 1, 1, &mut events)
             .unwrap();
         let capability = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
         assert_eq!(
-            registry.send(producer, capability, &[0; logos_abi::IPC_PAGE_BYTES]),
+            registry.send(producer, capability, &[0; logos_abi::IPC_PAGE_BYTES], &mut events),
             IpcStatus::Ok
         );
     }
@@ -483,9 +523,10 @@ mod tests {
     fn all_abi_endpoint_payloads_fit_the_dynamic_registry() {
         let (producer, consumer) = services();
         let mut registry = RuntimeIpcRegistry::new();
+        let mut events = RuntimeEventRegistry::new();
         for raw in 0..logos_abi::IPC_ENDPOINT_COUNT {
             let bytes = logos_abi::ipc_message_size(raw).unwrap();
-            registry.create_endpoint(producer, consumer, 0, bytes, 1, 1).unwrap();
+            registry.create_endpoint(producer, consumer, 0, bytes, 1, 1, &mut events).unwrap();
         }
     }
 
@@ -493,6 +534,7 @@ mod tests {
     fn built_in_capability_grants_fit_the_dynamic_registry() {
         let core = ServiceHandle::new(u32::MAX, 1).unwrap();
         let mut registry = RuntimeIpcRegistry::new();
+        let mut events = RuntimeEventRegistry::new();
         for raw in 0..logos_abi::IPC_ENDPOINT_COUNT {
             let endpoint_id = logos_abi::IpcEndpointId::from_index(raw).unwrap();
             let core_producer = matches!(
@@ -539,6 +581,7 @@ mod tests {
                     logos_abi::ipc_message_size(raw).unwrap(),
                     1,
                     1,
+                    &mut events,
                 )
                 .unwrap();
             for raw_service in 0..10 {

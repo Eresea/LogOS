@@ -494,6 +494,8 @@ impl ServiceRuntime {
     fn initialize_dynamic_ipc(&mut self) -> Result<(), ServiceRuntimeError> {
         let generation = (self.service_epoch as u32).max(1);
         let mut registry = RuntimeIpcRegistry::new();
+        let mut events =
+            crate::runtime_events::RuntimeEventRegistry::new_with_generation(generation);
         let mut endpoints = [logos_abi::EndpointHandle::EMPTY; logos_abi::IPC_ENDPOINT_COUNT];
         let mut capabilities =
             [[logos_abi::CapabilityHandle::EMPTY; logos_abi::MAX_IPC_CAPABILITIES]; SERVICE_COUNT];
@@ -521,6 +523,7 @@ impl ServiceRuntime {
                     message_bytes,
                     queue_capacity,
                     self.service_epoch,
+                    &mut events,
                 )
                 .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
             *endpoint_slot = endpoint;
@@ -542,6 +545,7 @@ impl ServiceRuntime {
         self.dynamic_endpoints = endpoints;
         self.dynamic_capabilities = capabilities;
         self.dynamic_ipc = Some(registry);
+        self.dynamic_events = Some(events);
         Ok(())
     }
 
@@ -2568,11 +2572,12 @@ impl ServiceRuntime {
             let bytes = unsafe {
                 core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
             };
-            let status = self
-                .dynamic_ipc
-                .as_mut()
-                .map(|registry| registry.send(caller, dynamic_capability, bytes))
-                .unwrap_or(logos_abi::IpcStatus::Disconnected);
+            let status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
+                (Some(registry), Some(events)) => {
+                    registry.send(caller, dynamic_capability, bytes, events)
+                }
+                _ => logos_abi::IpcStatus::Disconnected,
+            };
             let endpoint_index =
                 self.dynamic_endpoints.iter().position(|candidate| *candidate == endpoint);
             if status == logos_abi::IpcStatus::Ok {
@@ -2895,11 +2900,12 @@ impl ServiceRuntime {
                     expected_bytes,
                 )
             };
-            let status = self
-                .dynamic_ipc
-                .as_mut()
-                .map(|registry| registry.receive(caller, dynamic_capability, bytes))
-                .unwrap_or(logos_abi::IpcStatus::Disconnected);
+            let status = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
+                (Some(registry), Some(events)) => {
+                    registry.receive(caller, dynamic_capability, bytes, events)
+                }
+                _ => logos_abi::IpcStatus::Disconnected,
+            };
             let endpoint_index =
                 self.dynamic_endpoints.iter().position(|candidate| *candidate == endpoint);
             if status == logos_abi::IpcStatus::Ok {
