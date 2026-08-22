@@ -802,7 +802,7 @@ impl CompletionService {
         response: &mut CompletionResponse,
     ) -> Result<(), ()> {
         let mut cursor = 0u64;
-        for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
+        loop {
             let request_id = next_manager_request_id();
             let mut request =
                 logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, request_id);
@@ -833,6 +833,9 @@ impl CompletionService {
             }
             if manager_response.cursor == u64::MAX {
                 break;
+            }
+            if manager_response.cursor <= cursor {
+                return Err(());
             }
             cursor = manager_response.cursor;
         }
@@ -2130,7 +2133,7 @@ fn program_command(command: logos_flow::ProgramCommand<'_>, pending: &mut Pendin
 
 fn manager_record(name: &[u8]) -> Result<Option<logos_abi::ServiceManagerRecord>, IpcStatus> {
     let mut cursor = 0u64;
-    for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
+    loop {
         let request_id = next_manager_request_id();
         let mut request =
             logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, request_id);
@@ -2152,9 +2155,11 @@ fn manager_record(name: &[u8]) -> Result<Option<logos_abi::ServiceManagerRecord>
         if response.cursor == u64::MAX {
             return Ok(None);
         }
+        if response.cursor <= cursor {
+            return Err(IpcStatus::Malformed);
+        }
         cursor = response.cursor;
     }
-    Ok(None)
 }
 
 fn service_command(command: logos_flow::ServiceCommand<'_>, pending: &mut PendingOutput) {
@@ -2202,7 +2207,7 @@ fn service_command(command: logos_flow::ServiceCommand<'_>, pending: &mut Pendin
     let mut output = [0; logos_flow::MAX_OUTPUT_BYTES];
     let mut output_len = 0;
     let mut cursor = 0u64;
-    for _ in 0..logos_abi::MAX_MANAGER_SERVICES {
+    loop {
         let request_id = next_manager_request_id();
         let mut request = logos_abi::ManagerRequest::new(operation, request_id);
         request.cursor = cursor;
@@ -2235,6 +2240,10 @@ fn service_command(command: logos_flow::ServiceCommand<'_>, pending: &mut Pendin
         }
         if !list || response.cursor == u64::MAX {
             break;
+        }
+        if response.cursor <= cursor {
+            pending.stage(b"service manager malformed response\r\n");
+            return;
         }
         cursor = response.cursor;
     }

@@ -17,16 +17,9 @@ const CORE_SEND_CAPABILITY: common::CapabilitySpec =
     common::capability_spec(IpcEndpointId::DeviceToCore, logos_abi::IpcRights::Send);
 const CORE_RECEIVE_CAPABILITY: common::CapabilitySpec =
     common::capability_spec(IpcEndpointId::CoreToDevice, logos_abi::IpcRights::Receive);
-const CORE_SEND_SLOT: usize = common::capability_slot(
-    ServiceId::Device,
-    IpcEndpointId::DeviceToCore,
-    logos_abi::IpcRights::Send,
-);
-
 fn identity() -> (u16, u64) {
-    common::capability(CORE_SEND_SLOT)
-        .map(|capability| (capability.generation, capability.service_epoch))
-        .unwrap_or((1, 1))
+    let bootstrap = common::bootstrap_page();
+    (bootstrap.service.generation() as u16, bootstrap.service_epoch)
 }
 
 fn error_response(request: DeviceRequest, status: DeviceStatus) -> DeviceResponse {

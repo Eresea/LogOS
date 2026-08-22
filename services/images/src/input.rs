@@ -4,7 +4,9 @@
 
 mod common;
 
-use logos_abi::{INPUT_KEYBOARD_RING_BASE, InputMessage, IpcStatus, KeyboardByteRing};
+use logos_abi::{
+    INPUT_KEYBOARD_RING_BASE, InputMessage, IpcEndpointId, IpcStatus, KeyboardByteRing,
+};
 
 static mut PENDING: [Option<InputMessage>; 2] = [None, None];
 
@@ -17,9 +19,10 @@ pub extern "C" fn _start() -> ! {
         bootstrap.service.generation(),
     )
     .unwrap_or(logos_abi::ServiceHandle::EMPTY);
-    let output_capability = match common::discover_capability(
+    let output_capability = match common::discover_capability_contract(
         terminal,
         logos_abi::IpcRights::Send,
+        IpcEndpointId::InputToTerminal.index() as u16 + 1,
         core::mem::size_of::<InputMessage>(),
     ) {
         Ok(capability) => capability,

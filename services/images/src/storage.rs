@@ -35,11 +35,6 @@ const FETCH_RECEIVE_CAPABILITY: common::CapabilitySpec =
     common::capability_spec(IpcEndpointId::FetchToStorage, logos_abi::IpcRights::Receive);
 const FETCH_SEND_CAPABILITY: common::CapabilitySpec =
     common::capability_spec(IpcEndpointId::StorageToFetch, logos_abi::IpcRights::Send);
-const PACKAGE_RECEIVE_CAPABILITY_SLOT: usize = common::capability_slot(
-    logos_abi::ServiceId::Storage,
-    IpcEndpointId::CoreToStoragePackage,
-    logos_abi::IpcRights::Receive,
-);
 const PACKAGE_RECEIVE_CAPABILITY: common::CapabilitySpec =
     common::capability_spec(IpcEndpointId::CoreToStoragePackage, logos_abi::IpcRights::Receive);
 const PACKAGE_SEND_CAPABILITY: common::CapabilitySpec =
@@ -283,13 +278,17 @@ fn handle_package_request<B: logos_storage::BlockStore>(
     request: PackageRequest,
     filesystem: &mut DurableNamespaceV5<B>,
 ) -> PackageResponse {
-    let Some(capability) = common::capability(PACKAGE_RECEIVE_CAPABILITY_SLOT) else {
+    let Ok(capability) = common::capability_handle(PACKAGE_RECEIVE_CAPABILITY) else {
         return PackageResponse::new(request, PackageStatus::Invalid);
     };
+    let bootstrap = common::bootstrap_page();
+    if !bootstrap.is_valid() {
+        return PackageResponse::new(request, PackageStatus::Stale);
+    }
     let target = match request.validate_target(
-        PACKAGE_RECEIVE_CAPABILITY_SLOT,
-        capability.generation,
-        capability.service_epoch,
+        capability,
+        bootstrap.service_epoch as u16,
+        bootstrap.service_epoch,
     ) {
         Ok(service) => service,
         Err(status) => return PackageResponse::new(request, status),
@@ -354,15 +353,15 @@ fn handle_package_request<B: logos_storage::BlockStore>(
 }
 
 fn receive_package_request() -> Option<PackageRequest> {
+    let capability = common::capability_handle(PACKAGE_RECEIVE_CAPABILITY).ok()?;
+    let bootstrap = common::bootstrap_page();
     let mut request = PackageRequest::new(
         PackageOperation::Lookup,
         logos_abi::ServiceId::Storage,
         1,
-        common::capability(PACKAGE_RECEIVE_CAPABILITY_SLOT)
-            .map_or(1, |capability| capability.generation),
-        PACKAGE_RECEIVE_CAPABILITY_SLOT as u16,
-        common::capability(PACKAGE_RECEIVE_CAPABILITY_SLOT)
-            .map_or(1, |capability| capability.service_epoch),
+        bootstrap.service_epoch as u16,
+        capability,
+        bootstrap.service_epoch,
         0,
         0,
         0,

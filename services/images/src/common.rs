@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::{mem, ptr};
 
 use logos_abi::{IpcCapabilityPage, IpcStatus, ServiceId};
@@ -514,11 +514,13 @@ fn capability_record_matches(
     record: logos_abi::DirectoryRecord,
     peer: logos_abi::ServiceHandle,
     rights: logos_abi::IpcRights,
+    contract_id: u16,
     message_bytes: usize,
 ) -> bool {
     record.kind == logos_abi::DirectoryRecordKind::Capability
         && record.peer == peer
         && record.rights == rights as u8
+        && record.contract_id == contract_id
         && record.message_bytes as usize == message_bytes
         && logos_abi::CapabilityHandle::from_raw(record.handle).is_some()
 }
@@ -528,11 +530,12 @@ fn capability_from_response(
     response: &logos_abi::DirectoryResponse,
     peer: logos_abi::ServiceHandle,
     rights: logos_abi::IpcRights,
+    contract_id: u16,
     message_bytes: usize,
 ) -> Result<Option<logos_abi::CapabilityHandle>, logos_abi::DirectoryStatus> {
     let mut found = None;
     for record in &response.records[..response.count as usize] {
-        if !capability_record_matches(*record, peer, rights, message_bytes) {
+        if !capability_record_matches(*record, peer, rights, contract_id, message_bytes) {
             continue;
         }
         if found.is_some() {
@@ -544,9 +547,93 @@ fn capability_from_response(
 }
 
 #[allow(dead_code)]
+fn event_from_response(
+    response: &logos_abi::DirectoryResponse,
+    rights: logos_abi::IpcRights,
+    contract_id: u16,
+    message_bytes: usize,
+) -> Result<Option<logos_abi::EventHandle>, logos_abi::DirectoryStatus> {
+    let mut found = None;
+    for record in &response.records[..response.count as usize] {
+        if record.kind != logos_abi::DirectoryRecordKind::Capability
+            || record.rights != rights as u8
+            || record.contract_id != contract_id
+            || record.message_bytes as usize != message_bytes
+        {
+            continue;
+        }
+        let Some(event) = logos_abi::EventHandle::from_raw(record.event.raw()) else {
+            return Err(logos_abi::DirectoryStatus::Malformed);
+        };
+        if found.is_some() {
+            return Err(logos_abi::DirectoryStatus::Malformed);
+        }
+        found = Some(event);
+    }
+    Ok(found)
+}
+
+#[allow(dead_code)]
+fn discover_event_contract(
+    rights: logos_abi::IpcRights,
+    contract_id: u16,
+    message_bytes: usize,
+) -> Result<logos_abi::EventHandle, logos_abi::DirectoryStatus> {
+    #[cfg(target_os = "none")]
+    {
+        let bootstrap = bootstrap_page();
+        if !bootstrap.is_valid() || contract_id == 0 || message_bytes == 0 {
+            return Err(logos_abi::DirectoryStatus::Malformed);
+        }
+        let mut request = logos_abi::DirectoryRequest::new(
+            logos_abi::DirectoryOperation::Capabilities,
+            NEXT_EVENT_REQUEST.fetch_add(1, Ordering::Relaxed).max(1),
+        );
+        request.subject = bootstrap.service;
+        loop {
+            let mut response = logos_abi::DirectoryResponse::empty(
+                request.operation,
+                logos_abi::DirectoryStatus::Malformed,
+                request.request_id,
+            );
+            let status = directory_call(bootstrap.directory, &request, &mut response);
+            if status != logos_abi::DirectoryStatus::Ok {
+                return Err(status);
+            }
+            if let Some(event) = event_from_response(&response, rights, contract_id, message_bytes)?
+            {
+                return Ok(event);
+            }
+            if response.flags & logos_abi::DIRECTORY_FLAG_MORE == 0 {
+                return Err(logos_abi::DirectoryStatus::NotFound);
+            }
+            if response.cursor <= request.cursor {
+                return Err(logos_abi::DirectoryStatus::Malformed);
+            }
+            request.cursor = response.cursor;
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (rights, contract_id, message_bytes);
+        Err(logos_abi::DirectoryStatus::NotFound)
+    }
+}
+
+#[allow(dead_code)]
 pub fn discover_capability(
     peer: logos_abi::ServiceHandle,
     rights: logos_abi::IpcRights,
+    message_bytes: usize,
+) -> Result<logos_abi::CapabilityHandle, logos_abi::DirectoryStatus> {
+    discover_capability_contract(peer, rights, 0, message_bytes)
+}
+
+#[allow(dead_code)]
+pub fn discover_capability_contract(
+    peer: logos_abi::ServiceHandle,
+    rights: logos_abi::IpcRights,
+    contract_id: u16,
     message_bytes: usize,
 ) -> Result<logos_abi::CapabilityHandle, logos_abi::DirectoryStatus> {
     #[cfg(target_os = "none")]
@@ -569,7 +656,7 @@ pub fn discover_capability(
                 return Err(status);
             }
             if let Some(capability) =
-                capability_from_response(&response, peer, rights, message_bytes)?
+                capability_from_response(&response, peer, rights, contract_id, message_bytes)?
             {
                 return Ok(capability);
             }
@@ -584,7 +671,7 @@ pub fn discover_capability(
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (peer, rights, message_bytes);
+        let _ = (peer, rights, contract_id, message_bytes);
         Err(logos_abi::DirectoryStatus::NotFound)
     }
 }
@@ -657,6 +744,88 @@ pub const fn keyboard_read_event() -> u64 {
 }
 
 #[allow(dead_code)]
+fn next_event_request_id() -> u32 {
+    NEXT_EVENT_REQUEST.fetch_add(1, Ordering::Relaxed).max(1)
+}
+
+#[allow(dead_code)]
+fn event_set_for_mask(mask: u64) -> Option<logos_abi::EventSetHandle> {
+    #[cfg(target_os = "none")]
+    {
+        if mask == 0 || mask & logos_abi::keyboard_read_event_mask() != 0 {
+            return None;
+        }
+        unsafe {
+            if let Some((set, known_mask)) = *EVENT_SET_CACHE.0.get() {
+                if known_mask & mask == mask {
+                    return Some(set);
+                }
+            }
+        }
+        let (mut set, mut known_mask) =
+            unsafe { (*EVENT_SET_CACHE.0.get()).unwrap_or((logos_abi::EventSetHandle::EMPTY, 0)) };
+        if !set.is_valid() {
+            let request = logos_abi::EventRequest::new(
+                logos_abi::EventOperation::CreateSet,
+                next_event_request_id(),
+            );
+            let mut response = logos_abi::EventResponse::empty(
+                logos_abi::EventStatus::Malformed,
+                request.request_id,
+            );
+            if event_call(&request, &mut response) != logos_abi::EventStatus::Ok
+                || !response.event_set.is_valid()
+            {
+                return None;
+            }
+            set = response.event_set;
+        }
+        for bit in 0..logos_abi::IPC_ENDPOINT_COUNT * 2 {
+            let bit_mask = 1u64 << bit;
+            if mask & bit_mask == 0 || known_mask & bit_mask != 0 {
+                continue;
+            }
+            let endpoint = if bit < logos_abi::IPC_ENDPOINT_COUNT {
+                bit
+            } else {
+                bit - logos_abi::IPC_WRITE_EVENT_BASE
+            };
+            let rights = if bit < logos_abi::IPC_ENDPOINT_COUNT {
+                logos_abi::IpcRights::Receive
+            } else {
+                logos_abi::IpcRights::Send
+            };
+            let message_bytes = logos_abi::ipc_message_size(endpoint)?;
+            let Ok(event) = discover_event_contract(rights, endpoint as u16 + 1, message_bytes)
+            else {
+                return None;
+            };
+            let mut request = logos_abi::EventRequest::new(
+                logos_abi::EventOperation::Add,
+                next_event_request_id(),
+            );
+            request.event_set = set;
+            request.event = event;
+            let mut response = logos_abi::EventResponse::empty(
+                logos_abi::EventStatus::Malformed,
+                request.request_id,
+            );
+            if event_call(&request, &mut response) != logos_abi::EventStatus::Ok {
+                return None;
+            }
+            known_mask |= bit_mask;
+        }
+        unsafe { *EVENT_SET_CACHE.0.get() = Some((set, known_mask)) };
+        Some(set)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = mask;
+        None
+    }
+}
+
+#[allow(dead_code)]
 pub const fn capability_slot(
     service: ServiceId,
     endpoint: logos_abi::IpcEndpointId,
@@ -671,30 +840,18 @@ pub const fn capability_slot(
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapabilitySpec {
-    pub endpoint: logos_abi::IpcEndpointId,
+    pub contract_id: u16,
+    pub peer_index: u32,
+    pub message_bytes: u16,
     pub rights: logos_abi::IpcRights,
 }
 
-#[allow(dead_code)]
-pub const fn capability_spec(
+const fn capability_peer_index(
     endpoint: logos_abi::IpcEndpointId,
     rights: logos_abi::IpcRights,
-) -> CapabilitySpec {
-    CapabilitySpec { endpoint, rights }
-}
-
-#[allow(dead_code)]
-struct CapabilityCache(UnsafeCell<Option<Vec<(CapabilitySpec, logos_abi::CapabilityHandle)>>>);
-
-unsafe impl Sync for CapabilityCache {}
-
-#[allow(dead_code)]
-static DISCOVERED_CAPABILITIES: CapabilityCache = CapabilityCache(UnsafeCell::new(None));
-
-#[allow(dead_code)]
-fn capability_peer(spec: CapabilitySpec, generation: u32) -> Option<logos_abi::ServiceHandle> {
+) -> u32 {
     let core_endpoint = matches!(
-        spec.endpoint,
+        endpoint,
         logos_abi::IpcEndpointId::CoreToStorage
             | logos_abi::IpcEndpointId::StorageToCore
             | logos_abi::IpcEndpointId::CoreToNetwork
@@ -707,41 +864,77 @@ fn capability_peer(spec: CapabilitySpec, generation: u32) -> Option<logos_abi::S
             | logos_abi::IpcEndpointId::StorageMapToCore
     );
     if core_endpoint {
-        return logos_abi::ServiceHandle::new(u32::MAX, generation);
+        return u32::MAX;
     }
-    let service = match (spec.endpoint, spec.rights) {
+    match (endpoint, rights) {
         (logos_abi::IpcEndpointId::FetchToStorage, logos_abi::IpcRights::Send) => {
-            logos_abi::ServiceId::Storage
+            logos_abi::ServiceId::Storage.index() as u32
         }
         (logos_abi::IpcEndpointId::FetchToNetwork, logos_abi::IpcRights::Send) => {
-            logos_abi::ServiceId::Network
+            logos_abi::ServiceId::Network.index() as u32
         }
-        (_, logos_abi::IpcRights::Send) => spec.endpoint.consumer(),
-        (_, logos_abi::IpcRights::Receive) => spec.endpoint.producer(),
-    };
-    logos_abi::ServiceHandle::new(service.index() as u32, generation)
+        (_, logos_abi::IpcRights::Send) => endpoint.consumer().index() as u32,
+        (_, logos_abi::IpcRights::Receive) => endpoint.producer().index() as u32,
+    }
 }
+
+#[allow(dead_code)]
+pub const fn capability_spec(
+    endpoint: logos_abi::IpcEndpointId,
+    rights: logos_abi::IpcRights,
+) -> CapabilitySpec {
+    let message_bytes = match logos_abi::ipc_message_size(endpoint.index()) {
+        Some(bytes) if bytes <= u16::MAX as usize => bytes as u16,
+        _ => 0,
+    };
+    CapabilitySpec {
+        contract_id: endpoint.index() as u16 + 1,
+        peer_index: capability_peer_index(endpoint, rights),
+        message_bytes,
+        rights,
+    }
+}
+
+#[allow(dead_code)]
+struct CapabilityCache(UnsafeCell<Option<Vec<(CapabilitySpec, logos_abi::CapabilityHandle)>>>);
+
+unsafe impl Sync for CapabilityCache {}
+
+#[allow(dead_code)]
+static DISCOVERED_CAPABILITIES: CapabilityCache = CapabilityCache(UnsafeCell::new(None));
+
+#[allow(dead_code)]
+struct EventSetCache(UnsafeCell<Option<(logos_abi::EventSetHandle, u64)>>);
+
+unsafe impl Sync for EventSetCache {}
+
+#[allow(dead_code)]
+static EVENT_SET_CACHE: EventSetCache = EventSetCache(UnsafeCell::new(None));
+static NEXT_EVENT_REQUEST: AtomicU32 = AtomicU32::new(0x4000);
 
 #[allow(dead_code)]
 fn discovered_capability(spec: CapabilitySpec) -> Result<logos_abi::CapabilityHandle, IpcStatus> {
     #[cfg(target_os = "none")]
     {
         let bootstrap = bootstrap_page();
-        let peer =
-            capability_peer(spec, bootstrap.service.generation()).ok_or(IpcStatus::Unauthorized)?;
+        let peer = logos_abi::ServiceHandle::new(spec.peer_index, bootstrap.service.generation())
+            .ok_or(IpcStatus::Unauthorized)?;
         unsafe {
             if let Some(cache) = (&*DISCOVERED_CAPABILITIES.0.get()).as_ref() {
-                if let Some((_, capability)) =
-                    cache.iter().find(|(candidate, _)| *candidate == spec)
-                {
+                if let Some((_, capability)) = cache.iter().find(|(candidate, capability)| {
+                    *candidate == spec && capability.generation() == bootstrap.service.generation()
+                }) {
                     return Ok(*capability);
                 }
             }
         }
-        let message_bytes =
-            logos_abi::ipc_message_size(spec.endpoint.index()).ok_or(IpcStatus::Malformed)?;
-        let capability = discover_capability(peer, spec.rights, message_bytes)
-            .map_err(|_| IpcStatus::Unauthorized)?;
+        let message_bytes = usize::from(spec.message_bytes);
+        if message_bytes == 0 {
+            return Err(IpcStatus::Malformed);
+        }
+        let capability =
+            discover_capability_contract(peer, spec.rights, spec.contract_id, message_bytes)
+                .map_err(|_| IpcStatus::Unauthorized)?;
         unsafe {
             let cache = (&mut *DISCOVERED_CAPABILITIES.0.get()).get_or_insert_with(Vec::new);
             cache.try_reserve(1).map_err(|_| IpcStatus::Disconnected)?;
@@ -754,6 +947,11 @@ fn discovered_capability(spec: CapabilitySpec) -> Result<logos_abi::CapabilityHa
         let _ = spec;
         Err(IpcStatus::Unauthorized)
     }
+}
+
+#[allow(dead_code)]
+pub fn capability_handle(spec: CapabilitySpec) -> Result<logos_abi::CapabilityHandle, IpcStatus> {
+    discovered_capability(spec)
 }
 
 pub trait IpcCapabilityArgument: Copy {
@@ -776,8 +974,10 @@ impl IpcCapabilityArgument for usize {
 
 impl IpcCapabilityArgument for CapabilitySpec {
     fn resolve(self, message_bytes: usize) -> Result<(u64, usize), IpcStatus> {
-        let expected =
-            logos_abi::ipc_message_size(self.endpoint.index()).ok_or(IpcStatus::Unauthorized)?;
+        let expected = usize::from(self.message_bytes);
+        if expected == 0 {
+            return Err(IpcStatus::Unauthorized);
+        }
         if message_bytes != expected {
             return Err(IpcStatus::Malformed);
         }
@@ -990,7 +1190,7 @@ pub fn manager_call(
     }
     let status = manager_syscall(
         logos_abi::MANAGER_SYSCALL,
-        logos_abi::MANAGER_CAPABILITY_SLOT,
+        bootstrap_page().control.raw(),
         mem::size_of::<logos_abi::ManagerRequest>(),
     );
     if status == logos_abi::IpcStatus::Ok {
@@ -1088,13 +1288,13 @@ fn ipc_syscall_raw(number: usize, capability_raw: u64, length: usize) -> IpcStat
 }
 
 #[inline(always)]
-fn manager_syscall(number: usize, capability_slot: usize, length: usize) -> IpcStatus {
+fn manager_syscall(number: usize, capability_raw: u64, length: usize) -> IpcStatus {
     let mut raw = number;
     unsafe {
         asm!(
             "int 49",
             inout("rax") raw,
-            in("rdi") capability_slot,
+            in("rdi") capability_raw as usize,
             in("rsi") length,
             options(preserves_flags),
         );
@@ -1121,21 +1321,23 @@ mod tests {
             flags: 0,
             handle: capability.raw(),
             peer,
+            contract_id: 1,
             message_bytes: 16,
             queue_capacity: 1,
+            event: logos_abi::EventHandle::new(3, 1).unwrap(),
             name_len: 0,
-            reserved: [0; 3],
+            reserved: [0; 1],
             name: [0; logos_abi::MAX_SERVICE_NAME_BYTES],
         };
         response.count = 1;
         assert_eq!(
-            capability_from_response(&response, peer, logos_abi::IpcRights::Send, 16),
+            capability_from_response(&response, peer, logos_abi::IpcRights::Send, 1, 16),
             Ok(Some(capability))
         );
         response.records[1] = response.records[0];
         response.count = 2;
         assert_eq!(
-            capability_from_response(&response, peer, logos_abi::IpcRights::Send, 16),
+            capability_from_response(&response, peer, logos_abi::IpcRights::Send, 1, 16),
             Err(logos_abi::DirectoryStatus::Malformed)
         );
     }
