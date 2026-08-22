@@ -26,7 +26,7 @@ pub const FRAME_WORDS: usize = MAX_MANAGED_FRAMES.div_ceil(64);
 #[cfg(test)]
 pub const FRAME_SUMMARY_WORDS: usize = FRAME_WORDS.div_ceil(64);
 #[cfg(test)]
-const TEST_MAX_MANAGED_FRAMES: usize = 4096;
+const TEST_MAX_MANAGED_FRAMES: usize = 256;
 pub const MAX_FRAME_SHARDS: usize = 4;
 pub const MAX_MEMORY_CPUS: usize = 8;
 pub const FRAME_CACHE_CAPACITY: usize = 16;
@@ -40,9 +40,6 @@ pub const MAX_RECLAIMERS: usize = 8;
 pub const MAX_MEMORY_CLAIMS: usize = 128;
 pub const MAX_HEAP_SLOTS: usize = 256;
 pub const MAX_QUOTAS: usize = 32;
-
-#[cfg(target_os = "uefi")]
-pub(crate) const KERNEL_HEAP_PAGE_RECORD_COUNT: usize = 16;
 
 const NO_DEADLINE: u64 = u64::MAX;
 const INITIAL_GENERATION: u32 = 1;
@@ -472,6 +469,10 @@ pub struct FrameMetadataLayout {
     free_len: usize,
     summary_offset: usize,
     summary_len: usize,
+    heap_records_offset: usize,
+    heap_records_len: usize,
+    heap_leases_offset: usize,
+    heap_leases_len: usize,
     bytes: usize,
 }
 
@@ -485,7 +486,17 @@ impl FrameMetadataLayout {
         let summary_len = free_len.div_ceil(64);
         let summary_offset = align_up(free_offset.checked_add(free_bytes)?, align_of::<u64>())?;
         let summary_bytes = summary_len.checked_mul(size_of::<u64>())?;
-        let bytes = summary_offset.checked_add(summary_bytes)?;
+        let heap_records_len = frame_count;
+        let heap_records_offset =
+            align_up(summary_offset.checked_add(summary_bytes)?, align_of::<HeapPageRecord>())?;
+        let heap_records_bytes = heap_records_len.checked_mul(size_of::<HeapPageRecord>())?;
+        let heap_leases_len = frame_count;
+        let heap_leases_offset = align_up(
+            heap_records_offset.checked_add(heap_records_bytes)?,
+            align_of::<HeapLeaseRecord>(),
+        )?;
+        let heap_leases_bytes = heap_leases_len.checked_mul(size_of::<HeapLeaseRecord>())?;
+        let bytes = heap_leases_offset.checked_add(heap_leases_bytes)?;
         Some(Self {
             records_offset,
             records_len: frame_count,
@@ -493,6 +504,10 @@ impl FrameMetadataLayout {
             free_len,
             summary_offset,
             summary_len,
+            heap_records_offset,
+            heap_records_len,
+            heap_leases_offset,
+            heap_leases_len,
             bytes,
         })
     }
@@ -582,6 +597,10 @@ struct FrameMetadata {
     free_len: usize,
     summary: *mut u64,
     summary_len: usize,
+    heap_records: *mut HeapPageRecord,
+    heap_records_len: usize,
+    heap_leases: *mut HeapLeaseRecord,
+    heap_leases_len: usize,
 }
 
 unsafe impl Send for FrameMetadata {}
@@ -594,6 +613,10 @@ impl FrameMetadata {
         free_len: 0,
         summary: core::ptr::null_mut(),
         summary_len: 0,
+        heap_records: core::ptr::null_mut(),
+        heap_records_len: 0,
+        heap_leases: core::ptr::null_mut(),
+        heap_leases_len: 0,
     };
 
     fn configure(
@@ -609,10 +632,14 @@ impl FrameMetadata {
             self.records = base.add(layout.records_offset).cast();
             self.free = base.add(layout.free_offset).cast();
             self.summary = base.add(layout.summary_offset).cast();
+            self.heap_records = base.add(layout.heap_records_offset).cast();
+            self.heap_leases = base.add(layout.heap_leases_offset).cast();
         }
         self.records_len = layout.records_len;
         self.free_len = layout.free_len;
         self.summary_len = layout.summary_len;
+        self.heap_records_len = layout.heap_records_len;
+        self.heap_leases_len = layout.heap_leases_len;
         Ok(())
     }
 
@@ -622,6 +649,10 @@ impl FrameMetadata {
             slice::from_raw_parts_mut(self.records, self.records_len).fill(FrameRecord::EMPTY);
             slice::from_raw_parts_mut(self.free, self.free_len).fill(0);
             slice::from_raw_parts_mut(self.summary, self.summary_len).fill(0);
+            slice::from_raw_parts_mut(self.heap_records, self.heap_records_len)
+                .fill(HeapPageRecord::empty());
+            slice::from_raw_parts_mut(self.heap_leases, self.heap_leases_len)
+                .fill(HeapLeaseRecord::empty());
         }
     }
 
@@ -662,7 +693,14 @@ const TEST_METADATA_BYTES: usize = {
     let free_len = TEST_MAX_MANAGED_FRAMES.div_ceil(64);
     let free_offset = records_bytes.div_ceil(8) * 8;
     let summary_offset = (free_offset + free_len * size_of::<u64>()).div_ceil(8) * 8;
-    let bytes = summary_offset + free_len.div_ceil(64) * size_of::<u64>();
+    let heap_records_offset = (summary_offset + free_len.div_ceil(64) * size_of::<u64>())
+        .div_ceil(align_of::<HeapPageRecord>())
+        * align_of::<HeapPageRecord>();
+    let heap_leases_offset = (heap_records_offset
+        + TEST_MAX_MANAGED_FRAMES * size_of::<HeapPageRecord>())
+    .div_ceil(align_of::<HeapLeaseRecord>())
+        * align_of::<HeapLeaseRecord>();
+    let bytes = heap_leases_offset + TEST_MAX_MANAGED_FRAMES * size_of::<HeapLeaseRecord>();
     bytes.div_ceil(PAGE_SIZE as usize) * PAGE_SIZE as usize
 };
 
@@ -761,6 +799,17 @@ impl PhysicalFrameManager {
 
     pub const fn frame_count(&self) -> usize {
         self.frame_count
+    }
+
+    #[cfg(target_os = "uefi")]
+    fn heap_metadata(&mut self) -> (&mut [HeapPageRecord], &mut [HeapLeaseRecord]) {
+        let records = unsafe {
+            slice::from_raw_parts_mut(self.metadata.heap_records, self.metadata.heap_records_len)
+        };
+        let leases = unsafe {
+            slice::from_raw_parts_mut(self.metadata.heap_leases, self.metadata.heap_leases_len)
+        };
+        (records, leases)
     }
 
     pub const fn run_count(&self) -> usize {
@@ -1591,6 +1640,17 @@ impl SmpFrameAllocator {
     pub fn available(&self) -> usize {
         // SAFETY: callers use this snapshot for capacity reporting only.
         unsafe { (&*self.manager.get()).available() }
+    }
+
+    #[cfg(target_os = "uefi")]
+    #[allow(clippy::mut_from_ref)]
+    pub(crate) fn heap_metadata(&self) -> Option<(&mut [HeapPageRecord], &mut [HeapLeaseRecord])> {
+        if !self.initialized.load(Ordering::Acquire) {
+            return None;
+        }
+        // SAFETY: heap metadata is reserved during allocator initialization and
+        // is exclusively owned by the kernel heap after this handoff.
+        Some(unsafe { (&mut *self.manager.get()).heap_metadata() })
     }
 
     /// Flush cached frees into the shared frame metadata.
@@ -2683,7 +2743,7 @@ pub enum HeapAllocationKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeapAllocation {
     kind: HeapAllocationKind,
-    index: u16,
+    index: u32,
     generation: u32,
     owner: OwnerId,
     bytes: usize,
@@ -2786,7 +2846,8 @@ pub struct HeapPageRecord {
     owner: OwnerId,
     bytes: usize,
     address: usize,
-    pages: FrameBatch,
+    lease_start: u32,
+    lease_count: u16,
 }
 
 impl HeapPageRecord {
@@ -2797,8 +2858,21 @@ impl HeapPageRecord {
             owner: OwnerId(0),
             bytes: 0,
             address: 0,
-            pages: FrameBatch::empty(),
+            lease_start: 0,
+            lease_count: 0,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct HeapLeaseRecord {
+    used: bool,
+    lease: Option<FrameLease>,
+}
+
+impl HeapLeaseRecord {
+    const fn empty() -> Self {
+        Self { used: false, lease: None }
     }
 }
 
@@ -2811,6 +2885,7 @@ impl HeapPageRecord {
 pub struct KernelHeap<'a> {
     frames: &'a SmpFrameAllocator,
     page_records: &'a mut [HeapPageRecord],
+    page_leases: &'a mut [HeapLeaseRecord],
     central: TryLock<HeapCentral>,
     caches: [TryLock<HeapMagazine>; MAX_MEMORY_CPUS],
     quotas: [Quota; MAX_QUOTAS],
@@ -2820,10 +2895,12 @@ impl<'a> KernelHeap<'a> {
     pub const fn new(
         frames: &'a SmpFrameAllocator,
         page_records: &'a mut [HeapPageRecord],
+        page_leases: &'a mut [HeapLeaseRecord],
     ) -> Self {
         Self {
             frames,
             page_records,
+            page_leases,
             central: TryLock::new(HeapCentral::empty()),
             caches: [const { TryLock::new(HeapMagazine::empty()) }; MAX_MEMORY_CPUS],
             quotas: [Quota::EMPTY; MAX_QUOTAS],
@@ -2859,12 +2936,13 @@ impl<'a> KernelHeap<'a> {
             return Err(HeapError::Quota);
         }
         if bytes > 512 {
-            let Some((index, record)) =
-                self.page_records.iter_mut().enumerate().find(|(_, record)| !record.used)
-            else {
+            let Some(index) = self.page_records.iter().position(|record| !record.used) else {
                 return Err(HeapError::Exhausted);
             };
             let pages = bytes.div_ceil(PAGE_SIZE as usize);
+            let Some(lease_start) = self.find_lease_range(pages) else {
+                return Err(HeapError::Exhausted);
+            };
             let batch = self
                 .frames
                 .alloc_batch(cpu, owner, pages, FrameState::Dirty)
@@ -2873,16 +2951,22 @@ impl<'a> KernelHeap<'a> {
                 .get(0)
                 .map(|lease| lease.address().raw() as usize)
                 .ok_or(HeapError::InvalidHandle)?;
+            for offset in 0..pages {
+                self.page_leases[lease_start + offset] =
+                    HeapLeaseRecord { used: true, lease: batch.get(offset) };
+            }
+            let record = &mut self.page_records[index];
             record.used = true;
             record.generation = next_generation(record.generation);
             record.owner = owner;
             record.bytes = bytes;
             record.address = address;
-            record.pages = batch;
+            record.lease_start = lease_start as u32;
+            record.lease_count = pages as u16;
             self.quotas[quota_index].used += bytes;
             return Ok(HeapAllocation {
                 kind: HeapAllocationKind::Pages,
-                index: index as u16,
+                index: index as u32,
                 generation: record.generation,
                 owner,
                 bytes,
@@ -2917,7 +3001,7 @@ impl<'a> KernelHeap<'a> {
         self.quotas[quota_index].used += bytes;
         Ok(HeapAllocation {
             kind: HeapAllocationKind::Slab,
-            index: index as u16,
+            index: index as u32,
             generation: slot.generation,
             owner,
             bytes,
@@ -2928,7 +3012,7 @@ impl<'a> KernelHeap<'a> {
 
     pub fn free(&mut self, cpu: usize, allocation: HeapAllocation) -> Result<(), HeapError> {
         if allocation.kind == HeapAllocationKind::Pages {
-            let Some(record) = self.page_records.get_mut(allocation.index as usize) else {
+            let Some(record) = self.page_records.get(allocation.index as usize).copied() else {
                 return Err(HeapError::InvalidHandle);
             };
             if !record.used || record.generation != allocation.generation {
@@ -2937,19 +3021,25 @@ impl<'a> KernelHeap<'a> {
             if record.owner != allocation.owner {
                 return Err(HeapError::WrongOwner);
             }
-            if record.address != allocation.address
-                || record.bytes != allocation.bytes
-                || allocation.pages != Some(record.pages)
-            {
+            if record.address != allocation.address || record.bytes != allocation.bytes {
                 return Err(HeapError::InvalidHandle);
             }
             let bytes = record.bytes;
-            self.frames.free_batch(cpu, record.pages).map_err(map_alloc_error)?;
+            let batch = self.page_batch(record)?;
+            if allocation.pages != Some(batch) {
+                return Err(HeapError::InvalidHandle);
+            }
+            self.frames.free_batch(cpu, batch).map_err(map_alloc_error)?;
+            for offset in 0..record.lease_count as usize {
+                self.page_leases[record.lease_start as usize + offset] = HeapLeaseRecord::empty();
+            }
+            let record = &mut self.page_records[allocation.index as usize];
             record.used = false;
             record.owner = OwnerId(0);
             record.bytes = 0;
             record.address = 0;
-            record.pages = FrameBatch::empty();
+            record.lease_start = 0;
+            record.lease_count = 0;
             if let Some(quota) = self.quotas.get_mut(allocation.owner.raw() as usize) {
                 quota.used = quota.used.saturating_sub(bytes);
             }
@@ -2981,7 +3071,7 @@ impl<'a> KernelHeap<'a> {
             quota.used = quota.used.saturating_sub(allocation.bytes);
         }
         if let Some(mut cache) = self.caches[cpu].try_lock() {
-            let _ = cache.push(allocation.index);
+            let _ = cache.push(allocation.index as u16);
         }
         Ok(())
     }
@@ -3003,7 +3093,7 @@ impl<'a> KernelHeap<'a> {
                 .find(|(_, slot)| slot.used && slot.address == address)
                 .map(|(index, slot)| HeapAllocation {
                     kind: HeapAllocationKind::Slab,
-                    index: index as u16,
+                    index: index as u32,
                     generation: slot.generation,
                     owner: slot.owner,
                     bytes: slot.bytes,
@@ -3020,18 +3110,45 @@ impl<'a> KernelHeap<'a> {
             .enumerate()
             .find(|(_, record)| record.used && record.address == address)
         {
+            let batch = self.page_batch(*record)?;
             let allocation = HeapAllocation {
                 kind: HeapAllocationKind::Pages,
-                index: index as u16,
+                index: index as u32,
                 generation: record.generation,
                 owner: record.owner,
                 bytes: record.bytes,
                 address: record.address,
-                pages: Some(record.pages),
+                pages: Some(batch),
             };
             return self.free(cpu, allocation);
         }
         Err(HeapError::InvalidHandle)
+    }
+
+    fn find_lease_range(&self, pages: usize) -> Option<usize> {
+        if pages == 0 || pages > self.page_leases.len() {
+            return None;
+        }
+        (0..=self.page_leases.len() - pages).find(|start| {
+            self.page_leases[*start..*start + pages].iter().all(|record| !record.used)
+        })
+    }
+
+    fn page_batch(&self, record: HeapPageRecord) -> Result<FrameBatch, HeapError> {
+        let start = record.lease_start as usize;
+        let count = record.lease_count as usize;
+        let end = start.checked_add(count).ok_or(HeapError::InvalidHandle)?;
+        let leases = self.page_leases.get(start..end).ok_or(HeapError::InvalidHandle)?;
+        let mut batch = FrameBatch::empty();
+        for slot in leases {
+            if !slot.used {
+                return Err(HeapError::InvalidHandle);
+            }
+            batch
+                .push(slot.lease.ok_or(HeapError::InvalidHandle)?)
+                .map_err(|_| HeapError::InvalidHandle)?;
+        }
+        Ok(batch)
     }
 
     pub fn live_bytes(&self, owner: OwnerId) -> Option<usize> {
@@ -3069,10 +3186,6 @@ pub struct KernelGlobalAllocator<'a> {
     heap: TryLock<Option<KernelHeap<'a>>>,
     pressure: TryLock<PressureManager>,
 }
-
-#[cfg(target_os = "uefi")]
-pub(crate) static mut KERNEL_HEAP_PAGE_RECORDS: [HeapPageRecord; KERNEL_HEAP_PAGE_RECORD_COUNT] =
-    [const { HeapPageRecord::empty() }; KERNEL_HEAP_PAGE_RECORD_COUNT];
 
 #[cfg(target_os = "uefi")]
 #[global_allocator]
@@ -3114,14 +3227,13 @@ impl<'a> KernelGlobalAllocator<'a> {
 #[cfg(target_os = "uefi")]
 pub(crate) fn bind_kernel_global_allocator(frames: &SmpFrameAllocator) -> Result<(), HeapError> {
     let frames: &'static SmpFrameAllocator = unsafe { core::mem::transmute(frames) };
-    let records = unsafe {
-        let pointer = core::ptr::addr_of_mut!(KERNEL_HEAP_PAGE_RECORDS).cast::<HeapPageRecord>();
-        core::slice::from_raw_parts_mut(pointer, KERNEL_HEAP_PAGE_RECORD_COUNT)
-    };
+    let (records, leases) = frames.heap_metadata().ok_or(HeapError::InvalidRequest)?;
+    let (records, leases): (&'static mut [HeapPageRecord], &'static mut [HeapLeaseRecord]) =
+        unsafe { core::mem::transmute((records, leases)) };
     KERNEL_GLOBAL_ALLOCATOR
         .register_reclaimer(reclaim_kernel_frame_caches)
         .map_err(|_| HeapError::InvalidRequest)?;
-    KERNEL_GLOBAL_ALLOCATOR.bind(KernelHeap::new(frames, records))
+    KERNEL_GLOBAL_ALLOCATOR.bind(KernelHeap::new(frames, records, leases))
 }
 
 #[cfg(target_os = "uefi")]
@@ -3522,7 +3634,8 @@ mod tests {
         allocator.initialize(&normalized).unwrap();
         let owner = OwnerId::new(2).unwrap();
         let mut page_records = [HeapPageRecord::empty(); 2];
-        let mut heap = KernelHeap::new(&allocator, &mut page_records);
+        let mut page_leases = [HeapLeaseRecord::empty(); 16];
+        let mut heap = KernelHeap::new(&allocator, &mut page_records, &mut page_leases);
         heap.set_quota(owner, 8192).unwrap();
         assert_eq!(
             heap.alloc(0, owner, 32, 8, AllocationContext::Interrupt),
@@ -3543,6 +3656,27 @@ mod tests {
     }
 
     #[test]
+    fn heap_page_metadata_scales_with_reserved_capacity() {
+        let normalized = normalize_memory_map(&map(&[(0x1000, 32, true)]), &[]).unwrap();
+        let mut allocator = SmpFrameAllocator::empty();
+        allocator.initialize(&normalized).unwrap();
+        let owner = OwnerId::new(2).unwrap();
+        let mut page_records = [HeapPageRecord::empty(); 17];
+        let mut page_leases = [HeapLeaseRecord::empty(); 17];
+        let mut heap = KernelHeap::new(&allocator, &mut page_records, &mut page_leases);
+        heap.set_quota(owner, 17 * 513).unwrap();
+        let mut allocations = [None; 17];
+        for allocation in &mut allocations {
+            *allocation = Some(heap.alloc(0, owner, 513, 8, AllocationContext::Thread).unwrap());
+        }
+        assert!(heap.alloc(0, owner, 513, 8, AllocationContext::Thread).is_err());
+        for allocation in allocations.into_iter().flatten() {
+            heap.free(0, allocation).unwrap();
+        }
+        assert_eq!(heap.live_objects(owner), Some(0));
+    }
+
+    #[test]
     fn global_allocator_adapter_tracks_layout_addresses() {
         let normalized = normalize_memory_map(&map(&[(0x1000, 16, true)]), &[]).unwrap();
         let mut allocator = SmpFrameAllocator::empty();
@@ -3552,14 +3686,16 @@ mod tests {
         assert!(!unbound.is_bound());
         assert!(unsafe { GlobalAlloc::alloc(&unbound, small_layout) }.is_null());
         let mut page_records = [HeapPageRecord::empty(); 2];
-        let heap = KernelHeap::new(&allocator, &mut page_records);
+        let mut page_leases = [HeapLeaseRecord::empty(); 16];
+        let heap = KernelHeap::new(&allocator, &mut page_records, &mut page_leases);
         let global = KernelGlobalAllocator::empty();
         assert!(!global.is_bound());
         global.bind(heap).unwrap();
         assert!(global.is_bound());
         let mut second_records = [HeapPageRecord::empty(); 1];
+        let mut second_leases = [HeapLeaseRecord::empty(); 8];
         assert_eq!(
-            global.bind(KernelHeap::new(&allocator, &mut second_records)),
+            global.bind(KernelHeap::new(&allocator, &mut second_records, &mut second_leases)),
             Err(HeapError::InvalidRequest)
         );
 
@@ -3584,7 +3720,12 @@ mod tests {
         let mut allocator = SmpFrameAllocator::empty();
         allocator.initialize(&normalized).unwrap();
         let mut page_records = [HeapPageRecord::empty(); 2];
-        let global = KernelGlobalAllocator::new(KernelHeap::new(&allocator, &mut page_records));
+        let mut page_leases = [HeapLeaseRecord::empty(); 16];
+        let global = KernelGlobalAllocator::new(KernelHeap::new(
+            &allocator,
+            &mut page_records,
+            &mut page_leases,
+        ));
         global.register_reclaimer(reclaim_none).unwrap();
         RECLAIM_CALLS.store(0, Ordering::Relaxed);
 
