@@ -288,6 +288,24 @@ impl RuntimeServiceRegistry {
         }
     }
 
+    pub fn begin_lifecycle(
+        &mut self,
+        operation: ManagerOperation,
+        handle: ServiceHandle,
+    ) -> ManagerStatus {
+        let status = self.lifecycle_status(operation, handle);
+        if status != ManagerStatus::Ok {
+            return status;
+        }
+        let Ok(service) = self.service_mut(handle) else { return ManagerStatus::Stale };
+        service.state = match operation {
+            ManagerOperation::Start => ServiceState::Starting,
+            ManagerOperation::Stop | ManagerOperation::Restart => ServiceState::Stopping,
+            _ => return ManagerStatus::Unsupported,
+        };
+        ManagerStatus::Accepted
+    }
+
     pub fn manager_request(&self, request: ManagerRequest) -> ManagerResponse {
         let mut response =
             ManagerResponse::new(request.operation, ManagerStatus::Malformed, request.request_id);
@@ -564,6 +582,14 @@ mod tests {
         );
         registry.start(dependency).unwrap();
         assert_eq!(registry.lifecycle_status(ManagerOperation::Start, service), ManagerStatus::Ok);
+        assert_eq!(
+            registry.begin_lifecycle(ManagerOperation::Start, service),
+            ManagerStatus::Accepted
+        );
+        assert_eq!(
+            registry.lifecycle_status(ManagerOperation::Start, service),
+            ManagerStatus::Busy
+        );
         registry.start(service).unwrap();
         assert_eq!(
             registry.lifecycle_status(ManagerOperation::Start, service),

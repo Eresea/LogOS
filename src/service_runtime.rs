@@ -3401,6 +3401,11 @@ impl ServiceRuntime {
                 }
             }
         }
+        if service_lifecycle && decision.response.status == logos_abi::ManagerStatus::Accepted {
+            if let Some(registry) = self.dynamic_services.as_mut() {
+                let _ = registry.begin_lifecycle(request.operation, request.service);
+            }
+        }
         match decision.action {
             ManagerAction::None => {}
             ManagerAction::Start(service) => {
