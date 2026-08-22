@@ -146,14 +146,15 @@ impl RuntimeEventRegistry {
         if deadline != NO_DEADLINE && deadline < now {
             return Err(EventError::InvalidDeadline);
         }
-        let members = {
+        let member_count = {
             let set_record = self.set(set)?;
             if set_record.owner != owner {
                 return Err(EventError::Unauthorized);
             }
-            set_record.members.clone()
+            set_record.members.len()
         };
-        for event in members {
+        for index in 0..member_count {
+            let event = self.set(set)?.members.get(index).copied().ok_or(EventError::Stale)?;
             let record = self.event_mut(event)?;
             if record.signaled {
                 record.signaled = false;
