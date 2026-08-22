@@ -169,8 +169,6 @@ pub struct ServiceRuntime {
     heartbeat_ticks: [AtomicU64; SERVICE_COUNT],
     supervisor: LiveSupervisor,
     manager: ServiceManager,
-    manager_capability_frames: [Option<FrameAddress>; SERVICE_COUNT],
-    manager_generation: u32,
     pending_restart: Option<([ServiceId; crate::service_manager::MAX_SERVICE_SLOTS], usize)>,
     storage_map_windows: [[Option<crate::storage_ipc::StorageMapWindow>;
         crate::storage_ipc::STORAGE_MAP_WINDOWS_PER_CLIENT];
@@ -403,8 +401,6 @@ impl ServiceRuntime {
             heartbeat_ticks: [const { AtomicU64::new(0) }; SERVICE_COUNT],
             supervisor: LiveSupervisor::new(),
             manager: ServiceManager::new(),
-            manager_capability_frames: [None; SERVICE_COUNT],
-            manager_generation: 1,
             pending_restart: None,
             storage_map_windows: [[None; crate::storage_ipc::STORAGE_MAP_WINDOWS_PER_CLIENT];
                 crate::storage_ipc::STORAGE_MAP_CLIENTS],
@@ -929,29 +925,6 @@ impl ServiceRuntime {
                 logos_abi::IPC_CAPABILITY_BASE,
                 MappingFlags::READ_ONLY_DATA,
             )?;
-            let manager_rights = manager_rights(service);
-            if manager_rights != logos_abi::ManagerRights::NONE {
-                let manager_frame =
-                    self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
-                self.manager_capability_frames[service.index()] = Some(manager_frame);
-                memory.clear(manager_frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
-                let capability = logos_abi::ManagerCapability::new(
-                    self.manager_generation,
-                    manager_rights,
-                    self.service_epoch,
-                )
-                .ok_or(ServiceRuntimeError::StaleGeneration)?;
-                unsafe {
-                    (manager_frame.raw() as usize as *mut logos_abi::ManagerCapabilityPage)
-                        .write(logos_abi::ManagerCapabilityPage { capability });
-                }
-                self.map_ipc_private_page(
-                    process,
-                    manager_frame,
-                    logos_abi::MANAGER_CAPABILITY_BASE,
-                    MappingFlags::READ_ONLY_DATA,
-                )?;
-            }
         }
         let framebuffer = resources.framebuffer().ok_or(ServiceRuntimeError::Resources)?;
         self.map_framebuffer(framebuffer)?;
@@ -3293,18 +3266,8 @@ impl ServiceRuntime {
         if length != core::mem::size_of::<logos_abi::ManagerRequest>() {
             return logos_abi::IpcStatus::Malformed;
         }
-        let Some(capability_frame) = self.manager_capability_frames[service.index()] else {
-            return logos_abi::IpcStatus::Unauthorized;
-        };
-        let capability = unsafe {
-            (capability_frame.raw() as usize as *const logos_abi::ManagerCapabilityPage)
-                .read()
-                .capability
-        };
-        if capability.is_empty()
-            || capability.generation != self.manager_generation
-            || capability.service_epoch != self.service_epoch
-        {
+        let rights = manager_rights(service);
+        if rights == logos_abi::ManagerRights::NONE {
             return logos_abi::IpcStatus::Stale;
         }
         let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
@@ -3372,7 +3335,7 @@ impl ServiceRuntime {
                 manager_request.service = translated;
             }
         }
-        let mut decision = self.manager.request(manager_request, capability.rights);
+        let mut decision = self.manager.request(manager_request, rights);
         if matches!(
             request.operation,
             logos_abi::ManagerOperation::List | logos_abi::ManagerOperation::Status
@@ -3775,7 +3738,6 @@ impl ServiceRuntime {
             };
             let mut staging = false;
             let mut capabilities = false;
-            let mut manager_capability = false;
             for mapping_index in 0..crate::process::MAX_MAPPINGS_PER_ADDRESS_SPACE {
                 let Some(mapping) = self.processes.mapping(process, mapping_index) else {
                     continue;
@@ -3797,17 +3759,8 @@ impl ServiceRuntime {
                 if address == logos_abi::IPC_CAPABILITY_BASE {
                     capabilities = mapping.flags() == MappingFlags::READ_ONLY_DATA;
                 }
-                if address == logos_abi::MANAGER_CAPABILITY_BASE {
-                    manager_capability = mapping.flags() == MappingFlags::READ_ONLY_DATA;
-                }
             }
             if !staging || !capabilities {
-                return false;
-            }
-            if service == ServiceId::Flow && !manager_capability {
-                return false;
-            }
-            if service != ServiceId::Flow && manager_capability {
                 return false;
             }
         }
@@ -4075,7 +4028,6 @@ impl ServiceRuntime {
         crate::arch::begin_service_runtime_transition();
         self.ipc_generation = self.ipc_generation.wrapping_add(1).max(1);
         self.service_epoch = self.service_epoch.wrapping_add(1).max(1);
-        self.manager_generation = self.manager_generation.wrapping_add(1).max(1);
         self.network_config.service_epoch =
             self.network_config.service_epoch.wrapping_add(1).max(1);
         if !self.supervisor.prepare_restart() {
@@ -4593,11 +4545,6 @@ impl ServiceRuntime {
                 let address = FrameAddress::from_raw(*frame);
                 *frame = 0;
                 self.frame_pool.release(address).map_err(|_| ServiceRuntimeError::Resources)?;
-            }
-        }
-        for frame in &mut self.manager_capability_frames {
-            if let Some(frame) = frame.take() {
-                self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
             }
         }
         for index in 0..SERVICE_COUNT {
