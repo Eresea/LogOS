@@ -1948,6 +1948,13 @@ impl ServiceRuntime {
                 };
                 if status == logos_abi::IpcStatus::Ok {
                     if let Some(index) = endpoint_index {
+                        if let Some((read_event, _)) = self
+                            .dynamic_ipc
+                            .as_ref()
+                            .and_then(|registry| registry.endpoint_events(endpoint).ok())
+                        {
+                            self.signal_dynamic_event_waiters(read_event);
+                        }
                         crate::arch::signal_events(logos_abi::ipc_read_event_mask(index));
                     }
                 }
@@ -2779,6 +2786,13 @@ impl ServiceRuntime {
                 };
                 if status == logos_abi::IpcStatus::Ok {
                     if let Some(index) = endpoint_index {
+                        if let Some((_, write_event)) = self
+                            .dynamic_ipc
+                            .as_ref()
+                            .and_then(|registry| registry.endpoint_events(endpoint).ok())
+                        {
+                            self.signal_dynamic_event_waiters(write_event);
+                        }
                         crate::arch::signal_events(logos_abi::ipc_write_event_mask(index));
                     }
                 }
@@ -3613,33 +3627,26 @@ impl ServiceRuntime {
         deadline: u64,
     ) -> Result<(), logos_abi::EventStatus> {
         let events = self.dynamic_events.as_ref().ok_or(logos_abi::EventStatus::Stale)?;
-        let registry = self.dynamic_ipc.as_ref().ok_or(logos_abi::EventStatus::Stale)?;
-        let members = events.members(owner, set).map_err(event_status)?;
-        let mut mask = 0u64;
-        for event in members {
-            let Some(endpoint_index) = self.dynamic_endpoints.iter().position(|endpoint| {
-                registry
-                    .endpoint_events(*endpoint)
-                    .is_ok_and(|(read, write)| read == *event || write == *event)
-            }) else {
-                return Err(logos_abi::EventStatus::Stale);
-            };
-            let (read_event, write_event) = registry
-                .endpoint_events(self.dynamic_endpoints[endpoint_index])
-                .map_err(|_| logos_abi::EventStatus::Stale)?;
-            if *event == read_event {
-                mask |= logos_abi::ipc_read_event_mask(endpoint_index);
-            } else if *event == write_event {
-                mask |= logos_abi::ipc_write_event_mask(endpoint_index);
-            }
-        }
+        let _ = events.members(owner, set).map_err(event_status)?;
         let Some(task) = self.tasks[service.index()] else {
             return Err(logos_abi::EventStatus::Stale);
         };
-        if crate::arch::prepare_service_event_wait(task, mask, deadline).is_none() {
+        if crate::arch::prepare_service_event_set_wait(task, set, deadline).is_none() {
             return Err(logos_abi::EventStatus::Stale);
         }
         Ok(())
+    }
+
+    fn signal_dynamic_event_waiters(&self, event: logos_abi::EventHandle) {
+        let Some(events) = self.dynamic_events.as_ref() else { return };
+        events.for_each_waiter(event, |set, owner| {
+            let Ok(index) = usize::try_from(owner.index()) else { return };
+            let Some(service) = ServiceId::from_index(index) else { return };
+            if self.tasks[service.index()].is_none() {
+                return;
+            }
+            crate::arch::signal_event_set(set);
+        });
     }
 
     #[cfg(feature = "qemu-proof")]

@@ -192,6 +192,22 @@ impl RuntimeEventRegistry {
         Ok(&record.members)
     }
 
+    pub fn for_each_waiter<F>(&self, event: EventHandle, mut callback: F)
+    where
+        F: FnMut(EventSetHandle, ServiceHandle),
+    {
+        for (index, slot) in self.sets.iter().enumerate() {
+            let Some(record) = slot.value.as_ref() else { continue };
+            if !record.waiting || !record.members.contains(&event) {
+                continue;
+            }
+            let Some(set) = EventSetHandle::new(index as u32, slot.generation) else {
+                continue;
+            };
+            callback(set, record.owner);
+        }
+    }
+
     pub fn destroy_event(
         &mut self,
         owner: ServiceHandle,
@@ -395,6 +411,22 @@ mod tests {
         events.signal_irq(first).unwrap();
         assert_eq!(events.wait_any(owner, set, 2, Some(10)), Ok(EventWait::Ready(first)));
         assert_eq!(events.remove(owner, set, first), Ok(()));
+    }
+
+    #[test]
+    fn waiting_sets_are_enumerated_without_allocating() {
+        let owner = owner();
+        let mut events = RuntimeEventRegistry::new();
+        let event = events.create_event(owner).unwrap();
+        let set = events.create_set(owner).unwrap();
+        events.add(owner, set, event).unwrap();
+        assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Pending));
+
+        let mut found = None;
+        events.for_each_waiter(event, |candidate, candidate_owner| {
+            found = Some((candidate, candidate_owner));
+        });
+        assert_eq!(found, Some((set, owner)));
     }
 
     #[test]

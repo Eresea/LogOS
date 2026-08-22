@@ -94,6 +94,7 @@ struct TaskSlot {
     saved_rsp: AtomicUsize,
     context_saved: AtomicBool,
     wait_mask: AtomicU64,
+    wait_object: AtomicU64,
     address_space: AtomicUsize,
     process: AtomicU64,
     user_entry: AtomicUsize,
@@ -111,6 +112,7 @@ impl TaskSlot {
             saved_rsp: AtomicUsize::new(0),
             context_saved: AtomicBool::new(false),
             wait_mask: AtomicU64::new(0),
+            wait_object: AtomicU64::new(0),
             address_space: AtomicUsize::new(0),
             process: AtomicU64::new(0),
             user_entry: AtomicUsize::new(0),
@@ -267,6 +269,7 @@ impl Scheduler {
             slot.saved_rsp.store(0, Ordering::Release);
             slot.context_saved.store(false, Ordering::Release);
             slot.wait_mask.store(0, Ordering::Release);
+            slot.wait_object.store(0, Ordering::Release);
             slot.address_space.store(address_space, Ordering::Release);
             slot.address_space_published.store(address_space != 0, Ordering::Release);
             if let Some(launch) = user_launch {
@@ -324,6 +327,7 @@ impl Scheduler {
         }
 
         slot.wait_mask.store(0, Ordering::Release);
+        slot.wait_object.store(0, Ordering::Release);
         slot.wake_deadline.store(deadline, Ordering::Release);
         if mask == 0 {
             return Some(true);
@@ -340,6 +344,29 @@ impl Scheduler {
             slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
             return Some(false);
         }
+        Some(true)
+    }
+
+    /// Register a wait on one runtime event-set object.
+    #[allow(dead_code)]
+    pub(crate) fn wait_for_event_object(
+        &self,
+        handle: TaskHandle,
+        object: u64,
+        deadline: u64,
+    ) -> Option<bool> {
+        if object == 0 {
+            return None;
+        }
+        let slot = self.tasks.get(handle.slot as usize)?;
+        let word = slot.state.load(Ordering::Acquire);
+        if generation(word) != handle.generation || state(word) != RUNNING {
+            return None;
+        }
+        slot.wait_mask.store(0, Ordering::Release);
+        slot.wait_object.store(0, Ordering::Release);
+        slot.wake_deadline.store(deadline, Ordering::Release);
+        slot.wait_object.store(object, Ordering::Release);
         Some(true)
     }
 
@@ -361,6 +388,9 @@ impl Scheduler {
         self.event_signal_mask.fetch_or(mask, Ordering::AcqRel);
         let mut woken = 0;
         for (index, slot) in self.tasks.iter().enumerate() {
+            if slot.wait_object.load(Ordering::Acquire) != 0 {
+                continue;
+            }
             let wait_mask = slot.wait_mask.load(Ordering::Acquire);
             if wait_mask & mask == 0 {
                 continue;
@@ -381,6 +411,29 @@ impl Scheduler {
         woken
     }
 
+    /// Wake tasks waiting on one runtime event-set object.
+    #[allow(dead_code)]
+    pub(crate) fn signal_event_object(&self, object: u64) -> usize {
+        if object == 0 {
+            return 0;
+        }
+        let mut woken = 0;
+        for (index, slot) in self.tasks.iter().enumerate() {
+            if slot.wait_object.load(Ordering::Acquire) != object {
+                continue;
+            }
+            let word = slot.state.load(Ordering::Acquire);
+            if !matches!(state(word), BLOCKED | RUNNING) {
+                continue;
+            }
+            let handle = TaskHandle { slot: index as u8, generation: generation(word) };
+            if self.wake(handle) {
+                woken += 1;
+            }
+        }
+        woken
+    }
+
     #[cfg_attr(not(target_os = "uefi"), allow(dead_code))]
     pub(crate) fn reset_events(&self) {
         self.event_pending.store(0, Ordering::Release);
@@ -391,6 +444,7 @@ impl Scheduler {
                 self.wake(handle);
             }
             slot.wait_mask.store(0, Ordering::Release);
+            slot.wait_object.store(0, Ordering::Release);
             slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
         }
     }
@@ -426,6 +480,7 @@ impl Scheduler {
                 continue;
             }
             slot.wait_mask.store(0, Ordering::Release);
+            slot.wait_object.store(0, Ordering::Release);
             if slot
                 .state
                 .compare_exchange(
@@ -471,14 +526,17 @@ impl Scheduler {
                 BLOCKED => {
                     slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
                     slot.wait_mask.store(0, Ordering::Release);
+                    slot.wait_object.store(0, Ordering::Release);
                     pack(handle.generation, RUNNABLE)
                 }
                 RUNNING => {
                     slot.wait_mask.store(0, Ordering::Release);
+                    slot.wait_object.store(0, Ordering::Release);
                     old | WAKE_PENDING
                 }
                 RUNNABLE => {
                     slot.wait_mask.store(0, Ordering::Release);
+                    slot.wait_object.store(0, Ordering::Release);
                     old
                 }
                 _ => return false,
@@ -512,6 +570,7 @@ impl Scheduler {
             };
             slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
             slot.wait_mask.store(0, Ordering::Release);
+            slot.wait_object.store(0, Ordering::Release);
             if slot.state.compare_exchange(old, next, Ordering::AcqRel, Ordering::Acquire).is_ok() {
                 return true;
             }
@@ -587,6 +646,7 @@ impl Scheduler {
             let next_state = if state(old) == STOPPING { COMPLETED } else { next_state };
             if next_state != BLOCKED {
                 slot.wait_mask.store(0, Ordering::Release);
+                slot.wait_object.store(0, Ordering::Release);
             }
             if next_state != BLOCKED || matches!(outcome, FinishState::Blocked) {
                 slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
@@ -631,6 +691,7 @@ impl Scheduler {
         slot.address_space_published.store(false, Ordering::Release);
         slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
         slot.wait_mask.store(0, Ordering::Release);
+        slot.wait_object.store(0, Ordering::Release);
         slot.saved_rsp.store(0, Ordering::Release);
         slot.context_saved.store(false, Ordering::Release);
         slot.state.store(pack(next_generation(handle.generation), VACANT), Ordering::Release);
@@ -842,6 +903,18 @@ mod tests {
         assert!(scheduler.finish(handle, FinishState::TimedBlocked));
         assert_eq!(scheduler.state(handle), Some(TaskState::Blocked));
         assert_eq!(scheduler.signal_events(event), 1);
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
+        assert_eq!(scheduler.wake_due(10), 0);
+    }
+
+    #[test]
+    fn runtime_event_object_wait_blocks_and_signal_wakes_receiver() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert_eq!(scheduler.wait_for_event_object(handle, 0x1000, 10), Some(true));
+        assert!(scheduler.save_context(handle, 0x2180));
+        assert!(scheduler.finish(handle, FinishState::TimedBlocked));
+        assert_eq!(scheduler.signal_event_object(0x1000), 1);
         assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
         assert_eq!(scheduler.wake_due(10), 0);
     }

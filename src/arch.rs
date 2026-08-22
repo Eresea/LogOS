@@ -1814,12 +1814,12 @@ pub(crate) fn prepare_user_wait(
     context::prepare_wait(handle, mask, timeout)
 }
 
-pub(crate) fn prepare_service_event_wait(
+pub(crate) fn prepare_service_event_set_wait(
     task: crate::TaskHandle,
-    mask: u64,
+    event_set: logos_abi::EventSetHandle,
     deadline: u64,
 ) -> Option<bool> {
-    let should_block = SCHEDULER.wait_for_events(task, mask, deadline)?;
+    let should_block = SCHEDULER.wait_for_event_object(task, event_set.raw(), deadline)?;
     if should_block {
         let cpu = current_cpu();
         unsafe {
@@ -1835,6 +1835,17 @@ pub(crate) fn prepare_service_event_wait(
 pub(crate) fn signal_events(mask: u64) -> usize {
     let previous_wakes = SCHEDULER.event_wakes();
     let woken = SCHEDULER.signal_events(mask);
+    if SCHEDULER.event_wakes() != previous_wakes {
+        #[cfg(feature = "qemu-proof")]
+        crate::proof::event_wake_ipi_sent();
+        notify_reschedule_cpus(current_cpu());
+    }
+    woken
+}
+
+pub(crate) fn signal_event_set(event_set: logos_abi::EventSetHandle) -> usize {
+    let previous_wakes = SCHEDULER.event_wakes();
+    let woken = SCHEDULER.signal_event_object(event_set.raw());
     if SCHEDULER.event_wakes() != previous_wakes {
         #[cfg(feature = "qemu-proof")]
         crate::proof::event_wake_ipi_sent();
