@@ -306,6 +306,28 @@ impl RuntimeServiceRegistry {
         ManagerStatus::Accepted
     }
 
+    pub fn abort_lifecycle(
+        &mut self,
+        operation: ManagerOperation,
+        handle: ServiceHandle,
+    ) -> ManagerStatus {
+        let Ok(service) = self.service_mut(handle) else { return ManagerStatus::Stale };
+        let expected_state = match operation {
+            ManagerOperation::Start => ServiceState::Starting,
+            ManagerOperation::Stop | ManagerOperation::Restart => ServiceState::Stopping,
+            _ => return ManagerStatus::Unsupported,
+        };
+        if service.state != expected_state {
+            return ManagerStatus::InvalidState;
+        }
+        service.state = match operation {
+            ManagerOperation::Start => ServiceState::Stopped,
+            ManagerOperation::Stop | ManagerOperation::Restart => ServiceState::Running,
+            _ => return ManagerStatus::Unsupported,
+        };
+        ManagerStatus::Ok
+    }
+
     pub fn manager_request(&self, request: ManagerRequest) -> ManagerResponse {
         let mut response =
             ManagerResponse::new(request.operation, ManagerStatus::Malformed, request.request_id);
@@ -605,6 +627,27 @@ mod tests {
             registry.lifecycle_status(ManagerOperation::Restart, service),
             ManagerStatus::InvalidState
         );
+    }
+
+    #[test]
+    fn failed_lifecycle_admission_is_rolled_back() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let service = registry.register(b"service", b"image", &[]).unwrap();
+
+        assert_eq!(
+            registry.begin_lifecycle(ManagerOperation::Start, service),
+            ManagerStatus::Accepted
+        );
+        assert_eq!(registry.abort_lifecycle(ManagerOperation::Start, service), ManagerStatus::Ok);
+        assert_eq!(registry.state(service), Ok(ServiceState::Stopped));
+
+        registry.start(service).unwrap();
+        assert_eq!(
+            registry.begin_lifecycle(ManagerOperation::Restart, service),
+            ManagerStatus::Accepted
+        );
+        assert_eq!(registry.abort_lifecycle(ManagerOperation::Restart, service), ManagerStatus::Ok);
+        assert_eq!(registry.state(service), Ok(ServiceState::Running));
     }
 
     #[test]

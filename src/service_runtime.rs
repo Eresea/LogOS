@@ -1301,6 +1301,18 @@ impl ServiceRuntime {
         }
     }
 
+    fn abort_dynamic_service_lifecycle(
+        &mut self,
+        operation: logos_abi::ManagerOperation,
+        service: ServiceId,
+    ) {
+        let generation = (self.service_epoch as u32).max(1);
+        let Ok(handle) = dynamic_service_handle(service, generation) else { return };
+        if let Some(registry) = self.dynamic_services.as_mut() {
+            let _ = registry.abort_lifecycle(operation, handle);
+        }
+    }
+
     fn uses_package_image(&self, service: ServiceId) -> bool {
         self.manager.image_source(service)
             == Some(crate::service_manager::ServiceImageSource::FilesystemPackage)
@@ -3755,12 +3767,20 @@ impl ServiceRuntime {
             ManagerAction::Start(service) => {
                 if self.uses_package_image(service) {
                     self.manager.mark_stopped(service);
+                    self.abort_dynamic_service_lifecycle(
+                        logos_abi::ManagerOperation::Start,
+                        service,
+                    );
                     decision.response.status = logos_abi::ManagerStatus::Unsupported;
                     self.refresh_manager_response_record(&mut decision.response);
                 } else if self.reset_service_image(service).is_err()
                     || self.start_service_task(service).is_err()
                 {
                     self.manager.mark_failed(service);
+                    self.abort_dynamic_service_lifecycle(
+                        logos_abi::ManagerOperation::Start,
+                        service,
+                    );
                     decision.response.status = logos_abi::ManagerStatus::Capacity;
                     self.refresh_manager_response_record(&mut decision.response);
                 }
@@ -3775,12 +3795,20 @@ impl ServiceRuntime {
                 }
                 Err(_) => {
                     self.manager.mark_failed(service);
+                    self.abort_dynamic_service_lifecycle(
+                        logos_abi::ManagerOperation::Stop,
+                        service,
+                    );
                     decision.response.status = logos_abi::ManagerStatus::Busy;
                     self.refresh_manager_response_record(&mut decision.response);
                 }
             },
             ManagerAction::Restart(services, count) => {
                 if services[..count].iter().any(|service| self.uses_package_image(*service)) {
+                    self.abort_dynamic_service_lifecycle(
+                        logos_abi::ManagerOperation::Restart,
+                        services[0],
+                    );
                     decision.response.status = logos_abi::ManagerStatus::Unsupported;
                 } else if self.pending_restart.is_some()
                     || services[..count].iter().any(|service| {
@@ -3788,12 +3816,20 @@ impl ServiceRuntime {
                             .is_none_or(|task| crate::SCHEDULER.state(task).is_none())
                     })
                 {
+                    self.abort_dynamic_service_lifecycle(
+                        logos_abi::ManagerOperation::Restart,
+                        services[0],
+                    );
                     decision.response.status = logos_abi::ManagerStatus::Busy;
                 } else {
                     let mut admitted = 0;
                     for service in &services[..count] {
                         if self.request_stop_task(*service).is_err() {
                             self.manager.mark_failed(*service);
+                            self.abort_dynamic_service_lifecycle(
+                                logos_abi::ManagerOperation::Restart,
+                                services[0],
+                            );
                             decision.response.status = logos_abi::ManagerStatus::Busy;
                             self.refresh_manager_response_record(&mut decision.response);
                             if admitted != 0 {
