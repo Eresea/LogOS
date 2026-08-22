@@ -147,6 +147,7 @@ pub struct ServiceRuntime {
     startup: ServiceStartup,
     ipc: Option<ServiceIpcGraph>,
     dynamic_ipc: Option<RuntimeIpcRegistry>,
+    dynamic_services: Option<crate::runtime_services::RuntimeServiceRegistry>,
     dynamic_events: Option<crate::runtime_events::RuntimeEventRegistry>,
     dynamic_endpoints: [logos_abi::EndpointHandle; logos_abi::IPC_ENDPOINT_COUNT],
     dynamic_capabilities:
@@ -378,6 +379,7 @@ impl ServiceRuntime {
             startup: ServiceStartup::new(),
             ipc: None,
             dynamic_ipc: None,
+            dynamic_services: None,
             dynamic_events: None,
             dynamic_endpoints: [logos_abi::EndpointHandle::EMPTY; logos_abi::IPC_ENDPOINT_COUNT],
             dynamic_capabilities: [[logos_abi::CapabilityHandle::EMPTY;
@@ -437,6 +439,49 @@ impl ServiceRuntime {
     pub fn configure_network(&mut self, config: logos_abi::NetworkConfig) {
         self.network_config = config;
         self.manager.set_network_enabled(config.is_enabled());
+    }
+
+    fn initialize_dynamic_services(&mut self) -> Result<(), ServiceRuntimeError> {
+        let mut registry = crate::runtime_services::RuntimeServiceRegistry::new();
+        let mut handles = [logos_abi::ServiceHandle::EMPTY; SERVICE_COUNT];
+        for spec in SERVICE_IMAGES {
+            handles[spec.service().index()] = registry
+                .register(spec.name(), b"builtin", &[])
+                .map_err(|_| ServiceRuntimeError::Resources)?;
+        }
+        for spec in SERVICE_IMAGES {
+            let mut dependencies = Vec::new();
+            dependencies.try_reserve(SERVICE_COUNT).map_err(|_| ServiceRuntimeError::Resources)?;
+            for dependency in SERVICE_IMAGES {
+                if crate::service_images::service_dependencies(spec.service())
+                    & (1u16 << dependency.service().index())
+                    != 0
+                {
+                    dependencies.push(handles[dependency.service().index()]);
+                }
+            }
+            registry
+                .set_dependencies(handles[spec.service().index()], &dependencies)
+                .map_err(|_| ServiceRuntimeError::Resources)?;
+        }
+        if !self.network_config.is_enabled() {
+            registry
+                .disable(handles[ServiceId::Network.index()])
+                .map_err(|_| ServiceRuntimeError::Resources)?;
+            registry
+                .disable(handles[ServiceId::Fetch.index()])
+                .map_err(|_| ServiceRuntimeError::Resources)?;
+        }
+        for service in crate::service_images::SERVICE_START_ORDER {
+            if !self.network_config.is_enabled()
+                && (service == ServiceId::Network || service == ServiceId::Fetch)
+            {
+                continue;
+            }
+            registry.start(handles[service.index()]).map_err(|_| ServiceRuntimeError::Resources)?;
+        }
+        self.dynamic_services = Some(registry);
+        Ok(())
     }
 
     fn initialize_dynamic_ipc(&mut self) -> Result<(), ServiceRuntimeError> {
@@ -1273,6 +1318,7 @@ impl ServiceRuntime {
             self.startup.start(service).map_err(ServiceRuntimeError::Startup)?;
         }
         self.manager.initialize_running();
+        self.initialize_dynamic_services()?;
         Ok(())
     }
 
@@ -3918,6 +3964,7 @@ impl ServiceRuntime {
         }
         self.ipc = None;
         self.dynamic_ipc = None;
+        self.dynamic_services = None;
         self.dynamic_events = None;
         self.dynamic_endpoints = [logos_abi::EndpointHandle::EMPTY; logos_abi::IPC_ENDPOINT_COUNT];
         self.dynamic_capabilities =

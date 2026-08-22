@@ -20,6 +20,7 @@ impl Slot {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceState {
+    Disabled,
     Stopped,
     Running,
 }
@@ -96,6 +97,32 @@ impl RuntimeServiceRegistry {
     pub fn start(&mut self, handle: ServiceHandle) -> Result<(), ServiceRegistryError> {
         let mut visiting = Vec::new();
         self.start_inner(handle, &mut visiting)
+    }
+
+    pub fn set_dependencies(
+        &mut self,
+        handle: ServiceHandle,
+        dependencies: &[ServiceHandle],
+    ) -> Result<(), ServiceRegistryError> {
+        for dependency in dependencies {
+            if self.service(*dependency).is_err() {
+                return Err(ServiceRegistryError::InvalidDependency);
+            }
+        }
+        let service = self.service_mut(handle)?;
+        service
+            .dependencies
+            .try_reserve(dependencies.len().saturating_sub(service.dependencies.len()))
+            .map_err(|_| ServiceRegistryError::Capacity)?;
+        service.dependencies.clear();
+        service.dependencies.extend_from_slice(dependencies);
+        Ok(())
+    }
+
+    pub fn disable(&mut self, handle: ServiceHandle) -> Result<(), ServiceRegistryError> {
+        let service = self.service_mut(handle)?;
+        service.state = ServiceState::Disabled;
+        Ok(())
     }
 
     pub fn stop(&mut self, handle: ServiceHandle) -> Result<(), ServiceRegistryError> {
@@ -177,6 +204,7 @@ impl RuntimeServiceRegistry {
             let mut record = DirectoryRecord::service(service.handle, &service.name)
                 .expect("registry names are validated at registration");
             record.flags = match service.state {
+                ServiceState::Disabled => 2,
                 ServiceState::Stopped => 0,
                 ServiceState::Running => 1,
             };
