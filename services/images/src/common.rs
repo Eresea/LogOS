@@ -834,6 +834,24 @@ pub struct CapabilitySpec {
     pub rights: logos_abi::IpcRights,
 }
 
+#[allow(dead_code)]
+pub const CORE_PEER_INDEX: u32 = u32::MAX;
+
+#[allow(dead_code)]
+pub const fn capability_contract(
+    contract_id: u16,
+    peer_index: u32,
+    message_bytes: usize,
+    rights: logos_abi::IpcRights,
+) -> CapabilitySpec {
+    CapabilitySpec {
+        contract_id,
+        peer_index,
+        message_bytes: if message_bytes <= u16::MAX as usize { message_bytes as u16 } else { 0 },
+        rights,
+    }
+}
+
 const fn capability_peer_index(
     endpoint: logos_abi::IpcEndpointId,
     rights: logos_abi::IpcRights,

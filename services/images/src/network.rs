@@ -7,20 +7,42 @@ mod common;
 use core::{mem, ptr};
 use logos_abi::{IpcBytes, IpcStatus, MessageKind, NetworkRequest, NetworkResponse, ServiceId};
 
-const FLOW_RECEIVE: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::FlowToNetwork, logos_abi::IpcRights::Receive);
-const FLOW_SEND: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::NetworkToFlow, logos_abi::IpcRights::Send);
-const FETCH_RECEIVE: common::CapabilitySpec = common::capability_spec(
-    logos_abi::IpcEndpointId::FetchToNetwork,
+const FLOW_RECEIVE: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Flow.index() as u32,
+    mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const FETCH_SEND: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::NetworkToFetch, logos_abi::IpcRights::Send);
-const CORE_RECEIVE: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::CoreToNetwork, logos_abi::IpcRights::Receive);
-const CORE_SEND: common::CapabilitySpec =
-    common::capability_spec(logos_abi::IpcEndpointId::NetworkToCore, logos_abi::IpcRights::Send);
+const FLOW_SEND: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Flow.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Send,
+);
+const FETCH_RECEIVE: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Fetch.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Receive,
+);
+const FETCH_SEND: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_BYTES,
+    logos_abi::ServiceId::Fetch.index() as u32,
+    mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Send,
+);
+const CORE_RECEIVE: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_PACKET,
+    common::CORE_PEER_INDEX,
+    mem::size_of::<logos_abi::NetworkPacketDescriptor>(),
+    logos_abi::IpcRights::Receive,
+);
+const CORE_SEND: common::CapabilitySpec = common::capability_contract(
+    logos_abi::IPC_CONTRACT_PACKET,
+    common::CORE_PEER_INDEX,
+    mem::size_of::<logos_abi::NetworkPacketDescriptor>(),
+    logos_abi::IpcRights::Send,
+);
 
 #[cfg(target_os = "none")]
 mod stack {
