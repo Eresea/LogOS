@@ -442,7 +442,9 @@ impl ServiceRuntime {
     }
 
     fn initialize_dynamic_services(&mut self) -> Result<(), ServiceRuntimeError> {
-        let mut registry = crate::runtime_services::RuntimeServiceRegistry::new();
+        let mut registry = crate::runtime_services::RuntimeServiceRegistry::new_with_generation(
+            (self.service_epoch as u32).max(1),
+        );
         let mut handles = [logos_abi::ServiceHandle::EMPTY; SERVICE_COUNT];
         for spec in SERVICE_IMAGES {
             handles[spec.service().index()] = registry

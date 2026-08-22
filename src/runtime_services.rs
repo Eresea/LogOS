@@ -15,8 +15,8 @@ struct Slot {
 }
 
 impl Slot {
-    fn empty() -> Self {
-        Self { generation: 1, value: None }
+    fn with_generation(generation: u32) -> Self {
+        Self { generation: generation.max(1), value: None }
     }
 }
 
@@ -51,11 +51,16 @@ pub enum ServiceRegistryError {
 
 pub struct RuntimeServiceRegistry {
     slots: Vec<Slot>,
+    generation_seed: u32,
 }
 
 impl RuntimeServiceRegistry {
     pub fn new() -> Self {
-        Self { slots: Vec::new() }
+        Self::new_with_generation(1)
+    }
+
+    pub fn new_with_generation(generation: u32) -> Self {
+        Self { slots: Vec::new(), generation_seed: generation.max(1) }
     }
 
     pub fn register(
@@ -299,7 +304,7 @@ impl RuntimeServiceRegistry {
             return Ok(index);
         }
         self.slots.try_reserve(1).map_err(|_| ServiceRegistryError::Capacity)?;
-        self.slots.push(Slot::empty());
+        self.slots.push(Slot::with_generation(self.generation_seed));
         Ok(self.slots.len() - 1)
     }
 
@@ -446,6 +451,17 @@ mod tests {
             registry.register_with_quota(b"zero", b"image", &[], 0),
             Err(ServiceRegistryError::InvalidImage)
         );
+    }
+
+    #[test]
+    fn registry_generation_seed_rejects_previous_runtime_handles() {
+        let mut first = RuntimeServiceRegistry::new_with_generation(3);
+        let old = first.register(b"old", b"image", &[]).unwrap();
+        let mut replacement = RuntimeServiceRegistry::new_with_generation(4);
+        let current = replacement.register(b"new", b"image", &[]).unwrap();
+        assert_eq!(old.generation(), 3);
+        assert_eq!(current.generation(), 4);
+        assert_eq!(replacement.state(old), Err(ServiceRegistryError::Stale));
     }
 
     fn format_name(index: usize) -> Vec<u8> {
