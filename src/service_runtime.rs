@@ -1890,12 +1890,6 @@ impl ServiceRuntime {
             Ok(slot) => slot,
             Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
         };
-        let Some(graph) = self.ipc.as_ref() else {
-            return crate::service_ipc::IpcOutcome {
-                status: logos_abi::IpcStatus::Disconnected,
-                notified: false,
-            };
-        };
         let Some(capability_frame) = self.ipc_capability_frames[service.index()] else {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Unauthorized,
@@ -2070,6 +2064,12 @@ impl ServiceRuntime {
                     staging_frame.raw() as usize as *const u8,
                     core::mem::size_of::<logos_abi::IpcBytes>(),
                 )
+            };
+            let Some(graph) = self.ipc.as_ref() else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Disconnected,
+                    notified: false,
+                };
             };
             let outcome = graph.send(ServiceId::Network, response_capability, bytes);
             if outcome.notified {
@@ -2479,6 +2479,56 @@ impl ServiceRuntime {
                 notified: true,
             };
         }
+        if let Some(dynamic_capability) = logos_abi::CapabilityHandle::from_raw(capability_raw) {
+            let caller = match dynamic_service_handle(service, (self.service_epoch as u32).max(1)) {
+                Ok(caller) => caller,
+                Err(_) => {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Stale,
+                        notified: false,
+                    };
+                }
+            };
+            let (endpoint, expected_bytes) = match self
+                .dynamic_ipc
+                .as_ref()
+                .ok_or(logos_abi::IpcStatus::Disconnected)
+                .and_then(|registry| {
+                    registry.capability_endpoint(
+                        caller,
+                        dynamic_capability,
+                        logos_abi::IpcRights::Send,
+                    )
+                }) {
+                Ok(resolved) => resolved,
+                Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
+            };
+            if length != expected_bytes {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            }
+            let bytes = unsafe {
+                core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
+            };
+            let status = self
+                .dynamic_ipc
+                .as_mut()
+                .map(|registry| registry.send(caller, dynamic_capability, bytes))
+                .unwrap_or(logos_abi::IpcStatus::Disconnected);
+            let endpoint_index =
+                self.dynamic_endpoints.iter().position(|candidate| *candidate == endpoint);
+            if status == logos_abi::IpcStatus::Ok {
+                if let Some(index) = endpoint_index {
+                    crate::arch::signal_events(logos_abi::ipc_read_event_mask(index));
+                }
+            }
+            return crate::service_ipc::IpcOutcome {
+                status,
+                notified: status == logos_abi::IpcStatus::Ok,
+            };
+        }
         let bytes = unsafe {
             core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
         };
@@ -2488,6 +2538,12 @@ impl ServiceRuntime {
         {
             self.storage_proof.observe_request(bytes);
         }
+        let Some(graph) = self.ipc.as_ref() else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Disconnected,
+                notified: false,
+            };
+        };
         let outcome = graph.send(service, capability, bytes);
         if outcome.notified
             || (outcome.status == logos_abi::IpcStatus::Ok
@@ -2522,12 +2578,6 @@ impl ServiceRuntime {
         ) {
             Ok(slot) => slot,
             Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
-        };
-        let Some(graph) = self.ipc.as_ref() else {
-            return crate::service_ipc::IpcOutcome {
-                status: logos_abi::IpcStatus::Disconnected,
-                notified: false,
-            };
         };
         let Some(capability_frame) = self.ipc_capability_frames[service.index()] else {
             return crate::service_ipc::IpcOutcome {
@@ -2753,6 +2803,59 @@ impl ServiceRuntime {
                 notified: false,
             };
         }
+        if let Some(dynamic_capability) = logos_abi::CapabilityHandle::from_raw(capability_raw) {
+            let caller = match dynamic_service_handle(service, (self.service_epoch as u32).max(1)) {
+                Ok(caller) => caller,
+                Err(_) => {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Stale,
+                        notified: false,
+                    };
+                }
+            };
+            let (endpoint, expected_bytes) = match self
+                .dynamic_ipc
+                .as_ref()
+                .ok_or(logos_abi::IpcStatus::Disconnected)
+                .and_then(|registry| {
+                    registry.capability_endpoint(
+                        caller,
+                        dynamic_capability,
+                        logos_abi::IpcRights::Receive,
+                    )
+                }) {
+                Ok(resolved) => resolved,
+                Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
+            };
+            let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Unauthorized,
+                    notified: false,
+                };
+            };
+            let bytes = unsafe {
+                core::slice::from_raw_parts_mut(
+                    staging_frame.raw() as usize as *mut u8,
+                    expected_bytes,
+                )
+            };
+            let status = self
+                .dynamic_ipc
+                .as_mut()
+                .map(|registry| registry.receive(caller, dynamic_capability, bytes))
+                .unwrap_or(logos_abi::IpcStatus::Disconnected);
+            let endpoint_index =
+                self.dynamic_endpoints.iter().position(|candidate| *candidate == endpoint);
+            if status == logos_abi::IpcStatus::Ok {
+                if let Some(index) = endpoint_index {
+                    crate::arch::signal_events(logos_abi::ipc_write_event_mask(index));
+                }
+            }
+            return crate::service_ipc::IpcOutcome {
+                status,
+                notified: status == logos_abi::IpcStatus::Ok,
+            };
+        }
         let length = crate::service_ipc::ServiceIpcGraph::message_size(index);
         let dynamic_status = self.validate_dynamic_capability(
             service,
@@ -2772,6 +2875,12 @@ impl ServiceRuntime {
         };
         let bytes = unsafe {
             core::slice::from_raw_parts_mut(staging_frame.raw() as usize as *mut u8, length)
+        };
+        let Some(graph) = self.ipc.as_ref() else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Disconnected,
+                notified: false,
+            };
         };
         let outcome = graph.receive(service, capability, bytes);
         #[cfg(feature = "qemu-proof")]
