@@ -117,7 +117,9 @@ impl RuntimeServiceRegistry {
 
     pub fn start(&mut self, handle: ServiceHandle) -> Result<(), ServiceRegistryError> {
         let mut visiting = Vec::new();
-        self.start_inner(handle, &mut visiting)
+        let mut order = Vec::new();
+        self.collect_start_order(handle, &mut visiting, &mut order)?;
+        self.apply_start_order(&order)
     }
 
     pub fn set_dependencies(
@@ -163,9 +165,13 @@ impl RuntimeServiceRegistry {
         let index = self.index(handle)?;
         let dependencies = self.service(handle)?.dependencies.clone();
         let mut visiting = Vec::new();
+        visiting.push(handle);
+        let mut order = Vec::new();
         for dependency in dependencies {
-            self.start_inner(dependency, &mut visiting)?;
+            self.collect_start_order(dependency, &mut visiting, &mut order)?;
         }
+        visiting.pop();
+        self.apply_start_order(&order)?;
         let service = self.slots[index].value.as_mut().ok_or(ServiceRegistryError::Stale)?;
         service.epoch = next_epoch(service.epoch);
         service.state = ServiceState::Running;
@@ -282,25 +288,33 @@ impl RuntimeServiceRegistry {
         DirectoryStatus::Ok
     }
 
-    fn start_inner(
+    fn collect_start_order(
         &mut self,
         handle: ServiceHandle,
         visiting: &mut Vec<ServiceHandle>,
+        order: &mut Vec<ServiceHandle>,
     ) -> Result<(), ServiceRegistryError> {
         if visiting.contains(&handle) {
             return Err(ServiceRegistryError::DependencyCycle);
         }
         let dependencies = self.service(handle)?.dependencies.clone();
-        if self.state(handle)? == ServiceState::Running {
+        if self.state(handle)? == ServiceState::Running || order.contains(&handle) {
             return Ok(());
         }
         visiting.push(handle);
         for dependency in dependencies {
-            self.start_inner(dependency, visiting)?;
+            self.collect_start_order(dependency, visiting, order)?;
         }
         visiting.pop();
-        let service = self.service_mut(handle)?;
-        service.state = ServiceState::Running;
+        order.push(handle);
+        Ok(())
+    }
+
+    fn apply_start_order(&mut self, order: &[ServiceHandle]) -> Result<(), ServiceRegistryError> {
+        for handle in order {
+            let service = self.service_mut(*handle)?;
+            service.state = ServiceState::Running;
+        }
         Ok(())
     }
 
@@ -420,6 +434,20 @@ mod tests {
         assert_eq!(registry.state(service), Err(ServiceRegistryError::Stale));
         let replacement = registry.register(b"new", b"image", &[]).unwrap();
         assert_ne!(service, replacement);
+    }
+
+    #[test]
+    fn failed_dependency_start_does_not_leave_partial_running_state() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let first = registry.register(b"first", b"image", &[]).unwrap();
+        let second = registry.register(b"second", b"image", &[]).unwrap();
+        let root = registry.register(b"root", b"image", &[first, second]).unwrap();
+        registry.set_dependencies(second, &[root]).unwrap();
+
+        assert_eq!(registry.start(root), Err(ServiceRegistryError::DependencyCycle));
+        assert_eq!(registry.state(first), Ok(ServiceState::Stopped));
+        assert_eq!(registry.state(second), Ok(ServiceState::Stopped));
+        assert_eq!(registry.state(root), Ok(ServiceState::Stopped));
     }
 
     #[test]
