@@ -2964,6 +2964,17 @@ impl ServiceRuntime {
         let request =
             unsafe { core::ptr::read_unaligned(bytes.cast::<logos_abi::ManagerRequest>()) };
         let mut decision = self.manager.request(request, capability.rights);
+        if matches!(
+            request.operation,
+            logos_abi::ManagerOperation::List | logos_abi::ManagerOperation::Status
+        ) && !matches!(
+            decision.response.status,
+            logos_abi::ManagerStatus::Malformed | logos_abi::ManagerStatus::Unauthorized
+        ) {
+            if let Some(registry) = self.dynamic_services.as_ref() {
+                decision.response = registry.manager_request(request);
+            }
+        }
         match decision.action {
             ManagerAction::None => {}
             ManagerAction::Start(service) => {

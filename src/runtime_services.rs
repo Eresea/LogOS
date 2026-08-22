@@ -4,7 +4,9 @@ use alloc::vec::Vec;
 
 use logos_abi::{
     DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE, DirectoryOperation, DirectoryRecord,
-    DirectoryResponse, DirectoryStatus, MAX_SERVICE_NAME_BYTES, ServiceHandle,
+    DirectoryResponse, DirectoryStatus, MAX_PACKAGE_NAME_BYTES, MAX_SERVICE_NAME_BYTES,
+    ManagerOperation, ManagerRequest, ManagerResponse, ManagerState, ManagerStatus, ServiceHandle,
+    ServiceManagerRecord,
 };
 
 struct Slot {
@@ -32,6 +34,7 @@ struct ServiceRecord {
     dependencies: Vec<ServiceHandle>,
     state: ServiceState,
     epoch: u64,
+    restarts: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,6 +93,7 @@ impl RuntimeServiceRegistry {
             dependencies: deps,
             state: ServiceState::Stopped,
             epoch: 1,
+            restarts: 0,
         });
         Ok(handle)
     }
@@ -148,6 +152,7 @@ impl RuntimeServiceRegistry {
         let service = self.slots[index].value.as_mut().ok_or(ServiceRegistryError::Stale)?;
         service.epoch = next_epoch(service.epoch);
         service.state = ServiceState::Running;
+        service.restarts = service.restarts.saturating_add(1);
         Ok(())
     }
 
@@ -176,6 +181,36 @@ impl RuntimeServiceRegistry {
 
     pub fn image_len(&self, handle: ServiceHandle) -> Result<usize, ServiceRegistryError> {
         Ok(self.service(handle)?.image.len())
+    }
+
+    pub fn manager_request(&self, request: ManagerRequest) -> ManagerResponse {
+        let mut response =
+            ManagerResponse::new(request.operation, ManagerStatus::Malformed, request.request_id);
+        if request.request_id == 0 || request.abi_version != logos_abi::MANAGER_ABI_VERSION {
+            return response;
+        }
+        match request.operation {
+            ManagerOperation::List => {
+                response.status = ManagerStatus::Ok;
+                let cursor = usize::try_from(request.cursor).unwrap_or(usize::MAX);
+                let Some((next, record)) = self.next_manager_record(cursor) else {
+                    response.cursor = u64::MAX;
+                    return response;
+                };
+                response.cursor = next as u64;
+                response.record = record;
+            }
+            ManagerOperation::Status => {
+                let Ok(record) = self.manager_record(request.service) else {
+                    response.status = ManagerStatus::Stale;
+                    return response;
+                };
+                response.status = ManagerStatus::Ok;
+                response.record = record;
+            }
+            _ => response.status = ManagerStatus::Unsupported,
+        }
+        response
     }
 
     pub fn list(
@@ -273,6 +308,45 @@ impl RuntimeServiceRegistry {
         let index = self.index(handle)?;
         self.slots[index].value.as_mut().ok_or(ServiceRegistryError::Stale)
     }
+
+    fn manager_record(
+        &self,
+        handle: ServiceHandle,
+    ) -> Result<ServiceManagerRecord, ServiceRegistryError> {
+        let service = self.service(handle)?;
+        let mut name = [0; MAX_PACKAGE_NAME_BYTES];
+        let name_len = service.name.len().min(name.len());
+        name[..name_len].copy_from_slice(&service.name[..name_len]);
+        Ok(ServiceManagerRecord {
+            service: service.handle,
+            state: match service.state {
+                ServiceState::Disabled => ManagerState::Disabled,
+                ServiceState::Stopped => ManagerState::Stopped,
+                ServiceState::Running => ManagerState::Running,
+            },
+            restarts: service.restarts,
+            name_len: name_len as u8,
+            dependencies: service.dependencies.len().min(u16::MAX as usize) as u16,
+            reserved: [0; 2],
+            program_slot: u8::MAX,
+            reserved_program: [0; 3],
+            program_generation: 0,
+            name,
+        })
+    }
+
+    fn next_manager_record(&self, cursor: usize) -> Option<(usize, ServiceManagerRecord)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| slot.value.as_ref().map(|_| index))
+            .skip(cursor)
+            .find_map(|index| {
+                self.manager_record(self.slots[index].value.as_ref()?.handle)
+                    .ok()
+                    .map(|record| (index + 1, record))
+            })
+    }
 }
 
 impl Default for RuntimeServiceRegistry {
@@ -318,6 +392,33 @@ mod tests {
         assert_eq!(registry.state(service), Err(ServiceRegistryError::Stale));
         let replacement = registry.register(b"new", b"image", &[]).unwrap();
         assert_ne!(service, replacement);
+    }
+
+    #[test]
+    fn manager_requests_use_dynamic_records_and_opaque_cursors() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let mut handles = Vec::new();
+        for index in 0..12 {
+            handles.push(registry.register(format_name(index).as_slice(), b"image", &[]).unwrap());
+        }
+        let mut request = ManagerRequest::new(ManagerOperation::List, 1);
+        let mut listed = 0;
+        loop {
+            let response = registry.manager_request(request);
+            assert_eq!(response.status, ManagerStatus::Ok);
+            listed += usize::from(response.record.name_len != 0);
+            if response.cursor == u64::MAX {
+                break;
+            }
+            request.cursor = response.cursor;
+        }
+        assert_eq!(listed, handles.len());
+
+        let mut status = ManagerRequest::new(ManagerOperation::Status, 2);
+        status.service = handles[11];
+        assert_eq!(registry.manager_request(status).status, ManagerStatus::Ok);
+        registry.remove(handles[11]).unwrap();
+        assert_eq!(registry.manager_request(status).status, ManagerStatus::Stale);
     }
 
     fn format_name(index: usize) -> Vec<u8> {
