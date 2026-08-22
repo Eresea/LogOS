@@ -3007,6 +3007,19 @@ impl ServiceRuntime {
                 decision.response = registry.manager_request(request);
             }
         }
+        if matches!(
+            request.operation,
+            logos_abi::ManagerOperation::Start
+                | logos_abi::ManagerOperation::Stop
+                | logos_abi::ManagerOperation::Restart
+        ) {
+            if let Some(registry) = self.dynamic_services.as_ref() {
+                if registry.validate_lifecycle_handle(request.service).is_err() {
+                    decision.response.status = logos_abi::ManagerStatus::Stale;
+                    decision.action = ManagerAction::None;
+                }
+            }
+        }
         match decision.action {
             ManagerAction::None => {}
             ManagerAction::Start(service) => {

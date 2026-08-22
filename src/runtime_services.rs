@@ -204,6 +204,13 @@ impl RuntimeServiceRegistry {
         Ok(self.service(handle)?.heap_quota_pages)
     }
 
+    pub fn validate_lifecycle_handle(
+        &self,
+        handle: ServiceHandle,
+    ) -> Result<(), ServiceRegistryError> {
+        self.service(handle).map(|_| ())
+    }
+
     pub fn manager_request(&self, request: ManagerRequest) -> ManagerResponse {
         let mut response =
             ManagerResponse::new(request.operation, ManagerStatus::Malformed, request.request_id);
