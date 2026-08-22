@@ -43,7 +43,12 @@ fn error_response(request: DeviceRequest, status: DeviceStatus) -> DeviceRespons
     DeviceResponse::new(request, status, generation, service_epoch)
 }
 
-fn run() -> ! {
+fn run(
+    flow_receive_capability: logos_abi::CapabilityHandle,
+    flow_send_capability: logos_abi::CapabilityHandle,
+    core_send_capability: logos_abi::CapabilityHandle,
+    core_receive_capability: logos_abi::CapabilityHandle,
+) -> ! {
     let mut flow_request: Option<DeviceRequest> = None;
     let mut core_sent = false;
     let mut pending_response: Option<DeviceResponse> = None;
@@ -55,7 +60,7 @@ fn run() -> ! {
         let mut progressed = false;
 
         if let Some(response) = pending_response {
-            match common::ipc_send(FLOW_SEND_CAPABILITY, &response) {
+            match common::ipc_send_handle(flow_send_capability, &response) {
                 IpcStatus::Ok | IpcStatus::Stale | IpcStatus::Disconnected => {
                     pending_response = None;
                     flow_request = None;
@@ -75,7 +80,7 @@ fn run() -> ! {
         if pending_response.is_none() {
             if let Some(request) = flow_request {
                 if !core_sent {
-                    match common::ipc_send(CORE_SEND_CAPABILITY, &request) {
+                    match common::ipc_send_handle(core_send_capability, &request) {
                         IpcStatus::Ok => core_sent = true,
                         IpcStatus::Full => {}
                         _ => {
@@ -85,7 +90,7 @@ fn run() -> ! {
                     progressed = true;
                 } else {
                     let mut response = DeviceResponse::new(request, DeviceStatus::Invalid, 1, 1);
-                    match common::ipc_receive(CORE_RECEIVE_CAPABILITY, &mut response) {
+                    match common::ipc_receive_handle(core_receive_capability, &mut response) {
                         IpcStatus::Ok if response.is_valid_for(request) => {
                             if response.status == DeviceStatus::Ok
                                 && manager.publish(response).is_err()
@@ -106,7 +111,7 @@ fn run() -> ! {
                 }
             } else {
                 let mut request = DeviceRequest::new(DeviceOperation::List, 1);
-                match common::ipc_receive(FLOW_RECEIVE_CAPABILITY, &mut request) {
+                match common::ipc_receive_handle(flow_receive_capability, &mut request) {
                     IpcStatus::Ok if request.is_valid() => {
                         flow_request = Some(request);
                         progressed = true;
@@ -132,7 +137,28 @@ fn run() -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
-    run()
+    let flow_receive_capability = match common::capability_handle(FLOW_RECEIVE_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let flow_send_capability = match common::capability_handle(FLOW_SEND_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let core_send_capability = match common::capability_handle(CORE_SEND_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let core_receive_capability = match common::capability_handle(CORE_RECEIVE_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    run(
+        flow_receive_capability,
+        flow_send_capability,
+        core_send_capability,
+        core_receive_capability,
+    )
 }
 
 #[cfg(target_os = "none")]
