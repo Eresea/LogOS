@@ -1089,34 +1089,44 @@ pub fn directory_call(
     request: &logos_abi::DirectoryRequest,
     response: &mut logos_abi::DirectoryResponse,
 ) -> logos_abi::DirectoryStatus {
-    unsafe {
-        ptr::write_unaligned(
-            logos_abi::IPC_STAGING_BASE as *mut logos_abi::DirectoryRequest,
-            *request,
-        );
-    }
-    let mut raw = logos_abi::SERVICE_DIRECTORY_SYSCALL;
-    unsafe {
-        asm!(
-            "int 49",
-            inout("rax") raw,
-            in("rdi") capability.raw() as usize,
-            in("rsi") mem::size_of::<logos_abi::DirectoryRequest>(),
-            options(preserves_flags),
-        );
-    }
-    let status =
-        logos_abi::DirectoryStatus::from_raw(raw).unwrap_or(logos_abi::DirectoryStatus::Malformed);
-    if status == logos_abi::DirectoryStatus::Ok {
+    // The request/response page crosses the ring boundary; retry one malformed
+    // envelope after republishing the request, but never retry a semantic status.
+    for attempt in 0..2 {
+        unsafe {
+            ptr::write_volatile(
+                logos_abi::IPC_STAGING_BASE as *mut logos_abi::DirectoryRequest,
+                *request,
+            );
+        }
+        core::sync::atomic::fence(Ordering::Release);
+        let mut raw = logos_abi::SERVICE_DIRECTORY_SYSCALL;
+        unsafe {
+            asm!(
+                "int 49",
+                inout("rax") raw,
+                in("rdi") capability.raw() as usize,
+                in("rsi") mem::size_of::<logos_abi::DirectoryRequest>(),
+                options(preserves_flags),
+            );
+        }
+        let status = logos_abi::DirectoryStatus::from_raw(raw)
+            .unwrap_or(logos_abi::DirectoryStatus::Malformed);
+        if status != logos_abi::DirectoryStatus::Ok {
+            return status;
+        }
+        core::sync::atomic::fence(Ordering::Acquire);
         let received = unsafe {
-            ptr::read_unaligned(logos_abi::IPC_STAGING_BASE as *const logos_abi::DirectoryResponse)
+            ptr::read_volatile(logos_abi::IPC_STAGING_BASE as *const logos_abi::DirectoryResponse)
         };
-        if !received.is_valid_for(*request) {
+        if received.is_valid_for(*request) {
+            *response = received;
+            return status;
+        }
+        if attempt == 1 {
             return logos_abi::DirectoryStatus::Malformed;
         }
-        *response = received;
     }
-    status
+    logos_abi::DirectoryStatus::Malformed
 }
 
 #[inline(always)]

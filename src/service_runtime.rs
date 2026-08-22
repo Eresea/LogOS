@@ -3572,7 +3572,7 @@ impl ServiceRuntime {
             return logos_abi::DirectoryStatus::Malformed;
         }
         let request = unsafe {
-            core::ptr::read_unaligned(
+            core::ptr::read_volatile(
                 staging_frame.raw() as usize as *const logos_abi::DirectoryRequest
             )
         };
@@ -3629,8 +3629,9 @@ impl ServiceRuntime {
         if status == logos_abi::DirectoryStatus::Ok {
             crate::proof::dynamic_directory_used();
         }
+        core::sync::atomic::fence(Ordering::Release);
         unsafe {
-            core::ptr::write_unaligned(
+            core::ptr::write_volatile(
                 staging_frame.raw() as usize as *mut logos_abi::DirectoryResponse,
                 response,
             );
