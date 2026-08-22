@@ -41,13 +41,29 @@ pub extern "C" fn _start() -> ! {
     let terminal = unsafe { &mut *core::ptr::addr_of_mut!(TERMINAL) };
     let pending_render = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_RENDER) };
     let pending_session_input = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_SESSION_INPUT) };
+    let input_capability = match common::capability_handle(INPUT_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let display_capability = match common::capability_handle(DISPLAY_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let session_input_capability = match common::capability_handle(SESSION_INPUT_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let session_output_capability = match common::capability_handle(SESSION_OUTPUT_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
     let mut heartbeat_ticks = 0u16;
     let mut render_more = false;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Terminal);
         let mut wait_mask = 0;
         if let Some(message) = *pending_session_input {
-            match common::ipc_send(SESSION_INPUT_CAPABILITY, &message) {
+            match common::ipc_send_handle(session_input_capability, &message) {
                 IpcStatus::Ok => {
                     *pending_session_input = None;
                 }
@@ -64,9 +80,9 @@ pub extern "C" fn _start() -> ! {
         }
         if pending_session_input.is_none() {
             let mut event = InputMessage::key(KeyCode::Unknown, KeyState::Released, 0);
-            while common::ipc_receive(INPUT_CAPABILITY, &mut event) == IpcStatus::Ok {
+            while common::ipc_receive_handle(input_capability, &mut event) == IpcStatus::Ok {
                 if let Some(message) = terminal.input(&event) {
-                    match common::ipc_send(SESSION_INPUT_CAPABILITY, &message) {
+                    match common::ipc_send_handle(session_input_capability, &message) {
                         IpcStatus::Ok => {}
                         IpcStatus::Full => {
                             *pending_session_input = Some(message);
@@ -88,7 +104,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
         let mut message = IpcBytes::empty(MessageKind::SessionOutput);
-        while common::ipc_receive(SESSION_OUTPUT_CAPABILITY, &mut message) == IpcStatus::Ok {
+        while common::ipc_receive_handle(session_output_capability, &mut message) == IpcStatus::Ok {
             if let Some(bytes) = message.as_bytes() {
                 terminal.session_output_bytes(bytes);
             }
@@ -98,7 +114,7 @@ pub extern "C" fn _start() -> ! {
             *pending_render = terminal.next_render();
         }
         if let Some(render) = *pending_render {
-            match common::ipc_send(DISPLAY_CAPABILITY, &render) {
+            match common::ipc_send_handle(display_capability, &render) {
                 IpcStatus::Ok => {
                     *pending_render = None;
                     render_more = render.flags & logos_abi::RENDER_FLAG_MORE != 0;
