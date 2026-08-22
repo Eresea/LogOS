@@ -8,8 +8,8 @@ use alloc::{collections::VecDeque, vec::Vec};
 
 use logos_abi::{
     CapabilityHandle, DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE, DirectoryRecordKind,
-    DirectoryRequest, DirectoryResponse, DirectoryStatus, EndpointHandle, IpcRights, IpcStatus,
-    MAX_IPC_BYTES, ServiceHandle,
+    DirectoryRequest, DirectoryResponse, DirectoryStatus, EndpointHandle, IPC_PAGE_BYTES,
+    IpcRights, IpcStatus, ServiceHandle,
 };
 
 struct Slot<T> {
@@ -67,7 +67,7 @@ impl RuntimeIpcRegistry {
             || !consumer.is_valid()
             || producer == consumer
             || message_bytes == 0
-            || message_bytes > MAX_IPC_BYTES
+            || message_bytes > IPC_PAGE_BYTES
             || queue_capacity == 0
             || queue_capacity > usize::from(u16::MAX)
             || service_epoch == 0
@@ -382,5 +382,19 @@ mod tests {
         assert_eq!(registry.directory(request, &mut response), DirectoryStatus::Ok);
         assert_eq!(response.count, 1);
         assert!(response.is_valid_for(request));
+    }
+
+    #[test]
+    fn typed_payload_limit_is_the_ipc_page_not_compact_bytes_limit() {
+        let (producer, consumer) = services();
+        let mut registry = RuntimeIpcRegistry::new();
+        let endpoint = registry
+            .create_endpoint(producer, consumer, 2, logos_abi::IPC_PAGE_BYTES, 1, 1)
+            .unwrap();
+        let capability = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
+        assert_eq!(
+            registry.send(producer, capability, &[0; logos_abi::IPC_PAGE_BYTES]),
+            IpcStatus::Ok
+        );
     }
 }
