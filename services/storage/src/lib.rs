@@ -22,7 +22,7 @@ pub use packages::{
 pub use system_pool::{StoragePoolError, StoragePoolLayout};
 
 use logos_abi::{
-    IpcCapability, IpcStatus, StorageOperation, StorageRequest, StorageResponse, StorageStatus,
+    CapabilityHandle, IpcStatus, StorageOperation, StorageRequest, StorageResponse, StorageStatus,
 };
 use logos_storage::{BLOCK_BYTES, Block, BlockError, BlockIndex, BlockStore, ReadMap};
 
@@ -45,22 +45,39 @@ impl CacheSlot {
 pub trait KernelStorageIpc {
     fn send(
         &mut self,
-        capability: IpcCapability,
+        capability: StorageCapability,
         request: StorageRequest,
         staging: &mut Block,
     ) -> IpcStatus;
 
     fn receive(
         &mut self,
-        capability: IpcCapability,
+        capability: StorageCapability,
         response: &mut StorageResponse,
         staging: &mut Block,
     ) -> IpcStatus;
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StorageCapability {
+    pub handle: CapabilityHandle,
+    pub generation: u16,
+    pub service_epoch: u64,
+}
+
+impl StorageCapability {
+    pub fn new(handle: CapabilityHandle, generation: u16, service_epoch: u64) -> Option<Self> {
+        (handle.is_valid() && generation != 0 && service_epoch != 0).then_some(Self {
+            handle,
+            generation,
+            service_epoch,
+        })
+    }
+}
+
 pub struct IpcBlockStore<T> {
     transport: T,
-    capability: IpcCapability,
+    capability: StorageCapability,
     capability_slot: u16,
     generation: u16,
     service_epoch: u64,
@@ -75,41 +92,30 @@ pub struct IpcBlockStore<T> {
 impl<T> IpcBlockStore<T> {
     pub fn new(
         transport: T,
-        capability: IpcCapability,
-        generation: u16,
-        service_epoch: u64,
+        capability: StorageCapability,
         blocks: u64,
     ) -> Result<Self, BlockError> {
-        if generation == 0 || service_epoch == 0 || blocks == 0 {
+        if blocks == 0 {
             return Err(BlockError::InvalidRequest);
         }
-        Self::new_with_slot(
-            transport,
-            capability,
-            capability.endpoint as u16,
-            generation,
-            service_epoch,
-            blocks,
-        )
+        Self::new_with_slot(transport, capability, 0, blocks)
     }
 
     pub fn new_with_slot(
         transport: T,
-        capability: IpcCapability,
+        capability: StorageCapability,
         capability_slot: u16,
-        generation: u16,
-        service_epoch: u64,
         blocks: u64,
     ) -> Result<Self, BlockError> {
-        if generation == 0 || service_epoch == 0 || blocks == 0 {
+        if blocks == 0 {
             return Err(BlockError::InvalidRequest);
         }
         Ok(Self {
             transport,
             capability,
             capability_slot,
-            generation,
-            service_epoch,
+            generation: capability.generation,
+            service_epoch: capability.service_epoch,
             blocks,
             next_request: 1,
             staging: Block::zero(),
@@ -365,12 +371,12 @@ fn map_storage_status(status: StorageStatus) -> Result<(), BlockError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logos_abi::{IpcRights, StorageStatus};
+    use logos_abi::StorageStatus;
     use logos_storage::{JournalRecord, MemoryBlockStore, ReplayError, ReplaySink, Volume};
 
     struct TestKernel {
         store: MemoryBlockStore<32>,
-        expected: IpcCapability,
+        expected: StorageCapability,
         pending: Option<StorageRequest>,
         fault: Option<StorageStatus>,
         fail_read_after: Option<usize>,
@@ -378,7 +384,7 @@ mod tests {
     }
 
     impl TestKernel {
-        fn new(expected: IpcCapability) -> Self {
+        fn new(expected: StorageCapability) -> Self {
             Self {
                 store: MemoryBlockStore::new(),
                 expected,
@@ -397,7 +403,7 @@ mod tests {
     impl KernelStorageIpc for TestKernel {
         fn send(
             &mut self,
-            capability: IpcCapability,
+            capability: StorageCapability,
             request: StorageRequest,
             staging: &mut Block,
         ) -> IpcStatus {
@@ -420,7 +426,7 @@ mod tests {
 
         fn receive(
             &mut self,
-            capability: IpcCapability,
+            capability: StorageCapability,
             response: &mut StorageResponse,
             staging: &mut Block,
         ) -> IpcStatus {
@@ -459,8 +465,8 @@ mod tests {
         }
     }
 
-    fn capability() -> IpcCapability {
-        IpcCapability::new(0, IpcRights::Send, 3, 9).unwrap()
+    fn capability() -> StorageCapability {
+        StorageCapability::new(CapabilityHandle::new(0, 3).unwrap(), 3, 9).unwrap()
     }
 
     #[test]
@@ -469,7 +475,7 @@ mod tests {
         let mut expected = Block::zero();
         expected.as_bytes_mut()[0] = 0x5a;
         kernel.store.write_block(BlockIndex::new(1), &expected).unwrap();
-        let mut store = IpcBlockStore::new(kernel, capability(), 3, 9, 4).unwrap();
+        let mut store = IpcBlockStore::new(kernel, capability(), 4).unwrap();
         let mut output = Block::zero();
         store.read_block(BlockIndex::new(1), &mut output).unwrap();
         assert_eq!(output, expected);
@@ -481,8 +487,8 @@ mod tests {
     #[test]
     fn unauthorized_and_stale_capabilities_are_rejected() {
         let kernel = TestKernel::new(capability());
-        let wrong = IpcCapability::new(0, IpcRights::Send, 4, 9).unwrap();
-        let mut store = IpcBlockStore::new(kernel, wrong, 4, 9, 4).unwrap();
+        let wrong = StorageCapability::new(CapabilityHandle::new(0, 4).unwrap(), 4, 9).unwrap();
+        let mut store = IpcBlockStore::new(kernel, wrong, 4).unwrap();
         let mut output = Block::zero();
         assert_eq!(
             store.read_block(BlockIndex::new(0), &mut output),
@@ -494,12 +500,12 @@ mod tests {
     fn io_and_read_only_failures_propagate_as_typed_errors() {
         let mut kernel = TestKernel::new(capability());
         kernel.fault = Some(StorageStatus::Io);
-        let mut store = IpcBlockStore::new(kernel, capability(), 3, 9, 4).unwrap();
+        let mut store = IpcBlockStore::new(kernel, capability(), 4).unwrap();
         assert_eq!(store.flush(), Err(BlockError::Io));
 
         let mut kernel = TestKernel::new(capability());
         kernel.fault = Some(StorageStatus::ReadOnly);
-        let mut store = IpcBlockStore::new(kernel, capability(), 3, 9, 4).unwrap();
+        let mut store = IpcBlockStore::new(kernel, capability(), 4).unwrap();
         assert_eq!(
             store.write_block(BlockIndex::new(0), &Block::zero()),
             Err(BlockError::ReadOnly)
@@ -510,7 +516,7 @@ mod tests {
     fn malformed_success_response_is_rejected() {
         let mut kernel = TestKernel::new(capability());
         kernel.malformed_response = true;
-        let mut store = IpcBlockStore::new(kernel, capability(), 3, 9, 4).unwrap();
+        let mut store = IpcBlockStore::new(kernel, capability(), 4).unwrap();
         let mut output = Block::zero();
 
         assert_eq!(
@@ -522,7 +528,7 @@ mod tests {
     #[test]
     fn cache_read_maps_pin_slots_until_unmap() {
         let kernel = TestKernel::new(capability());
-        let mut store = IpcBlockStore::new(kernel, capability(), 3, 9, 32).unwrap();
+        let mut store = IpcBlockStore::new(kernel, capability(), 32).unwrap();
         let first = store.map_read_blocks(BlockIndex::new(0), 16).unwrap();
         let second = store.map_read_blocks(BlockIndex::new(16), 16).unwrap();
         assert_eq!(first, ReadMap { source_page: 0, pages: 16 });
@@ -541,7 +547,7 @@ mod tests {
     fn failed_cache_read_rolls_back_partial_pins() {
         let mut kernel = TestKernel::new(capability());
         kernel.fail_read_after = Some(1);
-        let mut store = IpcBlockStore::new(kernel, capability(), 3, 9, 32).unwrap();
+        let mut store = IpcBlockStore::new(kernel, capability(), 32).unwrap();
 
         assert_eq!(store.map_read_blocks(BlockIndex::new(0), 2), Err(BlockError::Io));
         assert!(store.pin_count.iter().all(|count| *count == 0));
@@ -571,7 +577,7 @@ mod tests {
     fn service_restart_reopens_and_replays_a_committed_transaction_once() {
         let capability = capability();
         let kernel = TestKernel::new(capability);
-        let mut store = IpcBlockStore::new(kernel, capability, 3, 9, 32).unwrap();
+        let mut store = IpcBlockStore::new(kernel, capability, 32).unwrap();
         let mut volume = Volume::format(&mut store).unwrap();
         let payload = [0x5a; 8];
         let transaction =
@@ -579,7 +585,7 @@ mod tests {
         assert_eq!(transaction, 1);
 
         let kernel = store.into_transport();
-        let mut reopened_store = IpcBlockStore::new(kernel, capability, 3, 9, 32).unwrap();
+        let mut reopened_store = IpcBlockStore::new(kernel, capability, 32).unwrap();
         let mut reopened = Volume::open(&mut reopened_store).unwrap();
         let mut sink = Sink { records: 0 };
         let summary = reopened.recover(&mut reopened_store, &mut sink).unwrap();

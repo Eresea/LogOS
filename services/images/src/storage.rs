@@ -5,24 +5,20 @@
 mod common;
 
 use logos_abi::{
-    IpcBytes, IpcCapability, IpcEndpointId, IpcStatus, MessageKind, PackageOperation,
-    PackageRequest, PackageResponse, PackageStatus, PackageTargetKind, StorageApiOperation,
-    StorageApiStatus, StorageMapRequest, StorageMapResponse, StorageOperation, StorageRequest,
-    StorageResponse, StorageStatus, USER_STORAGE_FLAG_BEGIN, USER_STORAGE_FLAG_END,
-    UserStorageOperation, UserStorageRequest, UserStorageResponse, UserStorageStatus,
+    IpcBytes, IpcEndpointId, IpcStatus, MessageKind, PackageOperation, PackageRequest,
+    PackageResponse, PackageStatus, PackageTargetKind, StorageApiOperation, StorageApiStatus,
+    StorageMapRequest, StorageMapResponse, StorageOperation, StorageRequest, StorageResponse,
+    StorageStatus, USER_STORAGE_FLAG_BEGIN, USER_STORAGE_FLAG_END, UserStorageOperation,
+    UserStorageRequest, UserStorageResponse, UserStorageStatus,
 };
 use logos_storage::Block;
 use logos_storage_service::{
     DurableNamespaceV5, IpcBlockStore, KernelStorageIpc, NamespaceError, StorageApiV5,
-    error_response,
+    StorageCapability, error_response,
 };
 use logos_user::{USER_SNAPSHOT_BYTES, UserCatalog, UserCatalogStore};
 
-const REQUEST_CAPABILITY_SLOT: usize = common::capability_slot(
-    logos_abi::ServiceId::Storage,
-    logos_abi::IpcEndpointId::StorageToCore,
-    logos_abi::IpcRights::Send,
-);
+const REQUEST_PROTOCOL_SLOT: u16 = 2;
 const REQUEST_CAPABILITY: common::CapabilitySpec =
     common::capability_spec(logos_abi::IpcEndpointId::StorageToCore, logos_abi::IpcRights::Send);
 const RESPONSE_CAPABILITY: common::CapabilitySpec =
@@ -150,12 +146,13 @@ fn unmap_request(
 }
 
 struct StorageTransport {
+    capability: StorageCapability,
     operation: Option<StorageOperation>,
 }
 
 impl StorageTransport {
-    const fn new() -> Self {
-        Self { operation: None }
+    const fn new(capability: StorageCapability) -> Self {
+        Self { capability, operation: None }
     }
 
     fn heartbeat(&self) {
@@ -166,12 +163,12 @@ impl StorageTransport {
 impl KernelStorageIpc for StorageTransport {
     fn send(
         &mut self,
-        capability: IpcCapability,
+        capability: StorageCapability,
         request: StorageRequest,
         staging: &mut Block,
     ) -> IpcStatus {
         self.heartbeat();
-        if common::capability(REQUEST_CAPABILITY_SLOT) != Some(capability) {
+        if capability != self.capability {
             return IpcStatus::Unauthorized;
         }
         self.operation = Some(request.operation);
@@ -183,12 +180,12 @@ impl KernelStorageIpc for StorageTransport {
 
     fn receive(
         &mut self,
-        capability: IpcCapability,
+        capability: StorageCapability,
         response: &mut StorageResponse,
         staging: &mut Block,
     ) -> IpcStatus {
         self.heartbeat();
-        if common::capability(REQUEST_CAPABILITY_SLOT) != Some(capability) {
+        if capability != self.capability {
             return IpcStatus::Unauthorized;
         }
         let status = common::ipc_receive(RESPONSE_CAPABILITY, response);
@@ -199,31 +196,32 @@ impl KernelStorageIpc for StorageTransport {
     }
 }
 
-fn new_store(capability: IpcCapability, blocks: u64) -> Option<IpcBlockStore<StorageTransport>> {
+fn new_store(
+    capability: StorageCapability,
+    blocks: u64,
+) -> Option<IpcBlockStore<StorageTransport>> {
     IpcBlockStore::new_with_slot(
-        StorageTransport::new(),
+        StorageTransport::new(capability),
         capability,
-        REQUEST_CAPABILITY_SLOT as u16,
-        capability.generation,
-        capability.service_epoch,
+        REQUEST_PROTOCOL_SLOT,
         blocks,
     )
     .ok()
 }
 
-fn discover(capability: IpcCapability) -> Option<u64> {
+fn discover(capability: StorageCapability) -> Option<u64> {
     let request = StorageRequest::new(
         StorageOperation::Reopen,
         1,
         capability.generation,
-        REQUEST_CAPABILITY_SLOT as u16,
+        REQUEST_PROTOCOL_SLOT,
         capability.service_epoch,
         0,
         0,
         0,
         0,
     )?;
-    let mut transport = StorageTransport::new();
+    let mut transport = StorageTransport::new(capability);
     let mut staging = Block::zero();
     if transport.send(capability, request, &mut staging) != IpcStatus::Ok {
         return None;
@@ -597,7 +595,7 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
     }
 }
 
-fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
+fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
     let Some(store) = new_store(capability, blocks) else {
         serve_storage_error(StorageApiStatus::Io);
     };
@@ -807,7 +805,17 @@ fn run_filesystem(capability: IpcCapability, blocks: u64) -> ! {
 pub extern "C" fn _start() -> ! {
     common::heartbeat(logos_abi::ServiceId::Storage);
     common::init_service_allocator();
-    let Some(capability) = common::capability(REQUEST_CAPABILITY_SLOT) else {
+    let Ok(capability_handle) = common::capability_handle(REQUEST_CAPABILITY) else {
+        serve_storage_error(StorageApiStatus::Io)
+    };
+    let Ok(generation) = u16::try_from(capability_handle.generation()) else {
+        serve_storage_error(StorageApiStatus::Io)
+    };
+    let Some(capability) = StorageCapability::new(
+        capability_handle,
+        generation,
+        common::bootstrap_page().service_epoch,
+    ) else {
         serve_storage_error(StorageApiStatus::Io)
     };
     let Some(blocks) = discover(capability) else { serve_storage_error(StorageApiStatus::Io) };
