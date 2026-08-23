@@ -177,7 +177,7 @@ pub struct ServiceRuntime {
     bootstrap_directory: Vec<logos_abi::CapabilityHandle>,
     bootstrap_heap: Vec<logos_abi::CapabilityHandle>,
     keyboard_event: logos_abi::EventHandle,
-    service_heaps: [ServiceHeapState; SERVICE_COUNT],
+    service_heaps: Vec<ServiceHeapState>,
     user_kdf_workspace: [u64; logos_abi::USER_KDF_WORKSPACE_PAGES],
     storage_data_frames: [Option<FrameAddress>; logos_abi::STORAGE_DATA_PAGES],
     network_config: logos_abi::NetworkConfig,
@@ -185,7 +185,7 @@ pub struct ServiceRuntime {
     network_packet_frames: [Option<FrameAddress>; logos_abi::NETWORK_PACKET_PAGE_COUNT],
     framebuffer_config_frame: Option<FrameAddress>,
     keyboard_frame: Option<FrameAddress>,
-    tasks: [Option<crate::TaskHandle>; SERVICE_COUNT],
+    tasks: Vec<Option<crate::TaskHandle>>,
     supervisor: LiveSupervisor,
     manager: ProgramManager,
     pending_restart: Option<Vec<ServiceHandle>>,
@@ -208,7 +208,7 @@ pub struct ServiceRuntime {
     pending_program_start: Option<(usize, logos_abi::ServiceManagerRecord)>,
     network_packet_response: Option<logos_abi::NetworkPacketDescriptor>,
     network_packet_sequence: u32,
-    suppressed_heartbeats: [AtomicBool; SERVICE_COUNT],
+    suppressed_heartbeats: Vec<AtomicBool>,
     frame_pool_ready: bool,
     #[cfg(feature = "storage-proof")]
     storage_proof: crate::storage_proof::StorageProofObserver,
@@ -407,7 +407,7 @@ impl ServiceRuntime {
             bootstrap_directory: Vec::new(),
             bootstrap_heap: Vec::new(),
             keyboard_event: logos_abi::EventHandle::EMPTY,
-            service_heaps: [const { ServiceHeapState::empty() }; SERVICE_COUNT],
+            service_heaps: Vec::new(),
             user_kdf_workspace: [0; logos_abi::USER_KDF_WORKSPACE_PAGES],
             storage_data_frames: [None; logos_abi::STORAGE_DATA_PAGES],
             network_config: logos_abi::NetworkConfig::disabled(),
@@ -415,7 +415,7 @@ impl ServiceRuntime {
             network_packet_frames: [None; logos_abi::NETWORK_PACKET_PAGE_COUNT],
             framebuffer_config_frame: None,
             keyboard_frame: None,
-            tasks: [None; SERVICE_COUNT],
+            tasks: Vec::new(),
             supervisor: LiveSupervisor::new(),
             manager: ProgramManager::new(),
             pending_restart: None,
@@ -436,7 +436,7 @@ impl ServiceRuntime {
             pending_program_start: None,
             network_packet_response: None,
             network_packet_sequence: 1,
-            suppressed_heartbeats: [const { AtomicBool::new(false) }; SERVICE_COUNT],
+            suppressed_heartbeats: Vec::new(),
             frame_pool_ready: false,
             #[cfg(feature = "storage-proof")]
             storage_proof: crate::storage_proof::StorageProofObserver::new(),
@@ -632,6 +632,11 @@ impl ServiceRuntime {
     }
 
     fn start_inner(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
+        self.service_heaps.resize_with(SERVICE_COUNT, ServiceHeapState::empty);
+        self.tasks.resize(SERVICE_COUNT, None);
+        while self.suppressed_heartbeats.len() < SERVICE_COUNT {
+            self.suppressed_heartbeats.push(AtomicBool::new(false));
+        }
         self.ipc_staging_frames.resize(SERVICE_COUNT, None);
         self.service_bootstrap_frames.resize(SERVICE_COUNT, 0);
         self.bootstrap_control.resize(SERVICE_COUNT, logos_abi::CapabilityHandle::EMPTY);
@@ -4867,6 +4872,9 @@ impl ServiceRuntime {
         self.bootstrap_control.clear();
         self.bootstrap_directory.clear();
         self.bootstrap_heap.clear();
+        self.service_heaps.clear();
+        self.tasks.clear();
+        self.suppressed_heartbeats.clear();
         for frame in &mut self.user_kdf_workspace {
             if *frame != 0 {
                 let address = FrameAddress::from_raw(*frame);
