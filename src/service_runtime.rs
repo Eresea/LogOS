@@ -3393,13 +3393,7 @@ impl ServiceRuntime {
         if !request.is_valid() {
             return logos_abi::DirectoryStatus::Malformed;
         }
-        let directory_generation = self.bootstrap_directory[service.index()].generation();
-        if directory_generation == 0 {
-            return logos_abi::DirectoryStatus::Stale;
-        }
-        let Some(service_handle) =
-            logos_abi::ServiceHandle::new(service.index() as u32, directory_generation)
-        else {
+        let Ok(service_handle) = self.runtime_service_handle(service) else {
             return logos_abi::DirectoryStatus::Stale;
         };
         if request.subject != logos_abi::ServiceHandle::EMPTY && request.subject != service_handle {
@@ -3412,7 +3406,7 @@ impl ServiceRuntime {
         if !expected_directory.is_valid() {
             return logos_abi::DirectoryStatus::Stale;
         }
-        if directory.generation() != directory_generation {
+        if directory.generation() != service_handle.generation() {
             return logos_abi::DirectoryStatus::Stale;
         }
         if directory != expected_directory {
