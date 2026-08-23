@@ -1,11 +1,99 @@
 //! Generation-safe runtime events and dynamically sized event sets.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use logos_abi::{EventHandle, EventSetHandle, ServiceHandle};
 
 const NO_DEADLINE: u64 = u64::MAX;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HardwareEventSource {
+    Network,
+}
+
+static NETWORK_EVENT_RAW: AtomicU64 = AtomicU64::new(0);
+static NETWORK_SET_RAW: AtomicU64 = AtomicU64::new(0);
+static NETWORK_PENDING: AtomicBool = AtomicBool::new(false);
+
+fn hardware_event_raw(source: HardwareEventSource) -> &'static AtomicU64 {
+    match source {
+        HardwareEventSource::Network => &NETWORK_EVENT_RAW,
+    }
+}
+
+fn hardware_set_raw(source: HardwareEventSource) -> &'static AtomicU64 {
+    match source {
+        HardwareEventSource::Network => &NETWORK_SET_RAW,
+    }
+}
+
+fn hardware_pending(source: HardwareEventSource) -> &'static AtomicBool {
+    match source {
+        HardwareEventSource::Network => &NETWORK_PENDING,
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn bind_hardware_event(source: HardwareEventSource, event: EventHandle) {
+    hardware_set_raw(source).store(0, Ordering::Release);
+    hardware_pending(source).store(false, Ordering::Release);
+    hardware_event_raw(source).store(event.raw(), Ordering::Release);
+}
+
+pub(crate) fn clear_hardware_event(source: HardwareEventSource) {
+    hardware_event_raw(source).store(0, Ordering::Release);
+    hardware_set_raw(source).store(0, Ordering::Release);
+    hardware_pending(source).store(false, Ordering::Release);
+}
+
+pub(crate) fn bind_hardware_wait_set(
+    source: HardwareEventSource,
+    event: EventHandle,
+    set: EventSetHandle,
+) {
+    if hardware_event_raw(source).load(Ordering::Acquire) == event.raw() {
+        hardware_set_raw(source).store(set.raw(), Ordering::Release);
+    }
+}
+
+pub(crate) fn unbind_hardware_wait_set(
+    source: HardwareEventSource,
+    event: EventHandle,
+    set: EventSetHandle,
+) {
+    if hardware_event_raw(source).load(Ordering::Acquire) == event.raw() {
+        let _ = hardware_set_raw(source).compare_exchange(
+            set.raw(),
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn signal_hardware_event(source: HardwareEventSource) {
+    if hardware_event_raw(source).load(Ordering::Acquire) == 0 {
+        return;
+    }
+    hardware_pending(source).store(true, Ordering::Release);
+    let set = hardware_set_raw(source).load(Ordering::Acquire);
+    if let Some(set) = EventSetHandle::from_raw(set) {
+        wake_event_set(set);
+    }
+}
+
+fn hardware_event_is_pending(event: EventHandle) -> bool {
+    hardware_event_raw(HardwareEventSource::Network).load(Ordering::Acquire) == event.raw()
+        && hardware_pending(HardwareEventSource::Network).load(Ordering::Acquire)
+}
+
+fn consume_hardware_event(event: EventHandle) {
+    if hardware_event_raw(HardwareEventSource::Network).load(Ordering::Acquire) == event.raw() {
+        hardware_pending(HardwareEventSource::Network).store(false, Ordering::Release);
+    }
+}
 
 struct Slot<T> {
     generation: u32,
@@ -118,6 +206,7 @@ impl RuntimeEventRegistry {
         }
         set_record.members.try_reserve(1).map_err(|_| EventError::Capacity)?;
         set_record.members.push(event);
+        bind_hardware_wait_set(HardwareEventSource::Network, event, set);
         Ok(())
     }
 
@@ -141,6 +230,7 @@ impl RuntimeEventRegistry {
             return Err(EventError::NotMember);
         };
         set_record.members.remove(index);
+        unbind_hardware_wait_set(HardwareEventSource::Network, event, set);
         Ok(())
     }
 
@@ -182,9 +272,11 @@ impl RuntimeEventRegistry {
         };
         for index in 0..member_count {
             let event = self.set(set)?.members.get(index).copied().ok_or(EventError::Stale)?;
-            let signaled = self.event(event)?.signaled.load(Ordering::Acquire);
+            let signaled = self.event(event)?.signaled.load(Ordering::Acquire)
+                || hardware_event_is_pending(event);
             if signaled {
                 self.event(event)?.signaled.store(false, Ordering::Release);
+                consume_hardware_event(event);
                 self.set_mut(set)?.waiting = false;
                 return Ok(EventWait::Ready(event));
             }
@@ -220,7 +312,9 @@ impl RuntimeEventRegistry {
             return Err(EventError::Unauthorized);
         }
         for event in &record.members {
-            if self.event(*event)?.signaled.load(Ordering::Acquire) {
+            if self.event(*event)?.signaled.load(Ordering::Acquire)
+                || hardware_event_is_pending(*event)
+            {
                 return Ok(true);
             }
         }
@@ -287,14 +381,22 @@ impl RuntimeEventRegistry {
         self.wake_waiters(event);
         self.events[index].value = None;
         self.events[index].generation = next_generation(self.events[index].generation);
-        for set in &mut self.sets {
-            if let Some(set) = set.value.as_mut() {
+        for (set_index, slot) in self.sets.iter_mut().enumerate() {
+            let Some(set_handle) = EventSetHandle::new(set_index as u32, slot.generation) else {
+                continue;
+            };
+            let set = &mut slot.value;
+            if let Some(set) = set.as_mut() {
                 if set.members.contains(&event) {
                     set.invalidated = true;
                     set.waiting = false;
+                    unbind_hardware_wait_set(HardwareEventSource::Network, event, set_handle);
                 }
                 set.members.retain(|member| *member != event);
             }
+        }
+        if hardware_event_raw(HardwareEventSource::Network).load(Ordering::Acquire) == event.raw() {
+            clear_hardware_event(HardwareEventSource::Network);
         }
         Ok(())
     }
@@ -310,6 +412,11 @@ impl RuntimeEventRegistry {
         }
         if self.sets[index].value.as_ref().is_some_and(|record| record.waiting) {
             wake_event_set(set);
+        }
+        if let Some(record) = self.sets[index].value.as_ref() {
+            for event in &record.members {
+                unbind_hardware_wait_set(HardwareEventSource::Network, *event, set);
+            }
         }
         self.sets[index].value = None;
         self.sets[index].generation = next_generation(self.sets[index].generation);
@@ -443,6 +550,21 @@ mod tests {
         events.signal_irq(event).unwrap();
         assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Ready(event)));
         assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Pending));
+    }
+
+    #[test]
+    fn hardware_signal_uses_the_bound_dynamic_event() {
+        clear_hardware_event(HardwareEventSource::Network);
+        let owner = owner();
+        let mut events = RuntimeEventRegistry::new();
+        let event = events.create_event(owner).unwrap();
+        let set = events.create_set(owner).unwrap();
+        events.add(owner, set, event).unwrap();
+        bind_hardware_event(HardwareEventSource::Network, event);
+        bind_hardware_wait_set(HardwareEventSource::Network, event, set);
+        signal_hardware_event(HardwareEventSource::Network);
+        assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Ready(event)));
+        clear_hardware_event(HardwareEventSource::Network);
     }
 
     #[test]

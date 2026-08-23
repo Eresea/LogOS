@@ -99,7 +99,9 @@ pub(crate) fn reset_network_device() {
 
 pub(crate) fn handle_network_interrupt() {
     virtio_net::handle_interrupt();
-    signal_events(logos_abi::ipc_read_event_mask(logos_abi::IpcEndpointId::CoreToNetwork.index()));
+    crate::runtime_events::signal_hardware_event(
+        crate::runtime_events::HardwareEventSource::Network,
+    );
 }
 
 pub(crate) fn submit_network_frame(source: usize, length: usize) -> bool {

@@ -528,6 +528,15 @@ impl ServiceRuntime {
                 )
                 .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
             endpoints.push(endpoint);
+            if endpoint_id == logos_abi::IpcEndpointId::CoreToNetwork {
+                let (read_event, _) = registry
+                    .endpoint_events(endpoint)
+                    .map_err(|_| ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+                crate::runtime_events::bind_hardware_event(
+                    crate::runtime_events::HardwareEventSource::Network,
+                    read_event,
+                );
+            }
 
             let core = dynamic_core_handle(generation)?;
             if producer == core || consumer == core {
@@ -4542,6 +4551,9 @@ impl ServiceRuntime {
     }
 
     fn reclaim_resources(&mut self) -> Result<(), ServiceRuntimeError> {
+        crate::runtime_events::clear_hardware_event(
+            crate::runtime_events::HardwareEventSource::Network,
+        );
         self.storage_map_windows = [[None; crate::storage_ipc::STORAGE_MAP_WINDOWS_PER_CLIENT];
             crate::storage_ipc::STORAGE_MAP_CLIENTS];
         if let Some(mut registry) = self.dynamic_ipc.take() {
