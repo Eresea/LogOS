@@ -534,7 +534,11 @@ fn capability_record_contract_matches(
     record.kind == logos_abi::DirectoryRecordKind::Capability
         && record.rights == rights as u8
         && record.contract_id == contract_id
+        && record.peer.is_valid()
         && record.message_bytes as usize == message_bytes
+        && record.queue_capacity != 0
+        && record.event.is_valid()
+        && record.reserved == [0; 1]
         && logos_abi::CapabilityHandle::from_raw(record.handle).is_some()
 }
 
@@ -1495,6 +1499,13 @@ mod tests {
         assert_eq!(
             merge_discovered_capability(&mut found, Some(capability)),
             Err(logos_abi::DirectoryStatus::Malformed)
+        );
+
+        response.count = 1;
+        response.records[0].event = logos_abi::EventHandle::EMPTY;
+        assert_eq!(
+            capability_from_response(&response, peer, logos_abi::IpcRights::Send, 1, 16),
+            Ok(None)
         );
     }
 
