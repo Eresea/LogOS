@@ -1,8 +1,8 @@
 //! Bounded memory contracts shared by the physical, virtual, and kernel heaps.
 //!
-//! The first implementation deliberately uses fixed metadata and host-testable
-//! state machines. Architecture code owns the eventual page-table writes and
-//! zeroing; this module owns identity, bounds, ownership, and wakeup contracts.
+//! Metadata is reserved from the discovered UEFI map and initialized after
+//! handoff. Architecture code owns page-table writes and zeroing; this module
+//! owns identity, bounds, ownership, and wakeup contracts.
 
 use core::{
     alloc::{GlobalAlloc, Layout},
