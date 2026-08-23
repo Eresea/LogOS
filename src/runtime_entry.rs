@@ -19,11 +19,11 @@ pub(crate) fn run() {
     #[cfg(feature = "qemu-proof")]
     proof::handoff_started();
     #[cfg(feature = "qemu-proof")]
+    crate::suppress_service_heartbeat(logos_abi::ServiceId::Terminal);
+    #[cfg(feature = "qemu-proof")]
     if !wait_for_manager_restart() {
         arch_fatal(b"LogOS vNext: manager restart proof");
     }
-    #[cfg(feature = "qemu-proof")]
-    crate::suppress_service_heartbeat(logos_abi::ServiceId::Terminal);
 
     #[cfg(feature = "package-proof")]
     {
