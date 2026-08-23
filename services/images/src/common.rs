@@ -690,36 +690,6 @@ fn merge_discovered_event(
 }
 
 #[allow(dead_code)]
-pub fn discover_capability_contract(
-    peer: logos_abi::ServiceHandle,
-    rights: logos_abi::IpcRights,
-    contract_id: u16,
-    message_bytes: usize,
-) -> Result<logos_abi::CapabilityHandle, logos_abi::DirectoryStatus> {
-    discover_capability_contract_selector(
-        PeerSelector::Handle(peer),
-        rights,
-        contract_id,
-        message_bytes,
-    )
-}
-
-#[allow(dead_code)]
-pub fn discover_capability_contract_index(
-    peer_index: u32,
-    rights: logos_abi::IpcRights,
-    contract_id: u16,
-    message_bytes: usize,
-) -> Result<logos_abi::CapabilityHandle, logos_abi::DirectoryStatus> {
-    discover_capability_contract_selector(
-        PeerSelector::Index(peer_index),
-        rights,
-        contract_id,
-        message_bytes,
-    )
-}
-
-#[allow(dead_code)]
 pub fn discover_capability_contract_any(
     rights: logos_abi::IpcRights,
     contract_id: u16,
@@ -752,7 +722,6 @@ pub fn discover_capability_contract_named(
 #[derive(Clone, Copy)]
 enum PeerSelector {
     Handle(logos_abi::ServiceHandle),
-    Index(u32),
     Any,
     Name { name: [u8; logos_abi::MAX_SERVICE_NAME_BYTES], length: u8 },
 }
@@ -832,7 +801,7 @@ fn discover_capability_contract_selector(
         };
         let peer_valid = match peer_selector {
             PeerSelector::Handle(peer) => peer.is_valid(),
-            PeerSelector::Index(_) | PeerSelector::Any | PeerSelector::Name { .. } => true,
+            PeerSelector::Any | PeerSelector::Name { .. } => true,
         };
         if !bootstrap.is_valid() || !peer_valid || contract_id == 0 || message_bytes == 0 {
             return Err(logos_abi::DirectoryStatus::Malformed);
@@ -879,7 +848,6 @@ fn discover_capability_contract_selector(
         for record in records {
             let peer_matches = match peer_selector {
                 PeerSelector::Handle(peer) => record.peer == peer,
-                PeerSelector::Index(peer_index) => record.peer.index() == peer_index,
                 PeerSelector::Any => true,
                 PeerSelector::Name { .. } => false,
             };
@@ -963,28 +931,10 @@ fn next_event_request_id() -> u32 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapabilitySpec {
     pub contract_id: u16,
-    pub peer_index: Option<u32>,
     pub peer_name: [u8; logos_abi::MAX_SERVICE_NAME_BYTES],
     pub peer_name_len: u8,
     pub message_bytes: u16,
     pub rights: logos_abi::IpcRights,
-}
-
-#[allow(dead_code)]
-pub const fn capability_contract(
-    contract_id: u16,
-    peer_index: u32,
-    message_bytes: usize,
-    rights: logos_abi::IpcRights,
-) -> CapabilitySpec {
-    CapabilitySpec {
-        contract_id,
-        peer_index: Some(peer_index),
-        peer_name: [0; logos_abi::MAX_SERVICE_NAME_BYTES],
-        peer_name_len: 0,
-        message_bytes: if message_bytes <= u16::MAX as usize { message_bytes as u16 } else { 0 },
-        rights,
-    }
 }
 
 #[allow(dead_code)]
@@ -995,7 +945,6 @@ pub const fn capability_contract_any(
 ) -> CapabilitySpec {
     CapabilitySpec {
         contract_id,
-        peer_index: None,
         peer_name: [0; logos_abi::MAX_SERVICE_NAME_BYTES],
         peer_name_len: 0,
         message_bytes: if message_bytes <= u16::MAX as usize { message_bytes as u16 } else { 0 },
@@ -1020,7 +969,6 @@ pub const fn capability_contract_named(
     }
     CapabilitySpec {
         contract_id,
-        peer_index: None,
         peer_name: name,
         peer_name_len: length as u8,
         message_bytes: if message_bytes <= u16::MAX as usize { message_bytes as u16 } else { 0 },
@@ -1231,17 +1179,7 @@ fn discovered_capability(spec: CapabilitySpec) -> Result<logos_abi::CapabilityHa
                 message_bytes,
             )
         } else {
-            match spec.peer_index {
-                Some(peer_index) => discover_capability_contract_index(
-                    peer_index,
-                    spec.rights,
-                    spec.contract_id,
-                    message_bytes,
-                ),
-                None => {
-                    discover_capability_contract_any(spec.rights, spec.contract_id, message_bytes)
-                }
-            }
+            discover_capability_contract_any(spec.rights, spec.contract_id, message_bytes)
         };
         result.map_err(|status| match status {
             logos_abi::DirectoryStatus::Stale => IpcStatus::Stale,
@@ -1508,12 +1446,10 @@ mod tests {
     #[test]
     fn named_capability_specs_keep_peer_policy_separate_from_handles() {
         let spec = capability_contract_named(7, b"flow", 16, logos_abi::IpcRights::Send);
-        assert_eq!(spec.peer_index, None);
         assert_eq!(spec.peer_name_len, 4);
         assert_eq!(&spec.peer_name[..4], b"flow");
 
         let any = capability_contract_any(7, 16, logos_abi::IpcRights::Send);
-        assert_eq!(any.peer_index, None);
         assert_eq!(any.peer_name_len, 0);
     }
 
