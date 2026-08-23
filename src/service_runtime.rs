@@ -482,6 +482,16 @@ impl ServiceRuntime {
                     self.service_heaps[spec.service().index()].quota_pages,
                 )
                 .map_err(|_| ServiceRuntimeError::Resources)?;
+            registry
+                .set_manager_rights(
+                    handles[spec.service().index()],
+                    if spec.service() == ServiceId::Flow {
+                        logos_abi::ManagerRights::ALL
+                    } else {
+                        logos_abi::ManagerRights::NONE
+                    },
+                )
+                .map_err(|_| ServiceRuntimeError::Resources)?;
         }
         for spec in SERVICE_IMAGES {
             let mut dependencies = Vec::new();
@@ -3376,7 +3386,14 @@ impl ServiceRuntime {
         if length != core::mem::size_of::<logos_abi::ManagerRequest>() {
             return logos_abi::IpcStatus::Malformed;
         }
-        let rights = manager_rights(service);
+        let Ok(service_handle) = self.runtime_service_handle(service) else {
+            return logos_abi::IpcStatus::Stale;
+        };
+        let rights = self
+            .dynamic_services
+            .as_ref()
+            .and_then(|registry| registry.manager_rights(service_handle).ok())
+            .unwrap_or(logos_abi::ManagerRights::NONE);
         if rights == logos_abi::ManagerRights::NONE {
             return logos_abi::IpcStatus::Stale;
         }
@@ -4892,13 +4909,6 @@ fn bootstrap_queue_capacity(index: usize) -> usize {
         Some(logos_abi::IpcMessageType::Render) => 1,
         Some(logos_abi::IpcMessageType::Bytes) => 8,
         _ => 1,
-    }
-}
-
-const fn manager_rights(service: ServiceId) -> logos_abi::ManagerRights {
-    match service {
-        ServiceId::Flow => logos_abi::ManagerRights::ALL,
-        _ => logos_abi::ManagerRights::NONE,
     }
 }
 

@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use logos_abi::{
     DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE, DirectoryOperation, DirectoryRecord,
     DirectoryResponse, DirectoryStatus, MAX_PACKAGE_NAME_BYTES, MAX_SERVICE_NAME_BYTES,
-    ManagerOperation, ManagerRequest, ManagerResponse, ManagerState, ManagerStatus,
+    ManagerOperation, ManagerRequest, ManagerResponse, ManagerRights, ManagerState, ManagerStatus,
     SERVICE_HEAP_MAX_PAGES, ServiceHandle, ServiceManagerRecord,
 };
 
@@ -39,6 +39,7 @@ struct ServiceRecord {
     epoch: u64,
     restarts: u8,
     heap_quota_pages: usize,
+    manager_rights: ManagerRights,
     ownership: ServiceOwnership,
 }
 
@@ -176,6 +177,7 @@ impl RuntimeServiceRegistry {
             epoch: 1,
             restarts: 0,
             heap_quota_pages,
+            manager_rights: ManagerRights::NONE,
             ownership: ServiceOwnership::EMPTY,
         });
         Ok(handle)
@@ -311,6 +313,22 @@ impl RuntimeServiceRegistry {
 
     pub fn heap_quota_pages(&self, handle: ServiceHandle) -> Result<usize, ServiceRegistryError> {
         Ok(self.service(handle)?.heap_quota_pages)
+    }
+
+    pub fn set_manager_rights(
+        &mut self,
+        handle: ServiceHandle,
+        rights: ManagerRights,
+    ) -> Result<(), ServiceRegistryError> {
+        self.service_mut(handle)?.manager_rights = rights;
+        Ok(())
+    }
+
+    pub fn manager_rights(
+        &self,
+        handle: ServiceHandle,
+    ) -> Result<ManagerRights, ServiceRegistryError> {
+        Ok(self.service(handle)?.manager_rights)
     }
 
     pub fn set_runtime_ownership(
@@ -954,6 +972,15 @@ mod tests {
             registry.register_with_quota(b"zero", b"image", &[], 0),
             Err(ServiceRegistryError::InvalidImage)
         );
+    }
+
+    #[test]
+    fn manager_rights_are_recorded_on_the_dynamic_service() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let handle = registry.register(b"service", b"image", &[]).unwrap();
+        assert_eq!(registry.manager_rights(handle), Ok(ManagerRights::NONE));
+        registry.set_manager_rights(handle, ManagerRights::ALL).unwrap();
+        assert_eq!(registry.manager_rights(handle), Ok(ManagerRights::ALL));
     }
 
     #[test]
