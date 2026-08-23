@@ -521,8 +521,17 @@ fn capability_record_matches(
     contract_id: u16,
     message_bytes: usize,
 ) -> bool {
-    record.kind == logos_abi::DirectoryRecordKind::Capability
+    capability_record_contract_matches(record, rights, contract_id, message_bytes)
         && record.peer == peer
+}
+
+fn capability_record_contract_matches(
+    record: logos_abi::DirectoryRecord,
+    rights: logos_abi::IpcRights,
+    contract_id: u16,
+    message_bytes: usize,
+) -> bool {
+    record.kind == logos_abi::DirectoryRecordKind::Capability
         && record.rights == rights as u8
         && record.contract_id == contract_id
         && record.message_bytes as usize == message_bytes
@@ -620,10 +629,50 @@ pub fn discover_capability_contract(
     contract_id: u16,
     message_bytes: usize,
 ) -> Result<logos_abi::CapabilityHandle, logos_abi::DirectoryStatus> {
+    discover_capability_contract_selector(
+        PeerSelector::Handle(peer),
+        rights,
+        contract_id,
+        message_bytes,
+    )
+}
+
+#[allow(dead_code)]
+pub fn discover_capability_contract_index(
+    peer_index: u32,
+    rights: logos_abi::IpcRights,
+    contract_id: u16,
+    message_bytes: usize,
+) -> Result<logos_abi::CapabilityHandle, logos_abi::DirectoryStatus> {
+    discover_capability_contract_selector(
+        PeerSelector::Index(peer_index),
+        rights,
+        contract_id,
+        message_bytes,
+    )
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+enum PeerSelector {
+    Handle(logos_abi::ServiceHandle),
+    Index(u32),
+}
+
+fn discover_capability_contract_selector(
+    peer_selector: PeerSelector,
+    rights: logos_abi::IpcRights,
+    contract_id: u16,
+    message_bytes: usize,
+) -> Result<logos_abi::CapabilityHandle, logos_abi::DirectoryStatus> {
     #[cfg(target_os = "none")]
     {
         let bootstrap = bootstrap_page();
-        if !bootstrap.is_valid() || !peer.is_valid() || contract_id == 0 || message_bytes == 0 {
+        let peer_valid = match peer_selector {
+            PeerSelector::Handle(peer) => peer.is_valid(),
+            PeerSelector::Index(_) => true,
+        };
+        if !bootstrap.is_valid() || !peer_valid || contract_id == 0 || message_bytes == 0 {
             return Err(logos_abi::DirectoryStatus::Malformed);
         }
         let records = unsafe {
@@ -666,7 +715,13 @@ pub fn discover_capability_contract(
         };
         let mut found = None;
         for record in records {
-            if !capability_record_matches(*record, peer, rights, contract_id, message_bytes) {
+            let peer_matches = match peer_selector {
+                PeerSelector::Handle(peer) => record.peer == peer,
+                PeerSelector::Index(peer_index) => record.peer.index() == peer_index,
+            };
+            if !peer_matches
+                || !capability_record_contract_matches(*record, rights, contract_id, message_bytes)
+            {
                 continue;
             }
             merge_discovered_capability(
@@ -678,7 +733,7 @@ pub fn discover_capability_contract(
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (peer, rights, contract_id, message_bytes);
+        let _ = (peer_selector, rights, contract_id, message_bytes);
         Err(logos_abi::DirectoryStatus::NotFound)
     }
 }
@@ -952,22 +1007,23 @@ pub fn sleep(service: ServiceId) {
 fn discovered_capability(spec: CapabilitySpec) -> Result<logos_abi::CapabilityHandle, IpcStatus> {
     #[cfg(target_os = "none")]
     {
-        let bootstrap = bootstrap_page();
-        let peer = logos_abi::ServiceHandle::new(spec.peer_index, bootstrap.service.generation())
-            .ok_or(IpcStatus::Unauthorized)?;
         let message_bytes = usize::from(spec.message_bytes);
         if message_bytes == 0 {
             return Err(IpcStatus::Malformed);
         }
-        discover_capability_contract(peer, spec.rights, spec.contract_id, message_bytes).map_err(
-            |status| match status {
-                logos_abi::DirectoryStatus::Stale => IpcStatus::Stale,
-                logos_abi::DirectoryStatus::Unauthorized => IpcStatus::Unauthorized,
-                logos_abi::DirectoryStatus::Malformed => IpcStatus::Malformed,
-                logos_abi::DirectoryStatus::NotFound => IpcStatus::Disconnected,
-                _ => IpcStatus::Disconnected,
-            },
+        discover_capability_contract_index(
+            spec.peer_index,
+            spec.rights,
+            spec.contract_id,
+            message_bytes,
         )
+        .map_err(|status| match status {
+            logos_abi::DirectoryStatus::Stale => IpcStatus::Stale,
+            logos_abi::DirectoryStatus::Unauthorized => IpcStatus::Unauthorized,
+            logos_abi::DirectoryStatus::Malformed => IpcStatus::Malformed,
+            logos_abi::DirectoryStatus::NotFound => IpcStatus::Disconnected,
+            _ => IpcStatus::Disconnected,
+        })
     }
     #[cfg(not(target_os = "none"))]
     {

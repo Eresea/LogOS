@@ -13,14 +13,8 @@ static mut PENDING: [Option<InputMessage>; 2] = [None, None];
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
-    let bootstrap = common::bootstrap_page();
-    let terminal = logos_abi::ServiceHandle::new(
+    let output_capability = match common::discover_capability_contract_index(
         logos_abi::ServiceId::Terminal.index() as u32,
-        bootstrap.service.generation(),
-    )
-    .unwrap_or(logos_abi::ServiceHandle::EMPTY);
-    let output_capability = match common::discover_capability_contract(
-        terminal,
         logos_abi::IpcRights::Send,
         IPC_CONTRACT_INPUT,
         core::mem::size_of::<InputMessage>(),
