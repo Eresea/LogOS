@@ -161,11 +161,11 @@ pub enum ServiceRuntimeError {
 
 pub struct ServiceRuntime {
     frame_pool: FramePool,
-    images: [LoadedImage; SERVICE_COUNT],
-    tables: [MaybeUninit<PageTableBuilder>; SERVICE_COUNT],
-    table_ready: [bool; SERVICE_COUNT],
+    images: Vec<LoadedImage>,
+    tables: Vec<MaybeUninit<PageTableBuilder>>,
+    table_ready: Vec<bool>,
     processes: crate::process::ProcessTable,
-    launches: [Option<(ProcessHandle, UserLaunch)>; SERVICE_COUNT],
+    launches: Vec<Option<(ProcessHandle, UserLaunch)>>,
     startup: ServiceStartup,
     dynamic_ipc: Option<RuntimeIpcRegistry>,
     dynamic_services: Option<crate::runtime_services::RuntimeServiceRegistry>,
@@ -202,8 +202,8 @@ pub struct ServiceRuntime {
     package_response: Option<logos_abi::PackageResponse>,
     #[allow(dead_code)]
     package_next_request: u32,
-    prepared_packages: [Option<PreparedServiceImage>; SERVICE_COUNT],
-    active_packages: [Option<ActivePackageImage>; SERVICE_COUNT],
+    prepared_packages: Vec<Option<PreparedServiceImage>>,
+    active_packages: Vec<Option<ActivePackageImage>>,
     programs: [ProgramRuntime; MAX_PROGRAMS],
     pending_program_start: Option<(usize, logos_abi::ServiceManagerRecord)>,
     network_packet_response: Option<logos_abi::NetworkPacketDescriptor>,
@@ -391,11 +391,11 @@ impl ServiceRuntime {
     pub const fn new() -> Self {
         Self {
             frame_pool: FramePool::empty(),
-            images: [const { LoadedImage::empty() }; SERVICE_COUNT],
-            tables: [const { MaybeUninit::uninit() }; SERVICE_COUNT],
-            table_ready: [false; SERVICE_COUNT],
+            images: Vec::new(),
+            tables: Vec::new(),
+            table_ready: Vec::new(),
             processes: crate::process::ProcessTable::new(),
-            launches: [None; SERVICE_COUNT],
+            launches: Vec::new(),
             startup: ServiceStartup::new(),
             dynamic_ipc: None,
             dynamic_services: None,
@@ -430,8 +430,8 @@ impl ServiceRuntime {
             package_capability: logos_abi::CapabilityHandle::EMPTY,
             package_response: None,
             package_next_request: 1,
-            prepared_packages: [const { None }; SERVICE_COUNT],
-            active_packages: [None; SERVICE_COUNT],
+            prepared_packages: Vec::new(),
+            active_packages: Vec::new(),
             programs: [const { ProgramRuntime::empty() }; MAX_PROGRAMS],
             pending_program_start: None,
             network_packet_response: None,
@@ -632,6 +632,12 @@ impl ServiceRuntime {
     }
 
     fn start_inner(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
+        self.images.resize_with(SERVICE_COUNT, LoadedImage::empty);
+        self.tables.resize_with(SERVICE_COUNT, MaybeUninit::uninit);
+        self.table_ready.resize(SERVICE_COUNT, false);
+        self.launches.resize(SERVICE_COUNT, None);
+        self.prepared_packages.resize_with(SERVICE_COUNT, || None);
+        self.active_packages.resize(SERVICE_COUNT, None);
         self.service_heaps.resize_with(SERVICE_COUNT, ServiceHeapState::empty);
         self.tasks.resize(SERVICE_COUNT, None);
         while self.suppressed_heartbeats.len() < SERVICE_COUNT {
@@ -4897,6 +4903,10 @@ impl ServiceRuntime {
             }
             self.images[index].reclaim(&mut self.frame_pool);
         }
+        self.images.clear();
+        self.tables.clear();
+        self.table_ready.clear();
+        self.launches.clear();
         for program in &mut self.programs {
             if let Some(process) = program.process.take() {
                 if self.processes.state(process) == Some(crate::process::ProcessState::Running) {
