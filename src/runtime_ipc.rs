@@ -1,8 +1,7 @@
 //! Runtime-owned IPC topology.
 //!
-//! The legacy service graph remains available during the ABI migration. This
-//! registry is the v5 ownership model: queues are private to Core, grants are
-//! explicit, and every externally visible identity carries a generation.
+//! The v5 ownership model: queues are private to Core, grants are explicit,
+//! and every externally visible identity carries a generation.
 
 use alloc::vec::Vec;
 
@@ -64,6 +63,9 @@ pub struct RuntimeIpcRegistry {
     endpoints: Vec<Slot<EndpointRecord>>,
     capabilities: Vec<Slot<CapabilityRecord>>,
     generation_seed: u32,
+    capability_generation: u32,
+    queue_budget_messages: usize,
+    queue_committed_messages: usize,
 }
 
 impl RuntimeIpcRegistry {
@@ -72,7 +74,19 @@ impl RuntimeIpcRegistry {
     }
 
     pub fn new_with_generation(generation: u32) -> Self {
-        Self { endpoints: Vec::new(), capabilities: Vec::new(), generation_seed: generation.max(1) }
+        Self::new_with_generation_and_budget(generation, usize::MAX)
+    }
+
+    pub fn new_with_generation_and_budget(generation: u32, queue_budget_messages: usize) -> Self {
+        let generation_seed = generation.max(1);
+        Self {
+            endpoints: Vec::new(),
+            capabilities: Vec::new(),
+            generation_seed,
+            capability_generation: next_generation(generation_seed),
+            queue_budget_messages,
+            queue_committed_messages: 0,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -97,6 +111,10 @@ impl RuntimeIpcRegistry {
         {
             return Err(IpcStatus::Malformed);
         }
+        if queue_capacity > self.queue_budget_messages.saturating_sub(self.queue_committed_messages)
+        {
+            return Err(IpcStatus::Full);
+        }
         let slot = self.allocate_endpoint_slot()?;
         let handle = EndpointHandle::new(slot as u32, self.endpoints[slot].generation)
             .ok_or(IpcStatus::Malformed)?;
@@ -112,7 +130,11 @@ impl RuntimeIpcRegistry {
             }
         };
         let mut queue = Vec::new();
-        queue.try_reserve(queue_capacity).map_err(|_| IpcStatus::Disconnected)?;
+        if queue.try_reserve(queue_capacity).is_err() {
+            let _ = events.destroy_event(producer, write_event);
+            let _ = events.destroy_event(consumer, read_event);
+            return Err(IpcStatus::Disconnected);
+        }
         for _ in 0..queue_capacity {
             queue.push(QueueMessage::empty());
         }
@@ -131,6 +153,8 @@ impl RuntimeIpcRegistry {
             queue_tail: 0,
             queue_len: 0,
         });
+        self.queue_committed_messages =
+            self.queue_committed_messages.saturating_add(queue_capacity);
         Ok(handle)
     }
 
@@ -151,12 +175,28 @@ impl RuntimeIpcRegistry {
         if !owns_endpoint {
             return Err(IpcStatus::Unauthorized);
         }
-        let slot = self.allocate_capability_slot()?;
+        let slot = self.allocate_capability_record()?;
         let handle = CapabilityHandle::new(slot as u32, self.capabilities[slot].generation)
             .ok_or(IpcStatus::Malformed)?;
         self.capabilities[slot].value =
             Some(CapabilityRecord { handle, owner, endpoint, rights, service_epoch });
         Ok(handle)
+    }
+
+    pub fn capability_for(
+        &self,
+        owner: ServiceHandle,
+        endpoint: EndpointHandle,
+        rights: IpcRights,
+    ) -> Result<CapabilityHandle, IpcStatus> {
+        self.capabilities
+            .iter()
+            .filter_map(|slot| slot.value.as_ref())
+            .find(|grant| {
+                grant.owner == owner && grant.endpoint == endpoint && grant.rights == rights
+            })
+            .map(|grant| grant.handle)
+            .ok_or(IpcStatus::Unauthorized)
     }
 
     pub fn destroy_endpoint(
@@ -166,6 +206,8 @@ impl RuntimeIpcRegistry {
     ) -> Result<(), IpcStatus> {
         let slot = self.endpoint_slot(endpoint)?;
         if let Some(record) = self.endpoints[slot].value.as_ref() {
+            self.queue_committed_messages =
+                self.queue_committed_messages.saturating_sub(record.queue_capacity);
             let _ = events.destroy_event(record.consumer, record.read_event);
             let _ = events.destroy_event(record.producer, record.write_event);
         }
@@ -337,7 +379,7 @@ impl RuntimeIpcRegistry {
             }
             if written == DIRECTORY_RECORDS_PER_PAGE {
                 response.flags |= DIRECTORY_FLAG_MORE;
-                response.cursor = request.cursor + written as u64;
+                response.cursor = request.cursor.saturating_add(written as u64);
                 break;
             }
             let Some(endpoint) = self.endpoint(capability.endpoint).ok() else { continue };
@@ -368,7 +410,7 @@ impl RuntimeIpcRegistry {
         }
         response.count = written as u8;
         if response.flags & DIRECTORY_FLAG_MORE == 0 {
-            response.cursor = request.cursor + written as u64;
+            response.cursor = request.cursor.saturating_add(written as u64);
         }
         DirectoryStatus::Ok
     }
@@ -392,7 +434,7 @@ impl RuntimeIpcRegistry {
             }
             if written == DIRECTORY_RECORDS_PER_PAGE {
                 response.flags |= DIRECTORY_FLAG_MORE;
-                response.cursor = request.cursor + written as u64;
+                response.cursor = request.cursor.saturating_add(written as u64);
                 break;
             }
             response.records[written] = logos_abi::DirectoryRecord {
@@ -414,7 +456,7 @@ impl RuntimeIpcRegistry {
         }
         response.count = written as u8;
         if response.flags & DIRECTORY_FLAG_MORE == 0 {
-            response.cursor = request.cursor + written as u64;
+            response.cursor = request.cursor.saturating_add(written as u64);
         }
         DirectoryStatus::Ok
     }
@@ -430,22 +472,14 @@ impl RuntimeIpcRegistry {
         Ok(self.endpoints.len() - 1)
     }
 
-    fn allocate_capability_slot(&mut self) -> Result<usize, IpcStatus> {
-        while self.capabilities.len() < logos_abi::BOOTSTRAP_CAPABILITY_COUNT {
-            self.capabilities.try_reserve(1).map_err(|_| IpcStatus::Disconnected)?;
-            self.capabilities.push(Slot::with_generation(self.generation_seed));
-        }
-        if let Some((index, _)) = self
-            .capabilities
-            .iter()
-            .enumerate()
-            .skip(logos_abi::BOOTSTRAP_CAPABILITY_COUNT)
-            .find(|(_, slot)| slot.value.is_none())
+    fn allocate_capability_record(&mut self) -> Result<usize, IpcStatus> {
+        if let Some((index, _)) =
+            self.capabilities.iter().enumerate().find(|(_, slot)| slot.value.is_none())
         {
             return Ok(index);
         }
         self.capabilities.try_reserve(1).map_err(|_| IpcStatus::Disconnected)?;
-        self.capabilities.push(Slot::with_generation(self.generation_seed));
+        self.capabilities.push(Slot::with_generation(self.capability_generation));
         Ok(self.capabilities.len() - 1)
     }
 
@@ -555,6 +589,21 @@ mod tests {
     }
 
     #[test]
+    fn queue_budget_is_reclaimed_when_an_endpoint_is_destroyed() {
+        let (producer, consumer) = services();
+        let mut registry = RuntimeIpcRegistry::new_with_generation_and_budget(1, 1);
+        let mut events = RuntimeEventRegistry::new();
+        let endpoint =
+            registry.create_endpoint(producer, consumer, 1, 1, 1, 1, &mut events).unwrap();
+        assert_eq!(
+            registry.create_endpoint(producer, consumer, 1, 1, 1, 1, &mut events),
+            Err(IpcStatus::Full)
+        );
+        registry.destroy_endpoint(endpoint, &mut events).unwrap();
+        assert!(registry.create_endpoint(producer, consumer, 1, 1, 1, 2, &mut events).is_ok());
+    }
+
+    #[test]
     fn stale_and_forged_capabilities_cannot_access_reused_endpoints() {
         let (producer, consumer) = services();
         let mut registry = RuntimeIpcRegistry::new();
@@ -584,10 +633,8 @@ mod tests {
             registry.create_endpoint(producer, consumer, 1, 1, 1, 1, &mut events).unwrap();
         let capability = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
 
-        assert!(capability.index() >= logos_abi::BOOTSTRAP_CAPABILITY_COUNT as u32);
-        for index in 0..logos_abi::BOOTSTRAP_CAPABILITY_COUNT as u32 {
-            assert_ne!(capability, CapabilityHandle::new(index, generation).unwrap());
-        }
+        assert_eq!(capability.index(), 0);
+        assert_ne!(capability, CapabilityHandle::new(0, generation).unwrap());
     }
 
     #[test]
@@ -659,6 +706,25 @@ mod tests {
         assert_eq!(
             registry.validate_capability(producer, send, IpcRights::Send, 3),
             Err(IpcStatus::Malformed)
+        );
+    }
+
+    #[test]
+    fn capability_lookup_is_owner_and_direction_bound() {
+        let (producer, consumer) = services();
+        let mut registry = RuntimeIpcRegistry::new();
+        let mut events = RuntimeEventRegistry::new();
+        let endpoint =
+            registry.create_endpoint(producer, consumer, 1, 4, 1, 1, &mut events).unwrap();
+        let send = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
+        assert_eq!(registry.capability_for(producer, endpoint, IpcRights::Send), Ok(send));
+        assert_eq!(
+            registry.capability_for(consumer, endpoint, IpcRights::Send),
+            Err(IpcStatus::Unauthorized)
+        );
+        assert_eq!(
+            registry.capability_for(producer, endpoint, IpcRights::Receive),
+            Err(IpcStatus::Unauthorized)
         );
     }
 

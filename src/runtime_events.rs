@@ -1,6 +1,7 @@
 //! Generation-safe runtime events and dynamically sized event sets.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use logos_abi::{EventHandle, EventSetHandle, ServiceHandle};
 
@@ -19,13 +20,14 @@ impl<T> Slot<T> {
 
 struct EventRecord {
     owner: ServiceHandle,
-    signaled: bool,
+    signaled: AtomicBool,
 }
 
 struct EventSetRecord {
     owner: ServiceHandle,
     members: Vec<EventHandle>,
     waiting: bool,
+    invalidated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,6 +46,13 @@ pub enum EventError {
     NotMember,
     InvalidDeadline,
     Busy,
+}
+
+pub(crate) fn wake_event_set(set: EventSetHandle) {
+    #[cfg(target_os = "uefi")]
+    crate::arch::signal_event_set(set);
+    #[cfg(not(target_os = "uefi"))]
+    let _ = set;
 }
 
 pub struct RuntimeEventRegistry {
@@ -68,7 +77,7 @@ impl RuntimeEventRegistry {
         let index = self.allocate_event_slot()?;
         let handle = EventHandle::new(index as u32, self.events[index].generation)
             .ok_or(EventError::Capacity)?;
-        self.events[index].value = Some(EventRecord { owner, signaled: false });
+        self.events[index].value = Some(EventRecord { owner, signaled: AtomicBool::new(false) });
         Ok(handle)
     }
 
@@ -80,7 +89,7 @@ impl RuntimeEventRegistry {
         let handle = EventSetHandle::new(index as u32, self.sets[index].generation)
             .ok_or(EventError::Capacity)?;
         self.sets[index].value =
-            Some(EventSetRecord { owner, members: Vec::new(), waiting: false });
+            Some(EventSetRecord { owner, members: Vec::new(), waiting: false, invalidated: false });
         Ok(handle)
     }
 
@@ -97,6 +106,9 @@ impl RuntimeEventRegistry {
         let set_record = self.set_mut(set)?;
         if set_record.owner != owner {
             return Err(EventError::Unauthorized);
+        }
+        if set_record.invalidated {
+            return Err(EventError::Stale);
         }
         if set_record.waiting {
             return Err(EventError::Busy);
@@ -119,6 +131,9 @@ impl RuntimeEventRegistry {
         if set_record.owner != owner {
             return Err(EventError::Unauthorized);
         }
+        if set_record.invalidated {
+            return Err(EventError::Stale);
+        }
         if set_record.waiting {
             return Err(EventError::Busy);
         }
@@ -130,8 +145,8 @@ impl RuntimeEventRegistry {
     }
 
     /// Nonallocating signal path for IRQ producers.
-    pub fn signal_irq(&mut self, event: EventHandle) -> Result<(), EventError> {
-        self.event_mut(event)?.signaled = true;
+    pub fn signal_irq(&self, event: EventHandle) -> Result<(), EventError> {
+        self.event(event)?.signaled.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -140,7 +155,7 @@ impl RuntimeEventRegistry {
         if record.owner != owner {
             return Err(EventError::Unauthorized);
         }
-        record.signaled = true;
+        record.signaled.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -160,13 +175,16 @@ impl RuntimeEventRegistry {
             if set_record.owner != owner {
                 return Err(EventError::Unauthorized);
             }
+            if set_record.invalidated {
+                return Err(EventError::Stale);
+            }
             set_record.members.len()
         };
         for index in 0..member_count {
             let event = self.set(set)?.members.get(index).copied().ok_or(EventError::Stale)?;
-            let signaled = self.event(event)?.signaled;
+            let signaled = self.event(event)?.signaled.load(Ordering::Acquire);
             if signaled {
-                self.event_mut(event)?.signaled = false;
+                self.event(event)?.signaled.store(false, Ordering::Release);
                 self.set_mut(set)?.waiting = false;
                 return Ok(EventWait::Ready(event));
             }
@@ -190,6 +208,55 @@ impl RuntimeEventRegistry {
             return Err(EventError::Unauthorized);
         }
         Ok(&record.members)
+    }
+
+    pub fn has_ready_event(
+        &self,
+        owner: ServiceHandle,
+        set: EventSetHandle,
+    ) -> Result<bool, EventError> {
+        let record = self.set(set)?;
+        if record.owner != owner {
+            return Err(EventError::Unauthorized);
+        }
+        for event in &record.members {
+            if self.event(*event)?.signaled.load(Ordering::Acquire) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn is_waiting(
+        &self,
+        owner: ServiceHandle,
+        set: EventSetHandle,
+    ) -> Result<bool, EventError> {
+        let record = self.set(set)?;
+        if record.owner != owner {
+            return Err(EventError::Unauthorized);
+        }
+        Ok(record.waiting)
+    }
+
+    pub fn cancel_wait(
+        &mut self,
+        owner: ServiceHandle,
+        set: EventSetHandle,
+    ) -> Result<(), EventError> {
+        let record = self.set_mut(set)?;
+        if record.owner != owner {
+            return Err(EventError::Unauthorized);
+        }
+        if record.invalidated {
+            return Err(EventError::Stale);
+        }
+        let was_waiting = record.waiting;
+        record.waiting = false;
+        if was_waiting {
+            wake_event_set(set);
+        }
+        Ok(())
     }
 
     pub fn for_each_waiter<F>(&self, event: EventHandle, mut callback: F)
@@ -217,10 +284,15 @@ impl RuntimeEventRegistry {
         if self.events[index].value.as_ref().is_some_and(|record| record.owner != owner) {
             return Err(EventError::Unauthorized);
         }
+        self.wake_waiters(event);
         self.events[index].value = None;
         self.events[index].generation = next_generation(self.events[index].generation);
         for set in &mut self.sets {
             if let Some(set) = set.value.as_mut() {
+                if set.members.contains(&event) {
+                    set.invalidated = true;
+                    set.waiting = false;
+                }
                 set.members.retain(|member| *member != event);
             }
         }
@@ -235,6 +307,9 @@ impl RuntimeEventRegistry {
         let index = self.set_index(set)?;
         if self.sets[index].value.as_ref().is_some_and(|record| record.owner != owner) {
             return Err(EventError::Unauthorized);
+        }
+        if self.sets[index].value.as_ref().is_some_and(|record| record.waiting) {
+            wake_event_set(set);
         }
         self.sets[index].value = None;
         self.sets[index].generation = next_generation(self.sets[index].generation);
@@ -252,6 +327,7 @@ impl RuntimeEventRegistry {
             })
             .collect();
         for event in events {
+            self.wake_waiters(event);
             let _ = self.destroy_event(owner, event);
         }
 
@@ -265,8 +341,17 @@ impl RuntimeEventRegistry {
             })
             .collect();
         for set in sets {
+            if self.set(set).is_ok_and(|record| record.waiting) {
+                wake_event_set(set);
+            }
             let _ = self.destroy_set(owner, set);
         }
+    }
+
+    fn wake_waiters(&self, event: EventHandle) {
+        self.for_each_waiter(event, |set, _| {
+            wake_event_set(set);
+        });
     }
 
     fn allocate_event_slot(&mut self) -> Result<usize, EventError> {
@@ -361,6 +446,32 @@ mod tests {
     }
 
     #[test]
+    fn readiness_can_be_rechecked_after_wait_publication() {
+        let owner = owner();
+        let mut events = RuntimeEventRegistry::new();
+        let event = events.create_event(owner).unwrap();
+        let set = events.create_set(owner).unwrap();
+        events.add(owner, set, event).unwrap();
+        assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Pending));
+        events.signal_irq(event).unwrap();
+        assert!(events.has_ready_event(owner, set).unwrap());
+    }
+
+    #[test]
+    fn cancellation_clears_a_published_wait_and_preserves_stale_checks() {
+        let owner = owner();
+        let mut events = RuntimeEventRegistry::new();
+        let event = events.create_event(owner).unwrap();
+        let set = events.create_set(owner).unwrap();
+        events.add(owner, set, event).unwrap();
+        assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Pending));
+        assert_eq!(events.cancel_wait(owner, set), Ok(()));
+        assert_eq!(events.is_waiting(owner, set), Ok(false));
+        events.destroy_set(owner, set).unwrap();
+        assert_eq!(events.cancel_wait(owner, set), Err(EventError::Stale));
+    }
+
+    #[test]
     fn registry_generation_seed_rejects_handles_from_a_previous_runtime() {
         let owner = owner();
         let mut first = RuntimeEventRegistry::new_with_generation(3);
@@ -382,6 +493,32 @@ mod tests {
         assert_eq!(events.signal_irq(event), Err(EventError::Stale));
         assert_eq!(events.destroy_set(owner, set), Ok(()));
         assert_eq!(events.destroy_set(owner, set), Err(EventError::Stale));
+    }
+
+    #[test]
+    fn waiting_state_is_visible_before_teardown() {
+        let owner = owner();
+        let mut events = RuntimeEventRegistry::new();
+        let event = events.create_event(owner).unwrap();
+        let set = events.create_set(owner).unwrap();
+        events.add(owner, set, event).unwrap();
+        assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Pending));
+        assert_eq!(events.is_waiting(owner, set), Ok(true));
+        events.destroy_set(owner, set).unwrap();
+        assert_eq!(events.is_waiting(owner, set), Err(EventError::Stale));
+    }
+
+    #[test]
+    fn destroying_a_member_invalidates_the_published_wait() {
+        let owner = owner();
+        let mut events = RuntimeEventRegistry::new();
+        let event = events.create_event(owner).unwrap();
+        let set = events.create_set(owner).unwrap();
+        events.add(owner, set, event).unwrap();
+        assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Pending));
+        events.destroy_event(owner, event).unwrap();
+        assert_eq!(events.is_waiting(owner, set), Ok(false));
+        assert_eq!(events.wait_any(owner, set, 2, Some(10)), Err(EventError::Stale));
     }
 
     #[test]

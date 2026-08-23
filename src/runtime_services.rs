@@ -27,6 +27,7 @@ pub enum ServiceState {
     Starting,
     Running,
     Stopping,
+    Failed,
 }
 
 struct ServiceRecord {
@@ -49,6 +50,42 @@ pub enum ServiceRegistryError {
     DependencyCycle,
     Capacity,
     RunningDependents,
+}
+
+#[derive(Debug)]
+pub enum RuntimeLifecycleAction {
+    Start(ServiceHandle),
+    Stop(ServiceHandle),
+    Restart(Vec<ServiceHandle>),
+}
+
+pub fn service_request_shape_valid(request: ManagerRequest) -> bool {
+    if request.abi_version != logos_abi::MANAGER_ABI_VERSION
+        || request.request_id == 0
+        || request.target_kind != logos_abi::ManagerTargetKind::Service
+        || request.reserved_tail != [0; 2]
+        || request.name_len as usize > request.name.len()
+        || request.name[request.name_len as usize..].iter().any(|byte| *byte != 0)
+    {
+        return false;
+    }
+    match request.operation {
+        ManagerOperation::List => {
+            request.service == ServiceHandle::EMPTY
+                && request.program_generation == 0
+                && request.program_slot == u8::MAX
+        }
+        ManagerOperation::Status
+        | ManagerOperation::Start
+        | ManagerOperation::Stop
+        | ManagerOperation::Restart => {
+            request.service.is_valid()
+                && request.program_slot == u8::MAX
+                && request.program_generation == 0
+                && request.cursor == 0
+        }
+        _ => false,
+    }
 }
 
 pub struct RuntimeServiceRegistry {
@@ -163,6 +200,19 @@ impl RuntimeServiceRegistry {
         Ok(())
     }
 
+    pub fn fail(&mut self, handle: ServiceHandle) -> Result<(), ServiceRegistryError> {
+        self.service_mut(handle)?.state = ServiceState::Failed;
+        Ok(())
+    }
+
+    pub fn mark_stopping(&mut self, handle: ServiceHandle) -> Result<(), ServiceRegistryError> {
+        let service = self.service_mut(handle)?;
+        if service.state == ServiceState::Running {
+            service.state = ServiceState::Stopping;
+        }
+        Ok(())
+    }
+
     pub fn restart(&mut self, handle: ServiceHandle) -> Result<(), ServiceRegistryError> {
         let index = self.index(handle)?;
         let dependencies = self.service(handle)?.dependencies.clone();
@@ -214,6 +264,22 @@ impl RuntimeServiceRegistry {
 
     pub fn image_len(&self, handle: ServiceHandle) -> Result<usize, ServiceRegistryError> {
         Ok(self.service(handle)?.image.len())
+    }
+
+    pub fn set_image(
+        &mut self,
+        handle: ServiceHandle,
+        image: &[u8],
+    ) -> Result<(), ServiceRegistryError> {
+        if image.is_empty() {
+            return Err(ServiceRegistryError::InvalidImage);
+        }
+        let service = self.service_mut(handle)?;
+        let mut replacement = Vec::new();
+        replacement.try_reserve(image.len()).map_err(|_| ServiceRegistryError::Capacity)?;
+        replacement.extend_from_slice(image);
+        service.image = replacement;
+        Ok(())
     }
 
     pub fn heap_quota_pages(&self, handle: ServiceHandle) -> Result<usize, ServiceRegistryError> {
@@ -306,6 +372,43 @@ impl RuntimeServiceRegistry {
         ManagerStatus::Accepted
     }
 
+    pub fn begin_lifecycle_action(
+        &mut self,
+        operation: ManagerOperation,
+        handle: ServiceHandle,
+    ) -> Result<RuntimeLifecycleAction, ManagerStatus> {
+        let status = self.lifecycle_status(operation, handle);
+        if status != ManagerStatus::Ok {
+            return Err(status);
+        }
+        match operation {
+            ManagerOperation::Start => {
+                self.service_mut(handle).map_err(|_| ManagerStatus::Stale)?.state =
+                    ServiceState::Starting;
+                Ok(RuntimeLifecycleAction::Start(handle))
+            }
+            ManagerOperation::Stop => {
+                self.service_mut(handle).map_err(|_| ManagerStatus::Stale)?.state =
+                    ServiceState::Stopping;
+                Ok(RuntimeLifecycleAction::Stop(handle))
+            }
+            ManagerOperation::Restart => {
+                let closure =
+                    self.restart_closure(handle).map_err(|_| ManagerStatus::Dependency)?;
+                for member in &closure {
+                    self.service_mut(*member).map_err(|_| ManagerStatus::Stale)?.state =
+                        ServiceState::Stopping;
+                }
+                Ok(RuntimeLifecycleAction::Restart(closure))
+            }
+            _ => Err(ManagerStatus::Unsupported),
+        }
+    }
+
+    pub fn service_index(&self, handle: ServiceHandle) -> Result<usize, ServiceRegistryError> {
+        self.index(handle)
+    }
+
     pub fn abort_lifecycle(
         &mut self,
         operation: ManagerOperation,
@@ -328,10 +431,27 @@ impl RuntimeServiceRegistry {
         ManagerStatus::Ok
     }
 
+    pub fn abort_lifecycle_members(&mut self, members: &[ServiceHandle]) -> ManagerStatus {
+        for handle in members {
+            let Ok(service) = self.service_mut(*handle) else {
+                return ManagerStatus::Stale;
+            };
+            if service.state != ServiceState::Stopping {
+                return ManagerStatus::InvalidState;
+            }
+        }
+        for handle in members {
+            if let Ok(service) = self.service_mut(*handle) {
+                service.state = ServiceState::Running;
+            }
+        }
+        ManagerStatus::Ok
+    }
+
     pub fn manager_request(&self, request: ManagerRequest) -> ManagerResponse {
         let mut response =
             ManagerResponse::new(request.operation, ManagerStatus::Malformed, request.request_id);
-        if request.request_id == 0 || request.abi_version != logos_abi::MANAGER_ABI_VERSION {
+        if !service_request_shape_valid(request) {
             return response;
         }
         match request.operation {
@@ -378,7 +498,7 @@ impl RuntimeServiceRegistry {
             }
             if written == DIRECTORY_RECORDS_PER_PAGE {
                 response.flags |= DIRECTORY_FLAG_MORE;
-                response.cursor = cursor + written as u64;
+                response.cursor = cursor.saturating_add(written as u64);
                 break;
             }
             let mut record = DirectoryRecord::service(service.handle, &service.name)
@@ -389,6 +509,7 @@ impl RuntimeServiceRegistry {
                 ServiceState::Starting => 1,
                 ServiceState::Running => 1,
                 ServiceState::Stopping => 0,
+                ServiceState::Failed => 0,
             };
             response.records[written] = record;
             written += 1;
@@ -396,7 +517,7 @@ impl RuntimeServiceRegistry {
         }
         response.count = written as u8;
         if response.flags & DIRECTORY_FLAG_MORE == 0 {
-            response.cursor = cursor + written as u64;
+            response.cursor = cursor.saturating_add(written as u64);
         }
         DirectoryStatus::Ok
     }
@@ -429,6 +550,46 @@ impl RuntimeServiceRegistry {
             service.state = ServiceState::Running;
         }
         Ok(())
+    }
+
+    fn restart_closure(
+        &self,
+        handle: ServiceHandle,
+    ) -> Result<Vec<ServiceHandle>, ServiceRegistryError> {
+        self.service(handle)?;
+        let mut included = Vec::new();
+        included.try_reserve(1).map_err(|_| ServiceRegistryError::Capacity)?;
+        included.push(handle);
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for service in self.slots.iter().filter_map(|slot| slot.value.as_ref()) {
+                if service.state == ServiceState::Running
+                    && !included.contains(&service.handle)
+                    && service.dependencies.iter().any(|dependency| included.contains(dependency))
+                {
+                    included.try_reserve(1).map_err(|_| ServiceRegistryError::Capacity)?;
+                    included.push(service.handle);
+                    changed = true;
+                }
+            }
+        }
+        let mut order = Vec::new();
+        order.try_reserve(included.len()).map_err(|_| ServiceRegistryError::Capacity)?;
+        let mut remaining = included;
+        while !remaining.is_empty() {
+            let position = remaining.iter().position(|candidate| {
+                self.service(*candidate).is_ok_and(|service| {
+                    !service.dependencies.iter().any(|dependency| remaining.contains(dependency))
+                })
+            });
+            let Some(position) = position else {
+                return Err(ServiceRegistryError::DependencyCycle);
+            };
+            order.push(remaining.swap_remove(position));
+        }
+        order.reverse();
+        Ok(order)
     }
 
     fn allocate_slot(&mut self) -> Result<usize, ServiceRegistryError> {
@@ -480,6 +641,7 @@ impl RuntimeServiceRegistry {
                 ServiceState::Starting => ManagerState::Starting,
                 ServiceState::Running => ManagerState::Running,
                 ServiceState::Stopping => ManagerState::Stopping,
+                ServiceState::Failed => ManagerState::Failed,
             },
             restarts: service.restarts,
             name_len: name_len as u8,
@@ -651,6 +813,37 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_action_builds_dynamic_restart_closure() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let dependency = registry.register(b"dependency", b"image", &[]).unwrap();
+        let service = registry.register(b"service", b"image", &[dependency]).unwrap();
+        let dependent = registry.register(b"dependent", b"image", &[service]).unwrap();
+        registry.start(dependent).unwrap();
+
+        let action = registry.begin_lifecycle_action(ManagerOperation::Restart, service).unwrap();
+        let RuntimeLifecycleAction::Restart(order) = action else {
+            panic!("restart must return a closure");
+        };
+        assert_eq!(order.as_slice(), &[dependent, service]);
+        assert_eq!(registry.state(dependent), Ok(ServiceState::Stopping));
+        assert_eq!(registry.state(service), Ok(ServiceState::Stopping));
+        assert_eq!(registry.state(dependency), Ok(ServiceState::Running));
+    }
+
+    #[test]
+    fn lifecycle_action_rollback_restores_restart_members() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let service = registry.register(b"service", b"image", &[]).unwrap();
+        registry.start(service).unwrap();
+        let action = registry.begin_lifecycle_action(ManagerOperation::Restart, service).unwrap();
+        let RuntimeLifecycleAction::Restart(members) = action else {
+            panic!("restart must return members");
+        };
+        assert_eq!(registry.abort_lifecycle_members(&members), ManagerStatus::Ok);
+        assert_eq!(registry.state(service), Ok(ServiceState::Running));
+    }
+
+    #[test]
     fn heap_quota_is_recorded_with_the_service_handle() {
         let mut registry = RuntimeServiceRegistry::new();
         let handle = registry.register_with_quota(b"quota", b"image", &[], 7).unwrap();
@@ -659,6 +852,17 @@ mod tests {
             registry.register_with_quota(b"zero", b"image", &[], 0),
             Err(ServiceRegistryError::InvalidImage)
         );
+    }
+
+    #[test]
+    fn image_metadata_updates_without_replacing_the_service_handle() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let handle = registry.register(b"service", b"builtin", &[]).unwrap();
+        assert_eq!(registry.image_len(handle), Ok(7));
+        registry.set_image(handle, b"package").unwrap();
+        assert_eq!(registry.image_len(handle), Ok(7));
+        assert_eq!(registry.set_image(handle, b""), Err(ServiceRegistryError::InvalidImage));
+        assert_eq!(registry.image_len(handle), Ok(7));
     }
 
     #[test]
@@ -675,6 +879,25 @@ mod tests {
         assert_eq!(response.status, ManagerStatus::Ok);
         assert_eq!(response.record.restarts, 1);
         assert_eq!(response.record.state, ManagerState::Running);
+    }
+
+    #[test]
+    fn failed_service_state_is_dynamic_and_generation_checked() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let handle = registry.register(b"service", b"image", &[]).unwrap();
+        registry.start(handle).unwrap();
+        registry.fail(handle).unwrap();
+
+        let mut request = ManagerRequest::new(ManagerOperation::Status, 1);
+        request.service = handle;
+        let response = registry.manager_request(request);
+        assert_eq!(response.status, ManagerStatus::Ok);
+        assert_eq!(response.record.state, ManagerState::Failed);
+
+        let stale =
+            ServiceHandle::new(handle.index(), handle.generation().wrapping_add(1)).unwrap();
+        request.service = stale;
+        assert_eq!(registry.manager_request(request).status, ManagerStatus::Stale);
     }
 
     #[test]

@@ -428,6 +428,7 @@ impl Scheduler {
             }
             let handle = TaskHandle { slot: index as u8, generation: generation(word) };
             if self.wake(handle) {
+                self.event_wakes.fetch_add(1, Ordering::Relaxed);
                 woken += 1;
             }
         }
@@ -915,6 +916,7 @@ mod tests {
         assert!(scheduler.save_context(handle, 0x2180));
         assert!(scheduler.finish(handle, FinishState::TimedBlocked));
         assert_eq!(scheduler.signal_event_object(0x1000), 1);
+        assert_eq!(scheduler.event_wakes(), 1);
         assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
         assert_eq!(scheduler.wake_due(10), 0);
     }
