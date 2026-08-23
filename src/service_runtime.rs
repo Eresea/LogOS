@@ -1853,23 +1853,16 @@ impl ServiceRuntime {
         process: ProcessHandle,
         now: u64,
     ) -> bool {
-        let Some(service) = self
-            .service_handles
-            .iter()
-            .position(|handle| *handle == owner)
-            .and_then(ServiceId::from_index)
-        else {
+        if self.service_handle_for_process(process) != Some(owner) {
+            return false;
+        }
+        let Some(service) = builtin_service_for_handle(&self.service_handles, owner) else {
             return false;
         };
         let index = service.index();
-        if self.launch(service).is_none_or(|(current, _)| current != process) {
-            return false;
-        }
         if !self.suppressed_heartbeats[index].load(Ordering::Acquire) {
-            if let Ok(handle) = self.runtime_service_handle(service) {
-                if let Some(registry) = self.dynamic_services.as_mut() {
-                    let _ = registry.set_heartbeat(handle, now);
-                }
+            if let Some(registry) = self.dynamic_services.as_mut() {
+                let _ = registry.set_heartbeat(owner, now);
             }
         }
         true
@@ -1880,15 +1873,7 @@ impl ServiceRuntime {
         owner: ServiceHandle,
         process: ProcessHandle,
     ) -> bool {
-        let Some(service) = self
-            .service_handles
-            .iter()
-            .position(|handle| *handle == owner)
-            .and_then(ServiceId::from_index)
-        else {
-            return false;
-        };
-        self.launch(service).is_some_and(|(current, _)| current == process)
+        self.service_handle_for_process(process) == Some(owner)
     }
 
     fn dynamic_service_heartbeat(&self, service: ServiceId) -> u64 {
@@ -4072,10 +4057,16 @@ impl ServiceRuntime {
     }
 
     pub(crate) fn service_for_process(&self, process: ProcessHandle) -> Option<ServiceId> {
-        SERVICE_IMAGES.iter().find_map(|spec| {
-            self.launch(spec.service())
+        let handle = self.service_handle_for_process(process)?;
+        builtin_service_for_handle(&self.service_handles, handle)
+    }
+
+    fn service_handle_for_process(&self, process: ProcessHandle) -> Option<ServiceHandle> {
+        self.launches.iter().enumerate().find_map(|(index, launch)| {
+            launch
                 .is_some_and(|(current, _)| current == process)
-                .then_some(spec.service())
+                .then(|| self.service_handles.get(index).copied())
+                .flatten()
         })
     }
 
