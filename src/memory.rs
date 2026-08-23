@@ -20,7 +20,7 @@ use crate::boot_resources::{MemoryDescriptor, MemoryMap, PAGE_SIZE};
 
 pub const MAX_MEMORY_RUNS: usize = logos_abi::MAX_MEMORY_DESCRIPTORS;
 #[cfg(test)]
-const TEST_MAX_MANAGED_FRAMES: usize = 256;
+const TEST_FRAME_COUNT: usize = 256;
 pub const MAX_FRAME_SHARDS: usize = 4;
 pub const MAX_MEMORY_CPUS: usize = 8;
 pub const FRAME_CACHE_CAPACITY: usize = 16;
@@ -707,21 +707,20 @@ impl FrameMetadata {
 
 #[cfg(test)]
 const TEST_METADATA_BYTES: usize = {
-    let records_bytes = TEST_MAX_MANAGED_FRAMES * size_of::<FrameRecord>();
-    let free_len = TEST_MAX_MANAGED_FRAMES.div_ceil(64);
+    let records_bytes = TEST_FRAME_COUNT * size_of::<FrameRecord>();
+    let free_len = TEST_FRAME_COUNT.div_ceil(64);
     let free_offset = records_bytes.div_ceil(8) * 8;
     let summary_offset = (free_offset + free_len * size_of::<u64>()).div_ceil(8) * 8;
     let heap_slots_offset = (summary_offset + free_len.div_ceil(64) * size_of::<u64>())
         .div_ceil(align_of::<HeapSlot>())
         * align_of::<HeapSlot>();
-    let heap_records_offset = (heap_slots_offset + TEST_MAX_MANAGED_FRAMES * size_of::<HeapSlot>())
+    let heap_records_offset = (heap_slots_offset + TEST_FRAME_COUNT * size_of::<HeapSlot>())
         .div_ceil(align_of::<HeapPageRecord>())
         * align_of::<HeapPageRecord>();
-    let heap_leases_offset = (heap_records_offset
-        + TEST_MAX_MANAGED_FRAMES * size_of::<HeapPageRecord>())
-    .div_ceil(align_of::<HeapLeaseRecord>())
+    let heap_leases_offset = (heap_records_offset + TEST_FRAME_COUNT * size_of::<HeapPageRecord>())
+        .div_ceil(align_of::<HeapLeaseRecord>())
         * align_of::<HeapLeaseRecord>();
-    let bytes = heap_leases_offset + TEST_MAX_MANAGED_FRAMES * size_of::<HeapLeaseRecord>();
+    let bytes = heap_leases_offset + TEST_FRAME_COUNT * size_of::<HeapLeaseRecord>();
     bytes.div_ceil(PAGE_SIZE as usize) * PAGE_SIZE as usize
 };
 
