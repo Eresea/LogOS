@@ -7,27 +7,27 @@ mod common;
 use core::{mem, ptr};
 use logos_abi::{IpcBytes, IpcStatus, MessageKind, NetworkRequest, NetworkResponse};
 
-const FLOW_RECEIVE: common::CapabilitySpec = common::capability_contract(
+const FLOW_RECEIVE: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Flow.index() as u32,
+    b"flow",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const FLOW_SEND: common::CapabilitySpec = common::capability_contract(
+const FLOW_SEND: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Flow.index() as u32,
+    b"flow",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const FETCH_RECEIVE: common::CapabilitySpec = common::capability_contract(
+const FETCH_RECEIVE: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Fetch.index() as u32,
+    b"fetch",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const FETCH_SEND: common::CapabilitySpec = common::capability_contract(
+const FETCH_SEND: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Fetch.index() as u32,
+    b"fetch",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
