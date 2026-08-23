@@ -161,7 +161,6 @@ pub struct ServiceRuntime {
     dynamic_services: Option<crate::runtime_services::RuntimeServiceRegistry>,
     service_handles: [logos_abi::ServiceHandle; SERVICE_COUNT],
     dynamic_events: Option<crate::runtime_events::RuntimeEventRegistry>,
-    dynamic_endpoints: Vec<logos_abi::EndpointHandle>,
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
     service_bootstrap_frames: [u64; SERVICE_COUNT],
     bootstrap_control: [logos_abi::CapabilityHandle; SERVICE_COUNT],
@@ -393,7 +392,6 @@ impl ServiceRuntime {
             dynamic_services: None,
             service_handles: [logos_abi::ServiceHandle::EMPTY; SERVICE_COUNT],
             dynamic_events: None,
-            dynamic_endpoints: Vec::new(),
             ipc_staging_frames: [None; SERVICE_COUNT],
             service_bootstrap_frames: [0; SERVICE_COUNT],
             bootstrap_control: [logos_abi::CapabilityHandle::EMPTY; SERVICE_COUNT],
@@ -523,11 +521,7 @@ impl ServiceRuntime {
         );
         let mut events =
             crate::runtime_events::RuntimeEventRegistry::new_with_generation(generation);
-        let mut endpoints = Vec::new();
         let mut package_capability = logos_abi::CapabilityHandle::EMPTY;
-        endpoints
-            .try_reserve(logos_abi::IPC_ENDPOINT_COUNT)
-            .map_err(|_| ServiceRuntimeError::Resources)?;
         for raw in 0..logos_abi::IPC_ENDPOINT_COUNT {
             let endpoint_id = logos_abi::IpcEndpointId::from_index(raw)
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
@@ -551,7 +545,6 @@ impl ServiceRuntime {
                     &mut events,
                 )
                 .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
-            endpoints.push(endpoint);
             if endpoint_id == logos_abi::IpcEndpointId::CoreToNetwork {
                 let (read_event, _) = registry
                     .endpoint_events(endpoint)
@@ -605,7 +598,6 @@ impl ServiceRuntime {
             keyboard_event,
         );
         self.keyboard_event = keyboard_event;
-        self.dynamic_endpoints = endpoints;
         self.dynamic_ipc = Some(registry);
         self.dynamic_events = Some(events);
         self.package_capability = package_capability;
@@ -2094,7 +2086,26 @@ impl ServiceRuntime {
         endpoint: logos_abi::EndpointHandle,
         manifest_index: usize,
     ) -> bool {
-        self.dynamic_endpoints.get(manifest_index).copied() == Some(endpoint)
+        let Some(endpoint_id) = logos_abi::IpcEndpointId::from_index(manifest_index) else {
+            return false;
+        };
+        let generation = (self.service_epoch as u32).max(1);
+        let Ok(producer) =
+            dynamic_endpoint_peer(endpoint_id, true, &self.service_handles, generation)
+        else {
+            return false;
+        };
+        let Ok(consumer) =
+            dynamic_endpoint_peer(endpoint_id, false, &self.service_handles, generation)
+        else {
+            return false;
+        };
+        let Some(contract_id) = logos_abi::ipc_contract_id(manifest_index) else {
+            return false;
+        };
+        self.dynamic_ipc.as_ref().is_some_and(|registry| {
+            registry.endpoint_matches(endpoint, producer, consumer, contract_id).unwrap_or(false)
+        })
     }
 
     fn endpoint_requires_core_dispatch(&self, endpoint: logos_abi::EndpointHandle) -> bool {
@@ -4220,10 +4231,9 @@ impl ServiceRuntime {
             }
             let old_service_epoch = self.service_epoch.wrapping_sub(1).max(1);
             let stale_rejected = self.dynamic_ipc.is_some()
-                && self
-                    .dynamic_endpoints
-                    .iter()
-                    .all(|endpoint| endpoint.generation() != old_service_epoch as u32);
+                && self.dynamic_ipc.as_ref().is_some_and(|registry| {
+                    registry.all_endpoint_generations_differ(old_service_epoch as u32)
+                });
             if !stale_rejected {
                 return Err(ServiceRuntimeError::StaleGeneration);
             }
@@ -4672,7 +4682,6 @@ impl ServiceRuntime {
         self.service_handles = [logos_abi::ServiceHandle::EMPTY; SERVICE_COUNT];
         self.dynamic_events = None;
         self.keyboard_event = logos_abi::EventHandle::EMPTY;
-        self.dynamic_endpoints.clear();
         self.storage_response = None;
         self.device_response = None;
         self.storage_map_response = None;

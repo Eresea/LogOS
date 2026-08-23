@@ -226,6 +226,26 @@ impl RuntimeIpcRegistry {
         Ok(self.endpoint(endpoint)?.contract_id)
     }
 
+    pub fn endpoint_matches(
+        &self,
+        endpoint: EndpointHandle,
+        producer: ServiceHandle,
+        consumer: ServiceHandle,
+        contract_id: u16,
+    ) -> Result<bool, IpcStatus> {
+        let record = self.endpoint(endpoint)?;
+        Ok(record.producer == producer
+            && record.consumer == consumer
+            && record.contract_id == contract_id)
+    }
+
+    pub fn all_endpoint_generations_differ(&self, generation: u32) -> bool {
+        self.endpoints
+            .iter()
+            .filter_map(|slot| slot.value.as_ref())
+            .all(|endpoint| endpoint.handle.generation() != generation)
+    }
+
     pub fn find_endpoint(
         &self,
         producer: ServiceHandle,
