@@ -1945,11 +1945,15 @@ impl ServiceRuntime {
         if self.service_handle_for_process(process) != Some(owner) {
             return false;
         }
-        let Some(service) = builtin_service_for_handle(&self.service_handles, owner) else {
+        let Some(service_slot) = self.service_handles.iter().position(|handle| *handle == owner)
+        else {
             return false;
         };
-        let index = service.index();
-        if !self.suppressed_heartbeats[index].load(Ordering::Acquire) {
+        if !self
+            .suppressed_heartbeats
+            .get(service_slot)
+            .is_some_and(|suppressed| suppressed.load(Ordering::Acquire))
+        {
             if let Some(registry) = self.dynamic_services.as_mut() {
                 let _ = registry.set_heartbeat(owner, now);
             }
