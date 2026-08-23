@@ -35,9 +35,8 @@ pub use runtime_abi::{
     ServiceBootstrapPage, ServiceHandle,
 };
 pub use service_manager::{
-    MANAGER_ABI_VERSION, ManagerCapability, ManagerCapabilityPage, ManagerOperation,
-    ManagerRequest, ManagerResponse, ManagerRights, ManagerState, ManagerStatus, ManagerTargetKind,
-    ServiceManagerRecord,
+    MANAGER_ABI_VERSION, ManagerOperation, ManagerRequest, ManagerResponse, ManagerRights,
+    ManagerState, ManagerStatus, ManagerTargetKind, ServiceManagerRecord,
 };
 pub use storage_api::{
     STORAGE_API_EXTENSION_VERSION, STORAGE_API_FLAG_REPLACE, STORAGE_API_MAP_DESCRIPTOR_BYTES,
@@ -2048,13 +2047,7 @@ mod tests {
     }
 
     #[test]
-    fn manager_capability_and_requests_are_bounded() {
-        let capability = ManagerCapability::new(3, ManagerRights::ALL, 9).unwrap();
-        assert!(capability.rights.contains(ManagerRights::INSPECT));
-        assert!(capability.rights.contains(ManagerRights::LIFECYCLE));
-        assert!(ManagerCapability::new(0, ManagerRights::ALL, 9).is_none());
-        assert!(ManagerCapability::new(3, ManagerRights::NONE, 9).is_none());
-        assert!(ManagerCapability::new(3, ManagerRights(0x80), 9).is_none());
+    fn manager_requests_are_bounded() {
         assert!(core::mem::size_of::<ManagerRequest>() <= IPC_PAGE_BYTES);
         assert!(core::mem::size_of::<ManagerResponse>() <= IPC_PAGE_BYTES);
         assert_eq!(MANAGER_CAPABILITY_BASE, IPC_CAPABILITY_BASE + IPC_PAGE_BYTES);

@@ -99,46 +99,6 @@ impl ManagerRights {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
-pub struct ManagerCapability {
-    pub generation: u32,
-    pub rights: ManagerRights,
-    pub reserved: [u8; 3],
-    pub service_epoch: u64,
-}
-
-impl ManagerCapability {
-    pub const EMPTY: Self =
-        Self { generation: 0, rights: ManagerRights::NONE, reserved: [0; 3], service_epoch: 0 };
-
-    pub const fn new(generation: u32, rights: ManagerRights, service_epoch: u64) -> Option<Self> {
-        if generation == 0
-            || rights.0 == 0
-            || rights.0 & !ManagerRights::ALL.0 != 0
-            || service_epoch == 0
-        {
-            return None;
-        }
-        Some(Self { generation, rights, reserved: [0; 3], service_epoch })
-    }
-
-    pub const fn is_empty(self) -> bool {
-        self.generation == 0
-    }
-}
-
-#[repr(C, align(16))]
-pub struct ManagerCapabilityPage {
-    pub capability: ManagerCapability,
-}
-
-impl ManagerCapabilityPage {
-    pub const fn empty() -> Self {
-        Self { capability: ManagerCapability::EMPTY }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(C)]
 pub struct ManagerRequest {
     pub abi_version: u16,
     pub operation: ManagerOperation,
@@ -279,15 +239,6 @@ impl ManagerResponse {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<ManagerCapability>() == 16);
-const _: () = assert!(core::mem::align_of::<ManagerCapability>() == 8);
-const _: () = assert!(core::mem::offset_of!(ManagerCapability, generation) == 0);
-const _: () = assert!(core::mem::offset_of!(ManagerCapability, rights) == 4);
-const _: () = assert!(core::mem::offset_of!(ManagerCapability, reserved) == 5);
-const _: () = assert!(core::mem::offset_of!(ManagerCapability, service_epoch) == 8);
-const _: () = assert!(core::mem::size_of::<ManagerCapabilityPage>() == 16);
-const _: () = assert!(core::mem::align_of::<ManagerCapabilityPage>() == 16);
-const _: () = assert!(core::mem::offset_of!(ManagerCapabilityPage, capability) == 0);
 const _: () = assert!(core::mem::size_of::<ManagerRequest>() <= crate::IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::align_of::<ManagerRequest>() == 8);
 const _: () = assert!(core::mem::offset_of!(ManagerRequest, abi_version) == 0);
@@ -320,7 +271,6 @@ const _: () = assert!(core::mem::offset_of!(ManagerResponse, status) == 3);
 const _: () = assert!(core::mem::offset_of!(ManagerResponse, request_id) == 4);
 const _: () = assert!(core::mem::offset_of!(ManagerResponse, cursor) == 8);
 const _: () = assert!(core::mem::offset_of!(ManagerResponse, record) == 16);
-const _: () = assert!(core::mem::size_of::<ManagerCapabilityPage>() <= crate::IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::size_of::<ManagerRequest>() <= crate::IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::size_of::<ManagerResponse>() <= crate::IPC_PAGE_BYTES);
 
