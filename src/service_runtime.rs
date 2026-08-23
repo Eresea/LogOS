@@ -1335,6 +1335,20 @@ impl ServiceRuntime {
             return logos_abi::IpcStatus::Full;
         }
         self.service_heaps[index].frames.push(frame);
+        if self
+            .dynamic_services
+            .as_mut()
+            .and_then(|registry| {
+                registry.set_heap_pages(service_handle, self.service_heaps[index].frames.len()).ok()
+            })
+            .is_none()
+        {
+            let _ = self.service_heaps[index].frames.pop();
+            let _ = unsafe { self.tables[index].assume_init_mut() }
+                .unmap_page(address, &mut IdentityPageTableMemory);
+            let _ = self.frame_pool.release(frame);
+            return logos_abi::IpcStatus::Stale;
+        }
         logos_abi::IpcStatus::Ok
     }
 
@@ -1384,6 +1398,16 @@ impl ServiceRuntime {
             crate::arch_fatal(b"LogOS vNext: service heap release");
         }
         let _ = self.service_heaps[index].frames.pop();
+        if self
+            .dynamic_services
+            .as_mut()
+            .and_then(|registry| {
+                registry.set_heap_pages(service_handle, self.service_heaps[index].frames.len()).ok()
+            })
+            .is_none()
+        {
+            crate::arch_fatal(b"LogOS vNext: service heap ownership");
+        }
         logos_abi::IpcStatus::Ok
     }
 

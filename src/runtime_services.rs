@@ -434,6 +434,18 @@ impl RuntimeServiceRegistry {
         Ok(())
     }
 
+    pub fn set_heap_pages(
+        &mut self,
+        handle: ServiceHandle,
+        heap_pages: usize,
+    ) -> Result<(), ServiceRegistryError> {
+        if heap_pages == 0 {
+            return Err(ServiceRegistryError::Capacity);
+        }
+        self.service_mut(handle)?.ownership.heap_pages = heap_pages;
+        Ok(())
+    }
+
     pub fn clear_runtime_ownership(
         &mut self,
         handle: ServiceHandle,
@@ -1088,13 +1100,14 @@ mod tests {
         );
         registry.set_runtime_counts(handle, 3, 4, 5).unwrap();
         registry.clear_execution_ownership(handle).unwrap();
+        registry.set_heap_pages(handle, 6).unwrap();
         assert_eq!(
             registry.ownership(handle),
             Ok(ServiceOwnership {
                 process: 0,
                 address_space: 0,
                 task: 0,
-                heap_pages: 0,
+                heap_pages: 6,
                 heartbeat: 0,
                 ipc_endpoints: 3,
                 capabilities: 4,
