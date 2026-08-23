@@ -1253,29 +1253,34 @@ impl ServiceRuntime {
         if pages != 1 {
             return logos_abi::IpcStatus::Malformed;
         }
-        let Some(service) = self.service_for_process(process) else {
+        let Some(service_slot) = self.service_slot_for_process(process) else {
             return logos_abi::IpcStatus::Unauthorized;
         };
-        if self.dynamic_service_state(service)
+        let Some(service_handle) = self.service_handles.get(service_slot).copied() else {
+            return logos_abi::IpcStatus::Stale;
+        };
+        let Some(service) = builtin_service_for_handle(&self.service_handles, service_handle)
+        else {
+            return logos_abi::IpcStatus::Unauthorized;
+        };
+        if self.dynamic_services.as_ref().and_then(|registry| registry.state(service_handle).ok())
             != Some(crate::runtime_services::ServiceState::Running)
         {
             return logos_abi::IpcStatus::Stale;
         }
-        let expected = self.bootstrap_heap[service.index()];
+        let expected = self.bootstrap_heap[service_slot];
         if !expected.is_valid() {
             return logos_abi::IpcStatus::Stale;
         }
         if capability_raw != expected.raw() {
             return logos_abi::IpcStatus::Unauthorized;
         }
-        let index = service.index();
+        let index = service_slot;
         let page = self.service_heaps[index].frames.len();
         let quota_pages = self
             .dynamic_services
             .as_ref()
-            .and_then(|registry| {
-                registry.heap_quota_pages(self.runtime_service_handle(service).ok()?).ok()
-            })
+            .and_then(|registry| registry.heap_quota_pages(service_handle).ok())
             .unwrap_or(self.service_heaps[index].quota_pages);
         if page >= quota_pages {
             return logos_abi::IpcStatus::Full;
@@ -1314,22 +1319,29 @@ impl ServiceRuntime {
         if pages != 1 {
             return logos_abi::IpcStatus::Malformed;
         }
-        let Some(service) = self.service_for_process(process) else {
+        let Some(service_slot) = self.service_slot_for_process(process) else {
             return logos_abi::IpcStatus::Unauthorized;
         };
-        if self.dynamic_service_state(service)
+        let Some(service_handle) = self.service_handles.get(service_slot).copied() else {
+            return logos_abi::IpcStatus::Stale;
+        };
+        let Some(_service) = builtin_service_for_handle(&self.service_handles, service_handle)
+        else {
+            return logos_abi::IpcStatus::Unauthorized;
+        };
+        if self.dynamic_services.as_ref().and_then(|registry| registry.state(service_handle).ok())
             != Some(crate::runtime_services::ServiceState::Running)
         {
             return logos_abi::IpcStatus::Stale;
         }
-        let expected = self.bootstrap_heap[service.index()];
+        let expected = self.bootstrap_heap[service_slot];
         if !expected.is_valid() {
             return logos_abi::IpcStatus::Stale;
         }
         if capability_raw != expected.raw() {
             return logos_abi::IpcStatus::Unauthorized;
         }
-        let index = service.index();
+        let index = service_slot;
         let page = self.service_heaps[index].frames.len();
         if page <= logos_abi::SERVICE_HEAP_INITIAL_PAGES {
             return logos_abi::IpcStatus::Full;
