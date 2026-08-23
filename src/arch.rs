@@ -1080,7 +1080,7 @@ pub(crate) fn record_service_heartbeat(
     }
     let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe {
-        let runtime = &*core::ptr::addr_of!(SERVICE_RUNTIME);
+        let runtime = &mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME);
         if service_runtime_restarting() {
             runtime.owns_service_process(service, process)
         } else {
