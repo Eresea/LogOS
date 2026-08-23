@@ -604,6 +604,17 @@ impl ServiceRuntime {
             keyboard_event,
         );
         self.keyboard_event = keyboard_event;
+        for spec in SERVICE_IMAGES {
+            let service = spec.service();
+            let owner = self.runtime_service_handle(service)?;
+            let (ipc_endpoints, capabilities) = registry.ownership_counts(owner);
+            let events_owned = events.ownership_count(owner);
+            if let Some(services) = self.dynamic_services.as_mut() {
+                services
+                    .set_runtime_counts(owner, ipc_endpoints, capabilities, events_owned)
+                    .map_err(|_| ServiceRuntimeError::Resources)?;
+            }
+        }
         self.dynamic_ipc = Some(registry);
         self.dynamic_events = Some(events);
         self.package_capability = package_capability;

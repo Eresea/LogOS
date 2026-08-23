@@ -199,6 +199,22 @@ impl RuntimeIpcRegistry {
             .ok_or(IpcStatus::Unauthorized)
     }
 
+    pub fn ownership_counts(&self, owner: ServiceHandle) -> (usize, usize) {
+        let endpoints = self
+            .endpoints
+            .iter()
+            .filter_map(|slot| slot.value.as_ref())
+            .filter(|endpoint| endpoint.producer == owner || endpoint.consumer == owner)
+            .count();
+        let capabilities = self
+            .capabilities
+            .iter()
+            .filter_map(|slot| slot.value.as_ref())
+            .filter(|capability| capability.owner == owner)
+            .count();
+        (endpoints, capabilities)
+    }
+
     pub fn destroy_endpoint(
         &mut self,
         endpoint: EndpointHandle,
@@ -588,6 +604,8 @@ mod tests {
         events.add(producer, write_set, write_event).unwrap();
         let send = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
         let receive = registry.grant(consumer, endpoint, IpcRights::Receive).unwrap();
+        assert_eq!(registry.ownership_counts(producer), (1, 1));
+        assert_eq!(registry.ownership_counts(consumer), (1, 1));
         assert_eq!(registry.send(producer, send, &[1, 2], &mut events), IpcStatus::Malformed);
         assert_eq!(registry.send(producer, send, &[1, 2, 3], &mut events), IpcStatus::Ok);
         assert_eq!(

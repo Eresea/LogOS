@@ -49,10 +49,22 @@ pub struct ServiceOwnership {
     pub task: u64,
     pub heap_pages: usize,
     pub heartbeat: u64,
+    pub ipc_endpoints: usize,
+    pub capabilities: usize,
+    pub events: usize,
 }
 
 impl ServiceOwnership {
-    const EMPTY: Self = Self { process: 0, address_space: 0, task: 0, heap_pages: 0, heartbeat: 0 };
+    const EMPTY: Self = Self {
+        process: 0,
+        address_space: 0,
+        task: 0,
+        heap_pages: 0,
+        heartbeat: 0,
+        ipc_endpoints: 0,
+        capabilities: 0,
+        events: 0,
+    };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -326,6 +338,20 @@ impl RuntimeServiceRegistry {
         heartbeat: u64,
     ) -> Result<(), ServiceRegistryError> {
         self.service_mut(handle)?.ownership.heartbeat = heartbeat;
+        Ok(())
+    }
+
+    pub fn set_runtime_counts(
+        &mut self,
+        handle: ServiceHandle,
+        ipc_endpoints: usize,
+        capabilities: usize,
+        events: usize,
+    ) -> Result<(), ServiceRegistryError> {
+        let service = self.service_mut(handle)?;
+        service.ownership.ipc_endpoints = ipc_endpoints;
+        service.ownership.capabilities = capabilities;
+        service.ownership.events = events;
         Ok(())
     }
 
@@ -931,6 +957,9 @@ mod tests {
                 task: 33,
                 heap_pages: 2,
                 heartbeat: 44,
+                ipc_endpoints: 0,
+                capabilities: 0,
+                events: 0,
             })
         );
         assert_eq!(

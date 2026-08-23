@@ -446,6 +446,14 @@ impl RuntimeEventRegistry {
         Ok(())
     }
 
+    pub fn ownership_count(&self, owner: ServiceHandle) -> usize {
+        self.events
+            .iter()
+            .filter_map(|slot| slot.value.as_ref())
+            .filter(|event| event.owner == owner)
+            .count()
+    }
+
     pub fn destroy_service(&mut self, owner: ServiceHandle) {
         let events: Vec<_> = self
             .events
@@ -569,10 +577,13 @@ mod tests {
         let mut events = RuntimeEventRegistry::new();
         let event = events.create_event(owner).unwrap();
         let set = events.create_set(owner).unwrap();
+        assert_eq!(events.ownership_count(owner), 1);
         events.add(owner, set, event).unwrap();
         events.signal_irq(event).unwrap();
         assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Ready(event)));
         assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Pending));
+        events.destroy_event(owner, event).unwrap();
+        assert_eq!(events.ownership_count(owner), 0);
     }
 
     #[test]
