@@ -60,7 +60,7 @@ pub extern "C" fn _start() -> ! {
     let mut heartbeat_ticks = 0u16;
     let mut render_more = false;
     loop {
-        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Terminal);
+        common::heartbeat_tick(&mut heartbeat_ticks);
         if let Some(message) = *pending_session_input {
             match common::ipc_send_handle(session_input_capability, &message) {
                 IpcStatus::Ok => {

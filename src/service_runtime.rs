@@ -1849,12 +1849,20 @@ impl ServiceRuntime {
         Err(ServiceRuntimeError::TaskStop)
     }
 
-    pub(crate) fn record_heartbeat(
+    pub(crate) fn record_heartbeat_handle(
         &mut self,
-        service: ServiceId,
+        owner: ServiceHandle,
         process: ProcessHandle,
         now: u64,
     ) -> bool {
+        let Some(service) = self
+            .service_handles
+            .iter()
+            .position(|handle| *handle == owner)
+            .and_then(ServiceId::from_index)
+        else {
+            return false;
+        };
         let index = service.index();
         if self.launch(service).is_none_or(|(current, _)| current != process) {
             return false;
@@ -1870,7 +1878,19 @@ impl ServiceRuntime {
         true
     }
 
-    pub(crate) fn owns_service_process(&self, service: ServiceId, process: ProcessHandle) -> bool {
+    pub(crate) fn owns_service_process_handle(
+        &self,
+        owner: ServiceHandle,
+        process: ProcessHandle,
+    ) -> bool {
+        let Some(service) = self
+            .service_handles
+            .iter()
+            .position(|handle| *handle == owner)
+            .and_then(ServiceId::from_index)
+        else {
+            return false;
+        };
         self.launch(service).is_some_and(|(current, _)| current == process)
     }
 

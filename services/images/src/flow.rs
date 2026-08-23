@@ -2692,7 +2692,7 @@ pub extern "C" fn _start() -> ! {
     let mut proof = StorageProof::new();
     let mut heartbeat_ticks = 0u16;
     loop {
-        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Flow);
+        common::heartbeat_tick(&mut heartbeat_ticks);
         let mut progressed = pending.flush(ipc_capabilities().output);
         if storage.active()
             || package.active()

@@ -53,7 +53,7 @@ pub extern "C" fn _start() -> ! {
     let mut render_pending = false;
     let mut render_complete = false;
     loop {
-        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Display);
+        common::heartbeat_tick(&mut heartbeat_ticks);
         let generation = common::bootstrap_page().service.generation() as u16;
         if display.generation() != generation {
             display.replace_generation(generation);

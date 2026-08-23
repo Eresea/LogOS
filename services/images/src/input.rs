@@ -33,7 +33,7 @@ pub extern "C" fn _start() -> ! {
     let mut decoder = logos_input::InputDecoder::new();
     let mut heartbeat_ticks = 0u16;
     loop {
-        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Input);
+        common::heartbeat_tick(&mut heartbeat_ticks);
         if let Some(message) = pending[0] {
             match common::ipc_send_handle(output_capability, &message) {
                 IpcStatus::Ok => {

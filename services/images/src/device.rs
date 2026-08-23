@@ -55,7 +55,7 @@ fn run(
     let mut manager = logos_device::DeviceManager::new();
 
     loop {
-        common::heartbeat_tick(&mut heartbeat_ticks, ServiceId::Device);
+        common::heartbeat_tick(&mut heartbeat_ticks);
         let mut progressed = false;
 
         if let Some(response) = pending_response {

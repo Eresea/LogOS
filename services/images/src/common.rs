@@ -818,19 +818,19 @@ pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle], servic
     #[cfg(target_os = "none")]
     {
         if capabilities.is_empty() {
-            heartbeat(service);
+            heartbeat();
             return;
         }
         let mut events = Vec::new();
         if events.try_reserve(capabilities.len()).is_err() {
-            heartbeat(service);
+            heartbeat();
             return;
         }
         for capability in capabilities.iter().copied() {
             let event = match discover_event_for_capability(capability) {
                 Ok(event) => event,
                 Err(_) => {
-                    heartbeat(service);
+                    heartbeat();
                     return;
                 }
             };
@@ -841,12 +841,12 @@ pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle], servic
     #[cfg(not(target_os = "none"))]
     {
         let _ = capabilities;
-        heartbeat(service);
+        heartbeat();
     }
 }
 
 #[allow(dead_code)]
-fn wait_on_event_handles(events: &[logos_abi::EventHandle], service: ServiceId) {
+fn wait_on_event_handles(events: &[logos_abi::EventHandle], _service: ServiceId) {
     #[cfg(target_os = "none")]
     {
         let cached = unsafe { &*EVENT_SET_CACHE.0.get() };
@@ -879,7 +879,7 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle], service: ServiceId) 
                 || !response.event_set.is_valid()
             {
                 unsafe { *EVENT_SET_CACHE.0.get() = EventSetCacheState::empty() };
-                heartbeat(service);
+                heartbeat();
                 return;
             }
             let set = response.event_set;
@@ -901,7 +901,7 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle], service: ServiceId) 
                     );
                     destroy.event_set = set;
                     let _ = event_call(&destroy, &mut add_response);
-                    heartbeat(service);
+                    heartbeat();
                     return;
                 }
             }
@@ -926,12 +926,12 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle], service: ServiceId) 
             let _ = event_call(&destroy, &mut response);
             unsafe { *EVENT_SET_CACHE.0.get() = EventSetCacheState::empty() };
         }
-        heartbeat(service);
+        heartbeat();
     }
     #[cfg(not(target_os = "none"))]
     {
         let _ = events;
-        heartbeat(service);
+        heartbeat();
     }
 }
 
@@ -982,23 +982,27 @@ pub fn capability_handle(spec: CapabilitySpec) -> Result<logos_abi::CapabilityHa
 }
 
 #[inline(always)]
-pub fn heartbeat(service: ServiceId) {
+pub fn heartbeat() {
+    let service = bootstrap_page().service;
+    if !service.is_valid() {
+        return;
+    }
     unsafe {
         asm!(
             "mov eax, 10",
             "int 49",
-            in("rdi") service as usize,
+            in("rdi") service.raw() as usize,
             lateout("rax") _,
             options(preserves_flags),
         );
     }
 }
 
-pub fn heartbeat_tick(ticks: &mut u16, service: ServiceId) {
+pub fn heartbeat_tick(ticks: &mut u16) {
     *ticks = ticks.wrapping_add(1);
     if *ticks == 1024 {
         *ticks = 0;
-        heartbeat(service);
+        heartbeat();
     }
 }
 

@@ -241,7 +241,7 @@ impl StorageTransport {
     }
 
     fn heartbeat(&self) {
-        common::heartbeat(logos_abi::ServiceId::Storage);
+        common::heartbeat();
     }
 }
 
@@ -588,8 +588,8 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
     let mut pending_package: Option<PackageResponse> = None;
     let mut heartbeat_ticks = 0u16;
     loop {
-        common::heartbeat(logos_abi::ServiceId::Storage);
-        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
+        common::heartbeat();
+        common::heartbeat_tick(&mut heartbeat_ticks);
         let mut progressed = false;
         if send_package_response(&mut pending_package) {
             progressed = true;
@@ -714,7 +714,7 @@ fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
     let mut pending_map: Option<PendingMap> = None;
     let mut heartbeat_ticks = 0u16;
     loop {
-        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Storage);
+        common::heartbeat_tick(&mut heartbeat_ticks);
         let mut progressed = false;
         if send_package_response(&mut pending_package) {
             progressed = true;
@@ -899,7 +899,7 @@ fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
 /// whole raw volume, reopens valid media, or formats only blank media.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    common::heartbeat(logos_abi::ServiceId::Storage);
+    common::heartbeat();
     common::init_service_allocator();
     let capabilities = IpcCapabilities {
         request: match common::capability_handle(REQUEST_CAPABILITY) {

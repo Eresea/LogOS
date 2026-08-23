@@ -544,7 +544,7 @@ pub extern "C" fn _start() -> ! {
     let mut ticks = 0u16;
     let mut elapsed = 0u32;
     loop {
-        common::heartbeat_tick(&mut ticks, logos_abi::ServiceId::Fetch);
+        common::heartbeat_tick(&mut ticks);
         elapsed = elapsed.saturating_add(1);
         let mut control = IpcBytes::empty(MessageKind::FetchControl);
         if common::ipc_receive_handle(ipc_capabilities().flow_receive, &mut control)

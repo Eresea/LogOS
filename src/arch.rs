@@ -1071,7 +1071,7 @@ pub(crate) fn supervise_services() -> bool {
 }
 
 pub(crate) fn record_service_heartbeat(
-    service: logos_abi::ServiceId,
+    service: logos_abi::ServiceHandle,
     process: crate::process::ProcessHandle,
     now: u64,
 ) -> bool {
@@ -1082,9 +1082,9 @@ pub(crate) fn record_service_heartbeat(
     unsafe {
         let runtime = &mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME);
         if service_runtime_restarting() {
-            runtime.owns_service_process(service, process)
+            runtime.owns_service_process_handle(service, process)
         } else {
-            runtime.record_heartbeat(service, process, now)
+            runtime.record_heartbeat_handle(service, process, now)
         }
     }
 }

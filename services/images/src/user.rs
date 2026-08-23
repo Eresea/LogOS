@@ -274,7 +274,7 @@ fn durable(operation: logos_abi::UserOperation) -> bool {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    common::heartbeat(logos_abi::ServiceId::User);
+    common::heartbeat();
     common::init_service_allocator();
     let flow_receive_capability = match common::capability_handle(FLOW_RECEIVE_CAPABILITY) {
         Ok(capability) => capability,
@@ -293,12 +293,12 @@ pub extern "C" fn _start() -> ! {
         Err(_) => common::idle(),
     };
     while !load_catalog(storage_send_capability, storage_receive_capability) {
-        common::heartbeat(logos_abi::ServiceId::User);
+        common::heartbeat();
         common::sleep(logos_abi::ServiceId::User);
     }
     let mut heartbeat_ticks = 0u16;
     loop {
-        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::User);
+        common::heartbeat_tick(&mut heartbeat_ticks);
         let mut request = IpcBytes::empty(MessageKind::UserRequest);
         match common::ipc_receive_handle(flow_receive_capability, &mut request) {
             IpcStatus::Ok => {

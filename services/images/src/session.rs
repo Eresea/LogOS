@@ -202,7 +202,7 @@ pub extern "C" fn _start() -> ! {
     pending.stage(prompt.as_bytes());
     let mut heartbeat_ticks = 0u16;
     loop {
-        common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Session);
+        common::heartbeat_tick(&mut heartbeat_ticks);
         if waiting_for_command && pending_control.is_none() {
             let mut terminal_input = IpcBytes::empty(MessageKind::SessionInput);
             if common::ipc_receive_handle(input_capability, &mut terminal_input) == IpcStatus::Ok

@@ -618,7 +618,7 @@ pub extern "C" fn _start() -> ! {
     let mut pending_tx = false;
     let mut pending_request: Option<PendingRequest> = None;
     loop {
-        common::heartbeat_tick(&mut ticks, ServiceId::Network);
+        common::heartbeat_tick(&mut ticks);
         elapsed_ticks = elapsed_ticks.saturating_add(1);
         let mut icmp_reply_received = false;
         if stack::ready() {

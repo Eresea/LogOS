@@ -290,8 +290,8 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
     let Some(launch) = SCHEDULER.user_launch(handle) else {
         return false;
     };
-    let service = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) };
-    let Some(service) = service_id(service) else {
+    let service = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) as u64 };
+    let Some(service) = logos_abi::ServiceHandle::from_raw(service) else {
         return false;
     };
     if !crate::arch::record_service_heartbeat(service, launch.process(), crate::current_ticks()) {
@@ -303,22 +303,6 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
 
 pub(crate) fn is_user_task(handle: TaskHandle) -> bool {
     handle.raw() == USER_TASK_RAW.load(Ordering::Acquire) || SCHEDULER.user_launch(handle).is_some()
-}
-
-fn service_id(raw: usize) -> Option<logos_abi::ServiceId> {
-    match raw {
-        1 => Some(logos_abi::ServiceId::Input),
-        2 => Some(logos_abi::ServiceId::Display),
-        3 => Some(logos_abi::ServiceId::Terminal),
-        4 => Some(logos_abi::ServiceId::Session),
-        5 => Some(logos_abi::ServiceId::Flow),
-        6 => Some(logos_abi::ServiceId::Storage),
-        7 => Some(logos_abi::ServiceId::Network),
-        8 => Some(logos_abi::ServiceId::Fetch),
-        9 => Some(logos_abi::ServiceId::Device),
-        10 => Some(logos_abi::ServiceId::User),
-        _ => None,
-    }
 }
 
 pub(crate) fn prepare_address_space(root: usize) {
