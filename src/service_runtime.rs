@@ -2234,7 +2234,12 @@ impl ServiceRuntime {
             Ok(resolved) => resolved,
             Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
         };
-        if self.dynamic_endpoint_matches(endpoint, crate::device_ipc::DEVICE_REQUEST_ENDPOINT) {
+        if self.dynamic_contract_matches(
+            endpoint,
+            Some(ServiceId::Device),
+            None,
+            logos_abi::IPC_CONTRACT_DEVICE_REQUEST,
+        ) {
             if length != expected_bytes {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Malformed,
@@ -2827,7 +2832,12 @@ impl ServiceRuntime {
             };
         }
         if service == ServiceId::Device
-            && self.dynamic_endpoint_matches(endpoint, crate::device_ipc::DEVICE_REQUEST_ENDPOINT)
+            && self.dynamic_contract_matches(
+                endpoint,
+                Some(ServiceId::Device),
+                None,
+                logos_abi::IPC_CONTRACT_DEVICE_REQUEST,
+            )
         {
             if length != core::mem::size_of::<logos_abi::DeviceRequest>() {
                 return crate::service_ipc::IpcOutcome {
@@ -3005,8 +3015,12 @@ impl ServiceRuntime {
                 Ok(resolved) => resolved,
                 Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
             };
-            if self.dynamic_endpoint_matches(endpoint, crate::device_ipc::DEVICE_RESPONSE_ENDPOINT)
-            {
+            if self.dynamic_contract_matches(
+                endpoint,
+                None,
+                Some(ServiceId::Device),
+                logos_abi::IPC_CONTRACT_DEVICE_RESPONSE,
+            ) {
                 let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
                     return crate::service_ipc::IpcOutcome {
                         status: logos_abi::IpcStatus::Unauthorized,
