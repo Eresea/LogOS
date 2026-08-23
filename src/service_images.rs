@@ -9,7 +9,7 @@ pub struct ServiceImageSpec {
     service: ServiceId,
     name: &'static [u8],
     path: &'static [u8],
-    dependencies: u8,
+    dependencies: &'static [ServiceId],
 }
 
 impl ServiceImageSpec {
@@ -17,7 +17,7 @@ impl ServiceImageSpec {
         service: ServiceId,
         name: &'static [u8],
         path: &'static [u8],
-        dependencies: u8,
+        dependencies: &'static [ServiceId],
     ) -> Self {
         Self { service, name, path, dependencies }
     }
@@ -34,7 +34,7 @@ impl ServiceImageSpec {
         self.path
     }
 
-    pub const fn dependencies(self) -> u8 {
+    pub const fn dependencies(self) -> &'static [ServiceId] {
         self.dependencies
     }
 
@@ -52,42 +52,40 @@ pub enum ServiceImageError {
 }
 
 pub const SERVICE_IMAGES: [ServiceImageSpec; 10] = [
-    ServiceImageSpec::new(ServiceId::Input, b"input", b"\\EFI\\LOGOS\\INPUT.ELF", 0),
-    ServiceImageSpec::new(ServiceId::Display, b"display", b"\\EFI\\LOGOS\\DISPLAY.ELF", 0),
+    ServiceImageSpec::new(ServiceId::Input, b"input", b"\\EFI\\LOGOS\\INPUT.ELF", &[]),
+    ServiceImageSpec::new(ServiceId::Display, b"display", b"\\EFI\\LOGOS\\DISPLAY.ELF", &[]),
     ServiceImageSpec::new(
         ServiceId::Terminal,
         b"terminal",
         b"\\EFI\\LOGOS\\TERMINAL.ELF",
-        (1 << ServiceId::Input.index()) | (1 << ServiceId::Display.index()),
+        &[ServiceId::Input, ServiceId::Display],
     ),
     ServiceImageSpec::new(
         ServiceId::Session,
         b"session",
         b"\\EFI\\LOGOS\\SESSION.ELF",
-        1 << ServiceId::Terminal.index(),
+        &[ServiceId::Terminal],
     ),
     ServiceImageSpec::new(
         ServiceId::Flow,
         b"flow",
         b"\\EFI\\LOGOS\\FLOW.ELF",
-        (1 << ServiceId::Session.index()) | (1 << ServiceId::Storage.index()),
+        &[ServiceId::Session, ServiceId::Storage, ServiceId::Device],
     ),
-    ServiceImageSpec::new(ServiceId::Storage, b"storage", b"\\EFI\\LOGOS\\STORAGE.ELF", 0),
-    ServiceImageSpec::new(ServiceId::Network, b"network", b"\\EFI\\LOGOS\\NETWORK.ELF", 0),
+    ServiceImageSpec::new(ServiceId::Storage, b"storage", b"\\EFI\\LOGOS\\STORAGE.ELF", &[]),
+    ServiceImageSpec::new(ServiceId::Network, b"network", b"\\EFI\\LOGOS\\NETWORK.ELF", &[]),
     ServiceImageSpec::new(
         ServiceId::Fetch,
         b"fetch",
         b"\\EFI\\LOGOS\\FETCH.ELF",
-        (1 << ServiceId::Flow.index())
-            | (1 << ServiceId::Storage.index())
-            | (1 << ServiceId::Network.index()),
+        &[ServiceId::Flow, ServiceId::Storage, ServiceId::Network],
     ),
-    ServiceImageSpec::new(ServiceId::Device, b"device", b"\\EFI\\LOGOS\\DEVICE.ELF", 0),
+    ServiceImageSpec::new(ServiceId::Device, b"device", b"\\EFI\\LOGOS\\DEVICE.ELF", &[]),
     ServiceImageSpec::new(
         ServiceId::User,
         b"user",
         b"\\EFI\\LOGOS\\USER.ELF",
-        1 << ServiceId::Storage.index(),
+        &[ServiceId::Storage],
     ),
 ];
 
@@ -108,14 +106,6 @@ pub const fn service_image(service: ServiceId) -> ServiceImageSpec {
     SERVICE_IMAGES[service.index()]
 }
 
-pub fn service_dependencies(service: ServiceId) -> u16 {
-    let mut dependencies = u16::from(service_image(service).dependencies());
-    if service == ServiceId::Flow {
-        dependencies |= 1u16 << ServiceId::Device.index();
-    }
-    dependencies
-}
-
 const fn manifest_is_indexed() -> bool {
     let mut index = 0;
     while index < SERVICE_IMAGES.len() {
@@ -123,8 +113,6 @@ const fn manifest_is_indexed() -> bool {
         if spec.service().index() != index
             || spec.name().is_empty()
             || spec.name().len() > MAX_SERVICE_NAME_BYTES
-            || (SERVICE_IMAGES.len() < 8
-                && spec.dependencies() & !((1u16 << SERVICE_IMAGES.len()) - 1) as u8 != 0)
         {
             return false;
         }
@@ -169,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_is_fixed_and_dependencies_are_valid() {
+    fn manifest_is_fixed_and_dependencies_are_explicit() {
         assert_eq!(SERVICE_IMAGES.len(), 10);
         assert_eq!(SERVICE_IMAGES[0].service(), ServiceId::Input);
         assert_eq!(SERVICE_IMAGES[1].service(), ServiceId::Display);
@@ -177,17 +165,19 @@ mod tests {
         assert_eq!(SERVICE_IMAGES[3].service(), ServiceId::Session);
         assert_eq!(SERVICE_IMAGES[4].service(), ServiceId::Flow);
         assert_eq!(SERVICE_IMAGES[5].service(), ServiceId::Storage);
-        assert_eq!(SERVICE_IMAGES[2].dependencies(), 0b0000_0011);
-        assert_eq!(SERVICE_IMAGES[4].dependencies(), 0b0010_1000);
-        assert_eq!(SERVICE_IMAGES[5].dependencies(), 0);
+        assert_eq!(SERVICE_IMAGES[2].dependencies(), &[ServiceId::Input, ServiceId::Display]);
+        assert_eq!(
+            SERVICE_IMAGES[4].dependencies(),
+            &[ServiceId::Session, ServiceId::Storage, ServiceId::Device]
+        );
+        assert!(SERVICE_IMAGES[5].dependencies().is_empty());
         assert_eq!(SERVICE_IMAGES[5].name(), b"storage");
         assert_eq!(SERVICE_IMAGES[6].service(), ServiceId::Network);
         assert_eq!(SERVICE_IMAGES[7].service(), ServiceId::Fetch);
         assert_eq!(SERVICE_IMAGES[8].service(), ServiceId::Device);
         assert_eq!(SERVICE_IMAGES[9].service(), ServiceId::User);
-        assert_eq!(SERVICE_IMAGES[9].dependencies(), 1 << ServiceId::Storage.index());
+        assert_eq!(SERVICE_IMAGES[9].dependencies(), &[ServiceId::Storage]);
         assert_eq!(service_image(ServiceId::Display).path(), b"\\EFI\\LOGOS\\DISPLAY.ELF");
-        assert_ne!(service_dependencies(ServiceId::Flow) & (1 << ServiceId::Device.index()), 0);
     }
 
     #[test]

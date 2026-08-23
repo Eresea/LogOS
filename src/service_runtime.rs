@@ -597,13 +597,8 @@ impl ServiceRuntime {
         for spec in SERVICE_IMAGES {
             let mut dependencies = Vec::new();
             dependencies.try_reserve(SERVICE_COUNT).map_err(|_| ServiceRuntimeError::Resources)?;
-            for dependency in SERVICE_IMAGES {
-                if crate::service_images::service_dependencies(spec.service())
-                    & (1u16 << dependency.service().index())
-                    != 0
-                {
-                    dependencies.push(handles[dependency.service().index()]);
-                }
+            for dependency in spec.dependencies() {
+                dependencies.push(handles[dependency.index()]);
             }
             registry
                 .set_dependencies(handles[spec.service().index()], &dependencies)
