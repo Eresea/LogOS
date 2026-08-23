@@ -1471,8 +1471,7 @@ impl ServiceRuntime {
         }
     }
 
-    fn refresh_dynamic_service_counts(&mut self, service: ServiceId) {
-        let Ok(owner) = self.runtime_service_handle(service) else { return };
+    fn refresh_dynamic_service_counts_handle(&mut self, owner: ServiceHandle) {
         let (ipc_endpoints, capabilities) = self
             .dynamic_ipc
             .as_ref()
@@ -3359,10 +3358,13 @@ impl ServiceRuntime {
         capability_raw: u64,
         length: usize,
     ) -> logos_abi::DirectoryStatus {
-        let Some(service) = self.service_for_process(process) else {
+        let Some(service_slot) = self.service_slot_for_process(process) else {
             return logos_abi::DirectoryStatus::Unauthorized;
         };
-        if self.dynamic_service_state(service)
+        let Some(service_handle) = self.service_handles.get(service_slot).copied() else {
+            return logos_abi::DirectoryStatus::Stale;
+        };
+        if self.dynamic_services.as_ref().and_then(|registry| registry.state(service_handle).ok())
             != Some(crate::runtime_services::ServiceState::Running)
         {
             return logos_abi::DirectoryStatus::Stale;
@@ -3370,7 +3372,8 @@ impl ServiceRuntime {
         if length != core::mem::size_of::<logos_abi::DirectoryRequest>() {
             return logos_abi::DirectoryStatus::Malformed;
         }
-        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+        let Some(staging_frame) = self.ipc_staging_frames.get(service_slot).copied().flatten()
+        else {
             return logos_abi::DirectoryStatus::Unauthorized;
         };
         let wire = unsafe {
@@ -3390,16 +3393,15 @@ impl ServiceRuntime {
         if !request.is_valid() {
             return logos_abi::DirectoryStatus::Malformed;
         }
-        let Ok(service_handle) = self.runtime_service_handle(service) else {
-            return logos_abi::DirectoryStatus::Stale;
-        };
         if request.subject != logos_abi::ServiceHandle::EMPTY && request.subject != service_handle {
             return logos_abi::DirectoryStatus::Unauthorized;
         }
         let Some(directory) = logos_abi::CapabilityHandle::from_raw(capability_raw) else {
             return logos_abi::DirectoryStatus::Unauthorized;
         };
-        let expected_directory = self.bootstrap_directory[service.index()];
+        let Some(expected_directory) = self.bootstrap_directory.get(service_slot).copied() else {
+            return logos_abi::DirectoryStatus::Stale;
+        };
         if !expected_directory.is_valid() {
             return logos_abi::DirectoryStatus::Stale;
         }
@@ -3819,10 +3821,13 @@ impl ServiceRuntime {
         process: ProcessHandle,
         length: usize,
     ) -> logos_abi::EventStatus {
-        let Some(service) = self.service_for_process(process) else {
+        let Some(service_slot) = self.service_slot_for_process(process) else {
             return logos_abi::EventStatus::Unauthorized;
         };
-        if self.dynamic_service_state(service)
+        let Some(owner) = self.service_handles.get(service_slot).copied() else {
+            return logos_abi::EventStatus::Stale;
+        };
+        if self.dynamic_services.as_ref().and_then(|registry| registry.state(owner).ok())
             != Some(crate::runtime_services::ServiceState::Running)
         {
             return logos_abi::EventStatus::Stale;
@@ -3830,7 +3835,8 @@ impl ServiceRuntime {
         if length != core::mem::size_of::<logos_abi::EventRequest>() {
             return logos_abi::EventStatus::Malformed;
         }
-        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+        let Some(staging_frame) = self.ipc_staging_frames.get(service_slot).copied().flatten()
+        else {
             return logos_abi::EventStatus::Unauthorized;
         };
         let wire = unsafe {
@@ -3848,10 +3854,6 @@ impl ServiceRuntime {
         if !request.is_valid() {
             return logos_abi::EventStatus::Malformed;
         }
-        let owner = match self.runtime_service_handle(service) {
-            Ok(owner) => owner,
-            Err(_) => return logos_abi::EventStatus::Stale,
-        };
         let events = self.dynamic_events.get_or_insert_with(|| {
             crate::runtime_events::RuntimeEventRegistry::new_with_generation(
                 (self.service_epoch as u32).max(1),
@@ -3902,7 +3904,7 @@ impl ServiceRuntime {
                 Ok(crate::runtime_events::EventWait::Pending) => {
                     if self
                         .prepare_dynamic_event_wait(
-                            service,
+                            service_slot,
                             owner,
                             request.event_set,
                             request.deadline,
@@ -3925,7 +3927,7 @@ impl ServiceRuntime {
             }
         };
         response.status = status;
-        self.refresh_dynamic_service_counts(service);
+        self.refresh_dynamic_service_counts_handle(owner);
         unsafe {
             core::ptr::write_unaligned(
                 staging_frame.raw() as usize as *mut logos_abi::EventResponse,
@@ -3952,14 +3954,14 @@ impl ServiceRuntime {
 
     fn prepare_dynamic_event_wait(
         &self,
-        service: ServiceId,
+        service_slot: usize,
         owner: logos_abi::ServiceHandle,
         set: logos_abi::EventSetHandle,
         deadline: u64,
     ) -> Result<(), logos_abi::EventStatus> {
         let events = self.dynamic_events.as_ref().ok_or(logos_abi::EventStatus::Stale)?;
         let _ = events.members(owner, set).map_err(event_status)?;
-        let Some(task) = self.tasks[service.index()] else {
+        let Some(task) = self.tasks.get(service_slot).copied().flatten() else {
             return Err(logos_abi::EventStatus::Stale);
         };
         let should_block = crate::arch::prepare_service_event_set_wait(task, set, deadline)
@@ -3981,10 +3983,12 @@ impl ServiceRuntime {
             if registry.validate_lifecycle_handle(owner).is_err() {
                 return;
             }
-            let Some(service) = builtin_service_for_handle(&self.service_handles, owner) else {
+            let Some(service_slot) =
+                self.service_handles.iter().position(|handle| *handle == owner)
+            else {
                 return;
             };
-            if self.tasks[service.index()].is_none() {
+            if self.tasks.get(service_slot).copied().flatten().is_none() {
                 return;
             }
             crate::arch::signal_event_set(set);
