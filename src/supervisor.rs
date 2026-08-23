@@ -205,6 +205,10 @@ impl LiveSupervisor {
         self.startup_grace_armed = false;
     }
 
+    pub fn arm_startup_grace(&mut self) {
+        self.startup_grace_armed = true;
+    }
+
     #[cfg(test)]
     fn state(&self, handle: ServiceHandle) -> ServiceState {
         let Ok(index) = usize::try_from(handle.index()) else { return ServiceState::Stopped };
@@ -273,6 +277,21 @@ mod tests {
                 &[Some(ProcessState::Running); 10]
             ),
             Some(handle(ServiceId::Storage))
+        );
+    }
+
+    #[test]
+    fn initial_service_registration_can_get_startup_grace() {
+        let mut supervisor = LiveSupervisor::new();
+        supervisor.arm_startup_grace();
+        assert!(supervisor.register(handle(ServiceId::Flow), 20));
+        assert_eq!(
+            supervisor.poll(
+                20 + STARTUP_GRACE_TICKS - 1,
+                &[0; 10],
+                &[Some(ProcessState::Running); 10]
+            ),
+            None
         );
     }
 

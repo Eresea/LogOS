@@ -1439,6 +1439,7 @@ impl ServiceRuntime {
     }
 
     pub fn start_tasks(&mut self) -> Result<(), ServiceRuntimeError> {
+        self.supervisor.arm_startup_grace();
         if self.network_config.is_enabled() {
             self.queue_network_link();
         }

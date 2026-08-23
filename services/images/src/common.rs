@@ -742,39 +742,54 @@ fn discover_service_name(
         {
             return Err(logos_abi::DirectoryStatus::Malformed);
         }
-        let mut request = logos_abi::DirectoryRequest::new(
-            logos_abi::DirectoryOperation::Services,
-            next_event_request_id(),
-        );
-        request.subject = bootstrap.service;
+        let records = unsafe {
+            let cache = core::ptr::addr_of_mut!(SERVICE_DIRECTORY);
+            if (*cache).is_none() {
+                let mut records = Vec::new();
+                records
+                    .try_reserve(logos_abi::DIRECTORY_RECORDS_PER_PAGE)
+                    .map_err(|_| logos_abi::DirectoryStatus::Capacity)?;
+                let mut request = logos_abi::DirectoryRequest::new(
+                    logos_abi::DirectoryOperation::Services,
+                    next_event_request_id(),
+                );
+                request.subject = bootstrap.service;
+                loop {
+                    let mut response = logos_abi::DirectoryResponse::empty(
+                        request.operation,
+                        logos_abi::DirectoryStatus::Malformed,
+                        request.request_id,
+                    );
+                    let status = directory_call(bootstrap.directory, &request, &mut response);
+                    if status != logos_abi::DirectoryStatus::Ok {
+                        return Err(status);
+                    }
+                    records
+                        .try_reserve(response.count as usize)
+                        .map_err(|_| logos_abi::DirectoryStatus::Capacity)?;
+                    records.extend_from_slice(&response.records[..response.count as usize]);
+                    if response.flags & logos_abi::DIRECTORY_FLAG_MORE == 0 {
+                        break;
+                    }
+                    if response.cursor <= request.cursor {
+                        return Err(logos_abi::DirectoryStatus::Malformed);
+                    }
+                    request.cursor = response.cursor;
+                }
+                *cache = Some(records);
+            }
+            (*cache).as_ref().expect("service directory cache").as_slice()
+        };
         let mut found = None;
-        loop {
-            let mut response = logos_abi::DirectoryResponse::empty(
-                request.operation,
-                logos_abi::DirectoryStatus::Malformed,
-                request.request_id,
-            );
-            let status = directory_call(bootstrap.directory, &request, &mut response);
-            if status != logos_abi::DirectoryStatus::Ok {
-                return Err(status);
+        for record in records {
+            if record.kind != logos_abi::DirectoryRecordKind::Service || record.name() != name {
+                continue;
             }
-            for record in &response.records[..response.count as usize] {
-                if record.kind != logos_abi::DirectoryRecordKind::Service || record.name() != name {
-                    continue;
-                }
-                let service = logos_abi::ServiceHandle::from_raw(record.handle)
-                    .ok_or(logos_abi::DirectoryStatus::Malformed)?;
-                if found.replace(service).is_some() {
-                    return Err(logos_abi::DirectoryStatus::Malformed);
-                }
-            }
-            if response.flags & logos_abi::DIRECTORY_FLAG_MORE == 0 {
-                break;
-            }
-            if response.cursor <= request.cursor {
+            let service = logos_abi::ServiceHandle::from_raw(record.handle)
+                .ok_or(logos_abi::DirectoryStatus::Malformed)?;
+            if found.replace(service).is_some() {
                 return Err(logos_abi::DirectoryStatus::Malformed);
             }
-            request.cursor = response.cursor;
         }
         found.ok_or(logos_abi::DirectoryStatus::NotFound)
     }
@@ -999,6 +1014,7 @@ unsafe impl Sync for EventSetCache {}
 #[allow(dead_code)]
 static EVENT_SET_CACHE: EventSetCache = EventSetCache(UnsafeCell::new(EventSetCacheState::empty()));
 static mut CAPABILITY_DIRECTORY: Option<Vec<logos_abi::DirectoryRecord>> = None;
+static mut SERVICE_DIRECTORY: Option<Vec<logos_abi::DirectoryRecord>> = None;
 static NEXT_EVENT_REQUEST: AtomicU32 = AtomicU32::new(0x4000);
 
 #[allow(dead_code)]

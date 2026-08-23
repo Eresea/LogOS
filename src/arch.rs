@@ -190,23 +190,31 @@ static KEYBOARD_IRQ_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) struct ServiceRuntimeGuard {
     held: bool,
+    interrupts_enabled: bool,
 }
 
 impl ServiceRuntimeGuard {
     fn acquire() -> Self {
+        let interrupts_enabled = interrupts_enabled();
+        disable_interrupts();
         acquire_service_runtime_lock();
-        Self { held: true }
+        Self { held: true, interrupts_enabled }
     }
 
     pub(crate) fn pause(&mut self) {
         if self.held {
             SERVICE_RUNTIME_LOCK.store(false, Ordering::Release);
             self.held = false;
+            if self.interrupts_enabled {
+                enable_interrupts();
+            }
         }
     }
 
     pub(crate) fn resume(&mut self) {
         if !self.held {
+            self.interrupts_enabled = interrupts_enabled();
+            disable_interrupts();
             acquire_service_runtime_lock();
             self.held = true;
         }
@@ -217,6 +225,9 @@ impl Drop for ServiceRuntimeGuard {
     fn drop(&mut self) {
         if self.held {
             SERVICE_RUNTIME_LOCK.store(false, Ordering::Release);
+            if self.interrupts_enabled {
+                enable_interrupts();
+            }
         }
     }
 }
@@ -228,6 +239,22 @@ fn acquire_service_runtime_lock() {
     {
         core::hint::spin_loop();
     }
+}
+
+fn interrupts_enabled() -> bool {
+    let flags: usize;
+    unsafe {
+        core::arch::asm!("pushfq", "pop {}", out(reg) flags, options(nomem, preserves_flags));
+    }
+    flags & (1 << 9) != 0
+}
+
+fn disable_interrupts() {
+    unsafe { core::arch::asm!("cli", options(nomem, nostack, preserves_flags)) };
+}
+
+fn enable_interrupts() {
+    unsafe { core::arch::asm!("sti", options(nomem, nostack, preserves_flags)) };
 }
 
 pub(crate) fn service_runtime_restarting() -> bool {
@@ -1290,8 +1317,7 @@ pub(crate) fn suppress_service_heartbeat(service: logos_abi::ServiceId) {
 pub(crate) fn fault_service_process(process: crate::process::ProcessHandle, vector: u8) -> bool {
     let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe {
-        let runtime = &mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME);
-        runtime.fault_process(process, vector).is_ok()
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).fault_process(process, vector).is_ok()
     }
 }
 
