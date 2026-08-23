@@ -44,17 +44,10 @@ impl ServiceHeapState {
     }
 }
 
-fn dynamic_service_handle(
-    service: ServiceId,
-    generation: u32,
-) -> Result<logos_abi::ServiceHandle, ServiceRuntimeError> {
-    logos_abi::ServiceHandle::new(service.index() as u32, generation)
-        .ok_or(ServiceRuntimeError::StaleGeneration)
-}
-
 fn dynamic_endpoint_peer(
     endpoint: logos_abi::IpcEndpointId,
     producer: bool,
+    service_handles: &[logos_abi::ServiceHandle; SERVICE_COUNT],
     generation: u32,
 ) -> Result<logos_abi::ServiceHandle, ServiceRuntimeError> {
     let core = || {
@@ -68,7 +61,11 @@ fn dynamic_endpoint_peer(
         | logos_abi::IpcEndpointId::StoragePackageToCore
         | logos_abi::IpcEndpointId::StorageMapToCore => {
             if producer {
-                dynamic_service_handle(endpoint.producer(), generation)
+                service_handles
+                    .get(endpoint.producer().index())
+                    .copied()
+                    .filter(|handle| handle.is_valid())
+                    .ok_or(ServiceRuntimeError::StaleGeneration)
             } else {
                 core()
             }
@@ -81,19 +78,28 @@ fn dynamic_endpoint_peer(
             if producer {
                 core()
             } else {
-                dynamic_service_handle(endpoint.consumer(), generation)
+                service_handles
+                    .get(endpoint.consumer().index())
+                    .copied()
+                    .filter(|handle| handle.is_valid())
+                    .ok_or(ServiceRuntimeError::StaleGeneration)
             }
         }
-        logos_abi::IpcEndpointId::FetchToStorage if !producer => {
-            dynamic_service_handle(ServiceId::Storage, generation)
-        }
-        logos_abi::IpcEndpointId::FetchToNetwork if !producer => {
-            dynamic_service_handle(ServiceId::Network, generation)
-        }
-        _ => dynamic_service_handle(
-            if producer { endpoint.producer() } else { endpoint.consumer() },
-            generation,
-        ),
+        logos_abi::IpcEndpointId::FetchToStorage if !producer => service_handles
+            [ServiceId::Storage.index()]
+        .is_valid()
+        .then_some(service_handles[ServiceId::Storage.index()])
+        .ok_or(ServiceRuntimeError::StaleGeneration),
+        logos_abi::IpcEndpointId::FetchToNetwork if !producer => service_handles
+            [ServiceId::Network.index()]
+        .is_valid()
+        .then_some(service_handles[ServiceId::Network.index()])
+        .ok_or(ServiceRuntimeError::StaleGeneration),
+        _ => service_handles
+            .get((if producer { endpoint.producer() } else { endpoint.consumer() }).index())
+            .copied()
+            .filter(|handle| handle.is_valid())
+            .ok_or(ServiceRuntimeError::StaleGeneration),
     }
 }
 
@@ -153,6 +159,7 @@ pub struct ServiceRuntime {
     startup: ServiceStartup,
     dynamic_ipc: Option<RuntimeIpcRegistry>,
     dynamic_services: Option<crate::runtime_services::RuntimeServiceRegistry>,
+    service_handles: [logos_abi::ServiceHandle; SERVICE_COUNT],
     dynamic_events: Option<crate::runtime_events::RuntimeEventRegistry>,
     dynamic_endpoints: Vec<logos_abi::EndpointHandle>,
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
@@ -384,6 +391,7 @@ impl ServiceRuntime {
             startup: ServiceStartup::new(),
             dynamic_ipc: None,
             dynamic_services: None,
+            service_handles: [logos_abi::ServiceHandle::EMPTY; SERVICE_COUNT],
             dynamic_events: None,
             dynamic_endpoints: Vec::new(),
             ipc_staging_frames: [None; SERVICE_COUNT],
@@ -445,6 +453,17 @@ impl ServiceRuntime {
         self.manager.set_network_enabled(config.is_enabled());
     }
 
+    fn runtime_service_handle(
+        &self,
+        service: ServiceId,
+    ) -> Result<logos_abi::ServiceHandle, ServiceRuntimeError> {
+        self.service_handles
+            .get(service.index())
+            .copied()
+            .filter(|handle| handle.is_valid())
+            .ok_or(ServiceRuntimeError::StaleGeneration)
+    }
+
     fn initialize_dynamic_services(&mut self) -> Result<(), ServiceRuntimeError> {
         let mut registry = crate::runtime_services::RuntimeServiceRegistry::new_with_generation(
             (self.service_epoch as u32).max(1),
@@ -491,6 +510,7 @@ impl ServiceRuntime {
             }
             registry.start(handles[service.index()]).map_err(|_| ServiceRuntimeError::Resources)?;
         }
+        self.service_handles = handles;
         self.dynamic_services = Some(registry);
         Ok(())
     }
@@ -511,8 +531,10 @@ impl ServiceRuntime {
         for raw in 0..logos_abi::IPC_ENDPOINT_COUNT {
             let endpoint_id = logos_abi::IpcEndpointId::from_index(raw)
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-            let producer = dynamic_endpoint_peer(endpoint_id, true, generation)?;
-            let consumer = dynamic_endpoint_peer(endpoint_id, false, generation)?;
+            let producer =
+                dynamic_endpoint_peer(endpoint_id, true, &self.service_handles, generation)?;
+            let consumer =
+                dynamic_endpoint_peer(endpoint_id, false, &self.service_handles, generation)?;
             let message_bytes = logos_abi::ipc_message_size(raw)
                 .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
             let contract_id = logos_abi::ipc_contract_id(raw)
@@ -554,7 +576,7 @@ impl ServiceRuntime {
 
             for spec in SERVICE_IMAGES {
                 let service = spec.service();
-                let owner = dynamic_service_handle(service, generation)?;
+                let owner = self.runtime_service_handle(service)?;
                 for rights in [logos_abi::IpcRights::Send, logos_abi::IpcRights::Receive] {
                     let owns_endpoint = match rights {
                         logos_abi::IpcRights::Send => producer == owner,
@@ -575,7 +597,7 @@ impl ServiceRuntime {
                 }
             }
         }
-        let input = dynamic_service_handle(ServiceId::Input, generation)?;
+        let input = self.runtime_service_handle(ServiceId::Input)?;
         let keyboard_event =
             events.create_event(input).map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
         crate::runtime_events::bind_hardware_event(
@@ -1143,14 +1165,13 @@ impl ServiceRuntime {
         if capability_raw != expected.raw() {
             return logos_abi::IpcStatus::Unauthorized;
         }
-        let generation = expected.generation();
         let index = service.index();
         let page = self.service_heaps[index].frames.len();
         let quota_pages = self
             .dynamic_services
             .as_ref()
             .and_then(|registry| {
-                registry.heap_quota_pages(dynamic_service_handle(service, generation).ok()?).ok()
+                registry.heap_quota_pages(self.runtime_service_handle(service).ok()?).ok()
             })
             .unwrap_or(self.service_heaps[index].quota_pages);
         if page >= quota_pages {
@@ -1310,32 +1331,28 @@ impl ServiceRuntime {
     }
 
     fn sync_dynamic_service_running(&mut self, service: ServiceId) {
-        let generation = (self.service_epoch as u32).max(1);
-        let Ok(handle) = dynamic_service_handle(service, generation) else { return };
+        let Ok(handle) = self.runtime_service_handle(service) else { return };
         if let Some(registry) = self.dynamic_services.as_mut() {
             let _ = registry.start(handle);
         }
     }
 
     fn sync_dynamic_service_stopped(&mut self, service: ServiceId) {
-        let generation = (self.service_epoch as u32).max(1);
-        let Ok(handle) = dynamic_service_handle(service, generation) else { return };
+        let Ok(handle) = self.runtime_service_handle(service) else { return };
         if let Some(registry) = self.dynamic_services.as_mut() {
             let _ = registry.stop(handle);
         }
     }
 
     fn sync_dynamic_service_failed(&mut self, service: ServiceId) {
-        let generation = (self.service_epoch as u32).max(1);
-        let Ok(handle) = dynamic_service_handle(service, generation) else { return };
+        let Ok(handle) = self.runtime_service_handle(service) else { return };
         if let Some(registry) = self.dynamic_services.as_mut() {
             let _ = registry.fail(handle);
         }
     }
 
     fn sync_dynamic_service_stopping(&mut self, service: ServiceId) {
-        let generation = (self.service_epoch as u32).max(1);
-        let Ok(handle) = dynamic_service_handle(service, generation) else { return };
+        let Ok(handle) = self.runtime_service_handle(service) else { return };
         if let Some(registry) = self.dynamic_services.as_mut() {
             let _ = registry.mark_stopping(handle);
         }
@@ -1345,14 +1362,12 @@ impl ServiceRuntime {
         &self,
         service: ServiceId,
     ) -> Option<crate::runtime_services::ServiceState> {
-        let generation = (self.service_epoch as u32).max(1);
-        let handle = dynamic_service_handle(service, generation).ok()?;
+        let handle = self.runtime_service_handle(service).ok()?;
         self.dynamic_services.as_ref()?.state(handle).ok()
     }
 
     fn sync_dynamic_service_restarted(&mut self, service: ServiceId) {
-        let generation = (self.service_epoch as u32).max(1);
-        let Ok(handle) = dynamic_service_handle(service, generation) else { return };
+        let Ok(handle) = self.runtime_service_handle(service) else { return };
         if let Some(registry) = self.dynamic_services.as_mut() {
             let _ = registry.record_restart(handle);
         }
@@ -1363,8 +1378,7 @@ impl ServiceRuntime {
         operation: logos_abi::ManagerOperation,
         service: ServiceId,
     ) {
-        let generation = (self.service_epoch as u32).max(1);
-        let Ok(handle) = dynamic_service_handle(service, generation) else { return };
+        let Ok(handle) = self.runtime_service_handle(service) else { return };
         if let Some(registry) = self.dynamic_services.as_mut() {
             let _ = registry.abort_lifecycle(operation, handle);
         }
@@ -1723,8 +1737,7 @@ impl ServiceRuntime {
             self.reclaim_prepared_packages();
             return Err(error);
         }
-        let generation = (self.service_epoch as u32).max(1);
-        let handle = dynamic_service_handle(service, generation)?;
+        let handle = self.runtime_service_handle(service)?;
         self.dynamic_services
             .as_mut()
             .ok_or(ServiceRuntimeError::Resources)?
@@ -2089,7 +2102,7 @@ impl ServiceRuntime {
                 return crate::service_ipc::IpcOutcome { status, notified: false };
             }
         };
-        let caller = match dynamic_service_handle(service, (self.service_epoch as u32).max(1)) {
+        let caller = match self.runtime_service_handle(service) {
             Ok(caller) => caller,
             Err(_) => {
                 return crate::service_ipc::IpcOutcome {
@@ -2330,10 +2343,7 @@ impl ServiceRuntime {
                     core::mem::size_of::<logos_abi::IpcBytes>(),
                 )
             };
-            let network = match dynamic_service_handle(
-                ServiceId::Network,
-                (self.service_epoch as u32).max(1),
-            ) {
+            let network = match self.runtime_service_handle(ServiceId::Network) {
                 Ok(network) => network,
                 Err(_) => {
                     return crate::service_ipc::IpcOutcome {
@@ -2830,7 +2840,7 @@ impl ServiceRuntime {
             };
         };
         {
-            let caller = match dynamic_service_handle(service, (self.service_epoch as u32).max(1)) {
+            let caller = match self.runtime_service_handle(service) {
                 Ok(caller) => caller,
                 Err(_) => {
                     return crate::service_ipc::IpcOutcome {
@@ -3389,9 +3399,7 @@ impl ServiceRuntime {
                         decision.response.status = logos_abi::ManagerStatus::Busy;
                         self.refresh_manager_response_record(&mut decision.response);
                     } else {
-                        let Ok(handle) =
-                            dynamic_service_handle(service, (self.service_epoch as u32).max(1))
-                        else {
+                        let Ok(handle) = self.runtime_service_handle(service) else {
                             self.abort_dynamic_service_lifecycle(
                                 logos_abi::ManagerOperation::Start,
                                 service,
@@ -3447,7 +3455,6 @@ impl ServiceRuntime {
                     );
                     decision.response.status = logos_abi::ManagerStatus::Busy;
                 } else {
-                    let generation = (self.service_epoch as u32).max(1);
                     let mut handles = Vec::new();
                     if handles.try_reserve(services.len()).is_err() {
                         self.abort_dynamic_service_lifecycle(
@@ -3457,7 +3464,7 @@ impl ServiceRuntime {
                         decision.response.status = logos_abi::ManagerStatus::Capacity;
                     } else {
                         for service in &services {
-                            let Ok(handle) = dynamic_service_handle(*service, generation) else {
+                            let Ok(handle) = self.runtime_service_handle(*service) else {
                                 self.abort_dynamic_service_lifecycle(
                                     logos_abi::ManagerOperation::Restart,
                                     services[0],
@@ -3570,7 +3577,7 @@ impl ServiceRuntime {
         if !request.is_valid() {
             return logos_abi::EventStatus::Malformed;
         }
-        let owner = match dynamic_service_handle(service, (self.service_epoch as u32).max(1)) {
+        let owner = match self.runtime_service_handle(service) {
             Ok(owner) => owner,
             Err(_) => return logos_abi::EventStatus::Stale,
         };
@@ -3831,7 +3838,7 @@ impl ServiceRuntime {
         let Some(registry) = self.dynamic_services.as_ref() else {
             return false;
         };
-        let Ok(handle) = dynamic_service_handle(service, (self.service_epoch as u32).max(1)) else {
+        let Ok(handle) = self.runtime_service_handle(service) else {
             return false;
         };
         let mut request = logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::Status, 1);
@@ -4591,6 +4598,9 @@ impl ServiceRuntime {
         crate::runtime_events::clear_hardware_event(
             crate::runtime_events::HardwareEventSource::Network,
         );
+        crate::runtime_events::clear_hardware_event(
+            crate::runtime_events::HardwareEventSource::Keyboard,
+        );
         self.storage_map_windows = [[None; crate::storage_ipc::STORAGE_MAP_WINDOWS_PER_CLIENT];
             crate::storage_ipc::STORAGE_MAP_CLIENTS];
         if let Some(mut registry) = self.dynamic_ipc.take() {
@@ -4599,14 +4609,15 @@ impl ServiceRuntime {
                 if let Ok(core) = dynamic_core_handle(generation) {
                     registry.destroy_service(core, events);
                 }
-                for spec in SERVICE_IMAGES {
-                    if let Ok(service) = dynamic_service_handle(spec.service(), generation) {
+                for service in self.service_handles {
+                    if service.is_valid() {
                         registry.destroy_service(service, events);
                     }
                 }
             }
         }
         self.dynamic_services = None;
+        self.service_handles = [logos_abi::ServiceHandle::EMPTY; SERVICE_COUNT];
         self.dynamic_events = None;
         self.keyboard_event = logos_abi::EventHandle::EMPTY;
         self.dynamic_endpoints.clear();
