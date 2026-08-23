@@ -28,27 +28,27 @@ const RESPONSE_CAPABILITY: common::CapabilitySpec = common::capability_contract_
     core::mem::size_of::<StorageResponse>(),
     logos_abi::IpcRights::Receive,
 );
-const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Flow.index() as u32,
+    b"flow",
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const FLOW_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const FLOW_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Flow.index() as u32,
+    b"flow",
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const FETCH_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const FETCH_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Fetch.index() as u32,
+    b"fetch",
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const FETCH_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const FETCH_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Fetch.index() as u32,
+    b"fetch",
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
@@ -72,15 +72,15 @@ const MAP_RESPONSE_CAPABILITY: common::CapabilitySpec = common::capability_contr
     core::mem::size_of::<StorageMapResponse>(),
     logos_abi::IpcRights::Receive,
 );
-const USER_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const USER_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::User.index() as u32,
+    b"user",
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const USER_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const USER_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::User.index() as u32,
+    b"user",
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
