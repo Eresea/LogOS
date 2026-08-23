@@ -22,7 +22,6 @@ use crate::{
     service_ipc::IpcError,
     service_loader::ServiceImageBundle,
     service_manager::{ManagerAction, ManagerDecision, ProgramManager},
-    service_startup::ServiceStartup,
     supervisor::LiveSupervisor,
 };
 
@@ -155,7 +154,6 @@ pub enum ServiceRuntimeError {
     PageTableRoot(PageTableError),
     PageTableMap(PageTableError),
     Process(ProcessError),
-    Startup(crate::service_startup::StartupError),
     Ipc(IpcError),
     IpcPrivateMapping(PageTableError),
     IpcPrivateProcess(ProcessError),
@@ -180,7 +178,7 @@ pub struct ServiceRuntime {
     table_ready: Vec<bool>,
     processes: crate::process::ProcessTable,
     launches: Vec<Option<(ProcessHandle, UserLaunch)>>,
-    startup: ServiceStartup,
+    launch_ready: bool,
     dynamic_ipc: Option<RuntimeIpcRegistry>,
     dynamic_services: Option<crate::runtime_services::RuntimeServiceRegistry>,
     service_handles: Vec<logos_abi::ServiceHandle>,
@@ -410,7 +408,7 @@ impl ServiceRuntime {
             table_ready: Vec::new(),
             processes: crate::process::ProcessTable::new(),
             launches: Vec::new(),
-            startup: ServiceStartup::new(),
+            launch_ready: false,
             dynamic_ipc: None,
             dynamic_services: None,
             service_handles: Vec::new(),
@@ -1022,7 +1020,7 @@ impl ServiceRuntime {
         memory.clear(keyboard_frame).map_err(ServiceRuntimeError::Keyboard)?;
         self.map_keyboard_ring(keyboard_frame)?;
         crate::arch::publish_keyboard_ring(keyboard_frame.raw() as usize);
-        self.startup.mark_launch_ready();
+        self.launch_ready = true;
         Ok(())
     }
 
@@ -1069,7 +1067,7 @@ impl ServiceRuntime {
     }
 
     pub fn all_launch_ready(&self) -> bool {
-        self.startup.all_launch_ready()
+        self.launch_ready
     }
 
     #[allow(dead_code)]
@@ -1431,7 +1429,6 @@ impl ServiceRuntime {
                 continue;
             }
             self.start_service_task(service)?;
-            self.startup.start(service).map_err(ServiceRuntimeError::Startup)?;
         }
         self.supervisor.clear_startup_grace();
         Ok(())
@@ -5110,7 +5107,7 @@ impl ServiceRuntime {
             program.manager_slot = u8::MAX;
         }
         self.pending_program_start = None;
-        self.startup = ServiceStartup::new();
+        self.launch_ready = false;
         Ok(())
     }
 

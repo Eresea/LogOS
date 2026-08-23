@@ -32,7 +32,6 @@ pub mod service_loader;
 pub mod service_manager;
 #[cfg(target_os = "uefi")]
 mod service_runtime;
-pub mod service_startup;
 #[allow(dead_code)]
 mod storage_ipc;
 #[cfg(all(feature = "storage-proof", target_os = "uefi"))]

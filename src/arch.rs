@@ -513,9 +513,6 @@ pub fn boot() -> Status {
                 crate::service_runtime::ServiceRuntimeError::Process(_) => {
                     fatal(b"LogOS vNext: service process")
                 }
-                crate::service_runtime::ServiceRuntimeError::Startup(_) => {
-                    fatal(b"LogOS vNext: service startup")
-                }
                 crate::service_runtime::ServiceRuntimeError::Ipc(_) => {
                     fatal(b"LogOS vNext: service IPC pages")
                 }
