@@ -129,6 +129,27 @@ fn ipc_capabilities() -> IpcCapabilities {
     }
 }
 
+fn wait_for_ipc() {
+    let capabilities = ipc_capabilities();
+    common::wait_on_capabilities(
+        &[
+            capabilities.input,
+            capabilities.output,
+            capabilities.storage_send,
+            capabilities.storage_receive,
+            capabilities.network_send,
+            capabilities.network_receive,
+            capabilities.fetch_send,
+            capabilities.fetch_receive,
+            capabilities.device_send,
+            capabilities.device_receive,
+            capabilities.user_send,
+            capabilities.user_receive,
+        ],
+        logos_abi::ServiceId::Flow,
+    );
+}
+
 static NEXT_MANAGER_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_NETWORK_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_DEVICE_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
@@ -574,10 +595,7 @@ impl NetworkClient {
                 match common::ipc_send_handle(ipc_capabilities().network_send, &cancel_message) {
                     IpcStatus::Ok => cancel_sent = true,
                     IpcStatus::Full => {
-                        common::wait(
-                            common::ipc_write_event(logos_abi::IpcEndpointId::FlowToNetwork),
-                            logos_abi::ServiceId::Flow,
-                        );
+                        wait_for_ipc();
                         continue;
                     }
                     status => return Err(status),
@@ -604,11 +622,7 @@ impl NetworkClient {
                     }
                     return value.is_valid_for(request).then_some(value).ok_or(IpcStatus::Stale);
                 }
-                IpcStatus::Empty => common::wait(
-                    common::ipc_read_event(logos_abi::IpcEndpointId::NetworkToFlow)
-                        | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
-                    logos_abi::ServiceId::Flow,
-                ),
+                IpcStatus::Empty => wait_for_ipc(),
                 status => return Err(status),
             }
         }
@@ -2560,11 +2574,11 @@ fn network_proof_probe(network: &mut NetworkClient) -> bool {
                         .request_message(close)
                         .is_ok_and(|response| response.result == NetworkResult::Stale);
                 }
-                common::wait(0, logos_abi::ServiceId::Flow);
+                common::sleep(logos_abi::ServiceId::Flow);
             }
             return false;
         }
-        common::wait(0, logos_abi::ServiceId::Flow);
+        common::sleep(logos_abi::ServiceId::Flow);
     }
     false
 }
@@ -2703,7 +2717,7 @@ pub extern "C" fn _start() -> ! {
     let pending_completion = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_COMPLETION) };
     #[cfg(feature = "qemu-proof")]
     while !manager_boot_probe() {
-        common::wait(0, logos_abi::ServiceId::Flow);
+        common::sleep(logos_abi::ServiceId::Flow);
     }
     #[cfg(feature = "qemu-proof")]
     if !manager_command_probe(pending, network) {
@@ -2745,10 +2759,7 @@ pub extern "C" fn _start() -> ! {
             match fetch.send_cancel() {
                 IpcStatus::Ok => fetch.cancel_pending = false,
                 IpcStatus::Full => {
-                    common::wait(
-                        common::ipc_write_event(logos_abi::IpcEndpointId::FlowToFetch),
-                        logos_abi::ServiceId::Flow,
-                    );
+                    wait_for_ipc();
                     continue;
                 }
                 _ => fetch.cancel_pending = false,
@@ -2756,10 +2767,7 @@ pub extern "C" fn _start() -> ! {
         }
         if pending.pending {
             if !progressed {
-                common::wait(
-                    common::ipc_write_event(logos_abi::IpcEndpointId::FlowToSession),
-                    logos_abi::ServiceId::Flow,
-                );
+                wait_for_ipc();
             }
             continue;
         }
@@ -2778,10 +2786,7 @@ pub extern "C" fn _start() -> ! {
             }
             if pending_completion.is_some() {
                 if !progressed {
-                    common::wait(
-                        common::ipc_write_event(logos_abi::IpcEndpointId::FlowToSession),
-                        logos_abi::ServiceId::Flow,
-                    );
+                    wait_for_ipc();
                 }
                 continue;
             }
@@ -2799,12 +2804,7 @@ pub extern "C" fn _start() -> ! {
             }
             if storage.active() {
                 if !progressed {
-                    common::wait(
-                        common::ipc_read_event(logos_abi::IpcEndpointId::StorageToFlow)
-                            | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToStorage)
-                            | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
-                        logos_abi::ServiceId::Flow,
-                    );
+                    wait_for_ipc();
                 }
                 continue;
             }
@@ -2817,12 +2817,7 @@ pub extern "C" fn _start() -> ! {
             }
             if package.active() {
                 if !progressed {
-                    common::wait(
-                        common::ipc_read_event(logos_abi::IpcEndpointId::StorageToFlow)
-                            | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToStorage)
-                            | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
-                        logos_abi::ServiceId::Flow,
-                    );
+                    wait_for_ipc();
                 }
                 continue;
             }
@@ -2835,12 +2830,7 @@ pub extern "C" fn _start() -> ! {
             }
             if device.active() {
                 if !progressed {
-                    common::wait(
-                        common::ipc_read_event(logos_abi::IpcEndpointId::DeviceToFlow)
-                            | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToDevice)
-                            | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
-                        logos_abi::ServiceId::Flow,
-                    );
+                    wait_for_ipc();
                 }
                 continue;
             }
@@ -2853,12 +2843,7 @@ pub extern "C" fn _start() -> ! {
             }
             if user.active() {
                 if !progressed {
-                    common::wait(
-                        common::ipc_read_event(logos_abi::IpcEndpointId::UserToFlow)
-                            | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToUser)
-                            | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
-                        logos_abi::ServiceId::Flow,
-                    );
+                    wait_for_ipc();
                 }
                 continue;
             }
@@ -2879,13 +2864,7 @@ pub extern "C" fn _start() -> ! {
             }
             if fetch.active() && fetch.foreground() {
                 if !progressed {
-                    common::wait(
-                        common::ipc_read_event(logos_abi::IpcEndpointId::FetchToFlow)
-                            | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToFetch)
-                            | common::ipc_write_event(logos_abi::IpcEndpointId::FlowToSession)
-                            | common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow),
-                        logos_abi::ServiceId::Flow,
-                    );
+                    wait_for_ipc();
                 }
                 continue;
             }
@@ -3240,12 +3219,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if !progressed {
-            common::wait(
-                common::ipc_read_event(logos_abi::IpcEndpointId::SessionToFlow)
-                    | common::ipc_read_event(logos_abi::IpcEndpointId::StorageToFlow)
-                    | common::ipc_read_event(logos_abi::IpcEndpointId::FetchToFlow),
-                logos_abi::ServiceId::Flow,
-            );
+            wait_for_ipc();
         }
     }
 }

@@ -5,11 +5,11 @@
 mod common;
 
 use logos_abi::{
-    IpcBytes, IpcEndpointId, IpcStatus, MessageKind, PackageOperation, PackageRequest,
-    PackageResponse, PackageStatus, PackageTargetKind, StorageApiOperation, StorageApiStatus,
-    StorageMapRequest, StorageMapResponse, StorageOperation, StorageRequest, StorageResponse,
-    StorageStatus, USER_STORAGE_FLAG_BEGIN, USER_STORAGE_FLAG_END, UserStorageOperation,
-    UserStorageRequest, UserStorageResponse, UserStorageStatus,
+    IpcBytes, IpcStatus, MessageKind, PackageOperation, PackageRequest, PackageResponse,
+    PackageStatus, PackageTargetKind, StorageApiOperation, StorageApiStatus, StorageMapRequest,
+    StorageMapResponse, StorageOperation, StorageRequest, StorageResponse, StorageStatus,
+    USER_STORAGE_FLAG_BEGIN, USER_STORAGE_FLAG_END, UserStorageOperation, UserStorageRequest,
+    UserStorageResponse, UserStorageStatus,
 };
 use logos_storage::Block;
 use logos_storage_service::{
@@ -18,7 +18,6 @@ use logos_storage_service::{
 };
 use logos_user::{USER_SNAPSHOT_BYTES, UserCatalog, UserCatalogStore};
 
-const REQUEST_PROTOCOL_SLOT: u16 = 2;
 const REQUEST_CAPABILITY: common::CapabilitySpec = common::capability_contract(
     logos_abi::IPC_CONTRACT_STORAGE_REQUEST,
     common::CORE_PEER_INDEX,
@@ -286,13 +285,7 @@ fn new_store(
     capability: StorageCapability,
     blocks: u64,
 ) -> Option<IpcBlockStore<StorageTransport>> {
-    IpcBlockStore::new_with_slot(
-        StorageTransport::new(capability),
-        capability,
-        REQUEST_PROTOCOL_SLOT,
-        blocks,
-    )
-    .ok()
+    IpcBlockStore::new(StorageTransport::new(capability), capability, blocks).ok()
 }
 
 fn discover(capability: StorageCapability) -> Option<u64> {
@@ -300,7 +293,6 @@ fn discover(capability: StorageCapability) -> Option<u64> {
         StorageOperation::Reopen,
         1,
         capability.generation,
-        REQUEST_PROTOCOL_SLOT,
         capability.service_epoch,
         0,
         0,
@@ -320,8 +312,8 @@ fn discover(capability: StorageCapability) -> Option<u64> {
                     .then_some(response.block_count)
                     .filter(|blocks| *blocks > 2);
             }
-            IpcStatus::Empty => common::wait(
-                common::ipc_read_event(IpcEndpointId::CoreToStorage),
+            IpcStatus::Empty => common::wait_on_capability(
+                ipc_capabilities().response,
                 logos_abi::ServiceId::Storage,
             ),
             _ => return None,
@@ -671,15 +663,18 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
             }
         }
         if !progressed {
-            common::wait(
-                common::ipc_read_event(IpcEndpointId::FlowToStorage)
-                    | common::ipc_write_event(IpcEndpointId::StorageToFlow)
-                    | common::ipc_read_event(IpcEndpointId::FetchToStorage)
-                    | common::ipc_write_event(IpcEndpointId::StorageToFetch)
-                    | common::ipc_read_event(IpcEndpointId::UserToStorage)
-                    | common::ipc_write_event(IpcEndpointId::StorageToUser)
-                    | common::ipc_read_event(IpcEndpointId::CoreToStoragePackage)
-                    | common::ipc_write_event(IpcEndpointId::StoragePackageToCore),
+            let capabilities = ipc_capabilities();
+            common::wait_on_capabilities(
+                &[
+                    capabilities.flow_receive,
+                    capabilities.flow_send,
+                    capabilities.fetch_receive,
+                    capabilities.fetch_send,
+                    capabilities.user_receive,
+                    capabilities.user_send,
+                    capabilities.package_receive,
+                    capabilities.package_send,
+                ],
                 logos_abi::ServiceId::Storage,
             );
         }
@@ -880,17 +875,20 @@ fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
             }
         }
         if !progressed {
-            common::wait(
-                common::ipc_read_event(IpcEndpointId::FlowToStorage)
-                    | common::ipc_write_event(IpcEndpointId::StorageToFlow)
-                    | common::ipc_read_event(IpcEndpointId::FetchToStorage)
-                    | common::ipc_write_event(IpcEndpointId::StorageToFetch)
-                    | common::ipc_read_event(IpcEndpointId::CoreToStorageMap)
-                    | common::ipc_write_event(IpcEndpointId::StorageMapToCore)
-                    | common::ipc_read_event(IpcEndpointId::UserToStorage)
-                    | common::ipc_write_event(IpcEndpointId::StorageToUser)
-                    | common::ipc_read_event(IpcEndpointId::CoreToStoragePackage)
-                    | common::ipc_write_event(IpcEndpointId::StoragePackageToCore),
+            let capabilities = ipc_capabilities();
+            common::wait_on_capabilities(
+                &[
+                    capabilities.flow_receive,
+                    capabilities.flow_send,
+                    capabilities.fetch_receive,
+                    capabilities.fetch_send,
+                    capabilities.map_request,
+                    capabilities.map_response,
+                    capabilities.user_receive,
+                    capabilities.user_send,
+                    capabilities.package_receive,
+                    capabilities.package_send,
+                ],
                 logos_abi::ServiceId::Storage,
             );
         }

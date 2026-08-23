@@ -7,9 +7,9 @@ mod common;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use logos_abi::{
-    IpcBytes, IpcEndpointId, IpcStatus, MessageKind, USER_STORAGE_CHUNK_BYTES,
-    USER_STORAGE_FLAG_BEGIN, USER_STORAGE_FLAG_END, UserRequest, UserResponse,
-    UserStorageOperation, UserStorageRequest, UserStorageResponse, UserStorageStatus,
+    IpcBytes, IpcStatus, MessageKind, USER_STORAGE_CHUNK_BYTES, USER_STORAGE_FLAG_BEGIN,
+    USER_STORAGE_FLAG_END, UserRequest, UserResponse, UserStorageOperation, UserStorageRequest,
+    UserStorageResponse, UserStorageStatus,
 };
 use logos_user::{EntropySource, USER_SNAPSHOT_BYTES, UserCatalogStore, UserError, UserService};
 
@@ -112,10 +112,9 @@ impl CatalogTransport {
         loop {
             match common::ipc_send_handle(self.send_capability, &message) {
                 IpcStatus::Ok => break,
-                IpcStatus::Full => common::wait(
-                    common::ipc_write_event(IpcEndpointId::UserToStorage),
-                    logos_abi::ServiceId::User,
-                ),
+                IpcStatus::Full => {
+                    common::wait_on_capability(self.send_capability, logos_abi::ServiceId::User)
+                }
                 _ => return Err(UserError::Persistence),
             }
         }
@@ -137,10 +136,9 @@ impl CatalogTransport {
                     }
                     return Ok(value);
                 }
-                IpcStatus::Empty => common::wait(
-                    common::ipc_read_event(IpcEndpointId::StorageToUser),
-                    logos_abi::ServiceId::User,
-                ),
+                IpcStatus::Empty => {
+                    common::wait_on_capability(self.receive_capability, logos_abi::ServiceId::User)
+                }
                 _ => return Err(UserError::Persistence),
             }
         }
@@ -296,7 +294,7 @@ pub extern "C" fn _start() -> ! {
     };
     while !load_catalog(storage_send_capability, storage_receive_capability) {
         common::heartbeat(logos_abi::ServiceId::User);
-        common::wait(0, logos_abi::ServiceId::User);
+        common::sleep(logos_abi::ServiceId::User);
     }
     let mut heartbeat_ticks = 0u16;
     loop {
@@ -324,20 +322,19 @@ pub extern "C" fn _start() -> ! {
                 loop {
                     match common::ipc_send_handle(flow_send_capability, &response) {
                         IpcStatus::Ok => break,
-                        IpcStatus::Full => common::wait(
-                            common::ipc_write_event(IpcEndpointId::UserToFlow),
+                        IpcStatus::Full => common::wait_on_capability(
+                            flow_send_capability,
                             logos_abi::ServiceId::User,
                         ),
                         _ => break,
                     }
                 }
             }
-            IpcStatus::Empty => common::wait(
-                common::ipc_read_event(IpcEndpointId::FlowToUser)
-                    | common::ipc_read_event(IpcEndpointId::StorageToUser),
+            IpcStatus::Empty => common::wait_on_capabilities(
+                &[flow_receive_capability, storage_receive_capability],
                 logos_abi::ServiceId::User,
             ),
-            _ => common::wait(0, logos_abi::ServiceId::User),
+            _ => common::sleep(logos_abi::ServiceId::User),
         }
     }
 }

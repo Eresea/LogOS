@@ -216,10 +216,7 @@ pub extern "C" fn _start() -> ! {
             match common::ipc_send_handle(flow_capability, &control) {
                 IpcStatus::Ok => pending_control = None,
                 IpcStatus::Full => {
-                    common::wait(
-                        common::ipc_write_event(logos_abi::IpcEndpointId::SessionToFlow),
-                        logos_abi::ServiceId::Session,
-                    );
+                    common::wait_on_capability(flow_capability, logos_abi::ServiceId::Session);
                     continue;
                 }
                 IpcStatus::Stale
@@ -232,10 +229,7 @@ pub extern "C" fn _start() -> ! {
         let mut progressed = pending.flush(output_capability);
         if !pending.is_empty() {
             if !progressed {
-                common::wait(
-                    common::ipc_write_event(logos_abi::IpcEndpointId::SessionToTerminal),
-                    logos_abi::ServiceId::Session,
-                );
+                common::wait_on_capability(output_capability, logos_abi::ServiceId::Session);
             }
             continue;
         }
@@ -246,10 +240,7 @@ pub extern "C" fn _start() -> ! {
                     progressed = true;
                 }
                 IpcStatus::Full => {
-                    common::wait(
-                        common::ipc_write_event(logos_abi::IpcEndpointId::SessionToFlow),
-                        logos_abi::ServiceId::Session,
-                    );
+                    common::wait_on_capability(flow_capability, logos_abi::ServiceId::Session);
                     continue;
                 }
                 IpcStatus::Stale
@@ -275,10 +266,7 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             if !progressed {
-                common::wait(
-                    common::ipc_write_event(logos_abi::IpcEndpointId::SessionToFlow),
-                    logos_abi::ServiceId::Session,
-                );
+                common::wait_on_capability(flow_capability, logos_abi::ServiceId::Session);
             }
             continue;
         }
@@ -318,10 +306,7 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             if !progressed {
-                common::wait(
-                    common::ipc_read_event(logos_abi::IpcEndpointId::FlowToSession),
-                    logos_abi::ServiceId::Session,
-                );
+                common::wait_on_capability(flow_output_capability, logos_abi::ServiceId::Session);
             }
             continue;
         }
@@ -367,11 +352,10 @@ pub extern "C" fn _start() -> ! {
             pending.stage(completion_output.as_bytes());
         }
         if !progressed {
-            let mut wait_mask = common::ipc_read_event(logos_abi::IpcEndpointId::TerminalToSession);
-            if session.completion_pending() {
-                wait_mask |= common::ipc_read_event(logos_abi::IpcEndpointId::FlowToSession);
-            }
-            common::wait(wait_mask, logos_abi::ServiceId::Session);
+            common::wait_on_capabilities(
+                &[input_capability, flow_output_capability],
+                logos_abi::ServiceId::Session,
+            );
         }
     }
 }

@@ -561,14 +561,14 @@ fn send_network_response(
     response: NetworkResponse,
 ) {
     let response = response_message(response);
-    let (capability, endpoint) = match peer {
-        Peer::Flow => (flow_send_capability, logos_abi::IpcEndpointId::NetworkToFlow),
-        Peer::Fetch => (fetch_send_capability, logos_abi::IpcEndpointId::NetworkToFetch),
+    let capability = match peer {
+        Peer::Flow => flow_send_capability,
+        Peer::Fetch => fetch_send_capability,
     };
     loop {
         match common::ipc_send_handle(capability, &response) {
             IpcStatus::Ok => break,
-            IpcStatus::Full => common::wait(common::ipc_write_event(endpoint), ServiceId::Network),
+            IpcStatus::Full => common::wait_on_capability(capability, ServiceId::Network),
             _ => break,
         }
     }
@@ -906,10 +906,8 @@ pub extern "C" fn _start() -> ! {
                 sequence = sequence.wrapping_add(1).max(1);
             }
         }
-        common::wait(
-            common::ipc_read_event(logos_abi::IpcEndpointId::FlowToNetwork)
-                | common::ipc_read_event(logos_abi::IpcEndpointId::FetchToNetwork)
-                | common::ipc_read_event(logos_abi::IpcEndpointId::CoreToNetwork),
+        common::wait_on_capabilities(
+            &[flow_receive_capability, fetch_receive_capability, core_receive_capability],
             ServiceId::Network,
         );
     }

@@ -5,8 +5,7 @@
 mod common;
 
 use logos_abi::{
-    DeviceOperation, DeviceRequest, DeviceResponse, DeviceStatus, IpcEndpointId, IpcStatus,
-    ServiceId,
+    DeviceOperation, DeviceRequest, DeviceResponse, DeviceStatus, IpcStatus, ServiceId,
 };
 
 const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
@@ -123,11 +122,13 @@ fn run(
         }
 
         if !progressed {
-            common::wait(
-                common::ipc_read_event(IpcEndpointId::FlowToDevice)
-                    | common::ipc_write_event(IpcEndpointId::DeviceToFlow)
-                    | common::ipc_write_event(IpcEndpointId::DeviceToCore)
-                    | common::ipc_read_event(IpcEndpointId::CoreToDevice),
+            common::wait_on_capabilities(
+                &[
+                    flow_receive_capability,
+                    flow_send_capability,
+                    core_send_capability,
+                    core_receive_capability,
+                ],
                 ServiceId::Device,
             );
         }

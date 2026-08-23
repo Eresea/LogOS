@@ -78,7 +78,6 @@ impl StorageCapability {
 pub struct IpcBlockStore<T> {
     transport: T,
     capability: StorageCapability,
-    capability_slot: u16,
     generation: u16,
     service_epoch: u64,
     blocks: u64,
@@ -98,22 +97,9 @@ impl<T> IpcBlockStore<T> {
         if blocks == 0 {
             return Err(BlockError::InvalidRequest);
         }
-        Self::new_with_slot(transport, capability, 0, blocks)
-    }
-
-    pub fn new_with_slot(
-        transport: T,
-        capability: StorageCapability,
-        capability_slot: u16,
-        blocks: u64,
-    ) -> Result<Self, BlockError> {
-        if blocks == 0 {
-            return Err(BlockError::InvalidRequest);
-        }
         Ok(Self {
             transport,
             capability,
-            capability_slot,
             generation: capability.generation,
             service_epoch: capability.service_epoch,
             blocks,
@@ -177,7 +163,6 @@ impl<T> IpcBlockStore<T> {
             operation,
             self.next_request(),
             self.generation,
-            self.capability_slot,
             self.service_epoch,
             0,
             blocks,

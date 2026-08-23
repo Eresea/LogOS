@@ -61,16 +61,12 @@ pub extern "C" fn _start() -> ! {
     let mut render_more = false;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks, logos_abi::ServiceId::Terminal);
-        let mut wait_mask = 0;
         if let Some(message) = *pending_session_input {
             match common::ipc_send_handle(session_input_capability, &message) {
                 IpcStatus::Ok => {
                     *pending_session_input = None;
                 }
-                IpcStatus::Full => {
-                    wait_mask |=
-                        common::ipc_write_event(logos_abi::IpcEndpointId::TerminalToSession)
-                }
+                IpcStatus::Full => {}
                 IpcStatus::Stale
                 | IpcStatus::Disconnected
                 | IpcStatus::Unauthorized
@@ -86,9 +82,6 @@ pub extern "C" fn _start() -> ! {
                         IpcStatus::Ok => {}
                         IpcStatus::Full => {
                             *pending_session_input = Some(message);
-                            wait_mask |= common::ipc_write_event(
-                                logos_abi::IpcEndpointId::TerminalToSession,
-                            );
                             break;
                         }
                         IpcStatus::Stale
@@ -99,9 +92,7 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
             }
-            if pending_session_input.is_none() {
-                wait_mask |= common::ipc_read_event(logos_abi::IpcEndpointId::InputToTerminal);
-            }
+            if pending_session_input.is_none() {}
         }
         let mut message = IpcBytes::empty(MessageKind::SessionOutput);
         while common::ipc_receive_handle(session_output_capability, &mut message) == IpcStatus::Ok {
@@ -109,7 +100,6 @@ pub extern "C" fn _start() -> ! {
                 terminal.session_output_bytes(bytes);
             }
         }
-        wait_mask |= common::ipc_read_event(logos_abi::IpcEndpointId::SessionToTerminal);
         if pending_render.is_none() {
             *pending_render = terminal.next_render();
         }
@@ -119,10 +109,7 @@ pub extern "C" fn _start() -> ! {
                     *pending_render = None;
                     render_more = render.flags & logos_abi::RENDER_FLAG_MORE != 0;
                 }
-                IpcStatus::Full => {
-                    wait_mask |=
-                        common::ipc_write_event(logos_abi::IpcEndpointId::TerminalToDisplay)
-                }
+                IpcStatus::Full => {}
                 IpcStatus::Stale
                 | IpcStatus::Disconnected
                 | IpcStatus::Unauthorized
@@ -136,9 +123,15 @@ pub extern "C" fn _start() -> ! {
         if pending_render.is_none() && render_more {
             continue;
         }
-        if wait_mask != 0 {
-            common::wait(wait_mask, logos_abi::ServiceId::Terminal);
-        }
+        common::wait_on_capabilities(
+            &[
+                input_capability,
+                session_input_capability,
+                session_output_capability,
+                display_capability,
+            ],
+            logos_abi::ServiceId::Terminal,
+        );
     }
 }
 

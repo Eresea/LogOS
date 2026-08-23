@@ -5,7 +5,7 @@
 mod common;
 
 use logos_abi::{
-    INPUT_KEYBOARD_RING_BASE, InputMessage, IpcEndpointId, IpcStatus, KeyboardByteRing,
+    INPUT_KEYBOARD_RING_BASE, IPC_CONTRACT_INPUT, InputMessage, IpcStatus, KeyboardByteRing,
 };
 
 static mut PENDING: [Option<InputMessage>; 2] = [None, None];
@@ -22,7 +22,7 @@ pub extern "C" fn _start() -> ! {
     let output_capability = match common::discover_capability_contract(
         terminal,
         logos_abi::IpcRights::Send,
-        IpcEndpointId::InputToTerminal.index() as u16 + 1,
+        IPC_CONTRACT_INPUT,
         core::mem::size_of::<InputMessage>(),
     ) {
         Ok(capability) => capability,
@@ -41,10 +41,7 @@ pub extern "C" fn _start() -> ! {
                     pending[1] = None;
                 }
                 IpcStatus::Full => {
-                    common::wait(
-                        common::ipc_write_event(logos_abi::IpcEndpointId::InputToTerminal),
-                        logos_abi::ServiceId::Input,
-                    );
+                    common::wait_on_capability(output_capability, logos_abi::ServiceId::Input);
                     continue;
                 }
                 IpcStatus::Stale
@@ -59,7 +56,7 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
         let Some(byte) = keyboard.pop() else {
-            common::wait(common::keyboard_read_event(), logos_abi::ServiceId::Input);
+            common::sleep(logos_abi::ServiceId::Input);
             continue;
         };
         let Some(event) = decoder.feed(byte) else {

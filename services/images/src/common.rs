@@ -1,5 +1,6 @@
 extern crate alloc;
 
+use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
 use core::cell::UnsafeCell;
@@ -405,6 +406,10 @@ impl ServiceAllocator {
             }
             let guard = self.lock();
             if !unsafe { (&mut *guard.allocator.state.get()).extend(1) } {
+                // Core has already mapped and charged this page. If the
+                // private allocator cannot publish the matching span, return
+                // the page immediately so the two ownership ledgers agree.
+                let _ = request_heap_shrink(capability);
                 return ptr::null_mut();
             }
         }
@@ -545,48 +550,31 @@ fn capability_from_response(
     Ok(found)
 }
 
-#[allow(dead_code)]
-fn event_from_response(
-    response: &logos_abi::DirectoryResponse,
-    rights: logos_abi::IpcRights,
-    contract_id: u16,
-    message_bytes: usize,
-) -> Result<Option<logos_abi::EventHandle>, logos_abi::DirectoryStatus> {
-    let mut found = None;
-    for record in &response.records[..response.count as usize] {
-        if record.kind != logos_abi::DirectoryRecordKind::Capability
-            || record.rights != rights as u8
-            || record.contract_id != contract_id
-            || record.message_bytes as usize != message_bytes
-        {
-            continue;
-        }
-        let Some(event) = logos_abi::EventHandle::from_raw(record.event.raw()) else {
-            return Err(logos_abi::DirectoryStatus::Malformed);
-        };
-        if found.is_some() {
+fn merge_discovered_capability(
+    found: &mut Option<logos_abi::CapabilityHandle>,
+    candidate: Option<logos_abi::CapabilityHandle>,
+) -> Result<(), logos_abi::DirectoryStatus> {
+    if let Some(candidate) = candidate {
+        if found.replace(candidate).is_some() {
             return Err(logos_abi::DirectoryStatus::Malformed);
         }
-        found = Some(event);
     }
-    Ok(found)
+    Ok(())
 }
 
 #[allow(dead_code)]
-fn discover_event_contract(
-    rights: logos_abi::IpcRights,
-    contract_id: u16,
-    message_bytes: usize,
+fn discover_event_for_capability(
+    capability: logos_abi::CapabilityHandle,
 ) -> Result<logos_abi::EventHandle, logos_abi::DirectoryStatus> {
     #[cfg(target_os = "none")]
     {
         let bootstrap = bootstrap_page();
-        if !bootstrap.is_valid() || contract_id == 0 || message_bytes == 0 {
+        if !bootstrap.is_valid() || !capability.is_valid() {
             return Err(logos_abi::DirectoryStatus::Malformed);
         }
         let mut request = logos_abi::DirectoryRequest::new(
             logos_abi::DirectoryOperation::Capabilities,
-            NEXT_EVENT_REQUEST.fetch_add(1, Ordering::Relaxed).max(1),
+            next_event_request_id(),
         );
         request.subject = bootstrap.service;
         loop {
@@ -599,8 +587,14 @@ fn discover_event_contract(
             if status != logos_abi::DirectoryStatus::Ok {
                 return Err(status);
             }
-            if let Some(event) = event_from_response(&response, rights, contract_id, message_bytes)?
-            {
+            for record in &response.records[..response.count as usize] {
+                if record.kind != logos_abi::DirectoryRecordKind::Capability
+                    || record.handle != capability.raw()
+                {
+                    continue;
+                }
+                let event = logos_abi::EventHandle::from_raw(record.event.raw())
+                    .ok_or(logos_abi::DirectoryStatus::Malformed)?;
                 return Ok(event);
             }
             if response.flags & logos_abi::DIRECTORY_FLAG_MORE == 0 {
@@ -614,18 +608,9 @@ fn discover_event_contract(
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (rights, contract_id, message_bytes);
+        let _ = capability;
         Err(logos_abi::DirectoryStatus::NotFound)
     }
-}
-
-#[allow(dead_code)]
-pub fn discover_capability(
-    peer: logos_abi::ServiceHandle,
-    rights: logos_abi::IpcRights,
-    message_bytes: usize,
-) -> Result<logos_abi::CapabilityHandle, logos_abi::DirectoryStatus> {
-    discover_capability_contract(peer, rights, 0, message_bytes)
 }
 
 #[allow(dead_code)]
@@ -638,12 +623,13 @@ pub fn discover_capability_contract(
     #[cfg(target_os = "none")]
     {
         let bootstrap = bootstrap_page();
-        if !bootstrap.is_valid() || !peer.is_valid() || message_bytes == 0 {
+        if !bootstrap.is_valid() || !peer.is_valid() || contract_id == 0 || message_bytes == 0 {
             return Err(logos_abi::DirectoryStatus::Malformed);
         }
         let mut request =
             logos_abi::DirectoryRequest::new(logos_abi::DirectoryOperation::Capabilities, 1);
         request.subject = bootstrap.service;
+        let mut found = None;
         loop {
             let mut response = logos_abi::DirectoryResponse::empty(
                 request.operation,
@@ -657,10 +643,10 @@ pub fn discover_capability_contract(
             if let Some(capability) =
                 capability_from_response(&response, peer, rights, contract_id, message_bytes)?
             {
-                return Ok(capability);
+                merge_discovered_capability(&mut found, Some(capability))?;
             }
             if response.flags & logos_abi::DIRECTORY_FLAG_MORE == 0 {
-                return Err(logos_abi::DirectoryStatus::NotFound);
+                return found.ok_or(logos_abi::DirectoryStatus::NotFound);
             }
             if response.cursor <= request.cursor {
                 return Err(logos_abi::DirectoryStatus::Malformed);
@@ -728,100 +714,8 @@ pub fn idle() -> ! {
 pub const WAIT_TIMEOUT_TICKS: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS / 2;
 
 #[allow(dead_code)]
-pub const fn ipc_read_event(endpoint: logos_abi::IpcEndpointId) -> u64 {
-    endpoint.read_event_mask()
-}
-
-#[allow(dead_code)]
-pub const fn ipc_write_event(endpoint: logos_abi::IpcEndpointId) -> u64 {
-    endpoint.write_event_mask()
-}
-
-#[allow(dead_code)]
-pub const fn keyboard_read_event() -> u64 {
-    logos_abi::keyboard_read_event_mask()
-}
-
-#[allow(dead_code)]
 fn next_event_request_id() -> u32 {
     NEXT_EVENT_REQUEST.fetch_add(1, Ordering::Relaxed).max(1)
-}
-
-#[allow(dead_code)]
-fn event_set_for_mask(mask: u64) -> Option<logos_abi::EventSetHandle> {
-    #[cfg(target_os = "none")]
-    {
-        if mask == 0 || mask & logos_abi::keyboard_read_event_mask() != 0 {
-            return None;
-        }
-        unsafe {
-            if let Some((set, known_mask)) = *EVENT_SET_CACHE.0.get() {
-                if known_mask & mask == mask {
-                    return Some(set);
-                }
-            }
-        }
-        let (mut set, mut known_mask) =
-            unsafe { (*EVENT_SET_CACHE.0.get()).unwrap_or((logos_abi::EventSetHandle::EMPTY, 0)) };
-        if !set.is_valid() {
-            let request = logos_abi::EventRequest::new(
-                logos_abi::EventOperation::CreateSet,
-                next_event_request_id(),
-            );
-            let mut response = logos_abi::EventResponse::empty(
-                logos_abi::EventStatus::Malformed,
-                request.request_id,
-            );
-            if event_call(&request, &mut response) != logos_abi::EventStatus::Ok
-                || !response.event_set.is_valid()
-            {
-                return None;
-            }
-            set = response.event_set;
-        }
-        for bit in 0..logos_abi::IPC_ENDPOINT_COUNT * 2 {
-            let bit_mask = 1u64 << bit;
-            if mask & bit_mask == 0 || known_mask & bit_mask != 0 {
-                continue;
-            }
-            let endpoint = if bit < logos_abi::IPC_ENDPOINT_COUNT {
-                bit
-            } else {
-                bit - logos_abi::IPC_WRITE_EVENT_BASE
-            };
-            let rights = if bit < logos_abi::IPC_ENDPOINT_COUNT {
-                logos_abi::IpcRights::Receive
-            } else {
-                logos_abi::IpcRights::Send
-            };
-            let message_bytes = logos_abi::ipc_message_size(endpoint)?;
-            let contract_id = logos_abi::ipc_contract_id(endpoint)?;
-            let Ok(event) = discover_event_contract(rights, contract_id, message_bytes) else {
-                return None;
-            };
-            let mut request = logos_abi::EventRequest::new(
-                logos_abi::EventOperation::Add,
-                next_event_request_id(),
-            );
-            request.event_set = set;
-            request.event = event;
-            let mut response = logos_abi::EventResponse::empty(
-                logos_abi::EventStatus::Malformed,
-                request.request_id,
-            );
-            if event_call(&request, &mut response) != logos_abi::EventStatus::Ok {
-                return None;
-            }
-            known_mask |= bit_mask;
-        }
-        unsafe { *EVENT_SET_CACHE.0.get() = Some((set, known_mask)) };
-        Some(set)
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = mask;
-        None
-    }
 }
 
 #[allow(dead_code)]
@@ -852,13 +746,159 @@ pub const fn capability_contract(
 }
 
 #[allow(dead_code)]
-struct EventSetCache(UnsafeCell<Option<(logos_abi::EventSetHandle, u64)>>);
+struct EventSetCacheState {
+    set: logos_abi::EventSetHandle,
+    events: Vec<logos_abi::EventHandle>,
+}
+
+impl EventSetCacheState {
+    const fn empty() -> Self {
+        Self { set: logos_abi::EventSetHandle::EMPTY, events: Vec::new() }
+    }
+}
+
+struct EventSetCache(UnsafeCell<EventSetCacheState>);
 
 unsafe impl Sync for EventSetCache {}
 
 #[allow(dead_code)]
-static EVENT_SET_CACHE: EventSetCache = EventSetCache(UnsafeCell::new(None));
+static EVENT_SET_CACHE: EventSetCache = EventSetCache(UnsafeCell::new(EventSetCacheState::empty()));
 static NEXT_EVENT_REQUEST: AtomicU32 = AtomicU32::new(0x4000);
+
+#[allow(dead_code)]
+fn current_ticks() -> u64 {
+    #[cfg(target_os = "none")]
+    {
+        let mut raw = logos_abi::CURRENT_TICKS_SYSCALL;
+        unsafe {
+            asm!(
+                "int 49",
+                inout("rax") raw,
+                options(preserves_flags),
+            );
+        }
+        raw as u64
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
+}
+
+#[allow(dead_code)]
+pub fn wait_on_capability(capability: logos_abi::CapabilityHandle, service: ServiceId) {
+    wait_on_capabilities(core::slice::from_ref(&capability), service);
+}
+
+#[allow(dead_code)]
+pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle], service: ServiceId) {
+    #[cfg(target_os = "none")]
+    {
+        let mut events = Vec::new();
+        if events.try_reserve(capabilities.len()).is_err() {
+            heartbeat(service);
+            return;
+        }
+        for capability in capabilities.iter().copied() {
+            let event = match discover_event_for_capability(capability) {
+                Ok(event) => event,
+                Err(_) => {
+                    heartbeat(service);
+                    return;
+                }
+            };
+            events.push(event);
+        }
+        let cached = unsafe { &*EVENT_SET_CACHE.0.get() };
+        let same = cached.set.is_valid() && cached.events.as_slice() == events.as_slice();
+        let set = if same {
+            cached.set
+        } else {
+            let cached_set = cached.set;
+            if cached_set.is_valid() {
+                let mut destroy = logos_abi::EventRequest::new(
+                    logos_abi::EventOperation::DestroySet,
+                    next_event_request_id(),
+                );
+                destroy.event_set = cached_set;
+                let mut response = logos_abi::EventResponse::empty(
+                    logos_abi::EventStatus::Malformed,
+                    destroy.request_id,
+                );
+                let _ = event_call(&destroy, &mut response);
+            }
+            let create = logos_abi::EventRequest::new(
+                logos_abi::EventOperation::CreateSet,
+                next_event_request_id(),
+            );
+            let mut response = logos_abi::EventResponse::empty(
+                logos_abi::EventStatus::Malformed,
+                create.request_id,
+            );
+            if event_call(&create, &mut response) != logos_abi::EventStatus::Ok
+                || !response.event_set.is_valid()
+            {
+                unsafe { *EVENT_SET_CACHE.0.get() = EventSetCacheState::empty() };
+                heartbeat(service);
+                return;
+            }
+            let set = response.event_set;
+            for event in &events {
+                let mut add = logos_abi::EventRequest::new(
+                    logos_abi::EventOperation::Add,
+                    next_event_request_id(),
+                );
+                add.event_set = set;
+                add.event = *event;
+                let mut add_response = logos_abi::EventResponse::empty(
+                    logos_abi::EventStatus::Malformed,
+                    add.request_id,
+                );
+                if event_call(&add, &mut add_response) != logos_abi::EventStatus::Ok {
+                    let mut destroy = logos_abi::EventRequest::new(
+                        logos_abi::EventOperation::DestroySet,
+                        next_event_request_id(),
+                    );
+                    destroy.event_set = set;
+                    let _ = event_call(&destroy, &mut add_response);
+                    heartbeat(service);
+                    return;
+                }
+            }
+            unsafe {
+                *EVENT_SET_CACHE.0.get() = EventSetCacheState { set, events };
+            }
+            set
+        };
+        let mut wait =
+            logos_abi::EventRequest::new(logos_abi::EventOperation::Wait, next_event_request_id());
+        wait.event_set = set;
+        wait.deadline = current_ticks().saturating_add(WAIT_TIMEOUT_TICKS);
+        let mut response =
+            logos_abi::EventResponse::empty(logos_abi::EventStatus::Malformed, wait.request_id);
+        let status = event_call(&wait, &mut response);
+        if status != logos_abi::EventStatus::Pending {
+            let mut destroy = logos_abi::EventRequest::new(
+                logos_abi::EventOperation::DestroySet,
+                next_event_request_id(),
+            );
+            destroy.event_set = set;
+            let _ = event_call(&destroy, &mut response);
+            unsafe { *EVENT_SET_CACHE.0.get() = EventSetCacheState::empty() };
+        }
+        heartbeat(service);
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = capabilities;
+        heartbeat(service);
+    }
+}
+
+#[allow(dead_code)]
+pub fn sleep(service: ServiceId) {
+    wait_on_capabilities(&[], service);
+}
 
 #[allow(dead_code)]
 fn discovered_capability(spec: CapabilitySpec) -> Result<logos_abi::CapabilityHandle, IpcStatus> {
@@ -922,45 +962,6 @@ pub fn proof_line(message: &[u8]) {
     }
     unsafe { asm!("out dx, al", in("dx") 0xe9u16, in("al") b'\r') };
     unsafe { asm!("out dx, al", in("dx") 0xe9u16, in("al") b'\n') };
-}
-
-#[inline(always)]
-pub fn wait(mask: u64, service: ServiceId) {
-    unsafe {
-        asm!(
-            "mov eax, 2",
-            "int 49",
-            in("rdi") mask as usize,
-            in("rsi") WAIT_TIMEOUT_TICKS as usize,
-            lateout("rax") _,
-            options(preserves_flags),
-        );
-    }
-    heartbeat(service);
-}
-
-#[inline(always)]
-#[allow(dead_code)]
-pub fn notify(mask: u64) {
-    if mask == 0 {
-        return;
-    }
-    unsafe {
-        asm!(
-            "mov eax, 3",
-            "int 49",
-            in("rdi") mask as usize,
-            lateout("rax") _,
-            options(preserves_flags),
-        );
-    }
-}
-
-#[allow(dead_code)]
-pub fn notify_edge(mask: u64, notification: logos_abi::Notify) {
-    if notification == logos_abi::Notify::Notified {
-        notify(mask);
-    }
 }
 
 #[inline(always)]
@@ -1202,6 +1203,12 @@ mod tests {
         response.count = 2;
         assert_eq!(
             capability_from_response(&response, peer, logos_abi::IpcRights::Send, 1, 16),
+            Err(logos_abi::DirectoryStatus::Malformed)
+        );
+        let mut found = None;
+        assert_eq!(merge_discovered_capability(&mut found, Some(capability)), Ok(()));
+        assert_eq!(
+            merge_discovered_capability(&mut found, Some(capability)),
             Err(logos_abi::DirectoryStatus::Malformed)
         );
     }

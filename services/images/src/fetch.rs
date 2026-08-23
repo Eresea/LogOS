@@ -648,10 +648,12 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
-        common::wait(
-            common::ipc_read_event(logos_abi::IpcEndpointId::FlowToFetch)
-                | common::ipc_read_event(logos_abi::IpcEndpointId::NetworkToFetch)
-                | common::ipc_read_event(logos_abi::IpcEndpointId::StorageToFetch),
+        common::wait_on_capabilities(
+            &[
+                ipc_capabilities().flow_receive,
+                ipc_capabilities().network_receive,
+                ipc_capabilities().storage_receive,
+            ],
             logos_abi::ServiceId::Fetch,
         );
     }
