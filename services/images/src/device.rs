@@ -6,27 +6,23 @@ mod common;
 
 use logos_abi::{DeviceOperation, DeviceRequest, DeviceResponse, DeviceStatus, IpcStatus};
 
-const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
     logos_abi::IPC_CONTRACT_DEVICE_REQUEST,
-    logos_abi::ServiceId::Flow.index() as u32,
     core::mem::size_of::<DeviceRequest>(),
     logos_abi::IpcRights::Receive,
 );
-const FLOW_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const FLOW_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
     logos_abi::IPC_CONTRACT_DEVICE_RESPONSE,
-    logos_abi::ServiceId::Flow.index() as u32,
     core::mem::size_of::<DeviceResponse>(),
     logos_abi::IpcRights::Send,
 );
-const CORE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const CORE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
     logos_abi::IPC_CONTRACT_DEVICE_REQUEST,
-    common::CORE_PEER_INDEX,
     core::mem::size_of::<DeviceRequest>(),
     logos_abi::IpcRights::Send,
 );
-const CORE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const CORE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
     logos_abi::IPC_CONTRACT_DEVICE_RESPONSE,
-    common::CORE_PEER_INDEX,
     core::mem::size_of::<DeviceResponse>(),
     logos_abi::IpcRights::Receive,
 );

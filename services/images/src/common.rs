@@ -883,9 +883,6 @@ pub struct CapabilitySpec {
 }
 
 #[allow(dead_code)]
-pub const CORE_PEER_INDEX: u32 = u32::MAX;
-
-#[allow(dead_code)]
 pub const fn capability_contract(
     contract_id: u16,
     peer_index: u32,

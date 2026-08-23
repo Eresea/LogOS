@@ -31,15 +31,13 @@ const FETCH_SEND: common::CapabilitySpec = common::capability_contract(
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const CORE_RECEIVE: common::CapabilitySpec = common::capability_contract(
+const CORE_RECEIVE: common::CapabilitySpec = common::capability_contract_any(
     logos_abi::IPC_CONTRACT_PACKET,
-    common::CORE_PEER_INDEX,
     mem::size_of::<logos_abi::NetworkPacketDescriptor>(),
     logos_abi::IpcRights::Receive,
 );
-const CORE_SEND: common::CapabilitySpec = common::capability_contract(
+const CORE_SEND: common::CapabilitySpec = common::capability_contract_any(
     logos_abi::IPC_CONTRACT_PACKET,
-    common::CORE_PEER_INDEX,
     mem::size_of::<logos_abi::NetworkPacketDescriptor>(),
     logos_abi::IpcRights::Send,
 );

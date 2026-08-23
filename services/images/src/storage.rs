@@ -18,15 +18,13 @@ use logos_storage_service::{
 };
 use logos_user::{USER_SNAPSHOT_BYTES, UserCatalog, UserCatalogStore};
 
-const REQUEST_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const REQUEST_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
     logos_abi::IPC_CONTRACT_STORAGE_REQUEST,
-    common::CORE_PEER_INDEX,
     core::mem::size_of::<StorageRequest>(),
     logos_abi::IpcRights::Send,
 );
-const RESPONSE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const RESPONSE_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
     logos_abi::IPC_CONTRACT_STORAGE_RESPONSE,
-    common::CORE_PEER_INDEX,
     core::mem::size_of::<StorageResponse>(),
     logos_abi::IpcRights::Receive,
 );
@@ -54,27 +52,23 @@ const FETCH_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contrac
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const PACKAGE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const PACKAGE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
     logos_abi::IPC_CONTRACT_PACKAGE_REQUEST,
-    common::CORE_PEER_INDEX,
     core::mem::size_of::<PackageRequest>(),
     logos_abi::IpcRights::Receive,
 );
-const PACKAGE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const PACKAGE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
     logos_abi::IPC_CONTRACT_PACKAGE_RESPONSE,
-    common::CORE_PEER_INDEX,
     core::mem::size_of::<PackageResponse>(),
     logos_abi::IpcRights::Send,
 );
-const MAP_REQUEST_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const MAP_REQUEST_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
     logos_abi::IPC_CONTRACT_STORAGE_MAP_REQUEST,
-    common::CORE_PEER_INDEX,
     core::mem::size_of::<StorageMapRequest>(),
     logos_abi::IpcRights::Send,
 );
-const MAP_RESPONSE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const MAP_RESPONSE_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
     logos_abi::IPC_CONTRACT_STORAGE_MAP_RESPONSE,
-    common::CORE_PEER_INDEX,
     core::mem::size_of::<StorageMapResponse>(),
     logos_abi::IpcRights::Receive,
 );
