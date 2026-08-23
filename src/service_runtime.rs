@@ -17,10 +17,11 @@ use crate::{
         AddressSpaceRoot, MappingFlags, ProcessError, ProcessHandle, UserLaunch, VirtualMapping,
     },
     runtime_ipc::RuntimeIpcRegistry,
+    runtime_services::ServiceImageSource,
     service_images::SERVICE_IMAGES,
     service_ipc::IpcError,
     service_loader::ServiceImageBundle,
-    service_manager::{ManagerAction, ManagerDecision, ProgramManager, ServiceImageSource},
+    service_manager::{ManagerAction, ManagerDecision, ProgramManager},
     service_startup::ServiceStartup,
     supervisor::LiveSupervisor,
 };
@@ -188,7 +189,6 @@ pub struct ServiceRuntime {
     heartbeat_ticks: [AtomicU64; SERVICE_COUNT],
     supervisor: LiveSupervisor,
     manager: ProgramManager,
-    image_sources: [ServiceImageSource; SERVICE_COUNT],
     pending_restart: Option<Vec<ServiceHandle>>,
     storage_map_windows: [[Option<crate::storage_ipc::StorageMapWindow>;
         crate::storage_ipc::STORAGE_MAP_WINDOWS_PER_CLIENT];
@@ -420,7 +420,6 @@ impl ServiceRuntime {
             heartbeat_ticks: [const { AtomicU64::new(0) }; SERVICE_COUNT],
             supervisor: LiveSupervisor::new(),
             manager: ProgramManager::new(),
-            image_sources: [ServiceImageSource::Predeclared; SERVICE_COUNT],
             pending_restart: None,
             storage_map_windows: [[None; crate::storage_ipc::STORAGE_MAP_WINDOWS_PER_CLIENT];
                 crate::storage_ipc::STORAGE_MAP_CLIENTS],
@@ -929,13 +928,16 @@ impl ServiceRuntime {
             let Some(image) = self.image(service) else {
                 return false;
             };
-            let expected = match self.image_sources[service.index()] {
-                ServiceImageSource::FilesystemPackage => {
+            let expected = match self.dynamic_services.as_ref().and_then(|registry| {
+                registry.image_source(self.runtime_service_handle(service).ok()?).ok()
+            }) {
+                Some(ServiceImageSource::FilesystemPackage) => {
                     image.page_count() as u32
                         + unsafe { self.tables[service.index()].assume_init_ref().table_count() }
                             as u32
                 }
-                ServiceImageSource::Predeclared => 0,
+                Some(ServiceImageSource::Builtin) => 0,
+                None => return false,
             };
             self.frame_pool.manager().owner_live(crate::memory::OwnerId::service(service))
                 == expected
@@ -1430,7 +1432,9 @@ impl ServiceRuntime {
     }
 
     fn uses_package_image(&self, service: ServiceId) -> bool {
-        self.image_sources[service.index()] == ServiceImageSource::FilesystemPackage
+        self.dynamic_services.as_ref().and_then(|registry| {
+            registry.image_source(self.runtime_service_handle(service).ok()?).ok()
+        }) == Some(ServiceImageSource::FilesystemPackage)
     }
 
     /// Reset the bounded image-owned memory and private staging before a
@@ -1791,7 +1795,12 @@ impl ServiceRuntime {
             .ok_or(ServiceRuntimeError::Resources)?
             .set_image(handle, b"package")
             .map_err(|_| ServiceRuntimeError::Resources)?;
-        self.image_sources[service.index()] = ServiceImageSource::FilesystemPackage;
+        let service_handle = self.runtime_service_handle(service)?;
+        self.dynamic_services
+            .as_mut()
+            .ok_or(ServiceRuntimeError::Resources)?
+            .set_image_source(service_handle, ServiceImageSource::FilesystemPackage)
+            .map_err(|_| ServiceRuntimeError::Resources)?;
         self.active_packages[service.index()] = Some(ActivePackageImage { service, plan });
         Ok(())
     }

@@ -30,6 +30,12 @@ pub enum ServiceState {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceImageSource {
+    Builtin,
+    FilesystemPackage,
+}
+
 struct ServiceRecord {
     handle: ServiceHandle,
     name: Vec<u8>,
@@ -40,6 +46,7 @@ struct ServiceRecord {
     restarts: u8,
     heap_quota_pages: usize,
     manager_rights: ManagerRights,
+    image_source: ServiceImageSource,
     ownership: ServiceOwnership,
 }
 
@@ -178,6 +185,7 @@ impl RuntimeServiceRegistry {
             restarts: 0,
             heap_quota_pages,
             manager_rights: ManagerRights::NONE,
+            image_source: ServiceImageSource::Builtin,
             ownership: ServiceOwnership::EMPTY,
         });
         Ok(handle)
@@ -329,6 +337,22 @@ impl RuntimeServiceRegistry {
         handle: ServiceHandle,
     ) -> Result<ManagerRights, ServiceRegistryError> {
         Ok(self.service(handle)?.manager_rights)
+    }
+
+    pub fn set_image_source(
+        &mut self,
+        handle: ServiceHandle,
+        source: ServiceImageSource,
+    ) -> Result<(), ServiceRegistryError> {
+        self.service_mut(handle)?.image_source = source;
+        Ok(())
+    }
+
+    pub fn image_source(
+        &self,
+        handle: ServiceHandle,
+    ) -> Result<ServiceImageSource, ServiceRegistryError> {
+        Ok(self.service(handle)?.image_source)
     }
 
     pub fn set_runtime_ownership(
@@ -981,6 +1005,15 @@ mod tests {
         assert_eq!(registry.manager_rights(handle), Ok(ManagerRights::NONE));
         registry.set_manager_rights(handle, ManagerRights::ALL).unwrap();
         assert_eq!(registry.manager_rights(handle), Ok(ManagerRights::ALL));
+    }
+
+    #[test]
+    fn image_source_is_recorded_on_the_dynamic_service() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let handle = registry.register(b"service", b"image", &[]).unwrap();
+        assert_eq!(registry.image_source(handle), Ok(ServiceImageSource::Builtin));
+        registry.set_image_source(handle, ServiceImageSource::FilesystemPackage).unwrap();
+        assert_eq!(registry.image_source(handle), Ok(ServiceImageSource::FilesystemPackage));
     }
 
     #[test]
