@@ -1,13 +1,15 @@
 //! Fixed Core-owned service lifecycle state and control-plane validation.
 
+use alloc::vec::Vec;
+
 use logos_abi::{
-    MAX_MANAGER_SERVICES, MAX_PACKAGE_NAME_BYTES, ManagerOperation, ManagerRequest, ManagerRights,
-    ManagerState, ManagerStatus, ManagerTargetKind, ServiceManagerRecord,
+    MAX_PACKAGE_NAME_BYTES, ManagerOperation, ManagerRequest, ManagerRights, ManagerState,
+    ManagerStatus, ManagerTargetKind, ServiceManagerRecord,
 };
 
 use crate::service_images::SERVICE_IMAGES;
 
-pub const MAX_SERVICE_SLOTS: usize = MAX_MANAGER_SERVICES;
+pub const MAX_SERVICE_SLOTS: usize = SERVICE_IMAGES.len();
 pub const MAX_PROGRAM_SLOTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,17 +41,17 @@ impl ServiceHandle {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ManagerAction {
     None,
     Start(logos_abi::ServiceId),
     Stop(logos_abi::ServiceId),
-    Restart([logos_abi::ServiceId; MAX_SERVICE_SLOTS], usize),
+    Restart(Vec<logos_abi::ServiceId>),
     ProgramStart(usize),
     ProgramStop(usize),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManagerDecision {
     pub response: logos_abi::ManagerResponse,
     pub action: ManagerAction,
@@ -499,17 +501,13 @@ impl ServiceManager {
                 } else if self.has_transitional_dependents(index) {
                     response.status = ManagerStatus::Busy;
                 } else {
-                    let mut services = [logos_abi::ServiceId::Input; MAX_SERVICE_SLOTS];
-                    let Some(count) = self.restart_closure(index, &mut services) else {
+                    let Some(services) = self.restart_closure(index) else {
                         response.status = ManagerStatus::Dependency;
                         return ManagerDecision { response, action: ManagerAction::None };
                     };
                     response.status = ManagerStatus::Accepted;
                     response.record = self.slots[index].record(index);
-                    return ManagerDecision {
-                        response,
-                        action: ManagerAction::Restart(services, count),
-                    };
+                    return ManagerDecision { response, action: ManagerAction::Restart(services) };
                 }
             }
             ManagerOperation::ProgramStart => {
@@ -674,13 +672,8 @@ impl ServiceManager {
         false
     }
 
-    fn restart_closure(
-        &self,
-        index: usize,
-        output: &mut [logos_abi::ServiceId; MAX_SERVICE_SLOTS],
-    ) -> Option<usize> {
+    fn restart_closure(&self, index: usize) -> Option<Vec<logos_abi::ServiceId>> {
         let mut included = 0u16;
-        let mut count = 0;
         let mut changed = true;
         included |= 1u16 << index;
         while changed {
@@ -697,7 +690,8 @@ impl ServiceManager {
                 }
             }
         }
-        let mut order = [logos_abi::ServiceId::Input; MAX_SERVICE_SLOTS];
+        let mut order = Vec::new();
+        order.try_reserve(SERVICE_IMAGES.len()).ok()?;
         let mut order_count = 0;
         let mut remaining = included;
         while remaining != 0 {
@@ -708,7 +702,7 @@ impl ServiceManager {
                 if remaining & bit != 0
                     && crate::service_images::service_dependencies(service) & remaining == 0
                 {
-                    order[order_count] = service;
+                    order.push(service);
                     order_count += 1;
                     remaining &= !bit;
                     advanced = true;
@@ -719,12 +713,9 @@ impl ServiceManager {
                 return None;
             }
         }
-        while order_count != 0 {
-            order_count -= 1;
-            output[count] = order[order_count];
-            count += 1;
-        }
-        Some(count)
+        order.truncate(order_count);
+        order.reverse();
+        Some(order)
     }
 }
 
@@ -939,24 +930,10 @@ mod tests {
             ManagerRights::ALL,
         );
         assert_eq!(decision.response.status, ManagerStatus::Accepted);
-        assert_eq!(
-            decision.action,
-            ManagerAction::Restart(
-                [
-                    ServiceId::Fetch,
-                    ServiceId::Flow,
-                    ServiceId::Session,
-                    ServiceId::Input,
-                    ServiceId::Input,
-                    ServiceId::Input,
-                    ServiceId::Input,
-                    ServiceId::Input,
-                    ServiceId::Input,
-                    ServiceId::Input,
-                ],
-                3,
-            )
-        );
+        let ManagerAction::Restart(services) = decision.action else {
+            panic!("restart must return a service worklist");
+        };
+        assert_eq!(services.as_slice(), &[ServiceId::Fetch, ServiceId::Flow, ServiceId::Session]);
     }
 
     #[test]
@@ -968,24 +945,10 @@ mod tests {
             ManagerRights::ALL,
         );
         assert_eq!(decision.response.status, ManagerStatus::Accepted);
-        assert_eq!(
-            decision.action,
-            ManagerAction::Restart(
-                [
-                    ServiceId::Fetch,
-                    ServiceId::Flow,
-                    ServiceId::Device,
-                    ServiceId::Input,
-                    ServiceId::Input,
-                    ServiceId::Input,
-                    ServiceId::Input,
-                    ServiceId::Input,
-                    ServiceId::Input,
-                    ServiceId::Input,
-                ],
-                3,
-            )
-        );
+        let ManagerAction::Restart(services) = decision.action else {
+            panic!("restart must return a service worklist");
+        };
+        assert_eq!(services.as_slice(), &[ServiceId::Fetch, ServiceId::Flow, ServiceId::Device]);
     }
 
     #[test]
