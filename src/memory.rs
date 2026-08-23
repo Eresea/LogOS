@@ -350,6 +350,14 @@ impl OwnerId {
         Self(2 + service.index() as u16)
     }
 
+    pub const fn service_handle(handle: logos_abi::ServiceHandle) -> Option<Self> {
+        if handle.index() > u16::MAX as u32 - 2 {
+            None
+        } else {
+            Self::new((handle.index() + 2) as u16)
+        }
+    }
+
     pub const fn new(raw: u16) -> Option<Self> {
         if raw == 0 { None } else { Some(Self(raw)) }
     }
@@ -3788,6 +3796,14 @@ mod tests {
         let second = manager.try_alloc(owner, FrameState::Dirty).unwrap();
         assert_ne!(first.generation(), second.generation());
         assert_eq!(manager.free(first), Err(FrameError::StaleHandle));
+    }
+
+    #[test]
+    fn service_frame_owner_is_derived_from_runtime_handle_index() {
+        let handle = logos_abi::ServiceHandle::new(3, 7).unwrap();
+        assert_eq!(OwnerId::service_handle(handle), OwnerId::new(5));
+        let unrepresentable = logos_abi::ServiceHandle::new(u32::MAX, 1).unwrap();
+        assert_eq!(OwnerId::service_handle(unrepresentable), None);
     }
 
     #[test]

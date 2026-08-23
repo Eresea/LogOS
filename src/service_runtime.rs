@@ -849,7 +849,8 @@ impl ServiceRuntime {
                 PageTableBuilder::new_for_owner(
                     &mut self.frame_pool,
                     &mut memory,
-                    OwnerId::service(service),
+                    OwnerId::service_handle(service_handle)
+                        .ok_or(ServiceRuntimeError::Resources)?,
                 )
             } else {
                 PageTableBuilder::new(&mut self.frame_pool, &mut memory)
@@ -900,7 +901,10 @@ impl ServiceRuntime {
                 for page in 0..pages {
                     let frame = self
                         .frame_pool
-                        .allocate_for(OwnerId::service(service))
+                        .allocate_for(
+                            OwnerId::service_handle(service_handle)
+                                .ok_or(ServiceRuntimeError::Resources)?,
+                        )
                         .map_err(|_| ServiceRuntimeError::Resources)?;
                     self.user_kdf_workspace[page] = frame.raw();
                     memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
@@ -1180,6 +1184,10 @@ impl ServiceRuntime {
         tables: &mut PageTableBuilder,
     ) -> Result<(), ServiceRuntimeError> {
         let index = service.index();
+        let service_handle =
+            self.service_handles.get(index).copied().ok_or(ServiceRuntimeError::StaleGeneration)?;
+        let owner =
+            OwnerId::service_handle(service_handle).ok_or(ServiceRuntimeError::Resources)?;
         let mut memory = IdentityPageTableMemory;
         let heap_quota_pages = self
             .dynamic_services
@@ -1195,10 +1203,8 @@ impl ServiceRuntime {
         if self.service_heaps[index].frames.try_reserve_exact(initial_heap_pages).is_err() {
             return Err(ServiceRuntimeError::Resources);
         }
-        let bootstrap = self
-            .frame_pool
-            .allocate_for(OwnerId::service(service))
-            .map_err(|_| ServiceRuntimeError::Resources)?;
+        let bootstrap =
+            self.frame_pool.allocate_for(owner).map_err(|_| ServiceRuntimeError::Resources)?;
         self.service_bootstrap_frames[index] = bootstrap.raw();
         memory.clear(bootstrap).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
         let generation = (self.service_epoch as u32).max(1);
@@ -1243,10 +1249,8 @@ impl ServiceRuntime {
             .map_err(ServiceRuntimeError::IpcPrivateProcess)?;
 
         for heap_page in 0..initial_heap_pages {
-            let frame = self
-                .frame_pool
-                .allocate_for(OwnerId::service(service))
-                .map_err(|_| ServiceRuntimeError::Resources)?;
+            let frame =
+                self.frame_pool.allocate_for(owner).map_err(|_| ServiceRuntimeError::Resources)?;
             self.service_heaps[index].frames.push(frame);
             memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
             let address = logos_abi::SERVICE_HEAP_BASE + heap_page * crate::loader::PAGE_SIZE;
@@ -1285,8 +1289,7 @@ impl ServiceRuntime {
         let Some(service_handle) = self.service_handles.get(service_slot).copied() else {
             return logos_abi::IpcStatus::Stale;
         };
-        let Some(service) = builtin_service_for_handle(&self.service_handles, service_handle)
-        else {
+        let Some(owner) = OwnerId::service_handle(service_handle) else {
             return logos_abi::IpcStatus::Unauthorized;
         };
         if self.dynamic_services.as_ref().and_then(|registry| registry.state(service_handle).ok())
@@ -1314,7 +1317,7 @@ impl ServiceRuntime {
         if self.service_heaps[index].frames.try_reserve(1).is_err() {
             return logos_abi::IpcStatus::Full;
         }
-        let frame = match self.frame_pool.allocate_for(OwnerId::service(service)) {
+        let frame = match self.frame_pool.allocate_for(owner) {
             Ok(frame) => frame,
             Err(_) => return logos_abi::IpcStatus::Full,
         };
@@ -1351,10 +1354,9 @@ impl ServiceRuntime {
         let Some(service_handle) = self.service_handles.get(service_slot).copied() else {
             return logos_abi::IpcStatus::Stale;
         };
-        let Some(_service) = builtin_service_for_handle(&self.service_handles, service_handle)
-        else {
+        if OwnerId::service_handle(service_handle).is_none() {
             return logos_abi::IpcStatus::Unauthorized;
-        };
+        }
         if self.dynamic_services.as_ref().and_then(|registry| registry.state(service_handle).ok())
             != Some(crate::runtime_services::ServiceState::Running)
         {
@@ -1885,7 +1887,9 @@ impl ServiceRuntime {
             ServiceId::Flow => crate::process::FLOW_STACK_PAGES,
             _ => crate::process::USER_STACK_PAGES,
         };
-        let owner = crate::memory::OwnerId::service(service);
+        let service_handle = self.runtime_service_handle(service)?;
+        let owner = crate::memory::OwnerId::service_handle(service_handle)
+            .ok_or(ServiceRuntimeError::Resources)?;
         let mut image = LoadedImage::load_with_stack_pages_for_owner(
             plan,
             &mut self.frame_pool,
