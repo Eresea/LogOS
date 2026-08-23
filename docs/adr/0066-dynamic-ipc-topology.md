@@ -32,6 +32,8 @@ fixed ABI in the live service image set.
 - Hardware producers bind pre-existing event handles and signal their pending state
   through an allocation-free source router; no endpoint-derived event mask is used
   for the network IRQ path.
+- The keyboard producer is represented by an Input-owned bootstrap event handle and
+  uses the same event-set wait path.
 - Contract IDs describe typed message agreements and never identify runtime
   endpoint slots; endpoint and event generations remain independently stale-safe.
 - Fixed wire-size and queue backpressure validation remain part of the hostile-peer proof.

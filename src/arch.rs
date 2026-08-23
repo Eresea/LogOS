@@ -1674,13 +1674,11 @@ pub(super) fn handle_keyboard_interrupt() {
                 unsafe { (&*(ring as *const logos_abi::KeyboardByteRing)).push(byte) }
             {
                 if notification == logos_abi::Notify::Notified {
-                    let woken = signal_events(logos_abi::keyboard_read_event_mask());
+                    crate::runtime_events::signal_hardware_event(
+                        crate::runtime_events::HardwareEventSource::Keyboard,
+                    );
                     #[cfg(feature = "qemu-proof")]
-                    if woken > 0 {
-                        proof_line(b"LogOS vNext: keyboard event wake");
-                    }
-                    #[cfg(not(feature = "qemu-proof"))]
-                    let _ = woken;
+                    proof_line(b"LogOS vNext: keyboard event wake");
                 }
             }
         }
@@ -1826,6 +1824,7 @@ pub(crate) fn prepare_service_event_set_wait(
     Some(should_block)
 }
 
+#[cfg_attr(not(feature = "qemu-proof"), allow(dead_code))]
 pub(crate) fn signal_events(mask: u64) -> usize {
     let previous_wakes = SCHEDULER.event_wakes();
     let woken = SCHEDULER.signal_events(mask);

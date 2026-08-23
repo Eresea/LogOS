@@ -59,6 +59,7 @@ pub struct ServiceBootstrapPage {
     pub control: CapabilityHandle,
     pub directory: CapabilityHandle,
     pub heap: CapabilityHandle,
+    pub keyboard_event: EventHandle,
     pub heap_base: u64,
     pub heap_pages: u32,
     pub heap_quota_pages: u32,
@@ -213,6 +214,7 @@ impl ServiceBootstrapPage {
             control: CapabilityHandle::EMPTY,
             directory: CapabilityHandle::EMPTY,
             heap: CapabilityHandle::EMPTY,
+            keyboard_event: EventHandle::EMPTY,
             heap_base: 0,
             heap_pages: 0,
             heap_quota_pages: 0,
@@ -227,6 +229,7 @@ impl ServiceBootstrapPage {
             && self.control.is_valid()
             && self.directory.is_valid()
             && self.heap.is_valid()
+            && (self.keyboard_event.raw() == 0 || self.keyboard_event.is_valid())
             && self.heap_base != 0
             && self.heap_base % IPC_PAGE_BYTES as u64 == 0
             && self.heap_pages != 0

@@ -10,27 +10,34 @@ const NO_DEADLINE: u64 = u64::MAX;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HardwareEventSource {
     Network,
+    Keyboard,
 }
 
 static NETWORK_EVENT_RAW: AtomicU64 = AtomicU64::new(0);
 static NETWORK_SET_RAW: AtomicU64 = AtomicU64::new(0);
 static NETWORK_PENDING: AtomicBool = AtomicBool::new(false);
+static KEYBOARD_EVENT_RAW: AtomicU64 = AtomicU64::new(0);
+static KEYBOARD_SET_RAW: AtomicU64 = AtomicU64::new(0);
+static KEYBOARD_PENDING: AtomicBool = AtomicBool::new(false);
 
 fn hardware_event_raw(source: HardwareEventSource) -> &'static AtomicU64 {
     match source {
         HardwareEventSource::Network => &NETWORK_EVENT_RAW,
+        HardwareEventSource::Keyboard => &KEYBOARD_EVENT_RAW,
     }
 }
 
 fn hardware_set_raw(source: HardwareEventSource) -> &'static AtomicU64 {
     match source {
         HardwareEventSource::Network => &NETWORK_SET_RAW,
+        HardwareEventSource::Keyboard => &KEYBOARD_SET_RAW,
     }
 }
 
 fn hardware_pending(source: HardwareEventSource) -> &'static AtomicBool {
     match source {
         HardwareEventSource::Network => &NETWORK_PENDING,
+        HardwareEventSource::Keyboard => &KEYBOARD_PENDING,
     }
 }
 
@@ -85,14 +92,28 @@ pub(crate) fn signal_hardware_event(source: HardwareEventSource) {
 }
 
 fn hardware_event_is_pending(event: EventHandle) -> bool {
-    hardware_event_raw(HardwareEventSource::Network).load(Ordering::Acquire) == event.raw()
-        && hardware_pending(HardwareEventSource::Network).load(Ordering::Acquire)
+    [HardwareEventSource::Network, HardwareEventSource::Keyboard].into_iter().any(|source| {
+        hardware_event_raw(source).load(Ordering::Acquire) == event.raw()
+            && hardware_pending(source).load(Ordering::Acquire)
+    })
 }
 
 fn consume_hardware_event(event: EventHandle) {
-    if hardware_event_raw(HardwareEventSource::Network).load(Ordering::Acquire) == event.raw() {
-        hardware_pending(HardwareEventSource::Network).store(false, Ordering::Release);
+    for source in [HardwareEventSource::Network, HardwareEventSource::Keyboard] {
+        if hardware_event_raw(source).load(Ordering::Acquire) == event.raw() {
+            hardware_pending(source).store(false, Ordering::Release);
+        }
     }
+}
+
+fn bind_all_hardware_wait_sets(event: EventHandle, set: EventSetHandle) {
+    bind_hardware_wait_set(HardwareEventSource::Network, event, set);
+    bind_hardware_wait_set(HardwareEventSource::Keyboard, event, set);
+}
+
+fn unbind_all_hardware_wait_sets(event: EventHandle, set: EventSetHandle) {
+    unbind_hardware_wait_set(HardwareEventSource::Network, event, set);
+    unbind_hardware_wait_set(HardwareEventSource::Keyboard, event, set);
 }
 
 struct Slot<T> {
@@ -206,7 +227,7 @@ impl RuntimeEventRegistry {
         }
         set_record.members.try_reserve(1).map_err(|_| EventError::Capacity)?;
         set_record.members.push(event);
-        bind_hardware_wait_set(HardwareEventSource::Network, event, set);
+        bind_all_hardware_wait_sets(event, set);
         Ok(())
     }
 
@@ -230,7 +251,7 @@ impl RuntimeEventRegistry {
             return Err(EventError::NotMember);
         };
         set_record.members.remove(index);
-        unbind_hardware_wait_set(HardwareEventSource::Network, event, set);
+        unbind_all_hardware_wait_sets(event, set);
         Ok(())
     }
 
@@ -390,13 +411,15 @@ impl RuntimeEventRegistry {
                 if set.members.contains(&event) {
                     set.invalidated = true;
                     set.waiting = false;
-                    unbind_hardware_wait_set(HardwareEventSource::Network, event, set_handle);
+                    unbind_all_hardware_wait_sets(event, set_handle);
                 }
                 set.members.retain(|member| *member != event);
             }
         }
-        if hardware_event_raw(HardwareEventSource::Network).load(Ordering::Acquire) == event.raw() {
-            clear_hardware_event(HardwareEventSource::Network);
+        for source in [HardwareEventSource::Network, HardwareEventSource::Keyboard] {
+            if hardware_event_raw(source).load(Ordering::Acquire) == event.raw() {
+                clear_hardware_event(source);
+            }
         }
         Ok(())
     }
@@ -415,7 +438,7 @@ impl RuntimeEventRegistry {
         }
         if let Some(record) = self.sets[index].value.as_ref() {
             for event in &record.members {
-                unbind_hardware_wait_set(HardwareEventSource::Network, *event, set);
+                unbind_all_hardware_wait_sets(*event, set);
             }
         }
         self.sets[index].value = None;

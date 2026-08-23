@@ -809,6 +809,19 @@ pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle], servic
             };
             events.push(event);
         }
+        wait_on_event_handles(&events, service);
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = capabilities;
+        heartbeat(service);
+    }
+}
+
+#[allow(dead_code)]
+fn wait_on_event_handles(events: &[logos_abi::EventHandle], service: ServiceId) {
+    #[cfg(target_os = "none")]
+    {
         let cached = unsafe { &*EVENT_SET_CACHE.0.get() };
         let same = cached.set.is_valid() && cached.events.as_slice() == events.as_slice();
         let set = if same {
@@ -866,7 +879,7 @@ pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle], servic
                 }
             }
             unsafe {
-                *EVENT_SET_CACHE.0.get() = EventSetCacheState { set, events };
+                *EVENT_SET_CACHE.0.get() = EventSetCacheState { set, events: events.to_vec() };
             }
             set
         };
@@ -890,13 +903,21 @@ pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle], servic
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = capabilities;
+        let _ = events;
         heartbeat(service);
     }
 }
 
 #[allow(dead_code)]
 pub fn sleep(service: ServiceId) {
+    #[cfg(target_os = "none")]
+    {
+        let keyboard_event = bootstrap_page().keyboard_event;
+        if service == ServiceId::Input && keyboard_event.is_valid() {
+            wait_on_event_handles(core::slice::from_ref(&keyboard_event), service);
+            return;
+        }
+    }
     wait_on_capabilities(&[], service);
 }
 
