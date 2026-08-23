@@ -5,7 +5,7 @@
 mod common;
 
 use core::{mem, ptr};
-use logos_abi::{IpcBytes, IpcStatus, MessageKind, NetworkRequest, NetworkResponse, ServiceId};
+use logos_abi::{IpcBytes, IpcStatus, MessageKind, NetworkRequest, NetworkResponse};
 
 const FLOW_RECEIVE: common::CapabilitySpec = common::capability_contract(
     logos_abi::IPC_CONTRACT_BYTES,
@@ -568,7 +568,7 @@ fn send_network_response(
     loop {
         match common::ipc_send_handle(capability, &response) {
             IpcStatus::Ok => break,
-            IpcStatus::Full => common::wait_on_capability(capability, ServiceId::Network),
+            IpcStatus::Full => common::wait_on_capability(capability),
             _ => break,
         }
     }
@@ -906,10 +906,11 @@ pub extern "C" fn _start() -> ! {
                 sequence = sequence.wrapping_add(1).max(1);
             }
         }
-        common::wait_on_capabilities(
-            &[flow_receive_capability, fetch_receive_capability, core_receive_capability],
-            ServiceId::Network,
-        );
+        common::wait_on_capabilities(&[
+            flow_receive_capability,
+            fetch_receive_capability,
+            core_receive_capability,
+        ]);
     }
 }
 

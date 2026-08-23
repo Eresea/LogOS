@@ -112,9 +112,7 @@ impl CatalogTransport {
         loop {
             match common::ipc_send_handle(self.send_capability, &message) {
                 IpcStatus::Ok => break,
-                IpcStatus::Full => {
-                    common::wait_on_capability(self.send_capability, logos_abi::ServiceId::User)
-                }
+                IpcStatus::Full => common::wait_on_capability(self.send_capability),
                 _ => return Err(UserError::Persistence),
             }
         }
@@ -136,9 +134,7 @@ impl CatalogTransport {
                     }
                     return Ok(value);
                 }
-                IpcStatus::Empty => {
-                    common::wait_on_capability(self.receive_capability, logos_abi::ServiceId::User)
-                }
+                IpcStatus::Empty => common::wait_on_capability(self.receive_capability),
                 _ => return Err(UserError::Persistence),
             }
         }
@@ -294,7 +290,7 @@ pub extern "C" fn _start() -> ! {
     };
     while !load_catalog(storage_send_capability, storage_receive_capability) {
         common::heartbeat();
-        common::sleep(logos_abi::ServiceId::User);
+        common::sleep();
     }
     let mut heartbeat_ticks = 0u16;
     loop {
@@ -322,19 +318,15 @@ pub extern "C" fn _start() -> ! {
                 loop {
                     match common::ipc_send_handle(flow_send_capability, &response) {
                         IpcStatus::Ok => break,
-                        IpcStatus::Full => common::wait_on_capability(
-                            flow_send_capability,
-                            logos_abi::ServiceId::User,
-                        ),
+                        IpcStatus::Full => common::wait_on_capability(flow_send_capability),
                         _ => break,
                     }
                 }
             }
-            IpcStatus::Empty => common::wait_on_capabilities(
-                &[flow_receive_capability, storage_receive_capability],
-                logos_abi::ServiceId::User,
-            ),
-            _ => common::sleep(logos_abi::ServiceId::User),
+            IpcStatus::Empty => {
+                common::wait_on_capabilities(&[flow_receive_capability, storage_receive_capability])
+            }
+            _ => common::sleep(),
         }
     }
 }

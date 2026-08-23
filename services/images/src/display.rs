@@ -78,7 +78,7 @@ pub extern "C" fn _start() -> ! {
             if !render_pending && display.toggle_cursor() {
                 render(display, framebuffer, config);
             }
-            common::wait_on_capability(input_capability, logos_abi::ServiceId::Display);
+            common::wait_on_capability(input_capability);
         }
     }
 }

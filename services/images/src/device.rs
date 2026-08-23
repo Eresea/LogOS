@@ -4,9 +4,7 @@
 
 mod common;
 
-use logos_abi::{
-    DeviceOperation, DeviceRequest, DeviceResponse, DeviceStatus, IpcStatus, ServiceId,
-};
+use logos_abi::{DeviceOperation, DeviceRequest, DeviceResponse, DeviceStatus, IpcStatus};
 
 const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
     logos_abi::IPC_CONTRACT_DEVICE_REQUEST,
@@ -122,15 +120,12 @@ fn run(
         }
 
         if !progressed {
-            common::wait_on_capabilities(
-                &[
-                    flow_receive_capability,
-                    flow_send_capability,
-                    core_send_capability,
-                    core_receive_capability,
-                ],
-                ServiceId::Device,
-            );
+            common::wait_on_capabilities(&[
+                flow_receive_capability,
+                flow_send_capability,
+                core_send_capability,
+                core_receive_capability,
+            ]);
         }
     }
 }

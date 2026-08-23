@@ -648,14 +648,11 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
-        common::wait_on_capabilities(
-            &[
-                ipc_capabilities().flow_receive,
-                ipc_capabilities().network_receive,
-                ipc_capabilities().storage_receive,
-            ],
-            logos_abi::ServiceId::Fetch,
-        );
+        common::wait_on_capabilities(&[
+            ipc_capabilities().flow_receive,
+            ipc_capabilities().network_receive,
+            ipc_capabilities().storage_receive,
+        ]);
     }
 }
 

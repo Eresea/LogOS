@@ -35,7 +35,7 @@ pub extern "C" fn _start() -> ! {
                     pending[1] = None;
                 }
                 IpcStatus::Full => {
-                    common::wait_on_capability(output_capability, logos_abi::ServiceId::Input);
+                    common::wait_on_capability(output_capability);
                     continue;
                 }
                 IpcStatus::Stale
@@ -50,7 +50,7 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
         let Some(byte) = keyboard.pop() else {
-            common::sleep(logos_abi::ServiceId::Input);
+            common::sleep();
             continue;
         };
         let Some(event) = decoder.feed(byte) else {

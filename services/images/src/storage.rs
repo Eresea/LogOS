@@ -312,10 +312,7 @@ fn discover(capability: StorageCapability) -> Option<u64> {
                     .then_some(response.block_count)
                     .filter(|blocks| *blocks > 2);
             }
-            IpcStatus::Empty => common::wait_on_capability(
-                ipc_capabilities().response,
-                logos_abi::ServiceId::Storage,
-            ),
+            IpcStatus::Empty => common::wait_on_capability(ipc_capabilities().response),
             _ => return None,
         }
     }
@@ -664,19 +661,16 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
         }
         if !progressed {
             let capabilities = ipc_capabilities();
-            common::wait_on_capabilities(
-                &[
-                    capabilities.flow_receive,
-                    capabilities.flow_send,
-                    capabilities.fetch_receive,
-                    capabilities.fetch_send,
-                    capabilities.user_receive,
-                    capabilities.user_send,
-                    capabilities.package_receive,
-                    capabilities.package_send,
-                ],
-                logos_abi::ServiceId::Storage,
-            );
+            common::wait_on_capabilities(&[
+                capabilities.flow_receive,
+                capabilities.flow_send,
+                capabilities.fetch_receive,
+                capabilities.fetch_send,
+                capabilities.user_receive,
+                capabilities.user_send,
+                capabilities.package_receive,
+                capabilities.package_send,
+            ]);
         }
     }
 }
@@ -876,21 +870,18 @@ fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
         }
         if !progressed {
             let capabilities = ipc_capabilities();
-            common::wait_on_capabilities(
-                &[
-                    capabilities.flow_receive,
-                    capabilities.flow_send,
-                    capabilities.fetch_receive,
-                    capabilities.fetch_send,
-                    capabilities.map_request,
-                    capabilities.map_response,
-                    capabilities.user_receive,
-                    capabilities.user_send,
-                    capabilities.package_receive,
-                    capabilities.package_send,
-                ],
-                logos_abi::ServiceId::Storage,
-            );
+            common::wait_on_capabilities(&[
+                capabilities.flow_receive,
+                capabilities.flow_send,
+                capabilities.fetch_receive,
+                capabilities.fetch_send,
+                capabilities.map_request,
+                capabilities.map_response,
+                capabilities.user_receive,
+                capabilities.user_send,
+                capabilities.package_receive,
+                capabilities.package_send,
+            ]);
         }
     }
 }

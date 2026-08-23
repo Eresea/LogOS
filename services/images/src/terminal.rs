@@ -123,15 +123,12 @@ pub extern "C" fn _start() -> ! {
         if pending_render.is_none() && render_more {
             continue;
         }
-        common::wait_on_capabilities(
-            &[
-                input_capability,
-                session_input_capability,
-                session_output_capability,
-                display_capability,
-            ],
-            logos_abi::ServiceId::Terminal,
-        );
+        common::wait_on_capabilities(&[
+            input_capability,
+            session_input_capability,
+            session_output_capability,
+            display_capability,
+        ]);
     }
 }
 

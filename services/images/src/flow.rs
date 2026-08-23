@@ -131,23 +131,20 @@ fn ipc_capabilities() -> IpcCapabilities {
 
 fn wait_for_ipc() {
     let capabilities = ipc_capabilities();
-    common::wait_on_capabilities(
-        &[
-            capabilities.input,
-            capabilities.output,
-            capabilities.storage_send,
-            capabilities.storage_receive,
-            capabilities.network_send,
-            capabilities.network_receive,
-            capabilities.fetch_send,
-            capabilities.fetch_receive,
-            capabilities.device_send,
-            capabilities.device_receive,
-            capabilities.user_send,
-            capabilities.user_receive,
-        ],
-        logos_abi::ServiceId::Flow,
-    );
+    common::wait_on_capabilities(&[
+        capabilities.input,
+        capabilities.output,
+        capabilities.storage_send,
+        capabilities.storage_receive,
+        capabilities.network_send,
+        capabilities.network_receive,
+        capabilities.fetch_send,
+        capabilities.fetch_receive,
+        capabilities.device_send,
+        capabilities.device_receive,
+        capabilities.user_send,
+        capabilities.user_receive,
+    ]);
 }
 
 static NEXT_MANAGER_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
@@ -2571,11 +2568,11 @@ fn network_proof_probe(network: &mut NetworkClient) -> bool {
                         .request_message(close)
                         .is_ok_and(|response| response.result == NetworkResult::Stale);
                 }
-                common::sleep(logos_abi::ServiceId::Flow);
+                common::sleep();
             }
             return false;
         }
-        common::sleep(logos_abi::ServiceId::Flow);
+        common::sleep();
     }
     false
 }
@@ -2682,7 +2679,7 @@ pub extern "C" fn _start() -> ! {
     let pending_completion = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_COMPLETION) };
     #[cfg(feature = "qemu-proof")]
     while !manager_boot_probe() {
-        common::sleep(logos_abi::ServiceId::Flow);
+        common::sleep();
     }
     #[cfg(feature = "qemu-proof")]
     if !manager_command_probe(pending, network) {

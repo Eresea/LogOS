@@ -7,7 +7,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::{mem, ptr};
 
-use logos_abi::{IpcStatus, ServiceId};
+use logos_abi::IpcStatus;
 
 const SERVICE_PAGE_BYTES: usize = 4096;
 const ALLOCATION_MAGIC: u64 = 0x4c4f_474f_5348_4541;
@@ -864,12 +864,12 @@ fn current_ticks() -> u64 {
 }
 
 #[allow(dead_code)]
-pub fn wait_on_capability(capability: logos_abi::CapabilityHandle, service: ServiceId) {
-    wait_on_capabilities(core::slice::from_ref(&capability), service);
+pub fn wait_on_capability(capability: logos_abi::CapabilityHandle) {
+    wait_on_capabilities(core::slice::from_ref(&capability));
 }
 
 #[allow(dead_code)]
-pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle], service: ServiceId) {
+pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle]) {
     #[cfg(target_os = "none")]
     {
         if capabilities.is_empty() {
@@ -891,7 +891,7 @@ pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle], servic
             };
             events.push(event);
         }
-        wait_on_event_handles(&events, service);
+        wait_on_event_handles(&events);
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -901,7 +901,7 @@ pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle], servic
 }
 
 #[allow(dead_code)]
-fn wait_on_event_handles(events: &[logos_abi::EventHandle], _service: ServiceId) {
+fn wait_on_event_handles(events: &[logos_abi::EventHandle]) {
     #[cfg(target_os = "none")]
     {
         let cached = unsafe { &*EVENT_SET_CACHE.0.get() };
@@ -991,16 +991,16 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle], _service: ServiceId)
 }
 
 #[allow(dead_code)]
-pub fn sleep(service: ServiceId) {
+pub fn sleep() {
     #[cfg(target_os = "none")]
     {
         let keyboard_event = bootstrap_page().keyboard_event;
-        if service == ServiceId::Input && keyboard_event.is_valid() {
-            wait_on_event_handles(core::slice::from_ref(&keyboard_event), service);
+        if keyboard_event.is_valid() {
+            wait_on_event_handles(core::slice::from_ref(&keyboard_event));
             return;
         }
     }
-    wait_on_capabilities(&[], service);
+    wait_on_capabilities(&[]);
 }
 
 #[allow(dead_code)]
