@@ -1,8 +1,5 @@
 use logos_abi::{DeviceRequest, DeviceStatus};
 
-pub const DEVICE_REQUEST_ENDPOINT: usize = logos_abi::IpcEndpointId::DeviceToCore as usize;
-pub const DEVICE_RESPONSE_ENDPOINT: usize = logos_abi::IpcEndpointId::CoreToDevice as usize;
-
 pub fn validate_request(
     request: DeviceRequest,
     generation: u16,
