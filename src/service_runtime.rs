@@ -630,7 +630,7 @@ impl ServiceRuntime {
     }
 
     fn initialize_dynamic_ipc(&mut self) -> Result<(), ServiceRuntimeError> {
-        let generation = service_handle.generation();
+        let generation = (self.service_epoch as u32).max(1);
         let mut registry = RuntimeIpcRegistry::new_with_generation_and_budget(
             generation,
             self.frame_pool.available(),
@@ -1207,7 +1207,7 @@ impl ServiceRuntime {
             self.frame_pool.allocate_for(owner).map_err(|_| ServiceRuntimeError::Resources)?;
         self.service_bootstrap_frames[index] = bootstrap.raw();
         memory.clear(bootstrap).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
-        let generation = (self.service_epoch as u32).max(1);
+        let generation = service_handle.generation();
         let control = bootstrap_capability(index, 0, generation)?;
         let directory = bootstrap_capability(index, 1, generation)?;
         let heap = bootstrap_capability(index, 2, generation)?;
