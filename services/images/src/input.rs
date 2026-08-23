@@ -50,7 +50,7 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
         let Some(byte) = keyboard.pop() else {
-            common::sleep();
+            common::sleep_on_keyboard();
             continue;
         };
         let Some(event) = decoder.feed(byte) else {

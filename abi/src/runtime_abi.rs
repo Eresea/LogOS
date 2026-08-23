@@ -2,6 +2,7 @@ use crate::{ABI_VERSION, IPC_PAGE_BYTES, MAX_SERVICE_NAME_BYTES, SERVICE_HEAP_MA
 
 pub const RUNTIME_ABI_VERSION: u16 = ABI_VERSION;
 pub const DIRECTORY_FLAG_MORE: u8 = 1 << 0;
+pub const DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD: u16 = 1 << 0;
 pub const DIRECTORY_RECORDS_PER_PAGE: usize = 32;
 macro_rules! define_handle {
     ($name:ident) => {
@@ -59,7 +60,6 @@ pub struct ServiceBootstrapPage {
     pub control: CapabilityHandle,
     pub directory: CapabilityHandle,
     pub heap: CapabilityHandle,
-    pub keyboard_event: EventHandle,
     pub heap_base: u64,
     pub heap_pages: u32,
     pub heap_quota_pages: u32,
@@ -214,7 +214,6 @@ impl ServiceBootstrapPage {
             control: CapabilityHandle::EMPTY,
             directory: CapabilityHandle::EMPTY,
             heap: CapabilityHandle::EMPTY,
-            keyboard_event: EventHandle::EMPTY,
             heap_base: 0,
             heap_pages: 0,
             heap_quota_pages: 0,
@@ -229,7 +228,6 @@ impl ServiceBootstrapPage {
             && self.control.is_valid()
             && self.directory.is_valid()
             && self.heap.is_valid()
-            && (self.keyboard_event.raw() == 0 || self.keyboard_event.is_valid())
             && self.heap_base != 0
             && self.heap_base % IPC_PAGE_BYTES as u64 == 0
             && self.heap_pages != 0
@@ -245,6 +243,7 @@ pub enum DirectoryOperation {
     Services = 1,
     Capabilities = 2,
     Endpoints = 3,
+    Events = 4,
 }
 
 impl DirectoryOperation {
@@ -253,6 +252,7 @@ impl DirectoryOperation {
             1 => Some(Self::Services),
             2 => Some(Self::Capabilities),
             3 => Some(Self::Endpoints),
+            4 => Some(Self::Events),
             _ => None,
         }
     }
@@ -290,6 +290,7 @@ pub enum DirectoryRecordKind {
     Service = 1,
     Capability = 2,
     Endpoint = 3,
+    Event = 4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -405,6 +406,15 @@ impl DirectoryRecord {
                     && self.message_bytes != 0
                     && usize::from(self.message_bytes) <= IPC_PAGE_BYTES
                     && self.queue_capacity != 0
+                    && !self.event.is_valid()
+            }
+            DirectoryRecordKind::Event => {
+                EventHandle::from_raw(self.handle).is_some()
+                    && self.rights == 0
+                    && self.peer.is_valid()
+                    && self.contract_id == 0
+                    && self.message_bytes == 0
+                    && self.queue_capacity == 0
                     && !self.event.is_valid()
             }
             DirectoryRecordKind::Service => {
@@ -553,6 +563,19 @@ mod tests {
         record.event = EventHandle::new(5, 2).unwrap();
         record.rights = 3;
         assert!(!record.is_valid());
+    }
+
+    #[test]
+    fn event_directory_records_carry_owner_and_hardware_flags() {
+        let mut record = DirectoryRecord::EMPTY;
+        record.kind = DirectoryRecordKind::Event;
+        record.flags = DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD;
+        record.handle = EventHandle::new(3, 2).unwrap().raw();
+        record.peer = ServiceHandle::new(4, 2).unwrap();
+        assert!(record.is_valid());
+        record.peer = ServiceHandle::EMPTY;
+        assert!(!record.is_valid());
+        assert_eq!(DirectoryOperation::from_raw(4), Some(DirectoryOperation::Events));
     }
 
     #[test]

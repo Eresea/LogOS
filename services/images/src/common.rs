@@ -623,6 +623,73 @@ fn discover_event_for_capability(
 }
 
 #[allow(dead_code)]
+fn discover_hardware_event(
+    flags: u16,
+) -> Result<logos_abi::EventHandle, logos_abi::DirectoryStatus> {
+    #[cfg(target_os = "none")]
+    {
+        let bootstrap = bootstrap_page();
+        if !bootstrap.is_valid() || flags == 0 {
+            return Err(logos_abi::DirectoryStatus::Malformed);
+        }
+        let mut request = logos_abi::DirectoryRequest::new(
+            logos_abi::DirectoryOperation::Events,
+            next_event_request_id(),
+        );
+        request.subject = bootstrap.service;
+        let mut found = None;
+        loop {
+            let mut response = logos_abi::DirectoryResponse::empty(
+                request.operation,
+                logos_abi::DirectoryStatus::Malformed,
+                request.request_id,
+            );
+            let status = directory_call(bootstrap.directory, &request, &mut response);
+            if status != logos_abi::DirectoryStatus::Ok {
+                return Err(status);
+            }
+            for record in &response.records[..response.count as usize] {
+                if record.kind != logos_abi::DirectoryRecordKind::Event
+                    || record.peer != bootstrap.service
+                    || record.flags & flags != flags
+                {
+                    continue;
+                }
+                merge_discovered_event(
+                    &mut found,
+                    logos_abi::EventHandle::from_raw(record.handle),
+                )?;
+            }
+            if response.flags & logos_abi::DIRECTORY_FLAG_MORE == 0 {
+                break;
+            }
+            if response.cursor <= request.cursor {
+                return Err(logos_abi::DirectoryStatus::Malformed);
+            }
+            request.cursor = response.cursor;
+        }
+        found.ok_or(logos_abi::DirectoryStatus::NotFound)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = flags;
+        Err(logos_abi::DirectoryStatus::NotFound)
+    }
+}
+
+fn merge_discovered_event(
+    found: &mut Option<logos_abi::EventHandle>,
+    candidate: Option<logos_abi::EventHandle>,
+) -> Result<(), logos_abi::DirectoryStatus> {
+    if let Some(candidate) = candidate {
+        if found.replace(candidate).is_some() {
+            return Err(logos_abi::DirectoryStatus::Malformed);
+        }
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub fn discover_capability_contract(
     peer: logos_abi::ServiceHandle,
     rights: logos_abi::IpcRights,
@@ -992,15 +1059,21 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle]) {
 
 #[allow(dead_code)]
 pub fn sleep() {
+    wait_on_capabilities(&[]);
+}
+
+#[allow(dead_code)]
+pub fn sleep_on_keyboard() {
     #[cfg(target_os = "none")]
     {
-        let keyboard_event = bootstrap_page().keyboard_event;
-        if keyboard_event.is_valid() {
+        if let Ok(keyboard_event) =
+            discover_hardware_event(logos_abi::DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD)
+        {
             wait_on_event_handles(core::slice::from_ref(&keyboard_event));
             return;
         }
     }
-    wait_on_capabilities(&[]);
+    sleep();
 }
 
 #[allow(dead_code)]

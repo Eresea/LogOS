@@ -606,12 +606,9 @@ impl ServiceRuntime {
             }
         }
         let input = self.runtime_service_handle(ServiceId::Input)?;
-        let keyboard_event =
-            events.create_event(input).map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
-        crate::runtime_events::bind_hardware_event(
-            crate::runtime_events::HardwareEventSource::Keyboard,
-            keyboard_event,
-        );
+        let keyboard_event = events
+            .create_hardware_event(input, crate::runtime_events::HardwareEventSource::Keyboard)
+            .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
         self.keyboard_event = keyboard_event;
         for spec in SERVICE_IMAGES {
             let service = spec.service();
@@ -820,7 +817,6 @@ impl ServiceRuntime {
             self.table_ready[index] = true;
         }
         self.initialize_dynamic_ipc()?;
-        self.publish_keyboard_event()?;
         let mut memory = IdentityPageTableMemory;
         for spec in SERVICE_IMAGES {
             let service = spec.service();
@@ -895,27 +891,6 @@ impl ServiceRuntime {
         self.map_keyboard_ring(keyboard_frame)?;
         crate::arch::publish_keyboard_ring(keyboard_frame.raw() as usize);
         self.startup.mark_launch_ready();
-        Ok(())
-    }
-
-    fn publish_keyboard_event(&mut self) -> Result<(), ServiceRuntimeError> {
-        let frame = self
-            .service_bootstrap_frames
-            .get(ServiceId::Input.index())
-            .copied()
-            .filter(|raw| *raw != 0)
-            .map(FrameAddress::from_raw)
-            .ok_or(ServiceRuntimeError::IpcPrivateMapping(PageTableError::InvalidMapping))?;
-        let mut page = unsafe {
-            core::ptr::read_unaligned(frame.raw() as usize as *const logos_abi::ServiceBootstrapPage)
-        };
-        page.keyboard_event = self.keyboard_event;
-        unsafe {
-            core::ptr::write_unaligned(
-                frame.raw() as usize as *mut logos_abi::ServiceBootstrapPage,
-                page,
-            );
-        }
         Ok(())
     }
 
@@ -1120,11 +1095,6 @@ impl ServiceRuntime {
             control,
             directory,
             heap,
-            keyboard_event: if service == ServiceId::Input {
-                self.keyboard_event
-            } else {
-                logos_abi::EventHandle::EMPTY
-            },
             heap_base: logos_abi::SERVICE_HEAP_BASE as u64,
             heap_pages: initial_heap_pages as u32,
             heap_quota_pages: heap_quota_pages as u32,
@@ -3385,6 +3355,10 @@ impl ServiceRuntime {
             },
             logos_abi::DirectoryOperation::Services => match self.dynamic_services.as_ref() {
                 Some(registry) => registry.list(request.cursor, &mut response, request.request_id),
+                None => logos_abi::DirectoryStatus::Stale,
+            },
+            logos_abi::DirectoryOperation::Events => match self.dynamic_events.as_ref() {
+                Some(registry) => registry.directory(dynamic_request, &mut response),
                 None => logos_abi::DirectoryStatus::Stale,
             },
         };

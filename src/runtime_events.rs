@@ -3,7 +3,11 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use logos_abi::{EventHandle, EventSetHandle, ServiceHandle};
+use logos_abi::{
+    DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD, DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE,
+    DirectoryRecord, DirectoryRecordKind, DirectoryRequest, DirectoryResponse, DirectoryStatus,
+    EventHandle, EventSetHandle, ServiceHandle,
+};
 
 const NO_DEADLINE: u64 = u64::MAX;
 
@@ -129,6 +133,7 @@ impl<T> Slot<T> {
 
 struct EventRecord {
     owner: ServiceHandle,
+    directory_flags: u16,
     signaled: AtomicBool,
 }
 
@@ -180,14 +185,94 @@ impl RuntimeEventRegistry {
     }
 
     pub fn create_event(&mut self, owner: ServiceHandle) -> Result<EventHandle, EventError> {
+        self.create_event_with_flags(owner, 0)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn create_hardware_event(
+        &mut self,
+        owner: ServiceHandle,
+        source: HardwareEventSource,
+    ) -> Result<EventHandle, EventError> {
+        let flags = match source {
+            HardwareEventSource::Network => 0,
+            HardwareEventSource::Keyboard => DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD,
+        };
+        let event = self.create_event_with_flags(owner, flags)?;
+        bind_hardware_event(source, event);
+        Ok(event)
+    }
+
+    fn create_event_with_flags(
+        &mut self,
+        owner: ServiceHandle,
+        directory_flags: u16,
+    ) -> Result<EventHandle, EventError> {
         if !owner.is_valid() {
             return Err(EventError::Unauthorized);
         }
         let index = self.allocate_event_slot()?;
         let handle = EventHandle::new(index as u32, self.events[index].generation)
             .ok_or(EventError::Capacity)?;
-        self.events[index].value = Some(EventRecord { owner, signaled: AtomicBool::new(false) });
+        self.events[index].value =
+            Some(EventRecord { owner, directory_flags, signaled: AtomicBool::new(false) });
         Ok(handle)
+    }
+
+    pub fn directory(
+        &self,
+        request: DirectoryRequest,
+        response: &mut DirectoryResponse,
+    ) -> DirectoryStatus {
+        if !request.is_valid()
+            || request.operation != logos_abi::DirectoryOperation::Events
+            || !request.subject.is_valid()
+        {
+            return DirectoryStatus::Malformed;
+        }
+        *response =
+            DirectoryResponse::empty(request.operation, DirectoryStatus::Ok, request.request_id);
+        let mut seen = 0u64;
+        let mut written = 0usize;
+        for (index, slot) in self.events.iter().enumerate() {
+            let Some(event) = slot.value.as_ref() else { continue };
+            if event.owner != request.subject {
+                continue;
+            }
+            if seen < request.cursor {
+                seen += 1;
+                continue;
+            }
+            if written == DIRECTORY_RECORDS_PER_PAGE {
+                response.flags |= DIRECTORY_FLAG_MORE;
+                response.cursor = request.cursor.saturating_add(written as u64);
+                break;
+            }
+            let Some(handle) = EventHandle::new(index as u32, slot.generation) else {
+                return DirectoryStatus::Malformed;
+            };
+            response.records[written] = DirectoryRecord {
+                kind: DirectoryRecordKind::Event,
+                rights: 0,
+                flags: event.directory_flags,
+                handle: handle.raw(),
+                peer: event.owner,
+                contract_id: 0,
+                message_bytes: 0,
+                queue_capacity: 0,
+                event: EventHandle::EMPTY,
+                name_len: 0,
+                reserved: [0; 1],
+                name: [0; logos_abi::MAX_SERVICE_NAME_BYTES],
+            };
+            written += 1;
+            seen += 1;
+        }
+        response.count = written as u8;
+        if response.flags & DIRECTORY_FLAG_MORE == 0 {
+            response.cursor = request.cursor.saturating_add(written as u64);
+        }
+        DirectoryStatus::Ok
     }
 
     pub fn create_set(&mut self, owner: ServiceHandle) -> Result<EventSetHandle, EventError> {
@@ -608,6 +693,27 @@ mod tests {
         signal_hardware_event(HardwareEventSource::Network);
         assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Ready(event)));
         clear_hardware_event(HardwareEventSource::Network);
+    }
+
+    #[test]
+    fn event_directory_exposes_owned_hardware_source() {
+        clear_hardware_event(HardwareEventSource::Keyboard);
+        let owner = owner();
+        let mut events = RuntimeEventRegistry::new();
+        let event = events.create_hardware_event(owner, HardwareEventSource::Keyboard).unwrap();
+        let mut request = DirectoryRequest::new(logos_abi::DirectoryOperation::Events, 1);
+        request.subject = owner;
+        let mut response = DirectoryResponse::empty(
+            request.operation,
+            DirectoryStatus::Malformed,
+            request.request_id,
+        );
+        assert_eq!(events.directory(request, &mut response), DirectoryStatus::Ok);
+        assert_eq!(response.count, 1);
+        assert_eq!(response.records[0].kind, DirectoryRecordKind::Event);
+        assert_eq!(response.records[0].handle, event.raw());
+        assert_eq!(response.records[0].flags, DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD);
+        clear_hardware_event(HardwareEventSource::Keyboard);
     }
 
     #[test]
