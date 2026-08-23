@@ -689,6 +689,12 @@ impl ServiceRuntime {
                 .map_err(|_| ServiceRuntimeError::Resources)?;
         }
 
+        for spec in SERVICE_IMAGES {
+            self.service_heaps[spec.service().index()].quota_pages =
+                logos_abi::SERVICE_HEAP_MAX_PAGES;
+        }
+        self.initialize_dynamic_services()?;
+
         for (index, spec) in SERVICE_IMAGES.iter().enumerate() {
             let service = spec.service();
             let stack_pages = match service {
@@ -813,7 +819,6 @@ impl ServiceRuntime {
             self.tables[index].write(tables);
             self.table_ready[index] = true;
         }
-        self.initialize_dynamic_services()?;
         self.initialize_dynamic_ipc()?;
         self.publish_keyboard_event()?;
         let mut memory = IdentityPageTableMemory;
@@ -1076,7 +1081,14 @@ impl ServiceRuntime {
     ) -> Result<(), ServiceRuntimeError> {
         let index = service.index();
         let mut memory = IdentityPageTableMemory;
-        let heap_quota_pages = logos_abi::SERVICE_HEAP_MAX_PAGES;
+        let heap_quota_pages = self
+            .dynamic_services
+            .as_ref()
+            .and_then(|registry| registry.heap_quota_pages(self.service_handles[index]).ok())
+            .unwrap_or(self.service_heaps[index].quota_pages);
+        if heap_quota_pages == 0 {
+            return Err(ServiceRuntimeError::Resources);
+        }
         let initial_heap_pages = logos_abi::SERVICE_HEAP_INITIAL_PAGES;
         self.service_heaps[index].quota_pages = heap_quota_pages;
         self.service_heaps[index].frames.clear();
