@@ -12,7 +12,6 @@ pub const STORAGE_UNMAP_OPERATION: u8 = 2;
 pub const PACKAGE_REQUEST_ENDPOINT: usize = logos_abi::IpcEndpointId::CoreToStoragePackage as usize;
 pub const PACKAGE_RESPONSE_ENDPOINT: usize =
     logos_abi::IpcEndpointId::StoragePackageToCore as usize;
-pub const PACKAGE_REQUEST_CAPABILITY_SLOT: usize = 6;
 
 pub const STORAGE_CACHE_PAGES: u64 = 32;
 /// Map requests address cache slots, not physical frame numbers.
