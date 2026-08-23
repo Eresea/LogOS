@@ -1552,8 +1552,13 @@ impl ServiceRuntime {
         }
         let _ = self.take_package_response_slot();
         self.set_package_request_slot(Some(request));
-        let Some(package_endpoint) =
-            self.dynamic_endpoints.get(crate::storage_ipc::PACKAGE_REQUEST_ENDPOINT).copied()
+        let Some(package_endpoint) = self
+            .dynamic_endpoint(
+                None,
+                Some(ServiceId::Storage),
+                logos_abi::IPC_CONTRACT_PACKAGE_REQUEST,
+            )
+            .ok()
         else {
             self.set_package_request_slot(None);
             return Err(ProcessError::ReadFailure);
@@ -1855,8 +1860,9 @@ impl ServiceRuntime {
                 };
             }
         };
-        let Some(request_endpoint) =
-            self.dynamic_endpoints.get(crate::device_ipc::DEVICE_REQUEST_ENDPOINT).copied()
+        let Some(request_endpoint) = self
+            .dynamic_endpoint(Some(ServiceId::Device), None, logos_abi::IPC_CONTRACT_DEVICE_REQUEST)
+            .ok()
         else {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Disconnected,
@@ -1907,8 +1913,13 @@ impl ServiceRuntime {
                 response,
             );
         }
-        let Some(response_endpoint) =
-            self.dynamic_endpoints.get(crate::device_ipc::DEVICE_RESPONSE_ENDPOINT).copied()
+        let Some(response_endpoint) = self
+            .dynamic_endpoint(
+                None,
+                Some(ServiceId::Device),
+                logos_abi::IPC_CONTRACT_DEVICE_RESPONSE,
+            )
+            .ok()
         else {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Disconnected,
@@ -2024,6 +2035,33 @@ impl ServiceRuntime {
             .as_ref()
             .ok_or(logos_abi::IpcStatus::Disconnected)?
             .capability_for(core, endpoint, rights)
+    }
+
+    fn dynamic_endpoint(
+        &self,
+        producer: Option<ServiceId>,
+        consumer: Option<ServiceId>,
+        contract_id: u16,
+    ) -> Result<logos_abi::EndpointHandle, logos_abi::IpcStatus> {
+        let core = dynamic_core_handle((self.service_epoch as u32).max(1))
+            .map_err(|_| logos_abi::IpcStatus::Stale)?;
+        let producer = match producer {
+            Some(service) => {
+                self.runtime_service_handle(service).map_err(|_| logos_abi::IpcStatus::Stale)?
+            }
+            None => core,
+        };
+        let consumer = match consumer {
+            Some(service) => {
+                self.runtime_service_handle(service).map_err(|_| logos_abi::IpcStatus::Stale)?
+            }
+            None => core,
+        };
+        self.dynamic_ipc.as_ref().ok_or(logos_abi::IpcStatus::Disconnected)?.find_endpoint(
+            producer,
+            consumer,
+            contract_id,
+        )
     }
 
     fn send_dynamic(
@@ -2353,9 +2391,12 @@ impl ServiceRuntime {
                 }
             };
             let Some(endpoint) = self
-                .dynamic_endpoints
-                .get(logos_abi::IpcEndpointId::NetworkToFlow.index())
-                .copied()
+                .dynamic_endpoint(
+                    Some(ServiceId::Network),
+                    Some(ServiceId::Flow),
+                    logos_abi::IPC_CONTRACT_PACKET,
+                )
+                .ok()
             else {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Disconnected,
@@ -2510,9 +2551,12 @@ impl ServiceRuntime {
                 },
             };
             let Some(response_endpoint) = self
-                .dynamic_endpoints
-                .get(crate::storage_ipc::STORAGE_MAP_RESPONSE_ENDPOINT)
-                .copied()
+                .dynamic_endpoint(
+                    None,
+                    Some(ServiceId::Storage),
+                    logos_abi::IPC_CONTRACT_STORAGE_MAP_RESPONSE,
+                )
+                .ok()
             else {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Disconnected,
@@ -2664,8 +2708,13 @@ impl ServiceRuntime {
                 }
                 _ => crate::storage_ipc::unsupported_response(request),
             };
-            let Some(response_endpoint) =
-                self.dynamic_endpoints.get(crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT).copied()
+            let Some(response_endpoint) = self
+                .dynamic_endpoint(
+                    None,
+                    Some(ServiceId::Storage),
+                    logos_abi::IPC_CONTRACT_STORAGE_RESPONSE,
+                )
+                .ok()
             else {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Disconnected,
@@ -3755,9 +3804,12 @@ impl ServiceRuntime {
             .as_ref()
             .and_then(|registry| {
                 let endpoint = self
-                    .dynamic_endpoints
-                    .get(logos_abi::IpcEndpointId::FetchToFlow.index())
-                    .copied()?;
+                    .dynamic_endpoint(
+                        Some(ServiceId::Fetch),
+                        Some(ServiceId::Flow),
+                        logos_abi::IPC_CONTRACT_BYTES,
+                    )
+                    .ok()?;
                 registry.endpoint_events(endpoint).ok()
             })
             .map(|(read, _)| read);

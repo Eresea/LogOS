@@ -226,6 +226,27 @@ impl RuntimeIpcRegistry {
         Ok(self.endpoint(endpoint)?.contract_id)
     }
 
+    pub fn find_endpoint(
+        &self,
+        producer: ServiceHandle,
+        consumer: ServiceHandle,
+        contract_id: u16,
+    ) -> Result<EndpointHandle, IpcStatus> {
+        if !producer.is_valid() || !consumer.is_valid() || contract_id == 0 {
+            return Err(IpcStatus::Malformed);
+        }
+        self.endpoints
+            .iter()
+            .filter_map(|slot| slot.value.as_ref())
+            .find(|endpoint| {
+                endpoint.producer == producer
+                    && endpoint.consumer == consumer
+                    && endpoint.contract_id == contract_id
+            })
+            .map(|endpoint| endpoint.handle)
+            .ok_or(IpcStatus::Disconnected)
+    }
+
     pub fn endpoint_events(
         &self,
         endpoint: EndpointHandle,
