@@ -13,9 +13,10 @@ encoding an index and generation.
 Core owns endpoint queues and capability records. Queue frames remain private to
 Core, while message types and payload sizes remain bounded typed contracts. A
 read-only service bootstrap page provides the service identity and bootstrap
-control grants; a paginated directory operation discovers only capabilities
-already granted by Core. Each capability directory record carries a stable typed
-contract ID, exact payload metadata, and the event handle for its direction.
+control grants; paginated directory operations discover only capabilities and
+events already granted by Core. Capability records carry a stable typed contract
+ID, exact payload metadata, and the event handle for their direction. Event records
+carry an owner, generation-safe event handle, and source flags for hardware events.
 
 Dynamic service registration and endpoint creation are policy-controlled Core
 operations. Services do not receive arbitrary capability delegation authority.
@@ -32,8 +33,8 @@ fixed ABI in the live service image set.
 - Hardware producers bind pre-existing event handles and signal their pending state
   through an allocation-free source router; no endpoint-derived event mask is used
   for the network IRQ path.
-- The keyboard producer is represented by an Input-owned bootstrap event handle and
-  uses the same event-set wait path.
+- The keyboard producer is represented by an Input-owned event-directory record and
+  uses the same event-set wait path; no hardware event is embedded in the bootstrap page.
 - The bootstrap endpoint manifest describes initial policy only. Contract IDs describe typed
   message agreements and never identify runtime endpoint slots; endpoint and event generations
   remain independently stale-safe.
@@ -42,7 +43,7 @@ fixed ABI in the live service image set.
 ## Implementation status
 
 The Core registries, v5 directory records, generation checks, and event-set syscall operations are
-live. Built-in service traffic resolves capabilities through the paginated directory and runtime
-endpoint handles; route-specific device, storage, package, and network adapters remain Core-owned
-policy behind those records. Service lifecycle requests validate dynamic handles before using the
-internal built-in image router, while program lifecycle remains a separately bounded contract.
+live. Built-in service traffic resolves capabilities and hardware events through paginated directory
+operations and runtime handles; route-specific device, storage, package, and network adapters remain
+Core-owned policy behind those records. Service lifecycle requests validate dynamic handles before
+using the internal built-in image router, while program lifecycle remains a separately bounded contract.

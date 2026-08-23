@@ -7,10 +7,10 @@ built-in images are the bootstrap set, while Core publishes runtime service, end
 capability, event, and event-set records.
 The live UEFI path uses the v5 registries and discovered capabilities; the old slot/graph/mask
 model is retained only in host-test fixtures where it still models bounded scheduler behavior.
-The capability directory syscall exposes v5 cursored records with a stable typed contract ID and
-direction-specific event handle. Service images resolve their private IPC descriptors to opaque
-capability handles; the live queue transport still retains a compatibility bridge while Core-owned
-producers and their wake paths are migrated.
+The capability and event directory syscalls expose v5 cursored records with stable typed contract
+IDs, direction-specific event handles, and owner/source metadata. Service images resolve their
+private IPC descriptors and hardware waits to opaque runtime handles; Core-owned queues and
+allocation-free producer wake paths are authoritative.
 
 ```text
 Terminal → Session → Flow → typed system API registry
