@@ -75,7 +75,15 @@ impl LiveSupervisor {
             }
             self.records.resize(index + 1, None);
         }
-        self.records[index].is_none_or(|record| record.handle == handle)
+        match self.records[index] {
+            None => true,
+            Some(record) if record.handle == handle => true,
+            Some(record) if record.state == ServiceState::Stopped => {
+                self.records[index] = None;
+                true
+            }
+            Some(_) => false,
+        }
     }
 
     pub fn register(&mut self, handle: ServiceHandle, now: u64) -> bool {
@@ -268,5 +276,17 @@ mod tests {
         }
         assert!(!supervisor.prepare_restart());
         assert!(supervisor.recovery);
+    }
+
+    #[test]
+    fn stale_generation_replaces_only_stopped_record() {
+        let mut supervisor = LiveSupervisor::new();
+        let old = handle(ServiceId::Flow);
+        let new = ServiceHandle::new(old.index(), old.generation() + 1).unwrap();
+        assert!(supervisor.register(old, 1));
+        assert!(!supervisor.ensure(new));
+        assert!(supervisor.prepare_restart());
+        assert!(supervisor.register(new, 2));
+        assert_eq!(supervisor.state(new), ServiceState::Running);
     }
 }
