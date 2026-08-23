@@ -1806,14 +1806,6 @@ pub fn sleep_current_for(ticks: u64) {
     context::sleep_current_for(ticks);
 }
 
-pub(crate) fn prepare_user_wait(
-    handle: crate::TaskHandle,
-    mask: u64,
-    timeout: u64,
-) -> Option<bool> {
-    context::prepare_wait(handle, mask, timeout)
-}
-
 pub(crate) fn prepare_service_event_set_wait(
     task: crate::TaskHandle,
     event_set: logos_abi::EventSetHandle,

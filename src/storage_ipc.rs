@@ -173,13 +173,9 @@ pub fn validate_map_descriptor(
 
 pub fn validate_request(
     request: StorageRequest,
-    capability_slot: usize,
     generation: u16,
     service_epoch: u64,
 ) -> Result<(), StorageStatus> {
-    if request.capability_slot as usize != capability_slot {
-        return Err(StorageStatus::Unauthorized);
-    }
     if request.generation != generation || request.service_epoch != service_epoch {
         return Err(StorageStatus::Stale);
     }
@@ -229,17 +225,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mailbox_validation_is_generation_and_capability_bound() {
-        let request =
-            StorageRequest::new(StorageOperation::Reopen, 1, 7, 0, 11, 0, 0, 0, 9).unwrap();
-        assert_eq!(validate_request(request, 0, 7, 11), Ok(()));
-        assert_eq!(validate_request(request, 1, 7, 11), Err(StorageStatus::Unauthorized));
-        assert_eq!(validate_request(request, 0, 8, 11), Err(StorageStatus::Stale));
+    fn mailbox_validation_is_generation_bound() {
+        let request = StorageRequest::new(StorageOperation::Reopen, 1, 7, 11, 0, 0, 0, 9).unwrap();
+        assert_eq!(validate_request(request, 7, 11), Ok(()));
+        assert_eq!(validate_request(request, 8, 11), Err(StorageStatus::Stale));
     }
 
     #[test]
     fn mailbox_returns_a_typed_bounded_response() {
-        let request = StorageRequest::new(StorageOperation::Flush, 4, 1, 0, 2, 0, 0, 0, 3).unwrap();
+        let request = StorageRequest::new(StorageOperation::Flush, 4, 1, 2, 0, 0, 0, 3).unwrap();
         let response = unsupported_response(request);
         assert_eq!(response.request_id, 4);
         assert_eq!(response.status, StorageStatus::Unsupported);
@@ -252,7 +246,6 @@ mod tests {
             StorageOperation::Read,
             4,
             1,
-            0,
             2,
             0,
             1,
@@ -261,7 +254,7 @@ mod tests {
         )
         .unwrap();
         request.flags = 1;
-        assert_eq!(validate_request(request, 0, 1, 2), Err(StorageStatus::Invalid));
+        assert_eq!(validate_request(request, 1, 2), Err(StorageStatus::Invalid));
     }
 
     #[test]

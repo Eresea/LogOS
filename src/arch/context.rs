@@ -206,20 +206,6 @@ pub fn sleep_current_for(ticks: u64) {
     }
 }
 
-pub(crate) fn prepare_wait(handle: crate::TaskHandle, mask: u64, timeout: u64) -> Option<bool> {
-    let now = TIMER_TICKS.load(Ordering::Acquire);
-    let deadline =
-        if timeout == 0 { u64::MAX } else { now.saturating_add(timeout).min(u64::MAX - 1) };
-    let should_block = SCHEDULER.wait_for_events(handle, mask, deadline)?;
-    if should_block {
-        let local = unsafe { &*(read_gs() as *const CpuLocal) };
-        local
-            .pending_action
-            .store(if timeout == 0 { ACTION_BLOCK } else { ACTION_TIMED_BLOCK }, Ordering::Release);
-    }
-    Some(should_block)
-}
-
 fn request_switch(action: u64) {
     unsafe {
         let local = &*(read_gs() as *const CpuLocal);

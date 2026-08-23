@@ -16,8 +16,6 @@ const USER_STACK_VA: usize = USER_CODE_VA + PAGE_SIZE;
 const SWITCH_VECTOR: u8 = 49;
 const PROOF_IMAGE_LEN: usize = 0x89;
 const SYSCALL_YIELD: usize = 1;
-const SYSCALL_WAIT: usize = 2;
-const SYSCALL_NOTIFY: usize = 3;
 const SYSCALL_EVENT: usize = logos_abi::EVENT_SYSCALL;
 const SYSCALL_CURRENT_TICKS: usize = logos_abi::CURRENT_TICKS_SYSCALL;
 const SYSCALL_SERVICE_HEAP_GROW: usize = logos_abi::SERVICE_HEAP_GROW_SYSCALL;
@@ -50,7 +48,6 @@ static USER_CR3: AtomicUsize = AtomicUsize::new(0);
 static KERNEL_CR3: AtomicUsize = AtomicUsize::new(0);
 static USER_TASK_RAW: AtomicU64 = AtomicU64::new(0);
 static USER_SYSCALLS: AtomicU64 = AtomicU64::new(0);
-static USER_BLOCKED_WAITS: AtomicU64 = AtomicU64::new(0);
 static USER_FAULTED: AtomicBool = AtomicBool::new(false);
 static USER_FAULT_VECTOR: AtomicUsize = AtomicUsize::new(0);
 
@@ -90,7 +87,6 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
         (core::ptr::addr_of!(USER_IMAGE) as usize, core::mem::size_of::<[u8; PROOF_IMAGE_LEN]>()),
         (core::ptr::addr_of!(USER_PROCESS_TABLE) as usize, core::mem::size_of::<ProcessTable>()),
         (core::ptr::addr_of!(USER_PROCESS) as usize, core::mem::size_of::<Option<ProcessHandle>>()),
-        (core::ptr::addr_of!(USER_BLOCKED_WAITS) as usize, core::mem::size_of::<AtomicU64>()),
     ] {
         crate::arch::reserve_storage_frames(pool, address, bytes);
     }
@@ -145,39 +141,6 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
             return false;
         }
         unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), 0) };
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        return true;
-    }
-    if number == SYSCALL_WAIT {
-        if USER_FAULTED.load(Ordering::Acquire)
-            && handle.raw() == USER_TASK_RAW.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        let mask = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) } as u64;
-        let timeout = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(9)) } as u64;
-        let Some(should_block) = crate::arch::prepare_user_wait(handle, mask, timeout) else {
-            return false;
-        };
-        if should_block {
-            USER_BLOCKED_WAITS.fetch_add(1, Ordering::Relaxed);
-        }
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), 0) };
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        return true;
-    }
-    if number == SYSCALL_NOTIFY {
-        let mask = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) } as u64;
-        let valid_mask = if logos_abi::EVENT_COUNT == 64 {
-            u64::MAX
-        } else {
-            (1u64 << logos_abi::EVENT_COUNT) - 1
-        };
-        if mask == 0 || mask & !valid_mask != 0 {
-            return false;
-        }
-        let woken = crate::arch::signal_events(mask);
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), woken) };
         USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
         return true;
     }
@@ -378,10 +341,6 @@ fn switch_cr3(root: usize) {
 
 pub(crate) fn syscalls() -> u64 {
     USER_SYSCALLS.load(Ordering::Acquire)
-}
-
-pub(crate) fn blocked_waits() -> u64 {
-    USER_BLOCKED_WAITS.load(Ordering::Acquire)
 }
 
 pub(crate) fn fault_observed() -> bool {

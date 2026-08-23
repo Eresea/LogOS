@@ -34,6 +34,7 @@ static DYNAMIC_IPC_READY: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_DIRECTORY_USED: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_MANAGER_USED: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_EVENT_USED: AtomicBool = AtomicBool::new(false);
+static DYNAMIC_EVENT_BLOCKED: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_HANDLE: AtomicU64 = AtomicU64::new(0);
 static BACKPRESSURE_FULL: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_BLOCKED: AtomicBool = AtomicBool::new(false);
@@ -148,6 +149,7 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
         (core::ptr::addr_of!(DYNAMIC_DIRECTORY_USED) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(DYNAMIC_MANAGER_USED) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(DYNAMIC_EVENT_USED) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(DYNAMIC_EVENT_BLOCKED) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(PROBE_RING) as usize, core::mem::size_of::<logos_abi::RenderIpc>()),
     ] {
         crate::arch::reserve_storage_frames(pool, address, bytes);
@@ -224,6 +226,10 @@ pub fn dynamic_event_used() {
     if !DYNAMIC_EVENT_USED.swap(true, Ordering::AcqRel) {
         crate::arch_proof_line(b"LogOS vNext: dynamic event set");
     }
+}
+
+pub(crate) fn dynamic_event_blocked() {
+    DYNAMIC_EVENT_BLOCKED.store(true, Ordering::Release);
 }
 
 #[cfg(feature = "package-proof")]
@@ -331,8 +337,6 @@ pub fn observe(cpu: usize) {
     let ring3_migrated = cpu_count == 1 || ring3_cpus & !1 != 0;
     let reschedule_ipi = cpu_count == 1 || RESCHEDULE_IPIS.load(Ordering::Acquire) != 0;
     let event_wake_ipi = cpu_count == 1 || EVENT_WAKE_IPI_RECEIVED.load(Ordering::Acquire);
-    let write_event_mask =
-        ((1u64 << logos_abi::IPC_ENDPOINT_COUNT) - 1) << logos_abi::IPC_WRITE_EVENT_BASE;
     let conditions_met = timers
         && progress
         && switches > 20
@@ -357,9 +361,8 @@ pub fn observe(cpu: usize) {
         && DYNAMIC_EVENT_USED.load(Ordering::Acquire)
         && LIVE_SERVICE_RESTARTED.load(Ordering::Acquire)
         && crate::user_mode::syscalls() > 0
-        && crate::user_mode::blocked_waits() > 0
+        && DYNAMIC_EVENT_BLOCKED.load(Ordering::Acquire)
         && SCHEDULER.event_wakes() > 0
-        && (SCHEDULER.event_signal_mask() & write_event_mask != 0)
         && BACKPRESSURE_FULL.load(Ordering::Acquire)
         && BACKPRESSURE_BLOCKED.load(Ordering::Acquire)
         && BACKPRESSURE_WAKE.load(Ordering::Acquire)
