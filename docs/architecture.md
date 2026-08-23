@@ -1,13 +1,12 @@
 # LogOS vNext Core architecture
 
 The package has two targets: the UEFI binary in `src/main.rs` calls `boot()` in `src/lib.rs`,
-while independent `x86_64-unknown-none` service images run in isolated roots. The ABI v5
-resource migration introduces one production allocator, private service heaps, and dynamic
-generation-safe service/IPC handles. The migration is staged; the current boot graph remains
-the compatibility baseline until the live service images switch together.
-The `runtime_ipc`, `runtime_events`, and `runtime_services` modules define the v5 record and
-validation model and now compile for UEFI; live service traffic remains on the compatibility graph
-until the live service images switch together.
+while independent `x86_64-unknown-none` service images run in isolated roots. ABI v5 owns one
+production allocator, private service heaps, and generation-safe service/IPC handles. The ten
+built-in images are the bootstrap set, while Core publishes runtime service, endpoint,
+capability, event, and event-set records.
+The live UEFI path uses the v5 registries and discovered capabilities; the old slot/graph/mask
+model is retained only in host-test fixtures where it still models bounded scheduler behavior.
 The capability directory syscall exposes v5 cursored records with a stable typed contract ID and
 direction-specific event handle. Service images resolve their private IPC descriptors to opaque
 capability handles; the live queue transport still retains a compatibility bridge while Core-owned
@@ -35,7 +34,7 @@ Terminal → Session → Flow → typed system API registry
 | Service process admission | `service_runtime` + `process` | binds each service root, coalesced mappings, and validated user launch metadata without entering service RIPs prematurely |
 | User launch transition | `arch` + `scheduler` | selects the task root before restore and provides the fixed-selector `iretq` path for service entry |
 | Service startup barrier | `service_startup` | enforces image → address space → process → launch-ready states and Input/Display → Terminal → Session → Storage → User/Device → Flow → Fetch dependencies; Network is independent and Fetch depends on it |
-| Service IPC boundary | `service_ipc` + `service_runtime` | ABI v5 owns runtime endpoint records, generation-safe capability grants, private staging, and Core-only queue frames; typed payloads remain bounded and only Core-granted capabilities are discoverable |
+| Service IPC boundary | `runtime_ipc` + `service_runtime` | ABI v5 owns runtime endpoint records, generation-safe capability grants, private staging, and Core-only queue frames; typed payloads remain bounded and only Core-granted capabilities are discoverable |
 | Network IPC extension | `service_ipc` + `service_runtime` | adds Flow/Fetch client routing with ABI v2 inline payloads capped at 192 bytes; Core-owned packet descriptors/pages remain private to Network |
 | Storage boundary | Core VirtIO block adapter + `logos-storage` v5 COW root + storage IPC/object service | Core owns PCI discovery, feature negotiation, fixed DMA arena, queues, MSI-X interrupt delivery, reset, timeouts, and flush; Storage owns dual roots, immutable extents, disjoint system/user/package pools, persistent allocation metadata, flushed commit records, recovery, durable object publication, object IDs, namespace resolution, and bounded file operations; Flow reaches Storage through versioned messages over private staging pages; v4 media fails closed at the v5 opener and is never silently reformatted; one active writer remains bounded while generation-safe handles, bounded multi-extent streamed files, and map/unmap validation are active |
 | User service | `services/images/src/user` + `services/user` | User owns canonical identities, Argon2id password verifiers, role capability templates, volatile session/capability handles, and lineage revocation; Flow reaches User through typed IPC, while User exchanges only chunked snapshots with Storage; no UID/GID mode bits or ambient path authority |
@@ -56,7 +55,7 @@ Terminal → Session → Flow → typed system API registry
 | Service restart contract | `service_lifecycle::ServiceLifecycle` | fixed owner-held operation slots become explicitly `Restarted`; late completions are rejected and retries remain owner policy |
 | Health service | `health::HealthService` | one in-process fixed command/response mailbox for `Ping`; restart rejects the old completion and caller explicitly retries |
 | Terminal ABI | `logos-abi` | fixed semantic input, session stream, cell-diff render, endpoint identity, and service identities |
-| IPC mechanics | `runtime_ipc` + `service_ipc` + `scheduler::Scheduler` | v5 runtime handles, discovered capabilities, exact typed payload validation, queue backpressure, and event-set operations own ordinary service traffic; hardware IRQ adapters retain internal nonallocating signal edges |
+| IPC mechanics | `runtime_ipc` + `service_ipc` + `scheduler::Scheduler` | v5 runtime handles, discovered capabilities, exact typed payload validation, queue backpressure, and event-set operations own all ordinary service traffic; hardware IRQ adapters signal pre-existing event objects without allocation |
 | Input service | `services/images/src/input` + `logos-input::InputDecoder` | consumes the Input-only PS/2 byte mapping, produces semantic key/text messages on the Input→Terminal ring, and owns modifier/layout state |
 | Terminal service | `services/images/src/terminal` + `logos-terminal::TerminalState` | ring-3 owns a bounded fixed 80×25 live surface, consumes Input and Session rings, and emits compact Session input and dirty-cell Display messages |
 | Display service | `services/images/src/display` + `logos-display` | ring-3 validates cell diffs and endpoint generations, then rasterizes dirty cells through embedded glyphs into its mapped GOP framebuffer |
@@ -68,7 +67,7 @@ Terminal → Session → Flow → typed system API registry
 | Process admission | `process::ProcessTable` | fixed 16-slot process model, bounded ELF64 load plans, one generation-safe address-space identity with 64 validated mappings per process, and exit/fault/reclaim outcomes |
 | User launch contract | `process::UserLaunch` + `Scheduler::spawn_user` | a running process with a bound root publishes entry RIP, aligned stack top, root, and process generation before its task becomes runnable |
 | Ring-3 CPU migration | `scheduler::claim_next` + `arch::context` | published ring-3 tasks may migrate after a context boundary; the target loads CR3 and its TSS `RSP0` before restore, while live mappings remain immutable |
-| Service image manifest | `service_images::SERVICE_IMAGES` | built-in ESP images remain the bootstrap set; ABI v5 registers services through generation-safe runtime records and later permits package-backed additions |
+| Service image manifest | `service_images::SERVICE_IMAGES` | built-in ESP images are bootstrap policy; ABI v5 registers them through generation-safe runtime records and permits additional policy-approved records |
 | Retained service images | `service_loader::ServiceImageBundle` | ten validated ELF records with page-aligned retained addresses, loaded before `ExitBootServices`, and no filesystem lifetime after UEFI exit |
 | Service ELF packaging | `services/images` + `scripts/build-services.ps1` | ten independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
 | Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all ten staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |

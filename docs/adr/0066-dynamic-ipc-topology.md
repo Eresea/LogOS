@@ -5,7 +5,7 @@
 
 ## Decision
 
-ABI v5 replaces fixed IPC capability slots, the compile-time endpoint enum, and
+ABI v5 replaces fixed IPC capability slots, endpoint-enum runtime identity, and
 the fixed service-count contract with generation-safe runtime handles. Services,
 endpoints, capabilities, events, and event sets use distinct opaque handles
 encoding an index and generation.
@@ -34,8 +34,9 @@ fixed ABI in the live service image set.
   for the network IRQ path.
 - The keyboard producer is represented by an Input-owned bootstrap event handle and
   uses the same event-set wait path.
-- Contract IDs describe typed message agreements and never identify runtime
-  endpoint slots; endpoint and event generations remain independently stale-safe.
+- The bootstrap endpoint manifest describes initial policy only. Contract IDs describe typed
+  message agreements and never identify runtime endpoint slots; endpoint and event generations
+  remain independently stale-safe.
 - Fixed wire-size and queue backpressure validation remain part of the hostile-peer proof.
 
 ## Implementation status
