@@ -109,6 +109,20 @@ fn dynamic_core_handle(generation: u32) -> Result<logos_abi::ServiceHandle, Serv
         .ok_or(ServiceRuntimeError::StaleGeneration)
 }
 
+fn bootstrap_capability(
+    service_index: usize,
+    kind: u32,
+    generation: u32,
+) -> Result<logos_abi::CapabilityHandle, ServiceRuntimeError> {
+    let index = u32::try_from(service_index).map_err(|_| ServiceRuntimeError::Resources)?;
+    let offset = index
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(kind))
+        .ok_or(ServiceRuntimeError::Resources)?;
+    logos_abi::CapabilityHandle::new(u32::MAX - offset, generation)
+        .ok_or(ServiceRuntimeError::Resources)
+}
+
 fn builtin_service_for_handle(
     handles: &[logos_abi::ServiceHandle],
     handle: logos_abi::ServiceHandle,
@@ -1191,12 +1205,9 @@ impl ServiceRuntime {
         self.service_bootstrap_frames[index] = bootstrap.raw();
         memory.clear(bootstrap).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
         let generation = (self.service_epoch as u32).max(1);
-        let control = logos_abi::CapabilityHandle::new(0, generation)
-            .ok_or(ServiceRuntimeError::Resources)?;
-        let directory = logos_abi::CapabilityHandle::new(1, generation)
-            .ok_or(ServiceRuntimeError::Resources)?;
-        let heap = logos_abi::CapabilityHandle::new(2, generation)
-            .ok_or(ServiceRuntimeError::Resources)?;
+        let control = bootstrap_capability(index, 0, generation)?;
+        let directory = bootstrap_capability(index, 1, generation)?;
+        let heap = bootstrap_capability(index, 2, generation)?;
         self.bootstrap_control[index] = control;
         self.bootstrap_directory[index] = directory;
         self.bootstrap_heap[index] = heap;
