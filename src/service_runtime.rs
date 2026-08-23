@@ -608,7 +608,7 @@ impl ServiceRuntime {
             let service = spec.service();
             let owner = self.runtime_service_handle(service)?;
             let (ipc_endpoints, capabilities) = registry.ownership_counts(owner);
-            let events_owned = events.ownership_count(owner);
+            let events_owned = events.ownership_count(owner) + events.event_set_count(owner);
             if let Some(services) = self.dynamic_services.as_mut() {
                 services
                     .set_runtime_counts(owner, ipc_endpoints, capabilities, events_owned)
@@ -1393,7 +1393,7 @@ impl ServiceRuntime {
         let events = self
             .dynamic_events
             .as_ref()
-            .map(|registry| registry.ownership_count(owner))
+            .map(|registry| registry.ownership_count(owner) + registry.event_set_count(owner))
             .unwrap_or(0);
         if let Some(registry) = self.dynamic_services.as_mut() {
             let _ = registry.set_runtime_counts(owner, ipc_endpoints, capabilities, events);

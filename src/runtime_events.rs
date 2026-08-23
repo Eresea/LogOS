@@ -454,6 +454,14 @@ impl RuntimeEventRegistry {
             .count()
     }
 
+    pub fn event_set_count(&self, owner: ServiceHandle) -> usize {
+        self.sets
+            .iter()
+            .filter_map(|slot| slot.value.as_ref())
+            .filter(|set| set.owner == owner)
+            .count()
+    }
+
     pub fn destroy_service(&mut self, owner: ServiceHandle) {
         let events: Vec<_> = self
             .events
@@ -578,6 +586,7 @@ mod tests {
         let event = events.create_event(owner).unwrap();
         let set = events.create_set(owner).unwrap();
         assert_eq!(events.ownership_count(owner), 1);
+        assert_eq!(events.event_set_count(owner), 1);
         events.add(owner, set, event).unwrap();
         events.signal_irq(event).unwrap();
         assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Ready(event)));
