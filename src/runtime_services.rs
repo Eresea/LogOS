@@ -336,6 +336,10 @@ impl RuntimeServiceRegistry {
         Ok(self.service(handle)?.image.len())
     }
 
+    pub fn image_bytes(&self, handle: ServiceHandle) -> Result<&[u8], ServiceRegistryError> {
+        Ok(&self.service(handle)?.image)
+    }
+
     pub fn set_image(
         &mut self,
         handle: ServiceHandle,
@@ -1110,8 +1114,11 @@ mod tests {
         assert_eq!(registry.image_len(handle), Ok(7));
         registry.set_image(handle, b"package").unwrap();
         assert_eq!(registry.image_len(handle), Ok(7));
+        assert_eq!(registry.image_bytes(handle), Ok(&b"package"[..]));
         assert_eq!(registry.set_image(handle, b""), Err(ServiceRegistryError::InvalidImage));
         assert_eq!(registry.image_len(handle), Ok(7));
+        registry.remove(handle).unwrap();
+        assert_eq!(registry.image_bytes(handle), Err(ServiceRegistryError::Stale));
     }
 
     #[test]
