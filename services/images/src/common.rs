@@ -626,33 +626,55 @@ pub fn discover_capability_contract(
         if !bootstrap.is_valid() || !peer.is_valid() || contract_id == 0 || message_bytes == 0 {
             return Err(logos_abi::DirectoryStatus::Malformed);
         }
-        let mut request =
-            logos_abi::DirectoryRequest::new(logos_abi::DirectoryOperation::Capabilities, 1);
-        request.subject = bootstrap.service;
+        let records = unsafe {
+            let cache = core::ptr::addr_of_mut!(CAPABILITY_DIRECTORY);
+            if (*cache).is_none() {
+                let mut records = Vec::new();
+                records
+                    .try_reserve(logos_abi::DIRECTORY_RECORDS_PER_PAGE)
+                    .map_err(|_| logos_abi::DirectoryStatus::Capacity)?;
+                let mut request = logos_abi::DirectoryRequest::new(
+                    logos_abi::DirectoryOperation::Capabilities,
+                    1,
+                );
+                request.subject = bootstrap.service;
+                loop {
+                    let mut response = logos_abi::DirectoryResponse::empty(
+                        request.operation,
+                        logos_abi::DirectoryStatus::Malformed,
+                        request.request_id,
+                    );
+                    let status = directory_call(bootstrap.directory, &request, &mut response);
+                    if status != logos_abi::DirectoryStatus::Ok {
+                        return Err(status);
+                    }
+                    records
+                        .try_reserve(response.count as usize)
+                        .map_err(|_| logos_abi::DirectoryStatus::Capacity)?;
+                    records.extend_from_slice(&response.records[..response.count as usize]);
+                    if response.flags & logos_abi::DIRECTORY_FLAG_MORE == 0 {
+                        break;
+                    }
+                    if response.cursor <= request.cursor {
+                        return Err(logos_abi::DirectoryStatus::Malformed);
+                    }
+                    request.cursor = response.cursor;
+                }
+                *cache = Some(records);
+            }
+            (*cache).as_ref().expect("capability directory cache").as_slice()
+        };
         let mut found = None;
-        loop {
-            let mut response = logos_abi::DirectoryResponse::empty(
-                request.operation,
-                logos_abi::DirectoryStatus::Malformed,
-                request.request_id,
-            );
-            let status = directory_call(bootstrap.directory, &request, &mut response);
-            if status != logos_abi::DirectoryStatus::Ok {
-                return Err(status);
+        for record in records {
+            if !capability_record_matches(*record, peer, rights, contract_id, message_bytes) {
+                continue;
             }
-            if let Some(capability) =
-                capability_from_response(&response, peer, rights, contract_id, message_bytes)?
-            {
-                merge_discovered_capability(&mut found, Some(capability))?;
-            }
-            if response.flags & logos_abi::DIRECTORY_FLAG_MORE == 0 {
-                return found.ok_or(logos_abi::DirectoryStatus::NotFound);
-            }
-            if response.cursor <= request.cursor {
-                return Err(logos_abi::DirectoryStatus::Malformed);
-            }
-            request.cursor = response.cursor;
+            merge_discovered_capability(
+                &mut found,
+                logos_abi::CapabilityHandle::from_raw(record.handle),
+            )?;
         }
+        found.ok_or(logos_abi::DirectoryStatus::NotFound)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -763,6 +785,7 @@ unsafe impl Sync for EventSetCache {}
 
 #[allow(dead_code)]
 static EVENT_SET_CACHE: EventSetCache = EventSetCache(UnsafeCell::new(EventSetCacheState::empty()));
+static mut CAPABILITY_DIRECTORY: Option<Vec<logos_abi::DirectoryRecord>> = None;
 static NEXT_EVENT_REQUEST: AtomicU32 = AtomicU32::new(0x4000);
 
 #[allow(dead_code)]
