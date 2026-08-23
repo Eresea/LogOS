@@ -48,7 +48,7 @@ impl ServiceHeapState {
 fn dynamic_endpoint_peer(
     endpoint: logos_abi::IpcEndpointId,
     producer: bool,
-    service_handles: &[logos_abi::ServiceHandle; SERVICE_COUNT],
+    service_handles: &[logos_abi::ServiceHandle],
     generation: u32,
 ) -> Result<logos_abi::ServiceHandle, ServiceRuntimeError> {
     let core = || {
@@ -110,7 +110,7 @@ fn dynamic_core_handle(generation: u32) -> Result<logos_abi::ServiceHandle, Serv
 }
 
 fn builtin_service_for_handle(
-    handles: &[logos_abi::ServiceHandle; SERVICE_COUNT],
+    handles: &[logos_abi::ServiceHandle],
     handle: logos_abi::ServiceHandle,
 ) -> Option<ServiceId> {
     SERVICE_IMAGES
@@ -169,7 +169,7 @@ pub struct ServiceRuntime {
     startup: ServiceStartup,
     dynamic_ipc: Option<RuntimeIpcRegistry>,
     dynamic_services: Option<crate::runtime_services::RuntimeServiceRegistry>,
-    service_handles: [logos_abi::ServiceHandle; SERVICE_COUNT],
+    service_handles: Vec<logos_abi::ServiceHandle>,
     dynamic_events: Option<crate::runtime_events::RuntimeEventRegistry>,
     ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
     service_bootstrap_frames: [u64; SERVICE_COUNT],
@@ -399,7 +399,7 @@ impl ServiceRuntime {
             startup: ServiceStartup::new(),
             dynamic_ipc: None,
             dynamic_services: None,
-            service_handles: [logos_abi::ServiceHandle::EMPTY; SERVICE_COUNT],
+            service_handles: Vec::new(),
             dynamic_events: None,
             ipc_staging_frames: [None; SERVICE_COUNT],
             service_bootstrap_frames: [0; SERVICE_COUNT],
@@ -471,9 +471,10 @@ impl ServiceRuntime {
         let mut registry = crate::runtime_services::RuntimeServiceRegistry::new_with_generation(
             (self.service_epoch as u32).max(1),
         );
-        let mut handles = [logos_abi::ServiceHandle::EMPTY; SERVICE_COUNT];
+        let mut handles = Vec::new();
+        handles.try_reserve(SERVICE_COUNT).map_err(|_| ServiceRuntimeError::Resources)?;
         for spec in SERVICE_IMAGES {
-            handles[spec.service().index()] = registry
+            let handle = registry
                 .register_with_quota(
                     spec.name(),
                     b"builtin",
@@ -481,6 +482,7 @@ impl ServiceRuntime {
                     self.service_heaps[spec.service().index()].quota_pages,
                 )
                 .map_err(|_| ServiceRuntimeError::Resources)?;
+            handles.push(handle);
             registry
                 .set_manager_rights(
                     handles[spec.service().index()],
@@ -4794,15 +4796,15 @@ impl ServiceRuntime {
                 if let Ok(core) = dynamic_core_handle(generation) {
                     registry.destroy_service(core, events);
                 }
-                for service in self.service_handles {
+                for service in &self.service_handles {
                     if service.is_valid() {
-                        registry.destroy_service(service, events);
+                        registry.destroy_service(*service, events);
                     }
                 }
             }
         }
         self.dynamic_services = None;
-        self.service_handles = [logos_abi::ServiceHandle::EMPTY; SERVICE_COUNT];
+        self.service_handles.clear();
         self.dynamic_events = None;
         self.keyboard_event = logos_abi::EventHandle::EMPTY;
         self.storage_response = None;
