@@ -10,27 +10,27 @@ use logos_abi::{
 };
 use logos_session::MAX_LINE_BYTES;
 
-const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Terminal.index() as u32,
+    b"terminal",
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Terminal.index() as u32,
+    b"terminal",
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const FLOW_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const FLOW_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Flow.index() as u32,
+    b"flow",
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const FLOW_OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const FLOW_OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Flow.index() as u32,
+    b"flow",
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );

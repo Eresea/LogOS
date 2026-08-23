@@ -729,11 +729,87 @@ pub fn discover_capability_contract_any(
 }
 
 #[allow(dead_code)]
+pub fn discover_capability_contract_named(
+    peer_name: &[u8],
+    rights: logos_abi::IpcRights,
+    contract_id: u16,
+    message_bytes: usize,
+) -> Result<logos_abi::CapabilityHandle, logos_abi::DirectoryStatus> {
+    if peer_name.is_empty() || peer_name.len() > logos_abi::MAX_SERVICE_NAME_BYTES {
+        return Err(logos_abi::DirectoryStatus::Malformed);
+    }
+    let mut name = [0; logos_abi::MAX_SERVICE_NAME_BYTES];
+    name[..peer_name.len()].copy_from_slice(peer_name);
+    discover_capability_contract_selector(
+        PeerSelector::Name { name, length: peer_name.len() as u8 },
+        rights,
+        contract_id,
+        message_bytes,
+    )
+}
+
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum PeerSelector {
     Handle(logos_abi::ServiceHandle),
     Index(u32),
     Any,
+    Name { name: [u8; logos_abi::MAX_SERVICE_NAME_BYTES], length: u8 },
+}
+
+fn discover_service_name(
+    name: &[u8],
+) -> Result<logos_abi::ServiceHandle, logos_abi::DirectoryStatus> {
+    #[cfg(target_os = "none")]
+    {
+        let bootstrap = bootstrap_page();
+        if !bootstrap.is_valid()
+            || name.is_empty()
+            || name.len() > logos_abi::MAX_SERVICE_NAME_BYTES
+        {
+            return Err(logos_abi::DirectoryStatus::Malformed);
+        }
+        let mut request = logos_abi::DirectoryRequest::new(
+            logos_abi::DirectoryOperation::Services,
+            next_event_request_id(),
+        );
+        request.subject = bootstrap.service;
+        let mut found = None;
+        loop {
+            let mut response = logos_abi::DirectoryResponse::empty(
+                request.operation,
+                logos_abi::DirectoryStatus::Malformed,
+                request.request_id,
+            );
+            let status = directory_call(bootstrap.directory, &request, &mut response);
+            if status != logos_abi::DirectoryStatus::Ok {
+                return Err(status);
+            }
+            for record in &response.records[..response.count as usize] {
+                if record.kind != logos_abi::DirectoryRecordKind::Service || record.name() != name {
+                    continue;
+                }
+                let service = logos_abi::ServiceHandle::from_raw(record.handle)
+                    .ok_or(logos_abi::DirectoryStatus::Malformed)?;
+                if found.replace(service).is_some() {
+                    return Err(logos_abi::DirectoryStatus::Malformed);
+                }
+            }
+            if response.flags & logos_abi::DIRECTORY_FLAG_MORE == 0 {
+                break;
+            }
+            if response.cursor <= request.cursor {
+                return Err(logos_abi::DirectoryStatus::Malformed);
+            }
+            request.cursor = response.cursor;
+        }
+        found.ok_or(logos_abi::DirectoryStatus::NotFound)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = name;
+        Err(logos_abi::DirectoryStatus::NotFound)
+    }
 }
 
 fn discover_capability_contract_selector(
@@ -745,9 +821,18 @@ fn discover_capability_contract_selector(
     #[cfg(target_os = "none")]
     {
         let bootstrap = bootstrap_page();
+        let peer_selector = match peer_selector {
+            PeerSelector::Name { name, length } => {
+                if length == 0 || usize::from(length) > name.len() {
+                    return Err(logos_abi::DirectoryStatus::Malformed);
+                }
+                PeerSelector::Handle(discover_service_name(&name[..usize::from(length)])?)
+            }
+            selector => selector,
+        };
         let peer_valid = match peer_selector {
             PeerSelector::Handle(peer) => peer.is_valid(),
-            PeerSelector::Index(_) | PeerSelector::Any => true,
+            PeerSelector::Index(_) | PeerSelector::Any | PeerSelector::Name { .. } => true,
         };
         if !bootstrap.is_valid() || !peer_valid || contract_id == 0 || message_bytes == 0 {
             return Err(logos_abi::DirectoryStatus::Malformed);
@@ -796,6 +881,7 @@ fn discover_capability_contract_selector(
                 PeerSelector::Handle(peer) => record.peer == peer,
                 PeerSelector::Index(peer_index) => record.peer.index() == peer_index,
                 PeerSelector::Any => true,
+                PeerSelector::Name { .. } => false,
             };
             if !peer_matches
                 || !capability_record_contract_matches(*record, rights, contract_id, message_bytes)
@@ -878,6 +964,8 @@ fn next_event_request_id() -> u32 {
 pub struct CapabilitySpec {
     pub contract_id: u16,
     pub peer_index: Option<u32>,
+    pub peer_name: [u8; logos_abi::MAX_SERVICE_NAME_BYTES],
+    pub peer_name_len: u8,
     pub message_bytes: u16,
     pub rights: logos_abi::IpcRights,
 }
@@ -892,6 +980,8 @@ pub const fn capability_contract(
     CapabilitySpec {
         contract_id,
         peer_index: Some(peer_index),
+        peer_name: [0; logos_abi::MAX_SERVICE_NAME_BYTES],
+        peer_name_len: 0,
         message_bytes: if message_bytes <= u16::MAX as usize { message_bytes as u16 } else { 0 },
         rights,
     }
@@ -906,6 +996,33 @@ pub const fn capability_contract_any(
     CapabilitySpec {
         contract_id,
         peer_index: None,
+        peer_name: [0; logos_abi::MAX_SERVICE_NAME_BYTES],
+        peer_name_len: 0,
+        message_bytes: if message_bytes <= u16::MAX as usize { message_bytes as u16 } else { 0 },
+        rights,
+    }
+}
+
+#[allow(dead_code)]
+pub const fn capability_contract_named(
+    contract_id: u16,
+    peer_name: &[u8],
+    message_bytes: usize,
+    rights: logos_abi::IpcRights,
+) -> CapabilitySpec {
+    let mut name = [0; logos_abi::MAX_SERVICE_NAME_BYTES];
+    let length =
+        if peer_name.len() <= logos_abi::MAX_SERVICE_NAME_BYTES { peer_name.len() } else { 0 };
+    let mut index = 0;
+    while index < length {
+        name[index] = peer_name[index];
+        index += 1;
+    }
+    CapabilitySpec {
+        contract_id,
+        peer_index: None,
+        peer_name: name,
+        peer_name_len: length as u8,
         message_bytes: if message_bytes <= u16::MAX as usize { message_bytes as u16 } else { 0 },
         rights,
     }
@@ -1106,14 +1223,25 @@ fn discovered_capability(spec: CapabilitySpec) -> Result<logos_abi::CapabilityHa
         if message_bytes == 0 {
             return Err(IpcStatus::Malformed);
         }
-        let result = match spec.peer_index {
-            Some(peer_index) => discover_capability_contract_index(
-                peer_index,
+        let result = if spec.peer_name_len != 0 {
+            discover_capability_contract_named(
+                &spec.peer_name[..usize::from(spec.peer_name_len)],
                 spec.rights,
                 spec.contract_id,
                 message_bytes,
-            ),
-            None => discover_capability_contract_any(spec.rights, spec.contract_id, message_bytes),
+            )
+        } else {
+            match spec.peer_index {
+                Some(peer_index) => discover_capability_contract_index(
+                    peer_index,
+                    spec.rights,
+                    spec.contract_id,
+                    message_bytes,
+                ),
+                None => {
+                    discover_capability_contract_any(spec.rights, spec.contract_id, message_bytes)
+                }
+            }
         };
         result.map_err(|status| match status {
             logos_abi::DirectoryStatus::Stale => IpcStatus::Stale,
@@ -1376,6 +1504,18 @@ fn manager_syscall(number: usize, capability_raw: u64, length: usize) -> IpcStat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_capability_specs_keep_peer_policy_separate_from_handles() {
+        let spec = capability_contract_named(7, b"flow", 16, logos_abi::IpcRights::Send);
+        assert_eq!(spec.peer_index, None);
+        assert_eq!(spec.peer_name_len, 4);
+        assert_eq!(&spec.peer_name[..4], b"flow");
+
+        let any = capability_contract_any(7, 16, logos_abi::IpcRights::Send);
+        assert_eq!(any.peer_index, None);
+        assert_eq!(any.peer_name_len, 0);
+    }
 
     #[test]
     fn capability_response_matching_rejects_duplicates_and_wrong_shapes() {
