@@ -351,11 +351,14 @@ impl RuntimeEventRegistry {
     }
 
     pub fn signal(&mut self, owner: ServiceHandle, event: EventHandle) -> Result<(), EventError> {
-        let record = self.event_mut(event)?;
-        if record.owner != owner {
+        if self.event(event)?.owner != owner {
             return Err(EventError::Unauthorized);
         }
-        record.signaled.store(true, Ordering::Release);
+        self.event(event)?.signaled.store(true, Ordering::Release);
+        // Task-context signaling has the same wake contract as IRQ signaling.
+        // The waiter was published before the signal, so the existing event
+        // object is sufficient and no collection growth is needed here.
+        self.for_each_waiter(event, |set, _| wake_event_set(set));
         Ok(())
     }
 
@@ -634,11 +637,6 @@ impl RuntimeEventRegistry {
         self.events[index].value.as_ref().ok_or(EventError::Stale)
     }
 
-    fn event_mut(&mut self, handle: EventHandle) -> Result<&mut EventRecord, EventError> {
-        let index = self.event_index(handle)?;
-        self.events[index].value.as_mut().ok_or(EventError::Stale)
-    }
-
     fn set(&self, handle: EventSetHandle) -> Result<&EventSetRecord, EventError> {
         let index = self.set_index(handle)?;
         self.sets[index].value.as_ref().ok_or(EventError::Stale)
@@ -730,6 +728,19 @@ mod tests {
         assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Pending));
         events.signal_irq(event).unwrap();
         assert!(events.has_ready_event(owner, set).unwrap());
+    }
+
+    #[test]
+    fn task_signal_wakes_a_published_waiter() {
+        let owner = owner();
+        let mut events = RuntimeEventRegistry::new();
+        let event = events.create_event(owner).unwrap();
+        let set = events.create_set(owner).unwrap();
+        events.add(owner, set, event).unwrap();
+        assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Pending));
+        events.signal(owner, event).unwrap();
+        assert!(events.has_ready_event(owner, set).unwrap());
+        assert_eq!(events.wait_any(owner, set, 2, Some(10)), Ok(EventWait::Ready(event)));
     }
 
     #[test]
