@@ -136,33 +136,7 @@ pub const PROGRAM_EXIT_SYSCALL: usize = 14;
 pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
-
 pub const IPC_ENDPOINT_COUNT: usize = 32;
-pub const IPC_READ_EVENT_BASE: usize = 0;
-pub const IPC_WRITE_EVENT_BASE: usize = IPC_READ_EVENT_BASE + IPC_ENDPOINT_COUNT;
-// Keep the event mask within the u64 syscall contract. Endpoint 31 has no
-// distinct write-edge bit; its producer uses bounded retry when that queue is
-// full, while all readable edges retain distinct notifications.
-pub const KEYBOARD_READ_EVENT: usize = 63;
-pub const EVENT_COUNT: usize = KEYBOARD_READ_EVENT + 1;
-
-pub const fn ipc_read_event_mask(endpoint: usize) -> u64 {
-    if endpoint < IPC_ENDPOINT_COUNT { 1u64 << (IPC_READ_EVENT_BASE + endpoint) } else { 0 }
-}
-
-pub const fn ipc_write_event_mask(endpoint: usize) -> u64 {
-    if endpoint >= IPC_ENDPOINT_COUNT {
-        0
-    } else if endpoint + IPC_WRITE_EVENT_BASE < KEYBOARD_READ_EVENT {
-        1u64 << (IPC_WRITE_EVENT_BASE + endpoint)
-    } else {
-        0
-    }
-}
-
-pub const fn keyboard_read_event_mask() -> u64 {
-    1u64 << KEYBOARD_READ_EVENT
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -896,14 +870,6 @@ impl IpcEndpointId {
             Self::UserToStorage => ServiceId::Storage,
             Self::StorageToUser => ServiceId::User,
         }
-    }
-
-    pub const fn read_event_mask(self) -> u64 {
-        ipc_read_event_mask(self.index())
-    }
-
-    pub const fn write_event_mask(self) -> u64 {
-        ipc_write_event_mask(self.index())
     }
 }
 
@@ -2048,7 +2014,6 @@ mod tests {
     fn ipc_metadata_matches_the_fixed_service_graph() {
         assert_eq!(IpcEndpointId::TerminalToSession.producer(), ServiceId::Terminal);
         assert_eq!(IpcEndpointId::TerminalToSession.consumer(), ServiceId::Session);
-        assert_eq!(IpcEndpointId::TerminalToSession.write_event_mask(), ipc_write_event_mask(2));
         assert_eq!(ipc_message_type(0), Some(IpcMessageType::Input));
         assert_eq!(ipc_message_type(1), Some(IpcMessageType::Render));
         assert_eq!(ipc_message_type(5), Some(IpcMessageType::Bytes));
@@ -2207,24 +2172,6 @@ mod tests {
         let message = RenderMessage::empty(MessageKind::RenderCells);
         assert_eq!(ring.send(identity, message), Err(SharedSendError::Disconnected));
         assert_eq!(ring.receive(identity), Err(SharedReceiveError::Disconnected));
-    }
-
-    #[test]
-    fn event_masks_are_fixed_and_disjoint() {
-        let mut all = 0;
-        for endpoint in 0..IPC_ENDPOINT_COUNT {
-            let read = ipc_read_event_mask(endpoint);
-            let write = ipc_write_event_mask(endpoint);
-            assert_eq!(all & read, 0);
-            all |= read;
-            assert_eq!(all & write, 0);
-            all |= write;
-        }
-        let keyboard = keyboard_read_event_mask();
-        assert_eq!(all & keyboard, 0);
-        all |= keyboard;
-        assert_eq!(EVENT_COUNT, 64);
-        assert_eq!(all.count_ones(), EVENT_COUNT as u32);
     }
 
     #[test]

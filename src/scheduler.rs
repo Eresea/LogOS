@@ -312,12 +312,7 @@ impl Scheduler {
         mask: u64,
         deadline: u64,
     ) -> Option<bool> {
-        let valid_mask = if logos_abi::EVENT_COUNT == 64 {
-            u64::MAX
-        } else {
-            (1u64 << logos_abi::EVENT_COUNT) - 1
-        };
-        if mask & !valid_mask != 0 || (mask == 0 && deadline == NO_DEADLINE) {
+        if mask == 0 && deadline == NO_DEADLINE {
             return None;
         }
         let slot = self.tasks.get(handle.slot as usize)?;
@@ -375,12 +370,6 @@ impl Scheduler {
     /// check-then-sleep race without an allocator or lock.
     #[allow(dead_code)]
     pub(crate) fn signal_events(&self, mask: u64) -> usize {
-        let valid_mask = if logos_abi::EVENT_COUNT == 64 {
-            u64::MAX
-        } else {
-            (1u64 << logos_abi::EVENT_COUNT) - 1
-        };
-        let mask = mask & valid_mask;
         if mask == 0 {
             return 0;
         }
@@ -846,6 +835,11 @@ pub static SCHEDULER: Scheduler = Scheduler::new();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const EVENT_READ_0: u64 = 1;
+    const EVENT_READ_3: u64 = 1 << 3;
+    const EVENT_WRITE_0: u64 = 1 << 32;
+    const EVENT_KEYBOARD: u64 = 1 << 63;
     use std::sync::Arc;
     use std::sync::Barrier;
     use std::thread;
@@ -888,7 +882,7 @@ mod tests {
     fn event_signal_before_wait_is_latched() {
         let scheduler = Scheduler::new();
         let handle = running(&scheduler);
-        let event = logos_abi::ipc_read_event_mask(0);
+        let event = EVENT_READ_0;
         assert_eq!(scheduler.signal_events(event), 0);
         assert_eq!(scheduler.wait_for_events(handle, event, 10), Some(false));
         assert_eq!(scheduler.state(handle), Some(TaskState::Running));
@@ -898,7 +892,7 @@ mod tests {
     fn event_wait_blocks_and_signal_wakes_receiver() {
         let scheduler = Scheduler::new();
         let handle = running(&scheduler);
-        let event = logos_abi::ipc_read_event_mask(0);
+        let event = EVENT_READ_0;
         assert_eq!(scheduler.wait_for_events(handle, event, 10), Some(true));
         assert!(scheduler.save_context(handle, 0x2100));
         assert!(scheduler.finish(handle, FinishState::TimedBlocked));
@@ -944,7 +938,7 @@ mod tests {
     fn event_signal_racing_with_block_claim_keeps_task_runnable() {
         let scheduler = Scheduler::new();
         let handle = running(&scheduler);
-        let event = logos_abi::ipc_write_event_mask(0);
+        let event = EVENT_WRITE_0;
         assert_eq!(scheduler.wait_for_events(handle, event, 0), Some(true));
         assert_eq!(scheduler.signal_events(event), 1);
         assert!(scheduler.save_context(handle, 0x2150));
@@ -956,11 +950,11 @@ mod tests {
     fn event_wait_accepts_a_bounded_wait_any_mask() {
         let scheduler = Scheduler::new();
         let handle = running(&scheduler);
-        let mask = logos_abi::ipc_read_event_mask(0) | logos_abi::ipc_read_event_mask(3);
+        let mask = EVENT_READ_0 | EVENT_READ_3;
         assert_eq!(scheduler.wait_for_events(handle, mask, 10), Some(true));
         assert!(scheduler.save_context(handle, 0x2180));
         assert!(scheduler.finish(handle, FinishState::TimedBlocked));
-        assert_eq!(scheduler.signal_events(logos_abi::ipc_read_event_mask(3)), 1);
+        assert_eq!(scheduler.signal_events(EVENT_READ_3), 1);
         assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
     }
 
@@ -968,7 +962,7 @@ mod tests {
     fn event_wait_timeout_clears_the_waiter() {
         let scheduler = Scheduler::new();
         let handle = running(&scheduler);
-        let event = logos_abi::keyboard_read_event_mask();
+        let event = EVENT_KEYBOARD;
         assert_eq!(scheduler.wait_for_events(handle, event, 20), Some(true));
         assert!(scheduler.save_context(handle, 0x21b0));
         assert!(scheduler.finish(handle, FinishState::TimedBlocked));
@@ -981,7 +975,7 @@ mod tests {
     fn reset_events_clears_wait_deadlines() {
         let scheduler = Scheduler::new();
         let handle = running(&scheduler);
-        let event = logos_abi::keyboard_read_event_mask();
+        let event = EVENT_KEYBOARD;
         assert_eq!(scheduler.wait_for_events(handle, event, 20), Some(true));
         assert!(scheduler.save_context(handle, 0x21d0));
         assert!(scheduler.finish(handle, FinishState::TimedBlocked));

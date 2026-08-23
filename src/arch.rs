@@ -1824,12 +1824,11 @@ pub(crate) fn prepare_service_event_set_wait(
     Some(should_block)
 }
 
-#[cfg_attr(not(feature = "qemu-proof"), allow(dead_code))]
-pub(crate) fn signal_events(mask: u64) -> usize {
+#[cfg(feature = "qemu-proof")]
+pub(crate) fn signal_event_object_raw(object: u64) -> usize {
     let previous_wakes = SCHEDULER.event_wakes();
-    let woken = SCHEDULER.signal_events(mask);
+    let woken = SCHEDULER.signal_event_object(object);
     if SCHEDULER.event_wakes() != previous_wakes {
-        #[cfg(feature = "qemu-proof")]
         crate::proof::event_wake_ipi_sent();
         notify_reschedule_cpus(current_cpu());
     }

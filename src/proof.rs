@@ -39,6 +39,7 @@ static BACKPRESSURE_HANDLE: AtomicU64 = AtomicU64::new(0);
 static BACKPRESSURE_FULL: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_BLOCKED: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_WAKE: AtomicBool = AtomicBool::new(false);
+const BACKPRESSURE_EVENT_OBJECT: u64 = 0x4250_524f_4f46;
 static BACKPRESSURE_RESUMED: AtomicBool = AtomicBool::new(false);
 static RING3_CPU_MASK: AtomicUsize = AtomicUsize::new(0);
 static RING3_AP_REPORTED: AtomicBool = AtomicBool::new(false);
@@ -481,7 +482,6 @@ fn backpressure_sender_task() {
     }
     BACKPRESSURE_FULL.store(true, Ordering::Release);
     let handle = TaskHandle::from_raw(BACKPRESSURE_HANDLE.load(Ordering::Acquire));
-    let event = logos_abi::ipc_write_event_mask(0);
     loop {
         match PROBE_RING.send(identity, message) {
             Ok(_) => {
@@ -489,7 +489,9 @@ fn backpressure_sender_task() {
                 break;
             }
             Err(logos_abi::SharedSendError::Full) => {
-                if SCHEDULER.wait_for_events(handle, event, u64::MAX) == Some(true) {
+                if SCHEDULER.wait_for_event_object(handle, BACKPRESSURE_EVENT_OBJECT, u64::MAX)
+                    == Some(true)
+                {
                     BACKPRESSURE_BLOCKED.store(true, Ordering::Release);
                     crate::block_current();
                 }
@@ -504,7 +506,6 @@ fn backpressure_sender_task() {
 
 fn try_backpressure_wake() {
     let identity = logos_abi::MessageIdentity::new(1, 1);
-    let event = logos_abi::ipc_write_event_mask(0);
     let raw = BACKPRESSURE_HANDLE.load(Ordering::Acquire);
     if raw == 0
         || !BACKPRESSURE_BLOCKED.load(Ordering::Acquire)
@@ -518,7 +519,7 @@ fn try_backpressure_wake() {
     if notification != logos_abi::Notify::Notified {
         crate::arch_fatal(b"LogOS vNext: backpressure probe edge");
     }
-    crate::arch::signal_events(event);
+    crate::arch::signal_event_object_raw(BACKPRESSURE_EVENT_OBJECT);
     BACKPRESSURE_WAKE.store(true, Ordering::Release);
 }
 
