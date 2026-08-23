@@ -448,7 +448,6 @@ impl ServiceRuntime {
 
     pub fn configure_network(&mut self, config: logos_abi::NetworkConfig) {
         self.network_config = config;
-        self.manager.set_network_enabled(config.is_enabled());
     }
 
     fn runtime_service_handle(
@@ -607,7 +606,6 @@ impl ServiceRuntime {
     }
 
     fn start_inner(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
-        self.manager.set_network_enabled(self.network_config.is_enabled());
         let resources = crate::arch::boot_resources().ok_or(ServiceRuntimeError::Resources)?;
         if !self.frame_pool_ready {
             let metadata_reservation =
@@ -1260,15 +1258,13 @@ impl ServiceRuntime {
     }
 
     pub fn start_tasks(&mut self) -> Result<(), ServiceRuntimeError> {
-        if self.manager.state(ServiceId::Network.index()) == Some(logos_abi::ManagerState::Stopped)
-        {
+        if self.network_config.is_enabled() {
             self.queue_network_link();
         }
         self.initialize_dynamic_services()?;
         for service in crate::service_images::SERVICE_START_ORDER {
             if (service == ServiceId::Network || service == ServiceId::Fetch)
-                && self.manager.state(ServiceId::Network.index())
-                    == Some(logos_abi::ManagerState::Disabled)
+                && !self.network_config.is_enabled()
             {
                 continue;
             }
@@ -1276,7 +1272,6 @@ impl ServiceRuntime {
             self.startup.start(service).map_err(ServiceRuntimeError::Startup)?;
         }
         self.supervisor.clear_startup_grace();
-        self.manager.initialize_running();
         Ok(())
     }
 
@@ -1317,7 +1312,6 @@ impl ServiceRuntime {
         let now = crate::current_ticks();
         self.heartbeat_ticks[index].store(now, Ordering::Release);
         self.supervisor.register(service, now);
-        self.manager.mark_running(service);
         self.sync_dynamic_service_running(service);
         Ok(())
     }
@@ -1356,13 +1350,6 @@ impl ServiceRuntime {
     ) -> Option<crate::runtime_services::ServiceState> {
         let handle = self.runtime_service_handle(service).ok()?;
         self.dynamic_services.as_ref()?.state(handle).ok()
-    }
-
-    fn sync_dynamic_service_restarted(&mut self, service: ServiceId) {
-        let Ok(handle) = self.runtime_service_handle(service) else { return };
-        if let Some(registry) = self.dynamic_services.as_mut() {
-            let _ = registry.record_restart(handle);
-        }
     }
 
     fn abort_dynamic_service_lifecycle(
@@ -1436,7 +1423,6 @@ impl ServiceRuntime {
     fn request_stop_service(&mut self, service: ServiceId) -> Result<bool, ServiceRuntimeError> {
         let stop_requested = self.request_stop_task(service)?;
         if stop_requested {
-            self.manager.mark_stopping(service);
             self.sync_dynamic_service_stopping(service);
         }
         Ok(stop_requested)
@@ -1786,7 +1772,6 @@ impl ServiceRuntime {
         if crate::SCHEDULER.state(task).is_none() {
             self.tasks[index] = None;
             self.supervisor.unregister(service);
-            self.manager.mark_stopped(service);
             self.sync_dynamic_service_stopped(service);
             return Ok(false);
         }
@@ -3478,7 +3463,6 @@ impl ServiceRuntime {
                         service,
                     );
                     self.sync_dynamic_service_failed(service);
-                    self.manager.mark_failed(service);
                     decision.response.status = logos_abi::ManagerStatus::Capacity;
                     self.refresh_manager_response_record(&mut decision.response);
                 }
@@ -3497,7 +3481,6 @@ impl ServiceRuntime {
                         service,
                     );
                     self.sync_dynamic_service_failed(service);
-                    self.manager.mark_failed(service);
                     decision.response.status = logos_abi::ManagerStatus::Busy;
                     self.refresh_manager_response_record(&mut decision.response);
                 }
@@ -3540,21 +3523,17 @@ impl ServiceRuntime {
                         let mut admitted = 0;
                         for service in &services {
                             if self.request_stop_task(*service).is_err() {
-                                self.manager.mark_failed(*service);
                                 self.abort_dynamic_service_lifecycle(
                                     logos_abi::ManagerOperation::Restart,
                                     services[0],
                                 );
                                 decision.response.status = logos_abi::ManagerStatus::Busy;
-                                if admitted != 0 {
-                                    self.manager.mark_restart_stopping(&services[..admitted]);
-                                }
+                                if admitted != 0 {}
                                 break;
                             }
                             admitted += 1;
                         }
                         if admitted == services.len() {
-                            self.manager.mark_restart_stopping(&services);
                             self.refresh_manager_response_record(&mut decision.response);
                             self.pending_restart = Some(handles);
                         }
@@ -4217,7 +4196,6 @@ impl ServiceRuntime {
         if !self.supervisor.prepare_restart() {
             return Err(ServiceRuntimeError::RestartLimit);
         }
-        self.manager.prepare_graph_restart();
         self.stop_tasks(runtime_guard)?;
         self.retain_active_package_images()?;
         crate::arch::prepare_task_address_space(0);
@@ -4339,9 +4317,7 @@ impl ServiceRuntime {
                 self.supervisor.unregister(service);
                 if process_failed {
                     self.sync_dynamic_service_failed(service);
-                    self.manager.mark_failed(service);
                 } else {
-                    self.manager.mark_stopped(service);
                     self.sync_dynamic_service_stopped(service);
                 }
             }
@@ -4374,18 +4350,6 @@ impl ServiceRuntime {
             // full teardown is the single path that reclaims and rebuilds the
             // runtime topology with a new service epoch.
             self.restart(bundle, runtime_guard)?;
-            self.manager.restart_complete(&services);
-            for handle in &handles {
-                let Some(service) = self
-                    .dynamic_services
-                    .as_ref()
-                    .and_then(|registry| registry.service_index(*handle).ok())
-                    .and_then(ServiceId::from_index)
-                else {
-                    return Err(ServiceRuntimeError::StaleGeneration);
-                };
-                self.sync_dynamic_service_restarted(service);
-            }
             self.supervisor.clear_startup_grace();
             #[cfg(feature = "qemu-proof")]
             crate::proof::manager_restart_completed();
