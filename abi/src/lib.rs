@@ -739,6 +739,7 @@ impl ServiceId {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+/// Bootstrap-only policy entry. Runtime endpoints use `EndpointHandle`.
 pub enum IpcEndpointId {
     InputToTerminal = 0,
     TerminalToDisplay = 1,
@@ -2010,7 +2011,7 @@ mod tests {
     }
 
     #[test]
-    fn ipc_metadata_matches_the_fixed_service_graph() {
+    fn bootstrap_ipc_metadata_matches_the_initial_policy() {
         assert_eq!(IpcEndpointId::TerminalToSession.producer(), ServiceId::Terminal);
         assert_eq!(IpcEndpointId::TerminalToSession.consumer(), ServiceId::Session);
         assert_eq!(ipc_message_type(0), Some(IpcMessageType::Input));

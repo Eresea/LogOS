@@ -54,7 +54,7 @@ Terminal → Session → Flow → typed system API registry
 | Runtime operations | `runtime::Runtime` | one in-process fixed command/response mailbox over two generation-safe operation slots with explicit ready/waiting/complete/cancelled/timed-out states |
 | Service restart contract | `service_lifecycle::ServiceLifecycle` | fixed owner-held operation slots become explicitly `Restarted`; late completions are rejected and retries remain owner policy |
 | Health service | `health::HealthService` | one in-process fixed command/response mailbox for `Ping`; restart rejects the old completion and caller explicitly retries |
-| Terminal ABI | `logos-abi` | fixed semantic input, session stream, cell-diff render, endpoint identity, and service identities |
+| Terminal ABI | `logos-abi` | fixed semantic input, session stream, cell-diff render, bootstrap endpoint policy, and generation-safe service identities |
 | IPC mechanics | `runtime_ipc` + `service_ipc` + `scheduler::Scheduler` | v5 runtime handles, discovered capabilities, exact typed payload validation, queue backpressure, and event-set operations own all ordinary service traffic; hardware IRQ adapters signal pre-existing event objects without allocation |
 | Input service | `services/images/src/input` + `logos-input::InputDecoder` | consumes the Input-only PS/2 byte mapping, produces semantic key/text messages on the Input→Terminal ring, and owns modifier/layout state |
 | Terminal service | `services/images/src/terminal` + `logos-terminal::TerminalState` | ring-3 owns a bounded fixed 80×25 live surface, consumes Input and Session rings, and emits compact Session input and dirty-cell Display messages |
