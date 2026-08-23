@@ -2,16 +2,8 @@
 
 use logos_abi::{StorageOperation, StorageRequest, StorageResponse, StorageStatus};
 
-pub const STORAGE_REQUEST_ENDPOINT: usize = logos_abi::IpcEndpointId::StorageToCore as usize;
-pub const STORAGE_RESPONSE_ENDPOINT: usize = logos_abi::IpcEndpointId::CoreToStorage as usize;
-pub const STORAGE_MAP_REQUEST_ENDPOINT: usize = logos_abi::IpcEndpointId::StorageMapToCore as usize;
-pub const STORAGE_MAP_RESPONSE_ENDPOINT: usize =
-    logos_abi::IpcEndpointId::CoreToStorageMap as usize;
 pub const STORAGE_MAP_OPERATION: u8 = 1;
 pub const STORAGE_UNMAP_OPERATION: u8 = 2;
-pub const PACKAGE_REQUEST_ENDPOINT: usize = logos_abi::IpcEndpointId::CoreToStoragePackage as usize;
-pub const PACKAGE_RESPONSE_ENDPOINT: usize =
-    logos_abi::IpcEndpointId::StoragePackageToCore as usize;
 
 pub const STORAGE_CACHE_PAGES: u64 = 32;
 /// Map requests address cache slots, not physical frame numbers.
