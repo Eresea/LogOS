@@ -343,6 +343,10 @@ impl RuntimeEventRegistry {
     /// Nonallocating signal path for IRQ producers.
     pub fn signal_irq(&self, event: EventHandle) -> Result<(), EventError> {
         self.event(event)?.signaled.store(true, Ordering::Release);
+        // The event and waiter records already exist. Waking here keeps the
+        // producer path allocation-free while closing the signal-before-wait
+        // race for IPC and hardware producers alike.
+        self.for_each_waiter(event, |set, _| wake_event_set(set));
         Ok(())
     }
 
