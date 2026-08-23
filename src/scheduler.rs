@@ -176,7 +176,6 @@ pub struct Scheduler {
     tasks: [TaskSlot; MAX_TASKS],
     cpus: [CpuState; MAX_CPUS],
     event_pending: AtomicU64,
-    event_signal_mask: AtomicU64,
     event_wakes: AtomicU64,
 }
 
@@ -191,7 +190,6 @@ impl Scheduler {
             tasks: [const { TaskSlot::new() }; MAX_TASKS],
             cpus: [const { CpuState::new() }; MAX_CPUS],
             event_pending: AtomicU64::new(0),
-            event_signal_mask: AtomicU64::new(0),
             event_wakes: AtomicU64::new(0),
         }
     }
@@ -305,7 +303,7 @@ impl Scheduler {
     /// block; an already pending event returns `false` so the caller can
     /// recheck its condition without entering the scheduler. A zero mask is
     /// allowed only with a finite deadline for a timeout-only sleep.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn wait_for_events(
         &self,
         handle: TaskHandle,
@@ -368,13 +366,12 @@ impl Scheduler {
     /// Signal event edges from a producer or IRQ-safe adapter. Pending bits
     /// remain latched until a matching waiter consumes them, closing the
     /// check-then-sleep race without an allocator or lock.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn signal_events(&self, mask: u64) -> usize {
         if mask == 0 {
             return 0;
         }
         self.event_pending.fetch_or(mask, Ordering::AcqRel);
-        self.event_signal_mask.fetch_or(mask, Ordering::AcqRel);
         let mut woken = 0;
         for (index, slot) in self.tasks.iter().enumerate() {
             if slot.wait_object.load(Ordering::Acquire) != 0 {
@@ -437,11 +434,6 @@ impl Scheduler {
             slot.wait_object.store(0, Ordering::Release);
             slot.wake_deadline.store(NO_DEADLINE, Ordering::Release);
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn event_signal_mask(&self) -> u64 {
-        self.event_signal_mask.load(Ordering::Acquire)
     }
 
     #[allow(dead_code)]
