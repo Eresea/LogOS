@@ -630,7 +630,7 @@ impl ServiceRuntime {
     }
 
     fn initialize_dynamic_ipc(&mut self) -> Result<(), ServiceRuntimeError> {
-        let generation = (self.service_epoch as u32).max(1);
+        let generation = service_handle.generation();
         let mut registry = RuntimeIpcRegistry::new_with_generation_and_budget(
             generation,
             self.frame_pool.available(),
@@ -1218,8 +1218,7 @@ impl ServiceRuntime {
             abi_version: logos_abi::RUNTIME_ABI_VERSION,
             flags: 0,
             service_epoch: self.service_epoch,
-            service: logos_abi::ServiceHandle::new(index as u32, generation)
-                .ok_or(ServiceRuntimeError::Resources)?,
+            service: service_handle,
             control,
             directory,
             heap,
