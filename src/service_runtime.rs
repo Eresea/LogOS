@@ -2263,13 +2263,13 @@ impl ServiceRuntime {
         capability_raw: u64,
         length: usize,
     ) -> crate::service_ipc::IpcOutcome {
-        let Some(service) = self.service_for_process(process) else {
+        let Some(caller) = self.service_handle_for_process(process) else {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Unauthorized,
                 notified: false,
             };
         };
-        if self.dynamic_service_state(service)
+        if self.dynamic_services.as_ref().and_then(|registry| registry.state(caller).ok())
             != Some(crate::runtime_services::ServiceState::Running)
         {
             return crate::service_ipc::IpcOutcome {
@@ -2291,15 +2291,7 @@ impl ServiceRuntime {
                 return crate::service_ipc::IpcOutcome { status, notified: false };
             }
         };
-        let caller = match self.runtime_service_handle(service) {
-            Ok(caller) => caller,
-            Err(_) => {
-                return crate::service_ipc::IpcOutcome {
-                    status: logos_abi::IpcStatus::Stale,
-                    notified: false,
-                };
-            }
-        };
+        let service = builtin_service_for_handle(&self.service_handles, caller);
         let (endpoint, expected_bytes) = match self
             .dynamic_ipc
             .as_ref()
@@ -2322,6 +2314,12 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
+            let Some(service) = service else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Unauthorized,
+                    notified: false,
+                };
+            };
             return self.dynamic_device_request(service, caller, dynamic_capability);
         }
         let disabled_flow_network = !self.network_config.is_enabled()
@@ -2338,7 +2336,7 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+            let Some(staging_frame) = self.staging_frame_for_process(process) else {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Unauthorized,
                     notified: false,
@@ -2348,7 +2346,7 @@ impl ServiceRuntime {
                 core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
             };
             #[cfg(feature = "storage-proof")]
-            if service == ServiceId::Flow
+            if service == Some(ServiceId::Flow)
                 && self.dynamic_contract_matches(
                     endpoint,
                     Some(ServiceId::Flow),
@@ -2365,6 +2363,12 @@ impl ServiceRuntime {
             };
         }
         if self.endpoint_requires_core_dispatch(endpoint) {
+            let Some(service) = service else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Unauthorized,
+                    notified: false,
+                };
+            };
             let status = self.dynamic_core_request(
                 service,
                 caller,
@@ -2382,13 +2386,13 @@ impl ServiceRuntime {
                 notified: false,
             };
         }
-        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+        let Some(staging_frame) = self.staging_frame_for_process(process) else {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Unauthorized,
                 notified: false,
             };
         };
-        if service == ServiceId::Network
+        if service == Some(ServiceId::Network)
             && self.dynamic_contract_matches(
                 endpoint,
                 Some(ServiceId::Network),
@@ -2467,7 +2471,7 @@ impl ServiceRuntime {
             };
             return crate::service_ipc::IpcOutcome { status, notified: false };
         }
-        if service == ServiceId::Flow
+        if service == Some(ServiceId::Flow)
             && self.dynamic_contract_matches(
                 endpoint,
                 Some(ServiceId::Flow),
@@ -2585,7 +2589,7 @@ impl ServiceRuntime {
                 notified: status == logos_abi::IpcStatus::Ok,
             };
         }
-        if service == ServiceId::Storage
+        if service == Some(ServiceId::Storage)
             && self.dynamic_contract_matches(
                 endpoint,
                 Some(ServiceId::Storage),
@@ -2744,7 +2748,7 @@ impl ServiceRuntime {
                 );
             }
             let status = self.queue_dynamic_core_response(
-                service,
+                ServiceId::Storage,
                 response_endpoint,
                 core::mem::size_of::<logos_abi::StorageMapResponse>(),
             );
@@ -2753,7 +2757,7 @@ impl ServiceRuntime {
                 notified: status == logos_abi::IpcStatus::Ok,
             };
         }
-        if service == ServiceId::Storage
+        if service == Some(ServiceId::Storage)
             && self.dynamic_contract_matches(
                 endpoint,
                 Some(ServiceId::Storage),
@@ -2907,7 +2911,7 @@ impl ServiceRuntime {
                 );
             }
             let status = self.queue_dynamic_core_response(
-                service,
+                ServiceId::Storage,
                 response_endpoint,
                 core::mem::size_of::<logos_abi::StorageResponse>(),
             );
@@ -2916,7 +2920,7 @@ impl ServiceRuntime {
                 notified: status == logos_abi::IpcStatus::Ok,
             };
         }
-        if service == ServiceId::Device
+        if service == Some(ServiceId::Device)
             && self.dynamic_contract_matches(
                 endpoint,
                 Some(ServiceId::Device),
@@ -2974,7 +2978,7 @@ impl ServiceRuntime {
                 notified: true,
             };
         }
-        if service == ServiceId::Storage
+        if service == Some(ServiceId::Storage)
             && self.dynamic_contract_matches(
                 endpoint,
                 Some(ServiceId::Storage),
@@ -3029,7 +3033,7 @@ impl ServiceRuntime {
                 notified: true,
             };
         }
-        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+        let Some(staging_frame) = self.staging_frame_for_process(process) else {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Unauthorized,
                 notified: false,
@@ -3039,7 +3043,7 @@ impl ServiceRuntime {
             core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
         };
         #[cfg(feature = "storage-proof")]
-        if service == ServiceId::Flow
+        if service == Some(ServiceId::Flow)
             && self.dynamic_contract_matches(
                 endpoint,
                 Some(ServiceId::Flow),
@@ -3058,13 +3062,13 @@ impl ServiceRuntime {
         process: ProcessHandle,
         capability_raw: u64,
     ) -> crate::service_ipc::IpcOutcome {
-        let Some(service) = self.service_for_process(process) else {
+        let Some(caller) = self.service_handle_for_process(process) else {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Unauthorized,
                 notified: false,
             };
         };
-        if self.dynamic_service_state(service)
+        if self.dynamic_services.as_ref().and_then(|registry| registry.state(caller).ok())
             != Some(crate::runtime_services::ServiceState::Running)
         {
             return crate::service_ipc::IpcOutcome {
@@ -3085,15 +3089,8 @@ impl ServiceRuntime {
             };
         };
         {
-            let caller = match self.runtime_service_handle(service) {
-                Ok(caller) => caller,
-                Err(_) => {
-                    return crate::service_ipc::IpcOutcome {
-                        status: logos_abi::IpcStatus::Stale,
-                        notified: false,
-                    };
-                }
-            };
+            #[cfg(any(feature = "qemu-proof", feature = "storage-proof"))]
+            let service = builtin_service_for_handle(&self.service_handles, caller);
             let (endpoint, expected_bytes) = match self
                 .dynamic_ipc
                 .as_ref()
@@ -3114,7 +3111,7 @@ impl ServiceRuntime {
                 Some(ServiceId::Device),
                 logos_abi::IPC_CONTRACT_DEVICE_RESPONSE,
             ) {
-                let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+                let Some(staging_frame) = self.staging_frame_for_process(process) else {
                     return crate::service_ipc::IpcOutcome {
                         status: logos_abi::IpcStatus::Unauthorized,
                         notified: false,
@@ -3138,7 +3135,7 @@ impl ServiceRuntime {
                 Some(ServiceId::Storage),
                 logos_abi::IPC_CONTRACT_STORAGE_RESPONSE,
             ) {
-                let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+                let Some(staging_frame) = self.staging_frame_for_process(process) else {
                     return crate::service_ipc::IpcOutcome {
                         status: logos_abi::IpcStatus::Unauthorized,
                         notified: false,
@@ -3162,7 +3159,7 @@ impl ServiceRuntime {
                 Some(ServiceId::Storage),
                 logos_abi::IPC_CONTRACT_STORAGE_MAP_RESPONSE,
             ) {
-                let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+                let Some(staging_frame) = self.staging_frame_for_process(process) else {
                     return crate::service_ipc::IpcOutcome {
                         status: logos_abi::IpcStatus::Unauthorized,
                         notified: false,
@@ -3186,7 +3183,7 @@ impl ServiceRuntime {
                 Some(ServiceId::Storage),
                 logos_abi::IPC_CONTRACT_PACKAGE_REQUEST,
             ) {
-                let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+                let Some(staging_frame) = self.staging_frame_for_process(process) else {
                     return crate::service_ipc::IpcOutcome {
                         status: logos_abi::IpcStatus::Unauthorized,
                         notified: false,
@@ -3210,7 +3207,7 @@ impl ServiceRuntime {
                 Some(ServiceId::Network),
                 logos_abi::IPC_CONTRACT_PACKET,
             ) {
-                let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+                let Some(staging_frame) = self.staging_frame_for_process(process) else {
                     return crate::service_ipc::IpcOutcome {
                         status: logos_abi::IpcStatus::Unauthorized,
                         notified: false,
@@ -3253,7 +3250,7 @@ impl ServiceRuntime {
                     );
                 }
                 let status = self.queue_dynamic_core_response(
-                    service,
+                    ServiceId::Network,
                     endpoint,
                     core::mem::size_of::<logos_abi::NetworkPacketDescriptor>(),
                 );
@@ -3274,7 +3271,7 @@ impl ServiceRuntime {
                 };
             }
             {
-                let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+                let Some(staging_frame) = self.staging_frame_for_process(process) else {
                     return crate::service_ipc::IpcOutcome {
                         status: logos_abi::IpcStatus::Unauthorized,
                         notified: false,
@@ -3289,7 +3286,7 @@ impl ServiceRuntime {
                 let status = self.receive_dynamic(caller, dynamic_capability, bytes);
                 if status == logos_abi::IpcStatus::Ok {
                     #[cfg(feature = "qemu-proof")]
-                    if service == ServiceId::Flow
+                    if service == Some(ServiceId::Flow)
                         && self.dynamic_contract_matches(
                             endpoint,
                             Some(ServiceId::Network),
@@ -3337,7 +3334,7 @@ impl ServiceRuntime {
                         }
                     }
                     #[cfg(feature = "storage-proof")]
-                    if service == ServiceId::Flow
+                    if service == Some(ServiceId::Flow)
                         && self.dynamic_contract_matches(
                             endpoint,
                             Some(ServiceId::Storage),
@@ -4133,13 +4130,20 @@ impl ServiceRuntime {
         builtin_service_for_handle(&self.service_handles, handle)
     }
 
-    fn service_handle_for_process(&self, process: ProcessHandle) -> Option<ServiceHandle> {
+    fn service_slot_for_process(&self, process: ProcessHandle) -> Option<usize> {
         self.launches.iter().enumerate().find_map(|(index, launch)| {
-            launch
-                .is_some_and(|(current, _)| current == process)
-                .then(|| self.service_handles.get(index).copied())
-                .flatten()
+            launch.is_some_and(|(current, _)| current == process).then_some(index)
         })
+    }
+
+    fn service_handle_for_process(&self, process: ProcessHandle) -> Option<ServiceHandle> {
+        self.service_slot_for_process(process)
+            .and_then(|index| self.service_handles.get(index).copied())
+    }
+
+    fn staging_frame_for_process(&self, process: ProcessHandle) -> Option<FrameAddress> {
+        self.service_slot_for_process(process)
+            .and_then(|index| self.ipc_staging_frames.get(index).copied().flatten())
     }
 
     #[cfg(feature = "qemu-proof")]
