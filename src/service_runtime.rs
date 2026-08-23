@@ -1167,6 +1167,11 @@ impl ServiceRuntime {
         let Some(service) = self.service_for_process(process) else {
             return logos_abi::IpcStatus::Unauthorized;
         };
+        if self.dynamic_service_state(service)
+            != Some(crate::runtime_services::ServiceState::Running)
+        {
+            return logos_abi::IpcStatus::Stale;
+        }
         let expected = self.bootstrap_heap[service.index()];
         if !expected.is_valid() {
             return logos_abi::IpcStatus::Stale;
@@ -1223,6 +1228,11 @@ impl ServiceRuntime {
         let Some(service) = self.service_for_process(process) else {
             return logos_abi::IpcStatus::Unauthorized;
         };
+        if self.dynamic_service_state(service)
+            != Some(crate::runtime_services::ServiceState::Running)
+        {
+            return logos_abi::IpcStatus::Stale;
+        }
         let expected = self.bootstrap_heap[service.index()];
         if !expected.is_valid() {
             return logos_abi::IpcStatus::Stale;
@@ -3195,6 +3205,11 @@ impl ServiceRuntime {
         let Some(service) = self.service_for_process(process) else {
             return logos_abi::DirectoryStatus::Unauthorized;
         };
+        if self.dynamic_service_state(service)
+            != Some(crate::runtime_services::ServiceState::Running)
+        {
+            return logos_abi::DirectoryStatus::Stale;
+        }
         if length != core::mem::size_of::<logos_abi::DirectoryRequest>() {
             return logos_abi::DirectoryStatus::Malformed;
         }
@@ -3287,6 +3302,11 @@ impl ServiceRuntime {
         let Some(service) = self.service_for_process(process) else {
             return logos_abi::IpcStatus::Unauthorized;
         };
+        if self.dynamic_service_state(service)
+            != Some(crate::runtime_services::ServiceState::Running)
+        {
+            return logos_abi::IpcStatus::Stale;
+        }
         let control = self.bootstrap_control[service.index()];
         if !control.is_valid() {
             return logos_abi::IpcStatus::Stale;
