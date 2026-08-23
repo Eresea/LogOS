@@ -19,75 +19,75 @@ use logos_abi::{
     UserResponse, UserStatus,
 };
 
-const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Session.index() as u32,
+    b"session",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Session.index() as u32,
+    b"session",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const STORAGE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const STORAGE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Storage.index() as u32,
+    b"storage",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const STORAGE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const STORAGE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Storage.index() as u32,
+    b"storage",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const NETWORK_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const NETWORK_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Network.index() as u32,
+    b"network",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const NETWORK_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const NETWORK_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Network.index() as u32,
+    b"network",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const FETCH_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const FETCH_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Fetch.index() as u32,
+    b"fetch",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const FETCH_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const FETCH_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Fetch.index() as u32,
+    b"fetch",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const DEVICE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const DEVICE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_DEVICE_REQUEST,
-    logos_abi::ServiceId::Device.index() as u32,
+    b"device",
     mem::size_of::<DeviceRequest>(),
     logos_abi::IpcRights::Send,
 );
-const DEVICE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const DEVICE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_DEVICE_RESPONSE,
-    logos_abi::ServiceId::Device.index() as u32,
+    b"device",
     mem::size_of::<DeviceResponse>(),
     logos_abi::IpcRights::Receive,
 );
-const USER_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const USER_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::User.index() as u32,
+    b"user",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const USER_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract(
+const USER_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::User.index() as u32,
+    b"user",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
