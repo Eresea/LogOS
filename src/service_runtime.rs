@@ -4566,28 +4566,33 @@ impl ServiceRuntime {
             self.programs[slot].task = None;
             self.programs[slot].manager_slot = u8::MAX;
         }
-        for spec in SERVICE_IMAGES {
-            let service = spec.service();
-            let index = service.index();
+        let service_slots = self.service_handles.len();
+        for index in 0..service_slots {
+            let Some(handle) = self.service_handles.get(index).copied() else {
+                continue;
+            };
             let Some(task) = self.tasks[index] else {
                 continue;
             };
             if crate::SCHEDULER.state(task) == Some(crate::TaskState::Completed) {
                 let process_failed = self
-                    .launch(service)
+                    .launches
+                    .get(index)
+                    .copied()
+                    .flatten()
                     .and_then(|(process, _)| self.processes.state(process))
                     .is_none_or(|state| !matches!(state, crate::process::ProcessState::Running));
                 if !crate::SCHEDULER.reclaim_completed(task) {
                     return Err(ServiceRuntimeError::TaskStop);
                 }
                 self.tasks[index] = None;
-                if let Ok(handle) = self.runtime_service_handle(service) {
-                    self.supervisor.unregister(handle);
-                }
-                if process_failed {
-                    self.sync_dynamic_service_failed(service);
-                } else {
-                    self.sync_dynamic_service_stopped(service);
+                self.supervisor.unregister(handle);
+                if let Some(registry) = self.dynamic_services.as_mut() {
+                    if process_failed {
+                        let _ = registry.fail(handle);
+                    } else {
+                        let _ = registry.stop(handle);
+                    }
                 }
             }
         }
