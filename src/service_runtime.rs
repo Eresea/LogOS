@@ -467,6 +467,81 @@ impl ServiceRuntime {
         handle.ok_or(ServiceRuntimeError::StaleGeneration)
     }
 
+    pub(crate) fn ensure_service_runtime_slot(
+        &mut self,
+        handle: ServiceHandle,
+    ) -> Result<usize, ServiceRuntimeError> {
+        if !handle.is_valid() {
+            return Err(ServiceRuntimeError::StaleGeneration);
+        }
+        let index = usize::try_from(handle.index()).map_err(|_| ServiceRuntimeError::Resources)?;
+        if let Some(existing) = self.service_handles.get(index) {
+            return (*existing == handle)
+                .then_some(index)
+                .ok_or(ServiceRuntimeError::StaleGeneration);
+        }
+        if index != self.service_handles.len() {
+            return Err(ServiceRuntimeError::Resources);
+        }
+        let add_resources = self.images.len() == self.service_handles.len();
+        let resources_consistent = self.tables.len() == self.images.len()
+            && self.table_ready.len() == self.images.len()
+            && self.launches.len() == self.images.len()
+            && self.ipc_staging_frames.len() == self.images.len()
+            && self.service_bootstrap_frames.len() == self.images.len()
+            && self.bootstrap_control.len() == self.images.len()
+            && self.bootstrap_directory.len() == self.images.len()
+            && self.bootstrap_heap.len() == self.images.len()
+            && self.service_heaps.len() == self.images.len()
+            && self.tasks.len() == self.images.len()
+            && self.prepared_packages.len() == self.images.len()
+            && self.active_packages.len() == self.images.len()
+            && self.suppressed_heartbeats.len() == self.images.len();
+        if !resources_consistent {
+            return Err(ServiceRuntimeError::Resources);
+        }
+        self.service_handles.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+        if add_resources {
+            self.images.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.tables.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.table_ready.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.launches.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.ipc_staging_frames.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.service_bootstrap_frames
+                .try_reserve(1)
+                .map_err(|_| ServiceRuntimeError::Resources)?;
+            self.bootstrap_control.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.bootstrap_directory.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.bootstrap_heap.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.service_heaps.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.tasks.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.prepared_packages.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.active_packages.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.suppressed_heartbeats
+                .try_reserve(1)
+                .map_err(|_| ServiceRuntimeError::Resources)?;
+        }
+
+        self.service_handles.push(handle);
+        if add_resources {
+            self.images.push(LoadedImage::empty());
+            self.tables.push(MaybeUninit::uninit());
+            self.table_ready.push(false);
+            self.launches.push(None);
+            self.ipc_staging_frames.push(None);
+            self.service_bootstrap_frames.push(0);
+            self.bootstrap_control.push(logos_abi::CapabilityHandle::EMPTY);
+            self.bootstrap_directory.push(logos_abi::CapabilityHandle::EMPTY);
+            self.bootstrap_heap.push(logos_abi::CapabilityHandle::EMPTY);
+            self.service_heaps.push(ServiceHeapState::empty());
+            self.tasks.push(None);
+            self.prepared_packages.push(None);
+            self.active_packages.push(None);
+            self.suppressed_heartbeats.push(AtomicBool::new(false));
+        }
+        Ok(index)
+    }
+
     fn initialize_dynamic_services(&mut self) -> Result<(), ServiceRuntimeError> {
         let mut registry = crate::runtime_services::RuntimeServiceRegistry::new_with_generation(
             (self.service_epoch as u32).max(1),
@@ -525,7 +600,10 @@ impl ServiceRuntime {
             }
             registry.start(handles[service.index()]).map_err(|_| ServiceRuntimeError::Resources)?;
         }
-        self.service_handles = handles;
+        self.service_handles.clear();
+        for handle in handles {
+            self.ensure_service_runtime_slot(handle)?;
+        }
         self.dynamic_services = Some(registry);
         Ok(())
     }
