@@ -3642,6 +3642,11 @@ impl ServiceRuntime {
         let Some(service) = self.service_for_process(process) else {
             return logos_abi::EventStatus::Unauthorized;
         };
+        if self.dynamic_service_state(service)
+            != Some(crate::runtime_services::ServiceState::Running)
+        {
+            return logos_abi::EventStatus::Stale;
+        }
         if length != core::mem::size_of::<logos_abi::EventRequest>() {
             return logos_abi::EventStatus::Malformed;
         }
