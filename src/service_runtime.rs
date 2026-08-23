@@ -1555,6 +1555,16 @@ impl ServiceRuntime {
         }
     }
 
+    fn abort_dynamic_service_lifecycle_handle(
+        &mut self,
+        operation: logos_abi::ManagerOperation,
+        handle: ServiceHandle,
+    ) {
+        if let Some(registry) = self.dynamic_services.as_mut() {
+            let _ = registry.abort_lifecycle(operation, handle);
+        }
+    }
+
     fn uses_package_image(&self, service: ServiceId) -> bool {
         self.dynamic_services.as_ref().and_then(|registry| {
             registry.image_source(self.runtime_service_handle(service).ok()?).ok()
@@ -3653,46 +3663,13 @@ impl ServiceRuntime {
             };
             let action = match action {
                 crate::runtime_services::RuntimeLifecycleAction::Start(handle) => {
-                    builtin_service_for_handle(&self.service_handles, handle)
-                        .map(ManagerAction::Start)
-                        .or_else(|| {
-                            let _ =
-                                registry.abort_lifecycle_members(core::slice::from_ref(&handle));
-                            None
-                        })
+                    Some(ManagerAction::Start(handle))
                 }
                 crate::runtime_services::RuntimeLifecycleAction::Stop(handle) => {
-                    builtin_service_for_handle(&self.service_handles, handle)
-                        .map(ManagerAction::Stop)
-                        .or_else(|| {
-                            let _ =
-                                registry.abort_lifecycle_members(core::slice::from_ref(&handle));
-                            None
-                        })
+                    Some(ManagerAction::Stop(handle))
                 }
                 crate::runtime_services::RuntimeLifecycleAction::Restart(handles) => {
-                    let mut services = Vec::new();
-                    if services.try_reserve(handles.len()).is_err() {
-                        let _ = registry.abort_lifecycle_members(&handles);
-                        None
-                    } else {
-                        let mut valid = true;
-                        for handle in &handles {
-                            let Some(service) =
-                                builtin_service_for_handle(&self.service_handles, *handle)
-                            else {
-                                valid = false;
-                                break;
-                            };
-                            services.push(service);
-                        }
-                        if valid {
-                            Some(ManagerAction::Restart(services))
-                        } else {
-                            let _ = registry.abort_lifecycle_members(&handles);
-                            None
-                        }
-                    }
+                    Some(ManagerAction::Restart(handles))
                 }
             };
             let Some(action) = action else {
@@ -3725,7 +3702,18 @@ impl ServiceRuntime {
         };
         match decision.action {
             ManagerAction::None => {}
-            ManagerAction::Start(service) => {
+            ManagerAction::Start(handle) => {
+                let Some(service) = builtin_service_for_handle(&self.service_handles, handle)
+                else {
+                    self.abort_dynamic_service_lifecycle_handle(
+                        logos_abi::ManagerOperation::Start,
+                        handle,
+                    );
+                    decision.response.status = logos_abi::ManagerStatus::Unsupported;
+                    self.refresh_manager_response_record(&mut decision.response);
+                    self.write_manager_response(staging_frame, decision.response);
+                    return logos_abi::IpcStatus::Ok;
+                };
                 if self.uses_package_image(service) {
                     if self.pending_restart.is_some() {
                         self.abort_dynamic_service_lifecycle(
@@ -3758,23 +3746,61 @@ impl ServiceRuntime {
                     self.refresh_manager_response_record(&mut decision.response);
                 }
             }
-            ManagerAction::Stop(service) => match self.request_stop_service(service) {
-                Ok(true) => {}
-                Ok(false) => {
-                    decision.response.status = logos_abi::ManagerStatus::Ok;
-                    self.refresh_manager_response_record(&mut decision.response);
-                }
-                Err(_) => {
-                    self.abort_dynamic_service_lifecycle(
+            ManagerAction::Stop(handle) => {
+                let Some(service) = builtin_service_for_handle(&self.service_handles, handle)
+                else {
+                    self.abort_dynamic_service_lifecycle_handle(
                         logos_abi::ManagerOperation::Stop,
-                        service,
+                        handle,
                     );
-                    self.sync_dynamic_service_failed(service);
-                    decision.response.status = logos_abi::ManagerStatus::Busy;
+                    decision.response.status = logos_abi::ManagerStatus::Unsupported;
                     self.refresh_manager_response_record(&mut decision.response);
+                    self.write_manager_response(staging_frame, decision.response);
+                    return logos_abi::IpcStatus::Ok;
+                };
+                match self.request_stop_service(service) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        decision.response.status = logos_abi::ManagerStatus::Ok;
+                        self.refresh_manager_response_record(&mut decision.response);
+                    }
+                    Err(_) => {
+                        self.abort_dynamic_service_lifecycle(
+                            logos_abi::ManagerOperation::Stop,
+                            service,
+                        );
+                        self.sync_dynamic_service_failed(service);
+                        decision.response.status = logos_abi::ManagerStatus::Busy;
+                        self.refresh_manager_response_record(&mut decision.response);
+                    }
                 }
-            },
-            ManagerAction::Restart(services) => {
+            }
+            ManagerAction::Restart(handles) => {
+                let mut services = Vec::new();
+                if services.try_reserve(handles.len()).is_err() {
+                    self.abort_dynamic_service_lifecycle_handle(
+                        logos_abi::ManagerOperation::Restart,
+                        handles[0],
+                    );
+                    decision.response.status = logos_abi::ManagerStatus::Capacity;
+                    self.refresh_manager_response_record(&mut decision.response);
+                    self.write_manager_response(staging_frame, decision.response);
+                    return logos_abi::IpcStatus::Ok;
+                }
+                for handle in &handles {
+                    let Some(service) = builtin_service_for_handle(&self.service_handles, *handle)
+                    else {
+                        self.abort_dynamic_service_lifecycle_handle(
+                            logos_abi::ManagerOperation::Restart,
+                            handles[0],
+                        );
+                        decision.response.status = logos_abi::ManagerStatus::Unsupported;
+                        self.refresh_manager_response_record(&mut decision.response);
+                        self.write_manager_response(staging_frame, decision.response);
+                        return logos_abi::IpcStatus::Ok;
+                    };
+                    services.push(service);
+                }
                 if self.pending_restart.is_some()
                     || services.iter().any(|service| {
                         self.tasks[service.index()]
@@ -4008,6 +4034,19 @@ impl ServiceRuntime {
         let status = registry.manager_request(request);
         if status.status == logos_abi::ManagerStatus::Ok {
             response.record = status.record;
+        }
+    }
+
+    fn write_manager_response(
+        &self,
+        staging_frame: FrameAddress,
+        response: logos_abi::ManagerResponse,
+    ) {
+        unsafe {
+            core::ptr::write_unaligned(
+                staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
+                response,
+            );
         }
     }
 

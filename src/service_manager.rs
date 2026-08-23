@@ -12,9 +12,9 @@ pub const MAX_PROGRAM_SLOTS: usize = 8;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ManagerAction {
     None,
-    Start(logos_abi::ServiceId),
-    Stop(logos_abi::ServiceId),
-    Restart(Vec<logos_abi::ServiceId>),
+    Start(logos_abi::ServiceHandle),
+    Stop(logos_abi::ServiceHandle),
+    Restart(Vec<logos_abi::ServiceHandle>),
     ProgramStart(usize),
     ProgramStop(usize),
 }
