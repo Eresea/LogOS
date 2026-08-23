@@ -28,7 +28,7 @@ Terminal → Session → Flow → typed system API registry
 | Boot resources | `boot_resources` | copies bounded memory-map, GOP framebuffer, and PS/2 identities before UEFI handles are discarded |
 | Physical frames | `frame_pool` + `memory` | copied UEFI descriptors normalize into sorted disjoint runs; ABI v5 reserves metadata pages before `ExitBootServices`, then sizes frame records from the discovered map with generation-safe leases, owner accounting, reclaim, and explicit exhaustion |
 | Memory subsystem contracts | `memory` | one production allocator owns physical frames; Core binds a `KernelGlobalAllocator` after handoff, charged to `OwnerId::KERNEL`, with bounded reclaim and fatal unrecoverable OOM; service heaps use shared read-only allocator code, private metadata, kernel-mediated growth, quotas, and bounded reclaim; interrupt paths remain explicitly nonblocking |
-| Control plane | `process` + `user_mode` | admission-time fixed service mappings plus bounded Wait/Notify, IpcSend, IpcReceive, and ServiceManager calls with process-bound capability checks |
+| Control plane | `process` + `user_mode` | admission-time service mappings plus bounded event-set, IpcSend, IpcReceive, and ServiceManager calls with process-bound handle checks |
 | ELF page admission | `loader` | maps validated segments and fixed user stacks to owned frames, then populates them through a page-local sink with bounded reclamation; Storage receives a fixed 128-page stack for bounded snapshot decoding and transaction state |
 | User page tables | `page_table` | builds four-level user mappings with fixed root/intermediate-frame bounds, W^X/NX flags, conflict rejection, and grouped reclamation |
 | Service address spaces | `service_runtime` | loads ten retained ELFs into owned frames and retains one isolated root per service before scheduler admission |
@@ -56,7 +56,7 @@ Terminal → Session → Flow → typed system API registry
 | Service restart contract | `service_lifecycle::ServiceLifecycle` | fixed owner-held operation slots become explicitly `Restarted`; late completions are rejected and retries remain owner policy |
 | Health service | `health::HealthService` | one in-process fixed command/response mailbox for `Ping`; restart rejects the old completion and caller explicitly retries |
 | Terminal ABI | `logos-abi` | fixed semantic input, session stream, cell-diff render, endpoint identity, and service identities |
-| IPC mechanics | `runtime_ipc` + `service_ipc` + `scheduler::Scheduler` | v5 runtime handles, directory discovery, capability validation, queue backpressure, and event-set operations are live; legacy queue transport and mask waits remain transitional for built-in service traffic |
+| IPC mechanics | `runtime_ipc` + `service_ipc` + `scheduler::Scheduler` | v5 runtime handles, discovered capabilities, exact typed payload validation, queue backpressure, and event-set operations own ordinary service traffic; hardware IRQ adapters retain internal nonallocating signal edges |
 | Input service | `services/images/src/input` + `logos-input::InputDecoder` | consumes the Input-only PS/2 byte mapping, produces semantic key/text messages on the Input→Terminal ring, and owns modifier/layout state |
 | Terminal service | `services/images/src/terminal` + `logos-terminal::TerminalState` | ring-3 owns a bounded fixed 80×25 live surface, consumes Input and Session rings, and emits compact Session input and dirty-cell Display messages |
 | Display service | `services/images/src/display` + `logos-display` | ring-3 validates cell diffs and endpoint generations, then rasterizes dirty cells through embedded glyphs into its mapped GOP framebuffer |
@@ -73,7 +73,7 @@ Terminal → Session → Flow → typed system API registry
 | Service ELF packaging | `services/images` + `scripts/build-services.ps1` | ten independent `x86_64-unknown-none` ELF artifacts, each bounded to 512 KiB and staged under the fixed ESP paths |
 | Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all ten staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
 | Service supervisor | `supervisor::LiveSupervisor` + `service_runtime` | live heartbeat polling, graph-wide quiesce, generation-bumped IPC rebuild, bounded process/page-table/frame reclamation, and restart limits |
-| Service manager | `runtime_services` + `service_manager` + `service_runtime` | dynamic records, generation-safe handles, allocated dependencies, opaque list cursors, and dynamic status discovery are live; lifecycle actions still use the bounded bootstrap manager during migration |
+| Service manager | `runtime_services` + `service_manager` + `service_runtime` | dynamic records, generation-safe handles, allocated dependencies, opaque list cursors, dynamic status/failure discovery, and service lifecycle admission are live; the fixed manager remains only for bounded program lifecycle and bootstrap image metadata |
 | Program lifecycle | `service_manager` + `service_runtime` + `process` + `scheduler` | eight fixed name-keyed program slots reuse the service manager ABI and Core resource owner; program ELF images receive only private code/data/stack mappings, Exit is the sole program syscall, and stop waits for scheduler completion before reclaiming process, page-table, and image frames |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
@@ -85,10 +85,11 @@ validated `UserLaunch`, and the scheduler publishes its entry, stack, root, and 
 before marking the task runnable. Hardware page-table construction, ring-3 entry, and safe live
 replacement are part of the service path.
 
-The ABI v5 dynamic-resource migration is staged. Core initializes runtime endpoint, capability,
-service, and event registries and proves directory, manager, and event-set operations in the UEFI
-proof. Built-in service payloads and legacy mask waits still use compatibility paths until queue
-transport, scheduler waits, and service lifecycle ownership are migrated together.
+The ABI v5 dynamic-resource migration is live for the built-in service runtime. Core initializes
+runtime endpoint, capability, service, and event registries; ordinary service traffic uses discovered
+handles, route-specific Core adapters resolve live endpoint records, and the scheduler publishes waits
+on event-set objects. Fixed bounds remain only where they describe typed payloads, hardware adapters,
+process/task admission, or the separately scoped program lifecycle.
 
 AP startup is deliberately narrow: xAPIC IDs, low-memory trampoline, current CR3, NXE, fixed
 stacks, and sequential INIT/SIPI/SIPI. x2APIC IDs, malformed topology, more than eight CPUs,

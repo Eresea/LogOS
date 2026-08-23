@@ -28,10 +28,10 @@ pub use package_ipc::{
     PackageRequest, PackageResponse, PackageStatus, PackageTarget, PackageTargetKind,
 };
 pub use runtime_abi::{
-    BOOTSTRAP_CAPABILITY_COUNT, CapabilityHandle, DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE,
-    DirectoryOperation, DirectoryRecord, DirectoryRecordKind, DirectoryRequest, DirectoryResponse,
-    DirectoryStatus, EndpointHandle, EventHandle, EventOperation, EventRequest, EventResponse,
-    EventSetHandle, EventStatus, RUNTIME_ABI_VERSION, ServiceBootstrapPage, ServiceHandle,
+    CapabilityHandle, DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE, DirectoryOperation,
+    DirectoryRecord, DirectoryRecordKind, DirectoryRequest, DirectoryResponse, DirectoryStatus,
+    EndpointHandle, EventHandle, EventOperation, EventRequest, EventResponse, EventSetHandle,
+    EventStatus, RUNTIME_ABI_VERSION, ServiceBootstrapPage, ServiceHandle,
 };
 pub use service_manager::{
     MANAGER_ABI_VERSION, ManagerCapability, ManagerCapabilityPage, ManagerOperation,
@@ -101,8 +101,6 @@ pub const IPC_CAPABILITY_BASE: usize = STORAGE_CACHE_BASE + STORAGE_CACHE_PAGES 
 pub const MANAGER_CAPABILITY_BASE: usize = IPC_CAPABILITY_BASE + IPC_PAGE_BYTES;
 pub const MANAGER_CAPABILITY_SLOT: usize = 0;
 pub const NETWORK_CONFIG_BASE: usize = SERVICE_IPC_BASE + 0x3a_000;
-pub const MAX_IPC_CAPABILITIES: usize = 12;
-pub const MAX_MANAGER_SERVICES: usize = 10;
 pub const MAX_SERVICE_NAME_BYTES: usize = 16;
 pub const SERVICE_HEARTBEAT_INTERVAL_TICKS: u64 = 100;
 pub const STORAGE_BLOCK_BYTES: u16 = 4096;
@@ -224,60 +222,6 @@ impl IpcRights {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(C)]
-pub struct IpcCapability {
-    pub endpoint: u8,
-    pub rights: IpcRights,
-    pub generation: u16,
-    pub service_epoch: u64,
-}
-
-impl IpcCapability {
-    pub const EMPTY: Self =
-        Self { endpoint: u8::MAX, rights: IpcRights::Send, generation: 0, service_epoch: 0 };
-
-    pub const fn new(
-        endpoint: usize,
-        rights: IpcRights,
-        generation: u16,
-        service_epoch: u64,
-    ) -> Option<Self> {
-        if endpoint >= IPC_ENDPOINT_COUNT || generation == 0 || service_epoch == 0 {
-            return None;
-        }
-        Some(Self { endpoint: endpoint as u8, rights, generation, service_epoch })
-    }
-
-    pub const fn is_empty(self) -> bool {
-        self.endpoint == u8::MAX
-    }
-
-    pub const fn endpoint_index(self) -> Option<usize> {
-        if self.endpoint < IPC_ENDPOINT_COUNT as u8 { Some(self.endpoint as usize) } else { None }
-    }
-}
-
-#[repr(C, align(16))]
-pub struct IpcCapabilityPage {
-    pub capabilities: [IpcCapability; MAX_IPC_CAPABILITIES],
-}
-
-impl IpcCapabilityPage {
-    pub const fn empty() -> Self {
-        Self { capabilities: [IpcCapability::EMPTY; MAX_IPC_CAPABILITIES] }
-    }
-
-    pub const fn get(&self, index: usize) -> Option<IpcCapability> {
-        if index < MAX_IPC_CAPABILITIES {
-            let capability = self.capabilities[index];
-            if !capability.is_empty() { Some(capability) } else { None }
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum IpcStatus {
     Ok = 0,
@@ -342,7 +286,6 @@ pub struct StorageRequest {
     pub flags: u8,
     pub request_id: u32,
     pub generation: u16,
-    pub capability_slot: u16,
     pub service_epoch: u64,
     pub start_block: u64,
     pub blocks: u16,
@@ -356,7 +299,6 @@ impl StorageRequest {
         operation: StorageOperation,
         request_id: u32,
         generation: u16,
-        capability_slot: u16,
         service_epoch: u64,
         start_block: u64,
         blocks: u16,
@@ -387,7 +329,6 @@ impl StorageRequest {
             flags: 0,
             request_id,
             generation,
-            capability_slot,
             service_epoch,
             start_block,
             blocks,
@@ -967,71 +908,6 @@ impl IpcEndpointId {
 }
 
 const _: () = assert!(IpcEndpointId::COUNT == IPC_ENDPOINT_COUNT);
-
-/// Fixed capability-page slot for one edge of the service graph.
-pub const fn ipc_capability_slot(
-    service: ServiceId,
-    endpoint: IpcEndpointId,
-    rights: IpcRights,
-) -> Option<usize> {
-    match (service, endpoint, rights) {
-        (ServiceId::Input, IpcEndpointId::InputToTerminal, IpcRights::Send) => Some(0),
-        (ServiceId::Display, IpcEndpointId::TerminalToDisplay, IpcRights::Receive) => Some(0),
-        (ServiceId::Terminal, IpcEndpointId::InputToTerminal, IpcRights::Receive) => Some(0),
-        (ServiceId::Terminal, IpcEndpointId::TerminalToDisplay, IpcRights::Send) => Some(1),
-        (ServiceId::Terminal, IpcEndpointId::TerminalToSession, IpcRights::Send) => Some(2),
-        (ServiceId::Terminal, IpcEndpointId::SessionToTerminal, IpcRights::Receive) => Some(3),
-        (ServiceId::Session, IpcEndpointId::TerminalToSession, IpcRights::Receive) => Some(0),
-        (ServiceId::Session, IpcEndpointId::SessionToTerminal, IpcRights::Send) => Some(1),
-        (ServiceId::Session, IpcEndpointId::SessionToFlow, IpcRights::Send) => Some(2),
-        (ServiceId::Session, IpcEndpointId::FlowToSession, IpcRights::Receive) => Some(3),
-        (ServiceId::Flow, IpcEndpointId::SessionToFlow, IpcRights::Receive) => Some(0),
-        (ServiceId::Flow, IpcEndpointId::FlowToSession, IpcRights::Send) => Some(1),
-        (ServiceId::Flow, IpcEndpointId::FlowToStorage, IpcRights::Send) => Some(2),
-        (ServiceId::Flow, IpcEndpointId::StorageToFlow, IpcRights::Receive) => Some(3),
-        (ServiceId::Storage, IpcEndpointId::FlowToStorage, IpcRights::Receive) => Some(0),
-        (ServiceId::Storage, IpcEndpointId::StorageToFlow, IpcRights::Send) => Some(1),
-        (ServiceId::Storage, IpcEndpointId::StorageToCore, IpcRights::Send) => Some(2),
-        (ServiceId::Storage, IpcEndpointId::CoreToStorage, IpcRights::Receive) => Some(3),
-        (ServiceId::Storage, IpcEndpointId::CoreToStoragePackage, IpcRights::Receive) => Some(6),
-        (ServiceId::Storage, IpcEndpointId::StoragePackageToCore, IpcRights::Send) => Some(7),
-        (ServiceId::Network, IpcEndpointId::NetworkToCore, IpcRights::Send) => Some(0),
-        (ServiceId::Network, IpcEndpointId::CoreToNetwork, IpcRights::Receive) => Some(1),
-        (ServiceId::Network, IpcEndpointId::FlowToNetwork, IpcRights::Receive) => Some(2),
-        (ServiceId::Network, IpcEndpointId::NetworkToFlow, IpcRights::Send) => Some(3),
-        (ServiceId::Flow, IpcEndpointId::FlowToNetwork, IpcRights::Send) => Some(4),
-        (ServiceId::Flow, IpcEndpointId::NetworkToFlow, IpcRights::Receive) => Some(5),
-        (ServiceId::Flow, IpcEndpointId::FlowToFetch, IpcRights::Send) => Some(6),
-        (ServiceId::Flow, IpcEndpointId::FetchToFlow, IpcRights::Receive) => Some(7),
-        (ServiceId::Fetch, IpcEndpointId::FetchToFlow, IpcRights::Send) => Some(0),
-        (ServiceId::Fetch, IpcEndpointId::FlowToFetch, IpcRights::Receive) => Some(1),
-        (ServiceId::Fetch, IpcEndpointId::FetchToStorage, IpcRights::Send) => Some(2),
-        (ServiceId::Fetch, IpcEndpointId::StorageToFetch, IpcRights::Receive) => Some(3),
-        (ServiceId::Fetch, IpcEndpointId::FetchToNetwork, IpcRights::Send) => Some(4),
-        (ServiceId::Fetch, IpcEndpointId::NetworkToFetch, IpcRights::Receive) => Some(5),
-        (ServiceId::Storage, IpcEndpointId::FetchToStorage, IpcRights::Receive) => Some(4),
-        (ServiceId::Storage, IpcEndpointId::StorageToFetch, IpcRights::Send) => Some(5),
-        (ServiceId::Network, IpcEndpointId::FetchToNetwork, IpcRights::Receive) => Some(4),
-        (ServiceId::Network, IpcEndpointId::NetworkToFetch, IpcRights::Send) => Some(5),
-        (ServiceId::Storage, IpcEndpointId::StorageMapToCore, IpcRights::Send) => Some(8),
-        (ServiceId::Storage, IpcEndpointId::CoreToStorageMap, IpcRights::Receive) => Some(9),
-        (ServiceId::Flow, IpcEndpointId::FlowToDevice, IpcRights::Send) => Some(8),
-        (ServiceId::Flow, IpcEndpointId::DeviceToFlow, IpcRights::Receive) => Some(9),
-        (ServiceId::Device, IpcEndpointId::FlowToDevice, IpcRights::Receive) => Some(2),
-        (ServiceId::Device, IpcEndpointId::DeviceToFlow, IpcRights::Send) => Some(3),
-        (ServiceId::Device, IpcEndpointId::DeviceToCore, IpcRights::Send) => Some(0),
-        (ServiceId::Device, IpcEndpointId::CoreToDevice, IpcRights::Receive) => Some(1),
-        (ServiceId::Flow, IpcEndpointId::FlowToUser, IpcRights::Send) => Some(10),
-        (ServiceId::Flow, IpcEndpointId::UserToFlow, IpcRights::Receive) => Some(11),
-        (ServiceId::User, IpcEndpointId::FlowToUser, IpcRights::Receive) => Some(0),
-        (ServiceId::User, IpcEndpointId::UserToFlow, IpcRights::Send) => Some(1),
-        (ServiceId::User, IpcEndpointId::UserToStorage, IpcRights::Send) => Some(2),
-        (ServiceId::User, IpcEndpointId::StorageToUser, IpcRights::Receive) => Some(3),
-        (ServiceId::Storage, IpcEndpointId::UserToStorage, IpcRights::Receive) => Some(10),
-        (ServiceId::Storage, IpcEndpointId::StorageToUser, IpcRights::Send) => Some(11),
-        _ => None,
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -2091,8 +1967,6 @@ pub type RenderIpc = SharedIpc<RenderMessage, 1>;
 pub type StreamIpc = SharedIpc<IpcBytes, 8>;
 
 const _: () = assert!(core::mem::size_of::<FramebufferConfig>() <= IPC_PAGE_BYTES);
-const _: () = assert!(core::mem::size_of::<IpcCapabilityPage>() <= IPC_PAGE_BYTES);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2198,22 +2072,6 @@ mod tests {
         assert_eq!(ipc_contract_id(6), Some(IPC_CONTRACT_STORAGE_REQUEST));
         assert_eq!(ipc_contract_id(7), Some(IPC_CONTRACT_STORAGE_RESPONSE));
         assert_eq!(ipc_contract_id(32), None);
-        assert_eq!(
-            ipc_capability_slot(
-                ServiceId::Terminal,
-                IpcEndpointId::TerminalToSession,
-                IpcRights::Send,
-            ),
-            Some(2)
-        );
-        assert_eq!(
-            ipc_capability_slot(
-                ServiceId::Terminal,
-                IpcEndpointId::TerminalToSession,
-                IpcRights::Receive,
-            ),
-            None
-        );
     }
 
     #[test]
@@ -2222,15 +2080,6 @@ mod tests {
         assert!(header.accepts(4, 8));
         assert!(!header.accepts(3, 8));
         assert!(!header.accepts(4, 9));
-    }
-
-    #[test]
-    fn capabilities_are_bounded_and_generation_stamped() {
-        let capability = IpcCapability::new(2, IpcRights::Send, 3, 9).unwrap();
-        assert_eq!(capability.endpoint_index(), Some(2));
-        assert_eq!(capability.rights, IpcRights::Send);
-        assert!(IpcCapability::new(IPC_ENDPOINT_COUNT, IpcRights::Receive, 1, 1).is_none());
-        assert!(IpcCapability::new(0, IpcRights::Receive, 0, 1).is_none());
     }
 
     #[test]
@@ -2308,15 +2157,6 @@ mod tests {
         assert!(NetworkRequest::wire_enums_valid(&request));
         request[core::mem::offset_of!(NetworkRequest, operation)] = u8::MAX;
         assert!(!NetworkRequest::wire_enums_valid(&request));
-    }
-
-    #[test]
-    fn capability_page_rejects_empty_and_out_of_range_slots() {
-        let mut page = IpcCapabilityPage::empty();
-        assert_eq!(page.get(0), None);
-        page.capabilities[0] = IpcCapability::new(0, IpcRights::Send, 1, 1).unwrap();
-        assert!(page.get(0).is_some());
-        assert_eq!(page.get(MAX_IPC_CAPABILITIES), None);
     }
 
     #[test]
@@ -2400,17 +2240,15 @@ mod tests {
 
     #[test]
     fn storage_requests_are_bounded_and_generation_stamped() {
-        let request =
-            StorageRequest::new(StorageOperation::Read, 7, 3, 1, 9, 12, 1, 4096, 4).unwrap();
+        let request = StorageRequest::new(StorageOperation::Read, 7, 3, 9, 12, 1, 4096, 4).unwrap();
         assert!(request.is_block_io());
-        assert!(StorageRequest::new(StorageOperation::Read, 7, 3, 1, 9, 12, 2, 4096, 4).is_none());
-        assert!(StorageRequest::new(StorageOperation::Read, 7, 3, 1, 9, 12, 0, 0, 4).is_none());
+        assert!(StorageRequest::new(StorageOperation::Read, 7, 3, 9, 12, 2, 4096, 4).is_none());
+        assert!(StorageRequest::new(StorageOperation::Read, 7, 3, 9, 12, 0, 0, 4).is_none());
         assert!(
             StorageRequest::new(
                 StorageOperation::Write,
                 7,
                 3,
-                1,
                 9,
                 12,
                 STORAGE_MAX_BLOCKS_PER_REQUEST + 1,

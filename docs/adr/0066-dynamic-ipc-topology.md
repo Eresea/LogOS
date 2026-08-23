@@ -27,12 +27,16 @@ fixed ABI in the live service image set.
 - Runtime topology can grow and shrink within physical-memory and owner quotas.
 - Restart invalidates service, endpoint, capability, and event generations.
 - Event waiting must move from endpoint-derived `u64` masks to runtime event sets.
+- The staged event syscall supports explicit wait cancellation; cancellation clears
+  the published waiter and wakes the scheduler object without consuming an event.
 - Contract IDs describe typed message agreements and never identify runtime
   endpoint slots; endpoint and event generations remain independently stale-safe.
 - Fixed wire-size and queue backpressure validation remain part of the hostile-peer proof.
 
 ## Implementation status
 
-The Core registries, v5 directory records, generation checks, and event-set syscall operations
-are live and QEMU-proven. Built-in queue transport, mask-based service waits, and lifecycle
-actions remain transitional until their ownership migration is completed.
+The Core registries, v5 directory records, generation checks, and event-set syscall operations are
+live. Built-in service traffic resolves capabilities through the paginated directory and runtime
+endpoint handles; route-specific device, storage, package, and network adapters remain Core-owned
+policy behind those records. Service lifecycle requests validate dynamic handles before using the
+internal built-in image router, while program lifecycle remains a separately bounded contract.

@@ -3,8 +3,6 @@ use crate::{ABI_VERSION, IPC_PAGE_BYTES, MAX_SERVICE_NAME_BYTES, SERVICE_HEAP_MA
 pub const RUNTIME_ABI_VERSION: u16 = ABI_VERSION;
 pub const DIRECTORY_FLAG_MORE: u8 = 1 << 0;
 pub const DIRECTORY_RECORDS_PER_PAGE: usize = 32;
-pub const BOOTSTRAP_CAPABILITY_COUNT: usize = 3;
-
 macro_rules! define_handle {
     ($name:ident) => {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,6 +75,7 @@ pub enum EventOperation {
     Wait = 6,
     Signal = 7,
     DestroySet = 8,
+    Cancel = 9,
 }
 
 impl EventOperation {
@@ -90,6 +89,7 @@ impl EventOperation {
             6 => Some(Self::Wait),
             7 => Some(Self::Signal),
             8 => Some(Self::DestroySet),
+            9 => Some(Self::Cancel),
             _ => None,
         }
     }
@@ -380,10 +380,42 @@ impl DirectoryRecord {
         if self.is_empty() {
             return self == Self::EMPTY;
         }
-        self.reserved == [0; 1]
-            && self.handle != 0
-            && (self.kind != DirectoryRecordKind::Capability
-                || (self.contract_id != 0 && self.peer.is_valid() && self.event.is_valid()))
+        if self.reserved != [0; 1] || self.handle == 0 {
+            return false;
+        }
+        let shape_valid = match self.kind {
+            DirectoryRecordKind::Capability => {
+                CapabilityHandle::from_raw(self.handle).is_some()
+                    && matches!(self.rights, 1 | 2)
+                    && self.contract_id != 0
+                    && self.peer.is_valid()
+                    && self.message_bytes != 0
+                    && usize::from(self.message_bytes) <= IPC_PAGE_BYTES
+                    && self.queue_capacity != 0
+                    && self.event.is_valid()
+            }
+            DirectoryRecordKind::Endpoint => {
+                EndpointHandle::from_raw(self.handle).is_some()
+                    && self.rights == 0
+                    && self.peer.is_valid()
+                    && self.contract_id != 0
+                    && self.message_bytes != 0
+                    && usize::from(self.message_bytes) <= IPC_PAGE_BYTES
+                    && self.queue_capacity != 0
+                    && !self.event.is_valid()
+            }
+            DirectoryRecordKind::Service => {
+                ServiceHandle::from_raw(self.handle).is_some()
+                    && self.rights == 0
+                    && self.name_len != 0
+                    && self.contract_id == 0
+                    && self.message_bytes == 0
+                    && self.queue_capacity == 0
+                    && !self.event.is_valid()
+            }
+            DirectoryRecordKind::Empty => false,
+        };
+        shape_valid
             && self.name_len as usize <= self.name.len()
             && self.name[self.name_len as usize..].iter().all(|byte| *byte == 0)
     }
@@ -505,6 +537,7 @@ mod tests {
     fn capability_directory_records_carry_contract_and_event_identity() {
         let mut record = DirectoryRecord::EMPTY;
         record.kind = DirectoryRecordKind::Capability;
+        record.rights = crate::IpcRights::Send as u8;
         record.handle = CapabilityHandle::new(3, 2).unwrap().raw();
         record.peer = ServiceHandle::new(4, 2).unwrap();
         record.contract_id = 9;
@@ -513,6 +546,9 @@ mod tests {
         record.event = EventHandle::new(5, 2).unwrap();
         assert!(record.is_valid());
         record.event = EventHandle::EMPTY;
+        assert!(!record.is_valid());
+        record.event = EventHandle::new(5, 2).unwrap();
+        record.rights = 3;
         assert!(!record.is_valid());
     }
 
