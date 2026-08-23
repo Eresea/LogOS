@@ -1064,6 +1064,9 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle]) {
             cached.set
         } else {
             let cached_set = cached.set;
+            // Do not leave a destroyed or partially rebuilt set reachable if
+            // any create/add operation below fails.
+            unsafe { *EVENT_SET_CACHE.0.get() = EventSetCacheState::empty() };
             if cached_set.is_valid() {
                 let mut destroy = logos_abi::EventRequest::new(
                     logos_abi::EventOperation::DestroySet,
