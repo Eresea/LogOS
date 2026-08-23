@@ -1891,7 +1891,7 @@ impl ServiceRuntime {
     }
 
     fn retain_active_package_images(&mut self) -> Result<(), ServiceRuntimeError> {
-        for index in 0..SERVICE_COUNT {
+        for index in 0..self.active_packages.len() {
             let Some(active) = self.active_packages[index] else {
                 continue;
             };
@@ -4927,7 +4927,7 @@ impl ServiceRuntime {
                 self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
             }
         }
-        for index in 0..SERVICE_COUNT {
+        for index in 0..self.service_heaps.len() {
             while let Some(frame) = self.service_heaps[index].frames.pop() {
                 if self.frame_pool.release(frame).is_err() {
                     self.service_heaps[index].frames.push(frame);
@@ -4957,7 +4957,7 @@ impl ServiceRuntime {
                 self.frame_pool.release(address).map_err(|_| ServiceRuntimeError::Resources)?;
             }
         }
-        for index in 0..SERVICE_COUNT {
+        for index in 0..self.launches.len() {
             if let Some((process, _)) = self.launches[index].take() {
                 if self.processes.state(process) == Some(crate::process::ProcessState::Running) {
                     self.processes.fault(process, 0xff).map_err(ServiceRuntimeError::Process)?;
