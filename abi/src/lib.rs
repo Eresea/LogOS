@@ -72,7 +72,6 @@ pub const CELL_ATTR_DIM: u16 = 1 << 1;
 pub const CELL_ATTR_UNDERLINE: u16 = 1 << 2;
 pub const MAX_SERVICE_IMAGE_BYTES: usize = 512 * 1024;
 pub const MAX_MEMORY_DESCRIPTORS: usize = 256;
-pub const MAX_MANAGED_FRAMES: usize = 65_536;
 pub const MAX_FRAMEBUFFER_BYTES: usize = 16 * 1024 * 1024;
 pub const DISPLAY_FRAMEBUFFER_BASE: usize = 0x0000_0100_1000_0000;
 pub const DISPLAY_CONFIG_BASE: usize = 0x0000_0100_1200_0000;

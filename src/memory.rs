@@ -20,12 +20,6 @@ use crate::boot_resources::{MemoryDescriptor, MemoryMap, PAGE_SIZE};
 
 pub const MAX_MEMORY_RUNS: usize = logos_abi::MAX_MEMORY_DESCRIPTORS;
 #[cfg(test)]
-pub const MAX_MANAGED_FRAMES: usize = logos_abi::MAX_MANAGED_FRAMES;
-#[cfg(test)]
-pub const FRAME_WORDS: usize = MAX_MANAGED_FRAMES.div_ceil(64);
-#[cfg(test)]
-pub const FRAME_SUMMARY_WORDS: usize = FRAME_WORDS.div_ceil(64);
-#[cfg(test)]
 const TEST_MAX_MANAGED_FRAMES: usize = 256;
 pub const MAX_FRAME_SHARDS: usize = 4;
 pub const MAX_MEMORY_CPUS: usize = 8;
