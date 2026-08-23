@@ -108,6 +108,15 @@ fn dynamic_core_handle(generation: u32) -> Result<logos_abi::ServiceHandle, Serv
         .ok_or(ServiceRuntimeError::StaleGeneration)
 }
 
+fn builtin_service_for_handle(
+    handles: &[logos_abi::ServiceHandle; SERVICE_COUNT],
+    handle: logos_abi::ServiceHandle,
+) -> Option<ServiceId> {
+    SERVICE_IMAGES
+        .iter()
+        .find_map(|spec| (handles[spec.service().index()] == handle).then_some(spec.service()))
+}
+
 fn event_status(error: crate::runtime_events::EventError) -> logos_abi::EventStatus {
     match error {
         crate::runtime_events::EventError::Stale => logos_abi::EventStatus::Stale,
@@ -3359,24 +3368,24 @@ impl ServiceRuntime {
                 }
             };
             let action = match action {
-                crate::runtime_services::RuntimeLifecycleAction::Start(handle) => registry
-                    .service_index(handle)
-                    .ok()
-                    .and_then(ServiceId::from_index)
-                    .map(ManagerAction::Start)
-                    .or_else(|| {
-                        let _ = registry.abort_lifecycle_members(core::slice::from_ref(&handle));
-                        None
-                    }),
-                crate::runtime_services::RuntimeLifecycleAction::Stop(handle) => registry
-                    .service_index(handle)
-                    .ok()
-                    .and_then(ServiceId::from_index)
-                    .map(ManagerAction::Stop)
-                    .or_else(|| {
-                        let _ = registry.abort_lifecycle_members(core::slice::from_ref(&handle));
-                        None
-                    }),
+                crate::runtime_services::RuntimeLifecycleAction::Start(handle) => {
+                    builtin_service_for_handle(&self.service_handles, handle)
+                        .map(ManagerAction::Start)
+                        .or_else(|| {
+                            let _ =
+                                registry.abort_lifecycle_members(core::slice::from_ref(&handle));
+                            None
+                        })
+                }
+                crate::runtime_services::RuntimeLifecycleAction::Stop(handle) => {
+                    builtin_service_for_handle(&self.service_handles, handle)
+                        .map(ManagerAction::Stop)
+                        .or_else(|| {
+                            let _ =
+                                registry.abort_lifecycle_members(core::slice::from_ref(&handle));
+                            None
+                        })
+                }
                 crate::runtime_services::RuntimeLifecycleAction::Restart(handles) => {
                     let mut services = Vec::new();
                     if services.try_reserve(handles.len()).is_err() {
@@ -3385,10 +3394,8 @@ impl ServiceRuntime {
                     } else {
                         let mut valid = true;
                         for handle in &handles {
-                            let Some(service) = registry
-                                .service_index(*handle)
-                                .ok()
-                                .and_then(ServiceId::from_index)
+                            let Some(service) =
+                                builtin_service_for_handle(&self.service_handles, *handle)
                             else {
                                 valid = false;
                                 break;
@@ -3748,8 +3755,9 @@ impl ServiceRuntime {
             if registry.validate_lifecycle_handle(owner).is_err() {
                 return;
             }
-            let Ok(index) = usize::try_from(owner.index()) else { return };
-            let Some(service) = ServiceId::from_index(index) else { return };
+            let Some(service) = builtin_service_for_handle(&self.service_handles, owner) else {
+                return;
+            };
             if self.tasks[service.index()].is_none() {
                 return;
             }
@@ -4334,10 +4342,7 @@ impl ServiceRuntime {
                 registry
                     .validate_lifecycle_handle(*handle)
                     .map_err(|_| ServiceRuntimeError::StaleGeneration)?;
-                let service = registry
-                    .service_index(*handle)
-                    .ok()
-                    .and_then(ServiceId::from_index)
+                let service = builtin_service_for_handle(&self.service_handles, *handle)
                     .ok_or(ServiceRuntimeError::StaleGeneration)?;
                 services.push(service);
             }

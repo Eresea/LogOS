@@ -405,10 +405,6 @@ impl RuntimeServiceRegistry {
         }
     }
 
-    pub fn service_index(&self, handle: ServiceHandle) -> Result<usize, ServiceRegistryError> {
-        self.index(handle)
-    }
-
     pub fn abort_lifecycle(
         &mut self,
         operation: ManagerOperation,
