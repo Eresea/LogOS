@@ -171,11 +171,11 @@ pub struct ServiceRuntime {
     dynamic_services: Option<crate::runtime_services::RuntimeServiceRegistry>,
     service_handles: Vec<logos_abi::ServiceHandle>,
     dynamic_events: Option<crate::runtime_events::RuntimeEventRegistry>,
-    ipc_staging_frames: [Option<FrameAddress>; SERVICE_COUNT],
-    service_bootstrap_frames: [u64; SERVICE_COUNT],
-    bootstrap_control: [logos_abi::CapabilityHandle; SERVICE_COUNT],
-    bootstrap_directory: [logos_abi::CapabilityHandle; SERVICE_COUNT],
-    bootstrap_heap: [logos_abi::CapabilityHandle; SERVICE_COUNT],
+    ipc_staging_frames: Vec<Option<FrameAddress>>,
+    service_bootstrap_frames: Vec<u64>,
+    bootstrap_control: Vec<logos_abi::CapabilityHandle>,
+    bootstrap_directory: Vec<logos_abi::CapabilityHandle>,
+    bootstrap_heap: Vec<logos_abi::CapabilityHandle>,
     keyboard_event: logos_abi::EventHandle,
     service_heaps: [ServiceHeapState; SERVICE_COUNT],
     user_kdf_workspace: [u64; logos_abi::USER_KDF_WORKSPACE_PAGES],
@@ -401,11 +401,11 @@ impl ServiceRuntime {
             dynamic_services: None,
             service_handles: Vec::new(),
             dynamic_events: None,
-            ipc_staging_frames: [None; SERVICE_COUNT],
-            service_bootstrap_frames: [0; SERVICE_COUNT],
-            bootstrap_control: [logos_abi::CapabilityHandle::EMPTY; SERVICE_COUNT],
-            bootstrap_directory: [logos_abi::CapabilityHandle::EMPTY; SERVICE_COUNT],
-            bootstrap_heap: [logos_abi::CapabilityHandle::EMPTY; SERVICE_COUNT],
+            ipc_staging_frames: Vec::new(),
+            service_bootstrap_frames: Vec::new(),
+            bootstrap_control: Vec::new(),
+            bootstrap_directory: Vec::new(),
+            bootstrap_heap: Vec::new(),
             keyboard_event: logos_abi::EventHandle::EMPTY,
             service_heaps: [const { ServiceHeapState::empty() }; SERVICE_COUNT],
             user_kdf_workspace: [0; logos_abi::USER_KDF_WORKSPACE_PAGES],
@@ -632,6 +632,11 @@ impl ServiceRuntime {
     }
 
     fn start_inner(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
+        self.ipc_staging_frames.resize(SERVICE_COUNT, None);
+        self.service_bootstrap_frames.resize(SERVICE_COUNT, 0);
+        self.bootstrap_control.resize(SERVICE_COUNT, logos_abi::CapabilityHandle::EMPTY);
+        self.bootstrap_directory.resize(SERVICE_COUNT, logos_abi::CapabilityHandle::EMPTY);
+        self.bootstrap_heap.resize(SERVICE_COUNT, logos_abi::CapabilityHandle::EMPTY);
         let resources = crate::arch::boot_resources().ok_or(ServiceRuntimeError::Resources)?;
         if !self.frame_pool_ready {
             let metadata_reservation =
@@ -4837,10 +4842,9 @@ impl ServiceRuntime {
             self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
             self.framebuffer_config_frame = None;
         }
-        for index in 0..SERVICE_COUNT {
-            if let Some(frame) = self.ipc_staging_frames[index] {
+        for frame in &mut self.ipc_staging_frames {
+            if let Some(frame) = frame.take() {
                 self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
-                self.ipc_staging_frames[index] = None;
             }
         }
         for index in 0..SERVICE_COUNT {
@@ -4858,6 +4862,11 @@ impl ServiceRuntime {
                 self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
             }
         }
+        self.ipc_staging_frames.clear();
+        self.service_bootstrap_frames.clear();
+        self.bootstrap_control.clear();
+        self.bootstrap_directory.clear();
+        self.bootstrap_heap.clear();
         for frame in &mut self.user_kdf_workspace {
             if *frame != 0 {
                 let address = FrameAddress::from_raw(*frame);
