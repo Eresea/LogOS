@@ -489,16 +489,18 @@ impl RuntimeServiceRegistry {
         }
         *response =
             DirectoryResponse::empty(DirectoryOperation::Services, DirectoryStatus::Ok, request_id);
-        let mut seen = 0u64;
+        let start = usize::try_from(cursor).unwrap_or(usize::MAX);
         let mut written = 0usize;
-        for service in self.slots.iter().filter_map(|slot| slot.value.as_ref()) {
-            if seen < cursor {
-                seen += 1;
-                continue;
-            }
+        for (index, service) in self
+            .slots
+            .iter()
+            .enumerate()
+            .skip(start)
+            .filter_map(|(index, slot)| slot.value.as_ref().map(|service| (index, service)))
+        {
             if written == DIRECTORY_RECORDS_PER_PAGE {
                 response.flags |= DIRECTORY_FLAG_MORE;
-                response.cursor = cursor.saturating_add(written as u64);
+                response.cursor = index as u64;
                 break;
             }
             let mut record = DirectoryRecord::service(service.handle, &service.name)
@@ -513,11 +515,10 @@ impl RuntimeServiceRegistry {
             };
             response.records[written] = record;
             written += 1;
-            seen += 1;
         }
         response.count = written as u8;
         if response.flags & DIRECTORY_FLAG_MORE == 0 {
-            response.cursor = cursor.saturating_add(written as u64);
+            response.cursor = u64::MAX;
         }
         DirectoryStatus::Ok
     }
@@ -690,14 +691,22 @@ mod tests {
     fn registry_is_not_limited_to_the_builtin_service_count() {
         let mut registry = RuntimeServiceRegistry::new();
         let mut handles = Vec::new();
-        for index in 0..12 {
+        for index in 0..(DIRECTORY_RECORDS_PER_PAGE + 4) {
             handles.push(registry.register(format_name(index).as_slice(), b"image", &[]).unwrap());
         }
         let mut response =
             DirectoryResponse::empty(DirectoryOperation::Services, DirectoryStatus::Malformed, 1);
         registry.list(0, &mut response, 1);
-        assert_eq!(response.count as usize, DIRECTORY_RECORDS_PER_PAGE.min(12));
-        assert_eq!(registry.state(handles[11]), Ok(ServiceState::Stopped));
+        assert_eq!(response.count as usize, DIRECTORY_RECORDS_PER_PAGE);
+        assert_eq!(response.cursor, DIRECTORY_RECORDS_PER_PAGE as u64);
+        registry.remove(handles[0]).unwrap();
+        let cursor = response.cursor;
+        registry.list(cursor, &mut response, 2);
+        assert_eq!(response.records[0].handle, handles[DIRECTORY_RECORDS_PER_PAGE].raw());
+        assert_eq!(
+            registry.state(handles[DIRECTORY_RECORDS_PER_PAGE + 3]),
+            Ok(ServiceState::Stopped)
+        );
     }
 
     #[test]
