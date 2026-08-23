@@ -363,6 +363,19 @@ impl RuntimeServiceRegistry {
         Ok(())
     }
 
+    pub fn clear_execution_ownership(
+        &mut self,
+        handle: ServiceHandle,
+    ) -> Result<(), ServiceRegistryError> {
+        let ownership = &mut self.service_mut(handle)?.ownership;
+        ownership.process = 0;
+        ownership.address_space = 0;
+        ownership.task = 0;
+        ownership.heap_pages = 0;
+        ownership.heartbeat = 0;
+        Ok(())
+    }
+
     pub fn ownership(
         &self,
         handle: ServiceHandle,
@@ -965,6 +978,21 @@ mod tests {
         assert_eq!(
             registry.set_runtime_ownership(handle, 0, 22, 33, 2),
             Err(ServiceRegistryError::Capacity)
+        );
+        registry.set_runtime_counts(handle, 3, 4, 5).unwrap();
+        registry.clear_execution_ownership(handle).unwrap();
+        assert_eq!(
+            registry.ownership(handle),
+            Ok(ServiceOwnership {
+                process: 0,
+                address_space: 0,
+                task: 0,
+                heap_pages: 0,
+                heartbeat: 0,
+                ipc_endpoints: 3,
+                capabilities: 4,
+                events: 5,
+            })
         );
         registry.clear_runtime_ownership(handle).unwrap();
         assert_eq!(registry.ownership(handle), Ok(ServiceOwnership::EMPTY));

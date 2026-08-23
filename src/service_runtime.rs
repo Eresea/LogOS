@@ -1365,7 +1365,7 @@ impl ServiceRuntime {
         let Ok(handle) = self.runtime_service_handle(service) else { return };
         if let Some(registry) = self.dynamic_services.as_mut() {
             let _ = registry.stop(handle);
-            let _ = registry.clear_runtime_ownership(handle);
+            let _ = registry.clear_execution_ownership(handle);
         }
     }
 
