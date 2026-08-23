@@ -720,10 +720,20 @@ pub fn discover_capability_contract_index(
 }
 
 #[allow(dead_code)]
+pub fn discover_capability_contract_any(
+    rights: logos_abi::IpcRights,
+    contract_id: u16,
+    message_bytes: usize,
+) -> Result<logos_abi::CapabilityHandle, logos_abi::DirectoryStatus> {
+    discover_capability_contract_selector(PeerSelector::Any, rights, contract_id, message_bytes)
+}
+
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum PeerSelector {
     Handle(logos_abi::ServiceHandle),
     Index(u32),
+    Any,
 }
 
 fn discover_capability_contract_selector(
@@ -737,7 +747,7 @@ fn discover_capability_contract_selector(
         let bootstrap = bootstrap_page();
         let peer_valid = match peer_selector {
             PeerSelector::Handle(peer) => peer.is_valid(),
-            PeerSelector::Index(_) => true,
+            PeerSelector::Index(_) | PeerSelector::Any => true,
         };
         if !bootstrap.is_valid() || !peer_valid || contract_id == 0 || message_bytes == 0 {
             return Err(logos_abi::DirectoryStatus::Malformed);
@@ -785,6 +795,7 @@ fn discover_capability_contract_selector(
             let peer_matches = match peer_selector {
                 PeerSelector::Handle(peer) => record.peer == peer,
                 PeerSelector::Index(peer_index) => record.peer.index() == peer_index,
+                PeerSelector::Any => true,
             };
             if !peer_matches
                 || !capability_record_contract_matches(*record, rights, contract_id, message_bytes)
@@ -866,7 +877,7 @@ fn next_event_request_id() -> u32 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapabilitySpec {
     pub contract_id: u16,
-    pub peer_index: u32,
+    pub peer_index: Option<u32>,
     pub message_bytes: u16,
     pub rights: logos_abi::IpcRights,
 }
@@ -883,7 +894,21 @@ pub const fn capability_contract(
 ) -> CapabilitySpec {
     CapabilitySpec {
         contract_id,
-        peer_index,
+        peer_index: Some(peer_index),
+        message_bytes: if message_bytes <= u16::MAX as usize { message_bytes as u16 } else { 0 },
+        rights,
+    }
+}
+
+#[allow(dead_code)]
+pub const fn capability_contract_any(
+    contract_id: u16,
+    message_bytes: usize,
+    rights: logos_abi::IpcRights,
+) -> CapabilitySpec {
+    CapabilitySpec {
+        contract_id,
+        peer_index: None,
         message_bytes: if message_bytes <= u16::MAX as usize { message_bytes as u16 } else { 0 },
         rights,
     }
@@ -1084,13 +1109,16 @@ fn discovered_capability(spec: CapabilitySpec) -> Result<logos_abi::CapabilityHa
         if message_bytes == 0 {
             return Err(IpcStatus::Malformed);
         }
-        discover_capability_contract_index(
-            spec.peer_index,
-            spec.rights,
-            spec.contract_id,
-            message_bytes,
-        )
-        .map_err(|status| match status {
+        let result = match spec.peer_index {
+            Some(peer_index) => discover_capability_contract_index(
+                peer_index,
+                spec.rights,
+                spec.contract_id,
+                message_bytes,
+            ),
+            None => discover_capability_contract_any(spec.rights, spec.contract_id, message_bytes),
+        };
+        result.map_err(|status| match status {
             logos_abi::DirectoryStatus::Stale => IpcStatus::Stale,
             logos_abi::DirectoryStatus::Unauthorized => IpcStatus::Unauthorized,
             logos_abi::DirectoryStatus::Malformed => IpcStatus::Malformed,
