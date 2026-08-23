@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use core::{
     mem::MaybeUninit,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use logos_abi::{ServiceHandle, ServiceId};
@@ -186,7 +186,6 @@ pub struct ServiceRuntime {
     framebuffer_config_frame: Option<FrameAddress>,
     keyboard_frame: Option<FrameAddress>,
     tasks: [Option<crate::TaskHandle>; SERVICE_COUNT],
-    heartbeat_ticks: [AtomicU64; SERVICE_COUNT],
     supervisor: LiveSupervisor,
     manager: ProgramManager,
     pending_restart: Option<Vec<ServiceHandle>>,
@@ -417,7 +416,6 @@ impl ServiceRuntime {
             framebuffer_config_frame: None,
             keyboard_frame: None,
             tasks: [None; SERVICE_COUNT],
-            heartbeat_ticks: [const { AtomicU64::new(0) }; SERVICE_COUNT],
             supervisor: LiveSupervisor::new(),
             manager: ProgramManager::new(),
             pending_restart: None,
@@ -1351,7 +1349,6 @@ impl ServiceRuntime {
             })?;
         self.tasks[index] = Some(task);
         let now = crate::current_ticks();
-        self.heartbeat_ticks[index].store(now, Ordering::Release);
         self.supervisor.register(service, now);
         self.sync_dynamic_service_running(service);
         Ok(())
@@ -1371,6 +1368,7 @@ impl ServiceRuntime {
                 task.raw(),
                 heap_pages,
             );
+            let _ = registry.set_heartbeat(handle, crate::current_ticks());
         }
     }
 
@@ -1868,7 +1866,6 @@ impl ServiceRuntime {
             return false;
         }
         if !self.suppressed_heartbeats[index].load(Ordering::Acquire) {
-            self.heartbeat_ticks[index].store(now, Ordering::Release);
             if let Ok(handle) = self.runtime_service_handle(service) {
                 if let Some(registry) = self.dynamic_services.as_mut() {
                     let _ = registry.set_heartbeat(handle, now);
@@ -1894,13 +1891,19 @@ impl ServiceRuntime {
         self.launch(service).is_some_and(|(current, _)| current == process)
     }
 
+    fn dynamic_service_heartbeat(&self, service: ServiceId) -> u64 {
+        let Some(registry) = self.dynamic_services.as_ref() else {
+            return 0;
+        };
+        let Ok(handle) = self.runtime_service_handle(service) else {
+            return 0;
+        };
+        registry.ownership(handle).map(|ownership| ownership.heartbeat).unwrap_or(0)
+    }
+
     #[cfg(feature = "qemu-proof")]
     pub(crate) fn suppress_heartbeat(&self, service: ServiceId) {
         self.suppressed_heartbeats[service.index()].store(true, Ordering::Release);
-    }
-
-    pub(crate) fn heartbeat_tick(&self, service: ServiceId) -> u64 {
-        self.heartbeat_ticks[service.index()].load(Ordering::Acquire)
     }
 
     fn dynamic_device_request(
@@ -4544,7 +4547,7 @@ impl ServiceRuntime {
         let mut process_states = [None; SERVICE_COUNT];
         for spec in SERVICE_IMAGES {
             let index = spec.service().index();
-            heartbeats[index] = self.heartbeat_tick(spec.service());
+            heartbeats[index] = self.dynamic_service_heartbeat(spec.service());
             process_states[index] = if self.tasks[index].is_some() {
                 self.launch(spec.service()).and_then(|(process, _)| self.processes.state(process))
             } else {
