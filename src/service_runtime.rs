@@ -604,6 +604,7 @@ impl ServiceRuntime {
         for handle in handles {
             self.ensure_service_runtime_slot(handle)?;
         }
+        self.supervisor.retain_slots(&self.service_handles);
         self.dynamic_services = Some(registry);
         Ok(())
     }

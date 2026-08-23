@@ -113,6 +113,15 @@ impl LiveSupervisor {
         }
     }
 
+    pub fn retain_slots(&mut self, handles: &[ServiceHandle]) {
+        for slot in &mut self.records {
+            let Some(record) = slot.as_ref() else { continue };
+            if !handles.iter().any(|handle| handle.index() == record.handle.index()) {
+                *slot = None;
+            }
+        }
+    }
+
     pub fn poll(
         &mut self,
         now: u64,
@@ -288,5 +297,9 @@ mod tests {
         assert!(supervisor.prepare_restart());
         assert!(supervisor.register(new, 2));
         assert_eq!(supervisor.state(new), ServiceState::Running);
+        let extra = ServiceHandle::new(12, 1).unwrap();
+        assert!(supervisor.register(extra, 2));
+        supervisor.retain_slots(&[new]);
+        assert_eq!(supervisor.state(extra), ServiceState::Stopped);
     }
 }
