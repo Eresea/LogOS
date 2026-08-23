@@ -179,7 +179,7 @@ pub(crate) fn run() {
 #[cfg(feature = "qemu-proof")]
 fn wait_for_manager_restart() -> bool {
     let deadline = current_ticks().saturating_add(
-        crate::supervisor::HEARTBEAT_INTERVAL * u64::from(crate::supervisor::MISSED_HEARTBEATS),
+        crate::supervisor::HEARTBEAT_INTERVAL * u64::from(crate::supervisor::MISSED_HEARTBEATS) + 1,
     );
     while current_ticks() < deadline {
         if crate::arch::manager_restart_ready(logos_abi::ServiceId::Storage) {
