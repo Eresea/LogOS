@@ -12,39 +12,39 @@ use logos_abi::{
 };
 use logos_fetch::{ResponseParser, Url};
 
-const FLOW_RECEIVE: common::CapabilitySpec = common::capability_contract(
+const FLOW_RECEIVE: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Flow.index() as u32,
+    b"flow",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const FLOW_SEND: common::CapabilitySpec = common::capability_contract(
+const FLOW_SEND: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Flow.index() as u32,
+    b"flow",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const STORAGE_SEND: common::CapabilitySpec = common::capability_contract(
+const STORAGE_SEND: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Storage.index() as u32,
+    b"storage",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const STORAGE_RECEIVE: common::CapabilitySpec = common::capability_contract(
+const STORAGE_RECEIVE: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Storage.index() as u32,
+    b"storage",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-const NETWORK_SEND: common::CapabilitySpec = common::capability_contract(
+const NETWORK_SEND: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Network.index() as u32,
+    b"network",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const NETWORK_RECEIVE: common::CapabilitySpec = common::capability_contract(
+const NETWORK_RECEIVE: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
-    logos_abi::ServiceId::Network.index() as u32,
+    b"network",
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
