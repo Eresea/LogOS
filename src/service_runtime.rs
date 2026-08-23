@@ -2156,6 +2156,14 @@ impl ServiceRuntime {
                 notified: false,
             };
         };
+        if self.dynamic_service_state(service)
+            != Some(crate::runtime_services::ServiceState::Running)
+        {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Disconnected,
+                notified: false,
+            };
+        }
         if logos_abi::CapabilityHandle::from_raw(capability_raw).is_none() {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Unauthorized,
@@ -2906,6 +2914,14 @@ impl ServiceRuntime {
                 notified: false,
             };
         };
+        if self.dynamic_service_state(service)
+            != Some(crate::runtime_services::ServiceState::Running)
+        {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Disconnected,
+                notified: false,
+            };
+        }
         if logos_abi::CapabilityHandle::from_raw(capability_raw).is_none() {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Unauthorized,
