@@ -215,14 +215,14 @@ pub struct ServiceRuntime {
 }
 
 struct PreparedServiceImage {
-    service: ServiceId,
+    handle: ServiceHandle,
     plan: crate::process::ElfLoadPlan,
     image: LoadedImage,
 }
 
 #[derive(Clone, Copy)]
 struct ActivePackageImage {
-    service: ServiceId,
+    handle: ServiceHandle,
     plan: crate::process::ElfLoadPlan,
 }
 
@@ -797,9 +797,13 @@ impl ServiceRuntime {
                 ServiceId::Flow => crate::process::FLOW_STACK_PAGES,
                 _ => crate::process::USER_STACK_PAGES,
             };
+            let service_handle = self.runtime_service_handle(service)?;
             let uses_prepared = self.prepared_packages[index]
                 .as_ref()
-                .is_some_and(|prepared| prepared.service == service);
+                // Prepared image state survives the graph restart that bumps
+                // the service generation. The slot index is the internal
+                // attachment key; the replacement handle is validated above.
+                .is_some_and(|prepared| prepared.handle.index() == service_handle.index());
             let mut memory = IdentityPageTableMemory;
             let (plan, mut loaded) = if uses_prepared {
                 let prepared =
@@ -1875,8 +1879,11 @@ impl ServiceRuntime {
             image.reclaim(&mut self.frame_pool);
             return Err(ServiceRuntimeError::Populate(error));
         }
-        self.prepared_packages[service.index()] =
-            Some(PreparedServiceImage { service, plan, image });
+        self.prepared_packages[service.index()] = Some(PreparedServiceImage {
+            handle: self.runtime_service_handle(service)?,
+            plan,
+            image,
+        });
         if let Err(error) = self.restart(bundle, runtime_guard) {
             self.reclaim_prepared_packages();
             return Err(error);
@@ -1893,7 +1900,8 @@ impl ServiceRuntime {
             .ok_or(ServiceRuntimeError::Resources)?
             .set_image_source(service_handle, ServiceImageSource::FilesystemPackage)
             .map_err(|_| ServiceRuntimeError::Resources)?;
-        self.active_packages[service.index()] = Some(ActivePackageImage { service, plan });
+        self.active_packages[service.index()] =
+            Some(ActivePackageImage { handle: self.runtime_service_handle(service)?, plan });
         Ok(())
     }
 
@@ -1919,7 +1927,7 @@ impl ServiceRuntime {
             }
             let image = core::mem::replace(&mut self.images[index], LoadedImage::empty());
             self.prepared_packages[index] =
-                Some(PreparedServiceImage { service: active.service, plan: active.plan, image });
+                Some(PreparedServiceImage { handle: active.handle, plan: active.plan, image });
         }
         Ok(())
     }
