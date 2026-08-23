@@ -39,6 +39,20 @@ struct ServiceRecord {
     epoch: u64,
     restarts: u8,
     heap_quota_pages: usize,
+    ownership: ServiceOwnership,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServiceOwnership {
+    pub process: u64,
+    pub address_space: u64,
+    pub task: u64,
+    pub heap_pages: usize,
+    pub heartbeat: u64,
+}
+
+impl ServiceOwnership {
+    const EMPTY: Self = Self { process: 0, address_space: 0, task: 0, heap_pages: 0, heartbeat: 0 };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,6 +164,7 @@ impl RuntimeServiceRegistry {
             epoch: 1,
             restarts: 0,
             heap_quota_pages,
+            ownership: ServiceOwnership::EMPTY,
         });
         Ok(handle)
     }
@@ -284,6 +299,49 @@ impl RuntimeServiceRegistry {
 
     pub fn heap_quota_pages(&self, handle: ServiceHandle) -> Result<usize, ServiceRegistryError> {
         Ok(self.service(handle)?.heap_quota_pages)
+    }
+
+    pub fn set_runtime_ownership(
+        &mut self,
+        handle: ServiceHandle,
+        process: u64,
+        address_space: u64,
+        task: u64,
+        heap_pages: usize,
+    ) -> Result<(), ServiceRegistryError> {
+        if process == 0 || address_space == 0 || task == 0 || heap_pages == 0 {
+            return Err(ServiceRegistryError::Capacity);
+        }
+        let service = self.service_mut(handle)?;
+        service.ownership.process = process;
+        service.ownership.address_space = address_space;
+        service.ownership.task = task;
+        service.ownership.heap_pages = heap_pages;
+        Ok(())
+    }
+
+    pub fn set_heartbeat(
+        &mut self,
+        handle: ServiceHandle,
+        heartbeat: u64,
+    ) -> Result<(), ServiceRegistryError> {
+        self.service_mut(handle)?.ownership.heartbeat = heartbeat;
+        Ok(())
+    }
+
+    pub fn clear_runtime_ownership(
+        &mut self,
+        handle: ServiceHandle,
+    ) -> Result<(), ServiceRegistryError> {
+        self.service_mut(handle)?.ownership = ServiceOwnership::EMPTY;
+        Ok(())
+    }
+
+    pub fn ownership(
+        &self,
+        handle: ServiceHandle,
+    ) -> Result<ServiceOwnership, ServiceRegistryError> {
+        Ok(self.service(handle)?.ownership)
     }
 
     pub fn validate_lifecycle_handle(
@@ -857,6 +915,32 @@ mod tests {
             registry.register_with_quota(b"zero", b"image", &[], 0),
             Err(ServiceRegistryError::InvalidImage)
         );
+    }
+
+    #[test]
+    fn runtime_ownership_is_handle_scoped_and_clearable() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let handle = registry.register(b"service", b"image", &[]).unwrap();
+        assert_eq!(registry.set_runtime_ownership(handle, 11, 22, 33, 2), Ok(()));
+        registry.set_heartbeat(handle, 44).unwrap();
+        assert_eq!(
+            registry.ownership(handle),
+            Ok(ServiceOwnership {
+                process: 11,
+                address_space: 22,
+                task: 33,
+                heap_pages: 2,
+                heartbeat: 44,
+            })
+        );
+        assert_eq!(
+            registry.set_runtime_ownership(handle, 0, 22, 33, 2),
+            Err(ServiceRegistryError::Capacity)
+        );
+        registry.clear_runtime_ownership(handle).unwrap();
+        assert_eq!(registry.ownership(handle), Ok(ServiceOwnership::EMPTY));
+        registry.remove(handle).unwrap();
+        assert_eq!(registry.ownership(handle), Err(ServiceRegistryError::Stale));
     }
 
     #[test]

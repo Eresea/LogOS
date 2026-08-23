@@ -1325,8 +1325,18 @@ impl ServiceRuntime {
 
     fn sync_dynamic_service_running(&mut self, service: ServiceId) {
         let Ok(handle) = self.runtime_service_handle(service) else { return };
+        let Some((process, launch)) = self.launch(service) else { return };
+        let Some(task) = self.tasks[service.index()] else { return };
+        let heap_pages = self.service_heaps[service.index()].frames.len();
         if let Some(registry) = self.dynamic_services.as_mut() {
             let _ = registry.start(handle);
+            let _ = registry.set_runtime_ownership(
+                handle,
+                process.raw(),
+                launch.address_space_root().raw() as u64,
+                task.raw(),
+                heap_pages,
+            );
         }
     }
 
@@ -1334,6 +1344,7 @@ impl ServiceRuntime {
         let Ok(handle) = self.runtime_service_handle(service) else { return };
         if let Some(registry) = self.dynamic_services.as_mut() {
             let _ = registry.stop(handle);
+            let _ = registry.clear_runtime_ownership(handle);
         }
     }
 
@@ -1786,7 +1797,7 @@ impl ServiceRuntime {
     }
 
     pub(crate) fn record_heartbeat(
-        &self,
+        &mut self,
         service: ServiceId,
         process: ProcessHandle,
         now: u64,
@@ -1797,6 +1808,11 @@ impl ServiceRuntime {
         }
         if !self.suppressed_heartbeats[index].load(Ordering::Acquire) {
             self.heartbeat_ticks[index].store(now, Ordering::Release);
+            if let Ok(handle) = self.runtime_service_handle(service) {
+                if let Some(registry) = self.dynamic_services.as_mut() {
+                    let _ = registry.set_heartbeat(handle, now);
+                }
+            }
         }
         true
     }

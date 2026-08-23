@@ -563,7 +563,7 @@ pub fn boot() -> Status {
                 }
             },
         );
-        let runtime = &*core::ptr::addr_of!(SERVICE_RUNTIME);
+        let runtime = &mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME);
         for spec in crate::service_images::SERVICE_IMAGES {
             if runtime.image(spec.service()).is_none()
                 || runtime.root(spec.service()).is_none()
