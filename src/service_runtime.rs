@@ -549,14 +549,27 @@ impl ServiceRuntime {
         let mut handles = Vec::new();
         handles.try_reserve(SERVICE_COUNT).map_err(|_| ServiceRuntimeError::Resources)?;
         for spec in SERVICE_IMAGES {
-            let handle = registry
-                .register_with_quota(
-                    spec.name(),
-                    b"builtin",
-                    &[],
-                    self.service_heaps[spec.service().index()].quota_pages,
-                )
-                .map_err(|_| ServiceRuntimeError::Resources)?;
+            let index = spec.service().index();
+            let package_backed = self.active_packages.get(index).is_some_and(Option::is_some);
+            let handle = if package_backed {
+                registry
+                    .register_filesystem_package(
+                        spec.name(),
+                        b"package",
+                        &[],
+                        self.service_heaps[index].quota_pages,
+                    )
+                    .map_err(|_| ServiceRuntimeError::Resources)?
+            } else {
+                registry
+                    .register_with_quota(
+                        spec.name(),
+                        b"builtin",
+                        &[],
+                        self.service_heaps[index].quota_pages,
+                    )
+                    .map_err(|_| ServiceRuntimeError::Resources)?
+            };
             handles.push(handle);
             registry
                 .set_manager_rights(
