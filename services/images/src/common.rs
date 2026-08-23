@@ -794,6 +794,10 @@ pub fn wait_on_capability(capability: logos_abi::CapabilityHandle, service: Serv
 pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle], service: ServiceId) {
     #[cfg(target_os = "none")]
     {
+        if capabilities.is_empty() {
+            heartbeat(service);
+            return;
+        }
         let mut events = Vec::new();
         if events.try_reserve(capabilities.len()).is_err() {
             heartbeat(service);
@@ -823,7 +827,7 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle], service: ServiceId) 
     #[cfg(target_os = "none")]
     {
         let cached = unsafe { &*EVENT_SET_CACHE.0.get() };
-        let same = cached.set.is_valid() && cached.events.as_slice() == events.as_slice();
+        let same = cached.set.is_valid() && cached.events.as_slice() == events;
         let set = if same {
             cached.set
         } else {
@@ -856,7 +860,7 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle], service: ServiceId) 
                 return;
             }
             let set = response.event_set;
-            for event in &events {
+            for event in events {
                 let mut add = logos_abi::EventRequest::new(
                     logos_abi::EventOperation::Add,
                     next_event_request_id(),
