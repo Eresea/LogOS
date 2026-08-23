@@ -1383,6 +1383,23 @@ impl ServiceRuntime {
         }
     }
 
+    fn refresh_dynamic_service_counts(&mut self, service: ServiceId) {
+        let Ok(owner) = self.runtime_service_handle(service) else { return };
+        let (ipc_endpoints, capabilities) = self
+            .dynamic_ipc
+            .as_ref()
+            .map(|registry| registry.ownership_counts(owner))
+            .unwrap_or((0, 0));
+        let events = self
+            .dynamic_events
+            .as_ref()
+            .map(|registry| registry.ownership_count(owner))
+            .unwrap_or(0);
+        if let Some(registry) = self.dynamic_services.as_mut() {
+            let _ = registry.set_runtime_counts(owner, ipc_endpoints, capabilities, events);
+        }
+    }
+
     fn dynamic_service_state(
         &self,
         service: ServiceId,
@@ -3765,6 +3782,7 @@ impl ServiceRuntime {
             }
         };
         response.status = status;
+        self.refresh_dynamic_service_counts(service);
         unsafe {
             core::ptr::write_unaligned(
                 staging_frame.raw() as usize as *mut logos_abi::EventResponse,
