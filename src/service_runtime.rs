@@ -738,22 +738,6 @@ impl ServiceRuntime {
     }
 
     fn start_inner(&mut self, bundle: &ServiceImageBundle) -> Result<(), ServiceRuntimeError> {
-        self.images.resize_with(SERVICE_COUNT, LoadedImage::empty);
-        self.tables.resize_with(SERVICE_COUNT, MaybeUninit::uninit);
-        self.table_ready.resize(SERVICE_COUNT, false);
-        self.launches.resize(SERVICE_COUNT, None);
-        self.prepared_packages.resize_with(SERVICE_COUNT, || None);
-        self.active_packages.resize(SERVICE_COUNT, None);
-        self.service_heaps.resize_with(SERVICE_COUNT, ServiceHeapState::empty);
-        self.tasks.resize(SERVICE_COUNT, None);
-        while self.suppressed_heartbeats.len() < SERVICE_COUNT {
-            self.suppressed_heartbeats.push(AtomicBool::new(false));
-        }
-        self.ipc_staging_frames.resize(SERVICE_COUNT, None);
-        self.service_bootstrap_frames.resize(SERVICE_COUNT, 0);
-        self.bootstrap_control.resize(SERVICE_COUNT, logos_abi::CapabilityHandle::EMPTY);
-        self.bootstrap_directory.resize(SERVICE_COUNT, logos_abi::CapabilityHandle::EMPTY);
-        self.bootstrap_heap.resize(SERVICE_COUNT, logos_abi::CapabilityHandle::EMPTY);
         let resources = crate::arch::boot_resources().ok_or(ServiceRuntimeError::Resources)?;
         if !self.frame_pool_ready {
             let metadata_reservation =
@@ -809,6 +793,26 @@ impl ServiceRuntime {
             crate::memory::bind_kernel_global_allocator(self.frame_pool.allocator())
                 .map_err(|_| ServiceRuntimeError::Resources)?;
         }
+
+        // Dynamic runtime storage must be allocated only after Core owns a
+        // live heap; before this point the global allocator has no backend.
+        self.images.resize_with(SERVICE_COUNT, LoadedImage::empty);
+        self.tables.resize_with(SERVICE_COUNT, MaybeUninit::uninit);
+        self.table_ready.resize(SERVICE_COUNT, false);
+        self.launches.resize(SERVICE_COUNT, None);
+        self.prepared_packages.resize_with(SERVICE_COUNT, || None);
+        self.active_packages.resize(SERVICE_COUNT, None);
+        self.service_heaps.resize_with(SERVICE_COUNT, ServiceHeapState::empty);
+        self.tasks.resize(SERVICE_COUNT, None);
+        while self.suppressed_heartbeats.len() < SERVICE_COUNT {
+            self.suppressed_heartbeats.push(AtomicBool::new(false));
+        }
+        self.ipc_staging_frames.resize(SERVICE_COUNT, None);
+        self.service_bootstrap_frames.resize(SERVICE_COUNT, 0);
+        self.bootstrap_control.resize(SERVICE_COUNT, logos_abi::CapabilityHandle::EMPTY);
+        self.bootstrap_directory.resize(SERVICE_COUNT, logos_abi::CapabilityHandle::EMPTY);
+        self.bootstrap_heap.resize(SERVICE_COUNT, logos_abi::CapabilityHandle::EMPTY);
+        self.service_handles.resize(SERVICE_COUNT, logos_abi::ServiceHandle::EMPTY);
 
         for spec in SERVICE_IMAGES {
             self.service_heaps[spec.service().index()].quota_pages =
