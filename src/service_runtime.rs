@@ -463,11 +463,9 @@ impl ServiceRuntime {
         &self,
         service: ServiceId,
     ) -> Result<logos_abi::ServiceHandle, ServiceRuntimeError> {
-        self.service_handles
-            .get(service.index())
-            .copied()
-            .filter(|handle| handle.is_valid())
-            .ok_or(ServiceRuntimeError::StaleGeneration)
+        let handle =
+            self.service_handles.get(service.index()).copied().filter(|handle| handle.is_valid());
+        handle.ok_or(ServiceRuntimeError::StaleGeneration)
     }
 
     fn initialize_dynamic_services(&mut self) -> Result<(), ServiceRuntimeError> {
@@ -795,6 +793,7 @@ impl ServiceRuntime {
             self.tables[index].write(tables);
             self.table_ready[index] = true;
         }
+        self.initialize_dynamic_services()?;
         self.initialize_dynamic_ipc()?;
         self.publish_keyboard_event()?;
         let mut memory = IdentityPageTableMemory;
@@ -1270,7 +1269,6 @@ impl ServiceRuntime {
         if self.network_config.is_enabled() {
             self.queue_network_link();
         }
-        self.initialize_dynamic_services()?;
         for service in crate::service_images::SERVICE_START_ORDER {
             if (service == ServiceId::Network || service == ServiceId::Fetch)
                 && !self.network_config.is_enabled()
@@ -3535,7 +3533,6 @@ impl ServiceRuntime {
                                     services[0],
                                 );
                                 decision.response.status = logos_abi::ManagerStatus::Busy;
-                                if admitted != 0 {}
                                 break;
                             }
                             admitted += 1;

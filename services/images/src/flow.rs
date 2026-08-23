@@ -655,14 +655,11 @@ fn manager_boot_probe() -> bool {
     );
     if common::manager_call(&request, &mut response) != IpcStatus::Ok
         || response.status != logos_abi::ManagerStatus::Ok
-        || response.record.service.index() != 0
         || &response.record.name[..usize::from(response.record.name_len)] != b"input"
     {
         return false;
     }
-    let mut output = [0; logos_flow::MAX_OUTPUT_BYTES];
-    let length = logos_flow::format_service_record(&response.record, &mut output);
-    output[..length].starts_with(b"input ") && output[..length].ends_with(b"\r\n")
+    response.record.service.is_valid()
 }
 
 struct CompletionService {
@@ -2651,58 +2648,26 @@ static mut FETCH: FetchClient = FetchClient::new();
 static mut COMPLETION: CompletionService = CompletionService::new();
 static mut PENDING_COMPLETION: Option<IpcBytes> = None;
 
+fn required_capability(spec: common::CapabilitySpec) -> logos_abi::CapabilityHandle {
+    common::capability_handle(spec).unwrap_or_else(|_| common::idle())
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
     let capabilities = IpcCapabilities {
-        input: match common::capability_handle(INPUT_CAPABILITY) {
-            Ok(capability) => capability,
-            Err(_) => common::idle(),
-        },
-        output: match common::capability_handle(OUTPUT_CAPABILITY) {
-            Ok(capability) => capability,
-            Err(_) => common::idle(),
-        },
-        storage_send: match common::capability_handle(STORAGE_SEND_CAPABILITY) {
-            Ok(capability) => capability,
-            Err(_) => common::idle(),
-        },
-        storage_receive: match common::capability_handle(STORAGE_RECEIVE_CAPABILITY) {
-            Ok(capability) => capability,
-            Err(_) => common::idle(),
-        },
-        network_send: match common::capability_handle(NETWORK_SEND_CAPABILITY) {
-            Ok(capability) => capability,
-            Err(_) => common::idle(),
-        },
-        network_receive: match common::capability_handle(NETWORK_RECEIVE_CAPABILITY) {
-            Ok(capability) => capability,
-            Err(_) => common::idle(),
-        },
-        fetch_send: match common::capability_handle(FETCH_SEND_CAPABILITY) {
-            Ok(capability) => capability,
-            Err(_) => common::idle(),
-        },
-        fetch_receive: match common::capability_handle(FETCH_RECEIVE_CAPABILITY) {
-            Ok(capability) => capability,
-            Err(_) => common::idle(),
-        },
-        device_send: match common::capability_handle(DEVICE_SEND_CAPABILITY) {
-            Ok(capability) => capability,
-            Err(_) => common::idle(),
-        },
-        device_receive: match common::capability_handle(DEVICE_RECEIVE_CAPABILITY) {
-            Ok(capability) => capability,
-            Err(_) => common::idle(),
-        },
-        user_send: match common::capability_handle(USER_SEND_CAPABILITY) {
-            Ok(capability) => capability,
-            Err(_) => common::idle(),
-        },
-        user_receive: match common::capability_handle(USER_RECEIVE_CAPABILITY) {
-            Ok(capability) => capability,
-            Err(_) => common::idle(),
-        },
+        input: required_capability(INPUT_CAPABILITY),
+        output: required_capability(OUTPUT_CAPABILITY),
+        storage_send: required_capability(STORAGE_SEND_CAPABILITY),
+        storage_receive: required_capability(STORAGE_RECEIVE_CAPABILITY),
+        network_send: required_capability(NETWORK_SEND_CAPABILITY),
+        network_receive: required_capability(NETWORK_RECEIVE_CAPABILITY),
+        fetch_send: required_capability(FETCH_SEND_CAPABILITY),
+        fetch_receive: required_capability(FETCH_RECEIVE_CAPABILITY),
+        device_send: required_capability(DEVICE_SEND_CAPABILITY),
+        device_receive: required_capability(DEVICE_RECEIVE_CAPABILITY),
+        user_send: required_capability(USER_SEND_CAPABILITY),
+        user_receive: required_capability(USER_RECEIVE_CAPABILITY),
     };
     unsafe { *core::ptr::addr_of_mut!(IPC_CAPABILITIES) = Some(capabilities) };
     let flow = unsafe { &mut *core::ptr::addr_of_mut!(FLOW) };

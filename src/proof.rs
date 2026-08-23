@@ -414,7 +414,7 @@ pub(crate) fn verify_service_manager_boundary() {
     ))
     .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: manager list"));
     if list.status != logos_abi::ManagerStatus::Ok
-        || list.record.service.index() != 0
+        || !list.record.service.is_valid()
         || &list.record.name[..usize::from(list.record.name_len)] != b"input"
     {
         crate::arch_fatal(b"LogOS vNext: manager list result");
