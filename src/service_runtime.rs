@@ -2154,6 +2154,16 @@ impl ServiceRuntime {
         })
     }
 
+    fn dynamic_contract_matches(
+        &self,
+        endpoint: logos_abi::EndpointHandle,
+        producer: Option<ServiceId>,
+        consumer: Option<ServiceId>,
+        contract_id: u16,
+    ) -> bool {
+        self.dynamic_endpoint(producer, consumer, contract_id).ok() == Some(endpoint)
+    }
+
     fn endpoint_requires_core_dispatch(&self, endpoint: logos_abi::EndpointHandle) -> bool {
         [
             logos_abi::IpcEndpointId::StorageToCore.index(),
@@ -2234,9 +2244,11 @@ impl ServiceRuntime {
             return self.dynamic_device_request(service, caller, dynamic_capability);
         }
         let disabled_flow_network = !self.network_config.is_enabled()
-            && self.dynamic_endpoint_matches(
+            && self.dynamic_contract_matches(
                 endpoint,
-                logos_abi::IpcEndpointId::FlowToNetwork.index(),
+                Some(ServiceId::Flow),
+                Some(ServiceId::Network),
+                logos_abi::IPC_CONTRACT_BYTES,
             );
         if !self.endpoint_requires_core_dispatch(endpoint) && !disabled_flow_network {
             if length != expected_bytes {
@@ -2294,8 +2306,12 @@ impl ServiceRuntime {
             };
         };
         if service == ServiceId::Network
-            && self
-                .dynamic_endpoint_matches(endpoint, logos_abi::IpcEndpointId::NetworkToCore.index())
+            && self.dynamic_contract_matches(
+                endpoint,
+                Some(ServiceId::Network),
+                None,
+                logos_abi::IPC_CONTRACT_PACKET,
+            )
         {
             if length != core::mem::size_of::<logos_abi::NetworkPacketDescriptor>() {
                 return crate::service_ipc::IpcOutcome {
@@ -2369,8 +2385,12 @@ impl ServiceRuntime {
             return crate::service_ipc::IpcOutcome { status, notified: false };
         }
         if service == ServiceId::Flow
-            && self
-                .dynamic_endpoint_matches(endpoint, logos_abi::IpcEndpointId::FlowToNetwork.index())
+            && self.dynamic_contract_matches(
+                endpoint,
+                Some(ServiceId::Flow),
+                Some(ServiceId::Network),
+                logos_abi::IPC_CONTRACT_BYTES,
+            )
             && self.dynamic_service_state(ServiceId::Network)
                 == Some(crate::runtime_services::ServiceState::Disabled)
         {
@@ -3068,9 +3088,12 @@ impl ServiceRuntime {
                     notified: status == logos_abi::IpcStatus::Ok,
                 };
             }
-            if self
-                .dynamic_endpoint_matches(endpoint, logos_abi::IpcEndpointId::CoreToNetwork.index())
-            {
+            if self.dynamic_contract_matches(
+                endpoint,
+                None,
+                Some(ServiceId::Network),
+                logos_abi::IPC_CONTRACT_PACKET,
+            ) {
                 let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
                     return crate::service_ipc::IpcOutcome {
                         status: logos_abi::IpcStatus::Unauthorized,
@@ -3151,9 +3174,11 @@ impl ServiceRuntime {
                 if status == logos_abi::IpcStatus::Ok {
                     #[cfg(feature = "qemu-proof")]
                     if service == ServiceId::Flow
-                        && self.dynamic_endpoint_matches(
+                        && self.dynamic_contract_matches(
                             endpoint,
-                            logos_abi::IpcEndpointId::NetworkToFlow.index(),
+                            Some(ServiceId::Network),
+                            Some(ServiceId::Flow),
+                            logos_abi::IPC_CONTRACT_BYTES,
                         )
                     {
                         if !logos_abi::IpcBytes::wire_enums_valid(bytes) {
