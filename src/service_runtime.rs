@@ -4113,8 +4113,8 @@ impl ServiceRuntime {
         process: ProcessHandle,
         request: logos_abi::EventRequest,
     ) -> Option<(logos_abi::EventStatus, logos_abi::EventResponse)> {
-        let service = self.service_for_process(process)?;
-        let frame = self.ipc_staging_frames[service.index()]?;
+        let slot = self.service_slot_for_process(process)?;
+        let frame = self.ipc_staging_frames.get(slot).copied().flatten()?;
         unsafe {
             core::ptr::write_unaligned(
                 frame.raw() as usize as *mut logos_abi::EventRequest,
@@ -4142,11 +4142,6 @@ impl ServiceRuntime {
         response.is_valid_for(request)
             && response.record.state == logos_abi::ManagerState::Running
             && response.record.restarts != 0
-    }
-
-    pub(crate) fn service_for_process(&self, process: ProcessHandle) -> Option<ServiceId> {
-        let handle = self.service_handle_for_process(process)?;
-        builtin_service_for_handle(&self.service_handles, handle)
     }
 
     fn service_slot_for_process(&self, process: ProcessHandle) -> Option<usize> {
@@ -4224,10 +4219,9 @@ impl ServiceRuntime {
             .processes
             .mapping(process, mapping_index)
             .ok_or(ServiceRuntimeError::Process(ProcessError::AddressSpace))?;
-        let service = self
-            .service_for_process(process)
+        let index = self
+            .service_slot_for_process(process)
             .ok_or(ServiceRuntimeError::Process(ProcessError::InvalidHandle))?;
-        let index = service.index();
         if !self.table_ready[index] {
             return Err(ServiceRuntimeError::Process(ProcessError::AddressSpace));
         }
