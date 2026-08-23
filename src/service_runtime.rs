@@ -2127,33 +2127,6 @@ impl ServiceRuntime {
         status
     }
 
-    fn dynamic_endpoint_matches(
-        &self,
-        endpoint: logos_abi::EndpointHandle,
-        manifest_index: usize,
-    ) -> bool {
-        let Some(endpoint_id) = logos_abi::IpcEndpointId::from_index(manifest_index) else {
-            return false;
-        };
-        let generation = (self.service_epoch as u32).max(1);
-        let Ok(producer) =
-            dynamic_endpoint_peer(endpoint_id, true, &self.service_handles, generation)
-        else {
-            return false;
-        };
-        let Ok(consumer) =
-            dynamic_endpoint_peer(endpoint_id, false, &self.service_handles, generation)
-        else {
-            return false;
-        };
-        let Some(contract_id) = logos_abi::ipc_contract_id(manifest_index) else {
-            return false;
-        };
-        self.dynamic_ipc.as_ref().is_some_and(|registry| {
-            registry.endpoint_matches(endpoint, producer, consumer, contract_id).unwrap_or(false)
-        })
-    }
-
     fn dynamic_contract_matches(
         &self,
         endpoint: logos_abi::EndpointHandle,
@@ -2166,19 +2139,21 @@ impl ServiceRuntime {
 
     fn endpoint_requires_core_dispatch(&self, endpoint: logos_abi::EndpointHandle) -> bool {
         [
-            logos_abi::IpcEndpointId::StorageToCore.index(),
-            logos_abi::IpcEndpointId::CoreToStorage.index(),
-            logos_abi::IpcEndpointId::NetworkToCore.index(),
-            logos_abi::IpcEndpointId::CoreToNetwork.index(),
-            logos_abi::IpcEndpointId::DeviceToCore.index(),
-            logos_abi::IpcEndpointId::CoreToDevice.index(),
-            logos_abi::IpcEndpointId::CoreToStoragePackage.index(),
-            logos_abi::IpcEndpointId::StoragePackageToCore.index(),
-            logos_abi::IpcEndpointId::StorageMapToCore.index(),
-            logos_abi::IpcEndpointId::CoreToStorageMap.index(),
+            (Some(ServiceId::Storage), None, logos_abi::IPC_CONTRACT_STORAGE_REQUEST),
+            (None, Some(ServiceId::Storage), logos_abi::IPC_CONTRACT_STORAGE_RESPONSE),
+            (Some(ServiceId::Network), None, logos_abi::IPC_CONTRACT_PACKET),
+            (None, Some(ServiceId::Network), logos_abi::IPC_CONTRACT_PACKET),
+            (Some(ServiceId::Device), None, logos_abi::IPC_CONTRACT_DEVICE_REQUEST),
+            (None, Some(ServiceId::Device), logos_abi::IPC_CONTRACT_DEVICE_RESPONSE),
+            (None, Some(ServiceId::Storage), logos_abi::IPC_CONTRACT_PACKAGE_REQUEST),
+            (Some(ServiceId::Storage), None, logos_abi::IPC_CONTRACT_PACKAGE_RESPONSE),
+            (Some(ServiceId::Storage), None, logos_abi::IPC_CONTRACT_STORAGE_MAP_REQUEST),
+            (None, Some(ServiceId::Storage), logos_abi::IPC_CONTRACT_STORAGE_MAP_RESPONSE),
         ]
         .into_iter()
-        .any(|index| self.dynamic_endpoint_matches(endpoint, index))
+        .any(|(producer, consumer, contract)| {
+            self.dynamic_contract_matches(endpoint, producer, consumer, contract)
+        })
     }
 
     pub(crate) fn ipc_send(
@@ -2964,8 +2939,12 @@ impl ServiceRuntime {
         };
         #[cfg(feature = "storage-proof")]
         if service == ServiceId::Flow
-            && self
-                .dynamic_endpoint_matches(endpoint, logos_abi::IpcEndpointId::FlowToStorage.index())
+            && self.dynamic_contract_matches(
+                endpoint,
+                Some(ServiceId::Flow),
+                Some(ServiceId::Storage),
+                logos_abi::IPC_CONTRACT_BYTES,
+            )
         {
             self.storage_proof.observe_request(bytes);
         }
