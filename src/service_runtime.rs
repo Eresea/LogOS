@@ -1426,6 +1426,10 @@ impl ServiceRuntime {
         if self.tasks[index].is_some() {
             return Ok(());
         }
+        let handle = self.runtime_service_handle(service)?;
+        if !self.supervisor.ensure(handle) {
+            return Err(ServiceRuntimeError::TaskCapacity);
+        }
         let Some((process, launch)) = self.launch(service) else {
             return Err(ServiceRuntimeError::TaskLaunch);
         };
@@ -1439,7 +1443,7 @@ impl ServiceRuntime {
             })?;
         self.tasks[index] = Some(task);
         let now = crate::current_ticks();
-        self.supervisor.register(service, now);
+        let _ = self.supervisor.register(handle, now);
         self.sync_dynamic_service_running(service);
         Ok(())
     }
@@ -1929,7 +1933,9 @@ impl ServiceRuntime {
         }
         if crate::SCHEDULER.state(task).is_none() {
             self.tasks[index] = None;
-            self.supervisor.unregister(service);
+            if let Ok(handle) = self.runtime_service_handle(service) {
+                self.supervisor.unregister(handle);
+            }
             self.sync_dynamic_service_stopped(service);
             return Ok(false);
         }
@@ -1969,11 +1975,8 @@ impl ServiceRuntime {
         self.service_handle_for_process(process) == Some(owner)
     }
 
-    fn dynamic_service_heartbeat(&self, service: ServiceId) -> u64 {
+    fn dynamic_service_heartbeat_handle(&self, handle: ServiceHandle) -> u64 {
         let Some(registry) = self.dynamic_services.as_ref() else {
-            return 0;
-        };
-        let Ok(handle) = self.runtime_service_handle(service) else {
             return 0;
         };
         registry.ownership(handle).map(|ownership| ownership.heartbeat).unwrap_or(0)
@@ -4578,7 +4581,9 @@ impl ServiceRuntime {
                     return Err(ServiceRuntimeError::TaskStop);
                 }
                 self.tasks[index] = None;
-                self.supervisor.unregister(service);
+                if let Ok(handle) = self.runtime_service_handle(service) {
+                    self.supervisor.unregister(handle);
+                }
                 if process_failed {
                     self.sync_dynamic_service_failed(service);
                 } else {
@@ -4631,19 +4636,34 @@ impl ServiceRuntime {
             }
             return Ok(true);
         }
-        let mut heartbeats = [0; SERVICE_COUNT];
-        let mut process_states = [None; SERVICE_COUNT];
-        for spec in SERVICE_IMAGES {
-            let index = spec.service().index();
-            heartbeats[index] = self.dynamic_service_heartbeat(spec.service());
-            process_states[index] = if self.tasks[index].is_some() {
-                self.launch(spec.service()).and_then(|(process, _)| self.processes.state(process))
-            } else {
-                None
-            };
+        let mut heartbeats = Vec::new();
+        let mut process_states = Vec::new();
+        if heartbeats.try_reserve(self.service_handles.len()).is_err()
+            || process_states.try_reserve(self.service_handles.len()).is_err()
+        {
+            return Err(ServiceRuntimeError::Resources);
         }
-        if let Some(failed) = self.supervisor.poll(now, heartbeats, process_states) {
-            if failed == ServiceId::Network
+        heartbeats.resize(self.service_handles.len(), 0);
+        process_states.resize(self.service_handles.len(), None);
+        for (index, handle) in self.service_handles.iter().copied().enumerate() {
+            heartbeats[index] = self.dynamic_service_heartbeat_handle(handle);
+            process_states[index] = self.tasks.get(index).copied().flatten().and_then(|_| {
+                self.launches
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .and_then(|(process, _)| self.processes.state(process))
+            });
+        }
+        if let Some(failed) = self.supervisor.poll(now, &heartbeats, &process_states) {
+            let Some(failed_service) = builtin_service_for_handle(&self.service_handles, failed)
+            else {
+                if let Some(registry) = self.dynamic_services.as_mut() {
+                    let _ = registry.fail(failed);
+                }
+                return Ok(false);
+            };
+            if failed_service == ServiceId::Network
                 && !self.uses_package_image(ServiceId::Network)
                 && !self.uses_package_image(ServiceId::Fetch)
             {
