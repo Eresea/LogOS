@@ -152,6 +152,39 @@ impl RuntimeServiceRegistry {
         dependencies: &[ServiceHandle],
         heap_quota_pages: usize,
     ) -> Result<ServiceHandle, ServiceRegistryError> {
+        self.register_with_source(
+            name,
+            image,
+            dependencies,
+            heap_quota_pages,
+            ServiceImageSource::Builtin,
+        )
+    }
+
+    pub fn register_filesystem_package(
+        &mut self,
+        name: &[u8],
+        image: &[u8],
+        dependencies: &[ServiceHandle],
+        heap_quota_pages: usize,
+    ) -> Result<ServiceHandle, ServiceRegistryError> {
+        self.register_with_source(
+            name,
+            image,
+            dependencies,
+            heap_quota_pages,
+            ServiceImageSource::FilesystemPackage,
+        )
+    }
+
+    fn register_with_source(
+        &mut self,
+        name: &[u8],
+        image: &[u8],
+        dependencies: &[ServiceHandle],
+        heap_quota_pages: usize,
+        image_source: ServiceImageSource,
+    ) -> Result<ServiceHandle, ServiceRegistryError> {
         if name.is_empty() || name.len() > MAX_SERVICE_NAME_BYTES {
             return Err(ServiceRegistryError::InvalidName);
         }
@@ -185,7 +218,7 @@ impl RuntimeServiceRegistry {
             restarts: 0,
             heap_quota_pages,
             manager_rights: ManagerRights::NONE,
-            image_source: ServiceImageSource::Builtin,
+            image_source,
             ownership: ServiceOwnership::EMPTY,
         });
         Ok(handle)
@@ -1014,6 +1047,16 @@ mod tests {
         assert_eq!(registry.image_source(handle), Ok(ServiceImageSource::Builtin));
         registry.set_image_source(handle, ServiceImageSource::FilesystemPackage).unwrap();
         assert_eq!(registry.image_source(handle), Ok(ServiceImageSource::FilesystemPackage));
+    }
+
+    #[test]
+    fn filesystem_packages_use_the_dynamic_registration_path() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let handle =
+            registry.register_filesystem_package(b"package-service", b"image", &[], 9).unwrap();
+        assert_eq!(registry.image_source(handle), Ok(ServiceImageSource::FilesystemPackage));
+        assert_eq!(registry.heap_quota_pages(handle), Ok(9));
+        assert_eq!(registry.state(handle), Ok(ServiceState::Stopped));
     }
 
     #[test]
