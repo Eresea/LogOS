@@ -6,13 +6,15 @@ mod common;
 
 use logos_abi::{DeviceOperation, DeviceRequest, DeviceResponse, DeviceStatus, IpcStatus};
 
-const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
+const FLOW_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_DEVICE_REQUEST,
+    b"flow",
     core::mem::size_of::<DeviceRequest>(),
     logos_abi::IpcRights::Receive,
 );
-const FLOW_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
+const FLOW_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_DEVICE_RESPONSE,
+    b"flow",
     core::mem::size_of::<DeviceResponse>(),
     logos_abi::IpcRights::Send,
 );

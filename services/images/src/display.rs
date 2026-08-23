@@ -8,8 +8,9 @@ use logos_abi::{
     DISPLAY_CONFIG_BASE, DISPLAY_FRAMEBUFFER_BASE, FramebufferConfig, FramebufferFormat, IpcStatus,
     MessageKind, RENDER_FLAG_MORE, RenderMessage,
 };
-const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
+const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_RENDER,
+    b"terminal",
     core::mem::size_of::<RenderMessage>(),
     logos_abi::IpcRights::Receive,
 );

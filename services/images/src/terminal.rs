@@ -6,23 +6,27 @@ mod common;
 
 use logos_abi::{InputMessage, IpcBytes, IpcStatus, KeyCode, KeyState, MessageKind};
 
-const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
+const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_INPUT,
+    b"input",
     core::mem::size_of::<InputMessage>(),
     logos_abi::IpcRights::Receive,
 );
-const DISPLAY_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
+const DISPLAY_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_RENDER,
+    b"display",
     core::mem::size_of::<logos_abi::RenderMessage>(),
     logos_abi::IpcRights::Send,
 );
-const SESSION_INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
+const SESSION_INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
+    b"session",
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
-const SESSION_OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_any(
+const SESSION_OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
+    b"session",
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
