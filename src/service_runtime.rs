@@ -3545,9 +3545,6 @@ impl ServiceRuntime {
             .as_ref()
             .and_then(|registry| registry.manager_rights(service_handle).ok())
             .unwrap_or(logos_abi::ManagerRights::NONE);
-        if rights == logos_abi::ManagerRights::NONE {
-            return logos_abi::IpcStatus::Stale;
-        }
         let Some(staging_frame) = self.ipc_staging_frames.get(service_slot).copied().flatten()
         else {
             return logos_abi::IpcStatus::Unauthorized;
@@ -3578,6 +3575,38 @@ impl ServiceRuntime {
             let response = logos_abi::ManagerResponse::new(
                 request.operation,
                 logos_abi::ManagerStatus::Malformed,
+                request.request_id,
+            );
+            unsafe {
+                core::ptr::write_unaligned(
+                    staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
+                    response,
+                );
+            }
+            return logos_abi::IpcStatus::Ok;
+        }
+        let service_operation = matches!(
+            request.operation,
+            logos_abi::ManagerOperation::List
+                | logos_abi::ManagerOperation::Status
+                | logos_abi::ManagerOperation::Start
+                | logos_abi::ManagerOperation::Stop
+                | logos_abi::ManagerOperation::Restart
+        );
+        let required_rights = if matches!(
+            request.operation,
+            logos_abi::ManagerOperation::Start
+                | logos_abi::ManagerOperation::Stop
+                | logos_abi::ManagerOperation::Restart
+        ) {
+            logos_abi::ManagerRights::LIFECYCLE
+        } else {
+            logos_abi::ManagerRights::INSPECT
+        };
+        if service_operation && !rights.contains(required_rights) {
+            let response = logos_abi::ManagerResponse::new(
+                request.operation,
+                logos_abi::ManagerStatus::Unauthorized,
                 request.request_id,
             );
             unsafe {
