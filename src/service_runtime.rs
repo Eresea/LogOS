@@ -3456,15 +3456,20 @@ impl ServiceRuntime {
         capability_raw: u64,
         length: usize,
     ) -> logos_abi::IpcStatus {
-        let Some(service) = self.service_for_process(process) else {
+        let Some(service_slot) = self.service_slot_for_process(process) else {
             return logos_abi::IpcStatus::Unauthorized;
         };
-        if self.dynamic_service_state(service)
+        let Some(service_handle) = self.service_handles.get(service_slot).copied() else {
+            return logos_abi::IpcStatus::Stale;
+        };
+        if self.dynamic_services.as_ref().and_then(|registry| registry.state(service_handle).ok())
             != Some(crate::runtime_services::ServiceState::Running)
         {
             return logos_abi::IpcStatus::Stale;
         }
-        let control = self.bootstrap_control[service.index()];
+        let Some(control) = self.bootstrap_control.get(service_slot).copied() else {
+            return logos_abi::IpcStatus::Stale;
+        };
         if !control.is_valid() {
             return logos_abi::IpcStatus::Stale;
         }
@@ -3474,9 +3479,6 @@ impl ServiceRuntime {
         if length != core::mem::size_of::<logos_abi::ManagerRequest>() {
             return logos_abi::IpcStatus::Malformed;
         }
-        let Ok(service_handle) = self.runtime_service_handle(service) else {
-            return logos_abi::IpcStatus::Stale;
-        };
         let rights = self
             .dynamic_services
             .as_ref()
@@ -3485,7 +3487,8 @@ impl ServiceRuntime {
         if rights == logos_abi::ManagerRights::NONE {
             return logos_abi::IpcStatus::Stale;
         }
-        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+        let Some(staging_frame) = self.ipc_staging_frames.get(service_slot).copied().flatten()
+        else {
             return logos_abi::IpcStatus::Unauthorized;
         };
         let bytes = staging_frame.raw() as usize as *const u8;
