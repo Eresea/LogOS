@@ -2273,9 +2273,11 @@ impl ServiceRuntime {
             };
             #[cfg(feature = "storage-proof")]
             if service == ServiceId::Flow
-                && self.dynamic_endpoint_matches(
+                && self.dynamic_contract_matches(
                     endpoint,
-                    logos_abi::IpcEndpointId::FlowToStorage.index(),
+                    Some(ServiceId::Flow),
+                    Some(ServiceId::Storage),
+                    logos_abi::IPC_CONTRACT_BYTES,
                 )
             {
                 self.storage_proof.observe_request(bytes);
@@ -2508,9 +2510,11 @@ impl ServiceRuntime {
             };
         }
         if service == ServiceId::Storage
-            && self.dynamic_endpoint_matches(
+            && self.dynamic_contract_matches(
                 endpoint,
-                crate::storage_ipc::STORAGE_MAP_REQUEST_ENDPOINT,
+                Some(ServiceId::Storage),
+                None,
+                logos_abi::IPC_CONTRACT_STORAGE_MAP_REQUEST,
             )
         {
             if length != core::mem::size_of::<logos_abi::StorageMapRequest>() {
@@ -2674,7 +2678,12 @@ impl ServiceRuntime {
             };
         }
         if service == ServiceId::Storage
-            && self.dynamic_endpoint_matches(endpoint, crate::storage_ipc::STORAGE_REQUEST_ENDPOINT)
+            && self.dynamic_contract_matches(
+                endpoint,
+                Some(ServiceId::Storage),
+                None,
+                logos_abi::IPC_CONTRACT_STORAGE_REQUEST,
+            )
         {
             if length != core::mem::size_of::<logos_abi::StorageRequest>() {
                 return crate::service_ipc::IpcOutcome {
@@ -2890,8 +2899,12 @@ impl ServiceRuntime {
             };
         }
         if service == ServiceId::Storage
-            && self
-                .dynamic_endpoint_matches(endpoint, crate::storage_ipc::PACKAGE_RESPONSE_ENDPOINT)
+            && self.dynamic_contract_matches(
+                endpoint,
+                Some(ServiceId::Storage),
+                None,
+                logos_abi::IPC_CONTRACT_PACKAGE_RESPONSE,
+            )
         {
             if length != core::mem::size_of::<logos_abi::PackageResponse>() {
                 return crate::service_ipc::IpcOutcome {
@@ -3039,30 +3052,11 @@ impl ServiceRuntime {
                     notified: status == logos_abi::IpcStatus::Ok,
                 };
             }
-            if self
-                .dynamic_endpoint_matches(endpoint, crate::storage_ipc::STORAGE_RESPONSE_ENDPOINT)
-            {
-                let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
-                    return crate::service_ipc::IpcOutcome {
-                        status: logos_abi::IpcStatus::Unauthorized,
-                        notified: false,
-                    };
-                };
-                let bytes = unsafe {
-                    core::slice::from_raw_parts_mut(
-                        staging_frame.raw() as usize as *mut u8,
-                        expected_bytes,
-                    )
-                };
-                let status = self.receive_dynamic(caller, dynamic_capability, bytes);
-                return crate::service_ipc::IpcOutcome {
-                    status,
-                    notified: status == logos_abi::IpcStatus::Ok,
-                };
-            }
-            if self.dynamic_endpoint_matches(
+            if self.dynamic_contract_matches(
                 endpoint,
-                crate::storage_ipc::STORAGE_MAP_RESPONSE_ENDPOINT,
+                None,
+                Some(ServiceId::Storage),
+                logos_abi::IPC_CONTRACT_STORAGE_RESPONSE,
             ) {
                 let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
                     return crate::service_ipc::IpcOutcome {
@@ -3082,8 +3076,36 @@ impl ServiceRuntime {
                     notified: status == logos_abi::IpcStatus::Ok,
                 };
             }
-            if self.dynamic_endpoint_matches(endpoint, crate::storage_ipc::PACKAGE_REQUEST_ENDPOINT)
-            {
+            if self.dynamic_contract_matches(
+                endpoint,
+                None,
+                Some(ServiceId::Storage),
+                logos_abi::IPC_CONTRACT_STORAGE_MAP_RESPONSE,
+            ) {
+                let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Unauthorized,
+                        notified: false,
+                    };
+                };
+                let bytes = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        staging_frame.raw() as usize as *mut u8,
+                        expected_bytes,
+                    )
+                };
+                let status = self.receive_dynamic(caller, dynamic_capability, bytes);
+                return crate::service_ipc::IpcOutcome {
+                    status,
+                    notified: status == logos_abi::IpcStatus::Ok,
+                };
+            }
+            if self.dynamic_contract_matches(
+                endpoint,
+                None,
+                Some(ServiceId::Storage),
+                logos_abi::IPC_CONTRACT_PACKAGE_REQUEST,
+            ) {
                 let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
                     return crate::service_ipc::IpcOutcome {
                         status: logos_abi::IpcStatus::Unauthorized,
@@ -3236,9 +3258,11 @@ impl ServiceRuntime {
                     }
                     #[cfg(feature = "storage-proof")]
                     if service == ServiceId::Flow
-                        && self.dynamic_endpoint_matches(
+                        && self.dynamic_contract_matches(
                             endpoint,
-                            logos_abi::IpcEndpointId::StorageToFlow.index(),
+                            Some(ServiceId::Storage),
+                            Some(ServiceId::Flow),
+                            logos_abi::IPC_CONTRACT_BYTES,
                         )
                     {
                         self.storage_proof.observe_response(bytes);
