@@ -19,7 +19,10 @@ ID, exact payload metadata, and the event handle for their direction. Event reco
 carry an owner, generation-safe event handle, and source flags for hardware events.
 
 Dynamic service registration and endpoint creation are policy-controlled Core
-operations. Services do not receive arbitrary capability delegation authority.
+operations. The manager `Register` operation creates a stopped filesystem-package
+record from a validated name; package lookup uses a name-bound target while the
+on-disk manifest may retain its built-in service target. Services do not receive
+arbitrary capability delegation authority.
 The ABI migration is versioned and intentionally does not support the previous
 fixed ABI in the live service image set.
 
@@ -43,7 +46,8 @@ fixed ABI in the live service image set.
 ## Implementation status
 
 The Core registries, v5 directory records, generation checks, and event-set syscall operations are
-live. Built-in service traffic resolves capabilities and hardware events through paginated directory
-operations and runtime handles; route-specific device, storage, package, and network adapters remain
-Core-owned policy behind those records. Service lifecycle requests validate dynamic handles before
-using the internal built-in image router, while program lifecycle remains a separately bounded contract.
+live. Built-in and package-backed service traffic resolves capabilities and hardware events through
+paginated directory operations and runtime handles; route-specific device, storage, package, and
+network adapters remain Core-owned policy behind those records. Service lifecycle requests validate
+dynamic handles before selecting either the built-in image or name-bound package loader, while program
+lifecycle remains a separately bounded contract.

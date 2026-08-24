@@ -130,10 +130,10 @@ validator and arena-scoped COW allocator define disjoint system, user-content, a
 while the v5 namespace routes file content through the user pool. Ordinary path operations are not treated as a user
 authorization boundary.
 
-Package-backed services are deliberately excluded from targeted manager image resets: Start and
-Restart return `Unsupported` until a bounded durable reload path exists. Supervisor failures route
-through the graph-wide restart, which retains the active package image while rebuilding IPC
-generations and service epochs.
+Package-backed service records use a name-bound package target for lookup and streamed ELF loading.
+Register, Start, Stop, and Restart operate on the dynamic service handle; a failed package lookup or
+image admission leaves the record failed and reclaims any partially allocated process, page-table,
+heap, IPC, and event resources. Built-in image metadata remains bootstrap policy, not lifecycle identity.
 
 ## Deferred next-step improvements
 
