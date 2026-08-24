@@ -86,6 +86,7 @@ pub enum NamespaceError {
     TooLarge,
     InvalidRecord,
     GenerationExhausted,
+    CommitNotPublished,
     Recovery,
     Unsupported,
     Package(PackageCatalogError),
@@ -2908,11 +2909,11 @@ impl NamespaceTransaction {
         namespace.retired_file_extent_count = self.retired_extent_count;
         match namespace.persist_snapshot() {
             Ok(generation) => Ok(generation.saturating_sub(1)),
-            Err(error) => match namespace.reopen() {
+            Err(_error) => match namespace.reopen() {
                 Ok(()) if namespace.volume.generation() > previous_generation => {
                     Ok(namespace.volume.generation().saturating_sub(1))
                 }
-                Ok(()) => Err(error),
+                Ok(()) => Err(NamespaceError::CommitNotPublished),
                 Err(recovery) => Err(recovery),
             },
         }
@@ -3325,6 +3326,19 @@ mod tests {
         assert!(transaction.commit(&mut fs).is_ok());
         assert!(fs.store.triggered);
         assert!(fs.resolve_path(b"/recovered").is_ok());
+    }
+
+    #[test]
+    fn unpublished_commit_reopens_without_poisoning_the_namespace() {
+        let store = CommitPublicationStore::new();
+        let mut fs = DurableNamespaceV5::format_v5(store).unwrap();
+        let mut transaction = fs.begin_transaction();
+        transaction.create_file(fs.transaction_base(), b"/notpublished").unwrap();
+        fs.store.arm(0);
+
+        assert_eq!(transaction.commit(&mut fs), Err(NamespaceError::CommitNotPublished));
+        assert_eq!(fs.resolve_path(b"/notpublished"), Err(NamespaceError::NotFound));
+        fs.create_file(fs.root(), b"after").unwrap();
     }
 
     #[test]

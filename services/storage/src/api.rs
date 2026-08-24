@@ -948,6 +948,7 @@ fn map_error(error: NamespaceError) -> StorageApiStatus {
         NamespaceError::NotEmpty => StorageApiStatus::NotEmpty,
         NamespaceError::Stale => StorageApiStatus::Stale,
         NamespaceError::TooLarge => StorageApiStatus::TooLarge,
+        NamespaceError::CommitNotPublished => StorageApiStatus::Io,
         NamespaceError::Recovery => StorageApiStatus::Io,
         NamespaceError::Format(_) | NamespaceError::Block(_) => StorageApiStatus::Io,
         NamespaceError::Unsupported => StorageApiStatus::Unsupported,
