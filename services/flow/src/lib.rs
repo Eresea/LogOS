@@ -1888,6 +1888,10 @@ mod tests {
             parse_flow_operation(b"fs.open(\"/file\").write(\"data\")").unwrap(),
             Some(FlowOperation::Storage(StorageCommand::Write { path: b"/file", data: b"data" }))
         );
+        assert_eq!(
+            parse_flow_operation(b"fs.touch(\"test\").create()").unwrap(),
+            Some(FlowOperation::Storage(StorageCommand::Touch { path: b"test" }))
+        );
         assert!(service.validate(br#"var path = "/file""#).is_ok());
         assert!(service.validate(br#"var data = "data""#).is_ok());
         assert_eq!(
