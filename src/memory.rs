@@ -3504,23 +3504,19 @@ unsafe impl GlobalAlloc for KernelGlobalAllocator<'_> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         match self.alloc_layout(layout) {
             Ok(pointer) => pointer,
-            Err(HeapError::Exhausted) => {
+            Err(_) => {
                 let reclaimed = self.notify_reclaim(PressureLevel::Warning);
                 if reclaimed == 0 {
                     let _ = self.notify_reclaim(PressureLevel::Critical);
                 }
                 match self.alloc_layout(layout) {
                     Ok(pointer) => pointer,
-                    Err(HeapError::Exhausted) => {
-                        #[cfg(target_os = "uefi")]
-                        crate::arch_fatal(b"LogOS vNext: kernel allocation");
-                        #[cfg(not(target_os = "uefi"))]
-                        return core::ptr::null_mut();
-                    }
+                    #[cfg(target_os = "uefi")]
+                    Err(_) => crate::arch_fatal(b"LogOS vNext: kernel allocation"),
+                    #[cfg(not(target_os = "uefi"))]
                     Err(_) => core::ptr::null_mut(),
                 }
             }
-            Err(_) => core::ptr::null_mut(),
         }
     }
 
