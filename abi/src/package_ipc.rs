@@ -11,6 +11,7 @@ const MAX_PACKAGE_BYTES: usize = PACKAGE_HEADER_BYTES + MAX_SERVICE_IMAGE_BYTES;
 pub enum PackageTargetKind {
     Service = 1,
     Program = 2,
+    NamedService = 3,
 }
 
 impl PackageTargetKind {
@@ -18,6 +19,7 @@ impl PackageTargetKind {
         match raw {
             1 => Some(Self::Service),
             2 => Some(Self::Program),
+            3 => Some(Self::NamedService),
             _ => None,
         }
     }
@@ -66,6 +68,12 @@ impl PackageTarget {
         Some(target)
     }
 
+    pub fn named_service(name: &[u8]) -> Option<Self> {
+        let mut target = Self::program(name)?;
+        target.kind = PackageTargetKind::NamedService;
+        Some(target)
+    }
+
     pub fn validate(self) -> Result<(), PackageStatus> {
         if self.reserved != 0 || self.name_len as usize > MAX_PACKAGE_NAME_BYTES {
             return Err(PackageStatus::Invalid);
@@ -83,6 +91,15 @@ impl PackageTarget {
                 if self.service != 0
                     || self.name_len == 0
                     || self.name[self.name_len as usize..].iter().any(|byte| *byte != 0)
+                {
+                    return Err(PackageStatus::Invalid);
+                }
+            }
+            PackageTargetKind::NamedService => {
+                if self.service != 0
+                    || self.name_len == 0
+                    || self.name[self.name_len as usize..].iter().any(|byte| *byte != 0)
+                    || Self::program(&self.name[..self.name_len as usize]).is_none()
                 {
                     return Err(PackageStatus::Invalid);
                 }
@@ -219,6 +236,33 @@ impl PackageRequest {
         Some(request)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_named_service(
+        operation: PackageOperation,
+        name: &[u8],
+        request_id: u32,
+        generation: u16,
+        capability: CapabilityHandle,
+        service_epoch: u64,
+        package_generation: u32,
+        offset: u32,
+        length: u16,
+    ) -> Option<Self> {
+        let mut request = Self::new(
+            operation,
+            ServiceId::Storage,
+            request_id,
+            generation,
+            capability,
+            service_epoch,
+            package_generation,
+            offset,
+            length,
+        )?;
+        request.target = PackageTarget::named_service(name)?;
+        Some(request)
+    }
+
     pub fn validate(
         self,
         capability: CapabilityHandle,
@@ -232,6 +276,7 @@ impl PackageRequest {
                     .ok_or(PackageStatus::Invalid)
             }
             PackageTargetKind::Program => Err(PackageStatus::Unsupported),
+            PackageTargetKind::NamedService => Err(PackageStatus::Unsupported),
         }
     }
 
@@ -362,7 +407,8 @@ impl PackageResponse {
             .get(core::mem::offset_of!(Self, status))
             .is_some_and(|raw| *raw <= PackageStatus::Full as u8)
             && bytes.get(core::mem::offset_of!(Self, target)).is_some_and(|raw| {
-                *raw >= PackageTargetKind::Service as u8 && *raw <= PackageTargetKind::Program as u8
+                *raw >= PackageTargetKind::Service as u8
+                    && *raw <= PackageTargetKind::NamedService as u8
             })
     }
 }
@@ -479,6 +525,28 @@ mod tests {
         assert_eq!(request.validate(capability(), 3, 11), Err(PackageStatus::Unsupported));
         let response = PackageResponse::new(request, PackageStatus::Ok).with_package(1, 404, 0, 0);
         assert_eq!(response.validate_for(request, 3, 11), Ok(()));
+    }
+
+    #[test]
+    fn named_service_target_is_name_bound_and_not_a_fixed_service_id() {
+        let request = PackageRequest::new_named_service(
+            PackageOperation::Lookup,
+            b"extra-service",
+            9,
+            3,
+            capability(),
+            11,
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            request.validate_target(capability(), 3, 11).unwrap().kind,
+            PackageTargetKind::NamedService
+        );
+        assert_eq!(request.validate(capability(), 3, 11), Err(PackageStatus::Unsupported));
+        assert!(PackageTarget::named_service(b"bad_name").is_none());
     }
 
     #[test]

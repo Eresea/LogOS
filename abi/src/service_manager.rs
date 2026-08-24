@@ -30,6 +30,7 @@ pub enum ManagerOperation {
     ProgramStart = 6,
     ProgramStatus = 7,
     ProgramStop = 8,
+    Register = 9,
 }
 
 impl ManagerOperation {
@@ -43,6 +44,7 @@ impl ManagerOperation {
             6 => Some(Self::ProgramStart),
             7 => Some(Self::ProgramStatus),
             8 => Some(Self::ProgramStop),
+            9 => Some(Self::Register),
             _ => None,
         }
     }
@@ -138,6 +140,14 @@ impl ManagerRequest {
         Some(self)
     }
 
+    pub fn with_service_name(mut self, name: &[u8]) -> Option<Self> {
+        crate::PackageTarget::program(name)?;
+        self.target_kind = ManagerTargetKind::Service;
+        self.name_len = name.len() as u8;
+        self.name[..name.len()].copy_from_slice(name);
+        Some(self)
+    }
+
     pub const fn program_target(self) -> bool {
         matches!(self.target_kind, ManagerTargetKind::Program)
     }
@@ -221,6 +231,7 @@ impl ManagerResponse {
             | ManagerOperation::ProgramStatus
             | ManagerOperation::ProgramStart
             | ManagerOperation::ProgramStop => self.cursor == 0,
+            ManagerOperation::Register => self.cursor == 0,
         };
         self.abi_version == MANAGER_ABI_VERSION
             && self.operation == request.operation
