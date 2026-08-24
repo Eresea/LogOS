@@ -2683,6 +2683,10 @@ pub extern "C" fn _start() -> ! {
     }
     #[cfg(feature = "qemu-proof")]
     if !manager_command_probe(pending, network) {
+        // The storage proof exercises the normal Flow->Storage command path;
+        // a failed optional manager/network preflight must not strand Flow
+        // before that workload can run.
+        #[cfg(not(feature = "storage-proof"))]
         common::idle();
     }
     #[cfg(feature = "storage-proof")]

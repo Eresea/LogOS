@@ -134,7 +134,9 @@ fn corrupt(filesystem: &mut DurableNamespaceV5<FileBlockStore>, info: PackageInf
     let mut block = Block::zero();
     let store = filesystem.block_store_mut();
     store.read_block(BlockIndex::new(extent.start), &mut block).expect("read corrupt target");
-    block.as_bytes_mut()[PACKAGE_HEADER_V2_BYTES] ^= 0xa5;
+    // Corrupt the header so activation rejects before streaming the whole
+    // payload. The proof targets rollback, not package transport duration.
+    block.as_bytes_mut()[0] ^= 0xa5;
     store.write_block(BlockIndex::new(extent.start), &block).expect("write corrupt target");
     store.flush().expect("flush corrupt target");
 }

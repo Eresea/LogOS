@@ -29,6 +29,11 @@ impl StorageProofObserver {
         let Ok(request) = logos_abi::StorageApiRequest::decode(&message) else {
             return;
         };
+        if request.operation == logos_abi::StorageApiOperation::CreateFile
+            && self.mode.load(Ordering::Acquire) == 0
+        {
+            crate::arch_proof_line(b"LogOS vNext: storage command API START");
+        }
         self.pending.store(request.operation as u8, Ordering::Release);
     }
 
@@ -51,6 +56,8 @@ impl StorageProofObserver {
                     self.mode.store(1, Ordering::Release);
                 } else if response.status == logos_abi::StorageApiStatus::AlreadyExists {
                     self.mode.store(2, Ordering::Release);
+                } else {
+                    crate::arch_proof_line(b"LogOS vNext: storage command API FAIL");
                 }
             }
         }
