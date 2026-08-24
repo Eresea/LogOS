@@ -122,13 +122,11 @@ fn bootstrap_capability(
         .ok_or(ServiceRuntimeError::Resources)
 }
 
-fn builtin_service_for_handle(
+fn service_id_for_handle(
     handles: &[logos_abi::ServiceHandle],
     handle: logos_abi::ServiceHandle,
 ) -> Option<ServiceId> {
-    SERVICE_IMAGES
-        .iter()
-        .find_map(|spec| (handles[spec.service().index()] == handle).then_some(spec.service()))
+    handles.iter().position(|current| *current == handle).and_then(ServiceId::from_index)
 }
 
 fn event_status(error: crate::runtime_events::EventError) -> logos_abi::EventStatus {
@@ -201,6 +199,8 @@ pub struct ServiceRuntime {
     supervisor: LiveSupervisor,
     manager: ProgramManager,
     pending_restart: Option<Vec<ServiceHandle>>,
+    pending_dynamic_start: Option<ServiceHandle>,
+    pending_dynamic_restart: Option<ServiceHandle>,
     storage_map_windows: [[Option<crate::storage_ipc::StorageMapWindow>;
         crate::storage_ipc::STORAGE_MAP_WINDOWS_PER_CLIENT];
         crate::storage_ipc::STORAGE_MAP_CLIENTS],
@@ -431,6 +431,8 @@ impl ServiceRuntime {
             supervisor: LiveSupervisor::new(),
             manager: ProgramManager::new(),
             pending_restart: None,
+            pending_dynamic_start: None,
+            pending_dynamic_restart: None,
             storage_map_windows: [[None; crate::storage_ipc::STORAGE_MAP_WINDOWS_PER_CLIENT];
                 crate::storage_ipc::STORAGE_MAP_CLIENTS],
             ipc_generation: 1,
@@ -477,6 +479,30 @@ impl ServiceRuntime {
         let handle =
             self.service_handles.get(service.index()).copied().filter(|handle| handle.is_valid());
         handle.ok_or(ServiceRuntimeError::StaleGeneration)
+    }
+
+    fn lifecycle_service_for_handle(
+        &self,
+        handle: ServiceHandle,
+    ) -> Result<ServiceId, logos_abi::ManagerStatus> {
+        let slot = self.lifecycle_slot_for_handle(handle)?;
+        ServiceId::from_index(slot).ok_or(logos_abi::ManagerStatus::Unsupported)
+    }
+
+    fn lifecycle_slot_for_handle(
+        &self,
+        handle: ServiceHandle,
+    ) -> Result<usize, logos_abi::ManagerStatus> {
+        let registry = self.dynamic_services.as_ref().ok_or(logos_abi::ManagerStatus::Stale)?;
+        registry.validate_lifecycle_handle(handle).map_err(|_| logos_abi::ManagerStatus::Stale)?;
+        let slot = registry
+            .runtime_slot(handle)
+            .map_err(|_| logos_abi::ManagerStatus::Stale)?
+            .ok_or(logos_abi::ManagerStatus::Unsupported)?;
+        if self.service_handles.get(slot).copied() != Some(handle) {
+            return Err(logos_abi::ManagerStatus::Stale);
+        }
+        Ok(slot)
     }
 
     pub(crate) fn ensure_service_runtime_slot(
@@ -621,8 +647,9 @@ impl ServiceRuntime {
             registry.start(handles[service.index()]).map_err(|_| ServiceRuntimeError::Resources)?;
         }
         self.service_handles.clear();
-        for handle in handles {
+        for (slot, handle) in handles.iter().copied().enumerate() {
             self.ensure_service_runtime_slot(handle)?;
+            registry.bind_runtime_slot(handle, slot).map_err(|_| ServiceRuntimeError::Resources)?;
         }
         if self.service_epoch > 1 {
             for handle in &self.service_handles {
@@ -914,7 +941,7 @@ impl ServiceRuntime {
                 loaded.reclaim(&mut self.frame_pool);
                 return Err(ServiceRuntimeError::Process(error));
             }
-            self.map_service_heap(service, process, &mut tables)?;
+            self.map_service_heap(service.index(), process, &mut tables)?;
             if service == ServiceId::User {
                 let pages = logos_abi::USER_KDF_WORKSPACE_PAGES;
                 for page in 0..pages {
@@ -1054,17 +1081,27 @@ impl ServiceRuntime {
             let Some(image) = self.image(service) else {
                 return false;
             };
-            let expected = match self.dynamic_services.as_ref().and_then(|registry| {
-                registry.image_source(self.runtime_service_handle(service).ok()?).ok()
-            }) {
-                Some(ServiceImageSource::FilesystemPackage) => {
-                    image.page_count() as u32
-                        + unsafe { self.tables[service.index()].assume_init_ref().table_count() }
-                            as u32
-                }
-                Some(ServiceImageSource::Builtin) => 0,
-                None => return false,
+            let Some(handle) = self.runtime_service_handle(service).ok() else {
+                return false;
             };
+            let Some(source) = self
+                .dynamic_services
+                .as_ref()
+                .and_then(|registry| registry.image_source(handle).ok())
+            else {
+                return false;
+            };
+            let runtime_frames = self.service_heaps[service.index()].frames.len()
+                + usize::from(self.service_bootstrap_frames[service.index()] != 0)
+                + if service == ServiceId::User { logos_abi::USER_KDF_WORKSPACE_PAGES } else { 0 };
+            let image_frames = match source {
+                ServiceImageSource::FilesystemPackage => {
+                    image.page_count()
+                        + unsafe { self.tables[service.index()].assume_init_ref().table_count() }
+                }
+                ServiceImageSource::Builtin => 0,
+            };
+            let expected = u32::try_from(runtime_frames + image_frames).unwrap_or(u32::MAX);
             self.frame_pool.manager().owner_live(crate::memory::OwnerId::service(service))
                 == expected
         })
@@ -1181,11 +1218,8 @@ impl ServiceRuntime {
         virtual_address: usize,
         flags: MappingFlags,
     ) -> Result<(), ServiceRuntimeError> {
-        let index = SERVICE_IMAGES
-            .iter()
-            .position(|spec| {
-                self.launch(spec.service()).is_some_and(|(handle, _)| handle == process)
-            })
+        let index = self
+            .service_slot_for_process(process)
             .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::InvalidHandle))?;
         let mut memory = IdentityPageTableMemory;
         unsafe { self.tables[index].assume_init_mut() }
@@ -1198,11 +1232,10 @@ impl ServiceRuntime {
 
     fn map_service_heap(
         &mut self,
-        service: ServiceId,
+        index: usize,
         process: ProcessHandle,
         tables: &mut PageTableBuilder,
     ) -> Result<(), ServiceRuntimeError> {
-        let index = service.index();
         let service_handle =
             self.service_handles.get(index).copied().ok_or(ServiceRuntimeError::StaleGeneration)?;
         let owner =
@@ -1536,13 +1569,6 @@ impl ServiceRuntime {
         }
     }
 
-    fn sync_dynamic_service_stopped(&mut self, service: ServiceId) {
-        let Ok(handle) = self.runtime_service_handle(service) else { return };
-        if let Some(registry) = self.dynamic_services.as_mut() {
-            let _ = registry.stop(handle);
-        }
-    }
-
     fn sync_dynamic_service_failed(&mut self, service: ServiceId) {
         let Ok(handle) = self.runtime_service_handle(service) else { return };
         if let Some(registry) = self.dynamic_services.as_mut() {
@@ -1722,8 +1748,299 @@ impl ServiceRuntime {
                 offset,
                 length,
             ),
+            logos_abi::PackageTargetKind::NamedService => {
+                logos_abi::PackageRequest::new_named_service(
+                    operation,
+                    &target.name[..target.name_len as usize],
+                    request_id,
+                    self.ipc_generation,
+                    self.package_capability,
+                    self.service_epoch,
+                    package_generation,
+                    offset,
+                    length,
+                )
+            }
         };
         request.ok_or(ProcessError::InvalidImage)
+    }
+
+    fn release_service_heap_slot(&mut self, index: usize) -> Result<(), ServiceRuntimeError> {
+        while let Some(frame) = self.service_heaps[index].frames.pop() {
+            self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+        }
+        if let Some(frame) = self.ipc_staging_frames[index].take() {
+            self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+        }
+        if self.service_bootstrap_frames[index] != 0 {
+            let frame = FrameAddress::from_raw(self.service_bootstrap_frames[index]);
+            self.service_bootstrap_frames[index] = 0;
+            self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+        }
+        self.bootstrap_control[index] = logos_abi::CapabilityHandle::EMPTY;
+        self.bootstrap_directory[index] = logos_abi::CapabilityHandle::EMPTY;
+        self.bootstrap_heap[index] = logos_abi::CapabilityHandle::EMPTY;
+        Ok(())
+    }
+
+    fn install_loaded_service_slot(
+        &mut self,
+        index: usize,
+        plan: crate::process::ElfLoadPlan,
+        mut loaded: LoadedImage,
+    ) -> Result<(), ServiceRuntimeError> {
+        let handle = self
+            .service_handles
+            .get(index)
+            .copied()
+            .filter(|handle| handle.is_valid())
+            .ok_or(ServiceRuntimeError::StaleGeneration)?;
+        let owner = OwnerId::service_handle(handle).ok_or(ServiceRuntimeError::Resources)?;
+        if !self.supervisor.ensure(handle) {
+            return Err(ServiceRuntimeError::TaskCapacity);
+        }
+        let mut memory = IdentityPageTableMemory;
+        let mut tables =
+            match PageTableBuilder::new_for_owner(&mut self.frame_pool, &mut memory, owner) {
+                Ok(tables) => tables,
+                Err(error) => {
+                    loaded.reclaim(&mut self.frame_pool);
+                    return Err(ServiceRuntimeError::PageTableRoot(error));
+                }
+            };
+        if let Err(error) = tables.map_image(&loaded, &mut self.frame_pool, &mut memory) {
+            tables.reclaim(&mut self.frame_pool, &mut memory);
+            loaded.reclaim(&mut self.frame_pool);
+            return Err(ServiceRuntimeError::PageTableMap(error));
+        }
+        let process = match self.processes.start_plan(plan) {
+            Ok(process) => process,
+            Err(error) => {
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+                loaded.reclaim(&mut self.frame_pool);
+                return Err(ServiceRuntimeError::Process(error));
+            }
+        };
+        let Some(root) = AddressSpaceRoot::new(tables.root().raw() as usize) else {
+            let _ = self.processes.reclaim(process);
+            tables.reclaim(&mut self.frame_pool, &mut memory);
+            loaded.reclaim(&mut self.frame_pool);
+            return Err(ServiceRuntimeError::Process(ProcessError::AddressSpace));
+        };
+        if let Err(error) = self.processes.bind_address_space_root(process, root) {
+            let _ = self.processes.reclaim(process);
+            tables.reclaim(&mut self.frame_pool, &mut memory);
+            loaded.reclaim(&mut self.frame_pool);
+            return Err(ServiceRuntimeError::Process(error));
+        }
+        if let Err(error) = map_loaded_pages(&mut self.processes, process, &loaded) {
+            let _ = self.processes.reclaim(process);
+            tables.reclaim(&mut self.frame_pool, &mut memory);
+            loaded.reclaim(&mut self.frame_pool);
+            return Err(ServiceRuntimeError::Process(error));
+        }
+        if let Err(error) = self.map_service_heap(index, process, &mut tables) {
+            let _ = self.processes.reclaim(process);
+            tables.reclaim(&mut self.frame_pool, &mut memory);
+            loaded.reclaim(&mut self.frame_pool);
+            let _ = self.release_service_heap_slot(index);
+            return Err(error);
+        }
+        let staging = match self.frame_pool.allocate_for(owner) {
+            Ok(frame) => frame,
+            Err(_) => {
+                let _ = self.processes.reclaim(process);
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+                loaded.reclaim(&mut self.frame_pool);
+                let _ = self.release_service_heap_slot(index);
+                return Err(ServiceRuntimeError::Resources);
+            }
+        };
+        if memory.clear(staging).is_err() {
+            let _ = self.frame_pool.release(staging);
+            let _ = self.processes.reclaim(process);
+            tables.reclaim(&mut self.frame_pool, &mut memory);
+            loaded.reclaim(&mut self.frame_pool);
+            let _ = self.release_service_heap_slot(index);
+            return Err(ServiceRuntimeError::IpcPrivateMapping(
+                PageTableError::InvalidVirtualAddress,
+            ));
+        }
+        if tables
+            .map_raw_page(
+                logos_abi::IPC_STAGING_BASE,
+                staging,
+                MappingFlags::DATA,
+                &mut self.frame_pool,
+                &mut memory,
+            )
+            .is_err()
+        {
+            let _ = self.frame_pool.release(staging);
+            let _ = self.processes.reclaim(process);
+            tables.reclaim(&mut self.frame_pool, &mut memory);
+            loaded.reclaim(&mut self.frame_pool);
+            let _ = self.release_service_heap_slot(index);
+            return Err(ServiceRuntimeError::IpcPrivateMapping(
+                PageTableError::InvalidVirtualAddress,
+            ));
+        }
+        let Some(mapping) = VirtualMapping::new(
+            logos_abi::IPC_STAGING_BASE,
+            staging.raw() as usize,
+            1,
+            MappingFlags::DATA,
+        ) else {
+            let _ = self.frame_pool.release(staging);
+            let _ = self.processes.reclaim(process);
+            tables.reclaim(&mut self.frame_pool, &mut memory);
+            loaded.reclaim(&mut self.frame_pool);
+            let _ = self.release_service_heap_slot(index);
+            return Err(ServiceRuntimeError::IpcPrivateProcess(ProcessError::AddressSpace));
+        };
+        if self.processes.map(process, mapping).is_err() {
+            let _ = self.frame_pool.release(staging);
+            let _ = self.processes.reclaim(process);
+            tables.reclaim(&mut self.frame_pool, &mut memory);
+            loaded.reclaim(&mut self.frame_pool);
+            let _ = self.release_service_heap_slot(index);
+            return Err(ServiceRuntimeError::IpcPrivateProcess(ProcessError::AddressSpace));
+        }
+        let launch = match self.processes.user_launch(process, loaded.entry(), loaded.stack_top()) {
+            Ok(launch) => launch,
+            Err(error) => {
+                let _ = self.frame_pool.release(staging);
+                let _ = self.processes.reclaim(process);
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+                loaded.reclaim(&mut self.frame_pool);
+                let _ = self.release_service_heap_slot(index);
+                return Err(ServiceRuntimeError::Process(error));
+            }
+        };
+        let task = match crate::SCHEDULER.spawn_user(service_task_entry, process, launch) {
+            Ok(task) => task,
+            Err(error) => {
+                let _ = self.frame_pool.release(staging);
+                let _ = self.processes.reclaim(process);
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+                loaded.reclaim(&mut self.frame_pool);
+                let _ = self.release_service_heap_slot(index);
+                return Err(match error {
+                    crate::SpawnError::Capacity => ServiceRuntimeError::TaskCapacity,
+                    crate::SpawnError::AddressSpace => ServiceRuntimeError::TaskAddressSpace,
+                    crate::SpawnError::UserLaunch => ServiceRuntimeError::TaskLaunch,
+                });
+            }
+        };
+        self.images[index] = loaded;
+        self.tables[index].write(tables);
+        self.table_ready[index] = true;
+        self.launches[index] = Some((process, launch));
+        self.ipc_staging_frames[index] = Some(staging);
+        self.tasks[index] = Some(task);
+        let now = crate::current_ticks();
+        let _ = self.supervisor.register(handle, now);
+        if let Some(registry) = self.dynamic_services.as_mut() {
+            let _ = registry.start(handle);
+            let _ = registry.set_runtime_ownership(
+                handle,
+                process.raw(),
+                launch.address_space_root().raw() as u64,
+                task.raw(),
+                self.service_heaps[index].frames.len(),
+            );
+            let _ = registry.set_heartbeat(handle, now);
+        }
+        Ok(())
+    }
+
+    fn start_dynamic_package_service(
+        &mut self,
+        handle: ServiceHandle,
+        runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
+    ) -> Result<(), ServiceRuntimeError> {
+        let index = self
+            .dynamic_services
+            .as_ref()
+            .and_then(|registry| registry.runtime_slot(handle).ok().flatten())
+            .ok_or(ServiceRuntimeError::StaleGeneration)?;
+        if index < SERVICE_COUNT || self.tasks[index].is_some() {
+            return Err(ServiceRuntimeError::Resources);
+        }
+        let name = self
+            .dynamic_services
+            .as_ref()
+            .ok_or(ServiceRuntimeError::Resources)?
+            .service_name(handle)
+            .map_err(|_| ServiceRuntimeError::StaleGeneration)?
+            .to_vec();
+        let target =
+            logos_abi::PackageTarget::named_service(&name).ok_or(ServiceRuntimeError::Image)?;
+        let request = self
+            .next_package_request_target(logos_abi::PackageOperation::Lookup, target, 0, 0, 0)
+            .map_err(ServiceRuntimeError::Process)?;
+        let response = self
+            .package_exchange(request, &mut [], runtime_guard)
+            .map_err(ServiceRuntimeError::Process)?;
+        if response.status != logos_abi::PackageStatus::Ok {
+            return Err(ServiceRuntimeError::Image);
+        }
+        let package_bytes = response.package_bytes as usize;
+        let package_generation = response.package_generation;
+        let (payload_offset, payload_length) = {
+            let mut reader = RuntimePackageReader::new(
+                self,
+                runtime_guard,
+                target,
+                package_generation,
+                0,
+                package_bytes,
+            );
+            let mut scratch = [0; crate::loader::PAGE_SIZE];
+            let header = logos_package::validate_package_v2(&mut reader, &mut scratch)
+                .map_err(|_| ServiceRuntimeError::Image)?;
+            if header.manifest.kind != logos_package::PackageKind::Service
+                || header.manifest.name.as_bytes() != name.as_slice()
+            {
+                return Err(ServiceRuntimeError::Image);
+            }
+            (logos_package::PACKAGE_HEADER_V2_BYTES, header.payload_length as usize)
+        };
+        let plan = {
+            let mut reader = RuntimePackageReader::new(
+                self,
+                runtime_guard,
+                target,
+                package_generation,
+                payload_offset,
+                payload_length,
+            );
+            crate::process::ElfLoadPlan::parse_reader(&mut reader)
+                .map_err(|_| ServiceRuntimeError::Image)?
+        };
+        let owner = OwnerId::service_handle(handle).ok_or(ServiceRuntimeError::Resources)?;
+        let mut image = LoadedImage::load_with_stack_pages_for_owner(
+            plan,
+            &mut self.frame_pool,
+            crate::process::USER_STACK_PAGES,
+            owner,
+        )
+        .map_err(ServiceRuntimeError::Load)?;
+        let mut reader = RuntimePackageReader::new(
+            self,
+            runtime_guard,
+            target,
+            package_generation,
+            payload_offset,
+            payload_length,
+        );
+        let mut scratch = [0; crate::loader::PAGE_SIZE];
+        let mut memory = IdentityPageTableMemory;
+        if let Err(error) = image.populate_reader(plan, &mut reader, &mut scratch, &mut memory) {
+            image.reclaim(&mut self.frame_pool);
+            return Err(ServiceRuntimeError::Populate(error));
+        }
+        self.install_loaded_service_slot(index, plan, image)
     }
 
     #[inline]
@@ -2010,7 +2327,10 @@ impl ServiceRuntime {
     }
 
     fn request_stop_task(&mut self, service: ServiceId) -> Result<bool, ServiceRuntimeError> {
-        let index = service.index();
+        self.request_stop_task_slot(service.index())
+    }
+
+    fn request_stop_task_slot(&mut self, index: usize) -> Result<bool, ServiceRuntimeError> {
         let Some(task) = self.tasks[index] else {
             return Err(ServiceRuntimeError::TaskStop);
         };
@@ -2019,10 +2339,14 @@ impl ServiceRuntime {
         }
         if crate::SCHEDULER.state(task).is_none() {
             self.tasks[index] = None;
-            if let Ok(handle) = self.runtime_service_handle(service) {
+            if let Some(handle) = self.service_handles.get(index).copied() {
                 self.supervisor.unregister(handle);
             }
-            self.sync_dynamic_service_stopped(service);
+            if let Some(handle) = self.service_handles.get(index).copied() {
+                if let Some(registry) = self.dynamic_services.as_mut() {
+                    let _ = registry.stop(handle);
+                }
+            }
             return Ok(false);
         }
         Err(ServiceRuntimeError::TaskStop)
@@ -2395,7 +2719,7 @@ impl ServiceRuntime {
                 return crate::service_ipc::IpcOutcome { status, notified: false };
             }
         };
-        let service = builtin_service_for_handle(&self.service_handles, caller);
+        let service = service_id_for_handle(&self.service_handles, caller);
         let (endpoint, expected_bytes) = match self
             .dynamic_ipc
             .as_ref()
@@ -3194,7 +3518,7 @@ impl ServiceRuntime {
         };
         {
             #[cfg(any(feature = "qemu-proof", feature = "storage-proof"))]
-            let service = builtin_service_for_handle(&self.service_handles, caller);
+            let service = service_id_for_handle(&self.service_handles, caller);
             let (endpoint, expected_bytes) = match self
                 .dynamic_ipc
                 .as_ref()
@@ -3614,6 +3938,7 @@ impl ServiceRuntime {
                 | logos_abi::ManagerOperation::Start
                 | logos_abi::ManagerOperation::Stop
                 | logos_abi::ManagerOperation::Restart
+                | logos_abi::ManagerOperation::Register
         ) && !crate::runtime_services::service_request_shape_valid(request)
         {
             let response = logos_abi::ManagerResponse::new(
@@ -3636,12 +3961,14 @@ impl ServiceRuntime {
                 | logos_abi::ManagerOperation::Start
                 | logos_abi::ManagerOperation::Stop
                 | logos_abi::ManagerOperation::Restart
+                | logos_abi::ManagerOperation::Register
         );
         let required_rights = if matches!(
             request.operation,
             logos_abi::ManagerOperation::Start
                 | logos_abi::ManagerOperation::Stop
                 | logos_abi::ManagerOperation::Restart
+                | logos_abi::ManagerOperation::Register
         ) {
             logos_abi::ManagerRights::LIFECYCLE
         } else {
@@ -3659,6 +3986,90 @@ impl ServiceRuntime {
                     response,
                 );
             }
+            return logos_abi::IpcStatus::Ok;
+        }
+        if request.operation == logos_abi::ManagerOperation::Register {
+            if self.dynamic_services.is_none() {
+                let response = logos_abi::ManagerResponse::new(
+                    request.operation,
+                    logos_abi::ManagerStatus::Stale,
+                    request.request_id,
+                );
+                self.write_manager_response(staging_frame, response);
+                return logos_abi::IpcStatus::Ok;
+            }
+            let handle = match self.dynamic_services.as_mut().and_then(|registry| {
+                registry
+                    .register_pending_package(request.name(), logos_abi::SERVICE_HEAP_MAX_PAGES)
+                    .ok()
+            }) {
+                Some(handle) => handle,
+                None => {
+                    let response = logos_abi::ManagerResponse::new(
+                        request.operation,
+                        logos_abi::ManagerStatus::Capacity,
+                        request.request_id,
+                    );
+                    self.write_manager_response(staging_frame, response);
+                    return logos_abi::IpcStatus::Ok;
+                }
+            };
+            let slot = match self.ensure_service_runtime_slot(handle) {
+                Ok(slot) => slot,
+                Err(_) => {
+                    if let Some(registry) = self.dynamic_services.as_mut() {
+                        let _ = registry.remove(handle);
+                    }
+                    let response = logos_abi::ManagerResponse::new(
+                        request.operation,
+                        logos_abi::ManagerStatus::Capacity,
+                        request.request_id,
+                    );
+                    self.write_manager_response(staging_frame, response);
+                    return logos_abi::IpcStatus::Ok;
+                }
+            };
+            if self
+                .dynamic_services
+                .as_mut()
+                .is_none_or(|registry| registry.bind_runtime_slot(handle, slot).is_err())
+            {
+                if let Some(registry) = self.dynamic_services.as_mut() {
+                    let _ = registry.remove(handle);
+                }
+                let response = logos_abi::ManagerResponse::new(
+                    request.operation,
+                    logos_abi::ManagerStatus::Capacity,
+                    request.request_id,
+                );
+                self.write_manager_response(staging_frame, response);
+                return logos_abi::IpcStatus::Ok;
+            }
+            self.service_heaps[slot].quota_pages = self
+                .dynamic_services
+                .as_ref()
+                .and_then(|registry| registry.heap_quota_pages(handle).ok())
+                .unwrap_or(logos_abi::SERVICE_HEAP_MAX_PAGES);
+            let mut status_request = logos_abi::ManagerRequest::new(
+                logos_abi::ManagerOperation::Status,
+                request.request_id,
+            );
+            status_request.service = handle;
+            let mut response = self
+                .dynamic_services
+                .as_ref()
+                .map(|registry| registry.manager_request(status_request))
+                .unwrap_or_else(|| {
+                    logos_abi::ManagerResponse::new(
+                        request.operation,
+                        logos_abi::ManagerStatus::Stale,
+                        request.request_id,
+                    )
+                });
+            response.operation = request.operation;
+            response.status = logos_abi::ManagerStatus::Ok;
+            response.request_id = request.request_id;
+            self.write_manager_response(staging_frame, response);
             return logos_abi::IpcStatus::Ok;
         }
         if matches!(
@@ -3771,8 +4182,38 @@ impl ServiceRuntime {
         match decision.action {
             ManagerAction::None => {}
             ManagerAction::Start(handle) => {
-                let Some(service) = builtin_service_for_handle(&self.service_handles, handle)
-                else {
+                let slot = match self.lifecycle_slot_for_handle(handle) {
+                    Ok(slot) => slot,
+                    Err(status) => {
+                        self.abort_dynamic_service_lifecycle_handle(
+                            logos_abi::ManagerOperation::Start,
+                            handle,
+                        );
+                        decision.response.status = status;
+                        self.refresh_manager_response_record(&mut decision.response);
+                        self.write_manager_response(staging_frame, decision.response);
+                        return logos_abi::IpcStatus::Ok;
+                    }
+                };
+                if slot >= SERVICE_COUNT {
+                    if self.pending_dynamic_start.is_some()
+                        || self.pending_dynamic_restart.is_some()
+                    {
+                        self.abort_dynamic_service_lifecycle_handle(
+                            logos_abi::ManagerOperation::Start,
+                            handle,
+                        );
+                        decision.response.status = logos_abi::ManagerStatus::Busy;
+                        self.refresh_manager_response_record(&mut decision.response);
+                    } else {
+                        self.pending_dynamic_start = Some(handle);
+                    }
+                    self.write_manager_response(staging_frame, decision.response);
+                    return logos_abi::IpcStatus::Ok;
+                }
+                let service =
+                    ServiceId::from_index(slot).ok_or(logos_abi::ManagerStatus::Unsupported);
+                let Ok(service) = service else {
                     self.abort_dynamic_service_lifecycle_handle(
                         logos_abi::ManagerOperation::Start,
                         handle,
@@ -3815,8 +4256,32 @@ impl ServiceRuntime {
                 }
             }
             ManagerAction::Stop(handle) => {
-                let Some(service) = builtin_service_for_handle(&self.service_handles, handle)
-                else {
+                let slot = match self.lifecycle_slot_for_handle(handle) {
+                    Ok(slot) => slot,
+                    Err(status) => {
+                        self.abort_dynamic_service_lifecycle_handle(
+                            logos_abi::ManagerOperation::Stop,
+                            handle,
+                        );
+                        decision.response.status = status;
+                        self.refresh_manager_response_record(&mut decision.response);
+                        self.write_manager_response(staging_frame, decision.response);
+                        return logos_abi::IpcStatus::Ok;
+                    }
+                };
+                if slot >= SERVICE_COUNT {
+                    if self.request_stop_task_slot(slot).is_err() {
+                        self.abort_dynamic_service_lifecycle_handle(
+                            logos_abi::ManagerOperation::Stop,
+                            handle,
+                        );
+                        decision.response.status = logos_abi::ManagerStatus::Busy;
+                        self.refresh_manager_response_record(&mut decision.response);
+                    }
+                    self.write_manager_response(staging_frame, decision.response);
+                    return logos_abi::IpcStatus::Ok;
+                }
+                let Some(service) = ServiceId::from_index(slot) else {
                     self.abort_dynamic_service_lifecycle_handle(
                         logos_abi::ManagerOperation::Stop,
                         handle,
@@ -3844,6 +4309,32 @@ impl ServiceRuntime {
                 }
             }
             ManagerAction::Restart(handles) => {
+                if handles.len() == 1
+                    && self
+                        .lifecycle_slot_for_handle(handles[0])
+                        .is_ok_and(|slot| slot >= SERVICE_COUNT)
+                {
+                    let handle = handles[0];
+                    if self.pending_dynamic_start.is_some()
+                        || self.pending_dynamic_restart.is_some()
+                        || self
+                            .request_stop_task_slot(
+                                self.lifecycle_slot_for_handle(handle).unwrap_or(usize::MAX),
+                            )
+                            .is_err()
+                    {
+                        self.abort_dynamic_service_lifecycle_handle(
+                            logos_abi::ManagerOperation::Restart,
+                            handle,
+                        );
+                        decision.response.status = logos_abi::ManagerStatus::Busy;
+                    } else {
+                        self.pending_dynamic_restart = Some(handle);
+                    }
+                    self.refresh_manager_response_record(&mut decision.response);
+                    self.write_manager_response(staging_frame, decision.response);
+                    return logos_abi::IpcStatus::Ok;
+                }
                 let mut services = Vec::new();
                 if services.try_reserve(handles.len()).is_err() {
                     self.abort_dynamic_service_lifecycle_handle(
@@ -3856,16 +4347,18 @@ impl ServiceRuntime {
                     return logos_abi::IpcStatus::Ok;
                 }
                 for handle in &handles {
-                    let Some(service) = builtin_service_for_handle(&self.service_handles, *handle)
-                    else {
-                        self.abort_dynamic_service_lifecycle_handle(
-                            logos_abi::ManagerOperation::Restart,
-                            handles[0],
-                        );
-                        decision.response.status = logos_abi::ManagerStatus::Unsupported;
-                        self.refresh_manager_response_record(&mut decision.response);
-                        self.write_manager_response(staging_frame, decision.response);
-                        return logos_abi::IpcStatus::Ok;
+                    let service = match self.lifecycle_service_for_handle(*handle) {
+                        Ok(service) => service,
+                        Err(status) => {
+                            self.abort_dynamic_service_lifecycle_handle(
+                                logos_abi::ManagerOperation::Restart,
+                                handles[0],
+                            );
+                            decision.response.status = status;
+                            self.refresh_manager_response_record(&mut decision.response);
+                            self.write_manager_response(staging_frame, decision.response);
+                            return logos_abi::IpcStatus::Ok;
+                        }
                     };
                     services.push(service);
                 }
@@ -4655,6 +5148,14 @@ impl ServiceRuntime {
         now: u64,
         runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
     ) -> Result<bool, ServiceRuntimeError> {
+        if let Some(handle) = self.pending_dynamic_start.take() {
+            if self.start_dynamic_package_service(handle, runtime_guard).is_err() {
+                if let Some(registry) = self.dynamic_services.as_mut() {
+                    let _ = registry.fail(handle);
+                }
+            }
+            return Ok(true);
+        }
         if let Some((slot, record)) = self.pending_program_start.take() {
             if self.start_program(slot, record, runtime_guard).is_err() {
                 let _ = self.manager.mark_program_failed(slot, record.program_generation);
@@ -4733,6 +5234,29 @@ impl ServiceRuntime {
                 }
                 self.tasks[index] = None;
                 self.supervisor.unregister(handle);
+                if index >= SERVICE_COUNT && self.pending_dynamic_restart == Some(handle) {
+                    self.reclaim_service_execution_slot(index)?;
+                    self.pending_dynamic_restart = None;
+                    let replacement = {
+                        let registry =
+                            self.dynamic_services.as_mut().ok_or(ServiceRuntimeError::Resources)?;
+                        registry.stop(handle).map_err(|_| ServiceRuntimeError::Resources)?;
+                        registry
+                            .replace_generation(handle)
+                            .map_err(|_| ServiceRuntimeError::Resources)?
+                    };
+                    self.service_handles[index] = replacement;
+                    self.dynamic_services
+                        .as_mut()
+                        .ok_or(ServiceRuntimeError::Resources)?
+                        .begin_lifecycle_action(logos_abi::ManagerOperation::Start, replacement)
+                        .map_err(|_| ServiceRuntimeError::Resources)?;
+                    self.pending_dynamic_start = Some(replacement);
+                    return Ok(true);
+                }
+                if index >= SERVICE_COUNT {
+                    self.reclaim_service_execution_slot(index)?;
+                }
                 if let Some(registry) = self.dynamic_services.as_mut() {
                     if process_failed {
                         let _ = registry.fail(handle);
@@ -4754,8 +5278,9 @@ impl ServiceRuntime {
                 registry
                     .validate_lifecycle_handle(*handle)
                     .map_err(|_| ServiceRuntimeError::StaleGeneration)?;
-                let service = builtin_service_for_handle(&self.service_handles, *handle)
-                    .ok_or(ServiceRuntimeError::StaleGeneration)?;
+                let service = self
+                    .lifecycle_service_for_handle(*handle)
+                    .map_err(|_| ServiceRuntimeError::StaleGeneration)?;
                 services.push(service);
             }
             if services.iter().any(|service| self.tasks[service.index()].is_some()) {
@@ -4807,8 +5332,7 @@ impl ServiceRuntime {
             });
         }
         if let Some(failed) = self.supervisor.poll(now, &heartbeats, &process_states) {
-            let Some(failed_service) = builtin_service_for_handle(&self.service_handles, failed)
-            else {
+            let Some(failed_service) = service_id_for_handle(&self.service_handles, failed) else {
                 if let Some(registry) = self.dynamic_services.as_mut() {
                     let _ = registry.fail(failed);
                 }
@@ -4825,6 +5349,35 @@ impl ServiceRuntime {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    fn reclaim_service_execution_slot(&mut self, index: usize) -> Result<(), ServiceRuntimeError> {
+        let handle =
+            self.service_handles.get(index).copied().ok_or(ServiceRuntimeError::StaleGeneration)?;
+        if let (Some(ipc), Some(events)) = (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut())
+        {
+            ipc.destroy_service(handle, events);
+        } else if let Some(events) = self.dynamic_events.as_mut() {
+            events.destroy_service(handle);
+        }
+        if let Some((process, _)) = self.launches[index].take() {
+            if self.processes.state(process) == Some(crate::process::ProcessState::Running) {
+                let _ = self.processes.fault(process, 0xff);
+            }
+            self.processes.reclaim(process).map_err(ServiceRuntimeError::Process)?;
+        }
+        if self.table_ready[index] {
+            let mut memory = IdentityPageTableMemory;
+            unsafe { self.tables[index].assume_init_mut() }
+                .reclaim(&mut self.frame_pool, &mut memory);
+            self.table_ready[index] = false;
+        }
+        self.images[index].reclaim(&mut self.frame_pool);
+        self.release_service_heap_slot(index)?;
+        if let Some(registry) = self.dynamic_services.as_mut() {
+            let _ = registry.clear_execution_resources(handle);
+        }
+        Ok(())
     }
 
     fn request_stop_program(&mut self, slot: usize) -> Result<(), ServiceRuntimeError> {

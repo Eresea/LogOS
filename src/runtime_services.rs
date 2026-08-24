@@ -52,6 +52,7 @@ struct ServiceRecord {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServiceOwnership {
+    pub runtime_slot: Option<usize>,
     pub process: u64,
     pub address_space: u64,
     pub task: u64,
@@ -64,6 +65,7 @@ pub struct ServiceOwnership {
 
 impl ServiceOwnership {
     const EMPTY: Self = Self {
+        runtime_slot: None,
         process: 0,
         address_space: 0,
         task: 0,
@@ -117,6 +119,13 @@ pub fn service_request_shape_valid(request: ManagerRequest) -> bool {
                 && request.program_slot == u8::MAX
                 && request.program_generation == 0
                 && request.cursor == 0
+        }
+        ManagerOperation::Register => {
+            request.service == ServiceHandle::EMPTY
+                && request.program_slot == u8::MAX
+                && request.program_generation == 0
+                && request.cursor == 0
+                && logos_abi::PackageTarget::program(request.name()).is_some()
         }
         _ => false,
     }
@@ -222,6 +231,14 @@ impl RuntimeServiceRegistry {
             ownership: ServiceOwnership::EMPTY,
         });
         Ok(handle)
+    }
+
+    pub fn register_pending_package(
+        &mut self,
+        name: &[u8],
+        heap_quota_pages: usize,
+    ) -> Result<ServiceHandle, ServiceRegistryError> {
+        self.register_filesystem_package(name, b"pending", &[], heap_quota_pages)
     }
 
     pub fn start(&mut self, handle: ServiceHandle) -> Result<(), ServiceRegistryError> {
@@ -360,6 +377,10 @@ impl RuntimeServiceRegistry {
         Ok(self.service(handle)?.heap_quota_pages)
     }
 
+    pub fn service_name(&self, handle: ServiceHandle) -> Result<&[u8], ServiceRegistryError> {
+        Ok(self.service(handle)?.name.as_slice())
+    }
+
     pub fn set_manager_rights(
         &mut self,
         handle: ServiceHandle,
@@ -409,6 +430,30 @@ impl RuntimeServiceRegistry {
         service.ownership.task = task;
         service.ownership.heap_pages = heap_pages;
         Ok(())
+    }
+
+    pub fn bind_runtime_slot(
+        &mut self,
+        handle: ServiceHandle,
+        slot: usize,
+    ) -> Result<(), ServiceRegistryError> {
+        if self
+            .slots
+            .iter()
+            .filter_map(|entry| entry.value.as_ref())
+            .any(|service| service.handle != handle && service.ownership.runtime_slot == Some(slot))
+        {
+            return Err(ServiceRegistryError::Capacity);
+        }
+        self.service_mut(handle)?.ownership.runtime_slot = Some(slot);
+        Ok(())
+    }
+
+    pub fn runtime_slot(
+        &self,
+        handle: ServiceHandle,
+    ) -> Result<Option<usize>, ServiceRegistryError> {
+        Ok(self.service(handle)?.ownership.runtime_slot)
     }
 
     pub fn set_heartbeat(
@@ -464,7 +509,40 @@ impl RuntimeServiceRegistry {
         ownership.task = 0;
         ownership.heap_pages = 0;
         ownership.heartbeat = 0;
+        ownership.runtime_slot = None;
         Ok(())
+    }
+
+    pub fn clear_execution_resources(
+        &mut self,
+        handle: ServiceHandle,
+    ) -> Result<(), ServiceRegistryError> {
+        let ownership = &mut self.service_mut(handle)?.ownership;
+        ownership.process = 0;
+        ownership.address_space = 0;
+        ownership.task = 0;
+        ownership.heap_pages = 0;
+        ownership.heartbeat = 0;
+        Ok(())
+    }
+
+    pub fn replace_generation(
+        &mut self,
+        handle: ServiceHandle,
+    ) -> Result<ServiceHandle, ServiceRegistryError> {
+        let index = self.index(handle)?;
+        let generation = next_generation(self.slots[index].generation);
+        let replacement =
+            ServiceHandle::new(index as u32, generation).ok_or(ServiceRegistryError::Capacity)?;
+        let service = self.slots[index].value.as_mut().ok_or(ServiceRegistryError::Stale)?;
+        if service.state != ServiceState::Stopped {
+            return Err(ServiceRegistryError::Capacity);
+        }
+        service.handle = replacement;
+        service.epoch = next_epoch(service.epoch);
+        service.restarts = service.restarts.saturating_add(1);
+        self.slots[index].generation = generation;
+        Ok(replacement)
     }
 
     pub fn ownership(
@@ -1076,6 +1154,34 @@ mod tests {
     }
 
     #[test]
+    fn pending_package_registration_can_alias_a_package_source_and_restart() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let handle = registry.register_pending_package(b"extra-service", 4).unwrap();
+        assert_eq!(registry.image_source(handle), Ok(ServiceImageSource::FilesystemPackage));
+        assert!(registry.register_pending_package(b"extra-service", 4).is_ok());
+        registry.start(handle).unwrap();
+        registry.mark_stopping(handle).unwrap();
+        registry.stop(handle).unwrap();
+        assert_eq!(registry.state(handle), Ok(ServiceState::Stopped));
+        registry.begin_lifecycle_action(ManagerOperation::Start, handle).unwrap();
+        assert_eq!(registry.state(handle), Ok(ServiceState::Starting));
+    }
+
+    #[test]
+    fn restart_generation_rejects_the_old_service_handle() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let handle = registry.register_pending_package(b"restartable", 4).unwrap();
+        registry.start(handle).unwrap();
+        registry.stop(handle).unwrap();
+        registry.bind_runtime_slot(handle, 12).unwrap();
+        let replacement = registry.replace_generation(handle).unwrap();
+        assert_ne!(replacement, handle);
+        assert_eq!(registry.state(handle), Err(ServiceRegistryError::Stale));
+        assert_eq!(registry.state(replacement), Ok(ServiceState::Stopped));
+        assert_eq!(registry.runtime_slot(replacement), Ok(Some(12)));
+    }
+
+    #[test]
     fn runtime_ownership_is_handle_scoped_and_clearable() {
         let mut registry = RuntimeServiceRegistry::new();
         let handle = registry.register(b"service", b"image", &[]).unwrap();
@@ -1084,6 +1190,7 @@ mod tests {
         assert_eq!(
             registry.ownership(handle),
             Ok(ServiceOwnership {
+                runtime_slot: None,
                 process: 11,
                 address_space: 22,
                 task: 33,
@@ -1104,6 +1211,7 @@ mod tests {
         assert_eq!(
             registry.ownership(handle),
             Ok(ServiceOwnership {
+                runtime_slot: None,
                 process: 0,
                 address_space: 0,
                 task: 0,
@@ -1118,6 +1226,23 @@ mod tests {
         assert_eq!(registry.ownership(handle), Ok(ServiceOwnership::EMPTY));
         registry.remove(handle).unwrap();
         assert_eq!(registry.ownership(handle), Err(ServiceRegistryError::Stale));
+    }
+
+    #[test]
+    fn runtime_slot_binding_is_generation_safe_and_clears_with_execution() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let handle = registry.register(b"service", b"image", &[]).unwrap();
+        assert_eq!(registry.runtime_slot(handle), Ok(None));
+        registry.bind_runtime_slot(handle, 7).unwrap();
+        assert_eq!(registry.runtime_slot(handle), Ok(Some(7)));
+        let other = registry.register(b"other", b"image", &[]).unwrap();
+        assert_eq!(registry.bind_runtime_slot(other, 7), Err(ServiceRegistryError::Capacity));
+        registry.set_runtime_ownership(handle, 11, 22, 33, 2).unwrap();
+        registry.clear_execution_ownership(handle).unwrap();
+        assert_eq!(registry.runtime_slot(handle), Ok(None));
+        let stale =
+            ServiceHandle::new(handle.index(), handle.generation().wrapping_add(1)).unwrap();
+        assert_eq!(registry.bind_runtime_slot(stale, 8), Err(ServiceRegistryError::Stale));
     }
 
     #[test]
@@ -1167,6 +1292,20 @@ mod tests {
             ServiceHandle::new(handle.index(), handle.generation().wrapping_add(1)).unwrap();
         request.service = stale;
         assert_eq!(registry.manager_request(request).status, ManagerStatus::Stale);
+    }
+
+    #[test]
+    fn lifecycle_validation_rejects_stale_handles_before_resource_actions() {
+        let mut registry = RuntimeServiceRegistry::new();
+        let current = registry.register(b"service", b"image", &[]).unwrap();
+        let stale =
+            ServiceHandle::new(current.index(), current.generation().wrapping_add(1)).unwrap();
+        assert_eq!(registry.validate_lifecycle_handle(current), Ok(()));
+        assert_eq!(registry.validate_lifecycle_handle(stale), Err(ServiceRegistryError::Stale));
+        assert_eq!(
+            registry.lifecycle_status(ManagerOperation::Restart, stale),
+            ManagerStatus::Stale
+        );
     }
 
     #[test]
