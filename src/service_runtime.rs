@@ -624,6 +624,13 @@ impl ServiceRuntime {
         for handle in handles {
             self.ensure_service_runtime_slot(handle)?;
         }
+        if self.service_epoch > 1 {
+            for handle in &self.service_handles {
+                if registry.state(*handle) == Ok(crate::runtime_services::ServiceState::Running) {
+                    registry.record_restart(*handle).map_err(|_| ServiceRuntimeError::Resources)?;
+                }
+            }
+        }
         self.supervisor.retain_slots(&self.service_handles);
         self.dynamic_services = Some(registry);
         Ok(())
@@ -786,7 +793,6 @@ impl ServiceRuntime {
             crate::memory::bind_kernel_global_allocator(self.frame_pool.allocator())
                 .map_err(|_| ServiceRuntimeError::Resources)?;
         }
-
         // Dynamic runtime storage must be allocated only after Core owns a
         // live heap; before this point the global allocator has no backend.
         self.images.resize_with(SERVICE_COUNT, LoadedImage::empty);
@@ -815,6 +821,19 @@ impl ServiceRuntime {
 
         for (index, spec) in SERVICE_IMAGES.iter().enumerate() {
             let service = spec.service();
+            #[cfg(feature = "qemu-proof")]
+            crate::arch::proof_line(match service {
+                ServiceId::Input => b"LogOS vNext: load Input",
+                ServiceId::Display => b"LogOS vNext: load Display",
+                ServiceId::Terminal => b"LogOS vNext: load Terminal",
+                ServiceId::Session => b"LogOS vNext: load Session",
+                ServiceId::Storage => b"LogOS vNext: load Storage",
+                ServiceId::User => b"LogOS vNext: load User",
+                ServiceId::Device => b"LogOS vNext: load Device",
+                ServiceId::Network => b"LogOS vNext: load Network",
+                ServiceId::Flow => b"LogOS vNext: load Flow",
+                ServiceId::Fetch => b"LogOS vNext: load Fetch",
+            });
             let stack_pages = match service {
                 ServiceId::Storage => crate::process::STORAGE_STACK_PAGES,
                 ServiceId::Network => crate::process::NETWORK_STACK_PAGES,
@@ -4611,6 +4630,8 @@ impl ServiceRuntime {
             if result.is_ok() {
                 #[cfg(feature = "qemu-proof")]
                 crate::proof::network_restart_completed();
+                #[cfg(feature = "qemu-proof")]
+                crate::proof::manager_restart_completed();
                 crate::arch::enable_keyboard_irq();
                 crate::arch::finish_service_runtime_transition();
             }

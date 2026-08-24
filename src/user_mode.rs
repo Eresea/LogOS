@@ -87,6 +87,12 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
         (core::ptr::addr_of!(USER_IMAGE) as usize, core::mem::size_of::<[u8; PROOF_IMAGE_LEN]>()),
         (core::ptr::addr_of!(USER_PROCESS_TABLE) as usize, core::mem::size_of::<ProcessTable>()),
         (core::ptr::addr_of!(USER_PROCESS) as usize, core::mem::size_of::<Option<ProcessHandle>>()),
+        (core::ptr::addr_of!(USER_CR3) as usize, core::mem::size_of::<AtomicUsize>()),
+        (core::ptr::addr_of!(KERNEL_CR3) as usize, core::mem::size_of::<AtomicUsize>()),
+        (core::ptr::addr_of!(USER_TASK_RAW) as usize, core::mem::size_of::<AtomicU64>()),
+        (core::ptr::addr_of!(USER_SYSCALLS) as usize, core::mem::size_of::<AtomicU64>()),
+        (core::ptr::addr_of!(USER_FAULTED) as usize, core::mem::size_of::<AtomicBool>()),
+        (core::ptr::addr_of!(USER_FAULT_VECTOR) as usize, core::mem::size_of::<AtomicUsize>()),
     ] {
         crate::arch::reserve_storage_frames(pool, address, bytes);
     }

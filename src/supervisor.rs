@@ -8,7 +8,7 @@ use logos_abi::ServiceHandle;
 pub const HEARTBEAT_INTERVAL: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS;
 pub const MISSED_HEARTBEATS: u8 = 3;
 pub const MAX_RESTARTS: u8 = 3;
-const STARTUP_GRACE_TICKS: u64 = HEARTBEAT_INTERVAL * 20;
+pub const STARTUP_GRACE_TICKS: u64 = HEARTBEAT_INTERVAL * 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceState {
