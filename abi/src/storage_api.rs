@@ -91,6 +91,11 @@ pub enum StorageApiStatus {
     Capacity = 12,
     TooLarge = 13,
     Unsupported = 14,
+    Unavailable = 15,
+    PermissionDenied = 16,
+    ReadOnly = 17,
+    Recovery = 18,
+    Corrupt = 19,
 }
 
 impl StorageApiStatus {
@@ -111,6 +116,11 @@ impl StorageApiStatus {
             12 => Some(Self::Capacity),
             13 => Some(Self::TooLarge),
             14 => Some(Self::Unsupported),
+            15 => Some(Self::Unavailable),
+            16 => Some(Self::PermissionDenied),
+            17 => Some(Self::ReadOnly),
+            18 => Some(Self::Recovery),
+            19 => Some(Self::Corrupt),
             _ => None,
         }
     }
@@ -616,6 +626,20 @@ mod tests {
             StorageApiResponse::decode(&response).unwrap().version,
             STORAGE_API_EXTENSION_VERSION
         );
+    }
+
+    #[test]
+    fn response_round_trips_specific_failure_statuses() {
+        for status in [
+            StorageApiStatus::Unavailable,
+            StorageApiStatus::PermissionDenied,
+            StorageApiStatus::ReadOnly,
+            StorageApiStatus::Recovery,
+            StorageApiStatus::Corrupt,
+        ] {
+            let message = StorageApiResponse::encode(status, 1, 0, &[], false).unwrap();
+            assert_eq!(StorageApiResponse::decode(&message).unwrap().status, status);
+        }
     }
 
     #[test]

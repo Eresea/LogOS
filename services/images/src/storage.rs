@@ -160,12 +160,13 @@ fn map_status(status: StorageStatus) -> StorageApiStatus {
         StorageStatus::Ok => StorageApiStatus::Ok,
         StorageStatus::Stale => StorageApiStatus::Stale,
         StorageStatus::Full => StorageApiStatus::Capacity,
-        StorageStatus::Invalid | StorageStatus::Unauthorized => StorageApiStatus::Invalid,
+        StorageStatus::Invalid => StorageApiStatus::Invalid,
+        StorageStatus::Unauthorized => StorageApiStatus::PermissionDenied,
         StorageStatus::Unsupported => StorageApiStatus::Unsupported,
-        StorageStatus::Io
-        | StorageStatus::OutOfBounds
-        | StorageStatus::ReadOnly
-        | StorageStatus::Recovery => StorageApiStatus::Io,
+        StorageStatus::Io => StorageApiStatus::Io,
+        StorageStatus::OutOfBounds => StorageApiStatus::TooLarge,
+        StorageStatus::ReadOnly => StorageApiStatus::ReadOnly,
+        StorageStatus::Recovery => StorageApiStatus::Recovery,
     }
 }
 
@@ -314,10 +315,60 @@ fn discover(capability: StorageCapability) -> Option<u64> {
 }
 
 fn storage_error_status(error: NamespaceError) -> StorageApiStatus {
-    if matches!(error, NamespaceError::Format(logos_storage::FormatError::UnsupportedVersion)) {
-        StorageApiStatus::Unsupported
-    } else {
-        StorageApiStatus::Io
+    match error {
+        NamespaceError::Format(logos_storage::FormatError::UnsupportedVersion) => {
+            StorageApiStatus::Unsupported
+        }
+        NamespaceError::Format(
+            logos_storage::FormatError::Corrupt | logos_storage::FormatError::ReplayRejected,
+        ) => StorageApiStatus::Corrupt,
+        NamespaceError::Recovery | NamespaceError::CommitNotPublished => StorageApiStatus::Recovery,
+        NamespaceError::Block(logos_storage::BlockError::ReadOnly) => StorageApiStatus::ReadOnly,
+        NamespaceError::Block(logos_storage::BlockError::Unauthorized) => {
+            StorageApiStatus::PermissionDenied
+        }
+        NamespaceError::Block(logos_storage::BlockError::OutOfBounds) => StorageApiStatus::TooLarge,
+        NamespaceError::Block(logos_storage::BlockError::Stale) => StorageApiStatus::Stale,
+        NamespaceError::Block(logos_storage::BlockError::InvalidRequest) => {
+            StorageApiStatus::Invalid
+        }
+        NamespaceError::Format(logos_storage::FormatError::Block(
+            logos_storage::BlockError::ReadOnly,
+        )) => StorageApiStatus::ReadOnly,
+        NamespaceError::Format(logos_storage::FormatError::Block(
+            logos_storage::BlockError::Unauthorized,
+        )) => StorageApiStatus::PermissionDenied,
+        NamespaceError::Format(logos_storage::FormatError::Block(
+            logos_storage::BlockError::OutOfBounds,
+        )) => StorageApiStatus::TooLarge,
+        NamespaceError::Format(logos_storage::FormatError::Block(
+            logos_storage::BlockError::Stale,
+        )) => StorageApiStatus::Stale,
+        NamespaceError::Format(logos_storage::FormatError::Block(
+            logos_storage::BlockError::InvalidRequest,
+        )) => StorageApiStatus::Invalid,
+        NamespaceError::Format(
+            logos_storage::FormatError::NotBlank
+            | logos_storage::FormatError::Unformatted
+            | logos_storage::FormatError::TooSmall
+            | logos_storage::FormatError::ProvisionedBlank,
+        ) => StorageApiStatus::Corrupt,
+        NamespaceError::Format(logos_storage::FormatError::PayloadTooLarge)
+        | NamespaceError::Format(logos_storage::FormatError::TransactionTooLarge) => {
+            StorageApiStatus::TooLarge
+        }
+        NamespaceError::Format(logos_storage::FormatError::JournalFull)
+        | NamespaceError::Format(logos_storage::FormatError::GenerationExhausted) => {
+            StorageApiStatus::Capacity
+        }
+        NamespaceError::Format(logos_storage::FormatError::InvalidRequest) => {
+            StorageApiStatus::Invalid
+        }
+        NamespaceError::Block(logos_storage::BlockError::Io)
+        | NamespaceError::Format(logos_storage::FormatError::Block(
+            logos_storage::BlockError::Io,
+        )) => StorageApiStatus::Io,
+        _ => StorageApiStatus::Io,
     }
 }
 

@@ -948,9 +948,31 @@ fn map_error(error: NamespaceError) -> StorageApiStatus {
         NamespaceError::NotEmpty => StorageApiStatus::NotEmpty,
         NamespaceError::Stale => StorageApiStatus::Stale,
         NamespaceError::TooLarge => StorageApiStatus::TooLarge,
-        NamespaceError::CommitNotPublished => StorageApiStatus::Io,
-        NamespaceError::Recovery => StorageApiStatus::Io,
-        NamespaceError::Format(_) | NamespaceError::Block(_) => StorageApiStatus::Io,
+        NamespaceError::CommitNotPublished | NamespaceError::Recovery => StorageApiStatus::Recovery,
+        NamespaceError::Format(logos_storage::FormatError::UnsupportedVersion) => {
+            StorageApiStatus::Unsupported
+        }
+        NamespaceError::Format(
+            logos_storage::FormatError::Corrupt
+            | logos_storage::FormatError::ReplayRejected
+            | logos_storage::FormatError::NotBlank
+            | logos_storage::FormatError::Unformatted
+            | logos_storage::FormatError::TooSmall
+            | logos_storage::FormatError::ProvisionedBlank,
+        ) => StorageApiStatus::Corrupt,
+        NamespaceError::Format(logos_storage::FormatError::PayloadTooLarge)
+        | NamespaceError::Format(logos_storage::FormatError::TransactionTooLarge) => {
+            StorageApiStatus::TooLarge
+        }
+        NamespaceError::Format(logos_storage::FormatError::JournalFull)
+        | NamespaceError::Format(logos_storage::FormatError::GenerationExhausted) => {
+            StorageApiStatus::Capacity
+        }
+        NamespaceError::Format(logos_storage::FormatError::InvalidRequest) => {
+            StorageApiStatus::Invalid
+        }
+        NamespaceError::Format(logos_storage::FormatError::Block(error)) => map_block_error(error),
+        NamespaceError::Block(error) => map_block_error(error),
         NamespaceError::Unsupported => StorageApiStatus::Unsupported,
         NamespaceError::Package(
             crate::packages::PackageCatalogError::VersionConflict
@@ -958,6 +980,17 @@ fn map_error(error: NamespaceError) -> StorageApiStatus {
             | crate::packages::PackageCatalogError::DependencyConflict,
         ) => StorageApiStatus::Invalid,
         NamespaceError::Package(_) => StorageApiStatus::Io,
+    }
+}
+
+fn map_block_error(error: logos_storage::BlockError) -> StorageApiStatus {
+    match error {
+        logos_storage::BlockError::OutOfBounds => StorageApiStatus::TooLarge,
+        logos_storage::BlockError::ReadOnly => StorageApiStatus::ReadOnly,
+        logos_storage::BlockError::Unauthorized => StorageApiStatus::PermissionDenied,
+        logos_storage::BlockError::Stale => StorageApiStatus::Stale,
+        logos_storage::BlockError::InvalidRequest => StorageApiStatus::Invalid,
+        logos_storage::BlockError::Io => StorageApiStatus::Io,
     }
 }
 
@@ -1092,6 +1125,23 @@ mod tests {
 
     fn status(message: &IpcBytes) -> StorageApiResponse<'_> {
         StorageApiResponse::decode(message).unwrap()
+    }
+
+    #[test]
+    fn namespace_errors_keep_specific_storage_causes() {
+        assert_eq!(
+            map_error(NamespaceError::Block(BlockError::ReadOnly)),
+            StorageApiStatus::ReadOnly
+        );
+        assert_eq!(
+            map_error(NamespaceError::Block(BlockError::Unauthorized)),
+            StorageApiStatus::PermissionDenied
+        );
+        assert_eq!(map_error(NamespaceError::Recovery), StorageApiStatus::Recovery);
+        assert_eq!(
+            map_error(NamespaceError::Format(logos_storage::FormatError::Corrupt)),
+            StorageApiStatus::Corrupt
+        );
     }
 
     #[test]

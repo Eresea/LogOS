@@ -2148,8 +2148,10 @@ fn storage_ipc_error(status: IpcStatus) -> StorageApiStatus {
     match status {
         IpcStatus::Stale => StorageApiStatus::Stale,
         IpcStatus::Malformed => StorageApiStatus::Invalid,
-        IpcStatus::Disconnected | IpcStatus::Unauthorized => StorageApiStatus::Io,
-        IpcStatus::Ok | IpcStatus::Full | IpcStatus::Empty => StorageApiStatus::Io,
+        IpcStatus::Disconnected => StorageApiStatus::Unavailable,
+        IpcStatus::Unauthorized => StorageApiStatus::PermissionDenied,
+        IpcStatus::Full => StorageApiStatus::Busy,
+        IpcStatus::Ok | IpcStatus::Empty => StorageApiStatus::Io,
     }
 }
 
@@ -2162,6 +2164,11 @@ fn status_text(status: StorageApiStatus) -> &'static [u8] {
         StorageApiStatus::Capacity => b"storage capacity exhausted\r\n",
         StorageApiStatus::Io => b"storage I/O error\r\n",
         StorageApiStatus::Unsupported => b"storage unsupported\r\n",
+        StorageApiStatus::Unavailable => b"storage service unavailable\r\n",
+        StorageApiStatus::PermissionDenied => b"storage access denied\r\n",
+        StorageApiStatus::ReadOnly => b"storage is read-only\r\n",
+        StorageApiStatus::Recovery => b"storage recovery required\r\n",
+        StorageApiStatus::Corrupt => b"storage format is invalid\r\n",
         StorageApiStatus::NotDirectory => b"not a directory\r\n",
         StorageApiStatus::IsDirectory => b"is a directory\r\n",
         StorageApiStatus::Root => b"cannot modify root\r\n",
@@ -3291,5 +3298,14 @@ mod tests {
         assert!(!client.active);
         assert!(client.done);
         assert_eq!(&client.result[..client.result_len], b"command cancelled\r\n");
+    }
+
+    #[test]
+    fn storage_failures_preserve_actionable_causes() {
+        assert_eq!(storage_ipc_error(IpcStatus::Disconnected), StorageApiStatus::Unavailable);
+        assert_eq!(storage_ipc_error(IpcStatus::Unauthorized), StorageApiStatus::PermissionDenied);
+        assert_eq!(storage_ipc_error(IpcStatus::Full), StorageApiStatus::Busy);
+        assert_eq!(status_text(StorageApiStatus::Recovery), b"storage recovery required\r\n");
+        assert_eq!(status_text(StorageApiStatus::ReadOnly), b"storage is read-only\r\n");
     }
 }
