@@ -1920,11 +1920,9 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
         for record in records.iter().take(count) {
             self.namespace.apply_record(WRITE_KIND, record.payload)?;
         }
-        if let Err(error) = self.persist_snapshot() {
-            return Err(match self.reopen() {
-                Ok(()) => error,
-                Err(recovery) => recovery,
-            });
+        let previous_generation = self.volume.generation();
+        if self.persist_snapshot().is_err() {
+            return self.recover_persist_error(previous_generation).map(|_| input.len());
         }
         Ok(input.len())
     }
@@ -3338,6 +3336,20 @@ mod tests {
 
         assert!(fs.create_file(fs.root(), b"direct").is_ok());
         assert!(fs.resolve_path(b"/direct").is_ok());
+    }
+
+    #[test]
+    fn direct_write_reports_success_when_reopen_recovers_published_commit() {
+        let store = CommitPublicationStore::new();
+        let mut fs = DurableNamespaceV5::format_v5(store).unwrap();
+        let file = fs.create_file(fs.root(), b"direct-write").unwrap();
+        fs.store.arm(3);
+
+        assert_eq!(fs.write(file, 0, b"durable"), Ok(7));
+        let mut reopened = DurableNamespaceV5::open_v5(fs.into_store()).unwrap();
+        let mut output = [0; 7];
+        assert_eq!(reopened.read(file, 0, &mut output), Ok(7));
+        assert_eq!(&output, b"durable");
     }
 
     #[test]
