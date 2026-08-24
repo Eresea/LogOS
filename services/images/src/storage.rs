@@ -362,7 +362,7 @@ fn handle_package_request<B: logos_storage::BlockStore>(
     }
     let target = match request.validate_target(
         capability,
-        bootstrap.service_epoch as u16,
+        bootstrap.ipc_generation,
         bootstrap.service_epoch,
     ) {
         Ok(service) => service,
@@ -441,7 +441,7 @@ fn receive_package_request() -> Option<PackageRequest> {
         PackageOperation::Lookup,
         logos_abi::ServiceId::Storage,
         1,
-        bootstrap.service_epoch as u16,
+        bootstrap.ipc_generation,
         capability,
         bootstrap.service_epoch,
         0,
@@ -960,17 +960,13 @@ pub extern "C" fn _start() -> ! {
     };
     unsafe { *core::ptr::addr_of_mut!(IPC_CAPABILITIES) = Some(capabilities) };
     let capability_handle = capabilities.request;
-    // Capability generations identify the grant slot. Storage request
-    // generations identify the current IPC topology and are carried by the
-    // service epoch; those values are intentionally independent.
-    let Ok(generation) = u16::try_from(common::bootstrap_page().service_epoch) else {
-        serve_storage_error(StorageApiStatus::Io)
-    };
-    let Some(capability) = StorageCapability::new(
-        capability_handle,
-        generation,
-        common::bootstrap_page().service_epoch,
-    ) else {
+    // Capability generations identify the grant slot. Storage requests carry
+    // the separately published IPC generation and service epoch.
+    let bootstrap = common::bootstrap_page();
+    let generation = bootstrap.ipc_generation;
+    let Some(capability) =
+        StorageCapability::new(capability_handle, generation, bootstrap.service_epoch)
+    else {
         serve_storage_error(StorageApiStatus::Io)
     };
     let Some(blocks) = discover(capability) else {

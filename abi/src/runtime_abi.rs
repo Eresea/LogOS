@@ -55,6 +55,8 @@ define_handle!(EventSetHandle);
 pub struct ServiceBootstrapPage {
     pub abi_version: u16,
     pub flags: u16,
+    pub ipc_generation: u16,
+    pub reserved: u16,
     pub service_epoch: u64,
     pub service: ServiceHandle,
     pub control: CapabilityHandle,
@@ -209,6 +211,8 @@ impl ServiceBootstrapPage {
         Self {
             abi_version: RUNTIME_ABI_VERSION,
             flags: 0,
+            ipc_generation: 0,
+            reserved: 0,
             service_epoch: 0,
             service: ServiceHandle::EMPTY,
             control: CapabilityHandle::EMPTY,
@@ -223,6 +227,8 @@ impl ServiceBootstrapPage {
     pub const fn is_valid(self) -> bool {
         self.abi_version == RUNTIME_ABI_VERSION
             && self.flags == 0
+            && self.ipc_generation != 0
+            && self.reserved == 0
             && self.service_epoch != 0
             && self.service.is_valid()
             && self.control.is_valid()
@@ -512,6 +518,7 @@ mod tests {
         let mut page = ServiceBootstrapPage::empty();
         assert!(!page.is_valid());
         page.service_epoch = 1;
+        page.ipc_generation = 1;
         page.service = ServiceHandle::new(1, 1).unwrap();
         page.control = CapabilityHandle::new(2, 1).unwrap();
         page.directory = CapabilityHandle::new(3, 1).unwrap();

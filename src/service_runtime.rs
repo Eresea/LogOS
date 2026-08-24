@@ -1269,6 +1269,8 @@ impl ServiceRuntime {
         let page = logos_abi::ServiceBootstrapPage {
             abi_version: logos_abi::RUNTIME_ABI_VERSION,
             flags: 0,
+            ipc_generation: self.ipc_generation,
+            reserved: 0,
             service_epoch: self.service_epoch,
             service: service_handle,
             control,
