@@ -160,7 +160,17 @@ function Invoke-StorageBoot {
                     }
                 }
                 if ($allMarkersFound) {
-                    Start-Sleep -Seconds 5
+                    $postMarkerDeadline = [DateTime]::UtcNow.AddSeconds(5)
+                    while ([DateTime]::UtcNow -lt $postMarkerDeadline) {
+                        if (Test-Path $log) {
+                            $postText = Get-Content $log -Raw
+                            if ($postText -match '(?i)(?:FATAL|QEMU proof FAIL|storage command API FAIL|panic)') {
+                                return $false
+                            }
+                        }
+                        if ($process.HasExited) { return $true }
+                        Start-Sleep -Milliseconds 250
+                    }
                     return $true
                 }
                 if ($text -match '(?i)(?:FATAL|QEMU proof FAIL|storage command API FAIL|panic)') {

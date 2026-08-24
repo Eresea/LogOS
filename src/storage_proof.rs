@@ -1,18 +1,35 @@
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 pub(crate) struct StorageProofObserver {
     mode: AtomicU8,
-    pending: AtomicU8,
-    missing: AtomicU8,
+    pending_operation: AtomicU8,
+    pending_path: AtomicU8,
+    pending_request: AtomicU32,
+    missing_paths: AtomicU8,
     reported: AtomicU8,
+}
+
+const PATH_SURVIVOR: u8 = 1;
+const PATH_ABORTED: u8 = 2;
+const PATH_REMOVED: u8 = 4;
+
+fn proof_path(path: &[u8]) -> u8 {
+    match path {
+        b"/api-survivor" => PATH_SURVIVOR,
+        b"/api-aborted" => PATH_ABORTED,
+        b"/api-removed" => PATH_REMOVED,
+        _ => 0,
+    }
 }
 
 impl StorageProofObserver {
     pub const fn new() -> Self {
         Self {
             mode: AtomicU8::new(0),
-            pending: AtomicU8::new(0),
-            missing: AtomicU8::new(0),
+            pending_operation: AtomicU8::new(0),
+            pending_path: AtomicU8::new(0),
+            pending_request: AtomicU32::new(0),
+            missing_paths: AtomicU8::new(0),
             reported: AtomicU8::new(0),
         }
     }
@@ -29,12 +46,16 @@ impl StorageProofObserver {
         let Ok(request) = logos_abi::StorageApiRequest::decode(&message) else {
             return;
         };
+        let path = proof_path(request.path);
         if request.operation == logos_abi::StorageApiOperation::CreateFile
+            && path == PATH_SURVIVOR
             && self.mode.load(Ordering::Acquire) == 0
         {
             crate::arch_proof_line(b"LogOS vNext: storage command API START");
         }
-        self.pending.store(request.operation as u8, Ordering::Release);
+        self.pending_operation.store(request.operation as u8, Ordering::Release);
+        self.pending_path.store(path, Ordering::Release);
+        self.pending_request.store(request.request_id, Ordering::Release);
     }
 
     pub fn observe_response(&self, bytes: &[u8]) {
@@ -49,9 +70,15 @@ impl StorageProofObserver {
         let Ok(response) = logos_abi::StorageApiResponse::decode(&message) else {
             return;
         };
-        let operation = self.pending.load(Ordering::Acquire);
+        let request_id = self.pending_request.load(Ordering::Acquire);
+        if request_id == 0 || response.request_id != request_id {
+            return;
+        }
+        let operation = self.pending_operation.load(Ordering::Acquire);
+        let path = self.pending_path.load(Ordering::Acquire);
+        self.pending_request.store(0, Ordering::Release);
         if operation == logos_abi::StorageApiOperation::CreateFile as u8 {
-            if self.mode.load(Ordering::Acquire) == 0 {
+            if path == PATH_SURVIVOR && self.mode.load(Ordering::Acquire) == 0 {
                 if response.status == logos_abi::StorageApiStatus::Ok {
                     self.mode.store(1, Ordering::Release);
                 } else if response.status == logos_abi::StorageApiStatus::AlreadyExists {
@@ -67,6 +94,7 @@ impl StorageProofObserver {
             && response.status == logos_abi::StorageApiStatus::Ok
             && !response.more
             && response.data == expected_data
+            && path == PATH_SURVIVOR
             && mode != 0
         {
             let marker: &[u8] = if mode == 1 {
@@ -83,9 +111,12 @@ impl StorageProofObserver {
                 crate::arch_proof_line(marker);
             }
         }
-        if response.status == logos_abi::StorageApiStatus::NotFound {
-            let missing = self.missing.fetch_add(1, Ordering::AcqRel) + 1;
-            if missing == 2 {
+        if response.status == logos_abi::StorageApiStatus::NotFound
+            && (path == PATH_ABORTED || path == PATH_REMOVED)
+        {
+            let previous = self.missing_paths.fetch_or(path, Ordering::AcqRel);
+            let required = PATH_ABORTED | PATH_REMOVED;
+            if previous & required != required && (previous | path) & required == required {
                 crate::arch_proof_line(b"LogOS vNext: storage command API cleanup PASS");
             }
         }
