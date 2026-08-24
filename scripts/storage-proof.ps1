@@ -35,9 +35,9 @@ if (-not (Test-Path $disk)) {
     try { $stream.Write($marker, 0, $marker.Length) } finally { $stream.Dispose() }
 }
 
-& cargo build --release --features qemu-proof --target x86_64-unknown-uefi
+& cargo build --release --features qemu-proof,storage-proof --target x86_64-unknown-uefi
 if ($LASTEXITCODE -ne 0) { throw 'UEFI build failed.' }
-& (Join-Path $PSScriptRoot 'build-services.ps1') -Release -Proof
+& (Join-Path $PSScriptRoot 'build-services.ps1') -Release -Proof -StorageProof
 if ($LASTEXITCODE -ne 0) { throw 'Service image build failed.' }
 
 New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\BOOT') | Out-Null
@@ -163,7 +163,9 @@ function Invoke-StorageBoot {
                     Start-Sleep -Seconds 5
                     return $true
                 }
-                if ($text -match '(?i)(?:FATAL|QEMU proof FAIL|panic)') { return $false }
+                if ($text -match '(?i)(?:FATAL|QEMU proof FAIL|storage command API FAIL|panic)') {
+                    return $false
+                }
             }
             if ($process.HasExited) { return $false }
             Start-Sleep -Milliseconds 250
@@ -181,7 +183,10 @@ function Invoke-StorageBoot {
 }
 
 if (-not (Invoke-StorageBoot -ExpectedMarkers @(
-        'LogOS vNext: QEMU proof PASS'
+        'LogOS vNext: QEMU proof PASS',
+        'LogOS vNext: storage proof PASS',
+        'LogOS vNext: storage command API PASS',
+        'LogOS vNext: storage command API cleanup PASS'
     ))) {
     throw "Storage format/write/flush proof failed. Log: $log"
 }
@@ -192,7 +197,8 @@ if (Test-Path -LiteralPath $disk) {
 Assert-V5UserCatalog $disk
 Corrupt-InactiveV5Superblock $disk
 if (-not (Invoke-StorageBoot -ExpectedMarkers @(
-        'LogOS vNext: QEMU proof PASS'
+        'LogOS vNext: storage recovery PASS',
+        'LogOS vNext: storage command API recovery PASS'
     ))) {
     throw "Storage reboot/recovery proof failed. Log: $log"
 }

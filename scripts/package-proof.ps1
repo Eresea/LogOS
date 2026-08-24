@@ -2,8 +2,8 @@ param(
     [switch]$Release,
     [ValidateRange(16, 4096)]
     [int]$DiskMiB = 64,
-    [ValidateRange(1, 10)]
-    [int]$TimeoutSeconds = 10
+    [ValidateRange(1, 120)]
+    [int]$TimeoutSeconds = 60
 )
 
 $ErrorActionPreference = 'Stop'
