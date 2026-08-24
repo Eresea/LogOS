@@ -99,8 +99,8 @@ not inspect, schedule, or orchestrate Runtime state. Runtime operations use the 
 wake primitives but retain their own deadlines, terminal states, and slot generations. The ten service
 ELFs are loaded before `ExitBootServices`, receive isolated roots and explicit mappings, and enter
 through the normal scheduler path. QEMU exercises the live service images and supervisor-driven restart.
-The fixed scheduler task stack is 64 KiB with a 256-byte canary so bounded interrupt
-and syscall depth cannot silently overwrite adjacent CPU metadata.
+Core enters on a 512 KiB per-CPU scheduler stack with a 256-byte canary; task stacks remain
+separately bounded so interrupt and syscall depth cannot silently overwrite adjacent CPU metadata.
 
 `v1_docs/` is historical and is not an active architecture contract.
 

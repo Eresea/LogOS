@@ -450,6 +450,20 @@ impl CpuLocal {
 static mut CPU_LOCALS: [CpuLocal; MAX_CPUS] = [const { CpuLocal::new() }; MAX_CPUS];
 
 pub fn boot() -> Status {
+    let stack_top = unsafe { CPU_LOCALS[0].scheduler_stack.0.as_ptr_range().end as u64 };
+    unsafe {
+        asm!(
+            "mov rsp, {stack}",
+            "and rsp, -16",
+            "jmp {entry}",
+            stack = in(reg) stack_top,
+            entry = sym boot_impl,
+            options(noreturn),
+        );
+    }
+}
+
+fn boot_impl() -> ! {
     debug_line(b"LogOS vNext: UEFI entered");
     let cpu_count = discover_cpus();
     measure_tsc();
@@ -891,6 +905,7 @@ pub(super) fn notify_reschedule_cpus(source_cpu: usize) {
 fn install_cpu(index: usize) {
     unsafe {
         CPU_LOCALS[index].initialize(index);
+        wrmsr(0xc000_0103, index as u64);
         write_gs(&CPU_LOCALS[index]);
     }
 }
@@ -958,7 +973,7 @@ pub(crate) fn reserve_storage_frames(
     let root = current_cr3() as u64 & 0x000f_ffff_ffff_f000;
     for virtual_address in (start..end & !0xfff).step_by(0x1000) {
         if let Some(frame) = translate_kernel_page(root, virtual_address as u64) {
-            pool.reserve(crate::frame_pool::FrameAddress::from_raw(frame));
+            pool.reserve(crate::frame_pool::FrameAddress::from_raw(frame & !0xfff));
         }
     }
 }
@@ -969,14 +984,14 @@ fn translate_kernel_page(root: u64, virtual_address: u64) -> Option<u64> {
     const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
     let pml4 = root;
     let pml4_entry = unsafe {
-        core::ptr::read_volatile((pml4 + ((virtual_address >> 36) & 0xff8)) as *const u64)
+        core::ptr::read_volatile((pml4 + ((virtual_address >> 39) & 0xff8)) as *const u64)
     };
     if pml4_entry & PRESENT == 0 {
         return None;
     }
     let pdpt = pml4_entry & ADDRESS_MASK;
     let pdpt_entry = unsafe {
-        core::ptr::read_volatile((pdpt + ((virtual_address >> 27) & 0xff8)) as *const u64)
+        core::ptr::read_volatile((pdpt + ((virtual_address >> 30) & 0xff8)) as *const u64)
     };
     if pdpt_entry & PRESENT == 0 {
         return None;
@@ -986,7 +1001,7 @@ fn translate_kernel_page(root: u64, virtual_address: u64) -> Option<u64> {
     }
     let pd = pdpt_entry & ADDRESS_MASK;
     let pd_entry =
-        unsafe { core::ptr::read_volatile((pd + ((virtual_address >> 18) & 0xff8)) as *const u64) };
+        unsafe { core::ptr::read_volatile((pd + ((virtual_address >> 21) & 0xff8)) as *const u64) };
     if pd_entry & PRESENT == 0 {
         return None;
     }
@@ -995,7 +1010,7 @@ fn translate_kernel_page(root: u64, virtual_address: u64) -> Option<u64> {
     }
     let pt = pd_entry & ADDRESS_MASK;
     let pt_entry =
-        unsafe { core::ptr::read_volatile((pt + ((virtual_address >> 9) & 0xff8)) as *const u64) };
+        unsafe { core::ptr::read_volatile((pt + ((virtual_address >> 12) & 0xff8)) as *const u64) };
     (pt_entry & PRESENT != 0).then_some((pt_entry & ADDRESS_MASK) | (virtual_address & 0xfff))
 }
 

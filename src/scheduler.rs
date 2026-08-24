@@ -8,10 +8,10 @@ use crate::process::{ProcessHandle, UserLaunch};
 pub const MAX_TASKS: usize = 24;
 pub const MAX_CPUS: usize = 8;
 #[cfg(target_os = "uefi")]
-pub const TASK_STACK_SIZE: usize = 256 * 1024;
+pub const TASK_STACK_SIZE: usize = 512 * 1024;
 #[cfg(not(target_os = "uefi"))]
 pub const TASK_STACK_SIZE: usize = 16 * 1024;
-pub const SCHEDULER_STACK_SIZE: usize = 64 * 1024;
+pub const SCHEDULER_STACK_SIZE: usize = 512 * 1024;
 pub const SCHEDULER_STACK_GUARD_BYTES: usize = 256;
 pub const IDLE_STACK_SIZE: usize = 4 * 1024;
 
@@ -31,6 +31,11 @@ const GENERATION_MASK: u64 = (1 << (64 - GENERATION_SHIFT)) - 1;
 const INITIAL_GENERATION: u64 = 1;
 const NO_CPU_TASK: u8 = u8::MAX;
 const NO_DEADLINE: u64 = u64::MAX;
+#[cfg(target_os = "uefi")]
+const SAVED_GPR_KERNEL_BYTES: usize = 15 * 8 + 8 + 24;
+const SAVED_GPR_USER_BYTES: usize = 15 * 8 + 8 + 40;
+const SAVED_GPR_BYTES: usize = SAVED_GPR_USER_BYTES;
+const SAVED_FX_BYTES: usize = 512 + 8;
 
 pub type TaskEntry = fn();
 
@@ -85,10 +90,24 @@ pub enum FinishState {
 #[repr(C, align(16))]
 struct TaskStack([u8; TASK_STACK_SIZE]);
 
+#[repr(C, align(16))]
+struct SavedContext {
+    fx: [u8; SAVED_FX_BYTES],
+    gpr: [u8; SAVED_GPR_BYTES],
+}
+
+impl SavedContext {
+    const fn new() -> Self {
+        Self { fx: [0; SAVED_FX_BYTES], gpr: [0; SAVED_GPR_BYTES] }
+    }
+}
+
 struct TaskSlot {
     entry: AtomicUsize,
     #[allow(dead_code)]
     stack: UnsafeCell<TaskStack>,
+    #[allow(dead_code)]
+    saved_context: UnsafeCell<SavedContext>,
     state: AtomicU64,
     wake_deadline: AtomicU64,
     saved_rsp: AtomicUsize,
@@ -106,6 +125,7 @@ impl TaskSlot {
         Self {
             entry: AtomicUsize::new(0),
             stack: UnsafeCell::new(TaskStack([0; TASK_STACK_SIZE])),
+            saved_context: UnsafeCell::new(SavedContext::new()),
             state: AtomicU64::new(pack(INITIAL_GENERATION, VACANT)),
             wake_deadline: AtomicU64::new(NO_DEADLINE),
             saved_rsp: AtomicUsize::new(0),
@@ -636,6 +656,48 @@ impl Scheduler {
         if let Some(cpu_state) = self.cpus.get(cpu) {
             cpu_state.ticks.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Copy an interrupted context off the per-CPU interrupt stack before it
+    /// can be reused by another interrupt.
+    #[cfg(target_os = "uefi")]
+    pub(crate) fn save_context_from_interrupt(
+        &self,
+        handle: TaskHandle,
+        fx_context: usize,
+    ) -> bool {
+        let Some(slot) = self.tasks.get(handle.slot as usize) else {
+            return false;
+        };
+        let word = slot.state.load(Ordering::Acquire);
+        if generation(word) != handle.generation || !matches!(state(word), RUNNING | STOPPING) {
+            return false;
+        }
+        unsafe {
+            let source_fx = fx_context as *const u8;
+            let source_gpr =
+                core::ptr::read_unaligned((fx_context + SAVED_FX_BYTES - 8) as *const usize)
+                    as *const u8;
+            let source_code =
+                core::ptr::read_unaligned((source_gpr as usize + 15 * 8 + 8 + 8) as *const usize);
+            let gpr_bytes =
+                if source_code == 0x1b { SAVED_GPR_USER_BYTES } else { SAVED_GPR_KERNEL_BYTES };
+            let context = &mut *slot.saved_context.get();
+            core::ptr::copy_nonoverlapping(source_fx, context.fx.as_mut_ptr(), SAVED_FX_BYTES);
+            let saved_gpr = if source_code == 0x1b {
+                core::ptr::copy_nonoverlapping(source_gpr, context.gpr.as_mut_ptr(), gpr_bytes);
+                context.gpr.as_ptr()
+            } else {
+                source_gpr
+            };
+            core::ptr::write_unaligned(
+                (context.fx.as_mut_ptr() as usize + SAVED_FX_BYTES - 8) as *mut usize,
+                saved_gpr as usize,
+            );
+            slot.saved_rsp.store(context.fx.as_ptr() as usize, Ordering::Release);
+        }
+        slot.context_saved.store(true, Ordering::Release);
+        true
     }
 
     pub fn ticks(&self, cpu: usize) -> Option<u64> {

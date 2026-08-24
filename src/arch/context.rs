@@ -7,6 +7,8 @@ use super::*;
 
 #[unsafe(no_mangle)]
 extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usize) -> usize {
+    #[cfg(target_os = "uefi")]
+    crate::user_mode::prepare_kernel();
     if HALTED.load(Ordering::Acquire) {
         fatal(b"LogOS vNext: halted");
     }
@@ -70,7 +72,11 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
     let local = unsafe { &*core::ptr::addr_of_mut!(CPU_LOCALS).cast::<CpuLocal>().add(cpu) };
     unsafe { write_apic(APIC_EOI, 0) };
     if let Some(current) = current {
-        if !SCHEDULER.save_context(current, fx_context) {
+        #[cfg(target_os = "uefi")]
+        let context_saved = SCHEDULER.save_context_from_interrupt(current, fx_context);
+        #[cfg(not(target_os = "uefi"))]
+        let context_saved = SCHEDULER.save_context(current, fx_context);
+        if !context_saved {
             fatal(b"LogOS vNext: context save");
         }
         let outcome = if user_fault {
@@ -384,10 +390,18 @@ global_asm!(
     "fxsave64 [rsp]",
     "mov [rsp + 512], r11",
     "mov r10, rsp",
-    "mov rsp, gs:8",
+    "mov ecx, 0xc0000101",
+    "rdmsr",
+    "shl rdx, 32",
+    "or rax, rdx",
+    "add rax, {scheduler_stack_top}",
+    "mov rsp, rax",
     "sub rsp, 40",
     "mov rcx, r10",
-    "mov rdx, gs:24",
+    "mov ecx, 0xc0000103",
+    "rdmsr",
+    "mov rdx, rax",
+    "mov rcx, r10",
     "mov r8, [r11 + 120]",
     "call schedule_from_interrupt",
     "add rsp, 40",
@@ -411,6 +425,8 @@ global_asm!(
     "pop rax",
     "add rsp, 8",
     "iretq",
+    scheduler_stack_top = const
+        core::mem::offset_of!(CpuLocal, scheduler_stack) + crate::SCHEDULER_STACK_SIZE,
 );
 
 #[cfg(feature = "qemu-proof")]
