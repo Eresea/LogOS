@@ -2898,6 +2898,7 @@ impl NamespaceTransaction {
         self,
         namespace: &mut DurableNamespace<B, V>,
     ) -> Result<u64, NamespaceError> {
+        let previous_generation = namespace.volume.generation();
         for slot in 0..MAX_OBJECTS {
             if let Some(record) = self.changes[slot] {
                 namespace.namespace.records[slot] = record;
@@ -2907,10 +2908,13 @@ impl NamespaceTransaction {
         namespace.retired_file_extent_count = self.retired_extent_count;
         match namespace.persist_snapshot() {
             Ok(generation) => Ok(generation.saturating_sub(1)),
-            Err(error) => Err(match namespace.reopen() {
-                Ok(()) => error,
-                Err(recovery) => recovery,
-            }),
+            Err(error) => match namespace.reopen() {
+                Ok(()) if namespace.volume.generation() > previous_generation => {
+                    Ok(namespace.volume.generation().saturating_sub(1))
+                }
+                Ok(()) => Err(error),
+                Err(recovery) => Err(recovery),
+            },
         }
     }
 
@@ -2968,6 +2972,55 @@ mod tests {
 
     fn heap_store() -> HeapStore {
         HeapStore(Box::new(MemoryBlockStore::new()))
+    }
+
+    struct CommitPublicationStore {
+        inner: Box<MemoryBlockStore<96>>,
+        writes: usize,
+        fail_at: Option<usize>,
+        triggered: bool,
+    }
+
+    impl CommitPublicationStore {
+        fn new() -> Self {
+            Self {
+                inner: Box::new(MemoryBlockStore::new()),
+                writes: 0,
+                fail_at: None,
+                triggered: false,
+            }
+        }
+
+        fn arm(&mut self, fail_at: usize) {
+            self.writes = 0;
+            self.fail_at = Some(fail_at);
+            self.triggered = false;
+        }
+    }
+
+    impl BlockStore for CommitPublicationStore {
+        fn block_count(&self) -> u64 {
+            self.inner.block_count()
+        }
+
+        fn read_block(&mut self, index: BlockIndex, output: &mut Block) -> Result<(), BlockError> {
+            self.inner.read_block(index, output)
+        }
+
+        fn write_block(&mut self, index: BlockIndex, input: &Block) -> Result<(), BlockError> {
+            if self.fail_at == Some(self.writes) {
+                self.fail_at = None;
+                self.triggered = true;
+                self.writes += 1;
+                return Err(BlockError::Io);
+            }
+            self.writes += 1;
+            self.inner.write_block(index, input)
+        }
+
+        fn flush(&mut self) -> Result<(), BlockError> {
+            self.inner.flush()
+        }
     }
 
     fn install(
@@ -3259,6 +3312,19 @@ mod tests {
         let mut output = [0; 7];
         assert_eq!(reopened.read(id, 0, &mut output).unwrap(), 7);
         assert_eq!(&output, b"durable");
+    }
+
+    #[test]
+    fn transaction_reports_success_when_reopen_recovers_published_commit() {
+        let store = CommitPublicationStore::new();
+        let mut fs = DurableNamespaceV5::format_v5(store).unwrap();
+        let mut transaction = fs.begin_transaction();
+        transaction.create_file(fs.transaction_base(), b"/recovered").unwrap();
+        fs.store.arm(3);
+
+        assert!(transaction.commit(&mut fs).is_ok());
+        assert!(fs.store.triggered);
+        assert!(fs.resolve_path(b"/recovered").is_ok());
     }
 
     #[test]
