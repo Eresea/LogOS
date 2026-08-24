@@ -321,6 +321,14 @@ fn storage_error_status(error: NamespaceError) -> StorageApiStatus {
     }
 }
 
+#[cfg(feature = "qemu-proof")]
+fn storage_startup_marker(marker: &[u8]) {
+    common::proof_line(marker);
+}
+
+#[cfg(not(feature = "qemu-proof"))]
+fn storage_startup_marker(_marker: &[u8]) {}
+
 fn package_status(error: NamespaceError) -> PackageStatus {
     match error {
         NamespaceError::Unsupported
@@ -374,6 +382,9 @@ fn handle_package_request<B: logos_storage::BlockStore>(
                 PackageTargetKind::Program => {
                     filesystem.lookup_package_name(&target.name[..target.name_len as usize])
                 }
+                PackageTargetKind::NamedService => {
+                    filesystem.lookup_package_name(&target.name[..target.name_len as usize])
+                }
             };
             match result {
                 Ok(info) => PackageResponse::new(request, PackageStatus::Ok).with_package(
@@ -392,6 +403,10 @@ fn handle_package_request<B: logos_storage::BlockStore>(
                         .map(logos_storage_service::PackageKey::Service)
                 }
                 PackageTargetKind::Program => filesystem
+                    .lookup_package_name(&target.name[..target.name_len as usize])
+                    .ok()
+                    .map(|info| info.handle.target),
+                PackageTargetKind::NamedService => filesystem
                     .lookup_package_name(&target.name[..target.name_len as usize])
                     .ok()
                     .map(|info| info.handle.target),
@@ -443,17 +458,16 @@ fn ensure_user_catalog(
     let buffer = unsafe { &mut *core::ptr::addr_of_mut!(USER_CATALOG_BUFFER) };
     match UserCatalogStore::load(filesystem, buffer) {
         Ok(length) if length != 0 => {
-            if catalog.load_from(filesystem, buffer).is_err()
-                || catalog.save_to(filesystem, buffer).is_err()
-            {
+            if catalog.restore_snapshot(&buffer[..length]).is_err() {
                 return false;
             }
             unsafe {
-                USER_CATALOG_LENGTH = catalog.encode_snapshot(buffer).ok().unwrap_or(length);
+                USER_CATALOG_LENGTH = length;
             }
             true
         }
         Err(logos_user::UserError::NotFound) => {
+            *catalog = UserCatalog::new();
             if catalog.save_to(filesystem, buffer).is_err() {
                 return false;
             }
@@ -535,11 +549,12 @@ fn handle_user_storage_request(
                     }
                     if USER_SAVE_ACTIVE && request.flags & USER_STORAGE_FLAG_END != 0 {
                         let snapshot = &USER_SAVE_BUFFER[..USER_SAVE_LENGTH];
-                        if offset + data_length != USER_SAVE_LENGTH
-                            || UserCatalogStore::save(filesystem, snapshot).is_err()
-                            || filesystem.flush().is_err()
-                        {
+                        if offset + data_length != USER_SAVE_LENGTH {
                             USER_SAVE_ACTIVE = false;
+                            response.status = UserStorageStatus::Invalid;
+                        } else if UserCatalogStore::save(filesystem, snapshot).is_err() {
+                            USER_SAVE_ACTIVE = false;
+                            response.status = UserStorageStatus::Io;
                         } else {
                             let target = &mut *core::ptr::addr_of_mut!(USER_CATALOG_BUFFER);
                             target[..USER_SAVE_LENGTH].copy_from_slice(snapshot);
@@ -577,10 +592,7 @@ fn send_package_response(pending: &mut Option<PackageResponse>) -> bool {
 fn serve_storage_error(status: StorageApiStatus) -> ! {
     let mut pending_response: Option<(Client, IpcBytes)> = None;
     let mut pending_package: Option<PackageResponse> = None;
-    let mut heartbeat_ticks = 0u16;
     loop {
-        common::heartbeat();
-        common::heartbeat_tick(&mut heartbeat_ticks);
         let mut progressed = false;
         if send_package_response(&mut pending_package) {
             progressed = true;
@@ -633,14 +645,14 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
                 let status_from_client =
                     match common::ipc_receive_handle(ipc_capabilities().flow_receive, &mut request)
                     {
-                        IpcStatus::Ok => IpcStatus::Ok,
-                        _ => {
+                        IpcStatus::Empty => {
                             client = Client::Fetch;
                             common::ipc_receive_handle(
                                 ipc_capabilities().fetch_receive,
                                 &mut request,
                             )
                         }
+                        status => status,
                     };
                 match status_from_client {
                     IpcStatus::Ok => {
@@ -671,28 +683,38 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
 
 fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
     let Some(store) = new_store(capability, blocks) else {
+        storage_startup_marker(b"LogOS vNext: storage startup store FAIL");
         serve_storage_error(StorageApiStatus::Io);
     };
     let mut filesystem = match DurableNamespaceV5::open_v5(store) {
         Ok(filesystem) => filesystem,
         Err(NamespaceError::Format(logos_storage::FormatError::Unformatted)) => {
             let Some(store) = new_store(capability, blocks) else {
+                storage_startup_marker(b"LogOS vNext: storage startup format-store FAIL");
                 serve_storage_error(StorageApiStatus::Io);
             };
-            DurableNamespaceV5::format_v5(store)
-                .unwrap_or_else(|error| serve_storage_error(storage_error_status(error)))
+            DurableNamespaceV5::format_v5(store).unwrap_or_else(|error| {
+                storage_startup_marker(b"LogOS vNext: storage startup format FAIL");
+                serve_storage_error(storage_error_status(error))
+            })
         }
         Err(NamespaceError::Format(logos_storage::FormatError::ProvisionedBlank)) => {
             let Some(store) = new_store(capability, blocks) else {
+                storage_startup_marker(b"LogOS vNext: storage startup provisioned-store FAIL");
                 serve_storage_error(StorageApiStatus::Io);
             };
-            DurableNamespaceV5::format_v5_provisioned(store)
-                .unwrap_or_else(|error| serve_storage_error(storage_error_status(error)))
+            DurableNamespaceV5::format_v5_provisioned(store).unwrap_or_else(|error| {
+                storage_startup_marker(b"LogOS vNext: storage startup provisioned FAIL");
+                serve_storage_error(storage_error_status(error))
+            })
         }
-        Err(error) => serve_storage_error(storage_error_status(error)),
+        Err(error) => {
+            storage_startup_marker(b"LogOS vNext: storage startup open FAIL");
+            serve_storage_error(storage_error_status(error))
+        }
     };
-    filesystem.flush().unwrap_or_else(|error| serve_storage_error(storage_error_status(error)));
     if !ensure_user_catalog(&mut filesystem) {
+        storage_startup_marker(b"LogOS vNext: storage startup catalog FAIL");
         serve_storage_error(StorageApiStatus::Io);
     }
 
@@ -799,14 +821,14 @@ fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
                 let received =
                     match common::ipc_receive_handle(ipc_capabilities().flow_receive, &mut request)
                     {
-                        IpcStatus::Ok => IpcStatus::Ok,
-                        _ => {
+                        IpcStatus::Empty => {
                             client = Client::Fetch;
                             common::ipc_receive_handle(
                                 ipc_capabilities().fetch_receive,
                                 &mut request,
                             )
                         }
+                        status => status,
                     };
                 if received == IpcStatus::Ok {
                     let operation = logos_abi::StorageApiRequest::decode(&request).ok();
@@ -938,7 +960,10 @@ pub extern "C" fn _start() -> ! {
     };
     unsafe { *core::ptr::addr_of_mut!(IPC_CAPABILITIES) = Some(capabilities) };
     let capability_handle = capabilities.request;
-    let Ok(generation) = u16::try_from(capability_handle.generation()) else {
+    // Capability generations identify the grant slot. Storage request
+    // generations identify the current IPC topology and are carried by the
+    // service epoch; those values are intentionally independent.
+    let Ok(generation) = u16::try_from(common::bootstrap_page().service_epoch) else {
         serve_storage_error(StorageApiStatus::Io)
     };
     let Some(capability) = StorageCapability::new(
@@ -948,7 +973,10 @@ pub extern "C" fn _start() -> ! {
     ) else {
         serve_storage_error(StorageApiStatus::Io)
     };
-    let Some(blocks) = discover(capability) else { serve_storage_error(StorageApiStatus::Io) };
+    let Some(blocks) = discover(capability) else {
+        storage_startup_marker(b"LogOS vNext: storage startup discover FAIL");
+        serve_storage_error(StorageApiStatus::Io)
+    };
     run_filesystem(capability, blocks)
 }
 
