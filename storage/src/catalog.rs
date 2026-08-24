@@ -138,14 +138,19 @@ impl SystemCatalogVolume {
 
         let mut candidate = None;
         for slot in 0..COMMIT_SLOTS {
-            if let Some(commit) = read_commit(store, slot)? {
-                if commit.generation > root.generation
-                    && candidate
-                        .is_none_or(|current: CommitRecord| commit.generation > current.generation)
-                {
-                    validate_commit(root, commit)?;
-                    candidate = Some(commit);
-                }
+            let Some(commit) = (match read_commit(store, slot) {
+                Ok(commit) => commit,
+                Err(CatalogError::Corrupt) => continue,
+                Err(error) => return Err(error),
+            }) else {
+                continue;
+            };
+            if commit.generation > root.generation
+                && candidate
+                    .is_none_or(|current: CommitRecord| commit.generation > current.generation)
+                && validate_commit(root, commit).is_ok()
+            {
+                candidate = Some(commit);
             }
         }
         if let Some(commit) = candidate {
@@ -241,6 +246,24 @@ impl SystemCatalogVolume {
     }
 
     pub fn replace_catalog<B: BlockStore>(
+        &mut self,
+        store: &mut B,
+        snapshot: &[u8],
+    ) -> Result<u64, CatalogError> {
+        let previous_generation = self.root.generation;
+        match self.replace_catalog_inner(store, snapshot) {
+            Ok(generation) => Ok(generation),
+            Err(error) if matches!(error, CatalogError::Block(_) | CatalogError::Corrupt) => {
+                let recovered = Self::open(store)?;
+                let generation = recovered.root.generation;
+                *self = recovered;
+                if generation > previous_generation { Ok(generation) } else { Err(error) }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn replace_catalog_inner<B: BlockStore>(
         &mut self,
         store: &mut B,
         snapshot: &[u8],
@@ -1182,6 +1205,17 @@ mod tests {
         let mut output = [0; 16];
         assert_eq!(reopened.read_catalog(&mut store, &mut output), Ok(6));
         assert_eq!(&output[..6], b"second");
+    }
+
+    #[test]
+    fn corrupt_stale_commit_record_does_not_hide_a_valid_root() {
+        let mut store = MemoryStore::<128>::new();
+        let mut volume = SystemCatalogVolume::format(&mut store, 8, 32).unwrap();
+        volume.replace_catalog(&mut store, b"catalog").unwrap();
+        store.blocks[COMMIT_START as usize].as_bytes_mut()[0] ^= 0xa5;
+
+        let reopened = SystemCatalogVolume::open(&mut store).unwrap();
+        assert_eq!(reopened.root().generation, volume.root().generation);
     }
 
     #[test]

@@ -1722,6 +1722,16 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
         self.persist_snapshot_with(transaction)
     }
 
+    fn recover_persist_error(&mut self, previous_generation: u64) -> Result<u64, NamespaceError> {
+        match self.reopen() {
+            Ok(()) if self.volume.generation() > previous_generation => {
+                Ok(self.volume.generation())
+            }
+            Ok(()) => Err(NamespaceError::CommitNotPublished),
+            Err(recovery) => Err(recovery),
+        }
+    }
+
     #[inline(never)]
     fn persist_snapshot_with(
         &mut self,
@@ -1788,11 +1798,9 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
         }
         self.namespace.apply_record(kind, payload)?;
         self.queue_retired_file_extents(&retired[..retired_count])?;
-        if let Err(error) = self.persist_snapshot() {
-            return Err(match self.reopen() {
-                Ok(()) => error,
-                Err(recovery) => recovery,
-            });
+        let previous_generation = self.volume.generation();
+        if self.persist_snapshot().is_err() {
+            return self.recover_persist_error(previous_generation).map(|_| ());
         }
         Ok(())
     }
@@ -2021,11 +2029,9 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
         }
         self.namespace.set_file_extents(id, &new_extents[..new_extent_count], new_length)?;
         self.queue_retired_file_extents(&old_extents[..old_extent_count])?;
-        if let Err(error) = self.persist_snapshot_with(transaction) {
-            return Err(match self.reopen() {
-                Ok(()) => error,
-                Err(recovery) => recovery,
-            });
+        let previous_generation = self.volume.generation();
+        if self.persist_snapshot_with(transaction).is_err() {
+            return self.recover_persist_error(previous_generation).map(|_| input.len());
         }
         Ok(input.len())
     }
@@ -2241,11 +2247,11 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
             }
             self.queue_retired_package_extents(&retired[..retired_count])?;
         }
-        if let Err(error) = self.persist_snapshot() {
-            return Err(match self.reopen() {
-                Ok(()) => error,
-                Err(recovery) => recovery,
-            });
+        let previous_generation = self.volume.generation();
+        if self.persist_snapshot().is_err() {
+            return self
+                .recover_persist_error(previous_generation)
+                .map(|_| PackageHandle { target: install.target, generation });
         }
         Ok(PackageHandle { target: install.target, generation })
     }
@@ -2909,13 +2915,9 @@ impl NamespaceTransaction {
         namespace.retired_file_extent_count = self.retired_extent_count;
         match namespace.persist_snapshot() {
             Ok(generation) => Ok(generation.saturating_sub(1)),
-            Err(_error) => match namespace.reopen() {
-                Ok(()) if namespace.volume.generation() > previous_generation => {
-                    Ok(namespace.volume.generation().saturating_sub(1))
-                }
-                Ok(()) => Err(NamespaceError::CommitNotPublished),
-                Err(recovery) => Err(recovery),
-            },
+            Err(_) => namespace
+                .recover_persist_error(previous_generation)
+                .map(|generation| generation.saturating_sub(1)),
         }
     }
 
@@ -3326,6 +3328,16 @@ mod tests {
         assert!(transaction.commit(&mut fs).is_ok());
         assert!(fs.store.triggered);
         assert!(fs.resolve_path(b"/recovered").is_ok());
+    }
+
+    #[test]
+    fn direct_namespace_commit_reports_success_when_reopen_recovers() {
+        let store = CommitPublicationStore::new();
+        let mut fs = DurableNamespaceV5::format_v5(store).unwrap();
+        fs.store.arm(3);
+
+        assert!(fs.create_file(fs.root(), b"direct").is_ok());
+        assert!(fs.resolve_path(b"/direct").is_ok());
     }
 
     #[test]
