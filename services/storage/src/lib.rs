@@ -247,8 +247,9 @@ impl<T: KernelStorageIpc> BlockStore for IpcBlockStore<T> {
         request.start_block = index.get();
         self.round_trip(request)?;
         *output = self.staging;
-        let slot = self.reserve_cache_slot(index.get())?;
-        unsafe { Self::copy_cache_from(slot, &self.staging) };
+        if let Ok(slot) = self.reserve_cache_slot(index.get()) {
+            unsafe { Self::copy_cache_from(slot, &self.staging) };
+        }
         Ok(())
     }
 
@@ -275,8 +276,9 @@ impl<T: KernelStorageIpc> BlockStore for IpcBlockStore<T> {
         let mut request = self.request(StorageOperation::Write, 1, BLOCK_BYTES as u16)?;
         request.start_block = index.get();
         self.round_trip(request)?;
-        let slot = self.reserve_cache_slot(index.get())?;
-        unsafe { Self::copy_cache_from(slot, input) };
+        if let Ok(slot) = self.reserve_cache_slot(index.get()) {
+            unsafe { Self::copy_cache_from(slot, input) };
+        }
         Ok(())
     }
 
@@ -482,6 +484,18 @@ mod tests {
     }
 
     #[test]
+    fn request_generation_is_independent_from_capability_generation() {
+        let capability =
+            StorageCapability::new(CapabilityHandle::new(0, 7).unwrap(), 3, 9).unwrap();
+        let kernel = TestKernel::new(capability);
+        let mut store = IpcBlockStore::new(kernel, capability, 4).unwrap();
+        let request = store.request(StorageOperation::Flush, 0, 0).unwrap();
+        assert_eq!(request.generation, 3);
+        assert_eq!(request.service_epoch, 9);
+        assert_eq!(capability.handle.generation(), 7);
+    }
+
+    #[test]
     fn io_and_read_only_failures_propagate_as_typed_errors() {
         let mut kernel = TestKernel::new(capability());
         kernel.fault = Some(StorageStatus::Io);
@@ -525,6 +539,23 @@ mod tests {
             Ok(ReadMap { source_page: 0, pages: 1 })
         );
         assert_eq!(store.unmap_read(first), Err(BlockError::Stale));
+        store.unmap_read(second).unwrap();
+    }
+
+    #[test]
+    fn physical_io_survives_a_full_pinned_cache() {
+        let kernel = TestKernel::new(capability());
+        let mut store = IpcBlockStore::new(kernel, capability(), 32).unwrap();
+        let first = store.map_read_blocks(BlockIndex::new(0), 16).unwrap();
+        let second = store.map_read_blocks(BlockIndex::new(16), 16).unwrap();
+        let block = Block::from_bytes([0x5a; BLOCK_BYTES]);
+
+        assert_eq!(store.write_block(BlockIndex::new(31), &block), Ok(()));
+        let mut output = Block::zero();
+        assert_eq!(store.read_block(BlockIndex::new(31), &mut output), Ok(()));
+        assert_eq!(output, block);
+
+        store.unmap_read(first).unwrap();
         store.unmap_read(second).unwrap();
     }
 
