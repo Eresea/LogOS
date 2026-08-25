@@ -34,6 +34,7 @@ static DYNAMIC_IPC_READY: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_DIRECTORY_USED: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_MANAGER_USED: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_EVENT_USED: AtomicBool = AtomicBool::new(false);
+static DYNAMIC_EVENT_TIMEOUT_PROVEN: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_EVENT_BLOCKED: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_ENDPOINT_PROVEN: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_STALE_HANDLES_REJECTED: AtomicBool = AtomicBool::new(false);
@@ -176,6 +177,10 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
         (core::ptr::addr_of!(DYNAMIC_DIRECTORY_USED) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(DYNAMIC_MANAGER_USED) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(DYNAMIC_EVENT_USED) as usize, core::mem::size_of::<AtomicBool>()),
+        (
+            core::ptr::addr_of!(DYNAMIC_EVENT_TIMEOUT_PROVEN) as usize,
+            core::mem::size_of::<AtomicBool>(),
+        ),
         (core::ptr::addr_of!(DYNAMIC_EVENT_BLOCKED) as usize, core::mem::size_of::<AtomicBool>()),
         (core::ptr::addr_of!(DYNAMIC_ENDPOINT_PROVEN) as usize, core::mem::size_of::<AtomicBool>()),
         (
@@ -269,6 +274,12 @@ pub fn dynamic_manager_used() {
 pub fn dynamic_event_used() {
     if !DYNAMIC_EVENT_USED.swap(true, Ordering::AcqRel) {
         crate::arch_proof_line(b"LogOS vNext: dynamic event set");
+    }
+}
+
+pub fn dynamic_event_timeout_proven() {
+    if !DYNAMIC_EVENT_TIMEOUT_PROVEN.swap(true, Ordering::AcqRel) {
+        crate::arch_proof_line(b"LogOS vNext: dynamic event timeout");
     }
 }
 
@@ -448,6 +459,7 @@ pub fn observe(cpu: usize) {
         && DYNAMIC_DIRECTORY_USED.load(Ordering::Acquire)
         && DYNAMIC_MANAGER_USED.load(Ordering::Acquire)
         && DYNAMIC_EVENT_USED.load(Ordering::Acquire)
+        && DYNAMIC_EVENT_TIMEOUT_PROVEN.load(Ordering::Acquire)
         && DYNAMIC_ENDPOINT_PROVEN.load(Ordering::Acquire)
         && DYNAMIC_STALE_HANDLES_REJECTED.load(Ordering::Acquire)
         && DYNAMIC_SERVICE_STALE_REJECTED.load(Ordering::Acquire)

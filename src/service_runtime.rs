@@ -5011,6 +5011,44 @@ impl ServiceRuntime {
         }) {
             return false;
         }
+        let timeout_set_request =
+            logos_abi::EventRequest::new(logos_abi::EventOperation::CreateSet, 0x5006);
+        let Some((status, response)) = self.event_proof_call(process, timeout_set_request) else {
+            return false;
+        };
+        if status != logos_abi::EventStatus::Ok || !response.event_set.is_valid() {
+            return false;
+        }
+        let timeout_set = response.event_set;
+        let mut timeout_add = logos_abi::EventRequest::new(logos_abi::EventOperation::Add, 0x5007);
+        timeout_add.event_set = timeout_set;
+        timeout_add.event = event;
+        if self
+            .event_proof_call(process, timeout_add)
+            .is_none_or(|(status, _)| status != logos_abi::EventStatus::Ok)
+        {
+            return false;
+        }
+        let mut timeout_wait =
+            logos_abi::EventRequest::new(logos_abi::EventOperation::Wait, 0x5008);
+        timeout_wait.event_set = timeout_set;
+        timeout_wait.deadline = crate::arch::current_ticks();
+        if self
+            .event_proof_call(process, timeout_wait)
+            .is_none_or(|(status, _)| status != logos_abi::EventStatus::Timeout)
+        {
+            return false;
+        }
+        let mut timeout_destroy =
+            logos_abi::EventRequest::new(logos_abi::EventOperation::DestroySet, 0x5009);
+        timeout_destroy.event_set = timeout_set;
+        if self
+            .event_proof_call(process, timeout_destroy)
+            .is_none_or(|(status, _)| status != logos_abi::EventStatus::Ok)
+        {
+            return false;
+        }
+        crate::proof::dynamic_event_timeout_proven();
         let mut destroy =
             logos_abi::EventRequest::new(logos_abi::EventOperation::DestroySet, 0x5005);
         destroy.event_set = set;
