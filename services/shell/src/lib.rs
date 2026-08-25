@@ -240,6 +240,42 @@ pub fn login_style_active(
     })
 }
 
+pub fn login_text_flags(build: &logos_ui_compiler::UiBuild, index: u16) -> u32 {
+    let Some(node) = build.document.node(usize::from(index)) else { return 0 };
+    if has_style(node, logos_ui_compiler::UiStyle::FontLight) {
+        logos_abi::GUI_TEXT_FLAG_LIGHT
+    } else {
+        0
+    }
+}
+
+pub fn login_input_text(
+    value: &[u8],
+    masked: bool,
+    width: u32,
+    output: &mut [u8; logos_abi::MAX_GUI_TEXT_BYTES],
+) -> usize {
+    let max_chars = ((width.saturating_sub(24) / 8) as usize).min(output.len());
+    if max_chars == 0 {
+        return 0;
+    }
+    let (start, prefix) = if value.len() <= max_chars {
+        (0, 0)
+    } else if max_chars <= 3 {
+        for byte in output.iter_mut().take(max_chars) {
+            *byte = b'.';
+        }
+        return max_chars;
+    } else {
+        output[..3].copy_from_slice(b"...");
+        (value.len().saturating_sub(max_chars - 3), 3)
+    };
+    for (offset, byte) in value[start..].iter().copied().take(max_chars - prefix).enumerate() {
+        output[prefix + offset] = if masked { b'*' } else { byte };
+    }
+    value.len().min(max_chars)
+}
+
 fn login_condition_active(expression: &[u8], state: LoginUiState) -> bool {
     match expression {
         b"claim" => state.claim,
@@ -614,5 +650,17 @@ mod tests {
             false,
             logos_ui_compiler::UiStyle::Opacity50,
         ));
+    }
+
+    #[test]
+    fn input_values_are_masked_and_overflow_is_tail_preserving() {
+        let mut output = [0; logos_abi::MAX_GUI_TEXT_BYTES];
+        let length = login_input_text(b"alice", false, 384, &mut output);
+        assert_eq!(&output[..length], b"alice");
+        let length = login_input_text(b"secret", true, 384, &mut output);
+        assert_eq!(&output[..length], b"******");
+        let length = login_input_text(b"abcdefgh", false, 64, &mut output);
+        assert_eq!(&output[..length], b"...gh");
+        assert_eq!(login_text_flags(&compile_login_page(), 3), logos_abi::GUI_TEXT_FLAG_LIGHT);
     }
 }

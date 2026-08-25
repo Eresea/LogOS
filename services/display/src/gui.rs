@@ -1,7 +1,7 @@
 use logos_abi::{
-    GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiRect, GuiStatus, GuiSurfaceOperation,
-    GuiSurfaceRequest, GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_DAMAGE_RECTS,
-    MAX_GUI_SURFACES, SurfaceHandle,
+    GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiRect, GuiStatus,
+    GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS,
+    MAX_GUI_DAMAGE_RECTS, MAX_GUI_SURFACES, SurfaceHandle,
 };
 
 #[derive(Clone, Copy)]
@@ -534,6 +534,11 @@ fn render_command(
                 for glyph_y in 0..super::GLYPH_HEIGHT {
                     for glyph_x in 0..super::GLYPH_WIDTH {
                         let coverage = glyph.rows[glyph_y][glyph_x];
+                        let coverage = if command.auxiliary & GUI_TEXT_FLAG_LIGHT != 0 {
+                            (u16::from(coverage) * 3 / 4) as u8
+                        } else {
+                            coverage
+                        };
                         if coverage != 0 {
                             let x = base_x + glyph_x as i32;
                             let y = command.y + glyph_y as i32;

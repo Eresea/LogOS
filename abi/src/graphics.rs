@@ -6,6 +6,7 @@ pub const MAX_GUI_COMMANDS: usize = 3;
 pub const MAX_GUI_BATCH_FRAGMENTS: usize = 4;
 pub const MAX_GUI_TEXT_BYTES: usize = 32;
 pub const GUI_DRAW_FLAG_MORE: u8 = 1 << 0;
+pub const GUI_TEXT_FLAG_LIGHT: u32 = 1 << 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -223,13 +224,27 @@ impl GuiDrawCommand {
     }
 
     pub fn glyph_run(x: i32, y: i32, color: u32, text: &[u8]) -> Option<Self> {
+        Self::glyph_run_styled(x, y, color, 0, text)
+    }
+
+    pub fn glyph_run_styled(
+        x: i32,
+        y: i32,
+        color: u32,
+        text_flags: u32,
+        text: &[u8],
+    ) -> Option<Self> {
         if text.len() > MAX_GUI_TEXT_BYTES {
+            return None;
+        }
+        if text_flags & !GUI_TEXT_FLAG_LIGHT != 0 {
             return None;
         }
         let mut command = Self::empty(GuiDrawKind::GlyphRun);
         command.x = x;
         command.y = y;
         command.color = color;
+        command.auxiliary = text_flags;
         command.text_len = text.len() as u8;
         command.text[..text.len()].copy_from_slice(text);
         Some(command)
@@ -244,7 +259,9 @@ impl GuiDrawCommand {
                     self.width != 0 && self.height != 0
                 }
                 GuiDrawKind::Line => self.width != 0 || self.height != 0,
-                GuiDrawKind::GlyphRun => self.text_len != 0,
+                GuiDrawKind::GlyphRun => {
+                    self.text_len != 0 && self.auxiliary & !GUI_TEXT_FLAG_LIGHT == 0
+                }
             }
     }
 }
@@ -407,6 +424,17 @@ mod tests {
         assert!(batch.is_valid());
         batch.flags = u8::MAX;
         assert!(!batch.is_valid());
+    }
+
+    #[test]
+    fn styled_glyph_runs_carry_only_supported_font_flags() {
+        let regular = GuiDrawCommand::glyph_run(0, 0, 0xffffff, b"A").unwrap();
+        let light =
+            GuiDrawCommand::glyph_run_styled(0, 0, 0xffffff, GUI_TEXT_FLAG_LIGHT, b"A").unwrap();
+        assert_eq!(regular.auxiliary, 0);
+        assert_eq!(light.auxiliary, GUI_TEXT_FLAG_LIGHT);
+        assert!(light.is_valid());
+        assert!(GuiDrawCommand::glyph_run_styled(0, 0, 0xffffff, 2, b"A").is_none());
     }
 
     #[test]

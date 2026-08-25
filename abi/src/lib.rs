@@ -24,10 +24,10 @@ pub use device_api::{
     DeviceState, DeviceStatus, MAX_DEVICES,
 };
 pub use graphics::{
-    GUI_DRAW_FLAG_MORE, GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind, GuiRect,
-    GuiSessionContext, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse,
-    MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_SURFACES,
-    MAX_GUI_TEXT_BYTES, SurfaceHandle,
+    GUI_DRAW_FLAG_MORE, GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook,
+    GuiHookKind, GuiRect, GuiSessionContext, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest,
+    GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS,
+    MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, SurfaceHandle,
 };
 
 pub use package_ipc::{
