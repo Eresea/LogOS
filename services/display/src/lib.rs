@@ -8,12 +8,17 @@ use logos_abi::{
     MAX_ROWS, MessageKind, RENDER_FLAG_MORE, RenderMessage,
 };
 
+mod gui;
+
+pub use gui::{GuiRegistryError, GuiSurfaceRegistry};
+
 pub use logos_abi::FramebufferFormat as PixelFormat;
 
 pub const GLYPH_WIDTH: usize = 8;
 pub const GLYPH_HEIGHT: usize = 16;
 pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
 const CURSOR_WIDTH: usize = 2;
+const GUI_BACKGROUND_ROWS_PER_STEP: usize = 32;
 const ASCII_FIRST: u32 = 0x20;
 const ASCII_LAST: u32 = 0x7e;
 const ASCII_GLYPH_COUNT: usize = (ASCII_LAST - ASCII_FIRST + 1) as usize;
@@ -217,6 +222,10 @@ pub struct Display {
     surface_initialized: bool,
     surface_background: u32,
     cursor_visible: bool,
+    gui: GuiSurfaceRegistry,
+    gui_background: Option<u32>,
+    gui_background_row: usize,
+    gui_background_pending: bool,
 }
 
 impl Display {
@@ -232,6 +241,10 @@ impl Display {
             surface_initialized: false,
             surface_background: 0,
             cursor_visible: true,
+            gui: GuiSurfaceRegistry::new(),
+            gui_background: None,
+            gui_background_row: 0,
+            gui_background_pending: false,
         }
     }
 
@@ -252,6 +265,10 @@ impl Display {
         self.surface_initialized = false;
         self.surface_background = 0;
         self.cursor_visible = true;
+        self.gui = GuiSurfaceRegistry::new();
+        self.gui_background = None;
+        self.gui_background_row = 0;
+        self.gui_background_pending = false;
     }
 
     pub fn toggle_cursor(&mut self) -> bool {
@@ -334,7 +351,7 @@ impl Display {
         let mut rendered = 0;
         let first_render = !self.surface_initialized;
         if first_render {
-            self.surface_background = self.cells[0].background;
+            self.surface_background = self.gui_background.unwrap_or(self.cells[0].background);
             let pixel = pixel_bytes(self.surface_background, format);
             let row_bytes = width * 4;
             for row in 0..height {
@@ -349,6 +366,17 @@ impl Display {
                 if !self.dirty[index] {
                     continue;
                 }
+                if self.gui_background.is_some() {
+                    self.dirty[index] = false;
+                    rendered += 1;
+                    continue;
+                }
+                self.gui.invalidate_rect(logos_abi::GuiRect::new(
+                    (column * GLYPH_WIDTH) as i32,
+                    (row * GLYPH_HEIGHT) as i32,
+                    GLYPH_WIDTH as u32,
+                    GLYPH_HEIGHT as u32,
+                ));
                 let cell = self.cells[index];
                 let is_cursor = row == self.cursor_row && column == self.cursor_column;
                 if first_render
@@ -390,7 +418,75 @@ impl Display {
                 rendered += 1;
             }
         }
+        if rendered != 0 {
+            let (damage, damage_count) = self.gui.take_damage();
+            rendered +=
+                self.gui.render(framebuffer, width, height, stride, format, &damage, damage_count);
+        }
         Ok(rendered)
+    }
+
+    pub fn invalidate_terminal(&mut self) {
+        self.dirty.fill(true);
+        self.surface_initialized = false;
+    }
+
+    pub fn gui(&self) -> &GuiSurfaceRegistry {
+        &self.gui
+    }
+
+    pub fn gui_mut(&mut self) -> &mut GuiSurfaceRegistry {
+        &mut self.gui
+    }
+
+    pub fn render_gui(
+        &mut self,
+        framebuffer: &mut [u8],
+        width: usize,
+        height: usize,
+        stride: usize,
+        format: PixelFormat,
+    ) -> Result<usize, DisplayError> {
+        let required = stride.checked_mul(height).ok_or(DisplayError::InvalidFramebuffer)?;
+        if stride < width * 4 || framebuffer.len() < required {
+            return Err(DisplayError::InvalidFramebuffer);
+        }
+        let background = self.gui.background_color();
+        if background != self.gui_background {
+            let restoring_terminal = background.is_none();
+            self.gui_background = background;
+            self.invalidate_terminal();
+            self.gui_background_row = 0;
+            self.gui_background_pending = background.is_some();
+            if restoring_terminal {
+                return self.render(framebuffer, width, height, stride, format);
+            }
+        }
+        if self.gui_background_pending {
+            self.surface_background = self.gui_background.unwrap_or(self.cells[0].background);
+            let end =
+                self.gui_background_row.saturating_add(GUI_BACKGROUND_ROWS_PER_STEP).min(height);
+            let pixel = pixel_bytes(self.surface_background, format);
+            let row_bytes = width * 4;
+            for row in self.gui_background_row..end {
+                let start = row * stride;
+                fill_row(&mut framebuffer[start..start + row_bytes], pixel);
+            }
+            let rendered_rows = end - self.gui_background_row;
+            self.gui_background_row = end;
+            if end < height {
+                return Ok(rendered_rows * width);
+            }
+            self.gui_background_pending = false;
+            self.surface_initialized = true;
+            self.dirty.fill(false);
+        }
+        let (damage, count) = self.gui.take_damage();
+        Ok(self.gui.render(framebuffer, width, height, stride, format, &damage, count))
+    }
+
+    pub const fn render_pending(&self) -> bool {
+        self.gui_background_pending
     }
 }
 
@@ -475,6 +571,81 @@ mod tests {
             Ok(80 * 25)
         );
         assert_eq!(display.render(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8), Ok(0));
+    }
+
+    #[test]
+    fn legacy_terminal_and_gui_surface_compose_without_idle_redraw() {
+        let mut display = Display::new(1);
+        let mut terminal = RenderMessage::empty(MessageKind::FullRedraw);
+        terminal.columns = 2;
+        terminal.rows = 1;
+        terminal.count = 1;
+        terminal.positions[0] = 0;
+        terminal.cells[0] = Cell {
+            codepoint: b'T' as u32,
+            background: 0x102030,
+            foreground: 0xffffff,
+            ..Cell::EMPTY
+        };
+        display.apply(1, &terminal).unwrap();
+        let mut framebuffer = std::vec![0; 64 * 32 * 4];
+        display.render(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
+        let mut root =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root.bounds = logos_abi::GuiRect::new(0, 0, 64, 32);
+        let handle = display.gui_mut().create(11, root).unwrap().surface;
+        let mut batch =
+            logos_abi::GuiDrawBatch::new(handle, 1, logos_abi::GuiRect::new(8, 8, 16, 8));
+        assert!(batch.push(logos_abi::GuiDrawCommand::fill_rect(
+            logos_abi::GuiRect::new(8, 8, 16, 8),
+            0xff0000,
+        )));
+        display.gui_mut().update(11, batch).unwrap();
+        assert!(
+            display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap() > 0
+        );
+        display.apply(1, &terminal).unwrap();
+        assert!(display.render(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap() > 0);
+        let pixel = (8 * 64 + 8) * 4;
+        assert_eq!(&framebuffer[pixel..pixel + 4], &[0, 0, 255, 0]);
+        let hidden = logos_abi::GuiDrawBatch::new(handle, 2, logos_abi::GuiRect::new(0, 0, 64, 32));
+        display.gui_mut().update(11, hidden).unwrap();
+        display.invalidate_terminal();
+        display.render(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
+        assert_eq!(&framebuffer[pixel..pixel + 4], &[0x30, 0x20, 0x10, 0]);
+        assert_eq!(display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8), Ok(0));
+    }
+
+    #[test]
+    fn surface_relative_fill_covers_the_actual_framebuffer() {
+        let mut display = Display::new(1);
+        let mut terminal = RenderMessage::empty(MessageKind::FullRedraw);
+        terminal.columns = 12;
+        terminal.rows = 4;
+        terminal.count = 1;
+        terminal.cells[0] = Cell {
+            codepoint: b' ' as u32,
+            background: 0x102030,
+            foreground: 0xffffff,
+            ..Cell::EMPTY
+        };
+        display.apply(1, &terminal).unwrap();
+        let mut root =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root.bounds = logos_abi::GuiRect::new(0, 0, 96, 64);
+        let handle = display.gui_mut().create(11, root).unwrap().surface;
+        let mut batch = logos_abi::GuiDrawBatch::new(handle, 1, logos_abi::GuiRect::SURFACE);
+        assert!(batch.push(logos_abi::GuiDrawCommand::fill_surface(0x203040)));
+        display.gui_mut().update(11, batch).unwrap();
+        let mut framebuffer = std::vec![0; 96 * 64 * 4];
+        loop {
+            let _ = display.render_gui(&mut framebuffer, 96, 64, 96 * 4, PixelFormat::Bgr8);
+            if !display.render_pending() {
+                break;
+            }
+        }
+        let pixel = (63 * 96 + 95) * 4;
+        assert_eq!(&framebuffer[pixel..pixel + 4], &[0x40, 0x30, 0x20, 0]);
     }
 
     #[test]
