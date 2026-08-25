@@ -182,6 +182,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos-lockscreen"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
 name = "logos-network"
 version = "0.1.0"
 dependencies = [
@@ -206,8 +213,10 @@ dependencies = [
  "logos-fetch",
  "logos-flow",
  "logos-input",
+ "logos-lockscreen",
  "logos-network",
  "logos-session",
+ "logos-shell",
  "logos-storage",
  "logos-storage-service",
  "logos-terminal",
@@ -216,6 +225,13 @@ dependencies = [
 
 [[package]]
 name = "logos-session"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
+name = "logos-shell"
 version = "0.1.0"
 dependencies = [
  "logos-abi",

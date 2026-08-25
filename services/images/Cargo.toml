@@ -25,6 +25,8 @@ logos-user = { path = "../user", default-features = false }
 logos-terminal = { path = "../terminal" }
 logos-network = { path = "../../network" }
 logos-fetch = { path = "../fetch" }
+logos-shell = { path = "../shell" }
+logos-lockscreen = { path = "../lockscreen" }
 
 [[bin]]
 name = "logos-input"
@@ -84,4 +86,16 @@ bench = false
 name = "logos-user"
 path = "src/user.rs"
 test = true
+bench = false
+
+[[bin]]
+name = "logos-shell"
+path = "src/shell.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "logos-lockscreen"
+path = "src/lockscreen.rs"
+test = false
 bench = false

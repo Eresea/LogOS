@@ -20,6 +20,8 @@ members = [
     "services/storage",
     "services/terminal",
     "services/fetch",
+    "services/shell",
+    "services/lockscreen",
     "services/images",
 ]
 resolver = "3"
