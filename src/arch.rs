@@ -1047,6 +1047,11 @@ pub(crate) fn restart_critical_section<R>(operation: impl FnOnce() -> R) -> R {
     result
 }
 
+pub(crate) fn restart_critical_section_held<R>(operation: impl FnOnce() -> R) -> R {
+    unsafe { asm!("cli", options(nomem, nostack, preserves_flags)) };
+    operation()
+}
+
 pub(crate) fn start_services() {
     // Tasks are published before this function returns. Keep interrupts off
     // until READY is visible so a just-published service cannot enter through

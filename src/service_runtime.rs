@@ -5438,7 +5438,7 @@ impl ServiceRuntime {
         self.stop_tasks(runtime_guard)?;
         self.retain_active_package_images()?;
         crate::arch::prepare_task_address_space(0);
-        crate::arch::restart_critical_section(|| {
+        crate::arch::restart_critical_section_held(|| {
             crate::arch::disable_keyboard_irq();
             crate::arch::reset_events();
             self.reclaim_resources()?;
