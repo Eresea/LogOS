@@ -1966,7 +1966,7 @@ impl ServiceRuntime {
             .as_ref()
             .and_then(|registry| registry.runtime_slot(handle).ok().flatten())
             .ok_or(ServiceRuntimeError::StaleGeneration)?;
-        if index < SERVICE_COUNT || self.tasks[index].is_some() {
+        if ServiceId::from_index(index).is_some() || self.tasks[index].is_some() {
             return Err(ServiceRuntimeError::Resources);
         }
         let name = self
@@ -4197,7 +4197,7 @@ impl ServiceRuntime {
                         return logos_abi::IpcStatus::Ok;
                     }
                 };
-                if slot >= SERVICE_COUNT {
+                if ServiceId::from_index(slot).is_none() {
                     if self.pending_dynamic_start.is_some()
                         || self.pending_dynamic_restart.is_some()
                     {
@@ -4271,7 +4271,7 @@ impl ServiceRuntime {
                         return logos_abi::IpcStatus::Ok;
                     }
                 };
-                if slot >= SERVICE_COUNT {
+                if ServiceId::from_index(slot).is_none() {
                     if self.request_stop_task_slot(slot).is_err() {
                         self.abort_dynamic_service_lifecycle_handle(
                             logos_abi::ManagerOperation::Stop,
@@ -4314,7 +4314,7 @@ impl ServiceRuntime {
                 if handles.len() == 1
                     && self
                         .lifecycle_slot_for_handle(handles[0])
-                        .is_ok_and(|slot| slot >= SERVICE_COUNT)
+                        .is_ok_and(|slot| ServiceId::from_index(slot).is_none())
                 {
                     let handle = handles[0];
                     if self.pending_dynamic_start.is_some()
@@ -5382,7 +5382,9 @@ impl ServiceRuntime {
                 }
                 self.tasks[index] = None;
                 self.supervisor.unregister(handle);
-                if index >= SERVICE_COUNT && self.pending_dynamic_restart == Some(handle) {
+                if ServiceId::from_index(index).is_none()
+                    && self.pending_dynamic_restart == Some(handle)
+                {
                     self.reclaim_service_execution_slot(index)?;
                     self.pending_dynamic_restart = None;
                     let replacement = {
@@ -5402,7 +5404,7 @@ impl ServiceRuntime {
                     self.pending_dynamic_start = Some(replacement);
                     return Ok(true);
                 }
-                if index >= SERVICE_COUNT {
+                if ServiceId::from_index(index).is_none() {
                     self.reclaim_service_execution_slot(index)?;
                 }
                 if let Some(registry) = self.dynamic_services.as_mut() {
