@@ -123,8 +123,16 @@ fn send_shell_surface(
     } else {
         idle
     };
+    let username_invalid = lockscreen.form().controls.username.touched()
+        && !lockscreen.form().controls.username.valid();
+    let password_invalid = lockscreen.form().controls.password.touched()
+        && !lockscreen.form().controls.password.valid();
     let _ = batches[1].push(GuiDrawCommand::fill_rect(username, username_color));
-    let _ = batches[1].push(GuiDrawCommand::stroke_rect(username, 0x6d8fc4, 1));
+    let _ = batches[1].push(GuiDrawCommand::stroke_rect(
+        username,
+        if username_invalid { 0xb84a4a } else { 0x6d8fc4 },
+        1,
+    ));
 
     let (username_value, password_value) = lockscreen.credentials();
     let length = if username_value.is_empty() {
@@ -142,7 +150,11 @@ fn send_shell_surface(
         let _ = batches[2].push(text);
     }
     let _ = batches[2].push(GuiDrawCommand::fill_rect(password, password_color));
-    let _ = batches[2].push(GuiDrawCommand::stroke_rect(password, 0x6d8fc4, 1));
+    let _ = batches[2].push(GuiDrawCommand::stroke_rect(
+        password,
+        if password_invalid { 0xb84a4a } else { 0x6d8fc4 },
+        1,
+    ));
 
     let length = if password_value.is_empty() {
         logos_shell::login_page_node_text(login_page, 4, state, &mut text)
@@ -158,13 +170,15 @@ fn send_shell_surface(
     ) {
         let _ = batches[3].push(text);
     }
-    let submit_color = if logos_shell::login_style_active(
-        login_page,
-        5,
-        state,
-        false,
-        logos_ui_compiler::UiStyle::Opacity50,
-    ) {
+    let submit_disabled = lockscreen.form().submitting() || !lockscreen.form().valid();
+    let submit_color = if submit_disabled
+        || logos_shell::login_style_active(
+            login_page,
+            5,
+            state,
+            false,
+            logos_ui_compiler::UiStyle::Opacity50,
+        ) {
         0x1b356b
     } else {
         0x356bd8
@@ -260,6 +274,8 @@ pub extern "C" fn _start() -> ! {
                     pending_user = IpcBytes::from_bytes(MessageKind::UserRequest, bytes);
                     logos_shell::Shell::acknowledge_sent(&mut request);
                     lockscreen.clear_password();
+                } else {
+                    lockscreen.cancel_submission();
                 }
             }
             if action != logos_lockscreen::LockScreenAction::Ignored {

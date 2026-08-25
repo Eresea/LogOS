@@ -94,6 +94,8 @@ impl UiExpression {
 pub enum UiBindingProperty {
     Value,
     Disabled,
+    Form,
+    Control,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -604,6 +606,22 @@ impl Parser<'_> {
                                 UiBinding { property: UiBindingProperty::Disabled, expression };
                         }
                     }
+                    b"form" if !two_way && node.kind == UiNodeKind::Form => {
+                        if node.binding.is_present() {
+                            self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
+                        } else {
+                            node.binding =
+                                UiBinding { property: UiBindingProperty::Form, expression };
+                        }
+                    }
+                    b"control" if !two_way && node.kind == UiNodeKind::TextInput => {
+                        if node.binding.is_present() {
+                            self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
+                        } else {
+                            node.binding =
+                                UiBinding { property: UiBindingProperty::Control, expression };
+                        }
+                    }
                     _ => self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset),
                 }
             }
@@ -889,6 +907,7 @@ mod tests {
         assert_eq!(build.document.node_count(), 6);
         assert_eq!(build.document.node(0).unwrap().kind, UiNodeKind::Panel);
         assert_eq!(build.document.node(1).unwrap().kind, UiNodeKind::Form);
+        assert_eq!(build.document.node(1).unwrap().binding.property, UiBindingProperty::Form);
         assert_eq!(build.document.node(1).unwrap().event.kind, UiEventKind::Submit);
         let form_styles = &build.document.node(1).unwrap().styles;
         assert!(form_styles.tokens[..form_styles.len as usize].contains(&UiStyle::FlexY));
@@ -900,7 +919,8 @@ mod tests {
             state: UiStyleState::Focus,
             style: UiStyle::BackgroundAccent,
         }));
-        assert_eq!(build.document.node(4).unwrap().binding.property, UiBindingProperty::Value);
+        assert_eq!(build.document.node(3).unwrap().binding.property, UiBindingProperty::Control);
+        assert_eq!(build.document.node(4).unwrap().binding.property, UiBindingProperty::Control);
         assert_eq!(build.document.node(5).unwrap().event.kind, UiEventKind::Click);
         let submit_conditions = &build.document.node(5).unwrap().conditional_styles;
         assert_eq!(submit_conditions.len, 1);
@@ -947,6 +967,23 @@ mod tests {
         assert!(!legacy.is_valid());
         assert!(matches!(
             legacy.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownBinding, .. })
+        ));
+    }
+
+    #[test]
+    fn form_and_control_bindings_are_limited_to_their_component_kinds() {
+        let build = compile(
+            r#"<ui.form [form]="loginForm"><ui.input [control]="loginForm.controls.name" /></ui.form>"#,
+        );
+        assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
+        assert_eq!(build.document.node(0).unwrap().binding.property, UiBindingProperty::Form);
+        assert_eq!(build.document.node(1).unwrap().binding.property, UiBindingProperty::Control);
+
+        let invalid = compile(r#"<ui.button [form]="loginForm" />"#);
+        assert!(!invalid.is_valid());
+        assert!(matches!(
+            invalid.diagnostics.get(0),
             Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownBinding, .. })
         ));
     }
