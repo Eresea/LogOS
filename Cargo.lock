@@ -235,6 +235,7 @@ name = "logos-shell"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
+ "logos-ui",
 ]
 
 [[package]]
@@ -253,6 +254,13 @@ dependencies = [
 
 [[package]]
 name = "logos-terminal"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
+name = "logos-ui"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
