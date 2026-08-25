@@ -1,4 +1,9 @@
-use super::{MAX_UI_NODES, UiBlueprint, UiError, UiNodeKind};
+#![no_std]
+
+#[cfg(test)]
+extern crate std;
+
+use logos_ui::{MAX_UI_NODES, UiBlueprint, UiError, UiNodeKind};
 
 pub const MAX_UI_SOURCE_BYTES: usize = 4096;
 pub const MAX_UI_NAME_BYTES: usize = 24;
@@ -301,6 +306,12 @@ impl UiBuild {
 
 pub fn lint(source: &str) -> UiDiagnostics {
     compile(source).diagnostics
+}
+
+pub const LOGIN_PAGE_SOURCE: &str = include_str!("../examples/login.ui");
+
+pub fn compile_login_page() -> UiBuild {
+    compile(LOGIN_PAGE_SOURCE)
 }
 
 pub fn compile(source: &str) -> UiBuild {

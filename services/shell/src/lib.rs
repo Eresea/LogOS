@@ -7,8 +7,8 @@ pub use logos_ui::{
     MAX_UI_NODES, UiBlueprint, UiError, UiNode, UiNodeHandle, UiNodeKind, UiNodeSpec, UiTree,
 };
 
-pub fn compile_login_page() -> logos_ui::compiler::UiBuild {
-    logos_ui::login::compile()
+pub fn compile_login_page() -> logos_ui_compiler::UiBuild {
+    logos_ui_compiler::compile_login_page()
 }
 
 use logos_abi::{

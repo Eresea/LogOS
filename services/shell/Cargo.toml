@@ -12,3 +12,4 @@ bench = false
 [dependencies]
 logos-abi = { path = "../../abi" }
 logos-ui = { path = "../../ui" }
+logos-ui-compiler = { path = "../../ui-compiler" }
