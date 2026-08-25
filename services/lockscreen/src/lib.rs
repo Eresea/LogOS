@@ -4,7 +4,8 @@
 extern crate std;
 
 use logos_abi::{
-    InputMessage, KeyCode, KeyState, MAX_TEXT_BYTES, MessageKind, UserOperation, UserStatus,
+    InputMessage, KeyCode, KeyState, MAX_TEXT_BYTES, MOD_SHIFT, MessageKind, UserOperation,
+    UserStatus,
 };
 
 pub const MAX_FIELD_BYTES: usize = 32;
@@ -90,12 +91,18 @@ impl LockScreen {
                 LockScreenAction::Changed
             }
             MessageKind::Key if input.state == KeyState::Pressed => match KeyCode(input.code) {
+                code if code == KeyCode::BackTab
+                    || (code == KeyCode::Tab && input.modifiers & MOD_SHIFT != 0) =>
+                {
+                    self.move_field(false);
+                    LockScreenAction::Changed
+                }
                 code if code == KeyCode::Tab || code == KeyCode::Down => {
-                    self.field = LockScreenField::Password;
+                    self.move_field(true);
                     LockScreenAction::Changed
                 }
                 code if code == KeyCode::Up => {
-                    self.field = LockScreenField::Username;
+                    self.move_field(false);
                     LockScreenAction::Changed
                 }
                 code if code == KeyCode::Backspace => {
@@ -160,6 +167,15 @@ impl LockScreen {
         }
     }
 
+    fn move_field(&mut self, forward: bool) {
+        self.field = match (self.field, forward) {
+            (LockScreenField::Username, true) => LockScreenField::Password,
+            (LockScreenField::Password, true) => LockScreenField::Password,
+            (LockScreenField::Password, false) => LockScreenField::Username,
+            (LockScreenField::Username, false) => LockScreenField::Username,
+        };
+    }
+
     fn reset_fields(&mut self) {
         self.username.fill(0);
         self.password.fill(0);
@@ -197,11 +213,30 @@ mod tests {
         let mut lock = LockScreen::new();
         lock.set_unclaimed();
         assert_eq!(lock.input(InputMessage::text(b"alice").unwrap()), LockScreenAction::Changed);
+        assert_eq!(lock.credentials().0, b"alice");
         assert_eq!(
             lock.input(InputMessage::key(KeyCode::Tab, KeyState::Pressed, 0)),
             LockScreenAction::Changed
         );
         assert_eq!(lock.input(InputMessage::text(b"secret").unwrap()), LockScreenAction::Changed);
+        assert_eq!(lock.credentials().1, b"secret");
+        assert_eq!(
+            lock.input(InputMessage::key(KeyCode::Tab, KeyState::Pressed, MOD_SHIFT)),
+            LockScreenAction::Changed
+        );
+        assert_eq!(lock.field(), LockScreenField::Username);
+        assert_eq!(lock.input(InputMessage::text(b"2").unwrap()), LockScreenAction::Changed);
+        assert_eq!(lock.credentials().0, b"alice2");
+        assert_eq!(
+            lock.input(InputMessage::key(KeyCode::BackTab, KeyState::Pressed, 0)),
+            LockScreenAction::Changed
+        );
+        assert_eq!(lock.field(), LockScreenField::Username);
+        assert_eq!(
+            lock.input(InputMessage::key(KeyCode::Down, KeyState::Pressed, 0)),
+            LockScreenAction::Changed
+        );
+        assert_eq!(lock.field(), LockScreenField::Password);
         assert_eq!(
             lock.input(InputMessage::key(KeyCode::Enter, KeyState::Pressed, 0)),
             LockScreenAction::Submit(UserOperation::Claim)
