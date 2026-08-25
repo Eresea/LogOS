@@ -12,6 +12,7 @@ pub const MAX_UI_EXPRESSION_BYTES: usize = 32;
 pub const MAX_UI_STYLE_TOKENS: usize = 8;
 pub const MAX_UI_STATE_STYLES: usize = 4;
 pub const MAX_UI_CONDITIONAL_STYLES: usize = 4;
+pub const MAX_UI_BINDINGS: usize = 4;
 pub const MAX_UI_DIAGNOSTICS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,6 +97,7 @@ pub enum UiBindingProperty {
     Disabled,
     Form,
     Control,
+    CanSubmit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,6 +112,29 @@ impl UiBinding {
 
     pub fn is_present(&self) -> bool {
         !self.expression.as_bytes().is_empty()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiBindingList {
+    pub entries: [UiBinding; MAX_UI_BINDINGS],
+    pub len: u8,
+}
+
+impl UiBindingList {
+    const EMPTY: Self = Self { entries: [UiBinding::EMPTY; MAX_UI_BINDINGS], len: 0 };
+
+    fn contains(&self, property: UiBindingProperty) -> bool {
+        self.entries[..self.len as usize].iter().any(|binding| binding.property == property)
+    }
+
+    fn push(&mut self, binding: UiBinding) -> bool {
+        if usize::from(self.len) == MAX_UI_BINDINGS {
+            return false;
+        }
+        self.entries[usize::from(self.len)] = binding;
+        self.len += 1;
+        true
     }
 }
 
@@ -246,7 +271,7 @@ pub struct UiNodeTemplate {
     pub parent: u16,
     pub key: UiName,
     pub text: UiText,
-    pub binding: UiBinding,
+    pub bindings: UiBindingList,
     pub event: UiEvent,
     pub styles: UiStyleList,
     pub state_styles: UiStateStyleList,
@@ -259,7 +284,7 @@ impl UiNodeTemplate {
         parent: u16::MAX,
         key: UiName::EMPTY,
         text: UiText::EMPTY,
-        binding: UiBinding::EMPTY,
+        bindings: UiBindingList::EMPTY,
         event: UiEvent::EMPTY,
         styles: UiStyleList::EMPTY,
         state_styles: UiStateStyleList::EMPTY,
@@ -587,43 +612,33 @@ impl Parser<'_> {
             self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
             return;
         };
-        if let Some(index) = node_index {
-            if let Some(node) = self.document.node_mut(index) {
-                match name.as_bytes() {
-                    b"value" if two_way => {
-                        if node.binding.is_present() {
-                            self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
-                        } else {
-                            node.binding =
-                                UiBinding { property: UiBindingProperty::Value, expression };
-                        }
-                    }
-                    b"disabled" if !two_way => {
-                        if node.binding.is_present() {
-                            self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
-                        } else {
-                            node.binding =
-                                UiBinding { property: UiBindingProperty::Disabled, expression };
-                        }
-                    }
-                    b"form" if !two_way && node.kind == UiNodeKind::Form => {
-                        if node.binding.is_present() {
-                            self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
-                        } else {
-                            node.binding =
-                                UiBinding { property: UiBindingProperty::Form, expression };
-                        }
-                    }
-                    b"control" if !two_way && node.kind == UiNodeKind::TextInput => {
-                        if node.binding.is_present() {
-                            self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
-                        } else {
-                            node.binding =
-                                UiBinding { property: UiBindingProperty::Control, expression };
-                        }
-                    }
-                    _ => self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset),
-                }
+        let Some(index) = node_index else { return };
+        let Some(node) = self.document.node(usize::from(index)) else { return };
+        let property = match name.as_bytes() {
+            b"value" if two_way => Some(UiBindingProperty::Value),
+            b"disabled" if !two_way => Some(UiBindingProperty::Disabled),
+            b"form" if !two_way && node.kind == UiNodeKind::Form => Some(UiBindingProperty::Form),
+            b"control" if !two_way && node.kind == UiNodeKind::TextInput => {
+                Some(UiBindingProperty::Control)
+            }
+            b"canSubmit" if !two_way && node.kind == UiNodeKind::Form => {
+                Some(UiBindingProperty::CanSubmit)
+            }
+            _ => None,
+        };
+        let Some(property) = property else {
+            self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
+            return;
+        };
+        self.add_binding(index, UiBinding { property, expression }, offset);
+    }
+
+    fn add_binding(&mut self, node_index: u16, binding: UiBinding, offset: usize) {
+        if let Some(node) = self.document.node_mut(node_index) {
+            if node.bindings.contains(binding.property) {
+                self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
+            } else if !node.bindings.push(binding) {
+                self.diagnostics.push(UiDiagnosticKind::Capacity, offset);
             }
         }
     }
@@ -907,7 +922,10 @@ mod tests {
         assert_eq!(build.document.node_count(), 6);
         assert_eq!(build.document.node(0).unwrap().kind, UiNodeKind::Panel);
         assert_eq!(build.document.node(1).unwrap().kind, UiNodeKind::Form);
-        assert_eq!(build.document.node(1).unwrap().binding.property, UiBindingProperty::Form);
+        let form_bindings = &build.document.node(1).unwrap().bindings;
+        assert_eq!(form_bindings.len, 2);
+        assert_eq!(form_bindings.entries[0].property, UiBindingProperty::Form);
+        assert_eq!(form_bindings.entries[1].property, UiBindingProperty::CanSubmit);
         assert_eq!(build.document.node(1).unwrap().event.kind, UiEventKind::Submit);
         let form_styles = &build.document.node(1).unwrap().styles;
         assert!(form_styles.tokens[..form_styles.len as usize].contains(&UiStyle::FlexY));
@@ -919,9 +937,15 @@ mod tests {
             state: UiStyleState::Focus,
             style: UiStyle::BackgroundAccent,
         }));
-        assert_eq!(build.document.node(3).unwrap().binding.property, UiBindingProperty::Control);
-        assert_eq!(build.document.node(4).unwrap().binding.property, UiBindingProperty::Control);
-        assert_eq!(build.document.node(5).unwrap().event.kind, UiEventKind::Click);
+        assert_eq!(
+            build.document.node(3).unwrap().bindings.entries[0].property,
+            UiBindingProperty::Control
+        );
+        assert_eq!(
+            build.document.node(4).unwrap().bindings.entries[0].property,
+            UiBindingProperty::Control
+        );
+        assert_eq!(build.document.node(5).unwrap().event.kind, UiEventKind::Submit);
         let submit_conditions = &build.document.node(5).unwrap().conditional_styles;
         assert_eq!(submit_conditions.len, 1);
         assert_eq!(submit_conditions.entries[0].style, UiStyle::Opacity50);
@@ -977,8 +1001,14 @@ mod tests {
             r#"<ui.form [form]="loginForm"><ui.input [control]="loginForm.controls.name" /></ui.form>"#,
         );
         assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
-        assert_eq!(build.document.node(0).unwrap().binding.property, UiBindingProperty::Form);
-        assert_eq!(build.document.node(1).unwrap().binding.property, UiBindingProperty::Control);
+        assert_eq!(
+            build.document.node(0).unwrap().bindings.entries[0].property,
+            UiBindingProperty::Form
+        );
+        assert_eq!(
+            build.document.node(1).unwrap().bindings.entries[0].property,
+            UiBindingProperty::Control
+        );
 
         let invalid = compile(r#"<ui.button [form]="loginForm" />"#);
         assert!(!invalid.is_valid());

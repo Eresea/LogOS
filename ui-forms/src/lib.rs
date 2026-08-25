@@ -238,6 +238,10 @@ impl FormState {
         self.submitting
     }
 
+    pub const fn can_submit(&self) -> bool {
+        self.valid && !self.submitting
+    }
+
     pub fn set_submitting(&mut self, submitting: bool) {
         self.submitting = submitting;
     }

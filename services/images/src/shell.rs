@@ -170,7 +170,7 @@ fn send_shell_surface(
     ) {
         let _ = batches[3].push(text);
     }
-    let submit_disabled = lockscreen.form().submitting() || !lockscreen.form().valid();
+    let submit_disabled = !lockscreen.form().can_submit();
     let submit_color = if submit_disabled
         || logos_shell::login_style_active(
             login_page,

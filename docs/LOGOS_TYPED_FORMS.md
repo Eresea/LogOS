@@ -183,14 +183,15 @@ login_form.dirty
 login_form.touched
 login_form.submitting
 login_form.errors
+login_form.canSubmit
 ```
 
 This can be consumed directly by the template:
 
 ```html
 <ui.button
-    [disabled]="!loginForm.valid || loginForm.submitting"
-    (click)="loginForm.submit()"
+    [disabled]="!loginForm.canSubmit"
+    (submit)="loginForm.submit()"
 >
     Unlock
 </ui.button>
@@ -211,7 +212,7 @@ login_form.submit();
 or from the template:
 
 ```html
-(click)="loginForm.submit()"
+(submit)="loginForm.submit()"
 ```
 
 `ui.form` also establishes submission semantics for its controls.
@@ -246,6 +247,7 @@ automatically while its submit handler is running.
 <ui.form
     #loginForm
     [form]="loginForm"
+    [canSubmit]="loginForm.canSubmit"
     (submit)="unlock"
     {flex-y gap-y-4}
 >
@@ -260,8 +262,8 @@ automatically while its submit handler is running.
     />
 
     <ui.button
-        [disabled]="!loginForm.valid || loginForm.submitting"
-        (click)="loginForm.submit()"
+        [disabled]="!loginForm.canSubmit"
+        (submit)="loginForm.submit()"
         {mt-4 px-6 py-3 rounded-lg bg-accent}
     >
         Unlock

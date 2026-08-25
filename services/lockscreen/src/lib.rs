@@ -51,6 +51,10 @@ impl LoginForm {
         self.state.submitting()
     }
 
+    pub const fn can_submit(&self) -> bool {
+        self.state.can_submit()
+    }
+
     pub const fn errors(&self) -> &logos_ui_forms::ValidationErrors {
         self.state.errors()
     }
@@ -80,7 +84,7 @@ impl LoginForm {
         self.state.set_touched(true);
         self.controls.username.set_touched(true);
         self.controls.password.set_touched(true);
-        if !self.valid() {
+        if !self.can_submit() {
             return false;
         }
         self.state.set_submitting(true);
@@ -118,6 +122,7 @@ pub enum LockScreenMode {
 pub enum LockScreenField {
     Username,
     Password,
+    Submit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -260,6 +265,7 @@ impl LockScreen {
         let control = match self.field {
             LockScreenField::Username => &mut self.form.controls.username,
             LockScreenField::Password => &mut self.form.controls.password,
+            LockScreenField::Submit => return,
         };
         let mut value = control.value();
         if value.push(byte) {
@@ -272,6 +278,7 @@ impl LockScreen {
         let control = match self.field {
             LockScreenField::Username => &mut self.form.controls.username,
             LockScreenField::Password => &mut self.form.controls.password,
+            LockScreenField::Submit => return,
         };
         if control.value_mut().pop() {
             control.mark_changed();
@@ -282,7 +289,9 @@ impl LockScreen {
     fn move_field(&mut self, forward: bool) {
         self.field = match (self.field, forward) {
             (LockScreenField::Username, true) => LockScreenField::Password,
-            (LockScreenField::Password, true) => LockScreenField::Password,
+            (LockScreenField::Password, true) => LockScreenField::Submit,
+            (LockScreenField::Submit, true) => LockScreenField::Submit,
+            (LockScreenField::Submit, false) => LockScreenField::Password,
             (LockScreenField::Password, false) => LockScreenField::Username,
             (LockScreenField::Username, false) => LockScreenField::Username,
         };
@@ -383,8 +392,10 @@ mod tests {
         let _ = lock.input(InputMessage::key(KeyCode::Tab, KeyState::Pressed, 0));
         assert_eq!(lock.input(enter), LockScreenAction::Changed);
         let _ = lock.input(InputMessage::text(b"secret").unwrap());
+        assert!(lock.form().can_submit());
         assert_eq!(lock.input(enter), LockScreenAction::Submit(UserOperation::Login));
         assert!(lock.form().submitting());
+        assert!(!lock.form().can_submit());
         assert_eq!(lock.input(enter), LockScreenAction::Ignored);
     }
 }
