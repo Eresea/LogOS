@@ -1290,6 +1290,12 @@ pub(crate) fn dynamic_ipc_proof() -> bool {
 }
 
 #[cfg(feature = "qemu-proof")]
+pub(crate) fn allocator_proof() -> bool {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe { (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).allocator_proof() }
+}
+
+#[cfg(feature = "qemu-proof")]
 pub(crate) fn manager_restart_ready(service: logos_abi::ServiceId) -> bool {
     let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).manager_restart_ready(service) }

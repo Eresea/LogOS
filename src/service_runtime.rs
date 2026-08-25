@@ -4815,6 +4815,56 @@ impl ServiceRuntime {
     }
 
     #[cfg(feature = "qemu-proof")]
+    pub(crate) fn allocator_proof(&mut self) -> bool {
+        let service = ServiceId::Flow;
+        let index = service.index();
+        let process = match self.launch(service).map(|(process, _)| process) {
+            Some(process) => process,
+            None => return false,
+        };
+        let handle = match self.service_handles.get(index).copied() {
+            Some(handle) if handle.is_valid() => handle,
+            _ => return false,
+        };
+        let capability =
+            self.bootstrap_heap.get(index).copied().unwrap_or(logos_abi::CapabilityHandle::EMPTY);
+        if !capability.is_valid() {
+            return false;
+        }
+        let current_pages = self.service_heaps[index].frames.len();
+        let old_quota = match self
+            .dynamic_services
+            .as_ref()
+            .and_then(|registry| registry.heap_quota_pages(handle).ok())
+        {
+            Some(quota) if quota > current_pages => quota,
+            _ => return false,
+        };
+        if self.dynamic_services.as_mut().is_none_or(|registry| {
+            registry.set_heap_quota_for_proof(handle, current_pages).is_err()
+        }) {
+            return false;
+        }
+        let exhausted =
+            self.grow_service_heap(process, capability.raw(), 1) == logos_abi::IpcStatus::Full;
+        let restored = self
+            .dynamic_services
+            .as_mut()
+            .is_some_and(|registry| registry.set_heap_quota_for_proof(handle, old_quota).is_ok());
+        let grown = restored
+            && self.grow_service_heap(process, capability.raw(), 1) == logos_abi::IpcStatus::Ok;
+        let reclaimed = grown
+            && self.shrink_service_heap(process, capability.raw(), 1) == logos_abi::IpcStatus::Ok
+            && self.service_heaps[index].frames.len() == current_pages;
+        if exhausted && reclaimed {
+            crate::proof::allocator_quota_proven();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "qemu-proof")]
     pub(crate) fn event_proof(&mut self) -> bool {
         let process = match self.launch(ServiceId::Flow) {
             Some((process, _)) => process,

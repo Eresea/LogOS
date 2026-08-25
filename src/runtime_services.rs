@@ -377,6 +377,23 @@ impl RuntimeServiceRegistry {
         Ok(self.service(handle)?.heap_quota_pages)
     }
 
+    #[cfg(feature = "qemu-proof")]
+    pub fn set_heap_quota_for_proof(
+        &mut self,
+        handle: ServiceHandle,
+        quota_pages: usize,
+    ) -> Result<(), ServiceRegistryError> {
+        if quota_pages == 0 {
+            return Err(ServiceRegistryError::Capacity);
+        }
+        let service = self.service_mut(handle)?;
+        if quota_pages < service.ownership.heap_pages {
+            return Err(ServiceRegistryError::Capacity);
+        }
+        service.heap_quota_pages = quota_pages;
+        Ok(())
+    }
+
     pub fn service_name(&self, handle: ServiceHandle) -> Result<&[u8], ServiceRegistryError> {
         Ok(self.service(handle)?.name.as_slice())
     }

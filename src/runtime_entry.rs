@@ -17,6 +17,10 @@ pub(crate) fn run() {
         arch_fatal(b"LogOS vNext: dynamic IPC proof");
     }
     #[cfg(feature = "qemu-proof")]
+    if !crate::arch::allocator_proof() {
+        arch_fatal(b"LogOS vNext: allocator proof");
+    }
+    #[cfg(feature = "qemu-proof")]
     if !crate::arch::event_proof() {
         arch_fatal(b"LogOS vNext: dynamic event proof");
     }

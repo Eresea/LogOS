@@ -39,6 +39,7 @@ static DYNAMIC_ENDPOINT_PROVEN: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_STALE_HANDLES_REJECTED: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_SERVICE_STALE_REJECTED: AtomicBool = AtomicBool::new(false);
 static RESTART_RESOURCES_RECLAIMED: AtomicBool = AtomicBool::new(false);
+static ALLOCATOR_QUOTA_PROVEN: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_FULL: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_BLOCKED: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_WAKE: AtomicBool = AtomicBool::new(false);
@@ -188,6 +189,7 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
             core::ptr::addr_of!(RESTART_RESOURCES_RECLAIMED) as usize,
             core::mem::size_of::<AtomicBool>(),
         ),
+        (core::ptr::addr_of!(ALLOCATOR_QUOTA_PROVEN) as usize, core::mem::size_of::<AtomicBool>()),
     ] {
         crate::arch::reserve_storage_frames(pool, address, bytes);
     }
@@ -286,6 +288,12 @@ pub fn dynamic_service_stale_rejected() {
 pub fn restart_resources_reclaimed() {
     if !RESTART_RESOURCES_RECLAIMED.swap(true, Ordering::AcqRel) {
         crate::arch_proof_line(b"LogOS vNext: restart resources reclaimed");
+    }
+}
+
+pub fn allocator_quota_proven() {
+    if !ALLOCATOR_QUOTA_PROVEN.swap(true, Ordering::AcqRel) {
+        crate::arch_proof_line(b"LogOS vNext: allocator quota exhaustion recovered");
     }
 }
 
@@ -433,6 +441,7 @@ pub fn observe(cpu: usize) {
         && DYNAMIC_STALE_HANDLES_REJECTED.load(Ordering::Acquire)
         && DYNAMIC_SERVICE_STALE_REJECTED.load(Ordering::Acquire)
         && RESTART_RESOURCES_RECLAIMED.load(Ordering::Acquire)
+        && ALLOCATOR_QUOTA_PROVEN.load(Ordering::Acquire)
         && LIVE_SERVICE_RESTARTED.load(Ordering::Acquire)
         && crate::user_mode::syscalls() > 0
         && DYNAMIC_EVENT_BLOCKED.load(Ordering::Acquire)
