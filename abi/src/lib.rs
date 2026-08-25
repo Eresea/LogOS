@@ -12,6 +12,7 @@ use core::{
 };
 
 mod device_api;
+mod graphics;
 mod package_ipc;
 mod runtime_abi;
 mod service_manager;
@@ -21,6 +22,11 @@ mod user_api;
 pub use device_api::{
     DEVICE_ABI_VERSION, DeviceKind, DeviceOperation, DeviceRecord, DeviceRequest, DeviceResponse,
     DeviceState, DeviceStatus, MAX_DEVICES,
+};
+pub use graphics::{
+    GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind, GuiRect, GuiSessionContext,
+    GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, MAX_GUI_COMMANDS,
+    MAX_GUI_DAMAGE_RECTS, MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, SurfaceHandle,
 };
 
 pub use package_ipc::{
@@ -134,7 +140,7 @@ pub const PROGRAM_EXIT_SYSCALL: usize = 14;
 pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
-pub const IPC_ENDPOINT_COUNT: usize = 32;
+pub const IPC_ENDPOINT_COUNT: usize = 41;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -178,6 +184,8 @@ pub enum ServiceId {
     Fetch = 8,
     Device = 9,
     User = 10,
+    Shell = 11,
+    LockScreen = 12,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -716,6 +724,8 @@ impl ServiceId {
             Self::Fetch => 7,
             Self::Device => 8,
             Self::User => 9,
+            Self::Shell => 10,
+            Self::LockScreen => 11,
         }
     }
 
@@ -731,6 +741,8 @@ impl ServiceId {
             7 => Some(Self::Fetch),
             8 => Some(Self::Device),
             9 => Some(Self::User),
+            10 => Some(Self::Shell),
+            11 => Some(Self::LockScreen),
             _ => None,
         }
     }
@@ -772,6 +784,15 @@ pub enum IpcEndpointId {
     UserToFlow = 29,
     UserToStorage = 30,
     StorageToUser = 31,
+    InputToShell = 32,
+    ShellToTerminal = 33,
+    ShellToDisplay = 34,
+    ShellToLockScreen = 35,
+    LockScreenToShell = 36,
+    ShellToUser = 37,
+    UserToShell = 38,
+    ShellToFlow = 39,
+    FlowToShell = 40,
 }
 
 impl IpcEndpointId {
@@ -815,6 +836,15 @@ impl IpcEndpointId {
             29 => Some(Self::UserToFlow),
             30 => Some(Self::UserToStorage),
             31 => Some(Self::StorageToUser),
+            32 => Some(Self::InputToShell),
+            33 => Some(Self::ShellToTerminal),
+            34 => Some(Self::ShellToDisplay),
+            35 => Some(Self::ShellToLockScreen),
+            36 => Some(Self::LockScreenToShell),
+            37 => Some(Self::ShellToUser),
+            38 => Some(Self::UserToShell),
+            39 => Some(Self::ShellToFlow),
+            40 => Some(Self::FlowToShell),
             _ => None,
         }
     }
@@ -842,6 +872,15 @@ impl IpcEndpointId {
             Self::FlowToUser => ServiceId::Flow,
             Self::UserToFlow | Self::UserToStorage => ServiceId::User,
             Self::StorageToUser => ServiceId::Storage,
+            Self::InputToShell => ServiceId::Input,
+            Self::ShellToTerminal
+            | Self::ShellToDisplay
+            | Self::ShellToLockScreen
+            | Self::ShellToUser
+            | Self::ShellToFlow => ServiceId::Shell,
+            Self::LockScreenToShell => ServiceId::LockScreen,
+            Self::UserToShell => ServiceId::User,
+            Self::FlowToShell => ServiceId::Flow,
         }
     }
 
@@ -868,6 +907,15 @@ impl IpcEndpointId {
             Self::UserToFlow => ServiceId::Flow,
             Self::UserToStorage => ServiceId::Storage,
             Self::StorageToUser => ServiceId::User,
+            Self::InputToShell
+            | Self::LockScreenToShell
+            | Self::UserToShell
+            | Self::FlowToShell => ServiceId::Shell,
+            Self::ShellToTerminal => ServiceId::Terminal,
+            Self::ShellToDisplay => ServiceId::Display,
+            Self::ShellToLockScreen => ServiceId::LockScreen,
+            Self::ShellToUser => ServiceId::User,
+            Self::ShellToFlow => ServiceId::Flow,
         }
     }
 }
@@ -902,11 +950,15 @@ pub enum MessageKind {
     UserResponse = 23,
     UserStorageRequest = 24,
     UserStorageResponse = 25,
+    GuiSurface = 26,
+    GuiDraw = 27,
+    GuiHook = 28,
+    GuiSession = 29,
 }
 
 impl MessageKind {
     pub const fn raw_is_valid(raw: u8) -> bool {
-        raw >= Self::Key as u8 && raw <= Self::UserStorageResponse as u8
+        raw >= Self::Key as u8 && raw <= Self::GuiSession as u8
     }
 }
 
@@ -1139,6 +1191,8 @@ impl IpcBytes {
 pub enum IpcMessageType {
     Input,
     Render,
+    Gui,
+    SessionContext,
     Bytes,
     Packet,
 }
@@ -1155,6 +1209,13 @@ pub const IPC_CONTRACT_STORAGE_MAP_REQUEST: u16 = 9;
 pub const IPC_CONTRACT_STORAGE_MAP_RESPONSE: u16 = 10;
 pub const IPC_CONTRACT_DEVICE_REQUEST: u16 = 11;
 pub const IPC_CONTRACT_DEVICE_RESPONSE: u16 = 12;
+pub const IPC_CONTRACT_GUI_SURFACE: u16 = 13;
+pub const IPC_CONTRACT_GUI_DRAW: u16 = 14;
+pub const IPC_CONTRACT_GUI_HOOK: u16 = 15;
+pub const IPC_CONTRACT_GUI_SESSION: u16 = 16;
+pub const IPC_CONTRACT_GUI_INPUT: u16 = 17;
+pub const IPC_CONTRACT_GUI_USER_REQUEST: u16 = 18;
+pub const IPC_CONTRACT_GUI_USER_RESPONSE: u16 = 19;
 
 /// Stable typed contract identifier for an endpoint's wire payload.
 ///
@@ -1189,9 +1250,36 @@ pub const fn ipc_contract_id(endpoint: usize) -> Option<u16> {
     {
         return Some(IPC_CONTRACT_DEVICE_RESPONSE);
     }
+    if endpoint == IpcEndpointId::InputToShell as usize
+        || endpoint == IpcEndpointId::ShellToTerminal as usize
+    {
+        return Some(IPC_CONTRACT_GUI_INPUT);
+    }
+    if endpoint == IpcEndpointId::ShellToDisplay as usize {
+        return Some(IPC_CONTRACT_GUI_DRAW);
+    }
+    if endpoint == IpcEndpointId::ShellToLockScreen as usize
+        || endpoint == IpcEndpointId::LockScreenToShell as usize
+    {
+        return Some(IPC_CONTRACT_GUI_HOOK);
+    }
+    if endpoint == IpcEndpointId::ShellToFlow as usize {
+        return Some(IPC_CONTRACT_GUI_SESSION);
+    }
+    if endpoint == IpcEndpointId::FlowToShell as usize {
+        return Some(IPC_CONTRACT_GUI_HOOK);
+    }
+    if endpoint == IpcEndpointId::ShellToUser as usize {
+        return Some(IPC_CONTRACT_GUI_USER_REQUEST);
+    }
+    if endpoint == IpcEndpointId::UserToShell as usize {
+        return Some(IPC_CONTRACT_GUI_USER_RESPONSE);
+    }
     match ipc_message_type(endpoint) {
         Some(IpcMessageType::Input) => Some(IPC_CONTRACT_INPUT),
         Some(IpcMessageType::Render) => Some(IPC_CONTRACT_RENDER),
+        Some(IpcMessageType::Gui) => Some(IPC_CONTRACT_GUI_DRAW),
+        Some(IpcMessageType::SessionContext) => Some(IPC_CONTRACT_GUI_SESSION),
         Some(IpcMessageType::Bytes) => Some(IPC_CONTRACT_BYTES),
         Some(IpcMessageType::Packet) => Some(IPC_CONTRACT_PACKET),
         None => None,
@@ -1205,6 +1293,10 @@ pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
         2..=5 | 8..=9 | 12..=19 | 24..=25 => Some(IpcMessageType::Bytes),
         10..=11 => Some(IpcMessageType::Packet),
         28..=31 => Some(IpcMessageType::Bytes),
+        32 | 33 => Some(IpcMessageType::Input),
+        34 => Some(IpcMessageType::Gui),
+        35..=38 | 40 => Some(IpcMessageType::Bytes),
+        39 => Some(IpcMessageType::SessionContext),
         _ => None,
     }
 }
@@ -1241,6 +1333,8 @@ pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
     match ipc_message_type(endpoint) {
         Some(IpcMessageType::Input) => Some(core::mem::size_of::<InputMessage>()),
         Some(IpcMessageType::Render) => Some(core::mem::size_of::<RenderMessage>()),
+        Some(IpcMessageType::Gui) => Some(core::mem::size_of::<GuiDrawBatch>()),
+        Some(IpcMessageType::SessionContext) => Some(core::mem::size_of::<GuiSessionContext>()),
         Some(IpcMessageType::Bytes) => Some(core::mem::size_of::<IpcBytes>()),
         Some(IpcMessageType::Packet) => Some(core::mem::size_of::<NetworkPacketDescriptor>()),
         None => None,
@@ -2035,7 +2129,11 @@ mod tests {
         );
         assert_eq!(ipc_contract_id(6), Some(IPC_CONTRACT_STORAGE_REQUEST));
         assert_eq!(ipc_contract_id(7), Some(IPC_CONTRACT_STORAGE_RESPONSE));
-        assert_eq!(ipc_contract_id(32), None);
+        assert_eq!(ipc_message_type(32), Some(IpcMessageType::Input));
+        assert_eq!(ipc_message_type(34), Some(IpcMessageType::Gui));
+        assert_eq!(ipc_contract_id(32), Some(IPC_CONTRACT_GUI_INPUT));
+        assert_eq!(ipc_contract_id(34), Some(IPC_CONTRACT_GUI_DRAW));
+        assert_eq!(ipc_contract_id(41), None);
     }
 
     #[test]
