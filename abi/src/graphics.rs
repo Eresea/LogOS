@@ -3,7 +3,9 @@ use super::{NamespaceCapabilityHandle, NamespaceRights, NamespaceRoot, SessionHa
 pub const MAX_GUI_SURFACES: usize = 8;
 pub const MAX_GUI_DAMAGE_RECTS: usize = 8;
 pub const MAX_GUI_COMMANDS: usize = 3;
+pub const MAX_GUI_BATCH_FRAGMENTS: usize = 4;
 pub const MAX_GUI_TEXT_BYTES: usize = 32;
+pub const GUI_DRAW_FLAG_MORE: u8 = 1 << 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -286,7 +288,7 @@ impl GuiDrawBatch {
         if !self.surface.is_valid()
             || self.sequence == 0
             || self.command_count as usize > MAX_GUI_COMMANDS
-            || self.flags != 0
+            || self.flags & !GUI_DRAW_FLAG_MORE != 0
             || self.reserved != 0
             || self.damage.is_empty()
         {
@@ -401,6 +403,10 @@ mod tests {
         assert!(batch.push(GuiDrawCommand::glyph_run(2, 2, 0xffffff, b"LogOS").unwrap()));
         assert!(batch.is_valid());
         assert!(!batch.push(GuiDrawCommand::empty(GuiDrawKind::GlyphRun)));
+        batch.flags = GUI_DRAW_FLAG_MORE;
+        assert!(batch.is_valid());
+        batch.flags = u8::MAX;
+        assert!(!batch.is_valid());
     }
 
     #[test]

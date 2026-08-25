@@ -1,13 +1,16 @@
 use logos_abi::{
     GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiRect, GuiStatus, GuiSurfaceOperation,
-    GuiSurfaceRequest, GuiSurfaceResponse, MAX_GUI_DAMAGE_RECTS, MAX_GUI_SURFACES, SurfaceHandle,
+    GuiSurfaceRequest, GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_DAMAGE_RECTS,
+    MAX_GUI_SURFACES, SurfaceHandle,
 };
 
 #[derive(Clone, Copy)]
 struct SurfaceSlot {
     handle: SurfaceHandle,
     bounds: GuiRect,
-    batch: Option<GuiDrawBatch>,
+    batches: [Option<GuiDrawBatch>; MAX_GUI_BATCH_FRAGMENTS],
+    batch_count: u8,
+    sequence: u32,
     z_order: i16,
     order: u32,
 }
@@ -16,7 +19,9 @@ impl SurfaceSlot {
     const EMPTY: Self = Self {
         handle: SurfaceHandle::EMPTY,
         bounds: GuiRect::EMPTY,
-        batch: None,
+        batches: [None; MAX_GUI_BATCH_FRAGMENTS],
+        batch_count: 0,
+        sequence: 0,
         z_order: 0,
         order: 0,
     };
@@ -91,7 +96,9 @@ impl GuiSurfaceRegistry {
         *slot = SurfaceSlot {
             handle,
             bounds: request.bounds,
-            batch: None,
+            batches: [None; MAX_GUI_BATCH_FRAGMENTS],
+            batch_count: 0,
+            sequence: 0,
             z_order: if matches!(request.operation, GuiSurfaceOperation::CreateRoot) {
                 0
             } else {
@@ -110,12 +117,26 @@ impl GuiSurfaceRegistry {
             return Err(GuiRegistryError::Malformed);
         }
         let index = self.authorized_index(owner, batch.surface)?;
-        let slot = &mut self.slots[index];
-        if slot.batch.is_some_and(|old| old == batch) {
+        let old_bounds = self.slots[index].bounds;
+        if self.slots[index].sequence == batch.sequence
+            && self.slots[index].batches[..self.slots[index].batch_count as usize]
+                .iter()
+                .flatten()
+                .any(|old| *old == batch)
+        {
             return Ok(());
         }
-        let old_bounds = slot.bounds;
-        slot.batch = (batch.command_count != 0).then_some(batch);
+        if self.slots[index].sequence != batch.sequence {
+            self.slots[index].batches = [None; MAX_GUI_BATCH_FRAGMENTS];
+            self.slots[index].batch_count = 0;
+            self.slots[index].sequence = batch.sequence;
+        }
+        if usize::from(self.slots[index].batch_count) == MAX_GUI_BATCH_FRAGMENTS {
+            return Err(GuiRegistryError::Backpressure);
+        }
+        let slot = &mut self.slots[index];
+        slot.batches[usize::from(slot.batch_count)] = Some(batch);
+        slot.batch_count += 1;
         self.add_damage(old_bounds)?;
         self.add_damage(batch.damage)?;
         Ok(())
@@ -126,7 +147,7 @@ impl GuiSurfaceRegistry {
             return;
         }
         for index in 0..MAX_GUI_SURFACES {
-            if !self.slots[index].occupied() || self.slots[index].batch.is_none() {
+            if !self.slots[index].occupied() || self.slots[index].batch_count == 0 {
                 continue;
             }
             let overlap = intersect(rect, self.slots[index].bounds);
@@ -138,23 +159,32 @@ impl GuiSurfaceRegistry {
         let mut selected = usize::MAX;
         for index in 0..MAX_GUI_SURFACES {
             let slot = self.slots[index];
-            let Some(batch) = slot.batch else { continue };
-            let Some(command) = batch.commands[..batch.command_count as usize].first() else {
-                continue;
-            };
-            if !is_surface_fill(*command)
-                || (selected != usize::MAX
-                    && (slot.z_order, slot.order)
-                        <= (self.slots[selected].z_order, self.slots[selected].order))
-            {
-                continue;
+            for batch in slot.batches[..slot.batch_count as usize].iter().flatten() {
+                let Some(command) = batch.commands[..batch.command_count as usize].first() else {
+                    continue;
+                };
+                if is_surface_fill(*command)
+                    && (selected == usize::MAX
+                        || (slot.z_order, slot.order)
+                            > (self.slots[selected].z_order, self.slots[selected].order))
+                {
+                    selected = index;
+                }
             }
-            selected = index;
         }
         if selected == usize::MAX {
             None
         } else {
-            self.slots[selected].batch.map(|batch| batch.commands[0].color)
+            self.slots[selected]
+                .batches
+                .iter()
+                .flatten()
+                .find(|batch| {
+                    batch.commands[..batch.command_count as usize]
+                        .first()
+                        .is_some_and(|command| is_surface_fill(*command))
+                })
+                .map(|batch| batch.commands[0].color)
         }
     }
 
@@ -238,37 +268,40 @@ impl GuiSurfaceRegistry {
 
         let mut rendered = 0;
         for index in order[..count].iter().copied() {
-            let Some(batch) = self.slots[index].batch else { continue };
             let mut clip = self.slots[index].bounds;
-            for command in batch.commands[..batch.command_count as usize].iter().copied() {
-                if is_surface_fill(command) {
-                    continue;
-                }
-                if command.kind == GuiDrawKind::ClipRect {
-                    clip = intersect(clip, command_rect(command));
-                    continue;
-                }
-                let bounds = command_rect(command);
-                if !damage[..damage_count].iter().any(|rect| touches(*rect, bounds)) {
-                    continue;
-                }
-                let command_clip = intersect(clip, bounds);
-                for damage_rect in damage[..damage_count].iter().copied() {
-                    let damage_clip = intersect(command_clip, damage_rect);
-                    if damage_clip.is_empty() {
+            for batch in
+                self.slots[index].batches[..self.slots[index].batch_count as usize].iter().flatten()
+            {
+                for command in batch.commands[..batch.command_count as usize].iter().copied() {
+                    if is_surface_fill(command) {
                         continue;
                     }
-                    rendered += render_command(
-                        framebuffer,
-                        width,
-                        height,
-                        stride,
-                        format,
-                        command,
-                        damage_clip,
-                        damage,
-                        damage_count,
-                    );
+                    if command.kind == GuiDrawKind::ClipRect {
+                        clip = intersect(clip, command_rect(command));
+                        continue;
+                    }
+                    let bounds = command_rect(command);
+                    if !damage[..damage_count].iter().any(|rect| touches(*rect, bounds)) {
+                        continue;
+                    }
+                    let command_clip = intersect(clip, bounds);
+                    for damage_rect in damage[..damage_count].iter().copied() {
+                        let damage_clip = intersect(command_clip, damage_rect);
+                        if damage_clip.is_empty() {
+                            continue;
+                        }
+                        rendered += render_command(
+                            framebuffer,
+                            width,
+                            height,
+                            stride,
+                            format,
+                            command,
+                            damage_clip,
+                            damage,
+                            damage_count,
+                        );
+                    }
                 }
             }
         }
@@ -636,6 +669,31 @@ mod tests {
         registry.update(7, batch).unwrap();
         let (_, count) = registry.take_damage();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn same_sequence_batches_accumulate_with_a_bounded_fragment_limit() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 16, 16)))
+            .unwrap()
+            .surface;
+        registry.take_damage();
+        for index in 0..MAX_GUI_BATCH_FRAGMENTS {
+            let mut batch = GuiDrawBatch::new(root, 4, GuiRect::new(index as i32, 0, 1, 1));
+            if index + 1 < MAX_GUI_BATCH_FRAGMENTS {
+                batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+            }
+            assert!(
+                batch
+                    .push(
+                        GuiDrawCommand::fill_rect(GuiRect::new(index as i32, 0, 1, 1), 0xffffff,)
+                    )
+            );
+            registry.update(7, batch).unwrap();
+        }
+        let overflow = GuiDrawBatch::new(root, 4, GuiRect::new(8, 0, 1, 1));
+        assert_eq!(registry.update(7, overflow), Err(GuiRegistryError::Backpressure));
     }
 
     #[test]
