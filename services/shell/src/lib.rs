@@ -7,6 +7,10 @@ pub use logos_ui::{
     MAX_UI_NODES, UiBlueprint, UiError, UiNode, UiNodeHandle, UiNodeKind, UiNodeSpec, UiTree,
 };
 
+pub fn compile_login_page() -> logos_ui::compiler::UiBuild {
+    logos_ui::login::compile()
+}
+
 use logos_abi::{
     GuiSessionContext, InputMessage, UserOperation, UserRequest, UserResponse, UserStatus,
 };
@@ -256,5 +260,14 @@ mod tests {
         shell.restart();
         assert_eq!(shell.phase(), ShellPhase::Locked);
         assert!(shell.context().is_clear());
+    }
+
+    #[test]
+    fn login_page_compiles_into_the_bounded_runtime_blueprint() {
+        let build = compile_login_page();
+        assert!(build.is_valid());
+        let blueprint = build.document.to_blueprint().unwrap();
+        let tree = UiTree::from_blueprint(&blueprint).unwrap();
+        assert_eq!(tree.len(), 5);
     }
 }
