@@ -5241,6 +5241,20 @@ impl ServiceRuntime {
             crate::arch::disable_keyboard_irq();
             crate::arch::reset_events();
             self.reclaim_resources()?;
+            #[cfg(feature = "qemu-proof")]
+            if self.dynamic_ipc.is_some()
+                || self.dynamic_services.is_some()
+                || self.dynamic_events.is_some()
+                || !self.service_handles.is_empty()
+                || !self.images.is_empty()
+                || !self.tables.is_empty()
+                || !self.tasks.is_empty()
+                || !self.ipc_staging_frames.is_empty()
+            {
+                return Err(ServiceRuntimeError::Resources);
+            }
+            #[cfg(feature = "qemu-proof")]
+            crate::proof::restart_resources_reclaimed();
             self.start(bundle)?;
             for suppressed in &self.suppressed_heartbeats {
                 suppressed.store(false, Ordering::Release);

@@ -37,6 +37,8 @@ static DYNAMIC_EVENT_USED: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_EVENT_BLOCKED: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_ENDPOINT_PROVEN: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_STALE_HANDLES_REJECTED: AtomicBool = AtomicBool::new(false);
+static DYNAMIC_SERVICE_STALE_REJECTED: AtomicBool = AtomicBool::new(false);
+static RESTART_RESOURCES_RECLAIMED: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_FULL: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_BLOCKED: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_WAKE: AtomicBool = AtomicBool::new(false);
@@ -178,6 +180,14 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
             core::ptr::addr_of!(DYNAMIC_STALE_HANDLES_REJECTED) as usize,
             core::mem::size_of::<AtomicBool>(),
         ),
+        (
+            core::ptr::addr_of!(DYNAMIC_SERVICE_STALE_REJECTED) as usize,
+            core::mem::size_of::<AtomicBool>(),
+        ),
+        (
+            core::ptr::addr_of!(RESTART_RESOURCES_RECLAIMED) as usize,
+            core::mem::size_of::<AtomicBool>(),
+        ),
     ] {
         crate::arch::reserve_storage_frames(pool, address, bytes);
     }
@@ -264,6 +274,18 @@ pub fn dynamic_endpoint_proven() {
 pub fn dynamic_stale_handles_rejected() {
     if !DYNAMIC_STALE_HANDLES_REJECTED.swap(true, Ordering::AcqRel) {
         crate::arch_proof_line(b"LogOS vNext: dynamic stale handles rejected");
+    }
+}
+
+pub fn dynamic_service_stale_rejected() {
+    if !DYNAMIC_SERVICE_STALE_REJECTED.swap(true, Ordering::AcqRel) {
+        crate::arch_proof_line(b"LogOS vNext: stale service handle rejected");
+    }
+}
+
+pub fn restart_resources_reclaimed() {
+    if !RESTART_RESOURCES_RECLAIMED.swap(true, Ordering::AcqRel) {
+        crate::arch_proof_line(b"LogOS vNext: restart resources reclaimed");
     }
 }
 
@@ -409,6 +431,8 @@ pub fn observe(cpu: usize) {
         && DYNAMIC_EVENT_USED.load(Ordering::Acquire)
         && DYNAMIC_ENDPOINT_PROVEN.load(Ordering::Acquire)
         && DYNAMIC_STALE_HANDLES_REJECTED.load(Ordering::Acquire)
+        && DYNAMIC_SERVICE_STALE_REJECTED.load(Ordering::Acquire)
+        && RESTART_RESOURCES_RECLAIMED.load(Ordering::Acquire)
         && LIVE_SERVICE_RESTARTED.load(Ordering::Acquire)
         && crate::user_mode::syscalls() > 0
         && DYNAMIC_EVENT_BLOCKED.load(Ordering::Acquire)
@@ -477,6 +501,18 @@ pub(crate) fn verify_service_manager_boundary() {
     {
         crate::arch_fatal(b"LogOS vNext: manager status result");
     }
+    let mut stale = logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::Status, 3);
+    stale.service = logos_abi::ServiceHandle::new(
+        list.record.service.index(),
+        list.record.service.generation().wrapping_add(1).max(1),
+    )
+    .unwrap_or(logos_abi::ServiceHandle::EMPTY);
+    let stale_response = crate::arch::manager_proof(stale)
+        .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: manager stale status"));
+    if stale_response.status != logos_abi::ManagerStatus::Stale {
+        crate::arch_fatal(b"LogOS vNext: manager stale handle accepted");
+    }
+    dynamic_service_stale_rejected();
     if crate::arch::manager_call(crate::process::ProcessHandle::from_raw(0), 0, 0)
         != logos_abi::IpcStatus::Unauthorized
     {
