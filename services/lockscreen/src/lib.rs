@@ -17,11 +17,13 @@ pub type LoginText = BoundedText<MAX_FIELD_BYTES>;
 pub struct LoginControls {
     pub username: Control<LoginText>,
     pub password: Control<LoginText>,
+    pub confirm_password: Control<LoginText>,
 }
 
 pub struct LoginForm {
     pub controls: LoginControls,
     state: FormState,
+    claim: bool,
 }
 
 impl LoginForm {
@@ -30,8 +32,10 @@ impl LoginForm {
             controls: LoginControls {
                 username: Control::new(LoginText::new()),
                 password: Control::new(LoginText::new()),
+                confirm_password: Control::new(LoginText::new()),
             },
             state: FormState::new(),
+            claim: false,
         }
     }
 
@@ -55,6 +59,10 @@ impl LoginForm {
         self.state.can_submit()
     }
 
+    pub const fn is_claim(&self) -> bool {
+        self.claim
+    }
+
     pub const fn errors(&self) -> &logos_ui_forms::ValidationErrors {
         self.state.errors()
     }
@@ -62,18 +70,43 @@ impl LoginForm {
     pub fn revalidate(&mut self) {
         let username_empty = self.controls.username.value_ref().is_empty();
         let password_empty = self.controls.password.value_ref().is_empty();
+        let confirmation_empty = self.controls.confirm_password.value_ref().is_empty();
+        let confirmation_matches =
+            self.controls.confirm_password.value_ref() == self.controls.password.value_ref();
         self.controls.username.clear_errors();
         self.controls.password.clear_errors();
+        self.controls.confirm_password.clear_errors();
         if username_empty {
             let _ = self.controls.username.add_error(ValidationError::Required);
         }
         if password_empty {
             let _ = self.controls.password.add_error(ValidationError::Required);
         }
+        if self.claim && confirmation_empty {
+            let _ = self.controls.confirm_password.add_error(ValidationError::Required);
+        } else if self.claim && !confirmation_matches {
+            let _ = self.controls.confirm_password.add_error(ValidationError::Mismatch);
+        }
         self.controls.username.set_valid(!username_empty);
         self.controls.password.set_valid(!password_empty);
-        self.state.set_valid(!username_empty && !password_empty);
-        self.state.set_dirty(self.controls.username.dirty() || self.controls.password.dirty());
+        self.controls
+            .confirm_password
+            .set_valid(!self.claim || (!confirmation_empty && confirmation_matches));
+        self.state.set_valid(
+            !username_empty
+                && !password_empty
+                && (!self.claim || (!confirmation_empty && confirmation_matches)),
+        );
+        self.state.set_dirty(
+            self.controls.username.dirty()
+                || self.controls.password.dirty()
+                || self.controls.confirm_password.dirty(),
+        );
+    }
+
+    pub fn set_claim_mode(&mut self, claim: bool) {
+        self.claim = claim;
+        self.revalidate();
     }
 
     pub fn begin_submission(&mut self) -> bool {
@@ -84,6 +117,7 @@ impl LoginForm {
         self.state.set_touched(true);
         self.controls.username.set_touched(true);
         self.controls.password.set_touched(true);
+        self.controls.confirm_password.set_touched(true);
         if !self.can_submit() {
             return false;
         }
@@ -98,6 +132,8 @@ impl LoginForm {
     pub fn clear_password(&mut self) {
         self.controls.password.value_mut().clear();
         self.controls.password.mark_changed();
+        self.controls.confirm_password.value_mut().clear();
+        self.controls.confirm_password.mark_changed();
         self.revalidate();
     }
 
@@ -122,6 +158,7 @@ pub enum LockScreenMode {
 pub enum LockScreenField {
     Username,
     Password,
+    ConfirmPassword,
     Submit,
 }
 
@@ -265,6 +302,7 @@ impl LockScreen {
         let control = match self.field {
             LockScreenField::Username => &mut self.form.controls.username,
             LockScreenField::Password => &mut self.form.controls.password,
+            LockScreenField::ConfirmPassword => &mut self.form.controls.confirm_password,
             LockScreenField::Submit => return,
         };
         let mut value = control.value();
@@ -278,6 +316,7 @@ impl LockScreen {
         let control = match self.field {
             LockScreenField::Username => &mut self.form.controls.username,
             LockScreenField::Password => &mut self.form.controls.password,
+            LockScreenField::ConfirmPassword => &mut self.form.controls.confirm_password,
             LockScreenField::Submit => return,
         };
         if control.value_mut().pop() {
@@ -287,18 +326,33 @@ impl LockScreen {
     }
 
     fn move_field(&mut self, forward: bool) {
-        self.field = match (self.field, forward) {
-            (LockScreenField::Username, true) => LockScreenField::Password,
-            (LockScreenField::Password, true) => LockScreenField::Submit,
-            (LockScreenField::Submit, true) => LockScreenField::Submit,
-            (LockScreenField::Submit, false) => LockScreenField::Password,
-            (LockScreenField::Password, false) => LockScreenField::Username,
-            (LockScreenField::Username, false) => LockScreenField::Username,
+        self.field = if self.mode == LockScreenMode::Claim {
+            match (self.field, forward) {
+                (LockScreenField::Username, true) => LockScreenField::Password,
+                (LockScreenField::Password, true) => LockScreenField::ConfirmPassword,
+                (LockScreenField::ConfirmPassword, true) => LockScreenField::Submit,
+                (LockScreenField::Submit, true) => LockScreenField::Submit,
+                (LockScreenField::Submit, false) => LockScreenField::ConfirmPassword,
+                (LockScreenField::ConfirmPassword, false) => LockScreenField::Password,
+                (LockScreenField::Password, false) => LockScreenField::Username,
+                (LockScreenField::Username, false) => LockScreenField::Username,
+            }
+        } else {
+            match (self.field, forward) {
+                (LockScreenField::Username, true) => LockScreenField::Password,
+                (LockScreenField::Password, true) => LockScreenField::Submit,
+                (LockScreenField::Submit, true) => LockScreenField::Submit,
+                (LockScreenField::Submit, false) => LockScreenField::Password,
+                (LockScreenField::Password, false) => LockScreenField::Username,
+                (LockScreenField::Username, false) => LockScreenField::Username,
+                (LockScreenField::ConfirmPassword, _) => LockScreenField::Password,
+            }
         };
     }
 
     fn reset_fields(&mut self) {
         self.form.reset();
+        self.form.set_claim_mode(self.mode == LockScreenMode::Claim);
         self.retries = 0;
         self.failure = false;
         self.field = LockScreenField::Username;
@@ -338,8 +392,18 @@ mod tests {
         );
         assert_eq!(lock.input(InputMessage::text(b"secret").unwrap()), LockScreenAction::Changed);
         assert_eq!(lock.credentials().1, b"secret");
+        assert_eq!(
+            lock.input(InputMessage::key(KeyCode::Tab, KeyState::Pressed, 0)),
+            LockScreenAction::Changed
+        );
+        assert_eq!(lock.field(), LockScreenField::ConfirmPassword);
+        assert_eq!(lock.input(InputMessage::text(b"secret").unwrap()), LockScreenAction::Changed);
         assert_eq!(lock.submit(), LockScreenAction::Submit(UserOperation::Claim));
         lock.cancel_submission();
+        assert_eq!(
+            lock.input(InputMessage::key(KeyCode::Tab, KeyState::Pressed, MOD_SHIFT)),
+            LockScreenAction::Changed
+        );
         assert_eq!(
             lock.input(InputMessage::key(KeyCode::Tab, KeyState::Pressed, MOD_SHIFT)),
             LockScreenAction::Changed
@@ -397,5 +461,21 @@ mod tests {
         assert!(lock.form().submitting());
         assert!(!lock.form().can_submit());
         assert_eq!(lock.input(enter), LockScreenAction::Ignored);
+    }
+
+    #[test]
+    fn claim_requires_matching_password_confirmation() {
+        let mut lock = LockScreen::new();
+        lock.set_unclaimed();
+        let _ = lock.input(InputMessage::text(b"admin").unwrap());
+        let _ = lock.input(InputMessage::key(KeyCode::Tab, KeyState::Pressed, 0));
+        let _ = lock.input(InputMessage::text(b"secret").unwrap());
+        let _ = lock.input(InputMessage::key(KeyCode::Tab, KeyState::Pressed, 0));
+        let _ = lock.input(InputMessage::text(b"different").unwrap());
+
+        assert_eq!(lock.submit(), LockScreenAction::Changed);
+        assert!(lock.form().controls.confirm_password.touched());
+        assert!(lock.form().controls.confirm_password.errors().contains(ValidationError::Mismatch));
+        assert!(!lock.form().can_submit());
     }
 }

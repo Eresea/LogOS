@@ -9,6 +9,7 @@ pub const MAX_VALIDATION_ERRORS: usize = 4;
 pub enum ValidationError {
     Required,
     MinLength(u8),
+    Mismatch,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
