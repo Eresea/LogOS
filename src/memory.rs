@@ -747,7 +747,6 @@ pub struct PhysicalFrameManager {
     run_count: usize,
     frame_count: usize,
     metadata: FrameMetadata,
-    owner_live: [u32; MAX_QUOTAS],
     #[cfg(test)]
     test_metadata: TestFrameMetadata,
 }
@@ -759,7 +758,6 @@ impl PhysicalFrameManager {
             run_count: 0,
             frame_count: 0,
             metadata: FrameMetadata::EMPTY,
-            owner_live: [0; MAX_QUOTAS],
             #[cfg(test)]
             test_metadata: TestFrameMetadata::empty(),
         }
@@ -790,7 +788,6 @@ impl PhysicalFrameManager {
         self.run_count = 0;
         self.frame_count = 0;
         self.metadata.clear();
-        self.owner_live.fill(0);
         for run_index in 0..map.len() {
             let Some(run) = map.get(run_index) else {
                 return Err(FrameError::InvalidMap);
@@ -1086,7 +1083,11 @@ impl PhysicalFrameManager {
     }
 
     pub fn owner_live(&self, owner: OwnerId) -> u32 {
-        self.owner_live.get(owner.raw() as usize).copied().unwrap_or(0)
+        self.metadata
+            .records()
+            .iter()
+            .filter(|record| record.state != FREE && record.owner == owner)
+            .count() as u32
     }
 
     pub fn fragmentation(&self) -> FragmentationSnapshot {
@@ -1132,22 +1133,15 @@ impl PhysicalFrameManager {
             };
             record.generation
         };
-        let owner_slot = owner.raw() as usize;
-        if let Some(live) = self.owner_live.get_mut(owner_slot) {
-            *live = live.saturating_add(1);
-        }
         let id = self.id_for_slot(slot).ok_or(FrameError::InvalidFrame)?;
         let address = self.address(id).ok_or(FrameError::InvalidFrame)?;
         Ok(FrameLease { address, id, generation, owner, state, home_cpu: 0, slot: slot as u32 })
     }
 
-    fn release_slot(&mut self, slot: usize, owner: OwnerId) {
+    fn release_slot(&mut self, slot: usize, _owner: OwnerId) {
         let record = &mut self.metadata.records_mut()[slot];
         record.owner = OwnerId(0);
         record.state = FREE;
-        if let Some(live) = self.owner_live.get_mut(owner.raw() as usize) {
-            *live = live.saturating_sub(1);
-        }
         self.set_free(slot);
     }
 
