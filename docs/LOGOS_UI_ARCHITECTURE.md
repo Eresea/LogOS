@@ -533,17 +533,19 @@ Likely states include:
 
 Dynamic utility application should be supported.
 
-Exact syntax remains open, but conceptually:
+Conditional utilities use the style delimiter followed by a bounded boolean
+expression:
 
 ```html
 <ui.row {
     items-center
-    [opacity-50]="hasError"
+    {opacity-50}="hasError"
 }>
 ```
 
 The first supported state is `focus`. Unsupported state names are compile
-diagnostics rather than runtime selector lookups.
+diagnostics rather than runtime selector lookups. A conditional utility uses
+the style delimiter with a value expression: `{opacity-50}="hasError"`.
 
 The compiler stores conditional utilities separately from ordinary bindings.
 The expression is a bounded boolean name resolved by the owning component; it
@@ -1369,7 +1371,8 @@ Template:
     <button
         [disabled]="!canUnlock"
         (click)="unlock()"
-        {mt-4 px-6 py-3 rounded-lg bg-accent disabled:opacity-50}
+        {opacity-50}="failure"
+        {mt-4 px-6 py-3 rounded-lg bg-accent}
     >
         Unlock
     </button>
@@ -1572,9 +1575,9 @@ It should establish the architecture while implementing only the capabilities ac
 
 The following details remain intentionally unresolved:
 
-1. exact `.ui` grammar;
+1. the rest of the `.ui` grammar beyond the bounded subset;
 2. exact import/alias syntax between Rust and templates;
-3. exact syntax for conditional style utilities;
+3. future conditional style states beyond the bounded boolean utility form;
 4. exact primitive namespace naming;
 5. exact signal API;
 6. exact DI provider declaration syntax;

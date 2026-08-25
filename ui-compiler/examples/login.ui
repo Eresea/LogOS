@@ -3,6 +3,6 @@
     <ui.text key="title" {text-4xl font-light mb-2}>LogOS</ui.text>
     <ui.input key="username" [(value)]="username" {w-96 font-light focus:bg-accent}/>
     <ui.input key="password" [(value)]="password" {w-96 mt-4 font-light focus:bg-accent}/>
-    <ui.button key="submit" [disabled]="unlocking" [opacity-50]="failure" (click)="unlock" {mt-4 px-6 py-3 rounded-lg bg-accent}>Unlock</ui.button>
+    <ui.button key="submit" [disabled]="unlocking" {opacity-50}="failure" (click)="unlock" {mt-4 px-6 py-3 rounded-lg bg-accent}>Unlock</ui.button>
   </ui.form>
 </ui.column>

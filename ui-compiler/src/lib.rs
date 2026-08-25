@@ -604,15 +604,7 @@ impl Parser<'_> {
                                 UiBinding { property: UiBindingProperty::Disabled, expression };
                         }
                     }
-                    _ => {
-                        let Some(style) = style_token(name.as_bytes()) else {
-                            self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
-                            return;
-                        };
-                        if !node.conditional_styles.push(UiConditionalStyle { style, expression }) {
-                            self.diagnostics.push(UiDiagnosticKind::Capacity, offset);
-                        }
-                    }
+                    _ => self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset),
                 }
             }
         }
@@ -662,9 +654,49 @@ impl Parser<'_> {
     fn parse_styles(&mut self, node_index: Option<u16>) {
         let offset = self.position;
         self.position += 1;
+        let mut rules = [UiStyleRule::Base(UiStyle::FullHeight); MAX_UI_STYLE_TOKENS];
+        let mut rule_count = 0;
         loop {
             self.skip_space();
             if self.consume_byte(b'}') {
+                self.skip_space();
+                if self.consume_byte(b'=') {
+                    let Some(expression) = self.read_quoted().and_then(UiExpression::from_bytes)
+                    else {
+                        self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                        return;
+                    };
+                    let Some(UiStyleRule::Base(style)) = (rule_count == 1).then(|| rules[0]) else {
+                        self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                        return;
+                    };
+                    if let Some(index) = node_index {
+                        if let Some(node) = self.document.node_mut(index) {
+                            if !node
+                                .conditional_styles
+                                .push(UiConditionalStyle { style, expression })
+                            {
+                                self.diagnostics.push(UiDiagnosticKind::Capacity, offset);
+                            }
+                        }
+                    }
+                    return;
+                }
+                if let Some(index) = node_index {
+                    if let Some(node) = self.document.node_mut(index) {
+                        for rule in rules.iter().take(rule_count) {
+                            let accepted = match *rule {
+                                UiStyleRule::Base(style) => node.styles.push(style),
+                                UiStyleRule::Focus(style) => node
+                                    .state_styles
+                                    .push(UiStateStyle { state: UiStyleState::Focus, style }),
+                            };
+                            if !accepted {
+                                self.diagnostics.push(UiDiagnosticKind::Capacity, offset);
+                            }
+                        }
+                    }
+                }
                 return;
             }
             let Some(token) = self.read_name() else {
@@ -676,19 +708,12 @@ impl Parser<'_> {
                 self.diagnostics.push(UiDiagnosticKind::UnknownStyle, offset);
                 continue;
             };
-            if let Some(index) = node_index {
-                if let Some(node) = self.document.node_mut(index) {
-                    let accepted = match rule {
-                        UiStyleRule::Base(style) => node.styles.push(style),
-                        UiStyleRule::Focus(style) => node
-                            .state_styles
-                            .push(UiStateStyle { state: UiStyleState::Focus, style }),
-                    };
-                    if !accepted {
-                        self.diagnostics.push(UiDiagnosticKind::Capacity, offset);
-                    }
-                }
+            if rule_count == MAX_UI_STYLE_TOKENS {
+                self.diagnostics.push(UiDiagnosticKind::Capacity, offset);
+                continue;
             }
+            rules[rule_count] = rule;
+            rule_count += 1;
         }
     }
 
@@ -905,6 +930,23 @@ mod tests {
         ));
         assert!(matches!(
             build.diagnostics.get(2),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownBinding, .. })
+        ));
+    }
+
+    #[test]
+    fn conditional_styles_use_style_braces_not_property_bindings() {
+        let build = compile(r#"<ui.button {opacity-50}="failure"/>"#);
+        assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
+        let conditionals = &build.document.node(0).unwrap().conditional_styles;
+        assert_eq!(conditionals.len, 1);
+        assert_eq!(conditionals.entries[0].style, UiStyle::Opacity50);
+        assert_eq!(conditionals.entries[0].expression.as_bytes(), b"failure");
+
+        let legacy = compile(r#"<ui.button [opacity-50]="failure"/>"#);
+        assert!(!legacy.is_valid());
+        assert!(matches!(
+            legacy.diagnostics.get(0),
             Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownBinding, .. })
         ));
     }
