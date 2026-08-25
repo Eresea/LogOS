@@ -186,6 +186,7 @@ name = "logos-lockscreen"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
+ "logos-ui-forms",
 ]
 
 [[package]]
@@ -274,6 +275,10 @@ version = "0.1.0"
 dependencies = [
  "logos-ui",
 ]
+
+[[package]]
+name = "logos-ui-forms"
+version = "0.1.0"
 
 [[package]]
 name = "logos-user"

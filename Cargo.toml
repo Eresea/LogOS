@@ -24,6 +24,7 @@ members = [
     "services/lockscreen",
     "services/images",
     "ui",
+    "ui-forms",
     "ui-compiler",
 ]
 resolver = "3"

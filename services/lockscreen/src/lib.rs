@@ -7,9 +7,106 @@ use logos_abi::{
     InputMessage, KeyCode, KeyState, MAX_TEXT_BYTES, MOD_SHIFT, MessageKind, UserOperation,
     UserStatus,
 };
+use logos_ui_forms::{BoundedText, Control, FormState, ValidationError};
 
 pub const MAX_FIELD_BYTES: usize = 32;
 pub const MAX_RETRIES: u8 = 3;
+
+pub type LoginText = BoundedText<MAX_FIELD_BYTES>;
+
+pub struct LoginControls {
+    pub username: Control<LoginText>,
+    pub password: Control<LoginText>,
+}
+
+pub struct LoginForm {
+    pub controls: LoginControls,
+    state: FormState,
+}
+
+impl LoginForm {
+    pub const fn new() -> Self {
+        Self {
+            controls: LoginControls {
+                username: Control::new(LoginText::new()),
+                password: Control::new(LoginText::new()),
+            },
+            state: FormState::new(),
+        }
+    }
+
+    pub const fn valid(&self) -> bool {
+        self.state.valid()
+    }
+
+    pub const fn dirty(&self) -> bool {
+        self.state.dirty()
+    }
+
+    pub const fn touched(&self) -> bool {
+        self.state.touched()
+    }
+
+    pub const fn submitting(&self) -> bool {
+        self.state.submitting()
+    }
+
+    pub const fn errors(&self) -> &logos_ui_forms::ValidationErrors {
+        self.state.errors()
+    }
+
+    pub fn revalidate(&mut self) {
+        let username_empty = self.controls.username.value_ref().is_empty();
+        let password_empty = self.controls.password.value_ref().is_empty();
+        self.controls.username.clear_errors();
+        self.controls.password.clear_errors();
+        if username_empty {
+            let _ = self.controls.username.add_error(ValidationError::Required);
+        }
+        if password_empty {
+            let _ = self.controls.password.add_error(ValidationError::Required);
+        }
+        self.controls.username.set_valid(!username_empty);
+        self.controls.password.set_valid(!password_empty);
+        self.state.set_valid(!username_empty && !password_empty);
+        self.state.set_dirty(self.controls.username.dirty() || self.controls.password.dirty());
+    }
+
+    pub fn begin_submission(&mut self) -> bool {
+        if self.submitting() {
+            return false;
+        }
+        self.revalidate();
+        self.state.set_touched(true);
+        self.controls.username.set_touched(true);
+        self.controls.password.set_touched(true);
+        if !self.valid() {
+            return false;
+        }
+        self.state.set_submitting(true);
+        true
+    }
+
+    pub fn complete_submission(&mut self) {
+        self.state.set_submitting(false);
+    }
+
+    pub fn clear_password(&mut self) {
+        self.controls.password.value_mut().clear();
+        self.controls.password.mark_changed();
+        self.revalidate();
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
+impl Default for LoginForm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LockScreenMode {
@@ -33,10 +130,7 @@ pub enum LockScreenAction {
 pub struct LockScreen {
     mode: LockScreenMode,
     field: LockScreenField,
-    username: [u8; MAX_FIELD_BYTES],
-    username_len: u8,
-    password: [u8; MAX_FIELD_BYTES],
-    password_len: u8,
+    form: LoginForm,
     retries: u8,
     failure: bool,
 }
@@ -46,10 +140,7 @@ impl LockScreen {
         Self {
             mode: LockScreenMode::Login,
             field: LockScreenField::Username,
-            username: [0; MAX_FIELD_BYTES],
-            username_len: 0,
-            password: [0; MAX_FIELD_BYTES],
-            password_len: 0,
+            form: LoginForm::new(),
             retries: 0,
             failure: false,
         }
@@ -68,6 +159,10 @@ impl LockScreen {
         self.failure
     }
 
+    pub const fn form(&self) -> &LoginForm {
+        &self.form
+    }
+
     pub fn set_unclaimed(&mut self) {
         self.mode = LockScreenMode::Claim;
         self.reset_fields();
@@ -79,6 +174,9 @@ impl LockScreen {
     }
 
     pub fn input(&mut self, input: InputMessage) -> LockScreenAction {
+        if self.form.submitting() {
+            return LockScreenAction::Ignored;
+        }
         match input.kind {
             MessageKind::Text | MessageKind::Paste => {
                 let Some(text) = input.text_bytes() else { return LockScreenAction::Ignored };
@@ -117,21 +215,27 @@ impl LockScreen {
     }
 
     /// Validate the active login form. Enter and a future button adapter share this path.
-    pub fn submit(&self) -> LockScreenAction {
-        if self.username_len == 0 || self.password_len == 0 {
-            LockScreenAction::Ignored
-        } else {
+    pub fn submit(&mut self) -> LockScreenAction {
+        if self.form.submitting() {
+            return LockScreenAction::Ignored;
+        }
+        if self.form.begin_submission() {
             LockScreenAction::Submit(self.mode.operation())
+        } else {
+            LockScreenAction::Changed
         }
     }
 
     pub fn credentials(&self) -> (&[u8], &[u8]) {
-        (&self.username[..self.username_len as usize], &self.password[..self.password_len as usize])
+        (
+            self.form.controls.username.value_ref().as_bytes(),
+            self.form.controls.password.value_ref().as_bytes(),
+        )
     }
 
     pub fn apply_status(&mut self, status: UserStatus) {
-        self.password.fill(0);
-        self.password_len = 0;
+        self.form.complete_submission();
+        self.form.clear_password();
         match status {
             UserStatus::Unclaimed => self.set_unclaimed(),
             UserStatus::BadCredentials => {
@@ -145,28 +249,33 @@ impl LockScreen {
     }
 
     pub fn clear_password(&mut self) {
-        self.password.fill(0);
-        self.password_len = 0;
+        self.form.clear_password();
+    }
+
+    pub fn cancel_submission(&mut self) {
+        self.form.complete_submission();
     }
 
     fn push(&mut self, byte: u8) {
-        let (buffer, length) = match self.field {
-            LockScreenField::Username => (&mut self.username, &mut self.username_len),
-            LockScreenField::Password => (&mut self.password, &mut self.password_len),
+        let control = match self.field {
+            LockScreenField::Username => &mut self.form.controls.username,
+            LockScreenField::Password => &mut self.form.controls.password,
         };
-        if usize::from(*length) < buffer.len() && byte.is_ascii_graphic() {
-            buffer[*length as usize] = byte;
-            *length += 1;
+        let mut value = control.value();
+        if value.push(byte) {
+            let _ = control.set_user(value);
+            self.form.revalidate();
         }
     }
 
     fn pop(&mut self) {
-        let length = match self.field {
-            LockScreenField::Username => &mut self.username_len,
-            LockScreenField::Password => &mut self.password_len,
+        let control = match self.field {
+            LockScreenField::Username => &mut self.form.controls.username,
+            LockScreenField::Password => &mut self.form.controls.password,
         };
-        if *length > 0 {
-            *length -= 1;
+        if control.value_mut().pop() {
+            control.mark_changed();
+            self.form.revalidate();
         }
     }
 
@@ -180,10 +289,7 @@ impl LockScreen {
     }
 
     fn reset_fields(&mut self) {
-        self.username.fill(0);
-        self.password.fill(0);
-        self.username_len = 0;
-        self.password_len = 0;
+        self.form.reset();
         self.retries = 0;
         self.failure = false;
         self.field = LockScreenField::Username;
@@ -224,6 +330,7 @@ mod tests {
         assert_eq!(lock.input(InputMessage::text(b"secret").unwrap()), LockScreenAction::Changed);
         assert_eq!(lock.credentials().1, b"secret");
         assert_eq!(lock.submit(), LockScreenAction::Submit(UserOperation::Claim));
+        lock.cancel_submission();
         assert_eq!(
             lock.input(InputMessage::key(KeyCode::Tab, KeyState::Pressed, MOD_SHIFT)),
             LockScreenAction::Changed
@@ -267,13 +374,17 @@ mod tests {
         let mut lock = LockScreen::new();
         lock.set_locked();
         let enter = InputMessage::key(KeyCode::Enter, KeyState::Pressed, 0);
-        assert_eq!(lock.submit(), LockScreenAction::Ignored);
-        assert_eq!(lock.input(enter), LockScreenAction::Ignored);
+        assert_eq!(lock.submit(), LockScreenAction::Changed);
+        assert!(lock.form().controls.username.touched());
+        assert!(lock.form().controls.username.errors().contains(ValidationError::Required));
+        assert!(lock.form().controls.password.errors().contains(ValidationError::Required));
+        assert_eq!(lock.input(enter), LockScreenAction::Changed);
         let _ = lock.input(InputMessage::text(b"alice").unwrap());
         let _ = lock.input(InputMessage::key(KeyCode::Tab, KeyState::Pressed, 0));
-        assert_eq!(lock.input(enter), LockScreenAction::Ignored);
+        assert_eq!(lock.input(enter), LockScreenAction::Changed);
         let _ = lock.input(InputMessage::text(b"secret").unwrap());
-        assert_eq!(lock.input(enter), lock.submit());
-        assert_eq!(lock.submit(), LockScreenAction::Submit(UserOperation::Login));
+        assert_eq!(lock.input(enter), LockScreenAction::Submit(UserOperation::Login));
+        assert!(lock.form().submitting());
+        assert_eq!(lock.input(enter), LockScreenAction::Ignored);
     }
 }

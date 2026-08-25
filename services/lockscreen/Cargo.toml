@@ -11,4 +11,4 @@ bench = false
 
 [dependencies]
 logos-abi = { path = "../../abi" }
-
+logos-ui-forms = { path = "../../ui-forms" }
