@@ -220,6 +220,7 @@ dependencies = [
  "logos-storage",
  "logos-storage-service",
  "logos-terminal",
+ "logos-ui-compiler",
  "logos-user",
 ]
 

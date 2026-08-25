@@ -11,6 +11,74 @@ pub fn compile_login_page() -> logos_ui_compiler::UiBuild {
     logos_ui_compiler::compile_login_page()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LoginUiState {
+    pub claim: bool,
+    pub failure: bool,
+}
+
+impl LoginUiState {
+    pub const fn new(claim: bool, failure: bool) -> Self {
+        Self { claim, failure }
+    }
+}
+
+pub fn login_page_text(
+    build: &logos_ui_compiler::UiBuild,
+    state: LoginUiState,
+    output: &mut [u8; logos_abi::MAX_GUI_TEXT_BYTES],
+) -> usize {
+    if !build.is_valid() {
+        return 0;
+    }
+    let mut length = 0;
+    for index in 0..build.document.node_count() {
+        let Some(node) = build.document.node(index) else { continue };
+        match node.kind {
+            UiNodeKind::Label => {
+                let text = if node.key.as_bytes() == b"title" {
+                    if state.failure {
+                        b"Retry login".as_slice()
+                    } else if state.claim {
+                        b"Claim login".as_slice()
+                    } else {
+                        node.text.as_bytes()
+                    }
+                } else {
+                    node.text.as_bytes()
+                };
+                append_text(output, &mut length, text);
+            }
+            UiNodeKind::TextInput => {
+                append_text(output, &mut length, b" [");
+                append_text(
+                    output,
+                    &mut length,
+                    if node.key.as_bytes() == b"password" { b"pwd" } else { b"usr" },
+                );
+                append_text(output, &mut length, b"]");
+            }
+            UiNodeKind::Button => {
+                append_text(output, &mut length, b" [");
+                append_text(output, &mut length, node.text.as_bytes());
+                append_text(output, &mut length, b"]");
+            }
+            UiNodeKind::Root | UiNodeKind::Panel => {}
+        }
+    }
+    length
+}
+
+fn append_text(output: &mut [u8; logos_abi::MAX_GUI_TEXT_BYTES], length: &mut usize, text: &[u8]) {
+    for byte in text {
+        if *length == output.len() {
+            break;
+        }
+        output[*length] = *byte;
+        *length += 1;
+    }
+}
+
 use logos_abi::{
     GuiSessionContext, InputMessage, UserOperation, UserRequest, UserResponse, UserStatus,
 };
@@ -269,5 +337,15 @@ mod tests {
         let blueprint = build.document.to_blueprint().unwrap();
         let tree = UiTree::from_blueprint(&blueprint).unwrap();
         assert_eq!(tree.len(), 5);
+    }
+
+    #[test]
+    fn login_page_text_is_compiled_and_bounded() {
+        let build = compile_login_page();
+        let mut output = [0; logos_abi::MAX_GUI_TEXT_BYTES];
+        let length = login_page_text(&build, LoginUiState::new(false, false), &mut output);
+        assert_eq!(&output[..length], b"LogOS [usr] [pwd] [Unlock]");
+        let length = login_page_text(&build, LoginUiState::new(false, true), &mut output);
+        assert_eq!(&output[..length], b"Retry login [usr] [pwd] [Unlock]");
     }
 }

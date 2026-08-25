@@ -8,7 +8,7 @@ use core::{mem, ptr};
 
 use logos_abi::{
     GuiDrawBatch, GuiDrawCommand, GuiRect, GuiSessionContext, InputMessage, IpcBytes, IpcStatus,
-    MessageKind, SurfaceHandle, UserRequest, UserResponse,
+    MAX_GUI_TEXT_BYTES, MessageKind, SurfaceHandle, UserRequest, UserResponse,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -53,29 +53,29 @@ static mut LOCKSCREEN: logos_lockscreen::LockScreen = logos_lockscreen::LockScre
 
 fn send_shell_surface(
     display: logos_abi::CapabilityHandle,
+    login_page: &logos_ui_compiler::UiBuild,
     lockscreen: &logos_lockscreen::LockScreen,
     sequence: &mut u32,
     visible: bool,
 ) {
     *sequence = sequence.wrapping_add(1).max(1);
-    let mut batch = GuiDrawBatch::new(
-        SurfaceHandle::new(0, 1, 11).unwrap(),
-        *sequence,
-        GuiRect::new(0, 0, 640, 400),
-    );
+    let mut batch =
+        GuiDrawBatch::new(SurfaceHandle::new(0, 1, 11).unwrap(), *sequence, GuiRect::SURFACE);
     if visible {
         let _ = batch.push(GuiDrawCommand::fill_surface(0x101820));
         let _ =
             batch.push(GuiDrawCommand::stroke_rect(GuiRect::new(24, 24, 592, 352), 0x4b89dc, 2));
-        let title = if lockscreen.failure() {
-            b"Login failed - try again".as_slice()
-        } else if lockscreen.mode() == logos_lockscreen::LockScreenMode::Claim {
-            b"Claim your LogOS account".as_slice()
-        } else {
-            b"LogOS login".as_slice()
-        };
-        if let Some(title) = GuiDrawCommand::glyph_run(48, 48, 0xffffff, title) {
-            let _ = batch.push(title);
+        let mut text = [0; MAX_GUI_TEXT_BYTES];
+        let length = logos_shell::login_page_text(
+            login_page,
+            logos_shell::LoginUiState::new(
+                lockscreen.mode() == logos_lockscreen::LockScreenMode::Claim,
+                lockscreen.failure(),
+            ),
+            &mut text,
+        );
+        if let Some(text) = GuiDrawCommand::glyph_run(48, 48, 0xffffff, &text[..length]) {
+            let _ = batch.push(text);
         }
     }
     let _ = common::ipc_send_handle(display, &batch);
@@ -109,9 +109,13 @@ pub extern "C" fn _start() -> ! {
         Err(_) => common::idle(),
     };
     let shell = unsafe { &mut *core::ptr::addr_of_mut!(SHELL) };
+    let login_page = logos_shell::compile_login_page();
+    if !login_page.is_valid() {
+        common::idle();
+    }
     let lockscreen = unsafe { &*core::ptr::addr_of!(LOCKSCREEN) };
     let mut surface_sequence = 0u32;
-    send_shell_surface(display, lockscreen, &mut surface_sequence, true);
+    send_shell_surface(display, &login_page, lockscreen, &mut surface_sequence, true);
     let context = GuiSessionContext::EMPTY;
     let _ = common::ipc_send_handle(flow, &context);
     let mut pending_user: Option<IpcBytes> = None;
@@ -143,7 +147,7 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             if action != logos_lockscreen::LockScreenAction::Ignored {
-                send_shell_surface(display, lockscreen, &mut surface_sequence, true);
+                send_shell_surface(display, &login_page, lockscreen, &mut surface_sequence, true);
             }
         }
         if let Some(request) = pending_user {
@@ -165,6 +169,7 @@ pub extern "C" fn _start() -> ! {
                     lockscreen.apply_status(result.status);
                     send_shell_surface(
                         display,
+                        &login_page,
                         lockscreen,
                         &mut surface_sequence,
                         shell.focus() == logos_shell::ShellFocus::LockScreen,

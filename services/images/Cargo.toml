@@ -26,6 +26,7 @@ logos-terminal = { path = "../terminal" }
 logos-network = { path = "../../network" }
 logos-fetch = { path = "../fetch" }
 logos-shell = { path = "../shell" }
+logos-ui-compiler = { path = "../../ui-compiler" }
 logos-lockscreen = { path = "../lockscreen" }
 
 [[bin]]
