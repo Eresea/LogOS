@@ -2,6 +2,7 @@ use logos_abi::GuiRect;
 
 pub const MAX_UI_NODES: usize = 32;
 const NO_PARENT: u16 = u16::MAX;
+pub const TAB_INDEX_NONE: i16 = -1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -12,6 +13,93 @@ pub enum UiNodeKind {
     Button = 4,
     TextInput = 5,
     Form = 6,
+}
+
+impl UiNodeKind {
+    pub const fn is_interactive(self) -> bool {
+        matches!(self, Self::Button | Self::TextInput)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiInteraction {
+    tab_index: i16,
+    disabled: bool,
+    focused: bool,
+}
+
+impl UiInteraction {
+    pub const fn for_kind(kind: UiNodeKind) -> Self {
+        Self {
+            tab_index: if kind.is_interactive() { 0 } else { TAB_INDEX_NONE },
+            disabled: false,
+            focused: false,
+        }
+    }
+
+    pub const fn tab_index(self) -> i16 {
+        self.tab_index
+    }
+
+    pub const fn is_disabled(self) -> bool {
+        self.disabled
+    }
+
+    pub const fn is_focused(self) -> bool {
+        self.focused
+    }
+
+    pub const fn is_focusable(self) -> bool {
+        self.tab_index >= 0 && !self.disabled
+    }
+
+    pub fn set_tab_index(&mut self, tab_index: i16) {
+        self.tab_index = tab_index;
+    }
+
+    pub fn set_disabled(&mut self, disabled: bool) {
+        self.disabled = disabled;
+        if disabled {
+            self.focused = false;
+        }
+    }
+
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused && !self.disabled && self.tab_index >= 0;
+    }
+}
+
+pub trait UiInteractive {
+    fn interaction(&self) -> &UiInteraction;
+    fn interaction_mut(&mut self) -> &mut UiInteraction;
+
+    fn tab_index(&self) -> i16 {
+        self.interaction().tab_index()
+    }
+
+    fn is_disabled(&self) -> bool {
+        self.interaction().is_disabled()
+    }
+
+    fn is_focused(&self) -> bool {
+        self.interaction().is_focused()
+    }
+
+    fn is_focusable(&self) -> bool {
+        self.interaction().is_focusable()
+    }
+
+    fn set_tab_index(&mut self, tab_index: i16) {
+        self.interaction_mut().set_tab_index(tab_index);
+    }
+
+    fn set_disabled(&mut self, disabled: bool) {
+        self.interaction_mut().set_disabled(disabled);
+    }
+
+    fn set_focused(&mut self, focused: bool) {
+        self.interaction_mut().set_focused(focused);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,15 +121,33 @@ pub struct UiNodeSpec {
     pub kind: UiNodeKind,
     pub parent: u16,
     pub key: u16,
+    pub interaction: UiInteraction,
 }
 
 impl UiNodeSpec {
     pub const fn root(kind: UiNodeKind, key: u16) -> Self {
-        Self { kind, parent: NO_PARENT, key }
+        Self { kind, parent: NO_PARENT, key, interaction: UiInteraction::for_kind(kind) }
     }
 
     pub const fn child(kind: UiNodeKind, parent: u16, key: u16) -> Self {
-        Self { kind, parent, key }
+        Self { kind, parent, key, interaction: UiInteraction::for_kind(kind) }
+    }
+
+    pub const fn root_with_interaction(
+        kind: UiNodeKind,
+        key: u16,
+        interaction: UiInteraction,
+    ) -> Self {
+        Self { kind, parent: NO_PARENT, key, interaction }
+    }
+
+    pub const fn child_with_interaction(
+        kind: UiNodeKind,
+        parent: u16,
+        key: u16,
+        interaction: UiInteraction,
+    ) -> Self {
+        Self { kind, parent, key, interaction }
     }
 }
 
@@ -56,17 +162,36 @@ impl UiBlueprint {
     }
 
     pub fn push_root(&mut self, kind: UiNodeKind, key: u16) -> Result<u16, UiError> {
+        self.push_root_with_interaction(kind, key, UiInteraction::for_kind(kind))
+    }
+
+    pub fn push_root_with_interaction(
+        &mut self,
+        kind: UiNodeKind,
+        key: u16,
+        interaction: UiInteraction,
+    ) -> Result<u16, UiError> {
         if self.count != 0 {
             return Err(UiError::RootExists);
         }
-        self.push(UiNodeSpec::root(kind, key))
+        self.push(UiNodeSpec::root_with_interaction(kind, key, interaction))
     }
 
     pub fn push_child(&mut self, kind: UiNodeKind, parent: u16, key: u16) -> Result<u16, UiError> {
+        self.push_child_with_interaction(kind, parent, key, UiInteraction::for_kind(kind))
+    }
+
+    pub fn push_child_with_interaction(
+        &mut self,
+        kind: UiNodeKind,
+        parent: u16,
+        key: u16,
+        interaction: UiInteraction,
+    ) -> Result<u16, UiError> {
         if usize::from(parent) >= self.count {
             return Err(UiError::InvalidParent);
         }
-        self.push(UiNodeSpec::child(kind, parent, key))
+        self.push(UiNodeSpec::child_with_interaction(kind, parent, key, interaction))
     }
 
     pub const fn len(&self) -> usize {
@@ -111,6 +236,7 @@ pub struct UiNode {
     pub key: u16,
     pub bounds: GuiRect,
     pub dirty: bool,
+    pub interaction: UiInteraction,
 }
 
 impl UiNode {
@@ -121,6 +247,7 @@ impl UiNode {
         key: 0,
         bounds: GuiRect::EMPTY,
         dirty: false,
+        interaction: UiInteraction::for_kind(UiNodeKind::Panel),
     };
 }
 
@@ -144,7 +271,7 @@ impl UiTree {
             } else {
                 tree.nodes[usize::from(spec.parent)].handle
             };
-            tree.insert(spec.kind, parent, spec.key)?;
+            tree.insert_with_interaction(spec.kind, parent, spec.key, spec.interaction)?;
         }
         Ok(tree)
     }
@@ -154,6 +281,16 @@ impl UiTree {
         kind: UiNodeKind,
         parent: UiNodeHandle,
         key: u16,
+    ) -> Result<UiNodeHandle, UiError> {
+        self.insert_with_interaction(kind, parent, key, UiInteraction::for_kind(kind))
+    }
+
+    pub fn insert_with_interaction(
+        &mut self,
+        kind: UiNodeKind,
+        parent: UiNodeHandle,
+        key: u16,
+        interaction: UiInteraction,
     ) -> Result<UiNodeHandle, UiError> {
         if parent.is_valid() && self.lookup(parent).is_err() {
             return Err(UiError::Stale);
@@ -168,7 +305,8 @@ impl UiTree {
         };
         self.generations[slot] = self.generations[slot].wrapping_add(1).max(1);
         let handle = UiNodeHandle { slot: slot as u16, generation: self.generations[slot] };
-        *node = UiNode { handle, parent, kind, key, bounds: GuiRect::EMPTY, dirty: true };
+        *node =
+            UiNode { handle, parent, kind, key, bounds: GuiRect::EMPTY, dirty: true, interaction };
         self.count += 1;
         Ok(handle)
     }
@@ -232,6 +370,16 @@ impl UiTree {
     }
 }
 
+impl UiInteractive for UiNode {
+    fn interaction(&self) -> &UiInteraction {
+        &self.interaction
+    }
+
+    fn interaction_mut(&mut self) -> &mut UiInteraction {
+        &mut self.interaction
+    }
+}
+
 impl Default for UiTree {
     fn default() -> Self {
         Self::new()
@@ -259,6 +407,31 @@ mod tests {
         assert_eq!(replacement.slot, button_handle.slot);
         assert_ne!(replacement.generation, button_handle.generation);
         assert_eq!(tree.node(button_handle), Err(UiError::Stale));
+    }
+
+    #[test]
+    fn interactive_nodes_expose_bounded_focus_contract() {
+        let mut tree = UiTree::new();
+        let root = tree.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 1).unwrap();
+        let button = tree.insert(UiNodeKind::Button, root, 2).unwrap();
+        let node = tree.node(button).unwrap();
+        assert!(node.is_focusable());
+        assert_eq!(node.tab_index(), 0);
+
+        let node = tree.node_mut(button).unwrap();
+        node.set_focused(true);
+        assert!(node.is_focused());
+        node.set_disabled(true);
+        assert!(!node.is_focusable());
+        assert!(!node.is_focused());
+    }
+
+    #[test]
+    fn non_interactive_nodes_are_not_focusable_by_default() {
+        let mut tree = UiTree::new();
+        let root = tree.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 1).unwrap();
+        let label = tree.insert(UiNodeKind::Label, root, 2).unwrap();
+        assert!(!tree.node(label).unwrap().is_focusable());
     }
 
     #[test]

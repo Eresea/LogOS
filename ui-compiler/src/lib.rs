@@ -3,7 +3,7 @@
 #[cfg(test)]
 extern crate std;
 
-use logos_ui::{MAX_UI_NODES, UiBlueprint, UiError, UiNodeKind};
+use logos_ui::{MAX_UI_NODES, UiBlueprint, UiError, UiInteraction, UiNodeKind};
 
 pub const MAX_UI_SOURCE_BYTES: usize = 4096;
 pub const MAX_UI_NAME_BYTES: usize = 24;
@@ -276,6 +276,7 @@ pub struct UiNodeTemplate {
     pub styles: UiStyleList,
     pub state_styles: UiStateStyleList,
     pub conditional_styles: UiConditionalStyleList,
+    pub interaction: UiInteraction,
 }
 
 impl UiNodeTemplate {
@@ -289,6 +290,7 @@ impl UiNodeTemplate {
         styles: UiStyleList::EMPTY,
         state_styles: UiStateStyleList::EMPTY,
         conditional_styles: UiConditionalStyleList::EMPTY,
+        interaction: UiInteraction::for_kind(UiNodeKind::Panel),
     };
 }
 
@@ -315,9 +317,14 @@ impl UiDocument {
             let node = self.nodes[index];
             let key = node_key(index, &node.key);
             if node.parent == u16::MAX {
-                blueprint.push_root(node.kind, key)?;
+                blueprint.push_root_with_interaction(node.kind, key, node.interaction)?;
             } else {
-                blueprint.push_child(node.kind, node.parent, key)?;
+                blueprint.push_child_with_interaction(
+                    node.kind,
+                    node.parent,
+                    key,
+                    node.interaction,
+                )?;
             }
         }
         Ok(blueprint)
@@ -480,7 +487,12 @@ impl Parser<'_> {
             self.diagnostics.push(UiDiagnosticKind::UnknownElement, start);
         }
         let node_index = if let Some(kind) = kind {
-            let node = UiNodeTemplate { kind, parent, ..UiNodeTemplate::EMPTY };
+            let node = UiNodeTemplate {
+                kind,
+                parent,
+                interaction: UiInteraction::for_kind(kind),
+                ..UiNodeTemplate::EMPTY
+            };
             let index = self.document.push(node);
             if index.is_none() {
                 self.diagnostics.push(UiDiagnosticKind::Capacity, start);
@@ -577,6 +589,20 @@ impl Parser<'_> {
             self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
             return;
         };
+        if name.as_bytes() == b"tabIndex" {
+            let Some(tab_index) = parse_tab_index(value) else {
+                self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                return;
+            };
+            let Some(index) = node_index else { return };
+            let Some(node) = self.document.node_mut(index) else { return };
+            if !node.kind.is_interactive() {
+                self.diagnostics.push(UiDiagnosticKind::UnknownAttribute, offset);
+                return;
+            }
+            node.interaction.set_tab_index(tab_index);
+            return;
+        }
         if name.as_bytes() != b"id" {
             self.diagnostics.push(UiDiagnosticKind::UnknownAttribute, offset);
             return;
@@ -847,6 +873,24 @@ fn element_kind(name: &[u8]) -> Option<UiNodeKind> {
     }
 }
 
+fn parse_tab_index(value: &[u8]) -> Option<i16> {
+    if value.is_empty() {
+        return None;
+    }
+    let (negative, digits) = if value[0] == b'-' { (true, &value[1..]) } else { (false, value) };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut result = 0i16;
+    for byte in digits {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        result = result.checked_mul(10)?.checked_add(i16::from(byte - b'0'))?;
+    }
+    if negative { result.checked_neg() } else { Some(result) }
+}
+
 fn node_key(index: usize, name: &UiName) -> u16 {
     let mut hash = 0x811c_u32 ^ index as u32;
     for byte in name.as_bytes() {
@@ -1027,6 +1071,34 @@ mod tests {
             legacy.diagnostics.get(0),
             Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownBinding, .. })
         ));
+    }
+
+    #[test]
+    fn interactive_components_expose_and_override_tab_index() {
+        let build = compile(
+            r#"<ui.column>
+                <ui.input tabIndex="4" />
+                <ui.button tabIndex="-1" />
+            </ui.column>"#,
+        );
+        assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
+        assert_eq!(build.document.node(1).unwrap().interaction.tab_index(), 4);
+        assert!(build.document.node(1).unwrap().interaction.is_focusable());
+        assert_eq!(build.document.node(2).unwrap().interaction.tab_index(), -1);
+        assert!(!build.document.node(2).unwrap().interaction.is_focusable());
+    }
+
+    #[test]
+    fn tab_index_is_rejected_on_non_interactive_components() {
+        let build = compile(r#"<ui.text tabIndex="1">label</ui.text>"#);
+        assert!(!build.is_valid());
+        assert!(
+            build
+                .diagnostics
+                .entries
+                .iter()
+                .any(|diagnostic| diagnostic.kind == UiDiagnosticKind::UnknownAttribute)
+        );
     }
 
     #[test]
