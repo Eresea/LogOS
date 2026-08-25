@@ -63,7 +63,7 @@ pub fn login_page_text(
                 append_text(output, &mut length, node.text.as_bytes());
                 append_text(output, &mut length, b"]");
             }
-            UiNodeKind::Root | UiNodeKind::Panel => {}
+            UiNodeKind::Root | UiNodeKind::Panel | UiNodeKind::Form => {}
         }
     }
     length
@@ -113,12 +113,13 @@ impl LoginLayout {
             return None;
         }
         let panel = inset(viewport, 24);
-        let field_width = build
-            .document
-            .node(2)
-            .filter(|node| has_style(node, logos_ui_compiler::UiStyle::Width96))
-            .map_or(240, |_| 384)
-            .min(panel.width);
+        let has_wide_field = (0..build.document.node_count())
+            .filter_map(|index| build.document.node(index))
+            .any(|node| {
+                node.kind == UiNodeKind::TextInput
+                    && has_style(node, logos_ui_compiler::UiStyle::Width96)
+            });
+        let field_width = (if has_wide_field { 384 } else { 240 }).min(panel.width);
         let center_x = panel.x.saturating_add((panel.width / 2) as i32);
         let field_x = center_x.saturating_sub((field_width / 2) as i32);
         let mut layout = Self { nodes: [LoginLayoutNode::EMPTY; MAX_LOGIN_LAYOUT_NODES], count: 0 };
@@ -126,7 +127,7 @@ impl LoginLayout {
         for index in 0..build.document.node_count() {
             let node = build.document.node(index)?;
             let (bounds, target) = match node.kind {
-                UiNodeKind::Root | UiNodeKind::Panel => (panel, None),
+                UiNodeKind::Root | UiNodeKind::Panel | UiNodeKind::Form => (panel, None),
                 UiNodeKind::Label => {
                     (GuiRect::new(field_x, panel.y.saturating_add(48), field_width, 32), None)
                 }
@@ -197,7 +198,7 @@ pub fn login_page_node_text(
         UiNodeKind::Label if node.key.as_bytes() == b"title" && state.claim => b"Claim login",
         UiNodeKind::Label | UiNodeKind::Button => node.text.as_bytes(),
         UiNodeKind::TextInput => node.key.as_bytes(),
-        UiNodeKind::Root | UiNodeKind::Panel => &[],
+        UiNodeKind::Root | UiNodeKind::Panel | UiNodeKind::Form => &[],
     };
     let mut length = 0;
     append_text(output, &mut length, text);
@@ -461,7 +462,7 @@ mod tests {
         assert!(build.is_valid());
         let blueprint = build.document.to_blueprint().unwrap();
         let tree = UiTree::from_blueprint(&blueprint).unwrap();
-        assert_eq!(tree.len(), 5);
+        assert_eq!(tree.len(), 6);
     }
 
     #[test]
@@ -494,9 +495,9 @@ mod tests {
     fn login_page_node_text_comes_from_compiled_nodes() {
         let build = compile_login_page();
         let mut output = [0; logos_abi::MAX_GUI_TEXT_BYTES];
-        let length = login_page_node_text(&build, 2, LoginUiState::new(false, false), &mut output);
+        let length = login_page_node_text(&build, 3, LoginUiState::new(false, false), &mut output);
         assert_eq!(&output[..length], b"username");
-        let length = login_page_node_text(&build, 4, LoginUiState::new(false, false), &mut output);
+        let length = login_page_node_text(&build, 5, LoginUiState::new(false, false), &mut output);
         assert_eq!(&output[..length], b"Unlock");
     }
 }

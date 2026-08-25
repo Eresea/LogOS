@@ -663,6 +663,7 @@ impl Parser<'_> {
 fn element_kind(name: &[u8]) -> Option<UiNodeKind> {
     match name {
         b"ui.column" | b"ui.panel" => Some(UiNodeKind::Panel),
+        b"ui.form" => Some(UiNodeKind::Form),
         b"ui.text" => Some(UiNodeKind::Label),
         b"ui.button" => Some(UiNodeKind::Button),
         b"ui.input" => Some(UiNodeKind::TextInput),
@@ -720,15 +721,17 @@ mod tests {
     fn lints_and_compiles_the_login_page() {
         let build = compile(LOGIN_PAGE);
         assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
-        assert_eq!(build.document.node_count(), 5);
+        assert_eq!(build.document.node_count(), 6);
         assert_eq!(build.document.node(0).unwrap().kind, UiNodeKind::Panel);
-        assert_eq!(build.document.node(1).unwrap().text.as_bytes(), b"LogOS");
-        assert_eq!(build.document.node(2).unwrap().kind, UiNodeKind::TextInput);
-        assert_eq!(build.document.node(3).unwrap().binding.property, UiBindingProperty::Value);
-        assert_eq!(build.document.node(4).unwrap().event.kind, UiEventKind::Click);
+        assert_eq!(build.document.node(1).unwrap().kind, UiNodeKind::Form);
+        assert_eq!(build.document.node(1).unwrap().event.kind, UiEventKind::Submit);
+        assert_eq!(build.document.node(2).unwrap().text.as_bytes(), b"LogOS");
+        assert_eq!(build.document.node(3).unwrap().kind, UiNodeKind::TextInput);
+        assert_eq!(build.document.node(4).unwrap().binding.property, UiBindingProperty::Value);
+        assert_eq!(build.document.node(5).unwrap().event.kind, UiEventKind::Click);
         assert_eq!(lint(LOGIN_PAGE).len(), 0);
         let blueprint = build.document.to_blueprint().unwrap();
-        assert_eq!(blueprint.len(), 5);
+        assert_eq!(blueprint.len(), 6);
     }
 
     #[test]

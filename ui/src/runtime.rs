@@ -11,6 +11,7 @@ pub enum UiNodeKind {
     Label = 3,
     Button = 4,
     TextInput = 5,
+    Form = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

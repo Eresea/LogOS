@@ -109,16 +109,19 @@ impl LockScreen {
                     self.pop();
                     LockScreenAction::Changed
                 }
-                code if code == KeyCode::Enter => {
-                    if self.username_len == 0 || self.password_len == 0 {
-                        LockScreenAction::Ignored
-                    } else {
-                        LockScreenAction::Submit(self.mode.operation())
-                    }
-                }
+                code if code == KeyCode::Enter => self.submit(),
                 _ => LockScreenAction::Ignored,
             },
             _ => LockScreenAction::Ignored,
+        }
+    }
+
+    /// Validate the active login form. Enter and a future button adapter share this path.
+    pub fn submit(&self) -> LockScreenAction {
+        if self.username_len == 0 || self.password_len == 0 {
+            LockScreenAction::Ignored
+        } else {
+            LockScreenAction::Submit(self.mode.operation())
         }
     }
 
@@ -220,6 +223,7 @@ mod tests {
         );
         assert_eq!(lock.input(InputMessage::text(b"secret").unwrap()), LockScreenAction::Changed);
         assert_eq!(lock.credentials().1, b"secret");
+        assert_eq!(lock.submit(), LockScreenAction::Submit(UserOperation::Claim));
         assert_eq!(
             lock.input(InputMessage::key(KeyCode::Tab, KeyState::Pressed, MOD_SHIFT)),
             LockScreenAction::Changed
@@ -256,5 +260,20 @@ mod tests {
         }
         assert_eq!(lock.retries(), MAX_RETRIES);
         assert!(lock.credentials().1.is_empty());
+    }
+
+    #[test]
+    fn enter_validates_the_form_before_submitting() {
+        let mut lock = LockScreen::new();
+        lock.set_locked();
+        let enter = InputMessage::key(KeyCode::Enter, KeyState::Pressed, 0);
+        assert_eq!(lock.submit(), LockScreenAction::Ignored);
+        assert_eq!(lock.input(enter), LockScreenAction::Ignored);
+        let _ = lock.input(InputMessage::text(b"alice").unwrap());
+        let _ = lock.input(InputMessage::key(KeyCode::Tab, KeyState::Pressed, 0));
+        assert_eq!(lock.input(enter), LockScreenAction::Ignored);
+        let _ = lock.input(InputMessage::text(b"secret").unwrap());
+        assert_eq!(lock.input(enter), lock.submit());
+        assert_eq!(lock.submit(), LockScreenAction::Submit(UserOperation::Login));
     }
 }

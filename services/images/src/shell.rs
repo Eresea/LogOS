@@ -72,7 +72,7 @@ fn send_shell_surface(
         lockscreen.failure(),
     );
     let Some(panel) = layout.node(0).map(|node| node.bounds) else { return };
-    let Some(title) = layout.node(1).map(|node| node.bounds) else { return };
+    let Some(title) = layout.node(2).map(|node| node.bounds) else { return };
     let Some(username) = layout.bounds_for(logos_shell::LoginHitTarget::Username) else {
         return;
     };
@@ -89,7 +89,7 @@ fn send_shell_surface(
     let _ = batches[0].push(GuiDrawCommand::stroke_rect(panel, 0x4b89dc, 2));
 
     let mut text = [0; MAX_GUI_TEXT_BYTES];
-    let length = logos_shell::login_page_node_text(login_page, 1, state, &mut text);
+    let length = logos_shell::login_page_node_text(login_page, 2, state, &mut text);
     if let Some(text) = GuiDrawCommand::glyph_run(title.x, title.y, 0xffffff, &text[..length]) {
         let _ = batches[1].push(text);
     }
@@ -108,7 +108,7 @@ fn send_shell_surface(
     let _ = batches[1].push(GuiDrawCommand::fill_rect(username, username_color));
     let _ = batches[1].push(GuiDrawCommand::stroke_rect(username, 0x6d8fc4, 1));
 
-    let length = logos_shell::login_page_node_text(login_page, 2, state, &mut text);
+    let length = logos_shell::login_page_node_text(login_page, 3, state, &mut text);
     if let Some(text) = GuiDrawCommand::glyph_run(
         username.x.saturating_add(12),
         username.y.saturating_add(12),
@@ -120,7 +120,7 @@ fn send_shell_surface(
     let _ = batches[2].push(GuiDrawCommand::fill_rect(password, password_color));
     let _ = batches[2].push(GuiDrawCommand::stroke_rect(password, 0x6d8fc4, 1));
 
-    let length = logos_shell::login_page_node_text(login_page, 3, state, &mut text);
+    let length = logos_shell::login_page_node_text(login_page, 4, state, &mut text);
     if let Some(text) = GuiDrawCommand::glyph_run(
         password.x.saturating_add(12),
         password.y.saturating_add(12),
@@ -130,7 +130,7 @@ fn send_shell_surface(
         let _ = batches[3].push(text);
     }
     let _ = batches[3].push(GuiDrawCommand::fill_rect(submit, 0x356bd8));
-    let length = logos_shell::login_page_node_text(login_page, 4, state, &mut text);
+    let length = logos_shell::login_page_node_text(login_page, 5, state, &mut text);
     if let Some(text) = GuiDrawCommand::glyph_run(
         submit.x.saturating_add(12),
         submit.y.saturating_add(12),
