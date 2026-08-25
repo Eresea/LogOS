@@ -482,7 +482,7 @@ impl ServiceRuntime {
     }
 
     fn lifecycle_service_for_handle(
-        &self,
+        &mut self,
         handle: ServiceHandle,
     ) -> Result<ServiceId, logos_abi::ManagerStatus> {
         let slot = self.lifecycle_slot_for_handle(handle)?;
@@ -490,18 +490,38 @@ impl ServiceRuntime {
     }
 
     fn lifecycle_slot_for_handle(
-        &self,
+        &mut self,
         handle: ServiceHandle,
     ) -> Result<usize, logos_abi::ManagerStatus> {
-        let registry = self.dynamic_services.as_ref().ok_or(logos_abi::ManagerStatus::Stale)?;
-        registry.validate_lifecycle_handle(handle).map_err(|_| logos_abi::ManagerStatus::Stale)?;
-        let slot = registry
-            .runtime_slot(handle)
-            .map_err(|_| logos_abi::ManagerStatus::Stale)?
-            .ok_or(logos_abi::ManagerStatus::Unsupported)?;
-        if self.service_handles.get(slot).copied() != Some(handle) {
-            return Err(logos_abi::ManagerStatus::Stale);
+        let runtime_slot = {
+            let registry = self.dynamic_services.as_ref().ok_or(logos_abi::ManagerStatus::Stale)?;
+            registry
+                .validate_lifecycle_handle(handle)
+                .map_err(|_| logos_abi::ManagerStatus::Stale)?;
+            registry.runtime_slot(handle).map_err(|_| logos_abi::ManagerStatus::Stale)?
+        };
+        if let Some(slot) = runtime_slot {
+            if self.service_handles.get(slot).copied() != Some(handle) {
+                return Err(logos_abi::ManagerStatus::Stale);
+            }
+            return Ok(slot);
         }
+
+        let slot = self.ensure_service_runtime_slot(handle).map_err(|error| match error {
+            ServiceRuntimeError::StaleGeneration => logos_abi::ManagerStatus::Stale,
+            _ => logos_abi::ManagerStatus::Capacity,
+        })?;
+        let quota = self
+            .dynamic_services
+            .as_ref()
+            .and_then(|registry| registry.heap_quota_pages(handle).ok())
+            .ok_or(logos_abi::ManagerStatus::Stale)?;
+        self.dynamic_services
+            .as_mut()
+            .ok_or(logos_abi::ManagerStatus::Stale)?
+            .bind_runtime_slot(handle, slot)
+            .map_err(|_| logos_abi::ManagerStatus::Capacity)?;
+        self.service_heaps[slot].quota_pages = quota;
         Ok(slot)
     }
 
@@ -4355,13 +4375,10 @@ impl ServiceRuntime {
                         .is_ok_and(|slot| ServiceId::from_index(slot).is_none())
                 {
                     let handle = handles[0];
+                    let restart_slot = self.lifecycle_slot_for_handle(handle).unwrap_or(usize::MAX);
                     if self.pending_dynamic_start.is_some()
                         || self.pending_dynamic_restart.is_some()
-                        || self
-                            .request_stop_task_slot(
-                                self.lifecycle_slot_for_handle(handle).unwrap_or(usize::MAX),
-                            )
-                            .is_err()
+                        || self.request_stop_task_slot(restart_slot).is_err()
                     {
                         self.abort_dynamic_service_lifecycle_handle(
                             logos_abi::ManagerOperation::Restart,
@@ -5545,14 +5562,13 @@ impl ServiceRuntime {
         }
         if let Some(handles) = self.pending_restart.take() {
             let mut services = Vec::new();
-            let Some(registry) = self.dynamic_services.as_ref() else {
-                return Err(ServiceRuntimeError::Resources);
-            };
             if services.try_reserve(handles.len()).is_err() {
                 return Err(ServiceRuntimeError::Resources);
             }
             for handle in &handles {
-                registry
+                self.dynamic_services
+                    .as_ref()
+                    .ok_or(ServiceRuntimeError::Resources)?
                     .validate_lifecycle_handle(*handle)
                     .map_err(|_| ServiceRuntimeError::StaleGeneration)?;
                 let service = self
