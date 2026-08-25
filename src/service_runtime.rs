@@ -4683,6 +4683,138 @@ impl ServiceRuntime {
     }
 
     #[cfg(feature = "qemu-proof")]
+    pub(crate) fn dynamic_ipc_proof(&mut self) -> bool {
+        let producer = match self.runtime_service_handle(ServiceId::Flow) {
+            Ok(handle) => handle,
+            Err(_) => return false,
+        };
+        let consumer = match dynamic_core_handle((self.service_epoch as u32).max(1)) {
+            Ok(handle) => handle,
+            Err(_) => return false,
+        };
+        let (endpoint, send, receive, read_event, write_event) =
+            match (&mut self.dynamic_ipc, &mut self.dynamic_events) {
+                (Some(ipc), Some(events)) => {
+                    let endpoint = match ipc.create_endpoint(
+                        producer,
+                        consumer,
+                        logos_abi::IPC_CONTRACT_BYTES,
+                        1,
+                        1,
+                        self.service_epoch,
+                        events,
+                    ) {
+                        Ok(endpoint) => endpoint,
+                        Err(_) => return false,
+                    };
+                    let send = match ipc.grant(producer, endpoint, logos_abi::IpcRights::Send) {
+                        Ok(capability) => capability,
+                        Err(_) => {
+                            let _ = ipc.destroy_endpoint(endpoint, events);
+                            return false;
+                        }
+                    };
+                    let receive = match ipc.grant(consumer, endpoint, logos_abi::IpcRights::Receive)
+                    {
+                        Ok(capability) => capability,
+                        Err(_) => {
+                            let _ = ipc.destroy_endpoint(endpoint, events);
+                            return false;
+                        }
+                    };
+                    let (read_event, write_event) = match ipc.endpoint_events(endpoint) {
+                        Ok(events) => events,
+                        Err(_) => {
+                            let _ = ipc.destroy_endpoint(endpoint, events);
+                            return false;
+                        }
+                    };
+                    (endpoint, send, receive, read_event, write_event)
+                }
+                _ => return false,
+            };
+
+        let success = match (&mut self.dynamic_ipc, &mut self.dynamic_events) {
+            (Some(ipc), Some(events)) => {
+                let input = [0xa5];
+                if ipc.send(producer, send, &input, events) != logos_abi::IpcStatus::Ok
+                    || ipc.send(producer, send, &input, events) != logos_abi::IpcStatus::Full
+                {
+                    let _ = ipc.destroy_endpoint(endpoint, events);
+                    return false;
+                }
+                let mut output = [0];
+                if ipc.receive(consumer, receive, &mut output, events) != logos_abi::IpcStatus::Ok
+                    || output != input
+                {
+                    let _ = ipc.destroy_endpoint(endpoint, events);
+                    return false;
+                }
+                if ipc.destroy_endpoint(endpoint, events).is_err()
+                    || events.signal_irq(read_event)
+                        != Err(crate::runtime_events::EventError::Stale)
+                    || events.signal_irq(write_event)
+                        != Err(crate::runtime_events::EventError::Stale)
+                    || ipc.send(producer, send, &input, events) != logos_abi::IpcStatus::Stale
+                    || ipc.endpoint_matches(
+                        endpoint,
+                        producer,
+                        consumer,
+                        logos_abi::IPC_CONTRACT_BYTES,
+                    ) != Err(logos_abi::IpcStatus::Stale)
+                {
+                    return false;
+                }
+                let replacement = match ipc.create_endpoint(
+                    producer,
+                    consumer,
+                    logos_abi::IPC_CONTRACT_BYTES,
+                    1,
+                    1,
+                    self.service_epoch,
+                    events,
+                ) {
+                    Ok(endpoint) => endpoint,
+                    Err(_) => return false,
+                };
+                let replacement_send =
+                    match ipc.grant(producer, replacement, logos_abi::IpcRights::Send) {
+                        Ok(capability) => capability,
+                        Err(_) => {
+                            let _ = ipc.destroy_endpoint(replacement, events);
+                            return false;
+                        }
+                    };
+                let replacement_receive =
+                    match ipc.grant(consumer, replacement, logos_abi::IpcRights::Receive) {
+                        Ok(capability) => capability,
+                        Err(_) => {
+                            let _ = ipc.destroy_endpoint(replacement, events);
+                            return false;
+                        }
+                    };
+                let mut replacement_output = [0];
+                let roundtrip = replacement != endpoint
+                    && ipc.send(producer, replacement_send, &input, events)
+                        == logos_abi::IpcStatus::Ok
+                    && ipc.receive(consumer, replacement_receive, &mut replacement_output, events)
+                        == logos_abi::IpcStatus::Ok
+                    && replacement_output == input;
+                let _ = ipc.destroy_endpoint(replacement, events);
+                roundtrip
+            }
+            _ => false,
+        };
+        if !success {
+            return false;
+        }
+        crate::proof::dynamic_endpoint_proven();
+        crate::proof::dynamic_stale_handles_rejected();
+        crate::proof::dynamic_backpressure_proven();
+        true
+    }
+
+    #[cfg(feature = "qemu-proof")]
     pub(crate) fn event_proof(&mut self) -> bool {
         let process = match self.launch(ServiceId::Flow) {
             Some((process, _)) => process,

@@ -1284,6 +1284,12 @@ pub(crate) fn event_proof() -> bool {
 }
 
 #[cfg(feature = "qemu-proof")]
+pub(crate) fn dynamic_ipc_proof() -> bool {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe { (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).dynamic_ipc_proof() }
+}
+
+#[cfg(feature = "qemu-proof")]
 pub(crate) fn manager_restart_ready(service: logos_abi::ServiceId) -> bool {
     let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).manager_restart_ready(service) }
@@ -1860,17 +1866,6 @@ pub(crate) fn prepare_service_event_set_wait(
         }
     }
     Some(should_block)
-}
-
-#[cfg(feature = "qemu-proof")]
-pub(crate) fn signal_event_object_raw(object: u64) -> usize {
-    let previous_wakes = SCHEDULER.event_wakes();
-    let woken = SCHEDULER.signal_event_object(object);
-    if SCHEDULER.event_wakes() != previous_wakes {
-        crate::proof::event_wake_ipi_sent();
-        notify_reschedule_cpus(current_cpu());
-    }
-    woken
 }
 
 pub(crate) fn signal_event_set(event_set: logos_abi::EventSetHandle) -> usize {

@@ -13,6 +13,10 @@ pub(crate) fn run() {
     #[cfg(feature = "qemu-proof")]
     proof::verify_service_manager_boundary();
     #[cfg(feature = "qemu-proof")]
+    if !crate::arch::dynamic_ipc_proof() {
+        arch_fatal(b"LogOS vNext: dynamic IPC proof");
+    }
+    #[cfg(feature = "qemu-proof")]
     if !crate::arch::event_proof() {
         arch_fatal(b"LogOS vNext: dynamic event proof");
     }
