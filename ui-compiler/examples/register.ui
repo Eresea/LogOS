@@ -1,0 +1,10 @@
+<ui.column #register {h-full items-center justify-center}>
+  <ui.form #registerForm [form]="registerForm" [canSubmit]="registerForm.canSubmit" (submit)="register" {flex-y gap-y-4}>
+    <ui.text #title {text-4xl font-light mb-2}>Create administrator</ui.text>
+    <ui.text #notice {font-light mb-2}>This account will own this system.</ui.text>
+    <ui.input #username [control]="registerForm.controls.username" {w-96 font-light focus:bg-accent}/>
+    <ui.input #password [control]="registerForm.controls.password" {w-96 mt-4 font-light focus:bg-accent}/>
+    <ui.input #confirmPassword [control]="registerForm.controls.confirmPassword" {w-96 mt-4 font-light focus:bg-accent}/>
+    <ui.button #submit [disabled]="!registerForm.canSubmit" {opacity-50}="failure" (submit)="registerForm.submit()" {mt-4 px-6 py-3 rounded-lg bg-accent}>Create administrator</ui.button>
+  </ui.form>
+</ui.column>

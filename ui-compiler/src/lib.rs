@@ -8,7 +8,7 @@ use logos_ui::{MAX_UI_NODES, UiBlueprint, UiError, UiNodeKind};
 pub const MAX_UI_SOURCE_BYTES: usize = 4096;
 pub const MAX_UI_NAME_BYTES: usize = 24;
 pub const MAX_UI_TEXT_BYTES: usize = 64;
-pub const MAX_UI_EXPRESSION_BYTES: usize = 32;
+pub const MAX_UI_EXPRESSION_BYTES: usize = 48;
 pub const MAX_UI_STYLE_TOKENS: usize = 8;
 pub const MAX_UI_STATE_STYLES: usize = 4;
 pub const MAX_UI_CONDITIONAL_STYLES: usize = 4;
@@ -413,9 +413,14 @@ pub fn lint(source: &str) -> UiDiagnostics {
 }
 
 pub const LOGIN_PAGE_SOURCE: &str = include_str!("../examples/login.ui");
+pub const REGISTER_PAGE_SOURCE: &str = include_str!("../examples/register.ui");
 
 pub fn compile_login_page() -> UiBuild {
     compile(LOGIN_PAGE_SOURCE)
+}
+
+pub fn compile_register_page() -> UiBuild {
+    compile(REGISTER_PAGE_SOURCE)
 }
 
 pub fn compile(source: &str) -> UiBuild {
@@ -969,6 +974,19 @@ mod tests {
         assert_eq!(lint(LOGIN_PAGE).len(), 0);
         let blueprint = build.document.to_blueprint().unwrap();
         assert_eq!(blueprint.len(), 6);
+    }
+
+    #[test]
+    fn lints_and_compiles_the_register_page() {
+        let build = compile_register_page();
+        assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
+        assert_eq!(build.document.node_count(), 8);
+        assert_eq!(build.document.node(1).unwrap().kind, UiNodeKind::Form);
+        assert_eq!(build.document.node(2).unwrap().text.as_bytes(), b"Create administrator");
+        assert_eq!(build.document.node(6).unwrap().key.as_bytes(), b"confirmPassword");
+        assert_eq!(build.document.node(7).unwrap().event.kind, UiEventKind::Submit);
+        assert_eq!(lint(REGISTER_PAGE_SOURCE).len(), 0);
+        assert_eq!(build.document.to_blueprint().unwrap().len(), 8);
     }
 
     #[test]

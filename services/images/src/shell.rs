@@ -52,6 +52,188 @@ const USER_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contr
 static mut SHELL: logos_shell::Shell = logos_shell::Shell::new();
 static mut LOCKSCREEN: logos_lockscreen::LockScreen = logos_lockscreen::LockScreen::new();
 
+struct ShellPages<'a> {
+    login: (&'a logos_ui_compiler::UiBuild, &'a logos_shell::LoginLayout),
+    register: (&'a logos_ui_compiler::UiBuild, &'a logos_shell::LoginLayout),
+}
+
+fn send_current_surface(
+    display: logos_abi::CapabilityHandle,
+    pages: ShellPages<'_>,
+    lockscreen: &logos_lockscreen::LockScreen,
+    sequence: &mut u32,
+    visible: bool,
+) {
+    if lockscreen.mode() == logos_lockscreen::LockScreenMode::Claim {
+        send_shell_surface(
+            display,
+            pages.register.0,
+            pages.register.1,
+            lockscreen,
+            sequence,
+            visible,
+        );
+    } else {
+        send_shell_surface(display, pages.login.0, pages.login.1, lockscreen, sequence, visible);
+    }
+}
+
+fn send_register_surface(
+    display: logos_abi::CapabilityHandle,
+    page: &logos_ui_compiler::UiBuild,
+    layout: &logos_shell::LoginLayout,
+    lockscreen: &logos_lockscreen::LockScreen,
+    sequence: &mut u32,
+    surface: SurfaceHandle,
+) {
+    let state = logos_shell::LoginUiState::new(true, lockscreen.failure());
+    let Some(panel) = layout.node(0).map(|node| node.bounds) else { return };
+    let Some(title_index) = logos_shell::named_node_index(page, b"title") else { return };
+    let Some(notice_index) = logos_shell::named_node_index(page, b"notice") else { return };
+    let Some(username_index) = logos_shell::named_node_index(page, b"username") else { return };
+    let Some(password_index) = logos_shell::named_node_index(page, b"password") else { return };
+    let Some(confirm_index) = logos_shell::named_node_index(page, b"confirmPassword") else {
+        return;
+    };
+    let Some(submit_index) = logos_shell::named_node_index(page, b"submit") else { return };
+    let Some(title) = layout.node(title_index).map(|node| node.bounds) else { return };
+    let Some(notice) = layout.node(notice_index).map(|node| node.bounds) else { return };
+    let Some(username) = layout.bounds_for(logos_shell::LoginHitTarget::Username) else {
+        return;
+    };
+    let Some(password) = layout.bounds_for(logos_shell::LoginHitTarget::Password) else { return };
+    let Some(confirm) = layout.bounds_for(logos_shell::LoginHitTarget::ConfirmPassword) else {
+        return;
+    };
+    let Some(submit) = layout.bounds_for(logos_shell::LoginHitTarget::Submit) else { return };
+
+    let mut batches =
+        [GuiDrawBatch::new(surface, *sequence, GuiRect::SURFACE); MAX_GUI_BATCH_FRAGMENTS];
+    for batch in &mut batches[..MAX_GUI_BATCH_FRAGMENTS - 1] {
+        batch.flags = GUI_DRAW_FLAG_MORE;
+    }
+    let _ = batches[0].push(GuiDrawCommand::fill_surface(0x101820));
+    let _ = batches[0].push(GuiDrawCommand::fill_rect(panel, 0x182535));
+
+    let mut text = [0; MAX_GUI_TEXT_BYTES];
+    let length = logos_shell::login_page_node_text(page, title_index, state, &mut text);
+    if let Some(text) = GuiDrawCommand::glyph_run_styled(
+        title.x,
+        title.y,
+        0xffffff,
+        logos_shell::login_text_flags(page, title_index),
+        &text[..length],
+    ) {
+        let _ = batches[0].push(text);
+    }
+
+    let length = logos_shell::login_page_node_text(page, notice_index, state, &mut text);
+    if let Some(text) = GuiDrawCommand::glyph_run_styled(
+        notice.x,
+        notice.y,
+        0xb8c7da,
+        logos_shell::login_text_flags(page, notice_index),
+        &text[..length],
+    ) {
+        let _ = batches[1].push(text);
+    }
+
+    let (username_value, password_value) = lockscreen.credentials();
+    let confirm_value = lockscreen.confirmation();
+    let username_color = if lockscreen.field() == logos_lockscreen::LockScreenField::Username {
+        0x315e91
+    } else {
+        0x263548
+    };
+    let password_color = if lockscreen.field() == logos_lockscreen::LockScreenField::Password {
+        0x315e91
+    } else {
+        0x263548
+    };
+    let confirm_color = if lockscreen.field() == logos_lockscreen::LockScreenField::ConfirmPassword
+    {
+        0x315e91
+    } else {
+        0x263548
+    };
+    let username_invalid = lockscreen.form().controls.username.touched()
+        && !lockscreen.form().controls.username.valid();
+    let password_invalid = lockscreen.form().controls.password.touched()
+        && !lockscreen.form().controls.password.valid();
+    let confirm_invalid = lockscreen.form().controls.confirm_password.touched()
+        && !lockscreen.form().controls.confirm_password.valid();
+    let _ = batches[1].push(GuiDrawCommand::fill_rect(
+        username,
+        if username_invalid { 0xb84a4a } else { username_color },
+    ));
+    let length = if username_value.is_empty() {
+        logos_shell::login_page_node_text(page, username_index, state, &mut text)
+    } else {
+        logos_shell::login_input_text(username_value, false, username.width, &mut text)
+    };
+    if let Some(text) = GuiDrawCommand::glyph_run_styled(
+        username.x.saturating_add(12),
+        username.y.saturating_add(12),
+        0xd9e5f5,
+        logos_shell::login_text_flags(page, username_index),
+        &text[..length],
+    ) {
+        let _ = batches[1].push(text);
+    }
+    let _ = batches[2].push(GuiDrawCommand::fill_rect(
+        password,
+        if password_invalid { 0xb84a4a } else { password_color },
+    ));
+    let length = if password_value.is_empty() {
+        logos_shell::login_page_node_text(page, password_index, state, &mut text)
+    } else {
+        logos_shell::login_input_text(password_value, true, password.width, &mut text)
+    };
+    if let Some(text) = GuiDrawCommand::glyph_run_styled(
+        password.x.saturating_add(12),
+        password.y.saturating_add(12),
+        0xd9e5f5,
+        logos_shell::login_text_flags(page, password_index),
+        &text[..length],
+    ) {
+        let _ = batches[2].push(text);
+    }
+    let _ = batches[2].push(GuiDrawCommand::fill_rect(
+        confirm,
+        if confirm_invalid { 0xb84a4a } else { confirm_color },
+    ));
+    let length = if confirm_value.is_empty() {
+        logos_shell::login_page_node_text(page, confirm_index, state, &mut text)
+    } else {
+        logos_shell::login_input_text(confirm_value, true, confirm.width, &mut text)
+    };
+    if let Some(text) = GuiDrawCommand::glyph_run_styled(
+        confirm.x.saturating_add(12),
+        confirm.y.saturating_add(12),
+        0xd9e5f5,
+        logos_shell::login_text_flags(page, confirm_index),
+        &text[..length],
+    ) {
+        let _ = batches[3].push(text);
+    }
+    let submit_disabled = !lockscreen.form().can_submit();
+    let submit_color = if submit_disabled { 0x1b356b } else { 0x356bd8 };
+    let _ = batches[3].push(GuiDrawCommand::fill_rect(submit, submit_color));
+    let length = logos_shell::login_page_node_text(page, submit_index, state, &mut text);
+    if let Some(text) = GuiDrawCommand::glyph_run_styled(
+        submit.x.saturating_add(12),
+        submit.y.saturating_add(12),
+        0xffffff,
+        logos_shell::login_text_flags(page, submit_index),
+        &text[..length],
+    ) {
+        let _ = batches[3].push(text);
+    }
+    for batch in &batches {
+        let _ = common::ipc_send_handle(display, batch);
+    }
+}
+
 fn send_shell_surface(
     display: logos_abi::CapabilityHandle,
     login_page: &logos_ui_compiler::UiBuild,
@@ -65,6 +247,10 @@ fn send_shell_surface(
     if !visible {
         let batch = GuiDrawBatch::new(surface, *sequence, GuiRect::SURFACE);
         let _ = common::ipc_send_handle(display, &batch);
+        return;
+    }
+    if logos_shell::named_node_index(login_page, b"confirmPassword").is_some() {
+        send_register_surface(display, login_page, layout, lockscreen, sequence, surface);
         return;
     }
     let state = logos_shell::LoginUiState::new(
@@ -228,7 +414,8 @@ pub extern "C" fn _start() -> ! {
     };
     let shell = unsafe { &mut *core::ptr::addr_of_mut!(SHELL) };
     let login_page = logos_shell::compile_login_page();
-    if !login_page.is_valid() {
+    let register_page = logos_shell::compile_register_page();
+    if !login_page.is_valid() || !register_page.is_valid() {
         common::idle();
     }
     let Some(login_layout) =
@@ -236,12 +423,19 @@ pub extern "C" fn _start() -> ! {
     else {
         common::idle();
     };
+    let Some(register_layout) =
+        logos_shell::LoginLayout::from_build(&register_page, GuiRect::new(0, 0, 640, 400))
+    else {
+        common::idle();
+    };
     let lockscreen = unsafe { &*core::ptr::addr_of!(LOCKSCREEN) };
     let mut surface_sequence = 0u32;
-    send_shell_surface(
+    send_current_surface(
         display,
-        &login_page,
-        &login_layout,
+        ShellPages {
+            login: (&login_page, &login_layout),
+            register: (&register_page, &register_layout),
+        },
         lockscreen,
         &mut surface_sequence,
         true,
@@ -279,10 +473,12 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             if action != logos_lockscreen::LockScreenAction::Ignored {
-                send_shell_surface(
+                send_current_surface(
                     display,
-                    &login_page,
-                    &login_layout,
+                    ShellPages {
+                        login: (&login_page, &login_layout),
+                        register: (&register_page, &register_layout),
+                    },
                     lockscreen,
                     &mut surface_sequence,
                     true,
@@ -306,10 +502,12 @@ pub extern "C" fn _start() -> ! {
                     let _ = common::ipc_send_handle(flow, &context);
                     let lockscreen = unsafe { &mut *core::ptr::addr_of_mut!(LOCKSCREEN) };
                     lockscreen.apply_status(result.status);
-                    send_shell_surface(
+                    send_current_surface(
                         display,
-                        &login_page,
-                        &login_layout,
+                        ShellPages {
+                            login: (&login_page, &login_layout),
+                            register: (&register_page, &register_layout),
+                        },
                         lockscreen,
                         &mut surface_sequence,
                         shell.focus() == logos_shell::ShellFocus::LockScreen,

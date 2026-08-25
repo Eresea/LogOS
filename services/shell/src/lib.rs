@@ -11,6 +11,10 @@ pub fn compile_login_page() -> logos_ui_compiler::UiBuild {
     logos_ui_compiler::compile_login_page()
 }
 
+pub fn compile_register_page() -> logos_ui_compiler::UiBuild {
+    logos_ui_compiler::compile_register_page()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoginUiState {
     pub claim: bool,
@@ -36,14 +40,8 @@ pub fn login_page_text(
         let Some(node) = build.document.node(index) else { continue };
         match node.kind {
             UiNodeKind::Label => {
-                let text = if node.key.as_bytes() == b"title" {
-                    if state.failure {
-                        b"Retry login".as_slice()
-                    } else if state.claim {
-                        b"Claim login".as_slice()
-                    } else {
-                        node.text.as_bytes()
-                    }
+                let text = if node.key.as_bytes() == b"title" && state.failure {
+                    b"Retry login".as_slice()
                 } else {
                     node.text.as_bytes()
                 };
@@ -54,7 +52,11 @@ pub fn login_page_text(
                 append_text(
                     output,
                     &mut length,
-                    if node.key.as_bytes() == b"password" { b"pwd" } else { b"usr" },
+                    match node.key.as_bytes() {
+                        b"password" => b"pwd",
+                        b"confirmPassword" => b"confirm",
+                        _ => b"usr",
+                    },
                 );
                 append_text(output, &mut length, b"]");
             }
@@ -85,6 +87,7 @@ pub const MAX_LOGIN_LAYOUT_NODES: usize = 8;
 pub enum LoginHitTarget {
     Username,
     Password,
+    ConfirmPassword,
     Submit,
 }
 
@@ -168,6 +171,8 @@ impl LoginLayout {
                     };
                     let target = if node.key.as_bytes() == b"password" {
                         Some(LoginHitTarget::Password)
+                    } else if node.key.as_bytes() == b"confirmPassword" {
+                        Some(LoginHitTarget::ConfirmPassword)
                     } else if node.kind == UiNodeKind::TextInput {
                         Some(LoginHitTarget::Username)
                     } else if node.kind == UiNodeKind::Button {
@@ -309,14 +314,22 @@ pub fn login_page_node_text(
     let Some(node) = build.document.node(usize::from(index)) else { return 0 };
     let text = match node.kind {
         UiNodeKind::Label if node.key.as_bytes() == b"title" && state.failure => b"Retry login",
-        UiNodeKind::Label if node.key.as_bytes() == b"title" && state.claim => b"Claim login",
         UiNodeKind::Label | UiNodeKind::Button => node.text.as_bytes(),
-        UiNodeKind::TextInput => node.key.as_bytes(),
+        UiNodeKind::TextInput => match node.key.as_bytes() {
+            b"confirmPassword" => b"confirm password",
+            key => key,
+        },
         UiNodeKind::Root | UiNodeKind::Panel | UiNodeKind::Form => &[],
     };
     let mut length = 0;
     append_text(output, &mut length, text);
     length
+}
+
+pub fn named_node_index(build: &logos_ui_compiler::UiBuild, name: &[u8]) -> Option<u16> {
+    (0..build.document.node_count()).find_map(|index| {
+        (build.document.node(index)?.key.as_bytes() == name).then_some(index as u16)
+    })
 }
 
 use logos_abi::{
@@ -577,6 +590,19 @@ mod tests {
         let blueprint = build.document.to_blueprint().unwrap();
         let tree = UiTree::from_blueprint(&blueprint).unwrap();
         assert_eq!(tree.len(), 6);
+    }
+
+    #[test]
+    fn register_page_compiles_with_confirmation_control() {
+        let build = compile_register_page();
+        assert!(build.is_valid());
+        let blueprint = build.document.to_blueprint().unwrap();
+        let tree = UiTree::from_blueprint(&blueprint).unwrap();
+        assert_eq!(tree.len(), 8);
+        let layout = LoginLayout::from_build(&build, GuiRect::new(0, 0, 640, 400)).unwrap();
+        let confirm = layout.bounds_for(LoginHitTarget::ConfirmPassword).unwrap();
+        let submit = layout.bounds_for(LoginHitTarget::Submit).unwrap();
+        assert!(submit.y > confirm.y);
     }
 
     #[test]

@@ -275,6 +275,10 @@ impl LockScreen {
         )
     }
 
+    pub fn confirmation(&self) -> &[u8] {
+        self.form.controls.confirm_password.value_ref().as_bytes()
+    }
+
     pub fn apply_status(&mut self, status: UserStatus) {
         self.form.complete_submission();
         self.form.clear_password();
