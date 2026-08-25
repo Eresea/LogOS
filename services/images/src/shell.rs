@@ -7,8 +7,9 @@ mod common;
 use core::{mem, ptr};
 
 use logos_abi::{
-    GuiDrawBatch, GuiDrawCommand, GuiRect, GuiSessionContext, InputMessage, IpcBytes, IpcStatus,
-    MAX_GUI_TEXT_BYTES, MessageKind, SurfaceHandle, UserRequest, UserResponse,
+    GUI_DRAW_FLAG_MORE, GuiDrawBatch, GuiDrawCommand, GuiRect, GuiSessionContext, InputMessage,
+    IpcBytes, IpcStatus, MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_TEXT_BYTES, MessageKind, SurfaceHandle,
+    UserRequest, UserResponse,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -54,31 +55,93 @@ static mut LOCKSCREEN: logos_lockscreen::LockScreen = logos_lockscreen::LockScre
 fn send_shell_surface(
     display: logos_abi::CapabilityHandle,
     login_page: &logos_ui_compiler::UiBuild,
+    layout: &logos_shell::LoginLayout,
     lockscreen: &logos_lockscreen::LockScreen,
     sequence: &mut u32,
     visible: bool,
 ) {
     *sequence = sequence.wrapping_add(1).max(1);
-    let mut batch =
-        GuiDrawBatch::new(SurfaceHandle::new(0, 1, 11).unwrap(), *sequence, GuiRect::SURFACE);
-    if visible {
-        let _ = batch.push(GuiDrawCommand::fill_surface(0x101820));
-        let _ =
-            batch.push(GuiDrawCommand::stroke_rect(GuiRect::new(24, 24, 592, 352), 0x4b89dc, 2));
-        let mut text = [0; MAX_GUI_TEXT_BYTES];
-        let length = logos_shell::login_page_text(
-            login_page,
-            logos_shell::LoginUiState::new(
-                lockscreen.mode() == logos_lockscreen::LockScreenMode::Claim,
-                lockscreen.failure(),
-            ),
-            &mut text,
-        );
-        if let Some(text) = GuiDrawCommand::glyph_run(48, 48, 0xffffff, &text[..length]) {
-            let _ = batch.push(text);
-        }
+    let surface = SurfaceHandle::new(0, 1, 11).unwrap();
+    if !visible {
+        let batch = GuiDrawBatch::new(surface, *sequence, GuiRect::SURFACE);
+        let _ = common::ipc_send_handle(display, &batch);
+        return;
     }
-    let _ = common::ipc_send_handle(display, &batch);
+    let state = logos_shell::LoginUiState::new(
+        lockscreen.mode() == logos_lockscreen::LockScreenMode::Claim,
+        lockscreen.failure(),
+    );
+    let Some(panel) = layout.node(0).map(|node| node.bounds) else { return };
+    let Some(title) = layout.node(1).map(|node| node.bounds) else { return };
+    let Some(username) = layout.bounds_for(logos_shell::LoginHitTarget::Username) else {
+        return;
+    };
+    let Some(password) = layout.bounds_for(logos_shell::LoginHitTarget::Password) else { return };
+    let Some(submit) = layout.bounds_for(logos_shell::LoginHitTarget::Submit) else { return };
+
+    let mut batches =
+        [GuiDrawBatch::new(surface, *sequence, GuiRect::SURFACE); MAX_GUI_BATCH_FRAGMENTS];
+    for batch in &mut batches[..MAX_GUI_BATCH_FRAGMENTS - 1] {
+        batch.flags = GUI_DRAW_FLAG_MORE;
+    }
+    let _ = batches[0].push(GuiDrawCommand::fill_surface(0x101820));
+    let _ = batches[0].push(GuiDrawCommand::fill_rect(panel, 0x182535));
+    let _ = batches[0].push(GuiDrawCommand::stroke_rect(panel, 0x4b89dc, 2));
+
+    let mut text = [0; MAX_GUI_TEXT_BYTES];
+    let length = logos_shell::login_page_node_text(login_page, 1, state, &mut text);
+    if let Some(text) = GuiDrawCommand::glyph_run(title.x, title.y, 0xffffff, &text[..length]) {
+        let _ = batches[1].push(text);
+    }
+    let active = 0x315e91;
+    let idle = 0x263548;
+    let username_color = if lockscreen.field() == logos_lockscreen::LockScreenField::Username {
+        active
+    } else {
+        idle
+    };
+    let password_color = if lockscreen.field() == logos_lockscreen::LockScreenField::Password {
+        active
+    } else {
+        idle
+    };
+    let _ = batches[1].push(GuiDrawCommand::fill_rect(username, username_color));
+    let _ = batches[1].push(GuiDrawCommand::stroke_rect(username, 0x6d8fc4, 1));
+
+    let length = logos_shell::login_page_node_text(login_page, 2, state, &mut text);
+    if let Some(text) = GuiDrawCommand::glyph_run(
+        username.x.saturating_add(12),
+        username.y.saturating_add(12),
+        0xd9e5f5,
+        &text[..length],
+    ) {
+        let _ = batches[2].push(text);
+    }
+    let _ = batches[2].push(GuiDrawCommand::fill_rect(password, password_color));
+    let _ = batches[2].push(GuiDrawCommand::stroke_rect(password, 0x6d8fc4, 1));
+
+    let length = logos_shell::login_page_node_text(login_page, 3, state, &mut text);
+    if let Some(text) = GuiDrawCommand::glyph_run(
+        password.x.saturating_add(12),
+        password.y.saturating_add(12),
+        0xd9e5f5,
+        &text[..length],
+    ) {
+        let _ = batches[3].push(text);
+    }
+    let _ = batches[3].push(GuiDrawCommand::fill_rect(submit, 0x356bd8));
+    let length = logos_shell::login_page_node_text(login_page, 4, state, &mut text);
+    if let Some(text) = GuiDrawCommand::glyph_run(
+        submit.x.saturating_add(12),
+        submit.y.saturating_add(12),
+        0xffffff,
+        &text[..length],
+    ) {
+        let _ = batches[3].push(text);
+    }
+    for batch in &batches {
+        let _ = common::ipc_send_handle(display, batch);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -113,9 +176,21 @@ pub extern "C" fn _start() -> ! {
     if !login_page.is_valid() {
         common::idle();
     }
+    let Some(login_layout) =
+        logos_shell::LoginLayout::from_build(&login_page, GuiRect::new(0, 0, 640, 400))
+    else {
+        common::idle();
+    };
     let lockscreen = unsafe { &*core::ptr::addr_of!(LOCKSCREEN) };
     let mut surface_sequence = 0u32;
-    send_shell_surface(display, &login_page, lockscreen, &mut surface_sequence, true);
+    send_shell_surface(
+        display,
+        &login_page,
+        &login_layout,
+        lockscreen,
+        &mut surface_sequence,
+        true,
+    );
     let context = GuiSessionContext::EMPTY;
     let _ = common::ipc_send_handle(flow, &context);
     let mut pending_user: Option<IpcBytes> = None;
@@ -147,7 +222,14 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             if action != logos_lockscreen::LockScreenAction::Ignored {
-                send_shell_surface(display, &login_page, lockscreen, &mut surface_sequence, true);
+                send_shell_surface(
+                    display,
+                    &login_page,
+                    &login_layout,
+                    lockscreen,
+                    &mut surface_sequence,
+                    true,
+                );
             }
         }
         if let Some(request) = pending_user {
@@ -170,6 +252,7 @@ pub extern "C" fn _start() -> ! {
                     send_shell_surface(
                         display,
                         &login_page,
+                        &login_layout,
                         lockscreen,
                         &mut surface_sequence,
                         shell.focus() == logos_shell::ShellFocus::LockScreen,

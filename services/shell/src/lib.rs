@@ -79,8 +79,133 @@ fn append_text(output: &mut [u8; logos_abi::MAX_GUI_TEXT_BYTES], length: &mut us
     }
 }
 
+pub const MAX_LOGIN_LAYOUT_NODES: usize = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LoginHitTarget {
+    Username,
+    Password,
+    Submit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LoginLayoutNode {
+    pub index: u16,
+    pub kind: UiNodeKind,
+    pub bounds: GuiRect,
+    pub target: Option<LoginHitTarget>,
+}
+
+impl LoginLayoutNode {
+    const EMPTY: Self =
+        Self { index: u16::MAX, kind: UiNodeKind::Panel, bounds: GuiRect::EMPTY, target: None };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LoginLayout {
+    nodes: [LoginLayoutNode; MAX_LOGIN_LAYOUT_NODES],
+    count: usize,
+}
+
+impl LoginLayout {
+    pub fn from_build(build: &logos_ui_compiler::UiBuild, viewport: GuiRect) -> Option<Self> {
+        if !build.is_valid() || viewport.is_empty() {
+            return None;
+        }
+        let panel = inset(viewport, 24);
+        let field_width = build
+            .document
+            .node(2)
+            .filter(|node| has_style(node, logos_ui_compiler::UiStyle::Width96))
+            .map_or(240, |_| 384)
+            .min(panel.width);
+        let center_x = panel.x.saturating_add((panel.width / 2) as i32);
+        let field_x = center_x.saturating_sub((field_width / 2) as i32);
+        let mut layout = Self { nodes: [LoginLayoutNode::EMPTY; MAX_LOGIN_LAYOUT_NODES], count: 0 };
+        let mut input_index = 0u32;
+        for index in 0..build.document.node_count() {
+            let node = build.document.node(index)?;
+            let (bounds, target) = match node.kind {
+                UiNodeKind::Root | UiNodeKind::Panel => (panel, None),
+                UiNodeKind::Label => {
+                    (GuiRect::new(field_x, panel.y.saturating_add(48), field_width, 32), None)
+                }
+                UiNodeKind::TextInput => {
+                    let y = panel.y.saturating_add(112 + input_index.saturating_mul(56) as i32);
+                    input_index = input_index.saturating_add(1);
+                    let target = if node.key.as_bytes() == b"password" {
+                        LoginHitTarget::Password
+                    } else {
+                        LoginHitTarget::Username
+                    };
+                    (GuiRect::new(field_x, y, field_width, 40), Some(target))
+                }
+                UiNodeKind::Button => (
+                    GuiRect::new(field_x, panel.y.saturating_add(240), field_width, 40),
+                    Some(LoginHitTarget::Submit),
+                ),
+            };
+            if layout.count == MAX_LOGIN_LAYOUT_NODES {
+                return None;
+            }
+            layout.nodes[layout.count] =
+                LoginLayoutNode { index: index as u16, kind: node.kind, bounds, target };
+            layout.count += 1;
+        }
+        Some(layout)
+    }
+
+    pub fn node(&self, index: u16) -> Option<LoginLayoutNode> {
+        self.nodes[..self.count].iter().copied().find(|node| node.index == index)
+    }
+
+    pub fn bounds_for(&self, target: LoginHitTarget) -> Option<GuiRect> {
+        self.nodes[..self.count]
+            .iter()
+            .find(|node| node.target == Some(target))
+            .map(|node| node.bounds)
+    }
+
+    pub fn hit_test(&self, x: i32, y: i32) -> Option<LoginHitTarget> {
+        self.nodes[..self.count]
+            .iter()
+            .rev()
+            .find(|node| node.target.is_some() && node.bounds.contains(x, y))
+            .and_then(|node| node.target)
+    }
+}
+
+fn inset(rect: GuiRect, amount: i32) -> GuiRect {
+    let width = rect.width.saturating_sub((amount as u32).saturating_mul(2));
+    let height = rect.height.saturating_sub((amount as u32).saturating_mul(2));
+    GuiRect::new(rect.x.saturating_add(amount), rect.y.saturating_add(amount), width, height)
+}
+
+fn has_style(node: &logos_ui_compiler::UiNodeTemplate, style: logos_ui_compiler::UiStyle) -> bool {
+    node.styles.tokens[..node.styles.len as usize].contains(&style)
+}
+
+pub fn login_page_node_text(
+    build: &logos_ui_compiler::UiBuild,
+    index: u16,
+    state: LoginUiState,
+    output: &mut [u8; logos_abi::MAX_GUI_TEXT_BYTES],
+) -> usize {
+    let Some(node) = build.document.node(usize::from(index)) else { return 0 };
+    let text = match node.kind {
+        UiNodeKind::Label if node.key.as_bytes() == b"title" && state.failure => b"Retry login",
+        UiNodeKind::Label if node.key.as_bytes() == b"title" && state.claim => b"Claim login",
+        UiNodeKind::Label | UiNodeKind::Button => node.text.as_bytes(),
+        UiNodeKind::TextInput => node.key.as_bytes(),
+        UiNodeKind::Root | UiNodeKind::Panel => &[],
+    };
+    let mut length = 0;
+    append_text(output, &mut length, text);
+    length
+}
+
 use logos_abi::{
-    GuiSessionContext, InputMessage, UserOperation, UserRequest, UserResponse, UserStatus,
+    GuiRect, GuiSessionContext, InputMessage, UserOperation, UserRequest, UserResponse, UserStatus,
 };
 
 pub const MAX_LOGIN_RETRIES: u8 = 3;
@@ -347,5 +472,31 @@ mod tests {
         assert_eq!(&output[..length], b"LogOS [usr] [pwd] [Unlock]");
         let length = login_page_text(&build, LoginUiState::new(false, true), &mut output);
         assert_eq!(&output[..length], b"Retry login [usr] [pwd] [Unlock]");
+    }
+
+    #[test]
+    fn login_layout_positions_fields_and_hit_tests_targets() {
+        let build = compile_login_page();
+        let layout = LoginLayout::from_build(&build, GuiRect::new(0, 0, 640, 400)).unwrap();
+        let username = layout.bounds_for(LoginHitTarget::Username).unwrap();
+        let password = layout.bounds_for(LoginHitTarget::Password).unwrap();
+        let submit = layout.bounds_for(LoginHitTarget::Submit).unwrap();
+        assert_eq!(username.width, 384);
+        assert!(password.y > username.y);
+        assert!(submit.y > password.y);
+        assert_eq!(layout.hit_test(username.x + 1, username.y + 1), Some(LoginHitTarget::Username));
+        assert_eq!(layout.hit_test(password.x + 1, password.y + 1), Some(LoginHitTarget::Password));
+        assert_eq!(layout.hit_test(submit.x + 1, submit.y + 1), Some(LoginHitTarget::Submit));
+        assert_eq!(layout.hit_test(0, 0), None);
+    }
+
+    #[test]
+    fn login_page_node_text_comes_from_compiled_nodes() {
+        let build = compile_login_page();
+        let mut output = [0; logos_abi::MAX_GUI_TEXT_BYTES];
+        let length = login_page_node_text(&build, 2, LoginUiState::new(false, false), &mut output);
+        assert_eq!(&output[..length], b"username");
+        let length = login_page_node_text(&build, 4, LoginUiState::new(false, false), &mut output);
+        assert_eq!(&output[..length], b"Unlock");
     }
 }
