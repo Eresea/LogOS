@@ -219,6 +219,37 @@ fn has_style(node: &logos_ui_compiler::UiNodeTemplate, style: logos_ui_compiler:
     node.styles.tokens[..node.styles.len as usize].contains(&style)
 }
 
+pub fn login_style_active(
+    build: &logos_ui_compiler::UiBuild,
+    index: u16,
+    state: LoginUiState,
+    focused: bool,
+    style: logos_ui_compiler::UiStyle,
+) -> bool {
+    let Some(node) = build.document.node(usize::from(index)) else { return false };
+    if has_style(node, style) {
+        return true;
+    }
+    if node.state_styles.entries[..node.state_styles.len as usize].iter().any(|entry| {
+        entry.state == logos_ui_compiler::UiStyleState::Focus && focused && entry.style == style
+    }) {
+        return true;
+    }
+    node.conditional_styles.entries[..node.conditional_styles.len as usize].iter().any(|entry| {
+        entry.style == style && login_condition_active(entry.expression.as_bytes(), state)
+    })
+}
+
+fn login_condition_active(expression: &[u8], state: LoginUiState) -> bool {
+    match expression {
+        b"claim" => state.claim,
+        b"failure" => state.failure,
+        b"true" => true,
+        b"false" => false,
+        _ => false,
+    }
+}
+
 fn gap_px(node: &logos_ui_compiler::UiNodeTemplate, horizontal: bool) -> i32 {
     let mut general = None;
     let mut axis = None;
@@ -550,5 +581,38 @@ mod tests {
         assert_eq!(&output[..length], b"username");
         let length = login_page_node_text(&build, 5, LoginUiState::new(false, false), &mut output);
         assert_eq!(&output[..length], b"Unlock");
+    }
+
+    #[test]
+    fn login_state_activates_focus_and_boolean_style_rules() {
+        let build = compile_login_page();
+        assert!(login_style_active(
+            &build,
+            3,
+            LoginUiState::new(false, false),
+            true,
+            logos_ui_compiler::UiStyle::BackgroundAccent,
+        ));
+        assert!(!login_style_active(
+            &build,
+            4,
+            LoginUiState::new(false, false),
+            false,
+            logos_ui_compiler::UiStyle::BackgroundAccent,
+        ));
+        assert!(login_style_active(
+            &build,
+            5,
+            LoginUiState::new(false, true),
+            false,
+            logos_ui_compiler::UiStyle::Opacity50,
+        ));
+        assert!(!login_style_active(
+            &build,
+            5,
+            LoginUiState::new(false, false),
+            false,
+            logos_ui_compiler::UiStyle::Opacity50,
+        ));
     }
 }

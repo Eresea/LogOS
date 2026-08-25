@@ -506,7 +506,7 @@ There should be no runtime CSS selector matching or general cascade.
 
 ## 11.2 State variants
 
-Useful state variants should be supported:
+Useful state variants are represented as bounded state-style records:
 
 ```html
 <button {
@@ -514,8 +514,7 @@ Useful state variants should be supported:
     py-2
     rounded-md
     bg-accent
-    hover:bg-accent-hover
-    disabled:opacity-50
+    focus:bg-accent
 }>
 ```
 
@@ -539,12 +538,18 @@ Exact syntax remains open, but conceptually:
 ```html
 <ui.row {
     items-center
-    [bg-error]="hasError"
-    [opacity-50]="disabled"
+    [opacity-50]="hasError"
 }>
 ```
 
-The implementation should preserve the same typed/dependency-aware model as normal bindings.
+The first supported state is `focus`. Unsupported state names are compile
+diagnostics rather than runtime selector lookups.
+
+The compiler stores conditional utilities separately from ordinary bindings.
+The expression is a bounded boolean name resolved by the owning component; it
+is not a general runtime expression evaluator. A false value removes the
+utility from the resolved style set, and a true value activates it. Each node
+has fixed limits for state and conditional style records.
 
 ---
 

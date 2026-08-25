@@ -10,6 +10,8 @@ pub const MAX_UI_NAME_BYTES: usize = 24;
 pub const MAX_UI_TEXT_BYTES: usize = 64;
 pub const MAX_UI_EXPRESSION_BYTES: usize = 32;
 pub const MAX_UI_STYLE_TOKENS: usize = 8;
+pub const MAX_UI_STATE_STYLES: usize = 4;
+pub const MAX_UI_CONDITIONAL_STYLES: usize = 4;
 pub const MAX_UI_DIAGNOSTICS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,6 +112,71 @@ impl UiBinding {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiStyleState {
+    Focus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiStateStyle {
+    pub state: UiStyleState,
+    pub style: UiStyle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiStateStyleList {
+    pub entries: [UiStateStyle; MAX_UI_STATE_STYLES],
+    pub len: u8,
+}
+
+impl UiStateStyleList {
+    const EMPTY: Self = Self {
+        entries: [UiStateStyle { state: UiStyleState::Focus, style: UiStyle::FullHeight };
+            MAX_UI_STATE_STYLES],
+        len: 0,
+    };
+
+    fn push(&mut self, entry: UiStateStyle) -> bool {
+        if usize::from(self.len) == MAX_UI_STATE_STYLES {
+            return false;
+        }
+        self.entries[usize::from(self.len)] = entry;
+        self.len += 1;
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiConditionalStyle {
+    pub style: UiStyle,
+    pub expression: UiExpression,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiConditionalStyleList {
+    pub entries: [UiConditionalStyle; MAX_UI_CONDITIONAL_STYLES],
+    pub len: u8,
+}
+
+impl UiConditionalStyleList {
+    const EMPTY: Self = Self {
+        entries: [UiConditionalStyle {
+            style: UiStyle::FullHeight,
+            expression: UiExpression::EMPTY,
+        }; MAX_UI_CONDITIONAL_STYLES],
+        len: 0,
+    };
+
+    fn push(&mut self, entry: UiConditionalStyle) -> bool {
+        if usize::from(self.len) == MAX_UI_CONDITIONAL_STYLES {
+            return false;
+        }
+        self.entries[usize::from(self.len)] = entry;
+        self.len += 1;
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiEventKind {
     Click,
     Submit,
@@ -149,6 +216,7 @@ pub enum UiStyle {
     BackgroundAccent,
     Text4xl,
     FontLight,
+    Opacity50,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -179,6 +247,8 @@ pub struct UiNodeTemplate {
     pub binding: UiBinding,
     pub event: UiEvent,
     pub styles: UiStyleList,
+    pub state_styles: UiStateStyleList,
+    pub conditional_styles: UiConditionalStyleList,
 }
 
 impl UiNodeTemplate {
@@ -190,6 +260,8 @@ impl UiNodeTemplate {
         binding: UiBinding::EMPTY,
         event: UiEvent::EMPTY,
         styles: UiStyleList::EMPTY,
+        state_styles: UiStateStyleList::EMPTY,
+        conditional_styles: UiConditionalStyleList::EMPTY,
     };
 }
 
@@ -513,20 +585,34 @@ impl Parser<'_> {
             self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
             return;
         };
-        let property = match name.as_bytes() {
-            b"value" if two_way => UiBindingProperty::Value,
-            b"disabled" if !two_way => UiBindingProperty::Disabled,
-            _ => {
-                self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
-                return;
-            }
-        };
         if let Some(index) = node_index {
             if let Some(node) = self.document.node_mut(index) {
-                if node.binding.is_present() {
-                    self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
-                } else {
-                    node.binding = UiBinding { property, expression };
+                match name.as_bytes() {
+                    b"value" if two_way => {
+                        if node.binding.is_present() {
+                            self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
+                        } else {
+                            node.binding =
+                                UiBinding { property: UiBindingProperty::Value, expression };
+                        }
+                    }
+                    b"disabled" if !two_way => {
+                        if node.binding.is_present() {
+                            self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
+                        } else {
+                            node.binding =
+                                UiBinding { property: UiBindingProperty::Disabled, expression };
+                        }
+                    }
+                    _ => {
+                        let Some(style) = style_token(name.as_bytes()) else {
+                            self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
+                            return;
+                        };
+                        if !node.conditional_styles.push(UiConditionalStyle { style, expression }) {
+                            self.diagnostics.push(UiDiagnosticKind::Capacity, offset);
+                        }
+                    }
                 }
             }
         }
@@ -586,15 +672,21 @@ impl Parser<'_> {
                 self.skip_until_attribute_end();
                 return;
             };
-            let Some(style) = style_token(token.as_bytes()) else {
+            let Some(rule) = style_rule(token.as_bytes()) else {
                 self.diagnostics.push(UiDiagnosticKind::UnknownStyle, offset);
                 continue;
             };
             if let Some(index) = node_index {
-                if let Some(node) = self.document.node_mut(index)
-                    && !node.styles.push(style)
-                {
-                    self.diagnostics.push(UiDiagnosticKind::Capacity, offset);
+                if let Some(node) = self.document.node_mut(index) {
+                    let accepted = match rule {
+                        UiStyleRule::Base(style) => node.styles.push(style),
+                        UiStyleRule::Focus(style) => node
+                            .state_styles
+                            .push(UiStateStyle { state: UiStyleState::Focus, style }),
+                    };
+                    if !accepted {
+                        self.diagnostics.push(UiDiagnosticKind::Capacity, offset);
+                    }
                 }
             }
         }
@@ -611,7 +703,7 @@ impl Parser<'_> {
     fn read_name(&mut self) -> Option<UiName> {
         let start = self.position;
         while let Some(byte) = self.peek() {
-            if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':') {
                 self.position += 1;
             } else {
                 break;
@@ -686,6 +778,19 @@ fn node_key(index: usize, name: &UiName) -> u16 {
     if key == 0 { 1 } else { key }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UiStyleRule {
+    Base(UiStyle),
+    Focus(UiStyle),
+}
+
+fn style_rule(token: &[u8]) -> Option<UiStyleRule> {
+    if let Some(style) = token.strip_prefix(b"focus:").and_then(style_token) {
+        return Some(UiStyleRule::Focus(style));
+    }
+    style_token(token).map(UiStyleRule::Base)
+}
+
 fn style_token(token: &[u8]) -> Option<UiStyle> {
     match token {
         b"h-full" => Some(UiStyle::FullHeight),
@@ -706,6 +811,7 @@ fn style_token(token: &[u8]) -> Option<UiStyle> {
         b"bg-accent" => Some(UiStyle::BackgroundAccent),
         b"text-4xl" => Some(UiStyle::Text4xl),
         b"font-light" => Some(UiStyle::FontLight),
+        b"opacity-50" => Some(UiStyle::Opacity50),
         _ => spacing_style(token),
     }
 }
@@ -764,8 +870,17 @@ mod tests {
         assert!(form_styles.tokens[..form_styles.len as usize].contains(&UiStyle::GapY(4)));
         assert_eq!(build.document.node(2).unwrap().text.as_bytes(), b"LogOS");
         assert_eq!(build.document.node(3).unwrap().kind, UiNodeKind::TextInput);
+        let username_states = &build.document.node(3).unwrap().state_styles;
+        assert!(username_states.entries[..username_states.len as usize].contains(&UiStateStyle {
+            state: UiStyleState::Focus,
+            style: UiStyle::BackgroundAccent,
+        }));
         assert_eq!(build.document.node(4).unwrap().binding.property, UiBindingProperty::Value);
         assert_eq!(build.document.node(5).unwrap().event.kind, UiEventKind::Click);
+        let submit_conditions = &build.document.node(5).unwrap().conditional_styles;
+        assert_eq!(submit_conditions.len, 1);
+        assert_eq!(submit_conditions.entries[0].style, UiStyle::Opacity50);
+        assert_eq!(submit_conditions.entries[0].expression.as_bytes(), b"failure");
         assert_eq!(lint(LOGIN_PAGE).len(), 0);
         let blueprint = build.document.to_blueprint().unwrap();
         assert_eq!(blueprint.len(), 6);

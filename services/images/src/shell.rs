@@ -95,12 +95,24 @@ fn send_shell_surface(
     }
     let active = 0x315e91;
     let idle = 0x263548;
-    let username_color = if lockscreen.field() == logos_lockscreen::LockScreenField::Username {
+    let username_color = if logos_shell::login_style_active(
+        login_page,
+        3,
+        state,
+        lockscreen.field() == logos_lockscreen::LockScreenField::Username,
+        logos_ui_compiler::UiStyle::BackgroundAccent,
+    ) {
         active
     } else {
         idle
     };
-    let password_color = if lockscreen.field() == logos_lockscreen::LockScreenField::Password {
+    let password_color = if logos_shell::login_style_active(
+        login_page,
+        4,
+        state,
+        lockscreen.field() == logos_lockscreen::LockScreenField::Password,
+        logos_ui_compiler::UiStyle::BackgroundAccent,
+    ) {
         active
     } else {
         idle
@@ -129,7 +141,18 @@ fn send_shell_surface(
     ) {
         let _ = batches[3].push(text);
     }
-    let _ = batches[3].push(GuiDrawCommand::fill_rect(submit, 0x356bd8));
+    let submit_color = if logos_shell::login_style_active(
+        login_page,
+        5,
+        state,
+        false,
+        logos_ui_compiler::UiStyle::Opacity50,
+    ) {
+        0x1b356b
+    } else {
+        0x356bd8
+    };
+    let _ = batches[3].push(GuiDrawCommand::fill_rect(submit, submit_color));
     let length = logos_shell::login_page_node_text(login_page, 5, state, &mut text);
     if let Some(text) = GuiDrawCommand::glyph_run(
         submit.x.saturating_add(12),
