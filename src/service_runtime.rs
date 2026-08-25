@@ -4766,20 +4766,28 @@ impl ServiceRuntime {
             Ok(handle) => handle,
             Err(_) => return false,
         };
+        let queue_frame = match self.frame_pool.allocate_for(OwnerId::KERNEL) {
+            Ok(frame) => frame,
+            Err(_) => return false,
+        };
         let (endpoint, send, receive, read_event, write_event) =
             match (&mut self.dynamic_ipc, &mut self.dynamic_events) {
                 (Some(ipc), Some(events)) => {
-                    let endpoint = match ipc.create_endpoint(
+                    let endpoint = match ipc.create_endpoint_with_frames(
                         producer,
                         consumer,
                         logos_abi::IPC_CONTRACT_BYTES,
                         1,
                         1,
                         self.service_epoch,
+                        core::slice::from_ref(&queue_frame),
                         events,
                     ) {
                         Ok(endpoint) => endpoint,
-                        Err(_) => return false,
+                        Err(_) => {
+                            let _ = self.frame_pool.release(queue_frame);
+                            return false;
+                        }
                     };
                     let send = match ipc.grant(producer, endpoint, logos_abi::IpcRights::Send) {
                         Ok(capability) => capability,
@@ -4817,7 +4825,10 @@ impl ServiceRuntime {
                     };
                     (endpoint, send, receive, read_event, write_event)
                 }
-                _ => return false,
+                _ => {
+                    let _ = self.frame_pool.release(queue_frame);
+                    return false;
+                }
             };
 
         let success = match (&mut self.dynamic_ipc, &mut self.dynamic_events) {
@@ -4851,17 +4862,25 @@ impl ServiceRuntime {
                 {
                     return false;
                 }
-                let replacement = match ipc.create_endpoint(
+                let replacement_frame = match self.frame_pool.allocate_for(OwnerId::KERNEL) {
+                    Ok(frame) => frame,
+                    Err(_) => return false,
+                };
+                let replacement = match ipc.create_endpoint_with_frames(
                     producer,
                     consumer,
                     logos_abi::IPC_CONTRACT_BYTES,
                     1,
                     1,
                     self.service_epoch,
+                    core::slice::from_ref(&replacement_frame),
                     events,
                 ) {
                     Ok(endpoint) => endpoint,
-                    Err(_) => return false,
+                    Err(_) => {
+                        let _ = self.frame_pool.release(replacement_frame);
+                        return false;
+                    }
                 };
                 let replacement_send =
                     match ipc.grant(producer, replacement, logos_abi::IpcRights::Send) {
