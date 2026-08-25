@@ -1330,10 +1330,30 @@ impl ServiceRuntime {
         process: ProcessHandle,
         tables: &mut PageTableBuilder,
     ) -> Result<(), ServiceRuntimeError> {
+        let result = self.map_service_heap_inner(index, process, tables);
+        if let Err(error) = result {
+            if self.release_service_heap_slot(index).is_err() {
+                return Err(ServiceRuntimeError::Resources);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn map_service_heap_inner(
+        &mut self,
+        index: usize,
+        process: ProcessHandle,
+        tables: &mut PageTableBuilder,
+    ) -> Result<(), ServiceRuntimeError> {
         let service_handle =
             self.service_handles.get(index).copied().ok_or(ServiceRuntimeError::StaleGeneration)?;
         let owner =
             OwnerId::service_handle(service_handle).ok_or(ServiceRuntimeError::Resources)?;
+        if !self.service_heaps[index].frames.is_empty() || self.service_bootstrap_frames[index] != 0
+        {
+            return Err(ServiceRuntimeError::Resources);
+        }
         let mut memory = IdentityPageTableMemory;
         let heap_quota_pages = self
             .dynamic_services
@@ -1345,7 +1365,6 @@ impl ServiceRuntime {
         }
         let initial_heap_pages = logos_abi::SERVICE_HEAP_INITIAL_PAGES;
         self.service_heaps[index].quota_pages = heap_quota_pages;
-        self.service_heaps[index].frames.clear();
         if self.service_heaps[index].frames.try_reserve_exact(initial_heap_pages).is_err() {
             return Err(ServiceRuntimeError::Resources);
         }
