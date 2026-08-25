@@ -23,6 +23,7 @@ members = [
     "services/shell",
     "services/lockscreen",
     "services/images",
+    "ui",
 ]
 resolver = "3"
 

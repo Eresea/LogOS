@@ -3,9 +3,7 @@
 #[cfg(test)]
 extern crate std;
 
-mod ui;
-
-pub use ui::{
+pub use logos_ui::{
     MAX_UI_NODES, UiBlueprint, UiError, UiNode, UiNodeHandle, UiNodeKind, UiNodeSpec, UiTree,
 };
 
