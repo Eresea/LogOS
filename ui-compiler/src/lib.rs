@@ -545,6 +545,7 @@ impl Parser<'_> {
                 Some(b'{') => self.parse_styles(node_index),
                 Some(b'[') => self.parse_binding(node_index),
                 Some(b'(') => self.parse_event(node_index),
+                Some(b'#') => self.parse_node_name(node_index),
                 Some(_) => self.parse_plain_attribute(node_index),
                 None => {
                     self.diagnostics.push(UiDiagnosticKind::UnexpectedEnd, offset);
@@ -571,7 +572,7 @@ impl Parser<'_> {
             self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
             return;
         };
-        if name.as_bytes() != b"key" && name.as_bytes() != b"id" {
+        if name.as_bytes() != b"id" {
             self.diagnostics.push(UiDiagnosticKind::UnknownAttribute, offset);
             return;
         }
@@ -582,6 +583,21 @@ impl Parser<'_> {
         if let Some(index) = node_index {
             if let Some(node) = self.document.node_mut(index) {
                 node.key = value;
+            }
+        }
+    }
+
+    fn parse_node_name(&mut self, node_index: Option<u16>) {
+        let offset = self.position;
+        self.position += 1;
+        let Some(name) = self.read_name() else {
+            self.diagnostics.push(UiDiagnosticKind::UnexpectedToken, offset);
+            self.skip_until_attribute_end();
+            return;
+        };
+        if let Some(index) = node_index {
+            if let Some(node) = self.document.node_mut(index) {
+                node.key = name;
             }
         }
     }
@@ -1015,6 +1031,21 @@ mod tests {
         assert!(matches!(
             invalid.diagnostics.get(0),
             Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownBinding, .. })
+        ));
+    }
+
+    #[test]
+    fn parses_hash_node_names_and_rejects_key_attributes() {
+        let build = compile(r#"<ui.form #loginForm><ui.input #username /></ui.form>"#);
+        assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
+        assert_eq!(build.document.node(0).unwrap().key.as_bytes(), b"loginForm");
+        assert_eq!(build.document.node(1).unwrap().key.as_bytes(), b"username");
+
+        let legacy = compile(r#"<ui.form key="loginForm" />"#);
+        assert!(!legacy.is_valid());
+        assert!(matches!(
+            legacy.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownAttribute, .. })
         ));
     }
 
