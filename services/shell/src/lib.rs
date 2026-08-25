@@ -313,7 +313,13 @@ pub fn login_page_node_text(
 ) -> usize {
     let Some(node) = build.document.node(usize::from(index)) else { return 0 };
     let text = match node.kind {
-        UiNodeKind::Label if node.key.as_bytes() == b"title" && state.failure => b"Retry login",
+        UiNodeKind::Label if node.key.as_bytes() == b"title" && state.failure => {
+            if named_node_index(build, b"notice").is_some() {
+                b"Retry setup".as_slice()
+            } else {
+                b"Retry login".as_slice()
+            }
+        }
         UiNodeKind::Label | UiNodeKind::Button => node.text.as_bytes(),
         UiNodeKind::TextInput => match node.key.as_bytes() {
             b"confirmPassword" => b"confirm password",
@@ -603,6 +609,14 @@ mod tests {
         let confirm = layout.bounds_for(LoginHitTarget::ConfirmPassword).unwrap();
         let submit = layout.bounds_for(LoginHitTarget::Submit).unwrap();
         assert!(submit.y > confirm.y);
+        let mut output = [0; logos_abi::MAX_GUI_TEXT_BYTES];
+        let length = login_page_node_text(
+            &build,
+            named_node_index(&build, b"title").unwrap(),
+            LoginUiState::new(true, true),
+            &mut output,
+        );
+        assert_eq!(&output[..length], b"Retry setup");
     }
 
     #[test]
