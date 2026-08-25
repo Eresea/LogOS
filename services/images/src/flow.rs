@@ -12,11 +12,11 @@ mod common;
 use logos_abi::{
     COMPLETION_FLAG_TRUNCATED, CompletionRequest, CompletionResponse, CompletionStatus,
     DeviceOperation, DeviceRequest, DeviceResponse, DeviceStatus, FetchBodyChunk, FetchControl,
-    FetchPhase, FetchRequest, FetchResponse, FetchStatus, FlowControl, IPC_FLAG_MORE, IpcBytes,
-    IpcStatus, MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation, NetworkRequest,
-    NetworkResponse, NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE, StorageApiOperation,
-    StorageApiRequest, StorageApiResponse, StorageApiStatus, UserOperation, UserRequest,
-    UserResponse, UserStatus,
+    FetchPhase, FetchRequest, FetchResponse, FetchStatus, FlowControl, GuiSessionContext,
+    IPC_FLAG_MORE, IpcBytes, IpcStatus, MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation,
+    NetworkRequest, NetworkResponse, NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE,
+    StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus, UserOperation,
+    UserRequest, UserResponse, UserStatus,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -91,6 +91,12 @@ const USER_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contr
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
+const SHELL_CONTEXT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_GUI_SESSION,
+    b"shell",
+    mem::size_of::<GuiSessionContext>(),
+    logos_abi::IpcRights::Receive,
+);
 
 #[derive(Clone, Copy)]
 struct IpcCapabilities {
@@ -106,6 +112,7 @@ struct IpcCapabilities {
     device_receive: logos_abi::CapabilityHandle,
     user_send: logos_abi::CapabilityHandle,
     user_receive: logos_abi::CapabilityHandle,
+    shell_context: logos_abi::CapabilityHandle,
 }
 
 static mut IPC_CAPABILITIES: Option<IpcCapabilities> = None;
@@ -125,6 +132,7 @@ fn ipc_capabilities() -> IpcCapabilities {
             device_receive: logos_abi::CapabilityHandle::EMPTY,
             user_send: logos_abi::CapabilityHandle::EMPTY,
             user_receive: logos_abi::CapabilityHandle::EMPTY,
+            shell_context: logos_abi::CapabilityHandle::EMPTY,
         })
     }
 }
@@ -144,6 +152,7 @@ fn wait_for_ipc() {
         capabilities.device_receive,
         capabilities.user_send,
         capabilities.user_receive,
+        capabilities.shell_context,
     ]);
 }
 
@@ -1457,6 +1466,22 @@ impl UserClient {
         self.active
     }
 
+    fn adopt_context(&mut self, context: GuiSessionContext) {
+        if context.is_authenticated() {
+            self.session = context.session;
+            self.user = context.user;
+            self.capability = context.capability;
+            self.root = context.root;
+            self.rights = context.rights;
+        } else {
+            self.session = logos_abi::SessionHandle::EMPTY;
+            self.user = logos_abi::UserId::EMPTY;
+            self.capability = logos_abi::NamespaceCapabilityHandle::EMPTY;
+            self.root = logos_abi::NamespaceRoot::EMPTY;
+            self.rights = logos_abi::NamespaceRights::NONE;
+        }
+    }
+
     fn drive(&mut self) -> bool {
         if !self.active {
             return false;
@@ -2672,6 +2697,7 @@ pub extern "C" fn _start() -> ! {
         device_receive: required_capability(DEVICE_RECEIVE_CAPABILITY),
         user_send: required_capability(USER_SEND_CAPABILITY),
         user_receive: required_capability(USER_RECEIVE_CAPABILITY),
+        shell_context: required_capability(SHELL_CONTEXT_CAPABILITY),
     };
     unsafe { *core::ptr::addr_of_mut!(IPC_CAPABILITIES) = Some(capabilities) };
     let flow = unsafe { &mut *core::ptr::addr_of_mut!(FLOW) };
@@ -2684,6 +2710,7 @@ pub extern "C" fn _start() -> ! {
     let fetch = unsafe { &mut *core::ptr::addr_of_mut!(FETCH) };
     let completion = unsafe { &mut *core::ptr::addr_of_mut!(COMPLETION) };
     let pending_completion = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_COMPLETION) };
+    let mut shell_context = GuiSessionContext::EMPTY;
     #[cfg(feature = "qemu-proof")]
     while !manager_boot_probe() {
         common::sleep();
@@ -2702,6 +2729,12 @@ pub extern "C" fn _start() -> ! {
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
         let mut progressed = pending.flush(ipc_capabilities().output);
+        while common::ipc_receive_handle(ipc_capabilities().shell_context, &mut shell_context)
+            == IpcStatus::Ok
+        {
+            user.adopt_context(shell_context);
+            progressed = true;
+        }
         if storage.active()
             || package.active()
             || device.active()

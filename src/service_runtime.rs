@@ -954,6 +954,8 @@ impl ServiceRuntime {
                 ServiceId::Network => b"LogOS vNext: load Network",
                 ServiceId::Flow => b"LogOS vNext: load Flow",
                 ServiceId::Fetch => b"LogOS vNext: load Fetch",
+                ServiceId::Shell => b"LogOS vNext: load Shell",
+                ServiceId::LockScreen => b"LogOS vNext: load LockScreen",
             });
             let stack_pages = match service {
                 ServiceId::Storage => crate::process::STORAGE_STACK_PAGES,
@@ -6106,6 +6108,7 @@ fn bootstrap_queue_capacity(index: usize) -> usize {
     match logos_abi::ipc_message_type(index) {
         Some(logos_abi::IpcMessageType::Input) => 32,
         Some(logos_abi::IpcMessageType::Render) => 1,
+        Some(logos_abi::IpcMessageType::Gui) | Some(logos_abi::IpcMessageType::SessionContext) => 8,
         Some(logos_abi::IpcMessageType::Bytes) => 8,
         _ => 1,
     }

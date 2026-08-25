@@ -7,8 +7,8 @@ mod common;
 use logos_abi::{InputMessage, IpcBytes, IpcStatus, KeyCode, KeyState, MessageKind};
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
-    logos_abi::IPC_CONTRACT_INPUT,
-    b"input",
+    logos_abi::IPC_CONTRACT_GUI_INPUT,
+    b"shell",
     core::mem::size_of::<InputMessage>(),
     logos_abi::IpcRights::Receive,
 );

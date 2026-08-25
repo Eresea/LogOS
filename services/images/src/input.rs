@@ -5,7 +5,7 @@
 mod common;
 
 use logos_abi::{
-    INPUT_KEYBOARD_RING_BASE, IPC_CONTRACT_INPUT, InputMessage, IpcStatus, KeyboardByteRing,
+    INPUT_KEYBOARD_RING_BASE, IPC_CONTRACT_GUI_INPUT, InputMessage, IpcStatus, KeyboardByteRing,
 };
 
 static mut PENDING: [Option<InputMessage>; 2] = [None, None];
@@ -14,9 +14,9 @@ static mut PENDING: [Option<InputMessage>; 2] = [None, None];
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
     let output_capability = match common::discover_capability_contract_named(
-        b"terminal",
+        b"shell",
         logos_abi::IpcRights::Send,
-        IPC_CONTRACT_INPUT,
+        IPC_CONTRACT_GUI_INPUT,
         core::mem::size_of::<InputMessage>(),
     ) {
         Ok(capability) => capability,

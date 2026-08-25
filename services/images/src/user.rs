@@ -25,6 +25,18 @@ const FLOW_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Send,
 );
+const SHELL_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_GUI_USER_REQUEST,
+    b"shell",
+    core::mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Receive,
+);
+const SHELL_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_GUI_USER_RESPONSE,
+    b"shell",
+    core::mem::size_of::<IpcBytes>(),
+    logos_abi::IpcRights::Send,
+);
 const STORAGE_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
     b"storage",
@@ -280,6 +292,14 @@ pub extern "C" fn _start() -> ! {
         Ok(capability) => capability,
         Err(_) => common::idle(),
     };
+    let shell_receive_capability = match common::capability_handle(SHELL_RECEIVE_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let shell_send_capability = match common::capability_handle(SHELL_SEND_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
     let storage_send_capability = match common::capability_handle(STORAGE_SEND_CAPABILITY) {
         Ok(capability) => capability,
         Err(_) => common::idle(),
@@ -296,37 +316,46 @@ pub extern "C" fn _start() -> ! {
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
         let mut request = IpcBytes::empty(MessageKind::UserRequest);
-        match common::ipc_receive_handle(flow_receive_capability, &mut request) {
-            IpcStatus::Ok => {
-                let response = request
-                    .as_bytes()
-                    .filter(|bytes| bytes.len() == core::mem::size_of::<UserRequest>())
-                    .map(|bytes| unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast()) })
-                    .map(|request: UserRequest| {
-                        let mut response = unsafe {
-                            core::ptr::addr_of_mut!(SERVICE).as_mut().unwrap().handle(request)
-                        };
-                        if response.status == logos_abi::UserStatus::Ok
-                            && durable(response.operation)
-                            && !persist_catalog(storage_send_capability, storage_receive_capability)
-                        {
-                            response.status = logos_abi::UserStatus::Invalid;
-                        }
-                        response_message(response)
-                    })
-                    .unwrap_or_else(|| IpcBytes::empty(MessageKind::UserResponse));
-                loop {
-                    match common::ipc_send_handle(flow_send_capability, &response) {
-                        IpcStatus::Ok => break,
-                        IpcStatus::Full => common::wait_on_capability(flow_send_capability),
-                        _ => break,
+        let send_capability =
+            if common::ipc_receive_handle(flow_receive_capability, &mut request) == IpcStatus::Ok {
+                flow_send_capability
+            } else if common::ipc_receive_handle(shell_receive_capability, &mut request)
+                == IpcStatus::Ok
+            {
+                shell_send_capability
+            } else {
+                common::wait_on_capabilities(&[
+                    flow_receive_capability,
+                    shell_receive_capability,
+                    storage_receive_capability,
+                ]);
+                continue;
+            };
+        {
+            let response = request
+                .as_bytes()
+                .filter(|bytes| bytes.len() == core::mem::size_of::<UserRequest>())
+                .map(|bytes| unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast()) })
+                .map(|request: UserRequest| {
+                    let mut response = unsafe {
+                        core::ptr::addr_of_mut!(SERVICE).as_mut().unwrap().handle(request)
+                    };
+                    if response.status == logos_abi::UserStatus::Ok
+                        && durable(response.operation)
+                        && !persist_catalog(storage_send_capability, storage_receive_capability)
+                    {
+                        response.status = logos_abi::UserStatus::Invalid;
                     }
+                    response_message(response)
+                })
+                .unwrap_or_else(|| IpcBytes::empty(MessageKind::UserResponse));
+            loop {
+                match common::ipc_send_handle(send_capability, &response) {
+                    IpcStatus::Ok => break,
+                    IpcStatus::Full => common::wait_on_capability(send_capability),
+                    _ => break,
                 }
             }
-            IpcStatus::Empty => {
-                common::wait_on_capabilities(&[flow_receive_capability, storage_receive_capability])
-            }
-            _ => common::sleep(),
         }
     }
 }
