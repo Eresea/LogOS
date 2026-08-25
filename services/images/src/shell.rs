@@ -51,6 +51,10 @@ const USER_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contr
 
 static mut SHELL: logos_shell::Shell = logos_shell::Shell::new();
 static mut LOCKSCREEN: logos_lockscreen::LockScreen = logos_lockscreen::LockScreen::new();
+static mut LOGIN_PAGE: Option<logos_ui_compiler::UiBuild> = None;
+static mut REGISTER_PAGE: Option<logos_ui_compiler::UiBuild> = None;
+static mut LOGIN_LAYOUT: Option<logos_shell::LoginLayout> = None;
+static mut REGISTER_LAYOUT: Option<logos_shell::LoginLayout> = None;
 
 struct ShellPages<'a> {
     login: (&'a logos_ui_compiler::UiBuild, &'a logos_shell::LoginLayout),
@@ -413,28 +417,41 @@ pub extern "C" fn _start() -> ! {
         Err(_) => common::idle(),
     };
     let shell = unsafe { &mut *core::ptr::addr_of_mut!(SHELL) };
-    let login_page = logos_shell::compile_login_page();
-    let register_page = logos_shell::compile_register_page();
+    unsafe {
+        ptr::write(core::ptr::addr_of_mut!(LOGIN_PAGE), Some(logos_shell::compile_login_page()));
+        ptr::write(
+            core::ptr::addr_of_mut!(REGISTER_PAGE),
+            Some(logos_shell::compile_register_page()),
+        );
+    }
+    let login_page = unsafe { (*core::ptr::addr_of!(LOGIN_PAGE)).as_ref() }.unwrap();
+    let register_page = unsafe { (*core::ptr::addr_of!(REGISTER_PAGE)).as_ref() }.unwrap();
     if !login_page.is_valid() || !register_page.is_valid() {
         common::idle();
     }
     let Some(login_layout) =
-        logos_shell::LoginLayout::from_build(&login_page, GuiRect::new(0, 0, 640, 400))
+        logos_shell::LoginLayout::from_build(login_page, GuiRect::new(0, 0, 640, 400))
     else {
         common::idle();
     };
     let Some(register_layout) =
-        logos_shell::LoginLayout::from_build(&register_page, GuiRect::new(0, 0, 640, 400))
+        logos_shell::LoginLayout::from_build(register_page, GuiRect::new(0, 0, 640, 400))
     else {
         common::idle();
     };
+    unsafe {
+        ptr::write(core::ptr::addr_of_mut!(LOGIN_LAYOUT), Some(login_layout));
+        ptr::write(core::ptr::addr_of_mut!(REGISTER_LAYOUT), Some(register_layout));
+    }
+    let login_layout = unsafe { (*core::ptr::addr_of!(LOGIN_LAYOUT)).as_ref() }.unwrap();
+    let register_layout = unsafe { (*core::ptr::addr_of!(REGISTER_LAYOUT)).as_ref() }.unwrap();
     let lockscreen = unsafe { &*core::ptr::addr_of!(LOCKSCREEN) };
     let mut surface_sequence = 0u32;
     send_current_surface(
         display,
         ShellPages {
-            login: (&login_page, &login_layout),
-            register: (&register_page, &register_layout),
+            login: (login_page, login_layout),
+            register: (register_page, register_layout),
         },
         lockscreen,
         &mut surface_sequence,
@@ -476,8 +493,8 @@ pub extern "C" fn _start() -> ! {
                 send_current_surface(
                     display,
                     ShellPages {
-                        login: (&login_page, &login_layout),
-                        register: (&register_page, &register_layout),
+                        login: (login_page, login_layout),
+                        register: (register_page, register_layout),
                     },
                     lockscreen,
                     &mut surface_sequence,
@@ -505,8 +522,8 @@ pub extern "C" fn _start() -> ! {
                     send_current_surface(
                         display,
                         ShellPages {
-                            login: (&login_page, &login_layout),
-                            register: (&register_page, &register_layout),
+                            login: (login_page, login_layout),
+                            register: (register_page, register_layout),
                         },
                         lockscreen,
                         &mut surface_sequence,
