@@ -133,9 +133,14 @@ impl UiEvent {
 pub enum UiStyle {
     FullHeight,
     FullWidth,
+    FlexX,
+    FlexY,
     ItemsCenter,
     JustifyCenter,
     Width96,
+    Gap(u8),
+    GapX(u8),
+    GapY(u8),
     MarginTop4,
     MarginBottom2,
     PaddingX6,
@@ -685,9 +690,14 @@ fn style_token(token: &[u8]) -> Option<UiStyle> {
     match token {
         b"h-full" => Some(UiStyle::FullHeight),
         b"w-full" => Some(UiStyle::FullWidth),
+        b"flex-x" => Some(UiStyle::FlexX),
+        b"flex-y" => Some(UiStyle::FlexY),
         b"items-center" => Some(UiStyle::ItemsCenter),
         b"justify-center" => Some(UiStyle::JustifyCenter),
         b"w-96" => Some(UiStyle::Width96),
+        b"gap" => Some(UiStyle::Gap(4)),
+        b"gap-x" => Some(UiStyle::GapX(4)),
+        b"gap-y" => Some(UiStyle::GapY(4)),
         b"mt-4" => Some(UiStyle::MarginTop4),
         b"mb-2" => Some(UiStyle::MarginBottom2),
         b"px-6" => Some(UiStyle::PaddingX6),
@@ -696,8 +706,32 @@ fn style_token(token: &[u8]) -> Option<UiStyle> {
         b"bg-accent" => Some(UiStyle::BackgroundAccent),
         b"text-4xl" => Some(UiStyle::Text4xl),
         b"font-light" => Some(UiStyle::FontLight),
-        _ => None,
+        _ => spacing_style(token),
     }
+}
+
+fn spacing_style(token: &[u8]) -> Option<UiStyle> {
+    if let Some(value) = token.strip_prefix(b"gap-x-").and_then(parse_spacing) {
+        return Some(UiStyle::GapX(value));
+    }
+    if let Some(value) = token.strip_prefix(b"gap-y-").and_then(parse_spacing) {
+        return Some(UiStyle::GapY(value));
+    }
+    token.strip_prefix(b"gap-").and_then(parse_spacing).map(UiStyle::Gap)
+}
+
+fn parse_spacing(value: &[u8]) -> Option<u8> {
+    if value.is_empty() {
+        return None;
+    }
+    let mut result = 0u8;
+    for byte in value {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        result = result.checked_mul(10)?.checked_add(byte - b'0')?;
+    }
+    (result <= 64).then_some(result)
 }
 
 fn trim_space(mut value: &[u8]) -> &[u8] {
@@ -725,6 +759,9 @@ mod tests {
         assert_eq!(build.document.node(0).unwrap().kind, UiNodeKind::Panel);
         assert_eq!(build.document.node(1).unwrap().kind, UiNodeKind::Form);
         assert_eq!(build.document.node(1).unwrap().event.kind, UiEventKind::Submit);
+        let form_styles = &build.document.node(1).unwrap().styles;
+        assert!(form_styles.tokens[..form_styles.len as usize].contains(&UiStyle::FlexY));
+        assert!(form_styles.tokens[..form_styles.len as usize].contains(&UiStyle::GapY(4)));
         assert_eq!(build.document.node(2).unwrap().text.as_bytes(), b"LogOS");
         assert_eq!(build.document.node(3).unwrap().kind, UiNodeKind::TextInput);
         assert_eq!(build.document.node(4).unwrap().binding.property, UiBindingProperty::Value);
@@ -755,6 +792,18 @@ mod tests {
             build.diagnostics.get(2),
             Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownBinding, .. })
         ));
+    }
+
+    #[test]
+    fn compiles_flex_and_axis_specific_gap_utilities() {
+        let build = compile(r#"<ui.column {flex-x gap-2 gap-x-3 gap-y-4}/>"#);
+        assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
+        let styles = &build.document.node(0).unwrap().styles;
+        let styles = &styles.tokens[..styles.len as usize];
+        assert!(styles.contains(&UiStyle::FlexX));
+        assert!(styles.contains(&UiStyle::Gap(2)));
+        assert!(styles.contains(&UiStyle::GapX(3)));
+        assert!(styles.contains(&UiStyle::GapY(4)));
     }
 
     #[test]

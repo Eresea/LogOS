@@ -1,5 +1,5 @@
 <ui.column key="login" {h-full items-center justify-center}>
-  <ui.form key="login-form" (submit)="unlock">
+  <ui.form key="login-form" (submit)="unlock" {flex-y gap-y-4}>
     <ui.text key="title" {text-4xl font-light mb-2}>LogOS</ui.text>
     <ui.input key="username" [(value)]="username" {w-96}/>
     <ui.input key="password" [(value)]="password" {w-96 mt-4}/>

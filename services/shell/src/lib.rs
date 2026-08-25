@@ -123,32 +123,65 @@ impl LoginLayout {
         let center_x = panel.x.saturating_add((panel.width / 2) as i32);
         let field_x = center_x.saturating_sub((field_width / 2) as i32);
         let mut layout = Self { nodes: [LoginLayoutNode::EMPTY; MAX_LOGIN_LAYOUT_NODES], count: 0 };
-        let mut input_index = 0u32;
+        let mut bounds_by_index = [GuiRect::EMPTY; MAX_UI_NODES];
+        let mut cursors = [0i32; MAX_UI_NODES];
+        let mut cursor_initialized = [false; MAX_UI_NODES];
         for index in 0..build.document.node_count() {
             let node = build.document.node(index)?;
             let (bounds, target) = match node.kind {
                 UiNodeKind::Root | UiNodeKind::Panel | UiNodeKind::Form => (panel, None),
-                UiNodeKind::Label => {
-                    (GuiRect::new(field_x, panel.y.saturating_add(48), field_width, 32), None)
-                }
-                UiNodeKind::TextInput => {
-                    let y = panel.y.saturating_add(112 + input_index.saturating_mul(56) as i32);
-                    input_index = input_index.saturating_add(1);
-                    let target = if node.key.as_bytes() == b"password" {
-                        LoginHitTarget::Password
-                    } else {
-                        LoginHitTarget::Username
+                UiNodeKind::Label | UiNodeKind::TextInput | UiNodeKind::Button => {
+                    let parent_index = usize::from(node.parent);
+                    let parent = build.document.node(parent_index)?;
+                    let parent_bounds = bounds_by_index[parent_index];
+                    let horizontal = has_style(parent, logos_ui_compiler::UiStyle::FlexX)
+                        && !has_style(parent, logos_ui_compiler::UiStyle::FlexY);
+                    if !cursor_initialized[parent_index] {
+                        let origin = if parent.kind == UiNodeKind::Form {
+                            if horizontal {
+                                parent_bounds.x
+                            } else {
+                                parent_bounds.y.saturating_add(48)
+                            }
+                        } else if horizontal {
+                            parent_bounds.x
+                        } else {
+                            parent_bounds.y
+                        };
+                        cursors[parent_index] = origin;
+                        cursor_initialized[parent_index] = true;
+                    }
+                    let (width, height) = match node.kind {
+                        UiNodeKind::Label => (field_width, 32),
+                        UiNodeKind::TextInput | UiNodeKind::Button => (field_width, 40),
+                        _ => unreachable!(),
                     };
-                    (GuiRect::new(field_x, y, field_width, 40), Some(target))
+                    let position = cursors[parent_index];
+                    let gap = gap_px(parent, horizontal);
+                    cursors[parent_index] = position
+                        .saturating_add(if horizontal { width as i32 } else { height as i32 })
+                        .saturating_add(gap);
+                    let bounds = if horizontal {
+                        GuiRect::new(position, parent_bounds.y.saturating_add(48), width, height)
+                    } else {
+                        GuiRect::new(field_x, position, width, height)
+                    };
+                    let target = if node.key.as_bytes() == b"password" {
+                        Some(LoginHitTarget::Password)
+                    } else if node.kind == UiNodeKind::TextInput {
+                        Some(LoginHitTarget::Username)
+                    } else if node.kind == UiNodeKind::Button {
+                        Some(LoginHitTarget::Submit)
+                    } else {
+                        None
+                    };
+                    (bounds, target)
                 }
-                UiNodeKind::Button => (
-                    GuiRect::new(field_x, panel.y.saturating_add(240), field_width, 40),
-                    Some(LoginHitTarget::Submit),
-                ),
             };
             if layout.count == MAX_LOGIN_LAYOUT_NODES {
                 return None;
             }
+            bounds_by_index[index] = bounds;
             layout.nodes[layout.count] =
                 LoginLayoutNode { index: index as u16, kind: node.kind, bounds, target };
             layout.count += 1;
@@ -184,6 +217,20 @@ fn inset(rect: GuiRect, amount: i32) -> GuiRect {
 
 fn has_style(node: &logos_ui_compiler::UiNodeTemplate, style: logos_ui_compiler::UiStyle) -> bool {
     node.styles.tokens[..node.styles.len as usize].contains(&style)
+}
+
+fn gap_px(node: &logos_ui_compiler::UiNodeTemplate, horizontal: bool) -> i32 {
+    let mut general = None;
+    let mut axis = None;
+    for style in &node.styles.tokens[..node.styles.len as usize] {
+        match (*style, horizontal) {
+            (logos_ui_compiler::UiStyle::Gap(value), _) => general = Some(value),
+            (logos_ui_compiler::UiStyle::GapX(value), true)
+            | (logos_ui_compiler::UiStyle::GapY(value), false) => axis = Some(value),
+            _ => {}
+        }
+    }
+    i32::from(axis.or(general).unwrap_or(0)).saturating_mul(4)
 }
 
 pub fn login_page_node_text(
@@ -482,7 +529,11 @@ mod tests {
         let username = layout.bounds_for(LoginHitTarget::Username).unwrap();
         let password = layout.bounds_for(LoginHitTarget::Password).unwrap();
         let submit = layout.bounds_for(LoginHitTarget::Submit).unwrap();
+        let title = layout.node(2).unwrap().bounds;
         assert_eq!(username.width, 384);
+        assert_eq!(username.y, title.y + title.height as i32 + 16);
+        assert_eq!(password.y, username.y + username.height as i32 + 16);
+        assert_eq!(submit.y, password.y + password.height as i32 + 16);
         assert!(password.y > username.y);
         assert!(submit.y > password.y);
         assert_eq!(layout.hit_test(username.x + 1, username.y + 1), Some(LoginHitTarget::Username));
