@@ -801,6 +801,41 @@ terminal.rebuild_layout(); // compile error
 
 This preserves normal Rust-style encapsulation across template/component boundaries.
 
+## Interactive Components
+
+Focusable components implement the shared `UiInteractive` contract instead of
+repeating focus fields and tab-order rules:
+
+```rust
+pub struct Toggle {
+    interaction: UiInteraction,
+}
+
+impl UiInteractive for Toggle {
+    fn interaction(&self) -> &UiInteraction {
+        &self.interaction
+    }
+
+    fn interaction_mut(&mut self) -> &mut UiInteraction {
+        &mut self.interaction
+    }
+}
+```
+
+The contract provides `tab_index`, disabled state, focus state, and the bounded
+`is_focusable()` check. Built-in buttons and inputs default to tab order `0`;
+non-interactive nodes default to `tabIndex=-1`. A page can opt an interactive
+component out of traversal or assign an explicit order:
+
+```html
+<ui.input tabIndex="-1" />
+<ui.button tabIndex="2" />
+```
+
+`tabIndex` is component metadata, not a style or arbitrary binding. The
+compiler rejects it on components that do not implement the interactive
+contract.
+
 ---
 
 # 19. Preferred Interaction Order
