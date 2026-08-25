@@ -59,6 +59,7 @@ The template binds the typed form to a `ui.form`:
 <ui.form
     #loginForm
     [form]="loginForm"
+    [canSubmit]="loginForm.canSubmit"
     (submit)="unlock"
 >
     ...
@@ -238,6 +239,26 @@ login_form.submitting
 ```
 
 automatically while its submit handler is running.
+
+---
+
+## Separate UI Pages
+
+Pages are separate `.ui` components so each flow can be compiled, laid out, and
+activated independently. The built-in authentication flow uses:
+
+```text
+ui-compiler/examples/login.ui
+ui-compiler/examples/register.ui
+```
+
+`login.ui` binds `loginForm`. `register.ui` binds `registerForm`, which adds a
+`confirmPassword` control and a form-level matching validator. The Shell selects
+the register page only while the User catalog is `Unclaimed`; a successful claim
+creates the first administrator through the existing User service contract.
+
+The page markup owns presentation and event wiring. The LockScreen service owns
+the bounded form state, validation, credential clearing, and User requests.
 
 ---
 
