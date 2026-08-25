@@ -5,6 +5,7 @@
 
 use alloc::vec::Vec;
 
+use crate::frame_pool::{FrameAddress, FramePool};
 use crate::runtime_events::RuntimeEventRegistry;
 use logos_abi::{
     CapabilityHandle, DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE, DirectoryRecordKind,
@@ -33,10 +34,15 @@ struct EndpointRecord {
     service_epoch: u64,
     read_event: EventHandle,
     write_event: EventHandle,
-    queue: Vec<QueueMessage>,
+    queue: QueueStorage,
     queue_head: usize,
     queue_tail: usize,
     queue_len: usize,
+}
+
+enum QueueStorage {
+    Heap(Vec<QueueMessage>),
+    Frames(Vec<FrameAddress>),
 }
 
 struct QueueMessage {
@@ -115,6 +121,82 @@ impl RuntimeIpcRegistry {
         {
             return Err(IpcStatus::Full);
         }
+        let mut queue = Vec::new();
+        if queue.try_reserve(queue_capacity).is_err() {
+            return Err(IpcStatus::Disconnected);
+        }
+        for _ in 0..queue_capacity {
+            queue.push(QueueMessage::empty());
+        }
+        self.create_endpoint_with_queue(
+            producer,
+            consumer,
+            contract_id,
+            message_bytes,
+            queue_capacity,
+            service_epoch,
+            QueueStorage::Heap(queue),
+            events,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_endpoint_with_frames(
+        &mut self,
+        producer: ServiceHandle,
+        consumer: ServiceHandle,
+        contract_id: u16,
+        message_bytes: usize,
+        queue_capacity: usize,
+        service_epoch: u64,
+        queue_frames: &[FrameAddress],
+        events: &mut RuntimeEventRegistry,
+    ) -> Result<EndpointHandle, IpcStatus> {
+        if queue_frames.len() != queue_capacity {
+            return Err(IpcStatus::Malformed);
+        }
+        let mut queue = Vec::new();
+        queue.try_reserve(queue_capacity).map_err(|_| IpcStatus::Disconnected)?;
+        queue.extend_from_slice(queue_frames);
+        self.create_endpoint_with_queue(
+            producer,
+            consumer,
+            contract_id,
+            message_bytes,
+            queue_capacity,
+            service_epoch,
+            QueueStorage::Frames(queue),
+            events,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_endpoint_with_queue(
+        &mut self,
+        producer: ServiceHandle,
+        consumer: ServiceHandle,
+        contract_id: u16,
+        message_bytes: usize,
+        queue_capacity: usize,
+        service_epoch: u64,
+        queue: QueueStorage,
+        events: &mut RuntimeEventRegistry,
+    ) -> Result<EndpointHandle, IpcStatus> {
+        if !producer.is_valid()
+            || !consumer.is_valid()
+            || producer == consumer
+            || message_bytes == 0
+            || message_bytes > IPC_PAGE_BYTES
+            || queue_capacity == 0
+            || queue_capacity > usize::from(u16::MAX)
+            || service_epoch == 0
+        {
+            return Err(IpcStatus::Malformed);
+        }
+        if queue_capacity > self.queue_budget_messages.saturating_sub(self.queue_committed_messages)
+        {
+            return Err(IpcStatus::Full);
+        }
         let slot = self.allocate_endpoint_slot()?;
         let handle = EndpointHandle::new(slot as u32, self.endpoints[slot].generation)
             .ok_or(IpcStatus::Malformed)?;
@@ -129,15 +211,6 @@ impl RuntimeIpcRegistry {
                 });
             }
         };
-        let mut queue = Vec::new();
-        if queue.try_reserve(queue_capacity).is_err() {
-            let _ = events.destroy_event(producer, write_event);
-            let _ = events.destroy_event(consumer, read_event);
-            return Err(IpcStatus::Disconnected);
-        }
-        for _ in 0..queue_capacity {
-            queue.push(QueueMessage::empty());
-        }
         self.endpoints[slot].value = Some(EndpointRecord {
             handle,
             producer,
@@ -220,12 +293,39 @@ impl RuntimeIpcRegistry {
         endpoint: EndpointHandle,
         events: &mut RuntimeEventRegistry,
     ) -> Result<(), IpcStatus> {
+        let _ = self.destroy_endpoint_inner(endpoint, events)?;
+        Ok(())
+    }
+
+    pub fn destroy_endpoint_with_pool(
+        &mut self,
+        endpoint: EndpointHandle,
+        events: &mut RuntimeEventRegistry,
+        frames: &mut FramePool,
+    ) -> Result<(), IpcStatus> {
+        let queue_frames = self.destroy_endpoint_inner(endpoint, events)?;
+        for frame in queue_frames {
+            frames.release(frame).map_err(|_| IpcStatus::Disconnected)?;
+        }
+        Ok(())
+    }
+
+    fn destroy_endpoint_inner(
+        &mut self,
+        endpoint: EndpointHandle,
+        events: &mut RuntimeEventRegistry,
+    ) -> Result<Vec<FrameAddress>, IpcStatus> {
         let slot = self.endpoint_slot(endpoint)?;
+        let mut queue_frames = Vec::new();
         if let Some(record) = self.endpoints[slot].value.as_ref() {
             self.queue_committed_messages =
                 self.queue_committed_messages.saturating_sub(record.queue_capacity);
             let _ = events.destroy_event(record.consumer, record.read_event);
             let _ = events.destroy_event(record.producer, record.write_event);
+            if let QueueStorage::Frames(frames) = &record.queue {
+                queue_frames.try_reserve(frames.len()).map_err(|_| IpcStatus::Disconnected)?;
+                queue_frames.extend_from_slice(frames);
+            }
         }
         self.endpoints[slot].value = None;
         self.endpoints[slot].generation = next_generation(self.endpoints[slot].generation);
@@ -235,7 +335,7 @@ impl RuntimeIpcRegistry {
                 capability.generation = next_generation(capability.generation);
             }
         }
-        Ok(())
+        Ok(queue_frames)
     }
 
     pub fn endpoint_contract_id(&self, endpoint: EndpointHandle) -> Result<u16, IpcStatus> {
@@ -325,6 +425,40 @@ impl RuntimeIpcRegistry {
     }
 
     pub fn destroy_service(&mut self, service: ServiceHandle, events: &mut RuntimeEventRegistry) {
+        self.destroy_service_inner(service, events, None);
+    }
+
+    pub fn destroy_service_with_pool(
+        &mut self,
+        service: ServiceHandle,
+        events: &mut RuntimeEventRegistry,
+        frames: &mut FramePool,
+    ) {
+        self.destroy_service_inner(service, events, Some(frames));
+    }
+
+    pub fn drain_queue_frames(&mut self, events: &mut RuntimeEventRegistry) -> Vec<FrameAddress> {
+        let endpoints: Vec<_> = self
+            .endpoints
+            .iter()
+            .filter_map(|slot| slot.value.as_ref().map(|record| record.handle))
+            .collect();
+        let mut frames = Vec::new();
+        for endpoint in endpoints {
+            if let Ok(queue_frames) = self.destroy_endpoint_inner(endpoint, events) {
+                let _ = frames.try_reserve(queue_frames.len());
+                frames.extend(queue_frames);
+            }
+        }
+        frames
+    }
+
+    fn destroy_service_inner(
+        &mut self,
+        service: ServiceHandle,
+        events: &mut RuntimeEventRegistry,
+        mut frames: Option<&mut FramePool>,
+    ) {
         let endpoints: Vec<_> = self
             .endpoints
             .iter()
@@ -333,7 +467,11 @@ impl RuntimeIpcRegistry {
             .map(|endpoint| endpoint.handle)
             .collect();
         for endpoint in endpoints {
-            let _ = self.destroy_endpoint(endpoint, events);
+            if let Some(frames) = frames.as_deref_mut() {
+                let _ = self.destroy_endpoint_with_pool(endpoint, events, frames);
+            } else {
+                let _ = self.destroy_endpoint(endpoint, events);
+            }
         }
         for capability in &mut self.capabilities {
             if capability.value.as_ref().is_some_and(|grant| grant.owner == service) {
@@ -372,7 +510,18 @@ impl RuntimeIpcRegistry {
             return IpcStatus::Full;
         }
         let index = endpoint.queue_tail;
-        endpoint.queue[index].bytes[..bytes.len()].copy_from_slice(bytes);
+        match &mut endpoint.queue {
+            QueueStorage::Heap(queue) => {
+                queue[index].bytes[..bytes.len()].copy_from_slice(bytes);
+            }
+            QueueStorage::Frames(queue) => unsafe {
+                core::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    queue[index].raw() as usize as *mut u8,
+                    bytes.len(),
+                );
+            },
+        }
         endpoint.queue_tail = (index + 1) % endpoint.queue_capacity;
         endpoint.queue_len += 1;
         let _ = events.signal_irq(endpoint.read_event);
@@ -407,7 +556,18 @@ impl RuntimeIpcRegistry {
             return IpcStatus::Empty;
         }
         let index = endpoint.queue_head;
-        bytes.copy_from_slice(&endpoint.queue[index].bytes[..endpoint.message_bytes]);
+        match &endpoint.queue {
+            QueueStorage::Heap(queue) => {
+                bytes.copy_from_slice(&queue[index].bytes[..endpoint.message_bytes]);
+            }
+            QueueStorage::Frames(queue) => unsafe {
+                core::ptr::copy_nonoverlapping(
+                    queue[index].raw() as usize as *const u8,
+                    bytes.as_mut_ptr(),
+                    endpoint.message_bytes,
+                );
+            },
+        }
         endpoint.queue_head = (index + 1) % endpoint.queue_capacity;
         endpoint.queue_len -= 1;
         let _ = events.signal_irq(endpoint.write_event);

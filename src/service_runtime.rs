@@ -672,54 +672,115 @@ impl ServiceRuntime {
         let mut events =
             crate::runtime_events::RuntimeEventRegistry::new_with_generation(generation);
         let mut package_capability = logos_abi::CapabilityHandle::EMPTY;
+        macro_rules! fail_ipc_init {
+            ($error:expr) => {{
+                for frame in registry.drain_queue_frames(&mut events) {
+                    let _ = self.frame_pool.release(frame);
+                }
+                crate::runtime_events::clear_hardware_event(
+                    crate::runtime_events::HardwareEventSource::Network,
+                );
+                crate::runtime_events::clear_hardware_event(
+                    crate::runtime_events::HardwareEventSource::Keyboard,
+                );
+                return Err($error);
+            }};
+        }
         for raw in 0..logos_abi::IPC_ENDPOINT_COUNT {
-            let endpoint_id = logos_abi::IpcEndpointId::from_index(raw)
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+            let endpoint_id = match logos_abi::IpcEndpointId::from_index(raw) {
+                Some(endpoint_id) => endpoint_id,
+                None => fail_ipc_init!(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity)),
+            };
             let producer =
-                dynamic_endpoint_peer(endpoint_id, true, &self.service_handles, generation)?;
-            let consumer =
-                dynamic_endpoint_peer(endpoint_id, false, &self.service_handles, generation)?;
-            let message_bytes = logos_abi::ipc_message_size(raw)
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
-            let contract_id = logos_abi::ipc_contract_id(raw)
-                .ok_or(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+                match dynamic_endpoint_peer(endpoint_id, true, &self.service_handles, generation) {
+                    Ok(producer) => producer,
+                    Err(error) => fail_ipc_init!(error),
+                };
+            let consumer = match dynamic_endpoint_peer(
+                endpoint_id,
+                false,
+                &self.service_handles,
+                generation,
+            ) {
+                Ok(consumer) => consumer,
+                Err(error) => fail_ipc_init!(error),
+            };
+            let message_bytes = match logos_abi::ipc_message_size(raw) {
+                Some(message_bytes) => message_bytes,
+                None => fail_ipc_init!(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity)),
+            };
+            let contract_id = match logos_abi::ipc_contract_id(raw) {
+                Some(contract_id) => contract_id,
+                None => fail_ipc_init!(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity)),
+            };
             let queue_capacity = bootstrap_queue_capacity(raw);
-            let endpoint = registry
-                .create_endpoint(
-                    producer,
-                    consumer,
-                    contract_id,
-                    message_bytes,
-                    queue_capacity,
-                    self.service_epoch,
-                    &mut events,
-                )
-                .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
+            let mut queue_frames = Vec::new();
+            if queue_frames.try_reserve(queue_capacity).is_err() {
+                fail_ipc_init!(ServiceRuntimeError::Resources);
+            }
+            for _ in 0..queue_capacity {
+                let frame = match self.frame_pool.allocate_for(OwnerId::KERNEL) {
+                    Ok(frame) => frame,
+                    Err(_) => {
+                        for frame in queue_frames.drain(..) {
+                            let _ = self.frame_pool.release(frame);
+                        }
+                        fail_ipc_init!(ServiceRuntimeError::Resources);
+                    }
+                };
+                queue_frames.push(frame);
+            }
+            let endpoint_result = registry.create_endpoint_with_frames(
+                producer,
+                consumer,
+                contract_id,
+                message_bytes,
+                queue_capacity,
+                self.service_epoch,
+                &queue_frames,
+                &mut events,
+            );
+            let endpoint = match endpoint_result {
+                Ok(endpoint) => endpoint,
+                Err(_) => {
+                    for frame in queue_frames {
+                        let _ = self.frame_pool.release(frame);
+                    }
+                    fail_ipc_init!(ServiceRuntimeError::Ipc(IpcError::Capacity));
+                }
+            };
             if endpoint_id == logos_abi::IpcEndpointId::CoreToNetwork {
-                let (read_event, _) = registry
-                    .endpoint_events(endpoint)
-                    .map_err(|_| ServiceRuntimeError::Ipc(IpcError::InvalidIdentity))?;
+                let (read_event, _) = match registry.endpoint_events(endpoint) {
+                    Ok(events) => events,
+                    Err(_) => fail_ipc_init!(ServiceRuntimeError::Ipc(IpcError::InvalidIdentity)),
+                };
                 crate::runtime_events::bind_hardware_event(
                     crate::runtime_events::HardwareEventSource::Network,
                     read_event,
                 );
             }
 
-            let core = dynamic_core_handle(generation)?;
+            let core = match dynamic_core_handle(generation) {
+                Ok(core) => core,
+                Err(error) => fail_ipc_init!(error),
+            };
             if producer == core || consumer == core {
                 let rights = if producer == core {
                     logos_abi::IpcRights::Send
                 } else {
                     logos_abi::IpcRights::Receive
                 };
-                registry
-                    .grant(core, endpoint, rights)
-                    .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
+                if registry.grant(core, endpoint, rights).is_err() {
+                    fail_ipc_init!(ServiceRuntimeError::Ipc(IpcError::Capacity));
+                }
             }
 
             for spec in SERVICE_IMAGES {
                 let service = spec.service();
-                let owner = self.runtime_service_handle(service)?;
+                let owner = match self.runtime_service_handle(service) {
+                    Ok(owner) => owner,
+                    Err(error) => fail_ipc_init!(error),
+                };
                 for rights in [logos_abi::IpcRights::Send, logos_abi::IpcRights::Receive] {
                     let owns_endpoint = match rights {
                         logos_abi::IpcRights::Send => producer == owner,
@@ -728,9 +789,10 @@ impl ServiceRuntime {
                     if !owns_endpoint {
                         continue;
                     }
-                    let grant = registry
-                        .grant(owner, endpoint, rights)
-                        .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
+                    let grant = match registry.grant(owner, endpoint, rights) {
+                        Ok(grant) => grant,
+                        Err(_) => fail_ipc_init!(ServiceRuntimeError::Ipc(IpcError::Capacity)),
+                    };
                     if service == ServiceId::Storage
                         && endpoint_id == logos_abi::IpcEndpointId::CoreToStoragePackage
                         && rights == logos_abi::IpcRights::Receive
@@ -740,20 +802,32 @@ impl ServiceRuntime {
                 }
             }
         }
-        let input = self.runtime_service_handle(ServiceId::Input)?;
-        let keyboard_event = events
+        let input = match self.runtime_service_handle(ServiceId::Input) {
+            Ok(input) => input,
+            Err(error) => fail_ipc_init!(error),
+        };
+        let keyboard_event = match events
             .create_hardware_event(input, crate::runtime_events::HardwareEventSource::Keyboard)
-            .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
+        {
+            Ok(event) => event,
+            Err(_) => fail_ipc_init!(ServiceRuntimeError::Ipc(IpcError::Capacity)),
+        };
         self.keyboard_event = keyboard_event;
         for spec in SERVICE_IMAGES {
             let service = spec.service();
-            let owner = self.runtime_service_handle(service)?;
+            let owner = match self.runtime_service_handle(service) {
+                Ok(owner) => owner,
+                Err(error) => fail_ipc_init!(error),
+            };
             let (ipc_endpoints, capabilities) = registry.ownership_counts(owner);
             let events_owned = events.ownership_count(owner) + events.event_set_count(owner);
             if let Some(services) = self.dynamic_services.as_mut() {
-                services
+                if services
                     .set_runtime_counts(owner, ipc_endpoints, capabilities, events_owned)
-                    .map_err(|_| ServiceRuntimeError::Resources)?;
+                    .is_err()
+                {
+                    fail_ipc_init!(ServiceRuntimeError::Resources);
+                }
             }
         }
         self.dynamic_ipc = Some(registry);
@@ -4710,7 +4784,11 @@ impl ServiceRuntime {
                     let send = match ipc.grant(producer, endpoint, logos_abi::IpcRights::Send) {
                         Ok(capability) => capability,
                         Err(_) => {
-                            let _ = ipc.destroy_endpoint(endpoint, events);
+                            let _ = ipc.destroy_endpoint_with_pool(
+                                endpoint,
+                                events,
+                                &mut self.frame_pool,
+                            );
                             return false;
                         }
                     };
@@ -4718,14 +4796,22 @@ impl ServiceRuntime {
                     {
                         Ok(capability) => capability,
                         Err(_) => {
-                            let _ = ipc.destroy_endpoint(endpoint, events);
+                            let _ = ipc.destroy_endpoint_with_pool(
+                                endpoint,
+                                events,
+                                &mut self.frame_pool,
+                            );
                             return false;
                         }
                     };
                     let (read_event, write_event) = match ipc.endpoint_events(endpoint) {
                         Ok(events) => events,
                         Err(_) => {
-                            let _ = ipc.destroy_endpoint(endpoint, events);
+                            let _ = ipc.destroy_endpoint_with_pool(
+                                endpoint,
+                                events,
+                                &mut self.frame_pool,
+                            );
                             return false;
                         }
                     };
@@ -4740,17 +4826,17 @@ impl ServiceRuntime {
                 if ipc.send(producer, send, &input, events) != logos_abi::IpcStatus::Ok
                     || ipc.send(producer, send, &input, events) != logos_abi::IpcStatus::Full
                 {
-                    let _ = ipc.destroy_endpoint(endpoint, events);
+                    let _ = ipc.destroy_endpoint_with_pool(endpoint, events, &mut self.frame_pool);
                     return false;
                 }
                 let mut output = [0];
                 if ipc.receive(consumer, receive, &mut output, events) != logos_abi::IpcStatus::Ok
                     || output != input
                 {
-                    let _ = ipc.destroy_endpoint(endpoint, events);
+                    let _ = ipc.destroy_endpoint_with_pool(endpoint, events, &mut self.frame_pool);
                     return false;
                 }
-                if ipc.destroy_endpoint(endpoint, events).is_err()
+                if ipc.destroy_endpoint_with_pool(endpoint, events, &mut self.frame_pool).is_err()
                     || events.signal_irq(read_event)
                         != Err(crate::runtime_events::EventError::Stale)
                     || events.signal_irq(write_event)
@@ -4781,7 +4867,11 @@ impl ServiceRuntime {
                     match ipc.grant(producer, replacement, logos_abi::IpcRights::Send) {
                         Ok(capability) => capability,
                         Err(_) => {
-                            let _ = ipc.destroy_endpoint(replacement, events);
+                            let _ = ipc.destroy_endpoint_with_pool(
+                                replacement,
+                                events,
+                                &mut self.frame_pool,
+                            );
                             return false;
                         }
                     };
@@ -4789,7 +4879,11 @@ impl ServiceRuntime {
                     match ipc.grant(consumer, replacement, logos_abi::IpcRights::Receive) {
                         Ok(capability) => capability,
                         Err(_) => {
-                            let _ = ipc.destroy_endpoint(replacement, events);
+                            let _ = ipc.destroy_endpoint_with_pool(
+                                replacement,
+                                events,
+                                &mut self.frame_pool,
+                            );
                             return false;
                         }
                     };
@@ -4800,7 +4894,7 @@ impl ServiceRuntime {
                     && ipc.receive(consumer, replacement_receive, &mut replacement_output, events)
                         == logos_abi::IpcStatus::Ok
                     && replacement_output == input;
-                let _ = ipc.destroy_endpoint(replacement, events);
+                let _ = ipc.destroy_endpoint_with_pool(replacement, events, &mut self.frame_pool);
                 roundtrip
             }
             _ => false,
@@ -5556,7 +5650,7 @@ impl ServiceRuntime {
             self.service_handles.get(index).copied().ok_or(ServiceRuntimeError::StaleGeneration)?;
         if let (Some(ipc), Some(events)) = (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut())
         {
-            ipc.destroy_service(handle, events);
+            ipc.destroy_service_with_pool(handle, events, &mut self.frame_pool);
         } else if let Some(events) = self.dynamic_events.as_mut() {
             events.destroy_service(handle);
         }
@@ -5818,11 +5912,11 @@ impl ServiceRuntime {
             if let Some(events) = self.dynamic_events.as_mut() {
                 let generation = self.service_epoch.wrapping_sub(1).max(1) as u32;
                 if let Ok(core) = dynamic_core_handle(generation) {
-                    registry.destroy_service(core, events);
+                    registry.destroy_service_with_pool(core, events, &mut self.frame_pool);
                 }
                 for service in &self.service_handles {
                     if service.is_valid() {
-                        registry.destroy_service(*service, events);
+                        registry.destroy_service_with_pool(*service, events, &mut self.frame_pool);
                     }
                 }
             }
