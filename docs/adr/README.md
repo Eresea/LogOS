@@ -67,3 +67,4 @@
 | [0064](0064-user-ipc-flow-storage.md) | Accepted | User reaches Flow and v5 Storage through bounded typed IPC and chunked catalog transport |
 | [0065](0065-runtime-allocation-ownership.md) | Accepted | UEFI-reserved runtime allocation metadata, Core GlobalAlloc, and private quota-controlled service heaps |
 | [0066](0066-dynamic-ipc-topology.md) | Accepted | Versioned generation-safe runtime service, endpoint, capability, and event handles |
+| [0067](0067-event-driven-graphical-shell.md) | Accepted | Display-owned retained surfaces with typed invalidation hooks and event-driven graphical shell services |
