@@ -4090,42 +4090,6 @@ impl ServiceRuntime {
                     return logos_abi::IpcStatus::Ok;
                 }
             };
-            let slot = match self.ensure_service_runtime_slot(handle) {
-                Ok(slot) => slot,
-                Err(_) => {
-                    if let Some(registry) = self.dynamic_services.as_mut() {
-                        let _ = registry.remove(handle);
-                    }
-                    let response = logos_abi::ManagerResponse::new(
-                        request.operation,
-                        logos_abi::ManagerStatus::Capacity,
-                        request.request_id,
-                    );
-                    self.write_manager_response(staging_frame, response);
-                    return logos_abi::IpcStatus::Ok;
-                }
-            };
-            if self
-                .dynamic_services
-                .as_mut()
-                .is_none_or(|registry| registry.bind_runtime_slot(handle, slot).is_err())
-            {
-                if let Some(registry) = self.dynamic_services.as_mut() {
-                    let _ = registry.remove(handle);
-                }
-                let response = logos_abi::ManagerResponse::new(
-                    request.operation,
-                    logos_abi::ManagerStatus::Capacity,
-                    request.request_id,
-                );
-                self.write_manager_response(staging_frame, response);
-                return logos_abi::IpcStatus::Ok;
-            }
-            self.service_heaps[slot].quota_pages = self
-                .dynamic_services
-                .as_ref()
-                .and_then(|registry| registry.heap_quota_pages(handle).ok())
-                .unwrap_or(logos_abi::SERVICE_HEAP_MAX_PAGES);
             let mut status_request = logos_abi::ManagerRequest::new(
                 logos_abi::ManagerOperation::Status,
                 request.request_id,

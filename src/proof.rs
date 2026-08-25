@@ -38,6 +38,7 @@ static DYNAMIC_EVENT_BLOCKED: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_ENDPOINT_PROVEN: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_STALE_HANDLES_REJECTED: AtomicBool = AtomicBool::new(false);
 static DYNAMIC_SERVICE_STALE_REJECTED: AtomicBool = AtomicBool::new(false);
+static DYNAMIC_SERVICE_REGISTERED: AtomicBool = AtomicBool::new(false);
 static RESTART_RESOURCES_RECLAIMED: AtomicBool = AtomicBool::new(false);
 static ALLOCATOR_QUOTA_PROVEN: AtomicBool = AtomicBool::new(false);
 static BACKPRESSURE_FULL: AtomicBool = AtomicBool::new(false);
@@ -186,6 +187,10 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
             core::mem::size_of::<AtomicBool>(),
         ),
         (
+            core::ptr::addr_of!(DYNAMIC_SERVICE_REGISTERED) as usize,
+            core::mem::size_of::<AtomicBool>(),
+        ),
+        (
             core::ptr::addr_of!(RESTART_RESOURCES_RECLAIMED) as usize,
             core::mem::size_of::<AtomicBool>(),
         ),
@@ -282,6 +287,12 @@ pub fn dynamic_stale_handles_rejected() {
 pub fn dynamic_service_stale_rejected() {
     if !DYNAMIC_SERVICE_STALE_REJECTED.swap(true, Ordering::AcqRel) {
         crate::arch_proof_line(b"LogOS vNext: stale service handle rejected");
+    }
+}
+
+pub fn dynamic_service_registered() {
+    if !DYNAMIC_SERVICE_REGISTERED.swap(true, Ordering::AcqRel) {
+        crate::arch_proof_line(b"LogOS vNext: dynamic service registration");
     }
 }
 
@@ -440,6 +451,7 @@ pub fn observe(cpu: usize) {
         && DYNAMIC_ENDPOINT_PROVEN.load(Ordering::Acquire)
         && DYNAMIC_STALE_HANDLES_REJECTED.load(Ordering::Acquire)
         && DYNAMIC_SERVICE_STALE_REJECTED.load(Ordering::Acquire)
+        && DYNAMIC_SERVICE_REGISTERED.load(Ordering::Acquire)
         && RESTART_RESOURCES_RECLAIMED.load(Ordering::Acquire)
         && ALLOCATOR_QUOTA_PROVEN.load(Ordering::Acquire)
         && LIVE_SERVICE_RESTARTED.load(Ordering::Acquire)
@@ -522,6 +534,22 @@ pub(crate) fn verify_service_manager_boundary() {
         crate::arch_fatal(b"LogOS vNext: manager stale handle accepted");
     }
     dynamic_service_stale_rejected();
+    let registration = logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::Register, 4)
+        .with_service_name(b"dyn-proof")
+        .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: manager registration shape"));
+    let registration = crate::arch::manager_proof(registration)
+        .unwrap_or_else(|| crate::arch_fatal(b"LogOS vNext: manager registration"));
+    if registration.status != logos_abi::ManagerStatus::Ok {
+        crate::arch_fatal(b"LogOS vNext: manager registration result");
+    }
+    if !registration.record.service.is_valid() {
+        crate::arch_fatal(b"LogOS vNext: manager registration result");
+    }
+    if logos_abi::ServiceId::from_index(registration.record.service.index() as usize).is_some() {
+        crate::arch_proof_line(b"LogOS vNext: registration reused builtin slot");
+        crate::arch_fatal(b"LogOS vNext: manager registration result");
+    }
+    dynamic_service_registered();
     if crate::arch::manager_call(crate::process::ProcessHandle::from_raw(0), 0, 0)
         != logos_abi::IpcStatus::Unauthorized
     {
