@@ -199,6 +199,47 @@ impl UiComponentTree {
         Ok(())
     }
 
+    pub fn focus_next(&mut self, forward: bool) -> Result<UiNodeHandle, UiComponentTreeError> {
+        let mut candidates = [UiNodeHandle::EMPTY; MAX_UI_COMPONENTS];
+        let mut count = 0;
+        for index in 0..MAX_UI_COMPONENTS {
+            let Ok(handle) = self.tree.handle_at(index) else { continue };
+            let node = self.tree.node(handle).map_err(map_tree_error)?;
+            if node.interaction.is_focusable()
+                && self.components[index].is_focusable()
+                && count < candidates.len()
+            {
+                let mut position = count;
+                while position != 0 {
+                    let previous = candidates[position - 1];
+                    let previous_node = self.tree.node(previous).map_err(map_tree_error)?;
+                    if (previous_node.interaction.tab_index(), previous.slot)
+                        <= (node.interaction.tab_index(), handle.slot)
+                    {
+                        break;
+                    }
+                    candidates[position] = previous;
+                    position -= 1;
+                }
+                candidates[position] = handle;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return Err(UiComponentTreeError::NotFocusable);
+        }
+        let current = candidates[..count].iter().position(|candidate| *candidate == self.focused);
+        let index = match (current, forward) {
+            (Some(index), true) => (index + 1).min(count - 1),
+            (Some(index), false) => index.saturating_sub(1),
+            (None, true) => 0,
+            (None, false) => count - 1,
+        };
+        let handle = candidates[index];
+        self.focus(handle)?;
+        Ok(handle)
+    }
+
     pub fn set_disabled(
         &mut self,
         handle: UiNodeHandle,
@@ -319,6 +360,22 @@ mod tests {
         host.dispatch(button_handle, UiInputEvent::Submit, &mut output).unwrap();
         assert_eq!(output.pop(), Some(UiComponentEvent::Clicked { target: button_handle }));
         assert!(!host.tree().node(input_handle).unwrap().interaction.is_focused());
+    }
+
+    #[test]
+    fn focus_traversal_orders_tab_indices_and_supports_reverse_navigation() {
+        let mut host = UiComponentTree::new();
+        let root = host.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 1).unwrap();
+        let first = host.insert(UiNodeKind::TextInput, root, 2).unwrap();
+        let second = host.insert(UiNodeKind::Button, root, 3).unwrap();
+        host.tree.node_mut(first).unwrap().interaction.set_tab_index(2);
+        host.tree.node_mut(second).unwrap().interaction.set_tab_index(1);
+
+        assert_eq!(host.focus_next(true), Ok(second));
+        assert_eq!(host.focus_next(true), Ok(first));
+        assert_eq!(host.focus_next(true), Ok(first));
+        assert_eq!(host.focus_next(false), Ok(second));
+        assert_eq!(host.focus_next(false), Ok(second));
     }
 
     #[test]
