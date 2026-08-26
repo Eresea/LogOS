@@ -3,10 +3,15 @@
 #[cfg(test)]
 extern crate std;
 
+mod events;
 mod reactive;
 mod runtime;
 mod template;
 
+pub use events::{
+    MAX_UI_EVENT_ROUTES, MAX_UI_OUTPUT_EVENTS, UiEventError, UiEventRouter, UiEventType,
+    UiHandlerId, UiInputEvent, UiOutput, UiOutputError, UiRoutedEvent,
+};
 pub use reactive::{
     MAX_UI_DEPENDENCIES, MAX_UI_DEPENDENCY_RECORDS, MAX_UI_INVALIDATIONS, UiBindingTarget,
     UiComputed, UiDependencyGraph, UiDependencySet, UiInvalidation, UiInvalidationKind,

@@ -1571,6 +1571,12 @@ and an explicit coalescing invalidation queue. A host or LogOS adapter decides
 when a changed signal is routed through the dependency graph; there is no
 global event bus or periodic change-detection loop.
 
+Component interaction uses the same explicit boundary. `UiInputEvent` contains
+the bounded semantic input variants, `UiEventRouter` maps a generation-safe
+node handle and event type to a handler ID, and `UiOutput<T>` provides a typed
+FIFO for component outputs. Full queues report backpressure; events do not
+silently disappear.
+
 The lock screen should drive the first implementation.
 
 A reasonable first milestone is:
