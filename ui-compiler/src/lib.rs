@@ -5,7 +5,7 @@ extern crate std;
 
 mod codegen;
 
-use logos_ui::{UiComponentContract, UiNodeKind};
+use logos_ui::{UiComponentContract, UiNodeKind, UiValueType};
 
 pub use codegen::{UiCodegenError, write_rust};
 
@@ -21,6 +21,7 @@ pub const MAX_UI_SOURCE_BYTES: usize = 4096;
 pub const MAX_UI_DIAGNOSTICS: usize = 16;
 pub const MAX_UI_HANDLERS: usize = 32;
 pub const MAX_UI_COMPONENT_CONTRACTS: usize = 16;
+pub const MAX_UI_VALUES: usize = 64;
 
 pub const UI_COMPONENT_NAMES: [&str; 5] =
     ["ui.button", "ui.column", "ui.form", "ui.input", "ui.text"];
@@ -69,6 +70,10 @@ pub enum UiDiagnosticKind {
     EventPayloadMismatch = 16,
     UnknownEventHandler = 17,
     EventHandlerTypeMismatch = 18,
+    UnknownBindingExpression = 19,
+    BindingTypeMismatch = 20,
+    StyleConditionTypeMismatch = 21,
+    UnknownStyleExpression = 22,
 }
 
 impl UiDiagnosticKind {
@@ -92,6 +97,10 @@ impl UiDiagnosticKind {
             Self::EventPayloadMismatch => "UI016",
             Self::UnknownEventHandler => "UI017",
             Self::EventHandlerTypeMismatch => "UI018",
+            Self::UnknownBindingExpression => "UI019",
+            Self::BindingTypeMismatch => "UI020",
+            Self::StyleConditionTypeMismatch => "UI021",
+            Self::UnknownStyleExpression => "UI022",
         }
     }
 
@@ -119,6 +128,10 @@ impl UiDiagnosticKind {
             Self::EventHandlerTypeMismatch => {
                 "event handler is registered for a different event payload"
             }
+            Self::UnknownBindingExpression => "binding expression is not registered",
+            Self::BindingTypeMismatch => "binding expression has the wrong value type",
+            Self::StyleConditionTypeMismatch => "conditional style expression must be boolean",
+            Self::UnknownStyleExpression => "conditional style expression is not registered",
         }
     }
 }
@@ -178,6 +191,9 @@ impl UiHandlerRegistry {
         expression: UiExpression,
         event: UiEventKind,
     ) -> Result<(), UiHandlerRegistryError> {
+        if expression.as_bytes().is_empty() {
+            return Err(UiHandlerRegistryError::InvalidExpression);
+        }
         let spec = UiHandlerSpec::new(expression, event);
         if self.entries[..self.count].contains(&spec) {
             return Ok(());
@@ -274,19 +290,110 @@ impl Default for UiComponentRegistry {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiValueSpec {
+    pub expression: UiExpression,
+    pub value_type: UiValueType,
+    pub writable: bool,
+}
+
+impl UiValueSpec {
+    pub const fn new(expression: UiExpression, value_type: UiValueType, writable: bool) -> Self {
+        Self { expression, value_type, writable }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiValueRegistryError {
+    InvalidExpression,
+    DuplicateExpression,
+    Capacity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiValueRegistry {
+    entries: [UiValueSpec; MAX_UI_VALUES],
+    count: usize,
+}
+
+impl UiValueRegistry {
+    pub const fn new() -> Self {
+        Self {
+            entries: [UiValueSpec::new(UiExpression::EMPTY, UiValueType::Unit, false);
+                MAX_UI_VALUES],
+            count: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn register_bytes(
+        &mut self,
+        expression: &[u8],
+        value_type: UiValueType,
+        writable: bool,
+    ) -> Result<(), UiValueRegistryError> {
+        let expression =
+            UiExpression::from_bytes(expression).ok_or(UiValueRegistryError::InvalidExpression)?;
+        self.register(expression, value_type, writable)
+    }
+
+    pub fn register(
+        &mut self,
+        expression: UiExpression,
+        value_type: UiValueType,
+        writable: bool,
+    ) -> Result<(), UiValueRegistryError> {
+        if expression.as_bytes().is_empty() {
+            return Err(UiValueRegistryError::InvalidExpression);
+        }
+        if self.entries[..self.count].iter().any(|entry| entry.expression == expression) {
+            return Err(UiValueRegistryError::DuplicateExpression);
+        }
+        if self.count == MAX_UI_VALUES {
+            return Err(UiValueRegistryError::Capacity);
+        }
+        self.entries[self.count] = UiValueSpec::new(expression, value_type, writable);
+        self.count += 1;
+        Ok(())
+    }
+
+    pub fn resolve(&self, expression: UiExpression) -> Option<UiValueSpec> {
+        self.entries[..self.count].iter().copied().find(|entry| entry.expression == expression)
+    }
+}
+
+impl Default for UiValueRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct UiCompileContext<'a> {
     component_registry: &'a UiComponentRegistry,
     handler_registry: Option<&'a UiHandlerRegistry>,
+    value_registry: Option<&'a UiValueRegistry>,
 }
 
 impl<'a> UiCompileContext<'a> {
     pub const fn new(component_registry: &'a UiComponentRegistry) -> Self {
-        Self { component_registry, handler_registry: None }
+        Self { component_registry, handler_registry: None, value_registry: None }
     }
 
     pub const fn with_handlers(mut self, handler_registry: &'a UiHandlerRegistry) -> Self {
         self.handler_registry = Some(handler_registry);
+        self
+    }
+
+    pub const fn with_values(mut self, value_registry: &'a UiValueRegistry) -> Self {
+        self.value_registry = Some(value_registry);
         self
     }
 }
@@ -406,6 +513,10 @@ pub fn lint_with_context(source: &str, context: &UiCompileContext<'_>) -> UiDiag
     compile_with_context(source, context).diagnostics
 }
 
+pub fn lint_with_values(source: &str, values: &UiValueRegistry) -> UiDiagnostics {
+    compile_with_values(source, values).diagnostics
+}
+
 pub const LOGIN_PAGE_SOURCE: &str = include_str!("../examples/login.ui");
 pub const REGISTER_PAGE_SOURCE: &str = include_str!("../examples/register.ui");
 
@@ -434,6 +545,12 @@ pub fn compile_with_components(source: &str, components: &UiComponentRegistry) -
     compile_with_context(source, &context)
 }
 
+pub fn compile_with_values(source: &str, values: &UiValueRegistry) -> UiBuild {
+    let components = UiComponentRegistry::builtins();
+    let context = UiCompileContext::new(&components).with_values(values);
+    compile_with_context(source, &context)
+}
+
 pub fn compile_with_context(source: &str, context: &UiCompileContext<'_>) -> UiBuild {
     if source.len() > MAX_UI_SOURCE_BYTES {
         let mut diagnostics = UiDiagnostics::EMPTY;
@@ -444,6 +561,7 @@ pub fn compile_with_context(source: &str, context: &UiCompileContext<'_>) -> UiB
         bytes: source.as_bytes(),
         component_registry: context.component_registry,
         handler_registry: context.handler_registry,
+        value_registry: context.value_registry,
         position: 0,
         document: UiDocument::EMPTY,
         diagnostics: UiDiagnostics::EMPTY,
@@ -456,6 +574,7 @@ struct Parser<'a> {
     bytes: &'a [u8],
     component_registry: &'a UiComponentRegistry,
     handler_registry: Option<&'a UiHandlerRegistry>,
+    value_registry: Option<&'a UiValueRegistry>,
     position: usize,
     document: UiDocument,
     diagnostics: UiDiagnostics,
@@ -683,6 +802,20 @@ impl Parser<'_> {
             self.diagnostics.push(UiDiagnosticKind::ReadOnlyBinding, offset);
             return;
         }
+        if let Some(registry) = self.value_registry {
+            let Some(value) = registry.resolve(expression) else {
+                self.diagnostics.push(UiDiagnosticKind::UnknownBindingExpression, offset);
+                return;
+            };
+            if value.value_type != input.value_type {
+                self.diagnostics.push(UiDiagnosticKind::BindingTypeMismatch, offset);
+                return;
+            }
+            if two_way && !value.writable {
+                self.diagnostics.push(UiDiagnosticKind::ReadOnlyBinding, offset);
+                return;
+            }
+        }
         let property = match name.as_bytes() {
             b"value" if node.kind == UiNodeKind::TextInput => Some(UiBindingProperty::Value),
             b"disabled" if !two_way => Some(UiBindingProperty::Disabled),
@@ -789,6 +922,17 @@ impl Parser<'_> {
                         self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
                         return;
                     };
+                    if let Some(registry) = self.value_registry {
+                        let Some(value) = registry.resolve(expression) else {
+                            self.diagnostics.push(UiDiagnosticKind::UnknownStyleExpression, offset);
+                            return;
+                        };
+                        if value.value_type != UiValueType::Bool {
+                            self.diagnostics
+                                .push(UiDiagnosticKind::StyleConditionTypeMismatch, offset);
+                            return;
+                        }
+                    }
                     let Some(UiStyleRule::Base(style)) = (rule_count == 1).then(|| rules[0]) else {
                         self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
                         return;
@@ -1288,6 +1432,61 @@ mod tests {
                 false
             )),
             Err(UiComponentRegistryError::Capacity)
+        );
+    }
+
+    #[test]
+    fn value_registry_checks_binding_types_and_writable_targets() {
+        let mut values = UiValueRegistry::new();
+        values.register_bytes(b"username", UiValueType::Text, true).unwrap();
+        values.register_bytes(b"failure", UiValueType::Bool, false).unwrap();
+        values.register_bytes(b"computedName", UiValueType::Text, false).unwrap();
+
+        let components = UiComponentRegistry::builtins();
+        let context = UiCompileContext::new(&components).with_values(&values);
+        let valid = compile_with_context(
+            r#"<ui.input [(value)]="username" {opacity-50}="failure"/>"#,
+            &context,
+        );
+        assert!(valid.is_valid(), "diagnostics: {:?}", valid.diagnostics);
+
+        let unknown = compile_with_context(r#"<ui.input [value]="missing"/>"#, &context);
+        assert!(matches!(
+            unknown.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownBindingExpression, .. })
+        ));
+
+        let mismatch = compile_with_context(r#"<ui.input [value]="failure"/>"#, &context);
+        assert!(matches!(
+            mismatch.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::BindingTypeMismatch, .. })
+        ));
+
+        let readonly = compile_with_context(r#"<ui.input [(value)]="computedName"/>"#, &context);
+        assert!(matches!(
+            readonly.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::ReadOnlyBinding, .. })
+        ));
+
+        let style_mismatch =
+            compile_with_context(r#"<ui.button {opacity-50}="username"/>"#, &context);
+        assert!(matches!(
+            style_mismatch.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::StyleConditionTypeMismatch, .. })
+        ));
+    }
+
+    #[test]
+    fn value_registry_rejects_invalid_and_duplicate_expressions() {
+        let mut values = UiValueRegistry::new();
+        assert_eq!(
+            values.register_bytes(b"", UiValueType::Text, true),
+            Err(UiValueRegistryError::InvalidExpression)
+        );
+        values.register_bytes(b"name", UiValueType::Text, true).unwrap();
+        assert_eq!(
+            values.register_bytes(b"name", UiValueType::Text, true),
+            Err(UiValueRegistryError::DuplicateExpression)
         );
     }
 
