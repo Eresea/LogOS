@@ -3,7 +3,11 @@
 #[cfg(test)]
 extern crate std;
 
+mod codegen;
+
 use logos_ui::UiNodeKind;
+
+pub use codegen::{UiCodegenError, write_rust};
 
 pub use logos_ui::{
     MAX_UI_BINDINGS, MAX_UI_CONDITIONAL_STYLES, MAX_UI_EXPRESSION_BYTES, MAX_UI_NAME_BYTES,
@@ -120,6 +124,16 @@ pub struct UiDiagnostics {
 }
 
 impl UiDiagnostics {
+    const fn new() -> Self {
+        Self {
+            entries: [UiDiagnostic {
+                kind: UiDiagnosticKind::UnexpectedToken,
+                span: UiSourceSpan::point(0),
+            }; MAX_UI_DIAGNOSTICS],
+            count: 0,
+        }
+    }
+
     const EMPTY: Self = Self {
         entries: [UiDiagnostic {
             kind: UiDiagnosticKind::UnexpectedToken,
@@ -156,6 +170,10 @@ pub struct UiBuild {
 }
 
 impl UiBuild {
+    pub const fn from_document(document: UiDocument) -> Self {
+        Self { document, diagnostics: UiDiagnostics::new() }
+    }
+
     pub const fn is_valid(&self) -> bool {
         self.diagnostics.is_empty() && self.document.node_count() != 0
     }

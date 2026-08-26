@@ -1577,6 +1577,10 @@ node handle and event type to a handler ID, and `UiOutput<T>` provides a typed
 FIFO for component outputs. Full queues report backpressure; events do not
 silently disappear.
 
+The compiler also exposes a deterministic Rust code generator for build
+systems. Generated documents use only `logos-ui` constructors and are loaded
+as fixed descriptors; `.ui` markup is not parsed by the boot-time runtime.
+
 The lock screen should drive the first implementation.
 
 A reasonable first milestone is:
