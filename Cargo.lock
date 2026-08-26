@@ -186,6 +186,7 @@ name = "logos-lockscreen"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
+ "logos-ui",
  "logos-ui-forms",
 ]
 
@@ -221,6 +222,7 @@ dependencies = [
  "logos-storage",
  "logos-storage-service",
  "logos-terminal",
+ "logos-ui",
  "logos-ui-compiler",
  "logos-user",
 ]
@@ -265,9 +267,6 @@ dependencies = [
 [[package]]
 name = "logos-ui"
 version = "0.1.0"
-dependencies = [
- "logos-abi",
-]
 
 [[package]]
 name = "logos-ui-compiler"
@@ -279,6 +278,13 @@ dependencies = [
 [[package]]
 name = "logos-ui-forms"
 version = "0.1.0"
+
+[[package]]
+name = "logos-ui-lsp"
+version = "0.1.0"
+dependencies = [
+ "logos-ui-compiler",
+]
 
 [[package]]
 name = "logos-user"

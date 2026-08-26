@@ -4,6 +4,14 @@
 
 mod common;
 
+mod generated_login_ui {
+    include!(concat!(env!("OUT_DIR"), "/login_ui.rs"));
+}
+
+mod generated_register_ui {
+    include!(concat!(env!("OUT_DIR"), "/register_ui.rs"));
+}
+
 use core::{mem, ptr};
 
 use logos_abi::{
@@ -55,10 +63,37 @@ static mut LOGIN_PAGE: Option<logos_ui_compiler::UiBuild> = None;
 static mut REGISTER_PAGE: Option<logos_ui_compiler::UiBuild> = None;
 static mut LOGIN_LAYOUT: Option<logos_shell::LoginLayout> = None;
 static mut REGISTER_LAYOUT: Option<logos_shell::LoginLayout> = None;
+static mut LOGIN_REACTIVE: logos_shell::LoginUiReactive = logos_shell::LoginUiReactive::new();
+static mut REGISTER_REACTIVE: logos_shell::LoginUiReactive = logos_shell::LoginUiReactive::new();
 
 struct ShellPages<'a> {
     login: (&'a logos_ui_compiler::UiBuild, &'a logos_shell::LoginLayout),
     register: (&'a logos_ui_compiler::UiBuild, &'a logos_shell::LoginLayout),
+}
+
+fn sync_login_reactive(
+    reactive: &mut logos_shell::LoginUiReactive,
+    lockscreen: &logos_lockscreen::LockScreen,
+) -> bool {
+    let (username, password) = lockscreen.credentials();
+    let Some(username) = logos_ui::UiText::from_bytes(username) else { return false };
+    let Some(password) = logos_ui::UiText::from_bytes(password) else { return false };
+    let Some(confirmation) = logos_ui::UiText::from_bytes(lockscreen.confirmation()) else {
+        return false;
+    };
+    let _ = reactive.set_username(username);
+    let _ = reactive.set_password(password);
+    let _ = reactive.set_confirmation(confirmation);
+    let _ = reactive.set_state(
+        logos_shell::LoginUiState::new(
+            lockscreen.mode() == logos_lockscreen::LockScreenMode::Claim,
+            lockscreen.failure(),
+        ),
+        lockscreen.form().can_submit(),
+    );
+    let committed = reactive.commit(|_| true).unwrap_or(0);
+    let _ = reactive.take_refresh();
+    committed != 0
 }
 
 fn send_current_surface(
@@ -418,11 +453,8 @@ pub extern "C" fn _start() -> ! {
     };
     let shell = unsafe { &mut *core::ptr::addr_of_mut!(SHELL) };
     unsafe {
-        ptr::write(core::ptr::addr_of_mut!(LOGIN_PAGE), Some(logos_shell::compile_login_page()));
-        ptr::write(
-            core::ptr::addr_of_mut!(REGISTER_PAGE),
-            Some(logos_shell::compile_register_page()),
-        );
+        ptr::write(core::ptr::addr_of_mut!(LOGIN_PAGE), Some(generated_login_ui::build()));
+        ptr::write(core::ptr::addr_of_mut!(REGISTER_PAGE), Some(generated_register_ui::build()));
     }
     let login_page = unsafe { (*core::ptr::addr_of!(LOGIN_PAGE)).as_ref() }.unwrap();
     let register_page = unsafe { (*core::ptr::addr_of!(REGISTER_PAGE)).as_ref() }.unwrap();
@@ -442,6 +474,16 @@ pub extern "C" fn _start() -> ! {
     unsafe {
         ptr::write(core::ptr::addr_of_mut!(LOGIN_LAYOUT), Some(login_layout));
         ptr::write(core::ptr::addr_of_mut!(REGISTER_LAYOUT), Some(register_layout));
+        ptr::write(core::ptr::addr_of_mut!(LOGIN_REACTIVE), logos_shell::LoginUiReactive::new());
+        ptr::write(core::ptr::addr_of_mut!(REGISTER_REACTIVE), logos_shell::LoginUiReactive::new());
+        let _ = (*core::ptr::addr_of_mut!(LOGIN_REACTIVE)).bind(
+            logos_shell::LoginUiTargets::from_build(login_page)
+                .unwrap_or(logos_shell::LoginUiTargets::EMPTY),
+        );
+        let _ = (*core::ptr::addr_of_mut!(REGISTER_REACTIVE)).bind(
+            logos_shell::LoginUiTargets::from_build(register_page)
+                .unwrap_or(logos_shell::LoginUiTargets::EMPTY),
+        );
     }
     let login_layout = unsafe { (*core::ptr::addr_of!(LOGIN_LAYOUT)).as_ref() }.unwrap();
     let register_layout = unsafe { (*core::ptr::addr_of!(REGISTER_LAYOUT)).as_ref() }.unwrap();
@@ -489,7 +531,17 @@ pub extern "C" fn _start() -> ! {
                     lockscreen.cancel_submission();
                 }
             }
-            if action != logos_lockscreen::LockScreenAction::Ignored {
+            let reactive_changed = unsafe {
+                if lockscreen.mode() == logos_lockscreen::LockScreenMode::Claim {
+                    sync_login_reactive(
+                        &mut *core::ptr::addr_of_mut!(REGISTER_REACTIVE),
+                        lockscreen,
+                    )
+                } else {
+                    sync_login_reactive(&mut *core::ptr::addr_of_mut!(LOGIN_REACTIVE), lockscreen)
+                }
+            };
+            if action != logos_lockscreen::LockScreenAction::Ignored || reactive_changed {
                 send_current_surface(
                     display,
                     ShellPages {
@@ -519,6 +571,15 @@ pub extern "C" fn _start() -> ! {
                     let _ = common::ipc_send_handle(flow, &context);
                     let lockscreen = unsafe { &mut *core::ptr::addr_of_mut!(LOCKSCREEN) };
                     lockscreen.apply_status(result.status);
+                    unsafe {
+                        let reactive =
+                            if lockscreen.mode() == logos_lockscreen::LockScreenMode::Claim {
+                                &mut *core::ptr::addr_of_mut!(REGISTER_REACTIVE)
+                            } else {
+                                &mut *core::ptr::addr_of_mut!(LOGIN_REACTIVE)
+                            };
+                        let _ = sync_login_reactive(reactive, lockscreen);
+                    }
                     send_current_surface(
                         display,
                         ShellPages {

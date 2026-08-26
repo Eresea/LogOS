@@ -1542,6 +1542,74 @@ Pipes are intentionally deferred rather than permanently rejected.
 
 # 38. Initial Implementation Scope
 
+The framework crates have an explicit portability boundary. `logos-ui` owns
+logical nodes, interaction state, framework geometry, and the bounded typed UI
+document/blueprint IR without importing the LogOS ABI or an operating-system
+renderer. `logos-ui-compiler` parses and validates `.ui` source, then produces
+that framework-owned representation. LogOS-specific compositor and input
+adapters convert it at the shell boundary.
+
+The compiler package also provides `logos-ui-lint` for host tooling. It uses
+the same bounded `no_std` compiler library and reports stable diagnostic codes
+with source line and column locations, so editor or Windows compatibility
+integrations do not need a second parser.
+
+The host command is intentionally ordinary Cargo tooling and works on Windows
+without linking the kernel or compositor:
+
+```powershell
+cargo run -p logos-ui-compiler --bin logos-ui-lint -- ui-compiler/examples/login.ui
+```
+
+Editor tooling keeps the same single-source-of-truth compiler boundary:
+
+```text
+logos-ui-compiler
+├── parser / AST
+├── resolver and component metadata
+├── type checker
+├── style vocabulary
+└── diagnostics
+
+logos-ui-lsp
+└── stdio JSON-RPC adapter for VS Code and other LSP clients
+```
+
+`logos-ui-lsp` is host-only. It reuses compiler diagnostics and vocabulary for
+`.ui` document synchronization, contextual completion, and hover information;
+the boot-time runtime and `logos-ui` remain unaware of LSP or editor state.
+Launch it as a stdio language server with:
+
+```powershell
+cargo run -p logos-ui-lsp --bin logos-ui-lsp
+```
+
+The compiler's host integration test also consumes the result only through
+`logos-ui` types, proving that a Windows compatibility host can instantiate the
+same document and runtime tree without importing LogOS services.
+
+The portable runtime also provides bounded reactive primitives: writable
+`UiSignal<T>` values, read-only `UiComputed<T>` values, fixed dependency sets,
+and an explicit coalescing invalidation queue. A host or LogOS adapter decides
+when a changed signal is routed through the dependency graph; there is no
+global event bus or periodic change-detection loop.
+
+Component interaction uses the same explicit boundary. `UiInputEvent` contains
+the bounded semantic input variants, `UiEventRouter` maps a generation-safe
+node handle and event type to a handler ID, and `UiOutput<T>` provides a typed
+FIFO for component outputs. Full queues report backpressure; events do not
+silently disappear.
+
+Rust components implement `UiComponent` with a concrete output type and
+handle semantic `UiInputEvent` values directly. The framework does not need
+dynamic reflection or trait-object dispatch: the host owns the static
+component wiring, while `UiOutput<T>` carries typed child-to-parent results.
+
+The compiler also exposes a deterministic Rust code generator for build
+systems. Generated documents use only `logos-ui` constructors and are loaded
+as fixed descriptors; `.ui` markup is not parsed by the boot-time runtime.
+The built-in service image uses this path for the login and registration pages.
+
 The lock screen should drive the first implementation.
 
 A reasonable first milestone is:

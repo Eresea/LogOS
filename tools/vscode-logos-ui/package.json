@@ -1,0 +1,42 @@
+{
+  "name": "logos-ui-vscode",
+  "displayName": "LogOS UI",
+  "description": "VS Code support for LogOS .ui templates",
+  "version": "0.0.1",
+  "publisher": "logos",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:logos-ui"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "logos-ui",
+        "extensions": [
+          ".ui"
+        ],
+        "aliases": [
+          "LogOS UI",
+          "logos-ui"
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "LogOS UI",
+      "properties": {
+        "logosUi.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to the logos-ui-lsp executable."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

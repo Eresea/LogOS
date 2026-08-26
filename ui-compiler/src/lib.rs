@@ -3,366 +3,453 @@
 #[cfg(test)]
 extern crate std;
 
-use logos_ui::{MAX_UI_NODES, UiBlueprint, UiError, UiInteraction, UiNodeKind};
+mod codegen;
+
+use logos_ui::{UiComponentContract, UiNodeKind, UiValueType};
+
+pub use codegen::{UiCodegenError, write_rust};
+
+pub use logos_ui::{
+    MAX_UI_BINDINGS, MAX_UI_CONDITIONAL_STYLES, MAX_UI_EXPRESSION_BYTES, MAX_UI_NAME_BYTES,
+    MAX_UI_STATE_STYLES, MAX_UI_STYLE_CONDITIONS, MAX_UI_STYLE_TOKENS, MAX_UI_TEXT_BYTES,
+    UiBinding, UiBindingList, UiBindingProperty, UiConditionalStyle, UiConditionalStyleList,
+    UiDocument, UiEvent, UiEventKind, UiExpression, UiName, UiNodeTemplate, UiStateStyle,
+    UiStateStyleList, UiStyle, UiStyleConditions, UiStyleList, UiStyleResolveError, UiStyleState,
+    UiText,
+};
 
 pub const MAX_UI_SOURCE_BYTES: usize = 4096;
-pub const MAX_UI_NAME_BYTES: usize = 24;
-pub const MAX_UI_TEXT_BYTES: usize = 64;
-pub const MAX_UI_EXPRESSION_BYTES: usize = 48;
-pub const MAX_UI_STYLE_TOKENS: usize = 8;
-pub const MAX_UI_STATE_STYLES: usize = 4;
-pub const MAX_UI_CONDITIONAL_STYLES: usize = 4;
-pub const MAX_UI_BINDINGS: usize = 4;
 pub const MAX_UI_DIAGNOSTICS: usize = 16;
+pub const MAX_UI_HANDLERS: usize = 32;
+pub const MAX_UI_COMPONENT_CONTRACTS: usize = 16;
+pub const MAX_UI_VALUES: usize = 64;
+
+pub const UI_COMPONENT_NAMES: [&str; 5] =
+    ["ui.button", "ui.column", "ui.form", "ui.input", "ui.text"];
+pub const UI_STYLE_NAMES: [&str; 19] = [
+    "h-full",
+    "w-full",
+    "flex-x",
+    "flex-y",
+    "items-center",
+    "justify-center",
+    "w-96",
+    "gap",
+    "gap-x",
+    "gap-y",
+    "mt-4",
+    "mb-2",
+    "px-6",
+    "py-3",
+    "rounded-lg",
+    "bg-accent",
+    "text-4xl",
+    "font-light",
+    "opacity-50",
+];
+pub const UI_BINDING_NAMES: [&str; 5] = ["value", "disabled", "form", "control", "canSubmit"];
+pub const UI_EVENT_NAMES: [&str; 3] = ["click", "submit", "changed"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiName {
-    bytes: [u8; MAX_UI_NAME_BYTES],
-    len: u8,
+#[repr(u8)]
+pub enum UiDiagnosticKind {
+    SourceTooLarge = 1,
+    UnexpectedToken = 2,
+    UnexpectedEnd = 3,
+    UnknownElement = 4,
+    UnknownAttribute = 5,
+    UnknownBinding = 6,
+    UnknownEvent = 7,
+    UnknownStyle = 8,
+    MissingValue = 9,
+    InvalidValue = 10,
+    MismatchedClose = 11,
+    TextNotAllowed = 12,
+    Capacity = 13,
+    ReadOnlyBinding = 14,
+    InvalidEventHandler = 15,
+    EventPayloadMismatch = 16,
+    UnknownEventHandler = 17,
+    EventHandlerTypeMismatch = 18,
+    UnknownBindingExpression = 19,
+    BindingTypeMismatch = 20,
+    StyleConditionTypeMismatch = 21,
+    UnknownStyleExpression = 22,
+    InvalidInterpolation = 23,
+    UnknownTextExpression = 24,
+    TextExpressionTypeMismatch = 25,
+    DuplicateNodeName = 26,
 }
 
-impl UiName {
-    pub const EMPTY: Self = Self { bytes: [0; MAX_UI_NAME_BYTES], len: 0 };
-
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.is_empty() || bytes.len() > MAX_UI_NAME_BYTES {
-            return None;
+impl UiDiagnosticKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::SourceTooLarge => "UI001",
+            Self::UnexpectedToken => "UI002",
+            Self::UnexpectedEnd => "UI003",
+            Self::UnknownElement => "UI004",
+            Self::UnknownAttribute => "UI005",
+            Self::UnknownBinding => "UI006",
+            Self::UnknownEvent => "UI007",
+            Self::UnknownStyle => "UI008",
+            Self::MissingValue => "UI009",
+            Self::InvalidValue => "UI010",
+            Self::MismatchedClose => "UI011",
+            Self::TextNotAllowed => "UI012",
+            Self::Capacity => "UI013",
+            Self::ReadOnlyBinding => "UI014",
+            Self::InvalidEventHandler => "UI015",
+            Self::EventPayloadMismatch => "UI016",
+            Self::UnknownEventHandler => "UI017",
+            Self::EventHandlerTypeMismatch => "UI018",
+            Self::UnknownBindingExpression => "UI019",
+            Self::BindingTypeMismatch => "UI020",
+            Self::StyleConditionTypeMismatch => "UI021",
+            Self::UnknownStyleExpression => "UI022",
+            Self::InvalidInterpolation => "UI023",
+            Self::UnknownTextExpression => "UI024",
+            Self::TextExpressionTypeMismatch => "UI025",
+            Self::DuplicateNodeName => "UI026",
         }
-        let mut value = Self::EMPTY;
-        value.bytes[..bytes.len()].copy_from_slice(bytes);
-        value.len = bytes.len() as u8;
-        Some(value)
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.len as usize]
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiText {
-    bytes: [u8; MAX_UI_TEXT_BYTES],
-    len: u8,
-}
-
-impl UiText {
-    pub const EMPTY: Self = Self { bytes: [0; MAX_UI_TEXT_BYTES], len: 0 };
-
-    fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() > MAX_UI_TEXT_BYTES {
-            return None;
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::SourceTooLarge => "UI source exceeds the bounded source limit",
+            Self::UnexpectedToken => "unexpected token",
+            Self::UnexpectedEnd => "unexpected end of UI source",
+            Self::UnknownElement => "element is not in scope",
+            Self::UnknownAttribute => "attribute is not supported",
+            Self::UnknownBinding => "binding is not supported for this component",
+            Self::UnknownEvent => "event is not supported for this component",
+            Self::UnknownStyle => "style utility is not recognized",
+            Self::MissingValue => "attribute or binding requires a value",
+            Self::InvalidValue => "value is invalid for this component",
+            Self::MismatchedClose => "closing element does not match the open element",
+            Self::TextNotAllowed => "text is not allowed in this component",
+            Self::Capacity => "UI document exceeds a bounded compiler limit",
+            Self::ReadOnlyBinding => "two-way binding requires a writable component input",
+            Self::InvalidEventHandler => {
+                "event handler must be a bounded method or call expression"
+            }
+            Self::EventPayloadMismatch => "$event is only available on changed handlers",
+            Self::UnknownEventHandler => "event handler is not registered for this component",
+            Self::EventHandlerTypeMismatch => {
+                "event handler is registered for a different event payload"
+            }
+            Self::UnknownBindingExpression => "binding expression is not registered",
+            Self::BindingTypeMismatch => "binding expression has the wrong value type",
+            Self::StyleConditionTypeMismatch => "conditional style expression must be boolean",
+            Self::UnknownStyleExpression => "conditional style expression is not registered",
+            Self::InvalidInterpolation => "text interpolation must be a bounded whole expression",
+            Self::UnknownTextExpression => "text interpolation expression is not registered",
+            Self::TextExpressionTypeMismatch => "text interpolation expression must be text",
+            Self::DuplicateNodeName => "node name is already used in this document",
         }
-        let mut value = Self::EMPTY;
-        value.bytes[..bytes.len()].copy_from_slice(bytes);
-        value.len = bytes.len() as u8;
-        Some(value)
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.len as usize]
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiExpression {
-    bytes: [u8; MAX_UI_EXPRESSION_BYTES],
-    len: u8,
-}
-
-impl UiExpression {
-    const EMPTY: Self = Self { bytes: [0; MAX_UI_EXPRESSION_BYTES], len: 0 };
-
-    fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.is_empty() || bytes.len() > MAX_UI_EXPRESSION_BYTES {
-            return None;
-        }
-        let mut value = Self::EMPTY;
-        value.bytes[..bytes.len()].copy_from_slice(bytes);
-        value.len = bytes.len() as u8;
-        Some(value)
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.len as usize]
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UiBindingProperty {
-    Value,
-    Disabled,
-    Form,
-    Control,
-    CanSubmit,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiBinding {
-    pub property: UiBindingProperty,
+pub struct UiHandlerSpec {
     pub expression: UiExpression,
+    pub event: UiEventKind,
 }
 
-impl UiBinding {
-    const EMPTY: Self =
-        Self { property: UiBindingProperty::Value, expression: UiExpression::EMPTY };
-
-    pub fn is_present(&self) -> bool {
-        !self.expression.as_bytes().is_empty()
+impl UiHandlerSpec {
+    pub const fn new(expression: UiExpression, event: UiEventKind) -> Self {
+        Self { expression, event }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiBindingList {
-    pub entries: [UiBinding; MAX_UI_BINDINGS],
-    pub len: u8,
-}
-
-impl UiBindingList {
-    const EMPTY: Self = Self { entries: [UiBinding::EMPTY; MAX_UI_BINDINGS], len: 0 };
-
-    fn contains(&self, property: UiBindingProperty) -> bool {
-        self.entries[..self.len as usize].iter().any(|binding| binding.property == property)
-    }
-
-    fn push(&mut self, binding: UiBinding) -> bool {
-        if usize::from(self.len) == MAX_UI_BINDINGS {
-            return false;
-        }
-        self.entries[usize::from(self.len)] = binding;
-        self.len += 1;
-        true
-    }
+pub enum UiHandlerRegistryError {
+    InvalidExpression,
+    Capacity,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UiStyleState {
-    Focus,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiStateStyle {
-    pub state: UiStyleState,
-    pub style: UiStyle,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiStateStyleList {
-    pub entries: [UiStateStyle; MAX_UI_STATE_STYLES],
-    pub len: u8,
-}
-
-impl UiStateStyleList {
-    const EMPTY: Self = Self {
-        entries: [UiStateStyle { state: UiStyleState::Focus, style: UiStyle::FullHeight };
-            MAX_UI_STATE_STYLES],
-        len: 0,
-    };
-
-    fn push(&mut self, entry: UiStateStyle) -> bool {
-        if usize::from(self.len) == MAX_UI_STATE_STYLES {
-            return false;
-        }
-        self.entries[usize::from(self.len)] = entry;
-        self.len += 1;
-        true
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiConditionalStyle {
-    pub style: UiStyle,
-    pub expression: UiExpression,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiConditionalStyleList {
-    pub entries: [UiConditionalStyle; MAX_UI_CONDITIONAL_STYLES],
-    pub len: u8,
-}
-
-impl UiConditionalStyleList {
-    const EMPTY: Self = Self {
-        entries: [UiConditionalStyle {
-            style: UiStyle::FullHeight,
-            expression: UiExpression::EMPTY,
-        }; MAX_UI_CONDITIONAL_STYLES],
-        len: 0,
-    };
-
-    fn push(&mut self, entry: UiConditionalStyle) -> bool {
-        if usize::from(self.len) == MAX_UI_CONDITIONAL_STYLES {
-            return false;
-        }
-        self.entries[usize::from(self.len)] = entry;
-        self.len += 1;
-        true
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UiEventKind {
-    Click,
-    Submit,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiEvent {
-    pub kind: UiEventKind,
-    pub handler: UiExpression,
-}
-
-impl UiEvent {
-    const EMPTY: Self = Self { kind: UiEventKind::Click, handler: UiExpression::EMPTY };
-
-    pub fn is_present(&self) -> bool {
-        !self.handler.as_bytes().is_empty()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UiStyle {
-    FullHeight,
-    FullWidth,
-    FlexX,
-    FlexY,
-    ItemsCenter,
-    JustifyCenter,
-    Width96,
-    Gap(u8),
-    GapX(u8),
-    GapY(u8),
-    MarginTop4,
-    MarginBottom2,
-    PaddingX6,
-    PaddingY3,
-    RoundedLarge,
-    BackgroundAccent,
-    Text4xl,
-    FontLight,
-    Opacity50,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiStyleList {
-    pub tokens: [UiStyle; MAX_UI_STYLE_TOKENS],
-    pub len: u8,
-}
-
-impl UiStyleList {
-    const EMPTY: Self = Self { tokens: [UiStyle::FullHeight; MAX_UI_STYLE_TOKENS], len: 0 };
-
-    fn push(&mut self, token: UiStyle) -> bool {
-        if usize::from(self.len) == MAX_UI_STYLE_TOKENS {
-            return false;
-        }
-        self.tokens[usize::from(self.len)] = token;
-        self.len += 1;
-        true
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiNodeTemplate {
-    pub kind: UiNodeKind,
-    pub parent: u16,
-    pub key: UiName,
-    pub text: UiText,
-    pub bindings: UiBindingList,
-    pub event: UiEvent,
-    pub styles: UiStyleList,
-    pub state_styles: UiStateStyleList,
-    pub conditional_styles: UiConditionalStyleList,
-    pub tab_index: i16,
-}
-
-impl UiNodeTemplate {
-    const EMPTY: Self = Self {
-        kind: UiNodeKind::Panel,
-        parent: u16::MAX,
-        key: UiName::EMPTY,
-        text: UiText::EMPTY,
-        bindings: UiBindingList::EMPTY,
-        event: UiEvent::EMPTY,
-        styles: UiStyleList::EMPTY,
-        state_styles: UiStateStyleList::EMPTY,
-        conditional_styles: UiConditionalStyleList::EMPTY,
-        tab_index: logos_ui::TAB_INDEX_NONE,
-    };
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiDocument {
-    nodes: [UiNodeTemplate; MAX_UI_NODES],
+pub struct UiHandlerRegistry {
+    entries: [UiHandlerSpec; MAX_UI_HANDLERS],
     count: usize,
 }
 
-impl UiDocument {
-    const EMPTY: Self = Self { nodes: [UiNodeTemplate::EMPTY; MAX_UI_NODES], count: 0 };
+impl UiHandlerRegistry {
+    pub const fn new() -> Self {
+        Self {
+            entries: [UiHandlerSpec::new(UiExpression::EMPTY, UiEventKind::Click); MAX_UI_HANDLERS],
+            count: 0,
+        }
+    }
 
-    pub const fn node_count(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.count
     }
 
-    pub fn node(&self, index: usize) -> Option<&UiNodeTemplate> {
-        (index < self.count).then(|| &self.nodes[index])
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
     }
 
-    pub fn to_blueprint(&self) -> Result<UiBlueprint, UiError> {
-        let mut blueprint = UiBlueprint::new();
-        for index in 0..self.count {
-            let node = self.nodes[index];
-            let key = node_key(index, &node.key);
-            let mut interaction = UiInteraction::for_kind(node.kind);
-            interaction.set_tab_index(node.tab_index);
-            if node.parent == u16::MAX {
-                blueprint.push_root_with_interaction(node.kind, key, interaction)?;
-            } else {
-                blueprint.push_child_with_interaction(node.kind, node.parent, key, interaction)?;
-            }
-        }
-        Ok(blueprint)
+    pub fn register_bytes(
+        &mut self,
+        expression: &[u8],
+        event: UiEventKind,
+    ) -> Result<(), UiHandlerRegistryError> {
+        let expression = UiExpression::from_bytes(expression)
+            .ok_or(UiHandlerRegistryError::InvalidExpression)?;
+        self.register(expression, event)
     }
 
-    fn push(&mut self, node: UiNodeTemplate) -> Option<u16> {
-        if self.count == MAX_UI_NODES {
-            return None;
+    pub fn register(
+        &mut self,
+        expression: UiExpression,
+        event: UiEventKind,
+    ) -> Result<(), UiHandlerRegistryError> {
+        if expression.as_bytes().is_empty() {
+            return Err(UiHandlerRegistryError::InvalidExpression);
         }
-        let index = self.count as u16;
-        self.nodes[self.count] = node;
+        let spec = UiHandlerSpec::new(expression, event);
+        if self.entries[..self.count].contains(&spec) {
+            return Ok(());
+        }
+        if self.count == MAX_UI_HANDLERS {
+            return Err(UiHandlerRegistryError::Capacity);
+        }
+        self.entries[self.count] = spec;
         self.count += 1;
-        Some(index)
+        Ok(())
     }
 
-    fn node_mut(&mut self, index: u16) -> Option<&mut UiNodeTemplate> {
-        self.nodes.get_mut(usize::from(index))
+    fn contains_expression(&self, expression: UiExpression) -> bool {
+        self.entries[..self.count].iter().any(|spec| spec.expression == expression)
+    }
+
+    fn accepts(&self, expression: UiExpression, event: UiEventKind) -> bool {
+        self.entries[..self.count].contains(&UiHandlerSpec::new(expression, event))
+    }
+}
+
+impl Default for UiHandlerRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UiDiagnosticKind {
-    SourceTooLarge,
-    UnexpectedToken,
-    UnexpectedEnd,
-    UnknownElement,
-    UnknownAttribute,
-    UnknownBinding,
-    UnknownEvent,
-    UnknownStyle,
-    MissingValue,
-    InvalidValue,
-    MismatchedClose,
-    TextNotAllowed,
+pub enum UiComponentRegistryError {
+    InvalidName,
+    DuplicateName,
     Capacity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiComponentRegistry {
+    entries: [UiComponentContract; MAX_UI_COMPONENT_CONTRACTS],
+    count: usize,
+}
+
+impl UiComponentRegistry {
+    pub const fn new() -> Self {
+        Self { entries: [UiComponentContract::EMPTY; MAX_UI_COMPONENT_CONTRACTS], count: 0 }
+    }
+
+    pub const fn builtins() -> Self {
+        let mut registry = Self::new();
+        registry.entries[0] = UiComponentContract::for_kind(UiNodeKind::Button);
+        registry.entries[1] = UiComponentContract::for_kind(UiNodeKind::TextInput);
+        registry.entries[2] = UiComponentContract::for_kind(UiNodeKind::Form);
+        registry.entries[3] = UiComponentContract::for_kind(UiNodeKind::Root);
+        registry.entries[4] = UiComponentContract::for_kind(UiNodeKind::Panel);
+        registry.entries[5] = UiComponentContract::for_kind(UiNodeKind::Label);
+        registry.entries[6] = UiComponentContract::new("ui.column", UiNodeKind::Panel, false);
+        registry.count = 7;
+        registry
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn register(
+        &mut self,
+        contract: UiComponentContract,
+    ) -> Result<(), UiComponentRegistryError> {
+        let name = contract.name.as_bytes();
+        if !valid_component_name(name) {
+            return Err(UiComponentRegistryError::InvalidName);
+        }
+        if self.entries[..self.count].iter().any(|entry| entry.name == contract.name) {
+            return Err(UiComponentRegistryError::DuplicateName);
+        }
+        if self.count == MAX_UI_COMPONENT_CONTRACTS {
+            return Err(UiComponentRegistryError::Capacity);
+        }
+        self.entries[self.count] = contract;
+        self.count += 1;
+        Ok(())
+    }
+
+    pub fn resolve(&self, name: &[u8]) -> Option<UiComponentContract> {
+        self.entries[..self.count].iter().copied().find(|contract| contract.name.as_bytes() == name)
+    }
+}
+
+impl Default for UiComponentRegistry {
+    fn default() -> Self {
+        Self::builtins()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiValueSpec {
+    pub expression: UiExpression,
+    pub value_type: UiValueType,
+    pub writable: bool,
+}
+
+impl UiValueSpec {
+    pub const fn new(expression: UiExpression, value_type: UiValueType, writable: bool) -> Self {
+        Self { expression, value_type, writable }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiValueRegistryError {
+    InvalidExpression,
+    DuplicateExpression,
+    Capacity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiValueRegistry {
+    entries: [UiValueSpec; MAX_UI_VALUES],
+    count: usize,
+}
+
+impl UiValueRegistry {
+    pub const fn new() -> Self {
+        Self {
+            entries: [UiValueSpec::new(UiExpression::EMPTY, UiValueType::Unit, false);
+                MAX_UI_VALUES],
+            count: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn register_bytes(
+        &mut self,
+        expression: &[u8],
+        value_type: UiValueType,
+        writable: bool,
+    ) -> Result<(), UiValueRegistryError> {
+        let expression =
+            UiExpression::from_bytes(expression).ok_or(UiValueRegistryError::InvalidExpression)?;
+        self.register(expression, value_type, writable)
+    }
+
+    pub fn register(
+        &mut self,
+        expression: UiExpression,
+        value_type: UiValueType,
+        writable: bool,
+    ) -> Result<(), UiValueRegistryError> {
+        if expression.as_bytes().is_empty() {
+            return Err(UiValueRegistryError::InvalidExpression);
+        }
+        if self.entries[..self.count].iter().any(|entry| entry.expression == expression) {
+            return Err(UiValueRegistryError::DuplicateExpression);
+        }
+        if self.count == MAX_UI_VALUES {
+            return Err(UiValueRegistryError::Capacity);
+        }
+        self.entries[self.count] = UiValueSpec::new(expression, value_type, writable);
+        self.count += 1;
+        Ok(())
+    }
+
+    pub fn resolve(&self, expression: UiExpression) -> Option<UiValueSpec> {
+        self.entries[..self.count].iter().copied().find(|entry| entry.expression == expression)
+    }
+}
+
+impl Default for UiValueRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct UiCompileContext<'a> {
+    component_registry: &'a UiComponentRegistry,
+    handler_registry: Option<&'a UiHandlerRegistry>,
+    value_registry: Option<&'a UiValueRegistry>,
+}
+
+impl<'a> UiCompileContext<'a> {
+    pub const fn new(component_registry: &'a UiComponentRegistry) -> Self {
+        Self { component_registry, handler_registry: None, value_registry: None }
+    }
+
+    pub const fn with_handlers(mut self, handler_registry: &'a UiHandlerRegistry) -> Self {
+        self.handler_registry = Some(handler_registry);
+        self
+    }
+
+    pub const fn with_values(mut self, value_registry: &'a UiValueRegistry) -> Self {
+        self.value_registry = Some(value_registry);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiSourceSpan {
+    pub start: u16,
+    pub length: u16,
+}
+
+impl UiSourceSpan {
+    pub const fn point(start: usize) -> Self {
+        let start = if start > u16::MAX as usize { u16::MAX } else { start as u16 };
+        Self { start, length: 1 }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiDiagnostic {
     pub kind: UiDiagnosticKind,
-    pub offset: u16,
+    pub span: UiSourceSpan,
+}
+
+impl UiDiagnostic {
+    pub const fn code(self) -> &'static str {
+        self.kind.code()
+    }
+
+    pub const fn message(self) -> &'static str {
+        self.kind.message()
+    }
+
+    pub const fn offset(self) -> usize {
+        self.span.start as usize
+    }
+
+    pub fn line_column(self, source: &str) -> (usize, usize) {
+        let offset = self.offset().min(source.len());
+        let prefix = &source.as_bytes()[..offset];
+        let line = prefix.iter().filter(|byte| **byte == b'\n').count() + 1;
+        let column = prefix.iter().rev().take_while(|byte| **byte != b'\n').count() + 1;
+        (line, column)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -372,9 +459,21 @@ pub struct UiDiagnostics {
 }
 
 impl UiDiagnostics {
+    const fn new() -> Self {
+        Self {
+            entries: [UiDiagnostic {
+                kind: UiDiagnosticKind::UnexpectedToken,
+                span: UiSourceSpan::point(0),
+            }; MAX_UI_DIAGNOSTICS],
+            count: 0,
+        }
+    }
+
     const EMPTY: Self = Self {
-        entries: [UiDiagnostic { kind: UiDiagnosticKind::UnexpectedToken, offset: 0 };
-            MAX_UI_DIAGNOSTICS],
+        entries: [UiDiagnostic {
+            kind: UiDiagnosticKind::UnexpectedToken,
+            span: UiSourceSpan::point(0),
+        }; MAX_UI_DIAGNOSTICS],
         count: 0,
     };
 
@@ -394,8 +493,7 @@ impl UiDiagnostics {
         if self.count == MAX_UI_DIAGNOSTICS {
             return;
         }
-        self.entries[self.count] =
-            UiDiagnostic { kind, offset: offset.min(usize::from(u16::MAX)) as u16 };
+        self.entries[self.count] = UiDiagnostic { kind, span: UiSourceSpan::point(offset) };
         self.count += 1;
     }
 }
@@ -407,6 +505,10 @@ pub struct UiBuild {
 }
 
 impl UiBuild {
+    pub const fn from_document(document: UiDocument) -> Self {
+        Self { document, diagnostics: UiDiagnostics::new() }
+    }
+
     pub const fn is_valid(&self) -> bool {
         self.diagnostics.is_empty() && self.document.node_count() != 0
     }
@@ -414,6 +516,18 @@ impl UiBuild {
 
 pub fn lint(source: &str) -> UiDiagnostics {
     compile(source).diagnostics
+}
+
+pub fn lint_with_handlers(source: &str, handlers: &UiHandlerRegistry) -> UiDiagnostics {
+    compile_with_handlers(source, handlers).diagnostics
+}
+
+pub fn lint_with_context(source: &str, context: &UiCompileContext<'_>) -> UiDiagnostics {
+    compile_with_context(source, context).diagnostics
+}
+
+pub fn lint_with_values(source: &str, values: &UiValueRegistry) -> UiDiagnostics {
+    compile_with_values(source, values).diagnostics
 }
 
 pub const LOGIN_PAGE_SOURCE: &str = include_str!("../examples/login.ui");
@@ -428,6 +542,29 @@ pub fn compile_register_page() -> UiBuild {
 }
 
 pub fn compile(source: &str) -> UiBuild {
+    let components = UiComponentRegistry::builtins();
+    let context = UiCompileContext::new(&components);
+    compile_with_context(source, &context)
+}
+
+pub fn compile_with_handlers(source: &str, handlers: &UiHandlerRegistry) -> UiBuild {
+    let components = UiComponentRegistry::builtins();
+    let context = UiCompileContext::new(&components).with_handlers(handlers);
+    compile_with_context(source, &context)
+}
+
+pub fn compile_with_components(source: &str, components: &UiComponentRegistry) -> UiBuild {
+    let context = UiCompileContext::new(components);
+    compile_with_context(source, &context)
+}
+
+pub fn compile_with_values(source: &str, values: &UiValueRegistry) -> UiBuild {
+    let components = UiComponentRegistry::builtins();
+    let context = UiCompileContext::new(&components).with_values(values);
+    compile_with_context(source, &context)
+}
+
+pub fn compile_with_context(source: &str, context: &UiCompileContext<'_>) -> UiBuild {
     if source.len() > MAX_UI_SOURCE_BYTES {
         let mut diagnostics = UiDiagnostics::EMPTY;
         diagnostics.push(UiDiagnosticKind::SourceTooLarge, MAX_UI_SOURCE_BYTES);
@@ -435,6 +572,9 @@ pub fn compile(source: &str) -> UiBuild {
     }
     let mut parser = Parser {
         bytes: source.as_bytes(),
+        component_registry: context.component_registry,
+        handler_registry: context.handler_registry,
+        value_registry: context.value_registry,
         position: 0,
         document: UiDocument::EMPTY,
         diagnostics: UiDiagnostics::EMPTY,
@@ -445,6 +585,9 @@ pub fn compile(source: &str) -> UiBuild {
 
 struct Parser<'a> {
     bytes: &'a [u8],
+    component_registry: &'a UiComponentRegistry,
+    handler_registry: Option<&'a UiHandlerRegistry>,
+    value_registry: Option<&'a UiValueRegistry>,
     position: usize,
     document: UiDocument,
     diagnostics: UiDiagnostics,
@@ -479,18 +622,19 @@ impl Parser<'_> {
             self.diagnostics.push(UiDiagnosticKind::UnexpectedToken, start);
             return None;
         };
-        let kind = element_kind(name.as_bytes());
-        if kind.is_none() {
+        let contract = self.component_registry.resolve(name.as_bytes());
+        if contract.is_none() {
             self.diagnostics.push(UiDiagnosticKind::UnknownElement, start);
         }
-        let node_index = if let Some(kind) = kind {
+        let node_index = if let Some(contract) = contract {
+            let kind = contract.kind;
             let node = UiNodeTemplate {
                 kind,
                 parent,
                 tab_index: if kind.is_interactive() { 0 } else { logos_ui::TAB_INDEX_NONE },
                 ..UiNodeTemplate::EMPTY
             };
-            let index = self.document.push(node);
+            let index = self.document.push_node(node);
             if index.is_none() {
                 self.diagnostics.push(UiDiagnosticKind::Capacity, start);
             }
@@ -499,7 +643,7 @@ impl Parser<'_> {
             None
         };
 
-        let self_closing = self.parse_attributes(node_index);
+        let self_closing = self.parse_attributes(node_index, contract);
         if self_closing {
             return node_index;
         }
@@ -530,21 +674,58 @@ impl Parser<'_> {
             if text.is_empty() {
                 continue;
             }
-            if let Some(index) = node_index {
-                if let Some(node) = self.document.node_mut(index) {
-                    if let Some(value) = UiText::from_bytes(text) {
-                        node.text = value;
-                    } else {
-                        self.diagnostics.push(UiDiagnosticKind::InvalidValue, text_start);
-                    }
-                }
-            } else {
-                self.diagnostics.push(UiDiagnosticKind::TextNotAllowed, text_start);
-            }
+            self.apply_text(node_index, text, text_start);
         }
     }
 
-    fn parse_attributes(&mut self, node_index: Option<u16>) -> bool {
+    fn apply_text(&mut self, node_index: Option<u16>, text: &[u8], offset: usize) {
+        if has_interpolation_marker(text) {
+            if !text.starts_with(b"{{") || !text.ends_with(b"}}") {
+                self.diagnostics.push(UiDiagnosticKind::InvalidInterpolation, offset);
+                return;
+            }
+            let expression_bytes = trim_space(&text[2..text.len() - 2]);
+            let Some(expression) = UiExpression::from_bytes(expression_bytes) else {
+                self.diagnostics.push(UiDiagnosticKind::InvalidInterpolation, offset);
+                return;
+            };
+            if let Some(registry) = self.value_registry {
+                let Some(value) = registry.resolve(expression) else {
+                    self.diagnostics.push(UiDiagnosticKind::UnknownTextExpression, offset);
+                    return;
+                };
+                if value.value_type != UiValueType::Text {
+                    self.diagnostics.push(UiDiagnosticKind::TextExpressionTypeMismatch, offset);
+                    return;
+                }
+            }
+            let Some(index) = node_index else {
+                self.diagnostics.push(UiDiagnosticKind::TextNotAllowed, offset);
+                return;
+            };
+            if let Some(node) = self.document.node_mut(index) {
+                node.text_binding = expression;
+            }
+            return;
+        }
+        if let Some(index) = node_index {
+            if let Some(node) = self.document.node_mut(index) {
+                if let Some(value) = UiText::from_bytes(text) {
+                    node.text = value;
+                } else {
+                    self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                }
+            }
+        } else {
+            self.diagnostics.push(UiDiagnosticKind::TextNotAllowed, offset);
+        }
+    }
+
+    fn parse_attributes(
+        &mut self,
+        node_index: Option<u16>,
+        contract: Option<UiComponentContract>,
+    ) -> bool {
         loop {
             self.skip_space();
             if self.starts_with(b"/>") {
@@ -557,8 +738,8 @@ impl Parser<'_> {
             let offset = self.position;
             match self.peek() {
                 Some(b'{') => self.parse_styles(node_index),
-                Some(b'[') => self.parse_binding(node_index),
-                Some(b'(') => self.parse_event(node_index),
+                Some(b'[') => self.parse_binding(node_index, contract),
+                Some(b'(') => self.parse_event(node_index, contract),
                 Some(b'#') => self.parse_node_name(node_index),
                 Some(_) => self.parse_plain_attribute(node_index),
                 None => {
@@ -609,9 +790,7 @@ impl Parser<'_> {
             return;
         };
         if let Some(index) = node_index {
-            if let Some(node) = self.document.node_mut(index) {
-                node.key = value;
-            }
+            self.assign_node_name(index, value, offset);
         }
     }
 
@@ -624,13 +803,25 @@ impl Parser<'_> {
             return;
         };
         if let Some(index) = node_index {
-            if let Some(node) = self.document.node_mut(index) {
-                node.key = name;
-            }
+            self.assign_node_name(index, name, offset);
         }
     }
 
-    fn parse_binding(&mut self, node_index: Option<u16>) {
+    fn assign_node_name(&mut self, index: u16, name: UiName, offset: usize) {
+        let duplicate = (0..self.document.node_count()).any(|candidate| {
+            candidate != usize::from(index)
+                && self.document.node(candidate).is_some_and(|node| node.key == name)
+        });
+        if duplicate {
+            self.diagnostics.push(UiDiagnosticKind::DuplicateNodeName, offset);
+            return;
+        }
+        if let Some(node) = self.document.node_mut(index) {
+            node.key = name;
+        }
+    }
+
+    fn parse_binding(&mut self, node_index: Option<u16>, contract: Option<UiComponentContract>) {
         let offset = self.position;
         self.position += 1;
         let two_way = self.consume_byte(b'(');
@@ -658,8 +849,31 @@ impl Parser<'_> {
         };
         let Some(index) = node_index else { return };
         let Some(node) = self.document.node(usize::from(index)) else { return };
+        let Some(contract) = contract else { return };
+        let Some(input) = contract.input(name.as_bytes()) else {
+            self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
+            return;
+        };
+        if two_way && !input.writable {
+            self.diagnostics.push(UiDiagnosticKind::ReadOnlyBinding, offset);
+            return;
+        }
+        if let Some(registry) = self.value_registry {
+            let Some(value) = registry.resolve(expression) else {
+                self.diagnostics.push(UiDiagnosticKind::UnknownBindingExpression, offset);
+                return;
+            };
+            if value.value_type != input.value_type {
+                self.diagnostics.push(UiDiagnosticKind::BindingTypeMismatch, offset);
+                return;
+            }
+            if two_way && !value.writable {
+                self.diagnostics.push(UiDiagnosticKind::ReadOnlyBinding, offset);
+                return;
+            }
+        }
         let property = match name.as_bytes() {
-            b"value" if two_way => Some(UiBindingProperty::Value),
+            b"value" if node.kind == UiNodeKind::TextInput => Some(UiBindingProperty::Value),
             b"disabled" if !two_way => Some(UiBindingProperty::Disabled),
             b"form" if !two_way && node.kind == UiNodeKind::Form => Some(UiBindingProperty::Form),
             b"control" if !two_way && node.kind == UiNodeKind::TextInput => {
@@ -687,7 +901,7 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_event(&mut self, node_index: Option<u16>) {
+    fn parse_event(&mut self, node_index: Option<u16>, contract: Option<UiComponentContract>) {
         let offset = self.position;
         self.position += 1;
         let Some(name) = self.read_name() else {
@@ -709,14 +923,35 @@ impl Parser<'_> {
             self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
             return;
         };
+        let Some(contract) = contract else { return };
+        if contract.output(name.as_bytes()).is_none() {
+            self.diagnostics.push(UiDiagnosticKind::UnknownEvent, offset);
+            return;
+        }
         let kind = match name.as_bytes() {
             b"click" => UiEventKind::Click,
             b"submit" => UiEventKind::Submit,
+            b"changed" => UiEventKind::Changed,
             _ => {
                 self.diagnostics.push(UiDiagnosticKind::UnknownEvent, offset);
                 return;
             }
         };
+        if let Err(diagnostic) = validate_event_handler(kind, handler.as_bytes()) {
+            self.diagnostics.push(diagnostic, offset);
+            return;
+        }
+        if let Some(registry) = self.handler_registry {
+            if !registry.accepts(handler, kind) {
+                let diagnostic = if registry.contains_expression(handler) {
+                    UiDiagnosticKind::EventHandlerTypeMismatch
+                } else {
+                    UiDiagnosticKind::UnknownEventHandler
+                };
+                self.diagnostics.push(diagnostic, offset);
+                return;
+            }
+        }
         if let Some(index) = node_index {
             if let Some(node) = self.document.node_mut(index) {
                 if node.event.is_present() {
@@ -743,6 +978,17 @@ impl Parser<'_> {
                         self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
                         return;
                     };
+                    if let Some(registry) = self.value_registry {
+                        let Some(value) = registry.resolve(expression) else {
+                            self.diagnostics.push(UiDiagnosticKind::UnknownStyleExpression, offset);
+                            return;
+                        };
+                        if value.value_type != UiValueType::Bool {
+                            self.diagnostics
+                                .push(UiDiagnosticKind::StyleConditionTypeMismatch, offset);
+                            return;
+                        }
+                    }
                     let Some(UiStyleRule::Base(style)) = (rule_count == 1).then(|| rules[0]) else {
                         self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
                         return;
@@ -859,15 +1105,94 @@ impl Parser<'_> {
     }
 }
 
-fn element_kind(name: &[u8]) -> Option<UiNodeKind> {
-    match name {
-        b"ui.column" | b"ui.panel" => Some(UiNodeKind::Panel),
-        b"ui.form" => Some(UiNodeKind::Form),
-        b"ui.text" => Some(UiNodeKind::Label),
-        b"ui.button" => Some(UiNodeKind::Button),
-        b"ui.input" => Some(UiNodeKind::TextInput),
-        _ => None,
+fn validate_event_handler(kind: UiEventKind, expression: &[u8]) -> Result<(), UiDiagnosticKind> {
+    if kind != UiEventKind::Changed && contains_event_placeholder(expression) {
+        return Err(UiDiagnosticKind::EventPayloadMismatch);
     }
+
+    let mut parser = HandlerParser { expression, position: 0 };
+    parser.skip_space();
+    if !parser.read_identifier() {
+        return Err(UiDiagnosticKind::InvalidEventHandler);
+    }
+    while parser.consume(b'.') {
+        if !parser.read_identifier() {
+            return Err(UiDiagnosticKind::InvalidEventHandler);
+        }
+    }
+    parser.skip_space();
+    if parser.consume(b'(') {
+        parser.skip_space();
+        if parser.starts_with(b"$event") {
+            if kind != UiEventKind::Changed {
+                return Err(UiDiagnosticKind::EventPayloadMismatch);
+            }
+            parser.position += b"$event".len();
+            parser.skip_space();
+        }
+        if !parser.consume(b')') {
+            return Err(UiDiagnosticKind::InvalidEventHandler);
+        }
+        parser.skip_space();
+    }
+    if parser.position != expression.len() {
+        return Err(UiDiagnosticKind::InvalidEventHandler);
+    }
+    Ok(())
+}
+
+fn contains_event_placeholder(expression: &[u8]) -> bool {
+    expression.windows(b"$event".len()).any(|window| window == b"$event")
+}
+
+struct HandlerParser<'a> {
+    expression: &'a [u8],
+    position: usize,
+}
+
+impl HandlerParser<'_> {
+    fn read_identifier(&mut self) -> bool {
+        let Some(first) = self.expression.get(self.position).copied() else { return false };
+        if !first.is_ascii_alphabetic() && first != b'_' {
+            return false;
+        }
+        self.position += 1;
+        while self
+            .expression
+            .get(self.position)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            self.position += 1;
+        }
+        true
+    }
+
+    fn skip_space(&mut self) {
+        while self.expression.get(self.position).is_some_and(u8::is_ascii_whitespace) {
+            self.position += 1;
+        }
+    }
+
+    fn starts_with(&self, value: &[u8]) -> bool {
+        self.expression.get(self.position..).is_some_and(|tail| tail.starts_with(value))
+    }
+
+    fn consume(&mut self, value: u8) -> bool {
+        if self.expression.get(self.position).copied() == Some(value) {
+            self.position += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn valid_component_name(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_UI_NAME_BYTES
+        && name
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b'-' | b':'))
 }
 
 fn parse_tab_index(value: &[u8]) -> Option<i16> {
@@ -886,16 +1211,6 @@ fn parse_tab_index(value: &[u8]) -> Option<i16> {
         result = result.checked_mul(10)?.checked_add(i16::from(byte - b'0'))?;
     }
     if negative { result.checked_neg() } else { Some(result) }
-}
-
-fn node_key(index: usize, name: &UiName) -> u16 {
-    let mut hash = 0x811c_u32 ^ index as u32;
-    for byte in name.as_bytes() {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    let key = hash as u16;
-    if key == 0 { 1 } else { key }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -970,6 +1285,10 @@ fn trim_space(mut value: &[u8]) -> &[u8] {
     value
 }
 
+fn has_interpolation_marker(value: &[u8]) -> bool {
+    value.windows(2).any(|window| window == b"{{" || window == b"}}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1031,11 +1350,23 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_expose_stable_codes_and_source_locations() {
+        let source = "<ui.column>\n  <ui.unknown />\n</ui.column>";
+        let diagnostics = lint(source);
+        let diagnostic = diagnostics.get(0).unwrap();
+        assert_eq!(diagnostic.kind, UiDiagnosticKind::UnknownElement);
+        assert_eq!(diagnostic.code(), "UI004");
+        assert_eq!(diagnostic.message(), "element is not in scope");
+        assert_eq!(diagnostic.span, UiSourceSpan { start: 14, length: 1 });
+        assert_eq!(diagnostic.line_column(source), (2, 3));
+    }
+
+    #[test]
     fn rejects_unknown_elements_styles_and_bindings() {
         let build = compile(
             r#"<ui.column {not-a-style}>
                 <ui.unknown />
-                <ui.input [value]="name" />
+                <ui.input [not-a-binding]="name" />
               </ui.column>"#,
         );
         assert!(!build.is_valid());
@@ -1051,6 +1382,230 @@ mod tests {
             build.diagnostics.get(2),
             Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownBinding, .. })
         ));
+    }
+
+    #[test]
+    fn event_handlers_use_a_bounded_typed_shape() {
+        let valid = compile(r#"<ui.input (changed)="passwordChanged($event)"/>"#);
+        assert!(valid.is_valid(), "diagnostics: {:?}", valid.diagnostics);
+
+        let unit_payload = compile(r#"<ui.button (click)="unlock($event)"/>"#);
+        assert!(!unit_payload.is_valid());
+        assert!(matches!(
+            unit_payload.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::EventPayloadMismatch, .. })
+        ));
+
+        let arbitrary_argument = compile(r#"<ui.input (changed)="passwordChanged(value)"/>"#);
+        assert!(!arbitrary_argument.is_valid());
+        assert!(matches!(
+            arbitrary_argument.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::InvalidEventHandler, .. })
+        ));
+
+        let unbounded = compile(r#"<ui.button (click)="unlock + 1"/>"#);
+        assert!(!unbounded.is_valid());
+        assert!(matches!(
+            unbounded.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::InvalidEventHandler, .. })
+        ));
+    }
+
+    #[test]
+    fn strict_handler_compilation_checks_registered_event_contracts() {
+        let mut handlers = UiHandlerRegistry::new();
+        handlers.register_bytes(b"login", UiEventKind::Submit).unwrap();
+        handlers.register_bytes(b"passwordChanged($event)", UiEventKind::Changed).unwrap();
+        handlers.register_bytes(b"login", UiEventKind::Submit).unwrap();
+        assert_eq!(handlers.len(), 2);
+
+        let valid = compile_with_handlers(r#"<ui.form (submit)="login"/>"#, &handlers);
+        assert!(valid.is_valid(), "diagnostics: {:?}", valid.diagnostics);
+
+        let unknown = compile_with_handlers(r#"<ui.form (submit)="register"/>"#, &handlers);
+        assert!(matches!(
+            unknown.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownEventHandler, .. })
+        ));
+
+        let mismatch = compile_with_handlers(r#"<ui.button (click)="login"/>"#, &handlers);
+        assert!(matches!(
+            mismatch.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::EventHandlerTypeMismatch, .. })
+        ));
+    }
+
+    #[test]
+    fn component_registry_compiles_custom_native_aliases() {
+        let mut components = UiComponentRegistry::builtins();
+        components
+            .register(
+                UiComponentContract::new("controls.text-field", UiNodeKind::TextInput, true)
+                    .with_input(logos_ui::UiComponentInput::new(
+                        "value",
+                        logos_ui::UiValueType::Text,
+                        true,
+                    ))
+                    .with_output(logos_ui::UiComponentOutput::new(
+                        "changed",
+                        logos_ui::UiValueType::Text,
+                    )),
+            )
+            .unwrap();
+
+        let mut handlers = UiHandlerRegistry::new();
+        handlers.register_bytes(b"nameChanged($event)", UiEventKind::Changed).unwrap();
+        let context = UiCompileContext::new(&components).with_handlers(&handlers);
+        let build = compile_with_context(
+            r#"<controls.text-field [(value)]="name" (changed)="nameChanged($event)"/>"#,
+            &context,
+        );
+        assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
+        assert_eq!(build.document.node(0).unwrap().kind, UiNodeKind::TextInput);
+        assert_eq!(components.len(), 8);
+    }
+
+    #[test]
+    fn component_registry_rejects_invalid_duplicate_and_excess_contracts() {
+        let mut components = UiComponentRegistry::builtins();
+        assert_eq!(
+            components.register(UiComponentContract::new("", UiNodeKind::Panel, false)),
+            Err(UiComponentRegistryError::InvalidName)
+        );
+        assert_eq!(
+            components.register(UiComponentContract::new("ui.button", UiNodeKind::Button, true)),
+            Err(UiComponentRegistryError::DuplicateName)
+        );
+
+        let names = [
+            "custom.a", "custom.b", "custom.c", "custom.d", "custom.e", "custom.f", "custom.g",
+            "custom.h", "custom.i", "custom.j",
+        ];
+        for name in names.iter().take(MAX_UI_COMPONENT_CONTRACTS - components.len()) {
+            components.register(UiComponentContract::new(name, UiNodeKind::Panel, false)).unwrap();
+        }
+        assert_eq!(components.len(), MAX_UI_COMPONENT_CONTRACTS);
+        assert_eq!(
+            components.register(UiComponentContract::new(
+                "custom.overflow",
+                UiNodeKind::Panel,
+                false
+            )),
+            Err(UiComponentRegistryError::Capacity)
+        );
+    }
+
+    #[test]
+    fn value_registry_checks_binding_types_and_writable_targets() {
+        let mut values = UiValueRegistry::new();
+        values.register_bytes(b"username", UiValueType::Text, true).unwrap();
+        values.register_bytes(b"failure", UiValueType::Bool, false).unwrap();
+        values.register_bytes(b"computedName", UiValueType::Text, false).unwrap();
+
+        let components = UiComponentRegistry::builtins();
+        let context = UiCompileContext::new(&components).with_values(&values);
+        let valid = compile_with_context(
+            r#"<ui.input [(value)]="username" {opacity-50}="failure"/>"#,
+            &context,
+        );
+        assert!(valid.is_valid(), "diagnostics: {:?}", valid.diagnostics);
+
+        let unknown = compile_with_context(r#"<ui.input [value]="missing"/>"#, &context);
+        assert!(matches!(
+            unknown.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownBindingExpression, .. })
+        ));
+
+        let mismatch = compile_with_context(r#"<ui.input [value]="failure"/>"#, &context);
+        assert!(matches!(
+            mismatch.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::BindingTypeMismatch, .. })
+        ));
+
+        let readonly = compile_with_context(r#"<ui.input [(value)]="computedName"/>"#, &context);
+        assert!(matches!(
+            readonly.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::ReadOnlyBinding, .. })
+        ));
+
+        let style_mismatch =
+            compile_with_context(r#"<ui.button {opacity-50}="username"/>"#, &context);
+        assert!(matches!(
+            style_mismatch.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::StyleConditionTypeMismatch, .. })
+        ));
+
+        let style_unknown =
+            compile_with_context(r#"<ui.button {opacity-50}="missing"/>"#, &context);
+        assert!(matches!(
+            style_unknown.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownStyleExpression, .. })
+        ));
+    }
+
+    #[test]
+    fn value_registry_rejects_invalid_and_duplicate_expressions() {
+        let mut values = UiValueRegistry::new();
+        assert_eq!(
+            values.register(UiExpression::EMPTY, UiValueType::Text, true),
+            Err(UiValueRegistryError::InvalidExpression)
+        );
+        assert_eq!(
+            values.register_bytes(b"", UiValueType::Text, true),
+            Err(UiValueRegistryError::InvalidExpression)
+        );
+        values.register_bytes(b"name", UiValueType::Text, true).unwrap();
+        assert_eq!(
+            values.register_bytes(b"name", UiValueType::Text, true),
+            Err(UiValueRegistryError::DuplicateExpression)
+        );
+    }
+
+    #[test]
+    fn text_interpolation_is_bounded_typed_and_codegen_safe() {
+        let mut values = UiValueRegistry::new();
+        values.register_bytes(b"displayName", UiValueType::Text, false).unwrap();
+        values.register_bytes(b"failure", UiValueType::Bool, false).unwrap();
+        let components = UiComponentRegistry::builtins();
+        let context = UiCompileContext::new(&components).with_values(&values);
+
+        let valid = compile_with_context(r#"<ui.text>{{ displayName }}</ui.text>"#, &context);
+        assert!(valid.is_valid(), "diagnostics: {:?}", valid.diagnostics);
+        let node = valid.document.node(0).unwrap();
+        assert!(node.text.as_bytes().is_empty());
+        assert_eq!(node.text_binding.as_bytes(), b"displayName");
+
+        let mut generated = String::new();
+        write_rust(&valid, &mut generated).unwrap();
+        assert!(generated.contains("text_binding: logos_ui::UiExpression::from_bytes"));
+        assert!(generated.contains("displayName"));
+
+        let unknown = compile_with_context(r#"<ui.text>{{ missing }}</ui.text>"#, &context);
+        assert!(matches!(
+            unknown.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownTextExpression, .. })
+        ));
+
+        let mismatch = compile_with_context(r#"<ui.text>{{ failure }}</ui.text>"#, &context);
+        assert!(matches!(
+            mismatch.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::TextExpressionTypeMismatch, .. })
+        ));
+
+        let mixed = compile(r#"<ui.text>Hello {{ displayName }}</ui.text>"#);
+        assert!(matches!(
+            mixed.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::InvalidInterpolation, .. })
+        ));
+    }
+
+    #[test]
+    fn handler_registry_rejects_invalid_expressions() {
+        let mut handlers = UiHandlerRegistry::new();
+        assert_eq!(
+            handlers.register_bytes(b"", UiEventKind::Click),
+            Err(UiHandlerRegistryError::InvalidExpression)
+        );
     }
 
     #[test]
@@ -1137,6 +1692,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_hash_node_names() {
+        let build = compile(r#"<ui.column #root><ui.text #root>duplicate</ui.text></ui.column>"#);
+        assert!(!build.is_valid());
+        assert!(matches!(
+            build.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::DuplicateNodeName, .. })
+        ));
+        assert_eq!(build.diagnostics.get(0).unwrap().code(), "UI026");
+    }
+
+    #[test]
     fn compiles_flex_and_axis_specific_gap_utilities() {
         let build = compile(r#"<ui.column {flex-x gap-2 gap-x-3 gap-y-4}/>"#);
         assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
@@ -1155,7 +1721,7 @@ mod tests {
         assert_eq!(report.diagnostics.get(0).unwrap().kind, UiDiagnosticKind::SourceTooLarge);
 
         let mut source = String::from("<ui.column>");
-        for _ in 0..MAX_UI_NODES {
+        for _ in 0..logos_ui::MAX_UI_NODES {
             source.push_str("<ui.text />");
         }
         source.push_str("</ui.column>");

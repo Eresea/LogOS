@@ -27,7 +27,11 @@ logos-network = { path = "../../network" }
 logos-fetch = { path = "../fetch" }
 logos-shell = { path = "../shell" }
 logos-ui-compiler = { path = "../../ui-compiler" }
+logos-ui = { path = "../../ui" }
 logos-lockscreen = { path = "../lockscreen" }
+
+[build-dependencies]
+logos-ui-compiler = { path = "../../ui-compiler" }
 
 [[bin]]
 name = "logos-input"
