@@ -360,13 +360,15 @@ global_asm!(
     "jmp context_common",
     ".global user_gp_fault_error",
     "user_gp_fault_error:",
-    "mov r12, [rsp]",
+    // The CPU error code is discarded; using a GPR here would corrupt the
+    // interrupted user register before the common context save runs.
     "add rsp, 8",
     "push 13",
     "jmp context_common",
     ".global user_pf_fault_error",
     "user_pf_fault_error:",
-    "mov r12, [rsp]",
+    // The CPU error code is discarded; using a GPR here would corrupt the
+    // interrupted user register before the common context save runs.
     "add rsp, 8",
     "push 14",
     "jmp context_common",

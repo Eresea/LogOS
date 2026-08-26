@@ -5236,9 +5236,15 @@ impl ServiceRuntime {
         let Some(service_handle) = self.service_handles.get(index).copied() else {
             return Ok(false);
         };
-        if self.dynamic_services.as_ref().and_then(|registry| registry.state(service_handle).ok())
-            != Some(crate::runtime_services::ServiceState::Running)
-        {
+        let service_state =
+            self.dynamic_services.as_ref().and_then(|registry| registry.state(service_handle).ok());
+        if !matches!(
+            service_state,
+            Some(
+                crate::runtime_services::ServiceState::Starting
+                    | crate::runtime_services::ServiceState::Running
+            )
+        ) {
             return Ok(false);
         }
         let extra_pages = self.service_stacks[index].frames.len();
