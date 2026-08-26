@@ -22,7 +22,7 @@ pub struct UiComponentInput {
 impl UiComponentInput {
     const EMPTY: Self = Self { name: "", value_type: UiValueType::Unit, writable: false };
 
-    const fn new(name: &'static str, value_type: UiValueType, writable: bool) -> Self {
+    pub const fn new(name: &'static str, value_type: UiValueType, writable: bool) -> Self {
         Self { name, value_type, writable }
     }
 }
@@ -36,7 +36,7 @@ pub struct UiComponentOutput {
 impl UiComponentOutput {
     const EMPTY: Self = Self { name: "", value_type: UiValueType::Unit };
 
-    const fn new(name: &'static str, value_type: UiValueType) -> Self {
+    pub const fn new(name: &'static str, value_type: UiValueType) -> Self {
         Self { name, value_type }
     }
 }
@@ -49,7 +49,7 @@ pub struct UiComponentMethod {
 impl UiComponentMethod {
     const EMPTY: Self = Self { name: "" };
 
-    const fn new(name: &'static str) -> Self {
+    pub const fn new(name: &'static str) -> Self {
         Self { name }
     }
 }
@@ -82,25 +82,25 @@ impl UiComponentContract {
 
     pub const fn for_kind(kind: UiNodeKind) -> Self {
         match kind {
-            UiNodeKind::Button => Self::empty("ui.button", kind, true)
+            UiNodeKind::Button => Self::new("ui.button", kind, true)
                 .with_input(UiComponentInput::new("disabled", UiValueType::Bool, false))
                 .with_output(UiComponentOutput::new("click", UiValueType::Unit))
                 .with_output(UiComponentOutput::new("submit", UiValueType::Unit))
                 .with_method(UiComponentMethod::new("focus")),
-            UiNodeKind::TextInput => Self::empty("ui.input", kind, true)
+            UiNodeKind::TextInput => Self::new("ui.input", kind, true)
                 .with_input(UiComponentInput::new("value", UiValueType::Text, true))
                 .with_input(UiComponentInput::new("disabled", UiValueType::Bool, false))
                 .with_input(UiComponentInput::new("control", UiValueType::Control, false))
                 .with_output(UiComponentOutput::new("changed", UiValueType::Text))
                 .with_output(UiComponentOutput::new("submit", UiValueType::Unit))
                 .with_method(UiComponentMethod::new("focus")),
-            UiNodeKind::Form => Self::empty("ui.form", kind, false)
+            UiNodeKind::Form => Self::new("ui.form", kind, false)
                 .with_input(UiComponentInput::new("form", UiValueType::Form, false))
                 .with_input(UiComponentInput::new("canSubmit", UiValueType::Bool, false))
                 .with_output(UiComponentOutput::new("submit", UiValueType::Unit)),
-            UiNodeKind::Root => Self::empty("ui.root", kind, false),
-            UiNodeKind::Panel => Self::empty("ui.panel", kind, false),
-            UiNodeKind::Label => Self::empty("ui.text", kind, false),
+            UiNodeKind::Root => Self::new("ui.root", kind, false),
+            UiNodeKind::Panel => Self::new("ui.panel", kind, false),
+            UiNodeKind::Label => Self::new("ui.text", kind, false),
         }
     }
 
@@ -124,23 +124,23 @@ impl UiComponentContract {
             .any(|method| method.name.as_bytes() == name)
     }
 
-    const fn empty(name: &'static str, kind: UiNodeKind, interactive: bool) -> Self {
+    pub const fn new(name: &'static str, kind: UiNodeKind, interactive: bool) -> Self {
         Self { name, kind, interactive, ..Self::EMPTY }
     }
 
-    const fn with_input(mut self, input: UiComponentInput) -> Self {
+    pub const fn with_input(mut self, input: UiComponentInput) -> Self {
         self.inputs[self.input_count as usize] = input;
         self.input_count += 1;
         self
     }
 
-    const fn with_output(mut self, output: UiComponentOutput) -> Self {
+    pub const fn with_output(mut self, output: UiComponentOutput) -> Self {
         self.outputs[self.output_count as usize] = output;
         self.output_count += 1;
         self
     }
 
-    const fn with_method(mut self, method: UiComponentMethod) -> Self {
+    pub const fn with_method(mut self, method: UiComponentMethod) -> Self {
         self.methods[self.method_count as usize] = method;
         self.method_count += 1;
         self
@@ -168,6 +168,13 @@ pub trait UiComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TOGGLE_CONTRACT: UiComponentContract =
+        UiComponentContract::new("controls.toggle", UiNodeKind::Button, true)
+            .with_input(UiComponentInput::new("disabled", UiValueType::Bool, false))
+            .with_output(UiComponentOutput::new("changed", UiValueType::Bool))
+            .with_method(UiComponentMethod::new("focus"));
+    const _: () = assert!(TOGGLE_CONTRACT.interactive);
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum ToggleOutput {
@@ -222,5 +229,14 @@ mod tests {
         let button = UiComponentContract::for_kind(UiNodeKind::Button);
         assert!(button.input(b"value").is_none());
         assert_eq!(button.output(b"click").unwrap().value_type, UiValueType::Unit);
+    }
+
+    #[test]
+    fn rust_components_can_declare_bounded_contracts() {
+        assert_eq!(TOGGLE_CONTRACT.name, "controls.toggle");
+        assert_eq!(TOGGLE_CONTRACT.kind, UiNodeKind::Button);
+        assert_eq!(TOGGLE_CONTRACT.input(b"disabled").unwrap().value_type, UiValueType::Bool);
+        assert_eq!(TOGGLE_CONTRACT.output(b"changed").unwrap().value_type, UiValueType::Bool);
+        assert!(TOGGLE_CONTRACT.method(b"focus"));
     }
 }
