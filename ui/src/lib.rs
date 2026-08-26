@@ -4,6 +4,7 @@
 extern crate std;
 
 mod component;
+mod components;
 mod events;
 mod layout;
 mod reactive;
@@ -11,6 +12,9 @@ mod runtime;
 mod template;
 
 pub use component::{UiComponent, UiEventDisposition};
+pub use components::{
+    UI_KEY_BACKSPACE, UI_KEY_ENTER, UiButton, UiButtonEvent, UiInput, UiInputEventOutput, UiPanel,
+};
 pub use events::{
     MAX_UI_EVENT_ROUTES, MAX_UI_OUTPUT_EVENTS, UiEventError, UiEventRouter, UiEventType,
     UiHandlerId, UiInputEvent, UiOutput, UiOutputError, UiRoutedEvent,
