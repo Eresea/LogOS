@@ -21,6 +21,21 @@ impl UiRect {
     pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
         Self { x, y, width, height }
     }
+
+    pub const fn is_empty(self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
+    pub const fn contains(self, x: i32, y: i32) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        let x = x as i64;
+        let y = y as i64;
+        let left = self.x as i64;
+        let top = self.y as i64;
+        x >= left && y >= top && x < left + self.width as i64 && y < top + self.height as i64
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -348,6 +363,7 @@ pub struct UiNode {
     pub parent: UiNodeHandle,
     pub kind: UiNodeKind,
     pub key: u16,
+    pub order: u32,
     pub text: UiText,
     pub styles: UiStyleList,
     pub bounds: UiRect,
@@ -364,6 +380,7 @@ impl UiNode {
         parent: UiNodeHandle::EMPTY,
         kind: UiNodeKind::Panel,
         key: 0,
+        order: 0,
         text: UiText::EMPTY,
         styles: UiStyleList::EMPTY,
         bounds: UiRect::EMPTY,
@@ -379,11 +396,17 @@ pub struct UiTree {
     nodes: [UiNode; MAX_UI_NODES],
     generations: [u16; MAX_UI_NODES],
     count: usize,
+    next_order: u32,
 }
 
 impl UiTree {
     pub const fn new() -> Self {
-        Self { nodes: [UiNode::EMPTY; MAX_UI_NODES], generations: [0; MAX_UI_NODES], count: 0 }
+        Self {
+            nodes: [UiNode::EMPTY; MAX_UI_NODES],
+            generations: [0; MAX_UI_NODES],
+            count: 0,
+            next_order: 0,
+        }
     }
 
     pub fn from_blueprint(blueprint: &UiBlueprint) -> Result<Self, UiError> {
@@ -481,11 +504,13 @@ impl UiTree {
         };
         self.generations[slot] = self.generations[slot].wrapping_add(1).max(1);
         let handle = UiNodeHandle { slot: slot as u16, generation: self.generations[slot] };
+        self.next_order = self.next_order.wrapping_add(1).max(1);
         *node = UiNode {
             handle,
             parent,
             kind,
             key,
+            order: self.next_order,
             text,
             styles,
             bounds: UiRect::EMPTY,
@@ -539,6 +564,24 @@ impl UiTree {
             .filter(|node| node.handle.is_valid())
             .map(|node| node.handle)
             .ok_or(UiError::NotFound)
+    }
+
+    pub fn hit_test(&self, x: i32, y: i32) -> Option<UiNodeHandle> {
+        let mut hit = None;
+        let mut order = 0;
+        for node in self.nodes.iter().filter(|node| node.handle.is_valid()) {
+            let clipped = node.clip.is_empty() || node.clip.contains(x, y);
+            if node.kind.is_interactive()
+                && node.interaction.is_focusable()
+                && node.bounds.contains(x, y)
+                && clipped
+                && node.order >= order
+            {
+                hit = Some(node.handle);
+                order = node.order;
+            }
+        }
+        hit
     }
 
     pub fn set_bounds(&mut self, handle: UiNodeHandle, bounds: UiRect) -> Result<(), UiError> {
@@ -762,6 +805,55 @@ mod tests {
         tree.destroy(root).unwrap();
         assert_eq!(tree.set_styles(root, styles), Err(UiError::Stale));
         assert_eq!(tree.has_style(root, UiStyle::BackgroundAccent), Err(UiError::Stale));
+    }
+
+    #[test]
+    fn hit_test_returns_the_topmost_visible_interactive_node() {
+        let mut tree = UiTree::new();
+        let root = tree.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 1).unwrap();
+        let first = tree.insert(UiNodeKind::Button, root, 2).unwrap();
+        let second = tree.insert(UiNodeKind::Button, root, 3).unwrap();
+        let bounds = UiRect::new(10, 20, 40, 30);
+        tree.set_bounds(first, bounds).unwrap();
+        tree.set_bounds(second, bounds).unwrap();
+
+        assert_eq!(tree.hit_test(10, 20), Some(second));
+        assert_eq!(tree.hit_test(50, 50), None);
+
+        tree.set_clip(second, UiRect::new(10, 20, 5, 5)).unwrap();
+        assert_eq!(tree.hit_test(12, 22), Some(second));
+        assert_eq!(tree.hit_test(20, 25), Some(first));
+
+        tree.node_mut(second).unwrap().interaction.set_disabled(true);
+        assert_eq!(tree.hit_test(12, 22), Some(first));
+    }
+
+    #[test]
+    fn hit_test_uses_retained_order_after_slot_reuse() {
+        let mut tree = UiTree::new();
+        let root = tree.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 1).unwrap();
+        let first = tree.insert(UiNodeKind::Button, root, 2).unwrap();
+        let second = tree.insert(UiNodeKind::Button, root, 3).unwrap();
+        let bounds = UiRect::new(0, 0, 10, 10);
+        tree.set_bounds(first, bounds).unwrap();
+        tree.set_bounds(second, bounds).unwrap();
+        tree.destroy(first).unwrap();
+        let replacement = tree.insert(UiNodeKind::Button, root, 4).unwrap();
+        tree.set_bounds(replacement, bounds).unwrap();
+
+        assert_eq!(replacement.slot, first.slot);
+        assert!(replacement.generation != first.generation);
+        assert_eq!(tree.hit_test(1, 1), Some(replacement));
+    }
+
+    #[test]
+    fn rectangles_use_half_open_bounds() {
+        let rectangle = UiRect::new(-2, 3, 4, 5);
+        assert!(rectangle.contains(-2, 3));
+        assert!(rectangle.contains(1, 7));
+        assert!(!rectangle.contains(2, 7));
+        assert!(!rectangle.contains(1, 8));
+        assert!(!UiRect::EMPTY.contains(0, 0));
     }
 
     #[test]
