@@ -277,6 +277,13 @@ impl UiStyleList {
         true
     }
 
+    pub fn push_unique(&mut self, token: UiStyle) -> Result<bool, UiStyleResolveError> {
+        if self.contains(token) {
+            return Ok(false);
+        }
+        if self.push(token) { Ok(true) } else { Err(UiStyleResolveError::Capacity) }
+    }
+
     pub fn to_layout_style(&self) -> UiLayoutStyle {
         let mut layout = UiLayoutStyle::EMPTY;
         for token in self.tokens[..self.len as usize].iter().copied() {
@@ -300,6 +307,68 @@ impl UiStyleList {
             }
         }
         layout
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiStyleResolveError {
+    Capacity,
+}
+
+pub const MAX_UI_STYLE_CONDITIONS: usize = MAX_UI_CONDITIONAL_STYLES;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UiStyleCondition {
+    expression: UiExpression,
+    active: bool,
+}
+
+impl UiStyleCondition {
+    const EMPTY: Self = Self { expression: UiExpression::EMPTY, active: false };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiStyleConditions {
+    entries: [UiStyleCondition; MAX_UI_STYLE_CONDITIONS],
+    len: u8,
+}
+
+impl UiStyleConditions {
+    pub const EMPTY: Self =
+        Self { entries: [UiStyleCondition::EMPTY; MAX_UI_STYLE_CONDITIONS], len: 0 };
+
+    pub fn set(&mut self, expression: UiExpression, active: bool) -> bool {
+        if expression.as_bytes().is_empty() {
+            return false;
+        }
+        if let Some(condition) = self.entries[..usize::from(self.len)]
+            .iter_mut()
+            .find(|condition| condition.expression == expression)
+        {
+            if condition.active == active {
+                return false;
+            }
+            condition.active = active;
+            return true;
+        }
+        if usize::from(self.len) == MAX_UI_STYLE_CONDITIONS {
+            return false;
+        }
+        self.entries[usize::from(self.len)] = UiStyleCondition { expression, active };
+        self.len += 1;
+        true
+    }
+
+    pub fn is_active(&self, expression: UiExpression) -> bool {
+        self.entries[..usize::from(self.len)]
+            .iter()
+            .any(|condition| condition.expression == expression && condition.active)
+    }
+}
+
+impl Default for UiStyleConditions {
+    fn default() -> Self {
+        Self::EMPTY
     }
 }
 
@@ -336,6 +405,31 @@ impl UiNodeTemplate {
         conditional_styles: UiConditionalStyleList::EMPTY,
         tab_index: TAB_INDEX_NONE,
     };
+
+    pub fn resolve_styles(
+        &self,
+        focused: bool,
+        conditions: &UiStyleConditions,
+    ) -> Result<UiStyleList, UiStyleResolveError> {
+        let mut resolved = UiStyleList::EMPTY;
+        for style in self.styles.tokens.iter().take(usize::from(self.styles.len)).copied() {
+            resolved.push_unique(style)?;
+        }
+        for state_style in self.state_styles.entries.iter().take(usize::from(self.state_styles.len))
+        {
+            if state_style.state == UiStyleState::Focus && focused {
+                resolved.push_unique(state_style.style)?;
+            }
+        }
+        for conditional in
+            self.conditional_styles.entries.iter().take(usize::from(self.conditional_styles.len))
+        {
+            if conditions.is_active(conditional.expression) {
+                resolved.push_unique(conditional.style)?;
+            }
+        }
+        Ok(resolved)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -455,5 +549,55 @@ mod tests {
         let root = tree.node(crate::UiNodeHandle { slot: 0, generation: 1 }).unwrap();
         assert_eq!(root.layout, layout);
         assert_eq!(root.styles, styles);
+    }
+
+    #[test]
+    fn resolves_base_focus_and_conditional_styles_without_duplicates() {
+        let mut node = UiNodeTemplate::EMPTY;
+        assert!(node.styles.push(UiStyle::BackgroundAccent));
+        assert!(
+            node.state_styles
+                .push(UiStateStyle { state: UiStyleState::Focus, style: UiStyle::RoundedLarge })
+        );
+        assert!(node.conditional_styles.push(UiConditionalStyle {
+            style: UiStyle::Opacity50,
+            expression: UiExpression::from_bytes(b"failure").unwrap(),
+        }));
+
+        let mut conditions = UiStyleConditions::EMPTY;
+        assert!(conditions.set(UiExpression::from_bytes(b"failure").unwrap(), true));
+        let resolved = node.resolve_styles(true, &conditions).unwrap();
+        assert_eq!(resolved.len, 3);
+        assert!(resolved.contains(UiStyle::BackgroundAccent));
+        assert!(resolved.contains(UiStyle::RoundedLarge));
+        assert!(resolved.contains(UiStyle::Opacity50));
+
+        assert!(!conditions.set(UiExpression::from_bytes(b"failure").unwrap(), true));
+        assert_eq!(node.resolve_styles(false, &conditions).unwrap().len, 2);
+    }
+
+    #[test]
+    fn resolved_style_capacity_is_reported() {
+        let mut node = UiNodeTemplate::EMPTY;
+        for style in [
+            UiStyle::FullHeight,
+            UiStyle::FullWidth,
+            UiStyle::FlexX,
+            UiStyle::FlexY,
+            UiStyle::ItemsCenter,
+            UiStyle::JustifyCenter,
+            UiStyle::Width96,
+            UiStyle::Gap(1),
+        ] {
+            assert!(node.styles.push(style));
+        }
+        assert!(
+            node.state_styles
+                .push(UiStateStyle { state: UiStyleState::Focus, style: UiStyle::GapX(1) })
+        );
+        assert_eq!(
+            node.resolve_styles(true, &UiStyleConditions::EMPTY),
+            Err(UiStyleResolveError::Capacity)
+        );
     }
 }
