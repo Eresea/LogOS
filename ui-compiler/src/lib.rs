@@ -276,7 +276,7 @@ pub struct UiNodeTemplate {
     pub styles: UiStyleList,
     pub state_styles: UiStateStyleList,
     pub conditional_styles: UiConditionalStyleList,
-    pub interaction: UiInteraction,
+    pub tab_index: i16,
 }
 
 impl UiNodeTemplate {
@@ -290,7 +290,7 @@ impl UiNodeTemplate {
         styles: UiStyleList::EMPTY,
         state_styles: UiStateStyleList::EMPTY,
         conditional_styles: UiConditionalStyleList::EMPTY,
-        interaction: UiInteraction::for_kind(UiNodeKind::Panel),
+        tab_index: logos_ui::TAB_INDEX_NONE,
     };
 }
 
@@ -316,15 +316,12 @@ impl UiDocument {
         for index in 0..self.count {
             let node = self.nodes[index];
             let key = node_key(index, &node.key);
+            let mut interaction = UiInteraction::for_kind(node.kind);
+            interaction.set_tab_index(node.tab_index);
             if node.parent == u16::MAX {
-                blueprint.push_root_with_interaction(node.kind, key, node.interaction)?;
+                blueprint.push_root_with_interaction(node.kind, key, interaction)?;
             } else {
-                blueprint.push_child_with_interaction(
-                    node.kind,
-                    node.parent,
-                    key,
-                    node.interaction,
-                )?;
+                blueprint.push_child_with_interaction(node.kind, node.parent, key, interaction)?;
             }
         }
         Ok(blueprint)
@@ -490,7 +487,7 @@ impl Parser<'_> {
             let node = UiNodeTemplate {
                 kind,
                 parent,
-                interaction: UiInteraction::for_kind(kind),
+                tab_index: if kind.is_interactive() { 0 } else { logos_ui::TAB_INDEX_NONE },
                 ..UiNodeTemplate::EMPTY
             };
             let index = self.document.push(node);
@@ -600,7 +597,7 @@ impl Parser<'_> {
                 self.diagnostics.push(UiDiagnosticKind::UnknownAttribute, offset);
                 return;
             }
-            node.interaction.set_tab_index(tab_index);
+            node.tab_index = tab_index;
             return;
         }
         if name.as_bytes() != b"id" {
@@ -1082,10 +1079,10 @@ mod tests {
             </ui.column>"#,
         );
         assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
-        assert_eq!(build.document.node(1).unwrap().interaction.tab_index(), 4);
-        assert!(build.document.node(1).unwrap().interaction.is_focusable());
-        assert_eq!(build.document.node(2).unwrap().interaction.tab_index(), -1);
-        assert!(!build.document.node(2).unwrap().interaction.is_focusable());
+        assert_eq!(build.document.node(1).unwrap().tab_index, 4);
+        assert!(build.document.node(1).unwrap().kind.is_interactive());
+        assert_eq!(build.document.node(2).unwrap().tab_index, -1);
+        assert!(build.document.node(2).unwrap().kind.is_interactive());
     }
 
     #[test]
