@@ -34,19 +34,30 @@ fn write_node<W: fmt::Write>(
     index: usize,
     node: &UiNodeTemplate,
 ) -> Result<(), UiCodegenError> {
-    write_line(output, format_line(index, "bindings", "logos_ui::UiBindingList::EMPTY", true))?;
+    write_line(
+        output,
+        format_line(index, "bindings", "logos_ui::UiBindingList::EMPTY", node.bindings.len != 0),
+    )?;
     for binding in node.bindings.entries.iter().take(usize::from(node.bindings.len)) {
         write_binding(output, index, binding)?;
     }
 
-    write_line(output, format_line(index, "styles", "logos_ui::UiStyleList::EMPTY", true))?;
+    write_line(
+        output,
+        format_line(index, "styles", "logos_ui::UiStyleList::EMPTY", node.styles.len != 0),
+    )?;
     for style in node.styles.tokens.iter().take(usize::from(node.styles.len)) {
         write_style_push(output, index, "styles", *style)?;
     }
 
     write_line(
         output,
-        format_line(index, "state_styles", "logos_ui::UiStateStyleList::EMPTY", true),
+        format_line(
+            index,
+            "state_styles",
+            "logos_ui::UiStateStyleList::EMPTY",
+            node.state_styles.len != 0,
+        ),
     )?;
     for state_style in node.state_styles.entries.iter().take(usize::from(node.state_styles.len)) {
         write_state_style(output, index, state_style)?;
@@ -54,7 +65,12 @@ fn write_node<W: fmt::Write>(
 
     write_line(
         output,
-        format_line(index, "conditional_styles", "logos_ui::UiConditionalStyleList::EMPTY", true),
+        format_line(
+            index,
+            "conditional_styles",
+            "logos_ui::UiConditionalStyleList::EMPTY",
+            node.conditional_styles.len != 0,
+        ),
     )?;
     for conditional in
         node.conditional_styles.entries.iter().take(usize::from(node.conditional_styles.len))
@@ -106,12 +122,12 @@ fn write_binding<W: fmt::Write>(
     index: usize,
     binding: &UiBinding,
 ) -> Result<(), UiCodegenError> {
-    write!(output, "    node_{index}_bindings.push(logos_ui::UiBinding {{ property: ")
+    write!(output, "    assert!(node_{index}_bindings.push(logos_ui::UiBinding {{ property: ")
         .map_err(|_| UiCodegenError::Output)?;
     write_binding_property(output, binding.property)?;
     write!(output, ", expression: ").map_err(|_| UiCodegenError::Output)?;
     write_expression(output, binding.expression)?;
-    write_line(output, " }).expect(\"generated UI binding capacity\");")
+    write_line(output, " }));")
 }
 
 fn write_style_push<W: fmt::Write>(
@@ -120,9 +136,9 @@ fn write_style_push<W: fmt::Write>(
     field: &str,
     style: UiStyle,
 ) -> Result<(), UiCodegenError> {
-    write!(output, "    node_{index}_{field}.push(").map_err(|_| UiCodegenError::Output)?;
+    write!(output, "    assert!(node_{index}_{field}.push(").map_err(|_| UiCodegenError::Output)?;
     write_style(output, style)?;
-    write_line(output, ").expect(\"generated UI style capacity\");")
+    write_line(output, "));")
 }
 
 fn write_state_style<W: fmt::Write>(
@@ -130,12 +146,12 @@ fn write_state_style<W: fmt::Write>(
     index: usize,
     state_style: &UiStateStyle,
 ) -> Result<(), UiCodegenError> {
-    write!(output, "    node_{index}_state_styles.push(logos_ui::UiStateStyle {{ state: ")
+    write!(output, "    assert!(node_{index}_state_styles.push(logos_ui::UiStateStyle {{ state: ")
         .map_err(|_| UiCodegenError::Output)?;
     write_state(output, state_style.state)?;
     write!(output, ", style: ").map_err(|_| UiCodegenError::Output)?;
     write_style(output, state_style.style)?;
-    write_line(output, " }).expect(\"generated UI state style capacity\");")
+    write_line(output, " }));")
 }
 
 fn write_conditional_style<W: fmt::Write>(
@@ -145,13 +161,13 @@ fn write_conditional_style<W: fmt::Write>(
 ) -> Result<(), UiCodegenError> {
     write!(
         output,
-        "    node_{index}_conditional_styles.push(logos_ui::UiConditionalStyle {{ style: "
+        "    assert!(node_{index}_conditional_styles.push(logos_ui::UiConditionalStyle {{ style: "
     )
     .map_err(|_| UiCodegenError::Output)?;
     write_style(output, conditional.style)?;
     write!(output, ", expression: ").map_err(|_| UiCodegenError::Output)?;
     write_expression(output, conditional.expression)?;
-    write_line(output, " }).expect(\"generated UI conditional style capacity\");")
+    write_line(output, " }));")
 }
 
 fn format_line<'a>(index: usize, field: &'a str, value: &'a str, mutable: bool) -> StringLine<'a> {
