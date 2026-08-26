@@ -2,6 +2,8 @@ pub const MAX_UI_NODES: usize = 32;
 const NO_PARENT: u16 = u16::MAX;
 pub const TAB_INDEX_NONE: i16 = -1;
 
+use crate::layout::{UiLayoutStyle, UiSize};
+
 /// Framework-owned logical geometry. Rendering adapters convert this into
 /// their platform or compositor rectangle type at the boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,15 +140,31 @@ pub struct UiNodeSpec {
     pub parent: u16,
     pub key: u16,
     pub interaction: UiInteraction,
+    pub layout: UiLayoutStyle,
+    pub intrinsic_size: UiSize,
 }
 
 impl UiNodeSpec {
     pub const fn root(kind: UiNodeKind, key: u16) -> Self {
-        Self { kind, parent: NO_PARENT, key, interaction: UiInteraction::for_kind(kind) }
+        Self {
+            kind,
+            parent: NO_PARENT,
+            key,
+            interaction: UiInteraction::for_kind(kind),
+            layout: UiLayoutStyle::EMPTY,
+            intrinsic_size: UiSize::ZERO,
+        }
     }
 
     pub const fn child(kind: UiNodeKind, parent: u16, key: u16) -> Self {
-        Self { kind, parent, key, interaction: UiInteraction::for_kind(kind) }
+        Self {
+            kind,
+            parent,
+            key,
+            interaction: UiInteraction::for_kind(kind),
+            layout: UiLayoutStyle::EMPTY,
+            intrinsic_size: UiSize::ZERO,
+        }
     }
 
     pub const fn root_with_interaction(
@@ -154,7 +172,14 @@ impl UiNodeSpec {
         key: u16,
         interaction: UiInteraction,
     ) -> Self {
-        Self { kind, parent: NO_PARENT, key, interaction }
+        Self {
+            kind,
+            parent: NO_PARENT,
+            key,
+            interaction,
+            layout: UiLayoutStyle::EMPTY,
+            intrinsic_size: UiSize::ZERO,
+        }
     }
 
     pub const fn child_with_interaction(
@@ -163,7 +188,14 @@ impl UiNodeSpec {
         key: u16,
         interaction: UiInteraction,
     ) -> Self {
-        Self { kind, parent, key, interaction }
+        Self {
+            kind,
+            parent,
+            key,
+            interaction,
+            layout: UiLayoutStyle::EMPTY,
+            intrinsic_size: UiSize::ZERO,
+        }
     }
 }
 
@@ -251,8 +283,11 @@ pub struct UiNode {
     pub kind: UiNodeKind,
     pub key: u16,
     pub bounds: UiRect,
+    pub clip: UiRect,
     pub dirty: bool,
     pub interaction: UiInteraction,
+    pub layout: UiLayoutStyle,
+    pub intrinsic_size: UiSize,
 }
 
 impl UiNode {
@@ -262,8 +297,11 @@ impl UiNode {
         kind: UiNodeKind::Panel,
         key: 0,
         bounds: UiRect::EMPTY,
+        clip: UiRect::EMPTY,
         dirty: false,
         interaction: UiInteraction::for_kind(UiNodeKind::Panel),
+        layout: UiLayoutStyle::EMPTY,
+        intrinsic_size: UiSize::ZERO,
     };
 }
 
@@ -321,8 +359,18 @@ impl UiTree {
         };
         self.generations[slot] = self.generations[slot].wrapping_add(1).max(1);
         let handle = UiNodeHandle { slot: slot as u16, generation: self.generations[slot] };
-        *node =
-            UiNode { handle, parent, kind, key, bounds: UiRect::EMPTY, dirty: true, interaction };
+        *node = UiNode {
+            handle,
+            parent,
+            kind,
+            key,
+            bounds: UiRect::EMPTY,
+            clip: UiRect::EMPTY,
+            dirty: true,
+            interaction,
+            layout: UiLayoutStyle::EMPTY,
+            intrinsic_size: UiSize::ZERO,
+        };
         self.count += 1;
         Ok(handle)
     }
@@ -368,6 +416,56 @@ impl UiTree {
             node.dirty = true;
         }
         Ok(())
+    }
+
+    pub fn set_clip(&mut self, handle: UiNodeHandle, clip: UiRect) -> Result<(), UiError> {
+        let node = self.node_mut(handle)?;
+        if node.clip != clip {
+            node.clip = clip;
+            node.dirty = true;
+        }
+        Ok(())
+    }
+
+    pub fn set_layout_style(
+        &mut self,
+        handle: UiNodeHandle,
+        layout: UiLayoutStyle,
+    ) -> Result<(), UiError> {
+        let node = self.node_mut(handle)?;
+        if node.layout != layout {
+            node.layout = layout;
+            node.dirty = true;
+        }
+        Ok(())
+    }
+
+    pub fn set_intrinsic_size(
+        &mut self,
+        handle: UiNodeHandle,
+        intrinsic_size: UiSize,
+    ) -> Result<(), UiError> {
+        let node = self.node_mut(handle)?;
+        if node.intrinsic_size != intrinsic_size {
+            node.intrinsic_size = intrinsic_size;
+            node.dirty = true;
+        }
+        Ok(())
+    }
+
+    pub fn children(
+        &self,
+        parent: UiNodeHandle,
+        output: &mut [UiNodeHandle; MAX_UI_NODES],
+    ) -> Result<usize, UiError> {
+        let _ = self.lookup(parent)?;
+        let mut count = 0;
+        for node in self.nodes.iter().filter(|node| node.handle.is_valid() && node.parent == parent)
+        {
+            output[count] = node.handle;
+            count += 1;
+        }
+        Ok(count)
     }
 
     pub fn clear_dirty(&mut self, handle: UiNodeHandle) -> Result<(), UiError> {

@@ -5,6 +5,7 @@ extern crate std;
 
 mod component;
 mod events;
+mod layout;
 mod reactive;
 mod runtime;
 mod template;
@@ -13,6 +14,10 @@ pub use component::{UiComponent, UiEventDisposition};
 pub use events::{
     MAX_UI_EVENT_ROUTES, MAX_UI_OUTPUT_EVENTS, UiEventError, UiEventRouter, UiEventType,
     UiHandlerId, UiInputEvent, UiOutput, UiOutputError, UiRoutedEvent,
+};
+pub use layout::{
+    UiEdges, UiLayoutAlignment, UiLayoutDirection, UiLayoutEngine, UiLayoutError, UiLayoutStyle,
+    UiOverflow, UiSize,
 };
 pub use reactive::{
     MAX_UI_DEPENDENCIES, MAX_UI_DEPENDENCY_RECORDS, MAX_UI_INVALIDATIONS, MAX_UI_TRACE_ENTRIES,
