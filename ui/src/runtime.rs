@@ -3,6 +3,7 @@ const NO_PARENT: u16 = u16::MAX;
 pub const TAB_INDEX_NONE: i16 = -1;
 
 use crate::layout::{UiLayoutStyle, UiSize};
+use crate::template::UiText;
 
 /// Framework-owned logical geometry. Rendering adapters convert this into
 /// their platform or compositor rectangle type at the boundary.
@@ -139,6 +140,7 @@ pub struct UiNodeSpec {
     pub kind: UiNodeKind,
     pub parent: u16,
     pub key: u16,
+    pub text: UiText,
     pub interaction: UiInteraction,
     pub layout: UiLayoutStyle,
     pub intrinsic_size: UiSize,
@@ -150,6 +152,7 @@ impl UiNodeSpec {
             kind,
             parent: NO_PARENT,
             key,
+            text: UiText::EMPTY,
             interaction: UiInteraction::for_kind(kind),
             layout: UiLayoutStyle::EMPTY,
             intrinsic_size: UiSize::ZERO,
@@ -161,6 +164,7 @@ impl UiNodeSpec {
             kind,
             parent,
             key,
+            text: UiText::EMPTY,
             interaction: UiInteraction::for_kind(kind),
             layout: UiLayoutStyle::EMPTY,
             intrinsic_size: UiSize::ZERO,
@@ -176,6 +180,7 @@ impl UiNodeSpec {
             kind,
             parent: NO_PARENT,
             key,
+            text: UiText::EMPTY,
             interaction,
             layout: UiLayoutStyle::EMPTY,
             intrinsic_size: UiSize::ZERO,
@@ -192,6 +197,7 @@ impl UiNodeSpec {
             kind,
             parent,
             key,
+            text: UiText::EMPTY,
             interaction,
             layout: UiLayoutStyle::EMPTY,
             intrinsic_size: UiSize::ZERO,
@@ -283,6 +289,15 @@ impl UiBlueprint {
         (index < self.count).then_some(self.specs[index])
     }
 
+    pub fn set_text(&mut self, index: u16, text: UiText) -> Result<(), UiError> {
+        let index = usize::from(index);
+        if index >= self.count {
+            return Err(UiError::NotFound);
+        }
+        self.specs[index].text = text;
+        Ok(())
+    }
+
     pub const fn is_empty(&self) -> bool {
         self.count == 0
     }
@@ -319,6 +334,7 @@ pub struct UiNode {
     pub parent: UiNodeHandle,
     pub kind: UiNodeKind,
     pub key: u16,
+    pub text: UiText,
     pub bounds: UiRect,
     pub clip: UiRect,
     pub dirty: bool,
@@ -333,6 +349,7 @@ impl UiNode {
         parent: UiNodeHandle::EMPTY,
         kind: UiNodeKind::Panel,
         key: 0,
+        text: UiText::EMPTY,
         bounds: UiRect::EMPTY,
         clip: UiRect::EMPTY,
         dirty: false,
@@ -362,10 +379,11 @@ impl UiTree {
             } else {
                 tree.nodes[usize::from(spec.parent)].handle
             };
-            tree.insert_with_interaction_and_layout(
+            tree.insert_with_text_and_interaction_and_layout(
                 spec.kind,
                 parent,
                 spec.key,
+                spec.text,
                 spec.interaction,
                 spec.layout,
                 spec.intrinsic_size,
@@ -409,6 +427,28 @@ impl UiTree {
         layout: UiLayoutStyle,
         intrinsic_size: UiSize,
     ) -> Result<UiNodeHandle, UiError> {
+        self.insert_with_text_and_interaction_and_layout(
+            kind,
+            parent,
+            key,
+            UiText::EMPTY,
+            interaction,
+            layout,
+            intrinsic_size,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_with_text_and_interaction_and_layout(
+        &mut self,
+        kind: UiNodeKind,
+        parent: UiNodeHandle,
+        key: u16,
+        text: UiText,
+        interaction: UiInteraction,
+        layout: UiLayoutStyle,
+        intrinsic_size: UiSize,
+    ) -> Result<UiNodeHandle, UiError> {
         if parent.is_valid() && self.lookup(parent).is_err() {
             return Err(UiError::Stale);
         }
@@ -427,6 +467,7 @@ impl UiTree {
             parent,
             kind,
             key,
+            text,
             bounds: UiRect::EMPTY,
             clip: UiRect::EMPTY,
             dirty: true,
@@ -487,6 +528,16 @@ impl UiTree {
             node.dirty = true;
         }
         Ok(())
+    }
+
+    pub fn set_text(&mut self, handle: UiNodeHandle, text: UiText) -> Result<bool, UiError> {
+        let node = self.node_mut(handle)?;
+        if node.text == text {
+            return Ok(false);
+        }
+        node.text = text;
+        node.dirty = true;
+        Ok(true)
     }
 
     pub fn set_clip(&mut self, handle: UiNodeHandle, clip: UiRect) -> Result<(), UiError> {
@@ -571,7 +622,7 @@ impl Default for UiTree {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<UiTree>() <= 4096);
+const _: () = assert!(core::mem::size_of::<UiTree>() <= 8192);
 
 #[cfg(test)]
 mod tests {
@@ -631,6 +682,28 @@ mod tests {
         assert!(!tree.node(leaf).unwrap().dirty);
         tree.destroy(root).unwrap();
         assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn text_is_retained_and_updates_only_when_changed() {
+        let mut blueprint = UiBlueprint::new();
+        let root = blueprint.push_root(UiNodeKind::Label, 1).unwrap();
+        blueprint.set_text(root, UiText::from_bytes(b"Title").unwrap()).unwrap();
+        let mut tree = UiTree::from_blueprint(&blueprint).unwrap();
+        let handle = tree.handle_at(0).unwrap();
+        assert_eq!(tree.node(handle).unwrap().text.as_bytes(), b"Title");
+
+        tree.clear_dirty(handle).unwrap();
+        assert_eq!(tree.set_text(handle, UiText::from_bytes(b"Title").unwrap()), Ok(false));
+        assert!(!tree.node(handle).unwrap().dirty);
+        assert_eq!(tree.set_text(handle, UiText::from_bytes(b"Updated").unwrap()), Ok(true));
+        assert!(tree.node(handle).unwrap().dirty);
+
+        tree.destroy(handle).unwrap();
+        assert_eq!(
+            tree.set_text(handle, UiText::from_bytes(b"stale").unwrap()),
+            Err(UiError::Stale)
+        );
     }
 
     #[test]

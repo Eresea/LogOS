@@ -357,13 +357,13 @@ impl UiDocument {
             let mut interaction = UiInteraction::for_kind(node.kind);
             interaction.set_tab_index(node.tab_index);
             let layout = node.styles.to_layout_style();
-            if node.parent == u16::MAX {
+            let blueprint_index = if node.parent == u16::MAX {
                 blueprint.push_root_with_interaction_and_layout(
                     node.kind,
                     key,
                     interaction,
                     layout,
-                )?;
+                )?
             } else {
                 blueprint.push_child_with_interaction_and_layout(
                     node.kind,
@@ -371,8 +371,9 @@ impl UiDocument {
                     key,
                     interaction,
                     layout,
-                )?;
-            }
+                )?
+            };
+            blueprint.set_text(blueprint_index, node.text)?;
         }
         Ok(blueprint)
     }
