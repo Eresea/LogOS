@@ -606,6 +606,9 @@ const _: () = assert!(core::mem::size_of::<UiCommitCoordinator>() <= 8192);
 
 #[cfg(test)]
 mod tests {
+    use crate::runtime::{UiNodeKind, UiTree};
+    use crate::template::UiText;
+
     use super::*;
 
     fn target(slot: u16) -> UiBindingTarget {
@@ -738,6 +741,28 @@ mod tests {
                 .entry(coordinator.trace().len() - 1)
                 .is_some_and(|entry| entry.kind == UiTraceKind::CommitFinished)
         );
+    }
+
+    #[test]
+    fn text_signal_invalidation_updates_only_the_targeted_node() {
+        let mut tree = UiTree::new();
+        let root = tree.insert(UiNodeKind::Label, UiNodeHandle::EMPTY, 1).unwrap();
+        let signal = UiSignalId::new(11);
+        let target = UiBindingTarget { node: root, property: UiBindingProperty::Text };
+        let mut coordinator = UiCommitCoordinator::new();
+        coordinator.watch(target, dependencies(signal), UiInvalidationKind::Paint).unwrap();
+        tree.clear_dirty(root).unwrap();
+
+        coordinator.publish(UiSignalChange { signal, revision: 1 }).unwrap();
+        assert_eq!(
+            coordinator.commit(|invalidation| {
+                tree.set_text(invalidation.target.node, UiText::from_bytes(b"updated").unwrap())
+                    .is_ok()
+            }),
+            Ok(1)
+        );
+        assert_eq!(tree.node(root).unwrap().text.as_bytes(), b"updated");
+        assert!(tree.node(root).unwrap().dirty);
     }
 
     #[test]
