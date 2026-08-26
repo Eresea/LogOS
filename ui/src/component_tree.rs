@@ -344,10 +344,10 @@ impl UiComponentTree {
             let old = self.focused;
             self.tree.node(old).map_err(map_tree_error)?;
             self.components[usize::from(old.slot)].set_focused(false);
-            self.tree.node_mut(old).map_err(map_tree_error)?.interaction.set_focused(false);
+            self.tree.set_focused(old, false).map_err(map_tree_error)?;
         }
         self.components[usize::from(handle.slot)].set_focused(true);
-        self.tree.node_mut(handle).map_err(map_tree_error)?.interaction.set_focused(true);
+        self.tree.set_focused(handle, true).map_err(map_tree_error)?;
         self.focused = handle;
         Ok(())
     }
@@ -359,7 +359,7 @@ impl UiComponentTree {
         let old = self.focused;
         self.tree.node(old).map_err(map_tree_error)?;
         self.components[usize::from(old.slot)].set_focused(false);
-        self.tree.node_mut(old).map_err(map_tree_error)?.interaction.set_focused(false);
+        self.tree.set_focused(old, false).map_err(map_tree_error)?;
         self.focused = UiNodeHandle::EMPTY;
         Ok(())
     }
@@ -414,7 +414,7 @@ impl UiComponentTree {
         if !self.components[usize::from(handle.slot)].set_disabled(disabled) {
             return Err(UiComponentTreeError::NotComponent);
         }
-        self.tree.node_mut(handle).map_err(map_tree_error)?.interaction.set_disabled(disabled);
+        self.tree.set_disabled(handle, disabled).map_err(map_tree_error)?;
         if disabled && self.focused == handle {
             self.focused = UiNodeHandle::EMPTY;
         }

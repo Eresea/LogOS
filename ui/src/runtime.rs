@@ -593,6 +593,28 @@ impl UiTree {
         Ok(())
     }
 
+    pub fn set_disabled(&mut self, handle: UiNodeHandle, disabled: bool) -> Result<bool, UiError> {
+        let node = self.node_mut(handle)?;
+        let before = node.interaction;
+        node.interaction.set_disabled(disabled);
+        if node.interaction == before {
+            return Ok(false);
+        }
+        node.dirty = true;
+        Ok(true)
+    }
+
+    pub fn set_focused(&mut self, handle: UiNodeHandle, focused: bool) -> Result<bool, UiError> {
+        let node = self.node_mut(handle)?;
+        let before = node.interaction;
+        node.interaction.set_focused(focused);
+        if node.interaction == before {
+            return Ok(false);
+        }
+        node.dirty = true;
+        Ok(true)
+    }
+
     pub fn set_text(&mut self, handle: UiNodeHandle, text: UiText) -> Result<bool, UiError> {
         let node = self.node_mut(handle)?;
         if node.text == text {
@@ -844,6 +866,25 @@ mod tests {
         assert_eq!(replacement.slot, first.slot);
         assert!(replacement.generation != first.generation);
         assert_eq!(tree.hit_test(1, 1), Some(replacement));
+    }
+
+    #[test]
+    fn interaction_changes_dirty_once_and_reject_stale_handles() {
+        let mut tree = UiTree::new();
+        let root = tree.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 1).unwrap();
+        let button = tree.insert(UiNodeKind::Button, root, 2).unwrap();
+        tree.clear_dirty(button).unwrap();
+        assert_eq!(tree.set_focused(button, true), Ok(true));
+        assert!(tree.node(button).unwrap().dirty);
+        tree.clear_dirty(button).unwrap();
+        assert_eq!(tree.set_focused(button, true), Ok(false));
+        assert!(!tree.node(button).unwrap().dirty);
+        assert_eq!(tree.set_disabled(button, true), Ok(true));
+        assert!(tree.node(button).unwrap().dirty);
+
+        tree.destroy(button).unwrap();
+        assert_eq!(tree.set_focused(button, false), Err(UiError::Stale));
+        assert_eq!(tree.set_disabled(button, false), Err(UiError::Stale));
     }
 
     #[test]
