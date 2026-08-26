@@ -269,6 +269,54 @@ impl UiComponentTree {
         &self.tree
     }
 
+    pub fn tree_mut(&mut self) -> &mut UiTree {
+        &mut self.tree
+    }
+
+    pub fn hit_test(&self, x: i32, y: i32) -> Option<UiNodeHandle> {
+        self.tree.hit_test(x, y)
+    }
+
+    pub fn dispatch_at(
+        &mut self,
+        event: UiInputEvent,
+        output: &mut UiOutput<UiComponentEvent>,
+    ) -> Result<Option<UiNodeHandle>, UiComponentTreeError> {
+        let (x, y) = match event {
+            UiInputEvent::PointerDown { x, y }
+            | UiInputEvent::PointerUp { x, y }
+            | UiInputEvent::PointerMove { x, y } => (x, y),
+            _ => return Err(UiComponentTreeError::NotComponent),
+        };
+        let Some(target) = self.hit_test(x, y) else { return Ok(None) };
+        if matches!(event, UiInputEvent::PointerDown { .. }) {
+            self.focus(target)?;
+        }
+        self.dispatch(target, event, output)?;
+        Ok(Some(target))
+    }
+
+    pub fn dispatch_at_with_hooks(
+        &mut self,
+        event: UiInputEvent,
+        router: &UiEventRouter,
+        component_output: &mut UiOutput<UiComponentEvent>,
+        routed_output: &mut UiOutput<UiRoutedEvent>,
+    ) -> Result<Option<UiNodeHandle>, UiComponentTreeError> {
+        let (x, y) = match event {
+            UiInputEvent::PointerDown { x, y }
+            | UiInputEvent::PointerUp { x, y }
+            | UiInputEvent::PointerMove { x, y } => (x, y),
+            _ => return Err(UiComponentTreeError::NotComponent),
+        };
+        let Some(target) = self.hit_test(x, y) else { return Ok(None) };
+        if matches!(event, UiInputEvent::PointerDown { .. }) {
+            self.focus(target)?;
+        }
+        self.dispatch_with_hooks(target, event, router, component_output, routed_output)?;
+        Ok(Some(target))
+    }
+
     pub fn handle_for_name(
         &self,
         document: &crate::UiDocument,
@@ -621,6 +669,7 @@ fn possible_component_event_type(
             if matches!(
                 event,
                 UiInputEvent::Click
+                    | UiInputEvent::PointerUp { .. }
                     | UiInputEvent::Submit
                     | UiInputEvent::KeyDown { code: crate::UI_KEY_ENTER, .. }
             ) =>
@@ -706,6 +755,60 @@ mod tests {
         host.dispatch(button_handle, UiInputEvent::Submit, &mut output).unwrap();
         assert_eq!(output.pop(), Some(UiComponentEvent::Clicked { target: button_handle }));
         assert!(!host.tree().node(input_handle).unwrap().interaction.is_focused());
+    }
+
+    #[test]
+    fn coordinate_dispatch_focuses_and_activates_the_hit_target() {
+        let mut host = UiComponentTree::new();
+        let root = host.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 1).unwrap();
+        let button = host.insert(UiNodeKind::Button, root, 2).unwrap();
+        host.tree_mut().set_bounds(button, crate::UiRect::new(4, 5, 20, 10)).unwrap();
+
+        let mut output = UiOutput::new();
+        assert_eq!(
+            host.dispatch_at(UiInputEvent::PointerDown { x: 8, y: 7 }, &mut output),
+            Ok(Some(button))
+        );
+        assert_eq!(host.focused(), button);
+        assert!(output.is_empty());
+        assert_eq!(
+            host.dispatch_at(UiInputEvent::PointerUp { x: 8, y: 7 }, &mut output),
+            Ok(Some(button))
+        );
+        assert_eq!(output.pop(), Some(UiComponentEvent::Clicked { target: button }));
+        assert_eq!(host.dispatch_at(UiInputEvent::PointerUp { x: 0, y: 0 }, &mut output), Ok(None));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn coordinate_dispatch_routes_pointer_activation_to_click_hooks() {
+        let mut host = UiComponentTree::new();
+        let root = host.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 1).unwrap();
+        let button = host.insert(UiNodeKind::Button, root, 2).unwrap();
+        host.tree_mut().set_bounds(button, crate::UiRect::new(0, 0, 10, 10)).unwrap();
+        let mut router = crate::UiEventRouter::new();
+        router.subscribe(button, crate::UiEventType::Click, crate::UiHandlerId::new(4)).unwrap();
+        let mut component_output = UiOutput::new();
+        let mut routed_output = UiOutput::new();
+
+        assert_eq!(
+            host.dispatch_at_with_hooks(
+                UiInputEvent::PointerUp { x: 5, y: 5 },
+                &router,
+                &mut component_output,
+                &mut routed_output,
+            ),
+            Ok(Some(button))
+        );
+        assert_eq!(component_output.pop(), Some(UiComponentEvent::Clicked { target: button }));
+        assert_eq!(
+            routed_output.pop(),
+            Some(UiRoutedEvent {
+                target: button,
+                handler: crate::UiHandlerId::new(4),
+                event: UiInputEvent::Click,
+            })
+        );
     }
 
     #[test]

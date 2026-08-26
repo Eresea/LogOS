@@ -59,7 +59,7 @@ impl UiComponent for UiButton {
                 self.set_focused(false);
                 Ok(UiEventDisposition::Consumed)
             }
-            UiInputEvent::Click | UiInputEvent::Submit => {
+            UiInputEvent::Click | UiInputEvent::PointerUp { .. } | UiInputEvent::Submit => {
                 output.emit(UiButtonEvent::Clicked)?;
                 Ok(UiEventDisposition::Consumed)
             }
@@ -303,6 +303,17 @@ mod tests {
             Ok(UiEventDisposition::Ignored)
         );
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn button_treats_pointer_up_as_a_typed_click() {
+        let mut button = UiButton::new();
+        let mut output = UiOutput::new();
+        assert_eq!(
+            button.handle_event(UiInputEvent::PointerUp { x: 1, y: 2 }, &mut output),
+            Ok(UiEventDisposition::Consumed)
+        );
+        assert_eq!(output.pop(), Some(UiButtonEvent::Clicked));
     }
 
     #[test]
