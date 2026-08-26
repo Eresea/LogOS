@@ -19,6 +19,7 @@ pub use logos_ui::{
 
 pub const MAX_UI_SOURCE_BYTES: usize = 4096;
 pub const MAX_UI_DIAGNOSTICS: usize = 16;
+pub const MAX_UI_HANDLERS: usize = 32;
 
 pub const UI_COMPONENT_NAMES: [&str; 5] =
     ["ui.button", "ui.column", "ui.form", "ui.input", "ui.text"];
@@ -65,6 +66,8 @@ pub enum UiDiagnosticKind {
     ReadOnlyBinding = 14,
     InvalidEventHandler = 15,
     EventPayloadMismatch = 16,
+    UnknownEventHandler = 17,
+    EventHandlerTypeMismatch = 18,
 }
 
 impl UiDiagnosticKind {
@@ -86,6 +89,8 @@ impl UiDiagnosticKind {
             Self::ReadOnlyBinding => "UI014",
             Self::InvalidEventHandler => "UI015",
             Self::EventPayloadMismatch => "UI016",
+            Self::UnknownEventHandler => "UI017",
+            Self::EventHandlerTypeMismatch => "UI018",
         }
     }
 
@@ -109,7 +114,93 @@ impl UiDiagnosticKind {
                 "event handler must be a bounded method or call expression"
             }
             Self::EventPayloadMismatch => "$event is only available on changed handlers",
+            Self::UnknownEventHandler => "event handler is not registered for this component",
+            Self::EventHandlerTypeMismatch => {
+                "event handler is registered for a different event payload"
+            }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiHandlerSpec {
+    pub expression: UiExpression,
+    pub event: UiEventKind,
+}
+
+impl UiHandlerSpec {
+    pub const fn new(expression: UiExpression, event: UiEventKind) -> Self {
+        Self { expression, event }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiHandlerRegistryError {
+    InvalidExpression,
+    Capacity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiHandlerRegistry {
+    entries: [UiHandlerSpec; MAX_UI_HANDLERS],
+    count: usize,
+}
+
+impl UiHandlerRegistry {
+    pub const fn new() -> Self {
+        Self {
+            entries: [UiHandlerSpec::new(UiExpression::EMPTY, UiEventKind::Click); MAX_UI_HANDLERS],
+            count: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn register_bytes(
+        &mut self,
+        expression: &[u8],
+        event: UiEventKind,
+    ) -> Result<(), UiHandlerRegistryError> {
+        let expression = UiExpression::from_bytes(expression)
+            .ok_or(UiHandlerRegistryError::InvalidExpression)?;
+        self.register(expression, event)
+    }
+
+    pub fn register(
+        &mut self,
+        expression: UiExpression,
+        event: UiEventKind,
+    ) -> Result<(), UiHandlerRegistryError> {
+        let spec = UiHandlerSpec::new(expression, event);
+        if self.entries[..self.count].contains(&spec) {
+            return Ok(());
+        }
+        if self.count == MAX_UI_HANDLERS {
+            return Err(UiHandlerRegistryError::Capacity);
+        }
+        self.entries[self.count] = spec;
+        self.count += 1;
+        Ok(())
+    }
+
+    fn contains_expression(&self, expression: UiExpression) -> bool {
+        self.entries[..self.count].iter().any(|spec| spec.expression == expression)
+    }
+
+    fn accepts(&self, expression: UiExpression, event: UiEventKind) -> bool {
+        self.entries[..self.count].contains(&UiHandlerSpec::new(expression, event))
+    }
+}
+
+impl Default for UiHandlerRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -220,6 +311,10 @@ pub fn lint(source: &str) -> UiDiagnostics {
     compile(source).diagnostics
 }
 
+pub fn lint_with_handlers(source: &str, handlers: &UiHandlerRegistry) -> UiDiagnostics {
+    compile_with_handlers(source, handlers).diagnostics
+}
+
 pub const LOGIN_PAGE_SOURCE: &str = include_str!("../examples/login.ui");
 pub const REGISTER_PAGE_SOURCE: &str = include_str!("../examples/register.ui");
 
@@ -232,6 +327,17 @@ pub fn compile_register_page() -> UiBuild {
 }
 
 pub fn compile(source: &str) -> UiBuild {
+    compile_internal(source, None)
+}
+
+pub fn compile_with_handlers(source: &str, handlers: &UiHandlerRegistry) -> UiBuild {
+    compile_internal(source, Some(handlers))
+}
+
+fn compile_internal<'a>(
+    source: &'a str,
+    handler_registry: Option<&'a UiHandlerRegistry>,
+) -> UiBuild {
     if source.len() > MAX_UI_SOURCE_BYTES {
         let mut diagnostics = UiDiagnostics::EMPTY;
         diagnostics.push(UiDiagnosticKind::SourceTooLarge, MAX_UI_SOURCE_BYTES);
@@ -242,6 +348,7 @@ pub fn compile(source: &str) -> UiBuild {
         position: 0,
         document: UiDocument::EMPTY,
         diagnostics: UiDiagnostics::EMPTY,
+        handler_registry,
     };
     parser.parse_document();
     UiBuild { document: parser.document, diagnostics: parser.diagnostics }
@@ -249,6 +356,7 @@ pub fn compile(source: &str) -> UiBuild {
 
 struct Parser<'a> {
     bytes: &'a [u8],
+    handler_registry: Option<&'a UiHandlerRegistry>,
     position: usize,
     document: UiDocument,
     diagnostics: UiDiagnostics,
@@ -542,6 +650,17 @@ impl Parser<'_> {
         if let Err(diagnostic) = validate_event_handler(kind, handler.as_bytes()) {
             self.diagnostics.push(diagnostic, offset);
             return;
+        }
+        if let Some(registry) = self.handler_registry {
+            if !registry.accepts(handler, kind) {
+                let diagnostic = if registry.contains_expression(handler) {
+                    UiDiagnosticKind::EventHandlerTypeMismatch
+                } else {
+                    UiDiagnosticKind::UnknownEventHandler
+                };
+                self.diagnostics.push(diagnostic, offset);
+                return;
+            }
         }
         if let Some(index) = node_index {
             if let Some(node) = self.document.node_mut(index) {
@@ -988,6 +1107,39 @@ mod tests {
             unbounded.diagnostics.get(0),
             Some(UiDiagnostic { kind: UiDiagnosticKind::InvalidEventHandler, .. })
         ));
+    }
+
+    #[test]
+    fn strict_handler_compilation_checks_registered_event_contracts() {
+        let mut handlers = UiHandlerRegistry::new();
+        handlers.register_bytes(b"login", UiEventKind::Submit).unwrap();
+        handlers.register_bytes(b"passwordChanged($event)", UiEventKind::Changed).unwrap();
+        handlers.register_bytes(b"login", UiEventKind::Submit).unwrap();
+        assert_eq!(handlers.len(), 2);
+
+        let valid = compile_with_handlers(r#"<ui.form (submit)="login"/>"#, &handlers);
+        assert!(valid.is_valid(), "diagnostics: {:?}", valid.diagnostics);
+
+        let unknown = compile_with_handlers(r#"<ui.form (submit)="register"/>"#, &handlers);
+        assert!(matches!(
+            unknown.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownEventHandler, .. })
+        ));
+
+        let mismatch = compile_with_handlers(r#"<ui.button (click)="login"/>"#, &handlers);
+        assert!(matches!(
+            mismatch.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::EventHandlerTypeMismatch, .. })
+        ));
+    }
+
+    #[test]
+    fn handler_registry_rejects_invalid_expressions() {
+        let mut handlers = UiHandlerRegistry::new();
+        assert_eq!(
+            handlers.register_bytes(b"", UiEventKind::Click),
+            Err(UiHandlerRegistryError::InvalidExpression)
+        );
     }
 
     #[test]
