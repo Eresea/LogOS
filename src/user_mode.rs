@@ -98,17 +98,37 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
     }
 }
 
-pub(crate) fn faulted(handle: TaskHandle, vector: usize) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FaultDisposition {
+    Retry,
+    Contained,
+    Fatal,
+}
+
+pub(crate) fn faulted(handle: TaskHandle, vector: usize, fault_address: usize) -> FaultDisposition {
     if !matches!(vector, 6 | 13 | 14) {
-        return false;
+        return FaultDisposition::Fatal;
     }
     if handle.raw() != USER_TASK_RAW.load(Ordering::Acquire) {
         let Some(launch) = SCHEDULER.user_launch(handle) else {
-            return false;
+            return FaultDisposition::Fatal;
         };
-        return crate::arch::fault_service_process(launch.process(), vector as u8);
+        if vector == 14 {
+            return match crate::arch::fault_service_page(launch.process(), fault_address) {
+                crate::service_runtime::ServiceFaultOutcome::Retry => FaultDisposition::Retry,
+                crate::service_runtime::ServiceFaultOutcome::Contained => {
+                    FaultDisposition::Contained
+                }
+                crate::service_runtime::ServiceFaultOutcome::Fatal => FaultDisposition::Fatal,
+            };
+        }
+        return if crate::arch::fault_service_process(launch.process(), vector as u8) {
+            FaultDisposition::Contained
+        } else {
+            FaultDisposition::Fatal
+        };
     }
-    mark_fault(vector)
+    if mark_fault(vector) { FaultDisposition::Contained } else { FaultDisposition::Fatal }
 }
 
 pub(crate) fn syscall_faulted(handle: TaskHandle) -> bool {

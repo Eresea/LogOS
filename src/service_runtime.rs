@@ -44,6 +44,18 @@ impl ServiceHeapState {
     }
 }
 
+struct ServiceStackState {
+    /// Pages committed below the initial stack window. The initial window is
+    /// part of `LoadedImage`; these frames are borrowed only on demand.
+    frames: Vec<FrameAddress>,
+}
+
+impl ServiceStackState {
+    const fn empty() -> Self {
+        Self { frames: Vec::new() }
+    }
+}
+
 fn dynamic_endpoint_peer(
     endpoint: logos_abi::IpcEndpointId,
     producer: bool,
@@ -169,6 +181,17 @@ pub enum ServiceRuntimeError {
     StaleGeneration,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ServiceFaultOutcome {
+    /// The missing stack page was committed and the interrupted instruction
+    /// can be retried.
+    Retry,
+    /// The process was contained as a user fault.
+    Contained,
+    /// The runtime could not safely contain the fault.
+    Fatal,
+}
+
 pub struct ServiceRuntime {
     frame_pool: FramePool,
     images: Vec<LoadedImage>,
@@ -188,6 +211,7 @@ pub struct ServiceRuntime {
     bootstrap_heap: Vec<logos_abi::CapabilityHandle>,
     keyboard_event: logos_abi::EventHandle,
     service_heaps: Vec<ServiceHeapState>,
+    service_stacks: Vec<ServiceStackState>,
     user_kdf_workspace: [u64; logos_abi::USER_KDF_WORKSPACE_PAGES],
     storage_data_frames: [Option<FrameAddress>; logos_abi::STORAGE_DATA_PAGES],
     network_config: logos_abi::NetworkConfig,
@@ -420,6 +444,7 @@ impl ServiceRuntime {
             bootstrap_heap: Vec::new(),
             keyboard_event: logos_abi::EventHandle::EMPTY,
             service_heaps: Vec::new(),
+            service_stacks: Vec::new(),
             user_kdf_workspace: [0; logos_abi::USER_KDF_WORKSPACE_PAGES],
             storage_data_frames: [None; logos_abi::STORAGE_DATA_PAGES],
             network_config: logos_abi::NetworkConfig::disabled(),
@@ -551,6 +576,7 @@ impl ServiceRuntime {
             && self.bootstrap_directory.len() == self.images.len()
             && self.bootstrap_heap.len() == self.images.len()
             && self.service_heaps.len() == self.images.len()
+            && self.service_stacks.len() == self.images.len()
             && self.tasks.len() == self.images.len()
             && self.prepared_packages.len() == self.images.len()
             && self.active_packages.len() == self.images.len()
@@ -572,6 +598,7 @@ impl ServiceRuntime {
             self.bootstrap_directory.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
             self.bootstrap_heap.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
             self.service_heaps.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.service_stacks.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
             self.tasks.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
             self.prepared_packages.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
             self.active_packages.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
@@ -592,6 +619,7 @@ impl ServiceRuntime {
             self.bootstrap_directory.push(logos_abi::CapabilityHandle::EMPTY);
             self.bootstrap_heap.push(logos_abi::CapabilityHandle::EMPTY);
             self.service_heaps.push(ServiceHeapState::empty());
+            self.service_stacks.push(ServiceStackState::empty());
             self.tasks.push(None);
             self.prepared_packages.push(None);
             self.active_packages.push(None);
@@ -923,6 +951,7 @@ impl ServiceRuntime {
         self.prepared_packages.resize_with(SERVICE_COUNT, || None);
         self.active_packages.resize(SERVICE_COUNT, None);
         self.service_heaps.resize_with(SERVICE_COUNT, ServiceHeapState::empty);
+        self.service_stacks.resize_with(SERVICE_COUNT, ServiceStackState::empty);
         self.tasks.resize(SERVICE_COUNT, None);
         while self.suppressed_heartbeats.len() < SERVICE_COUNT {
             self.suppressed_heartbeats.push(AtomicBool::new(false));
@@ -957,13 +986,6 @@ impl ServiceRuntime {
                 ServiceId::Shell => b"LogOS vNext: load Shell",
                 ServiceId::LockScreen => b"LogOS vNext: load LockScreen",
             });
-            let stack_pages = match service {
-                ServiceId::Storage => crate::process::STORAGE_STACK_PAGES,
-                ServiceId::Network => crate::process::NETWORK_STACK_PAGES,
-                ServiceId::Flow => crate::process::FLOW_STACK_PAGES,
-                ServiceId::Shell => crate::process::SHELL_STACK_PAGES,
-                _ => crate::process::USER_STACK_PAGES,
-            };
             let service_handle = self.runtime_service_handle(service)?;
             let uses_prepared = self.prepared_packages[index]
                 .as_ref()
@@ -979,9 +1001,12 @@ impl ServiceRuntime {
             } else {
                 let image = unsafe { bundle.image(service) }.ok_or(ServiceRuntimeError::Image)?;
                 let plan = spec.validate_image(image).map_err(|_| ServiceRuntimeError::Image)?;
-                let mut loaded =
-                    LoadedImage::load_with_stack_pages(plan, &mut self.frame_pool, stack_pages)
-                        .map_err(ServiceRuntimeError::Load)?;
+                let mut loaded = LoadedImage::load_with_stack_pages(
+                    plan,
+                    &mut self.frame_pool,
+                    crate::process::USER_STACK_PAGES,
+                )
+                .map_err(ServiceRuntimeError::Load)?;
                 if let Err(error) = loaded.populate(plan, image, &mut memory) {
                     loaded.reclaim(&mut self.frame_pool);
                     return Err(ServiceRuntimeError::Populate(error));
@@ -1189,6 +1214,7 @@ impl ServiceRuntime {
                 return false;
             };
             let runtime_frames = self.service_heaps[service.index()].frames.len()
+                + self.service_stacks[service.index()].frames.len()
                 + usize::from(self.service_bootstrap_frames[service.index()] != 0)
                 + if service == ServiceId::User { logos_abi::USER_KDF_WORKSPACE_PAGES } else { 0 };
             let image_frames = match source {
@@ -1884,6 +1910,12 @@ impl ServiceRuntime {
     }
 
     fn release_service_heap_slot(&mut self, index: usize) -> Result<(), ServiceRuntimeError> {
+        while let Some(frame) = self.service_stacks[index].frames.pop() {
+            if self.frame_pool.release(frame).is_err() {
+                self.service_stacks[index].frames.push(frame);
+                return Err(ServiceRuntimeError::Resources);
+            }
+        }
         while let Some(frame) = self.service_heaps[index].frames.pop() {
             self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
         }
@@ -2359,20 +2391,13 @@ impl ServiceRuntime {
             crate::process::ElfLoadPlan::parse_reader(&mut payload_reader)
                 .map_err(|_| ServiceRuntimeError::Image)?
         };
-        let stack_pages = match service {
-            ServiceId::Storage => crate::process::STORAGE_STACK_PAGES,
-            ServiceId::Network => crate::process::NETWORK_STACK_PAGES,
-            ServiceId::Flow => crate::process::FLOW_STACK_PAGES,
-            ServiceId::Shell => crate::process::SHELL_STACK_PAGES,
-            _ => crate::process::USER_STACK_PAGES,
-        };
         let service_handle = self.runtime_service_handle(service)?;
         let owner = crate::memory::OwnerId::service_handle(service_handle)
             .ok_or(ServiceRuntimeError::Resources)?;
         let mut image = LoadedImage::load_with_stack_pages_for_owner(
             plan,
             &mut self.frame_pool,
-            stack_pages,
+            crate::process::USER_STACK_PAGES,
             owner,
         )
         .map_err(ServiceRuntimeError::Load)?;
@@ -5182,6 +5207,70 @@ impl ServiceRuntime {
         self.processes.fault(process, vector)
     }
 
+    pub(crate) fn handle_page_fault(
+        &mut self,
+        process: ProcessHandle,
+        fault_address: usize,
+    ) -> ServiceFaultOutcome {
+        match self.grow_service_stack(process, fault_address) {
+            Ok(true) => ServiceFaultOutcome::Retry,
+            Ok(false) => match self.processes.fault(process, 14) {
+                Ok(()) => ServiceFaultOutcome::Contained,
+                Err(_) => ServiceFaultOutcome::Fatal,
+            },
+            Err(_) => match self.processes.fault(process, 14) {
+                Ok(()) => ServiceFaultOutcome::Contained,
+                Err(_) => ServiceFaultOutcome::Fatal,
+            },
+        }
+    }
+
+    fn grow_service_stack(
+        &mut self,
+        process: ProcessHandle,
+        fault_address: usize,
+    ) -> Result<bool, ProcessError> {
+        let Some(index) = self.service_slot_for_process(process) else {
+            return Ok(false);
+        };
+        let Some(service_handle) = self.service_handles.get(index).copied() else {
+            return Ok(false);
+        };
+        if self.dynamic_services.as_ref().and_then(|registry| registry.state(service_handle).ok())
+            != Some(crate::runtime_services::ServiceState::Running)
+        {
+            return Ok(false);
+        }
+        let extra_pages = self.service_stacks[index].frames.len();
+        let Some(target) = crate::loader::service_stack_growth_address(extra_pages) else {
+            return Ok(false);
+        };
+        if fault_address & !(crate::loader::PAGE_SIZE - 1) != target {
+            return Ok(false);
+        }
+        self.service_stacks[index].frames.try_reserve(1).map_err(|_| ProcessError::Capacity)?;
+        let owner = OwnerId::service_handle(service_handle).ok_or(ProcessError::InvalidHandle)?;
+        let frame = self.frame_pool.allocate_for(owner).map_err(|_| ProcessError::Capacity)?;
+        let mut memory = IdentityPageTableMemory;
+        if memory.clear(frame).is_err() {
+            let _ = self.frame_pool.release(frame);
+            return Err(ProcessError::AddressSpace);
+        }
+        let mapped = unsafe { self.tables[index].assume_init_mut() }.map_raw_page(
+            target,
+            frame,
+            MappingFlags::DATA,
+            &mut self.frame_pool,
+            &mut memory,
+        );
+        if mapped.is_err() {
+            let _ = self.frame_pool.release(frame);
+            return Ok(false);
+        }
+        self.service_stacks[index].frames.push(frame);
+        Ok(true)
+    }
+
     pub(crate) fn exit_process(
         &mut self,
         process: ProcessHandle,
@@ -6021,6 +6110,12 @@ impl ServiceRuntime {
             }
         }
         for index in 0..self.service_heaps.len() {
+            while let Some(frame) = self.service_stacks[index].frames.pop() {
+                if self.frame_pool.release(frame).is_err() {
+                    self.service_stacks[index].frames.push(frame);
+                    return Err(ServiceRuntimeError::Resources);
+                }
+            }
             while let Some(frame) = self.service_heaps[index].frames.pop() {
                 if self.frame_pool.release(frame).is_err() {
                     self.service_heaps[index].frames.push(frame);
@@ -6041,6 +6136,7 @@ impl ServiceRuntime {
         self.bootstrap_directory.clear();
         self.bootstrap_heap.clear();
         self.service_heaps.clear();
+        self.service_stacks.clear();
         self.tasks.clear();
         self.suppressed_heartbeats.clear();
         for frame in &mut self.user_kdf_workspace {

@@ -28,10 +28,12 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         let Some(handle) = current else {
             fatal(b"LogOS vNext: fault without task");
         };
-        if !crate::user_mode::faulted(handle, vector) {
-            fatal(b"LogOS vNext: kernel fault");
+        let fault_address = if vector == 14 { crate::arch::page_fault_address() } else { 0 };
+        match crate::user_mode::faulted(handle, vector, fault_address) {
+            crate::user_mode::FaultDisposition::Retry => false,
+            crate::user_mode::FaultDisposition::Contained => true,
+            crate::user_mode::FaultDisposition::Fatal => fatal(b"LogOS vNext: kernel fault"),
         }
-        true
     } else {
         false
     };

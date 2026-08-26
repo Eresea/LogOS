@@ -5,8 +5,24 @@ use crate::process::{AddressSpaceRoot, ElfLoadPlan, ImageReader, MappingFlags, U
 
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_LOAD_PAGES: usize =
-    crate::process::MAX_IMAGE_BYTES / PAGE_SIZE + crate::process::STORAGE_STACK_PAGES + 2;
+    crate::process::MAX_IMAGE_BYTES / PAGE_SIZE + crate::process::USER_STACK_PAGES + 2;
 pub const USER_STACK_BASE: usize = 0x0000_0100_0100_0000;
+
+/// Return the next downward stack page that the runtime may commit.
+pub const fn service_stack_growth_address(extra_pages: usize) -> Option<usize> {
+    if extra_pages
+        >= crate::process::MAX_SERVICE_STACK_PAGES.saturating_sub(crate::process::USER_STACK_PAGES)
+    {
+        return None;
+    }
+    let Some(page_count) = extra_pages.checked_add(1) else {
+        return None;
+    };
+    let Some(offset) = page_count.checked_mul(PAGE_SIZE) else {
+        return None;
+    };
+    USER_STACK_BASE.checked_sub(offset)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadedPage {
@@ -595,6 +611,18 @@ mod tests {
             LoadedImage::load_with_stack_pages(plan, &mut pool, usize::MAX),
             Err(LoadError::Capacity)
         ));
+    }
+
+    #[test]
+    fn service_stack_growth_is_downward_and_bounded() {
+        assert_eq!(service_stack_growth_address(0), Some(USER_STACK_BASE - PAGE_SIZE));
+        assert_eq!(service_stack_growth_address(1), Some(USER_STACK_BASE - 2 * PAGE_SIZE));
+        assert_eq!(
+            service_stack_growth_address(
+                crate::process::MAX_SERVICE_STACK_PAGES - crate::process::USER_STACK_PAGES
+            ),
+            None
+        );
     }
 
     #[test]

@@ -1353,6 +1353,24 @@ pub(crate) fn fault_service_process(process: crate::process::ProcessHandle, vect
     }
 }
 
+pub(crate) fn fault_service_page(
+    process: crate::process::ProcessHandle,
+    fault_address: usize,
+) -> crate::service_runtime::ServiceFaultOutcome {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).handle_page_fault(process, fault_address)
+    }
+}
+
+pub(crate) fn page_fault_address() -> usize {
+    let mut address = 0;
+    unsafe {
+        asm!("mov {address}, cr2", address = out(reg) address, options(nostack, preserves_flags));
+    }
+    address
+}
+
 pub(crate) fn exit_process(process: crate::process::ProcessHandle, code: u8) -> bool {
     let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe { (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).exit_process(process, code).is_ok() }
