@@ -766,6 +766,29 @@ mod tests {
     }
 
     #[test]
+    fn style_signal_invalidation_updates_only_the_targeted_node() {
+        let mut tree = UiTree::new();
+        let root = tree.insert(UiNodeKind::Panel, UiNodeHandle::EMPTY, 1).unwrap();
+        let signal = UiSignalId::new(12);
+        let target = UiBindingTarget { node: root, property: UiBindingProperty::Styles };
+        let mut coordinator = UiCommitCoordinator::new();
+        coordinator.watch(target, dependencies(signal), UiInvalidationKind::Paint).unwrap();
+        tree.clear_dirty(root).unwrap();
+
+        coordinator.publish(UiSignalChange { signal, revision: 1 }).unwrap();
+        assert_eq!(
+            coordinator.commit(|invalidation| {
+                let mut styles = crate::UiStyleList::EMPTY;
+                let _ = styles.push(crate::UiStyle::BackgroundAccent);
+                tree.set_styles(invalidation.target.node, styles).is_ok()
+            }),
+            Ok(1)
+        );
+        assert!(tree.has_style(root, crate::UiStyle::BackgroundAccent).unwrap());
+        assert!(tree.node(root).unwrap().dirty);
+    }
+
+    #[test]
     fn coordinator_coalesces_changes_and_preserves_failed_work() {
         let signal = UiSignalId::new(10);
         let mut coordinator = UiCommitCoordinator::new();

@@ -90,6 +90,7 @@ impl UiExpression {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiBindingProperty {
     Text,
+    Styles,
     Value,
     Disabled,
     Form,

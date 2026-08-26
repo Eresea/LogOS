@@ -210,6 +210,7 @@ fn write_binding_property<W: fmt::Write>(
 ) -> Result<(), UiCodegenError> {
     let name = match property {
         UiBindingProperty::Text => "Text",
+        UiBindingProperty::Styles => "Styles",
         UiBindingProperty::Value => "Value",
         UiBindingProperty::Disabled => "Disabled",
         UiBindingProperty::Form => "Form",
