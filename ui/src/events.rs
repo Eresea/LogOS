@@ -192,6 +192,28 @@ impl UiEventRouter {
         true
     }
 
+    pub fn unsubscribe_target(&mut self, target: UiNodeHandle) -> usize {
+        let mut removed = 0;
+        let mut index = 0;
+        while index < self.len {
+            if self.routes[index].target == target {
+                self.routes.copy_within(index + 1..self.len, index);
+                self.len -= 1;
+                removed += 1;
+            } else {
+                index += 1;
+            }
+        }
+        removed
+    }
+
+    pub fn is_subscribed(&self, target: UiNodeHandle, event_type: UiEventType) -> bool {
+        self.routes
+            .iter()
+            .take(self.len)
+            .any(|route| route.target == target && route.event_type == event_type)
+    }
+
     pub fn dispatch(
         &self,
         target: UiNodeHandle,
@@ -273,6 +295,19 @@ mod tests {
         assert_eq!(output.pop().unwrap().handler, UiHandlerId::new(2));
         assert!(router.unsubscribe(FIRST, UiEventType::KeyDown));
         assert!(!router.unsubscribe(FIRST, UiEventType::KeyDown));
+    }
+
+    #[test]
+    fn target_cleanup_removes_only_the_exact_generation() {
+        let mut router = UiEventRouter::new();
+        router.subscribe(FIRST, UiEventType::Click, UiHandlerId::new(1)).unwrap();
+        router.subscribe(FIRST, UiEventType::Submit, UiHandlerId::new(2)).unwrap();
+        router.subscribe(SECOND, UiEventType::Click, UiHandlerId::new(3)).unwrap();
+
+        assert_eq!(router.unsubscribe_target(FIRST), 2);
+        assert_eq!(router.len(), 1);
+        assert!(!router.is_subscribed(FIRST, UiEventType::Click));
+        assert!(router.is_subscribed(SECOND, UiEventType::Click));
     }
 
     #[test]

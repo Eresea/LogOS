@@ -1,4 +1,7 @@
-use crate::events::{MAX_UI_OUTPUT_EVENTS, UiInputEvent, UiOutput, UiOutputError};
+use crate::events::{
+    MAX_UI_OUTPUT_EVENTS, UiEventError, UiEventRouter, UiInputEvent, UiOutput, UiOutputError,
+    UiRoutedEvent,
+};
 use crate::runtime::{UiError, UiNodeHandle, UiNodeKind, UiTree};
 use crate::{
     UiButton, UiButtonEvent, UiComponent, UiEventDisposition, UiInput, UiInputEventOutput,
@@ -157,6 +160,15 @@ impl UiComponentTree {
         Ok(())
     }
 
+    pub fn destroy_with_router(
+        &mut self,
+        handle: UiNodeHandle,
+        router: &mut UiEventRouter,
+    ) -> Result<usize, UiComponentTreeError> {
+        self.destroy(handle)?;
+        Ok(router.unsubscribe_target(handle))
+    }
+
     pub const fn tree(&self) -> &UiTree {
         &self.tree
     }
@@ -304,6 +316,24 @@ impl UiComponentTree {
         output.emit(event).map_err(|_| UiComponentTreeError::OutputFull)?;
         Ok(UiEventDisposition::Consumed)
     }
+
+    pub fn dispatch_with_hooks(
+        &mut self,
+        handle: UiNodeHandle,
+        event: UiInputEvent,
+        router: &UiEventRouter,
+        component_output: &mut UiOutput<UiComponentEvent>,
+        routed_output: &mut UiOutput<UiRoutedEvent>,
+    ) -> Result<UiEventDisposition, UiComponentTreeError> {
+        if router.is_subscribed(handle, event.event_type())
+            && routed_output.len() == MAX_UI_OUTPUT_EVENTS
+        {
+            return Err(UiComponentTreeError::OutputFull);
+        }
+        let disposition = self.dispatch(handle, event, component_output)?;
+        router.dispatch(handle, event, routed_output).map_err(map_event_error)?;
+        Ok(disposition)
+    }
 }
 
 impl Default for UiComponentTree {
@@ -318,6 +348,13 @@ fn map_tree_error(error: UiError) -> UiComponentTreeError {
         UiError::InvalidParent | UiError::RootExists | UiError::Stale | UiError::NotFound => {
             UiComponentTreeError::Stale
         }
+    }
+}
+
+fn map_event_error(error: UiEventError) -> UiComponentTreeError {
+    match error {
+        UiEventError::OutputFull => UiComponentTreeError::OutputFull,
+        UiEventError::Capacity => UiComponentTreeError::Capacity,
     }
 }
 
@@ -393,5 +430,90 @@ mod tests {
         assert_eq!(replacement.slot, input.slot);
         assert_ne!(replacement.generation, input.generation);
         assert_eq!(host.value(input), Err(UiComponentTreeError::Stale));
+    }
+
+    #[test]
+    fn routed_dispatch_keeps_component_and_handler_outputs_typed() {
+        let mut host = UiComponentTree::new();
+        let root = host.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 1).unwrap();
+        let button = host.insert(UiNodeKind::Button, root, 2).unwrap();
+        let mut router = crate::UiEventRouter::new();
+        router.subscribe(button, crate::UiEventType::Click, crate::UiHandlerId::new(9)).unwrap();
+        let mut component_output = UiOutput::new();
+        let mut routed_output = UiOutput::new();
+
+        host.dispatch_with_hooks(
+            button,
+            UiInputEvent::Click,
+            &router,
+            &mut component_output,
+            &mut routed_output,
+        )
+        .unwrap();
+
+        assert_eq!(component_output.pop(), Some(UiComponentEvent::Clicked { target: button }));
+        assert_eq!(
+            routed_output.pop(),
+            Some(UiRoutedEvent {
+                target: button,
+                handler: crate::UiHandlerId::new(9),
+                event: UiInputEvent::Click,
+            })
+        );
+    }
+
+    #[test]
+    fn destroying_a_component_cleans_its_routes_before_slot_reuse() {
+        let mut host = UiComponentTree::new();
+        let root = host.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 1).unwrap();
+        let button = host.insert(UiNodeKind::Button, root, 2).unwrap();
+        let mut router = crate::UiEventRouter::new();
+        router.subscribe(button, crate::UiEventType::Click, crate::UiHandlerId::new(3)).unwrap();
+
+        assert_eq!(host.destroy_with_router(button, &mut router), Ok(1));
+        let replacement = host.insert(UiNodeKind::Button, root, 4).unwrap();
+        let mut component_output = UiOutput::new();
+        let mut routed_output = UiOutput::new();
+        host.dispatch_with_hooks(
+            replacement,
+            UiInputEvent::Click,
+            &router,
+            &mut component_output,
+            &mut routed_output,
+        )
+        .unwrap();
+        assert!(routed_output.is_empty());
+    }
+
+    #[test]
+    fn routed_backpressure_does_not_mutate_component_state() {
+        let mut host = UiComponentTree::new();
+        let root = host.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 1).unwrap();
+        let button = host.insert(UiNodeKind::Button, root, 2).unwrap();
+        let mut router = crate::UiEventRouter::new();
+        router.subscribe(button, crate::UiEventType::Click, crate::UiHandlerId::new(1)).unwrap();
+        let mut component_output = UiOutput::new();
+        let mut routed_output = UiOutput::new();
+        for _ in 0..MAX_UI_OUTPUT_EVENTS {
+            routed_output
+                .emit(UiRoutedEvent {
+                    target: button,
+                    handler: crate::UiHandlerId::new(0),
+                    event: UiInputEvent::Click,
+                })
+                .unwrap();
+        }
+
+        assert_eq!(
+            host.dispatch_with_hooks(
+                button,
+                UiInputEvent::Click,
+                &router,
+                &mut component_output,
+                &mut routed_output,
+            ),
+            Err(UiComponentTreeError::OutputFull)
+        );
+        assert!(component_output.is_empty());
     }
 }
