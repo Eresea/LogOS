@@ -9,7 +9,7 @@ use logos_abi::{
 };
 use logos_ui::{
     UI_KEY_BACKSPACE, UiButton, UiButtonEvent, UiComponent, UiInput, UiInputEvent,
-    UiInputEventOutput, UiOutput, UiText,
+    UiInputEventOutput, UiInteractive, UiOutput, UiText,
 };
 use logos_ui_forms::{BoundedText, Control, FormState, ValidationError};
 
@@ -177,8 +177,40 @@ pub struct LockScreen {
     mode: LockScreenMode,
     field: LockScreenField,
     form: LoginForm,
+    components: LockScreenComponents,
     retries: u8,
     failure: bool,
+}
+
+struct LockScreenComponents {
+    username: UiInput,
+    password: UiInput,
+    confirm_password: UiInput,
+    submit: UiButton,
+}
+
+impl LockScreenComponents {
+    const fn new() -> Self {
+        Self {
+            username: UiInput::new(),
+            password: UiInput::new(),
+            confirm_password: UiInput::new(),
+            submit: UiButton::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        let _ = self.username.clear_value();
+        let _ = self.password.clear_value();
+        let _ = self.confirm_password.clear_value();
+    }
+
+    fn focus(&mut self, field: LockScreenField) {
+        self.username.set_focused(field == LockScreenField::Username);
+        self.password.set_focused(field == LockScreenField::Password);
+        self.confirm_password.set_focused(field == LockScreenField::ConfirmPassword);
+        self.submit.set_focused(field == LockScreenField::Submit);
+    }
 }
 
 impl LockScreen {
@@ -187,6 +219,7 @@ impl LockScreen {
             mode: LockScreenMode::Login,
             field: LockScreenField::Username,
             form: LoginForm::new(),
+            components: LockScreenComponents::new(),
             retries: 0,
             failure: false,
         }
@@ -306,7 +339,7 @@ impl LockScreen {
 
     pub fn apply_status(&mut self, status: UserStatus) {
         self.form.complete_submission();
-        self.form.clear_password();
+        self.clear_password();
         match status {
             UserStatus::Unclaimed => self.set_unclaimed(),
             UserStatus::BadCredentials => {
@@ -321,6 +354,8 @@ impl LockScreen {
 
     pub fn clear_password(&mut self) {
         self.form.clear_password();
+        let _ = self.components.password.clear_value();
+        let _ = self.components.confirm_password.clear_value();
     }
 
     pub fn cancel_submission(&mut self) {
@@ -328,20 +363,15 @@ impl LockScreen {
     }
 
     fn component_event(&mut self, event: UiInputEvent) -> bool {
-        let current = match self.field {
-            LockScreenField::Username => self.form.controls.username.value_ref().as_bytes(),
-            LockScreenField::Password => self.form.controls.password.value_ref().as_bytes(),
-            LockScreenField::ConfirmPassword => {
-                self.form.controls.confirm_password.value_ref().as_bytes()
-            }
+        let component = match self.field {
+            LockScreenField::Username => &mut self.components.username,
+            LockScreenField::Password => &mut self.components.password,
+            LockScreenField::ConfirmPassword => &mut self.components.confirm_password,
             LockScreenField::Submit => return false,
         };
-        let mut component = UiInput::new();
-        let Some(value) = UiText::from_bytes(current) else { return false };
-        let _ = component.set_value(value);
         component.set_masked(self.field != LockScreenField::Username);
         let mut output = UiOutput::new();
-        let _ = component.handle_event(UiInputEvent::Focus, &mut output);
+        component.set_focused(true);
         let _ = component.handle_event(event, &mut output);
         let mut changed = false;
         while let Some(event) = output.pop() {
@@ -354,24 +384,18 @@ impl LockScreen {
 
     fn component_submit(&mut self) -> bool {
         if self.field == LockScreenField::Submit {
-            let mut button = UiButton::new();
             let mut output = UiOutput::new();
-            let _ = button.handle_event(UiInputEvent::Submit, &mut output);
+            let _ = self.components.submit.handle_event(UiInputEvent::Submit, &mut output);
             return matches!(output.pop(), Some(UiButtonEvent::Clicked));
         }
-        let current = match self.field {
-            LockScreenField::Username => self.form.controls.username.value_ref().as_bytes(),
-            LockScreenField::Password => self.form.controls.password.value_ref().as_bytes(),
-            LockScreenField::ConfirmPassword => {
-                self.form.controls.confirm_password.value_ref().as_bytes()
-            }
+        let component = match self.field {
+            LockScreenField::Username => &mut self.components.username,
+            LockScreenField::Password => &mut self.components.password,
+            LockScreenField::ConfirmPassword => &mut self.components.confirm_password,
             LockScreenField::Submit => return false,
         };
-        let mut component = UiInput::new();
-        let Some(value) = UiText::from_bytes(current) else { return false };
-        let _ = component.set_value(value);
         let mut output = UiOutput::new();
-        let _ = component.handle_event(UiInputEvent::Focus, &mut output);
+        component.set_focused(true);
         let _ = component.handle_event(UiInputEvent::Submit, &mut output);
         matches!(output.pop(), Some(UiInputEventOutput::Submitted))
     }
@@ -379,20 +403,41 @@ impl LockScreen {
     fn set_component_value(&mut self, value: UiText) -> bool {
         let bytes = value.as_bytes();
         if bytes.len() > MAX_FIELD_BYTES || bytes.iter().any(|byte| !byte.is_ascii_graphic()) {
+            self.restore_component_value();
             return false;
         }
         let Some(value) = LoginText::from_bytes(bytes) else { return false };
-        let control = match self.field {
-            LockScreenField::Username => &mut self.form.controls.username,
-            LockScreenField::Password => &mut self.form.controls.password,
-            LockScreenField::ConfirmPassword => &mut self.form.controls.confirm_password,
+        let accepted = match self.field {
+            LockScreenField::Username => self.form.controls.username.set_user(value),
+            LockScreenField::Password => self.form.controls.password.set_user(value),
+            LockScreenField::ConfirmPassword => self.form.controls.confirm_password.set_user(value),
             LockScreenField::Submit => return false,
         };
-        if !control.set_user(value) {
+        if !accepted {
+            self.restore_component_value();
             return false;
         }
         self.form.revalidate();
         true
+    }
+
+    fn restore_component_value(&mut self) {
+        let current = match self.field {
+            LockScreenField::Username => self.form.controls.username.value_ref().as_bytes(),
+            LockScreenField::Password => self.form.controls.password.value_ref().as_bytes(),
+            LockScreenField::ConfirmPassword => {
+                self.form.controls.confirm_password.value_ref().as_bytes()
+            }
+            LockScreenField::Submit => return,
+        };
+        let Some(value) = UiText::from_bytes(current) else { return };
+        let component = match self.field {
+            LockScreenField::Username => &mut self.components.username,
+            LockScreenField::Password => &mut self.components.password,
+            LockScreenField::ConfirmPassword => &mut self.components.confirm_password,
+            LockScreenField::Submit => return,
+        };
+        let _ = component.set_value(value);
     }
 
     fn move_field(&mut self, forward: bool) {
@@ -418,14 +463,17 @@ impl LockScreen {
                 (LockScreenField::ConfirmPassword, _) => LockScreenField::Password,
             }
         };
+        self.components.focus(self.field);
     }
 
     fn reset_fields(&mut self) {
         self.form.reset();
+        self.components.clear();
         self.form.set_claim_mode(self.mode == LockScreenMode::Claim);
         self.retries = 0;
         self.failure = false;
         self.field = LockScreenField::Username;
+        self.components.focus(self.field);
     }
 }
 
@@ -444,7 +492,7 @@ impl Default for LockScreen {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<LockScreen>() <= 256);
+const _: () = assert!(core::mem::size_of::<LockScreen>() <= 640);
 
 #[cfg(test)]
 mod tests {

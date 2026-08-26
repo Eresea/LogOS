@@ -111,6 +111,15 @@ impl UiInput {
         true
     }
 
+    pub fn clear_value(&mut self) -> bool {
+        if self.len == 0 {
+            return false;
+        }
+        self.value.fill(0);
+        self.len = 0;
+        true
+    }
+
     pub const fn is_readonly(&self) -> bool {
         self.readonly
     }
@@ -367,5 +376,14 @@ mod tests {
         assert!(input.set_value(value));
         assert_eq!(input.value(), value);
         assert!(!input.set_value(value));
+    }
+
+    #[test]
+    fn clearing_a_value_zeroes_the_bounded_buffer() {
+        let mut input = UiInput::new();
+        input.set_value(UiText::from_bytes(b"secret").unwrap());
+        assert!(input.clear_value());
+        assert_eq!(input.value(), UiText::EMPTY);
+        assert!(!input.clear_value());
     }
 }
