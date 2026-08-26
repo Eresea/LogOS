@@ -5,7 +5,7 @@ use crate::events::{
 use crate::runtime::{UiError, UiNodeHandle, UiNodeKind, UiTree};
 use crate::{
     UiButton, UiButtonEvent, UiComponent, UiEventDisposition, UiInput, UiInputEventOutput,
-    UiInteractive, UiPanel, UiText,
+    UiInteractive, UiPanel, UiStyleConditions, UiStyleList, UiText,
 };
 
 pub const MAX_UI_COMPONENTS: usize = crate::MAX_UI_NODES;
@@ -295,6 +295,36 @@ impl UiComponentTree {
         self.components[usize::from(handle.slot)].value().ok_or(UiComponentTreeError::NotComponent)
     }
 
+    pub fn set_text(
+        &mut self,
+        handle: UiNodeHandle,
+        text: UiText,
+    ) -> Result<bool, UiComponentTreeError> {
+        self.tree.set_text(handle, text).map_err(map_tree_error)
+    }
+
+    pub fn set_styles(
+        &mut self,
+        handle: UiNodeHandle,
+        styles: UiStyleList,
+    ) -> Result<bool, UiComponentTreeError> {
+        self.tree.set_styles(handle, styles).map_err(map_tree_error)
+    }
+
+    pub fn apply_document_styles(
+        &mut self,
+        document: &crate::UiDocument,
+        node_index: u16,
+        conditions: &UiStyleConditions,
+    ) -> Result<bool, UiComponentTreeError> {
+        let node = document.node(usize::from(node_index)).ok_or(UiComponentTreeError::Stale)?;
+        let handle = self.tree.handle_at(usize::from(node_index)).map_err(map_tree_error)?;
+        let focused = self.tree.node(handle).map_err(map_tree_error)?.interaction.is_focused();
+        let styles =
+            node.resolve_styles(focused, conditions).map_err(|_| UiComponentTreeError::Capacity)?;
+        self.set_styles(handle, styles)
+    }
+
     pub fn dispatch(
         &mut self,
         handle: UiNodeHandle,
@@ -523,6 +553,52 @@ mod tests {
         host.dispatch(button_handle, UiInputEvent::Submit, &mut output).unwrap();
         assert_eq!(output.pop(), Some(UiComponentEvent::Clicked { target: button_handle }));
         assert!(!host.tree().node(input_handle).unwrap().interaction.is_focused());
+    }
+
+    #[test]
+    fn host_applies_document_styles_using_focus_and_conditions() {
+        let mut styles = crate::UiStyleList::EMPTY;
+        assert!(styles.push(crate::UiStyle::BackgroundAccent));
+        let mut document = crate::UiDocument::EMPTY;
+        document
+            .push_node(crate::UiNodeTemplate {
+                kind: UiNodeKind::Button,
+                tab_index: 0,
+                styles,
+                state_styles: crate::UiStateStyleList {
+                    entries: [crate::UiStateStyle {
+                        state: crate::UiStyleState::Focus,
+                        style: crate::UiStyle::RoundedLarge,
+                    }; crate::MAX_UI_STATE_STYLES],
+                    len: 1,
+                },
+                conditional_styles: crate::UiConditionalStyleList {
+                    entries: [crate::UiConditionalStyle {
+                        style: crate::UiStyle::Opacity50,
+                        expression: crate::UiExpression::from_bytes(b"failure").unwrap(),
+                    }; crate::MAX_UI_CONDITIONAL_STYLES],
+                    len: 1,
+                },
+                ..crate::UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+        let mut router = crate::UiEventRouter::new();
+        let mut host = UiComponentTree::from_document(&document, &mut router).unwrap();
+        let handle = host.tree().handle_at(0).unwrap();
+        host.focus(handle).unwrap();
+        let mut conditions = crate::UiStyleConditions::EMPTY;
+        assert!(conditions.set(crate::UiExpression::from_bytes(b"failure").unwrap(), true));
+
+        assert_eq!(host.apply_document_styles(&document, 0, &conditions), Ok(true));
+        assert!(host.tree().has_style(handle, crate::UiStyle::RoundedLarge).unwrap());
+        assert!(host.tree().has_style(handle, crate::UiStyle::Opacity50).unwrap());
+        assert_eq!(host.apply_document_styles(&document, 0, &conditions), Ok(false));
+
+        assert!(conditions.set(crate::UiExpression::from_bytes(b"failure").unwrap(), false));
+        assert_eq!(host.apply_document_styles(&document, 0, &conditions), Ok(true));
+        assert!(!host.tree().has_style(handle, crate::UiStyle::Opacity50).unwrap());
+        assert!(host.set_text(handle, UiText::from_bytes(b"Unlock").unwrap()).unwrap());
+        assert_eq!(host.tree().node(handle).unwrap().text.as_bytes(), b"Unlock");
     }
 
     #[test]
