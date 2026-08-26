@@ -7,6 +7,10 @@ use logos_abi::{
     InputMessage, KeyCode, KeyState, MAX_TEXT_BYTES, MOD_SHIFT, MessageKind, UserOperation,
     UserStatus,
 };
+use logos_ui::{
+    UI_KEY_BACKSPACE, UiButton, UiButtonEvent, UiComponent, UiInput, UiInputEvent,
+    UiInputEventOutput, UiOutput, UiText,
+};
 use logos_ui_forms::{BoundedText, Control, FormState, ValidationError};
 
 pub const MAX_FIELD_BYTES: usize = 32;
@@ -225,10 +229,19 @@ impl LockScreen {
                 if text.len() > MAX_TEXT_BYTES {
                     return LockScreenAction::Ignored;
                 }
-                for byte in text.iter().copied() {
-                    self.push(byte);
+                let mut changed = false;
+                if let Ok(text) = core::str::from_utf8(text) {
+                    for scalar in text.chars() {
+                        changed |=
+                            self.component_event(UiInputEvent::TextInput { scalar: scalar as u32 });
+                    }
+                } else {
+                    for byte in text.iter().copied() {
+                        changed |= self
+                            .component_event(UiInputEvent::TextInput { scalar: u32::from(byte) });
+                    }
                 }
-                LockScreenAction::Changed
+                if changed { LockScreenAction::Changed } else { LockScreenAction::Ignored }
             }
             MessageKind::Key if input.state == KeyState::Pressed => match KeyCode(input.code) {
                 code if code == KeyCode::BackTab
@@ -246,10 +259,22 @@ impl LockScreen {
                     LockScreenAction::Changed
                 }
                 code if code == KeyCode::Backspace => {
-                    self.pop();
-                    LockScreenAction::Changed
+                    if self.component_event(UiInputEvent::KeyDown {
+                        code: UI_KEY_BACKSPACE,
+                        modifiers: input.modifiers as u8,
+                    }) {
+                        LockScreenAction::Changed
+                    } else {
+                        LockScreenAction::Ignored
+                    }
                 }
-                code if code == KeyCode::Enter => self.submit(),
+                code if code == KeyCode::Enter => {
+                    if self.component_submit() {
+                        self.submit()
+                    } else {
+                        LockScreenAction::Ignored
+                    }
+                }
                 _ => LockScreenAction::Ignored,
             },
             _ => LockScreenAction::Ignored,
@@ -302,31 +327,72 @@ impl LockScreen {
         self.form.complete_submission();
     }
 
-    fn push(&mut self, byte: u8) {
-        let control = match self.field {
-            LockScreenField::Username => &mut self.form.controls.username,
-            LockScreenField::Password => &mut self.form.controls.password,
-            LockScreenField::ConfirmPassword => &mut self.form.controls.confirm_password,
-            LockScreenField::Submit => return,
+    fn component_event(&mut self, event: UiInputEvent) -> bool {
+        let current = match self.field {
+            LockScreenField::Username => self.form.controls.username.value_ref().as_bytes(),
+            LockScreenField::Password => self.form.controls.password.value_ref().as_bytes(),
+            LockScreenField::ConfirmPassword => {
+                self.form.controls.confirm_password.value_ref().as_bytes()
+            }
+            LockScreenField::Submit => return false,
         };
-        let mut value = control.value();
-        if value.push(byte) {
-            let _ = control.set_user(value);
-            self.form.revalidate();
+        let mut component = UiInput::new();
+        let Some(value) = UiText::from_bytes(current) else { return false };
+        let _ = component.set_value(value);
+        component.set_masked(self.field != LockScreenField::Username);
+        let mut output = UiOutput::new();
+        let _ = component.handle_event(UiInputEvent::Focus, &mut output);
+        let _ = component.handle_event(event, &mut output);
+        let mut changed = false;
+        while let Some(event) = output.pop() {
+            if let UiInputEventOutput::Changed(value) = event {
+                changed |= self.set_component_value(value);
+            }
         }
+        changed
     }
 
-    fn pop(&mut self) {
+    fn component_submit(&mut self) -> bool {
+        if self.field == LockScreenField::Submit {
+            let mut button = UiButton::new();
+            let mut output = UiOutput::new();
+            let _ = button.handle_event(UiInputEvent::Submit, &mut output);
+            return matches!(output.pop(), Some(UiButtonEvent::Clicked));
+        }
+        let current = match self.field {
+            LockScreenField::Username => self.form.controls.username.value_ref().as_bytes(),
+            LockScreenField::Password => self.form.controls.password.value_ref().as_bytes(),
+            LockScreenField::ConfirmPassword => {
+                self.form.controls.confirm_password.value_ref().as_bytes()
+            }
+            LockScreenField::Submit => return false,
+        };
+        let mut component = UiInput::new();
+        let Some(value) = UiText::from_bytes(current) else { return false };
+        let _ = component.set_value(value);
+        let mut output = UiOutput::new();
+        let _ = component.handle_event(UiInputEvent::Focus, &mut output);
+        let _ = component.handle_event(UiInputEvent::Submit, &mut output);
+        matches!(output.pop(), Some(UiInputEventOutput::Submitted))
+    }
+
+    fn set_component_value(&mut self, value: UiText) -> bool {
+        let bytes = value.as_bytes();
+        if bytes.len() > MAX_FIELD_BYTES || bytes.iter().any(|byte| !byte.is_ascii_graphic()) {
+            return false;
+        }
+        let Some(value) = LoginText::from_bytes(bytes) else { return false };
         let control = match self.field {
             LockScreenField::Username => &mut self.form.controls.username,
             LockScreenField::Password => &mut self.form.controls.password,
             LockScreenField::ConfirmPassword => &mut self.form.controls.confirm_password,
-            LockScreenField::Submit => return,
+            LockScreenField::Submit => return false,
         };
-        if control.value_mut().pop() {
-            control.mark_changed();
-            self.form.revalidate();
+        if !control.set_user(value) {
+            return false;
         }
+        self.form.revalidate();
+        true
     }
 
     fn move_field(&mut self, forward: bool) {

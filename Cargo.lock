@@ -186,6 +186,7 @@ name = "logos-lockscreen"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
+ "logos-ui",
  "logos-ui-forms",
 ]
 
