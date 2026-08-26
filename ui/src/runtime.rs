@@ -279,6 +279,10 @@ impl UiBlueprint {
         self.count
     }
 
+    pub fn spec(&self, index: usize) -> Option<UiNodeSpec> {
+        (index < self.count).then_some(self.specs[index])
+    }
+
     pub const fn is_empty(&self) -> bool {
         self.count == 0
     }

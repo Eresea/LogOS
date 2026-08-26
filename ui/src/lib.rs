@@ -4,6 +4,7 @@
 extern crate std;
 
 mod component;
+mod component_tree;
 mod components;
 mod events;
 mod layout;
@@ -14,6 +15,9 @@ mod template;
 pub use component::{
     MAX_UI_COMPONENT_MEMBERS, UiComponent, UiComponentContract, UiComponentInput,
     UiComponentMethod, UiComponentOutput, UiEventDisposition, UiValueType,
+};
+pub use component_tree::{
+    MAX_UI_COMPONENTS, UiComponentEvent, UiComponentTree, UiComponentTreeError,
 };
 pub use components::{
     UI_KEY_BACKSPACE, UI_KEY_ENTER, UiButton, UiButtonEvent, UiInput, UiInputEventOutput, UiPanel,

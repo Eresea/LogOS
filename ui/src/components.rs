@@ -11,6 +11,7 @@ pub enum UiButtonEvent {
     Clicked,
 }
 
+#[derive(Clone, Copy)]
 pub struct UiButton {
     interaction: UiInteraction,
 }
@@ -77,6 +78,7 @@ pub enum UiInputEventOutput {
     Submitted,
 }
 
+#[derive(Clone, Copy)]
 pub struct UiInput {
     interaction: UiInteraction,
     value: [u8; MAX_UI_TEXT_BYTES],
