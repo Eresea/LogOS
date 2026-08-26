@@ -1,4 +1,5 @@
 use crate::runtime::UiNodeHandle;
+use crate::template::UiText;
 
 pub const MAX_UI_OUTPUT_EVENTS: usize = 32;
 pub const MAX_UI_EVENT_ROUTES: usize = 32;
@@ -28,6 +29,7 @@ pub enum UiEventType {
     Blur = 7,
     Click = 8,
     Submit = 9,
+    Changed = 10,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,6 +43,7 @@ pub enum UiInputEvent {
     Blur,
     Click,
     Submit,
+    Changed { value: UiText },
 }
 
 impl UiInputEvent {
@@ -55,6 +58,7 @@ impl UiInputEvent {
             Self::Blur => UiEventType::Blur,
             Self::Click => UiEventType::Click,
             Self::Submit => UiEventType::Submit,
+            Self::Changed { .. } => UiEventType::Changed,
         }
     }
 }
@@ -241,7 +245,7 @@ impl Default for UiEventRouter {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<UiOutput<UiRoutedEvent>>() <= 1024);
+const _: () = assert!(core::mem::size_of::<UiOutput<UiRoutedEvent>>() <= 4096);
 const _: () = assert!(core::mem::size_of::<UiEventRouter>() <= 1024);
 
 #[cfg(test)]

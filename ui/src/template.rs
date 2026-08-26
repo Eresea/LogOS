@@ -206,6 +206,16 @@ pub enum UiEventKind {
     Changed,
 }
 
+impl UiEventKind {
+    pub const fn event_type(self) -> crate::UiEventType {
+        match self {
+            Self::Click => crate::UiEventType::Click,
+            Self::Submit => crate::UiEventType::Submit,
+            Self::Changed => crate::UiEventType::Changed,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiEvent {
     pub kind: UiEventKind,
