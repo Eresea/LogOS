@@ -5,7 +5,7 @@ extern crate std;
 
 mod codegen;
 
-use logos_ui::UiNodeKind;
+use logos_ui::{UiComponentContract, UiNodeKind};
 
 pub use codegen::{UiCodegenError, write_rust};
 
@@ -36,6 +36,7 @@ pub enum UiDiagnosticKind {
     MismatchedClose = 11,
     TextNotAllowed = 12,
     Capacity = 13,
+    ReadOnlyBinding = 14,
 }
 
 impl UiDiagnosticKind {
@@ -54,6 +55,7 @@ impl UiDiagnosticKind {
             Self::MismatchedClose => "UI011",
             Self::TextNotAllowed => "UI012",
             Self::Capacity => "UI013",
+            Self::ReadOnlyBinding => "UI014",
         }
     }
 
@@ -72,6 +74,7 @@ impl UiDiagnosticKind {
             Self::MismatchedClose => "closing element does not match the open element",
             Self::TextNotAllowed => "text is not allowed in this component",
             Self::Capacity => "UI document exceeds a bounded compiler limit",
+            Self::ReadOnlyBinding => "two-way binding requires a writable component input",
         }
     }
 }
@@ -425,8 +428,17 @@ impl Parser<'_> {
         };
         let Some(index) = node_index else { return };
         let Some(node) = self.document.node(usize::from(index)) else { return };
+        let contract = UiComponentContract::for_kind(node.kind);
+        let Some(input) = contract.input(name.as_bytes()) else {
+            self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
+            return;
+        };
+        if two_way && !input.writable {
+            self.diagnostics.push(UiDiagnosticKind::ReadOnlyBinding, offset);
+            return;
+        }
         let property = match name.as_bytes() {
-            b"value" if two_way => Some(UiBindingProperty::Value),
+            b"value" if node.kind == UiNodeKind::TextInput => Some(UiBindingProperty::Value),
             b"disabled" if !two_way => Some(UiBindingProperty::Disabled),
             b"form" if !two_way && node.kind == UiNodeKind::Form => Some(UiBindingProperty::Form),
             b"control" if !two_way && node.kind == UiNodeKind::TextInput => {
@@ -476,9 +488,18 @@ impl Parser<'_> {
             self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
             return;
         };
+        let contract = node_index
+            .and_then(|index| self.document.node(usize::from(index)))
+            .map(|node| UiComponentContract::for_kind(node.kind));
+        let Some(contract) = contract else { return };
+        if contract.output(name.as_bytes()).is_none() {
+            self.diagnostics.push(UiDiagnosticKind::UnknownEvent, offset);
+            return;
+        }
         let kind = match name.as_bytes() {
             b"click" => UiEventKind::Click,
             b"submit" => UiEventKind::Submit,
+            b"changed" => UiEventKind::Changed,
             _ => {
                 self.diagnostics.push(UiDiagnosticKind::UnknownEvent, offset);
                 return;
@@ -804,7 +825,7 @@ mod tests {
         let build = compile(
             r#"<ui.column {not-a-style}>
                 <ui.unknown />
-                <ui.input [value]="name" />
+                <ui.input [not-a-binding]="name" />
               </ui.column>"#,
         );
         assert!(!build.is_valid());

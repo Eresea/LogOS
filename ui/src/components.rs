@@ -1,7 +1,7 @@
 use crate::events::{UiInputEvent, UiOutput, UiOutputError};
 use crate::runtime::{UiInteraction, UiInteractive};
 use crate::template::{MAX_UI_TEXT_BYTES, UiText};
-use crate::{UiComponent, UiEventDisposition};
+use crate::{UiComponent, UiComponentContract, UiEventDisposition};
 
 pub const UI_KEY_ENTER: u16 = 2;
 pub const UI_KEY_BACKSPACE: u16 = 3;
@@ -39,6 +39,7 @@ impl UiInteractive for UiButton {
 
 impl UiComponent for UiButton {
     type Output = UiButtonEvent;
+    const CONTRACT: UiComponentContract = UiComponentContract::for_kind(crate::UiNodeKind::Button);
 
     fn handle_event(
         &mut self,
@@ -165,6 +166,8 @@ impl UiInteractive for UiInput {
 
 impl UiComponent for UiInput {
     type Output = UiInputEventOutput;
+    const CONTRACT: UiComponentContract =
+        UiComponentContract::for_kind(crate::UiNodeKind::TextInput);
 
     fn handle_event(
         &mut self,
@@ -223,6 +226,7 @@ impl Default for UiPanel {
 
 impl UiComponent for UiPanel {
     type Output = ();
+    const CONTRACT: UiComponentContract = UiComponentContract::for_kind(crate::UiNodeKind::Panel);
 
     fn handle_event(
         &mut self,

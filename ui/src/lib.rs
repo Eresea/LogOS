@@ -11,7 +11,10 @@ mod reactive;
 mod runtime;
 mod template;
 
-pub use component::{UiComponent, UiEventDisposition};
+pub use component::{
+    MAX_UI_COMPONENT_MEMBERS, UiComponent, UiComponentContract, UiComponentInput,
+    UiComponentMethod, UiComponentOutput, UiEventDisposition, UiValueType,
+};
 pub use components::{
     UI_KEY_BACKSPACE, UI_KEY_ENTER, UiButton, UiButtonEvent, UiInput, UiInputEventOutput, UiPanel,
 };

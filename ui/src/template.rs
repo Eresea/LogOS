@@ -203,6 +203,7 @@ impl UiConditionalStyleList {
 pub enum UiEventKind {
     Click,
     Submit,
+    Changed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

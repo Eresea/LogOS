@@ -223,6 +223,7 @@ fn write_event_kind<W: fmt::Write>(
     let name = match kind {
         UiEventKind::Click => "Click",
         UiEventKind::Submit => "Submit",
+        UiEventKind::Changed => "Changed",
     };
     write!(output, "logos_ui::UiEventKind::{name}").map_err(|_| UiCodegenError::Output)
 }
