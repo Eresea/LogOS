@@ -961,6 +961,7 @@ impl ServiceRuntime {
                 ServiceId::Storage => crate::process::STORAGE_STACK_PAGES,
                 ServiceId::Network => crate::process::NETWORK_STACK_PAGES,
                 ServiceId::Flow => crate::process::FLOW_STACK_PAGES,
+                ServiceId::Shell => crate::process::SHELL_STACK_PAGES,
                 _ => crate::process::USER_STACK_PAGES,
             };
             let service_handle = self.runtime_service_handle(service)?;
@@ -2362,6 +2363,7 @@ impl ServiceRuntime {
             ServiceId::Storage => crate::process::STORAGE_STACK_PAGES,
             ServiceId::Network => crate::process::NETWORK_STACK_PAGES,
             ServiceId::Flow => crate::process::FLOW_STACK_PAGES,
+            ServiceId::Shell => crate::process::SHELL_STACK_PAGES,
             _ => crate::process::USER_STACK_PAGES,
         };
         let service_handle = self.runtime_service_handle(service)?;

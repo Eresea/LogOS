@@ -4,6 +4,8 @@ pub const MAX_USER_PROCESSES: usize = 16;
 pub const MAX_ADDRESS_SPACES: usize = MAX_USER_PROCESSES;
 pub const MAX_MAPPINGS_PER_ADDRESS_SPACE: usize = 64;
 pub const USER_STACK_PAGES: usize = 8;
+/// Shell startup compiles bounded UI pages before entering its event wait.
+pub const SHELL_STACK_PAGES: usize = 16;
 /// Storage uses bounded journal replay and transaction shadow state.
 pub const STORAGE_STACK_PAGES: usize = 128;
 /// Network protocol polling uses bounded smoltcp packet-processing frames.
