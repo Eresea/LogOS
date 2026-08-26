@@ -1,8 +1,24 @@
-use logos_abi::GuiRect;
-
 pub const MAX_UI_NODES: usize = 32;
 const NO_PARENT: u16 = u16::MAX;
 pub const TAB_INDEX_NONE: i16 = -1;
+
+/// Framework-owned logical geometry. Rendering adapters convert this into
+/// their platform or compositor rectangle type at the boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl UiRect {
+    pub const EMPTY: Self = Self { x: 0, y: 0, width: 0, height: 0 };
+
+    pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self { x, y, width, height }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -234,7 +250,7 @@ pub struct UiNode {
     pub parent: UiNodeHandle,
     pub kind: UiNodeKind,
     pub key: u16,
-    pub bounds: GuiRect,
+    pub bounds: UiRect,
     pub dirty: bool,
     pub interaction: UiInteraction,
 }
@@ -245,7 +261,7 @@ impl UiNode {
         parent: UiNodeHandle::EMPTY,
         kind: UiNodeKind::Panel,
         key: 0,
-        bounds: GuiRect::EMPTY,
+        bounds: UiRect::EMPTY,
         dirty: false,
         interaction: UiInteraction::for_kind(UiNodeKind::Panel),
     };
@@ -306,7 +322,7 @@ impl UiTree {
         self.generations[slot] = self.generations[slot].wrapping_add(1).max(1);
         let handle = UiNodeHandle { slot: slot as u16, generation: self.generations[slot] };
         *node =
-            UiNode { handle, parent, kind, key, bounds: GuiRect::EMPTY, dirty: true, interaction };
+            UiNode { handle, parent, kind, key, bounds: UiRect::EMPTY, dirty: true, interaction };
         self.count += 1;
         Ok(handle)
     }
@@ -345,7 +361,7 @@ impl UiTree {
         Ok(&mut self.nodes[index])
     }
 
-    pub fn set_bounds(&mut self, handle: UiNodeHandle, bounds: GuiRect) -> Result<(), UiError> {
+    pub fn set_bounds(&mut self, handle: UiNodeHandle, bounds: UiRect) -> Result<(), UiError> {
         let node = self.node_mut(handle)?;
         if node.bounds != bounds {
             node.bounds = bounds;
@@ -440,7 +456,7 @@ mod tests {
         let root = tree.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 1).unwrap();
         let child = tree.insert(UiNodeKind::Panel, root, 2).unwrap();
         let leaf = tree.insert(UiNodeKind::Label, child, 3).unwrap();
-        tree.set_bounds(leaf, GuiRect::new(4, 5, 20, 10)).unwrap();
+        tree.set_bounds(leaf, UiRect::new(4, 5, 20, 10)).unwrap();
         assert!(tree.node(leaf).unwrap().dirty);
         tree.clear_dirty(leaf).unwrap();
         assert!(!tree.node(leaf).unwrap().dirty);

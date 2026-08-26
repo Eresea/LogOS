@@ -1542,6 +1542,12 @@ Pipes are intentionally deferred rather than permanently rejected.
 
 # 38. Initial Implementation Scope
 
+The framework crates have an explicit portability boundary. `logos-ui` owns
+logical nodes, interaction state, and framework geometry without importing the
+LogOS ABI or an operating-system renderer. `logos-ui-compiler` produces the
+bounded typed representation from `.ui` source. LogOS-specific compositor and
+input adapters convert that representation at the shell boundary.
+
 The lock screen should drive the first implementation.
 
 A reasonable first milestone is:
