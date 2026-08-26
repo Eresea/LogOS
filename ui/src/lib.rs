@@ -15,9 +15,10 @@ pub use events::{
     UiHandlerId, UiInputEvent, UiOutput, UiOutputError, UiRoutedEvent,
 };
 pub use reactive::{
-    MAX_UI_DEPENDENCIES, MAX_UI_DEPENDENCY_RECORDS, MAX_UI_INVALIDATIONS, UiBindingTarget,
-    UiComputed, UiDependencyGraph, UiDependencySet, UiInvalidation, UiInvalidationKind,
-    UiInvalidationQueue, UiReactiveError, UiReadable, UiSignal, UiSignalChange, UiSignalId,
+    MAX_UI_DEPENDENCIES, MAX_UI_DEPENDENCY_RECORDS, MAX_UI_INVALIDATIONS, MAX_UI_TRACE_ENTRIES,
+    UiBindingTarget, UiCommitCoordinator, UiCommitError, UiComputed, UiDebugTrace,
+    UiDependencyGraph, UiDependencySet, UiInvalidation, UiInvalidationKind, UiInvalidationQueue,
+    UiReactiveError, UiReadable, UiSignal, UiSignalChange, UiSignalId, UiTraceEntry, UiTraceKind,
     UiWritable,
 };
 pub use runtime::{

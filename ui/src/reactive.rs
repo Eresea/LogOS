@@ -4,11 +4,14 @@ use crate::template::UiBindingProperty;
 pub const MAX_UI_DEPENDENCIES: usize = 4;
 pub const MAX_UI_DEPENDENCY_RECORDS: usize = 16;
 pub const MAX_UI_INVALIDATIONS: usize = 32;
+pub const MAX_UI_TRACE_ENTRIES: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiSignalId(u16);
 
 impl UiSignalId {
+    pub const EMPTY: Self = Self(u16::MAX);
+
     pub const fn new(index: u16) -> Self {
         Self(index)
     }
@@ -172,6 +175,10 @@ pub struct UiBindingTarget {
     pub property: UiBindingProperty,
 }
 
+impl UiBindingTarget {
+    pub const EMPTY: Self = Self { node: UiNodeHandle::EMPTY, property: UiBindingProperty::Value };
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum UiInvalidationKind {
@@ -234,6 +241,10 @@ impl UiInvalidationQueue {
         self.len == 0
     }
 
+    pub const fn peek(&self) -> Option<UiInvalidation> {
+        if self.len == 0 { None } else { Some(self.entries[0]) }
+    }
+
     pub fn pop(&mut self) -> Option<UiInvalidation> {
         if self.len == 0 {
             return None;
@@ -266,6 +277,224 @@ impl UiInvalidationQueue {
         self.entries[self.len] = invalidation;
         self.len += 1;
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum UiTraceKind {
+    SignalChanged = 1,
+    InvalidationsQueued = 2,
+    QueueBackpressure = 3,
+    CommitStarted = 4,
+    InvalidationApplied = 5,
+    CommitFinished = 6,
+    RefreshRequested = 7,
+    RefreshTaken = 8,
+    CommitRejected = 9,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiTraceEntry {
+    pub sequence: u32,
+    pub kind: UiTraceKind,
+    pub signal: UiSignalId,
+    pub target: UiBindingTarget,
+    pub invalidation: UiInvalidationKind,
+    pub revision: u32,
+    pub count: u16,
+}
+
+impl UiTraceEntry {
+    const EMPTY: Self = Self {
+        sequence: 0,
+        kind: UiTraceKind::SignalChanged,
+        signal: UiSignalId::EMPTY,
+        target: UiBindingTarget::EMPTY,
+        invalidation: UiInvalidationKind::Paint,
+        revision: 0,
+        count: 0,
+    };
+
+    const fn event(kind: UiTraceKind, count: usize) -> Self {
+        Self { kind, count: count as u16, ..Self::EMPTY }
+    }
+
+    const fn signal(change: UiSignalChange) -> Self {
+        Self {
+            kind: UiTraceKind::SignalChanged,
+            signal: change.signal,
+            revision: change.revision,
+            ..Self::EMPTY
+        }
+    }
+
+    const fn invalidation(invalidation: UiInvalidation) -> Self {
+        Self {
+            kind: UiTraceKind::InvalidationApplied,
+            target: invalidation.target,
+            invalidation: invalidation.kind,
+            revision: invalidation.revision,
+            ..Self::EMPTY
+        }
+    }
+}
+
+pub struct UiDebugTrace {
+    entries: [UiTraceEntry; MAX_UI_TRACE_ENTRIES],
+    next: usize,
+    len: usize,
+    sequence: u32,
+}
+
+impl UiDebugTrace {
+    pub const fn new() -> Self {
+        Self { entries: [UiTraceEntry::EMPTY; MAX_UI_TRACE_ENTRIES], next: 0, len: 0, sequence: 0 }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn entry(&self, index: usize) -> Option<UiTraceEntry> {
+        if index >= self.len {
+            return None;
+        }
+        let oldest = (self.next + MAX_UI_TRACE_ENTRIES - self.len) % MAX_UI_TRACE_ENTRIES;
+        Some(self.entries[(oldest + index) % MAX_UI_TRACE_ENTRIES])
+    }
+
+    pub fn clear(&mut self) {
+        self.next = 0;
+        self.len = 0;
+        self.sequence = 0;
+    }
+
+    fn record(&mut self, mut entry: UiTraceEntry) {
+        self.sequence = self.sequence.wrapping_add(1).max(1);
+        entry.sequence = self.sequence;
+        self.entries[self.next] = entry;
+        self.next = (self.next + 1) % MAX_UI_TRACE_ENTRIES;
+        self.len = self.len.saturating_add(1).min(MAX_UI_TRACE_ENTRIES);
+    }
+}
+
+impl Default for UiDebugTrace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiCommitError {
+    ApplyRejected,
+}
+
+pub struct UiCommitCoordinator {
+    graph: UiDependencyGraph,
+    queue: UiInvalidationQueue,
+    trace: UiDebugTrace,
+    refresh_deadline: Option<u64>,
+}
+
+impl UiCommitCoordinator {
+    pub const fn new() -> Self {
+        Self {
+            graph: UiDependencyGraph::new(),
+            queue: UiInvalidationQueue::new(),
+            trace: UiDebugTrace::new(),
+            refresh_deadline: None,
+        }
+    }
+
+    pub fn watch(
+        &mut self,
+        target: UiBindingTarget,
+        dependencies: UiDependencySet,
+        kind: UiInvalidationKind,
+    ) -> Result<(), UiReactiveError> {
+        self.graph.watch(target, dependencies, kind)
+    }
+
+    pub fn unwatch(&mut self, target: UiBindingTarget) -> bool {
+        self.graph.unwatch(target)
+    }
+
+    pub fn publish(&mut self, change: UiSignalChange) -> Result<usize, UiReactiveError> {
+        self.trace.record(UiTraceEntry::signal(change));
+        let result = self.graph.invalidate(change, &mut self.queue);
+        match result {
+            Ok(routed) => {
+                if routed != 0 {
+                    self.trace
+                        .record(UiTraceEntry::event(UiTraceKind::InvalidationsQueued, routed));
+                    self.request_refresh(0);
+                }
+                Ok(routed)
+            }
+            Err(error) => {
+                self.trace
+                    .record(UiTraceEntry::event(UiTraceKind::QueueBackpressure, self.queue.len()));
+                Err(error)
+            }
+        }
+    }
+
+    pub fn pending_invalidations(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn request_refresh(&mut self, deadline: u64) {
+        let replace = self.refresh_deadline.is_none_or(|current| deadline < current);
+        if replace {
+            self.refresh_deadline = Some(deadline);
+            self.trace.record(UiTraceEntry::event(UiTraceKind::RefreshRequested, 1));
+        }
+    }
+
+    pub fn take_refresh(&mut self) -> Option<u64> {
+        let deadline = self.refresh_deadline.take();
+        if deadline.is_some() {
+            self.trace.record(UiTraceEntry::event(UiTraceKind::RefreshTaken, 1));
+        }
+        deadline
+    }
+
+    pub fn commit<F>(&mut self, mut apply: F) -> Result<usize, UiCommitError>
+    where
+        F: FnMut(UiInvalidation) -> bool,
+    {
+        if self.queue.is_empty() {
+            return Ok(0);
+        }
+        self.trace.record(UiTraceEntry::event(UiTraceKind::CommitStarted, self.queue.len()));
+        let mut committed = 0;
+        while let Some(invalidation) = self.queue.peek() {
+            if !apply(invalidation) {
+                self.trace
+                    .record(UiTraceEntry::event(UiTraceKind::CommitRejected, self.queue.len()));
+                return Err(UiCommitError::ApplyRejected);
+            }
+            let _ = self.queue.pop();
+            self.trace.record(UiTraceEntry::invalidation(invalidation));
+            committed += 1;
+        }
+        self.trace.record(UiTraceEntry::event(UiTraceKind::CommitFinished, committed));
+        Ok(committed)
+    }
+
+    pub const fn trace(&self) -> &UiDebugTrace {
+        &self.trace
+    }
+}
+
+impl Default for UiCommitCoordinator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -372,6 +601,8 @@ impl Default for UiDependencyGraph {
 
 const _: () = assert!(core::mem::size_of::<UiDependencyGraph>() <= 1024);
 const _: () = assert!(core::mem::size_of::<UiInvalidationQueue>() <= 1024);
+const _: () = assert!(core::mem::size_of::<UiDebugTrace>() <= 4096);
+const _: () = assert!(core::mem::size_of::<UiCommitCoordinator>() <= 8192);
 
 #[cfg(test)]
 mod tests {
@@ -475,5 +706,74 @@ mod tests {
             Err(UiReactiveError::QueueFull)
         );
         assert_eq!(queue.len(), MAX_UI_INVALIDATIONS - 1);
+    }
+
+    #[test]
+    fn coordinator_commits_targeted_work_and_consumes_one_shot_refresh() {
+        let signal = UiSignalId::new(9);
+        let target = target(4);
+        let mut coordinator = UiCommitCoordinator::new();
+        coordinator.watch(target, dependencies(signal), UiInvalidationKind::Paint).unwrap();
+
+        assert_eq!(coordinator.publish(UiSignalChange { signal, revision: 2 }), Ok(1));
+        assert_eq!(coordinator.pending_invalidations(), 1);
+        assert_eq!(coordinator.take_refresh(), Some(0));
+        assert_eq!(coordinator.take_refresh(), None);
+
+        let mut applied = [UiBindingTarget::EMPTY; 1];
+        let mut count = 0;
+        assert_eq!(
+            coordinator.commit(|invalidation| {
+                applied[count] = invalidation.target;
+                count += 1;
+                true
+            }),
+            Ok(1)
+        );
+        assert_eq!(applied[0], target);
+        assert_eq!(coordinator.pending_invalidations(), 0);
+        assert!(
+            coordinator
+                .trace()
+                .entry(coordinator.trace().len() - 1)
+                .is_some_and(|entry| entry.kind == UiTraceKind::CommitFinished)
+        );
+    }
+
+    #[test]
+    fn coordinator_coalesces_changes_and_preserves_failed_work() {
+        let signal = UiSignalId::new(10);
+        let mut coordinator = UiCommitCoordinator::new();
+        coordinator.watch(target(5), dependencies(signal), UiInvalidationKind::Layout).unwrap();
+
+        assert_eq!(coordinator.publish(UiSignalChange { signal, revision: 1 }), Ok(1));
+        assert_eq!(coordinator.publish(UiSignalChange { signal, revision: 2 }), Ok(1));
+        assert_eq!(coordinator.pending_invalidations(), 1);
+        assert_eq!(coordinator.commit(|_| false), Err(UiCommitError::ApplyRejected));
+        assert_eq!(coordinator.pending_invalidations(), 1);
+
+        let mut revision = 0;
+        assert_eq!(
+            coordinator.commit(|invalidation| {
+                revision = invalidation.revision;
+                true
+            }),
+            Ok(1)
+        );
+        assert_eq!(revision, 2);
+    }
+
+    #[test]
+    fn debug_trace_is_bounded_and_keeps_oldest_retained_order() {
+        let mut trace = UiDebugTrace::new();
+        for index in 0..MAX_UI_TRACE_ENTRIES + 2 {
+            trace.record(UiTraceEntry::event(UiTraceKind::CommitFinished, index));
+        }
+        assert_eq!(trace.len(), MAX_UI_TRACE_ENTRIES);
+        assert_eq!(trace.entry(0).unwrap().count, 2);
+        assert_eq!(
+            trace.entry(MAX_UI_TRACE_ENTRIES - 1).unwrap().count,
+            (MAX_UI_TRACE_ENTRIES + 1) as u16
+        );
     }
 }
