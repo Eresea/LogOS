@@ -1474,11 +1474,22 @@ mod tests {
             style_mismatch.diagnostics.get(0),
             Some(UiDiagnostic { kind: UiDiagnosticKind::StyleConditionTypeMismatch, .. })
         ));
+
+        let style_unknown =
+            compile_with_context(r#"<ui.button {opacity-50}="missing"/>"#, &context);
+        assert!(matches!(
+            style_unknown.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownStyleExpression, .. })
+        ));
     }
 
     #[test]
     fn value_registry_rejects_invalid_and_duplicate_expressions() {
         let mut values = UiValueRegistry::new();
+        assert_eq!(
+            values.register(UiExpression::EMPTY, UiValueType::Text, true),
+            Err(UiValueRegistryError::InvalidExpression)
+        );
         assert_eq!(
             values.register_bytes(b"", UiValueType::Text, true),
             Err(UiValueRegistryError::InvalidExpression)
