@@ -1561,6 +1561,29 @@ without linking the kernel or compositor:
 cargo run -p logos-ui-compiler --bin logos-ui-lint -- ui-compiler/examples/login.ui
 ```
 
+Editor tooling keeps the same single-source-of-truth compiler boundary:
+
+```text
+logos-ui-compiler
+├── parser / AST
+├── resolver and component metadata
+├── type checker
+├── style vocabulary
+└── diagnostics
+
+logos-ui-lsp
+└── stdio JSON-RPC adapter for VS Code and other LSP clients
+```
+
+`logos-ui-lsp` is host-only. It reuses compiler diagnostics and vocabulary for
+`.ui` document synchronization, contextual completion, and hover information;
+the boot-time runtime and `logos-ui` remain unaware of LSP or editor state.
+Launch it as a stdio language server with:
+
+```powershell
+cargo run -p logos-ui-lsp --bin logos-ui-lsp
+```
+
 The compiler's host integration test also consumes the result only through
 `logos-ui` types, proving that a Windows compatibility host can instantiate the
 same document and runtime tree without importing LogOS services.

@@ -20,6 +20,32 @@ pub use logos_ui::{
 pub const MAX_UI_SOURCE_BYTES: usize = 4096;
 pub const MAX_UI_DIAGNOSTICS: usize = 16;
 
+pub const UI_COMPONENT_NAMES: [&str; 5] =
+    ["ui.button", "ui.column", "ui.form", "ui.input", "ui.text"];
+pub const UI_STYLE_NAMES: [&str; 19] = [
+    "h-full",
+    "w-full",
+    "flex-x",
+    "flex-y",
+    "items-center",
+    "justify-center",
+    "w-96",
+    "gap",
+    "gap-x",
+    "gap-y",
+    "mt-4",
+    "mb-2",
+    "px-6",
+    "py-3",
+    "rounded-lg",
+    "bg-accent",
+    "text-4xl",
+    "font-light",
+    "opacity-50",
+];
+pub const UI_BINDING_NAMES: [&str; 5] = ["value", "disabled", "form", "control", "canSubmit"];
+pub const UI_EVENT_NAMES: [&str; 3] = ["click", "submit", "changed"];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum UiDiagnosticKind {

@@ -1,0 +1,19 @@
+[package]
+name = "logos-ui-lsp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[lib]
+test = true
+bench = false
+
+[[bin]]
+name = "logos-ui-lsp"
+path = "src/bin/logos-ui-lsp.rs"
+test = false
+bench = false
+
+[dependencies]
+logos-ui-compiler = { path = "../ui-compiler" }
