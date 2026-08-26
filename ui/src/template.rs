@@ -449,6 +449,11 @@ impl UiDocument {
         (index < self.count).then(|| &self.nodes[index])
     }
 
+    pub fn node_index_by_name(&self, name: &[u8]) -> Option<u16> {
+        (0..self.count)
+            .find_map(|index| (self.nodes[index].key.as_bytes() == name).then_some(index as u16))
+    }
+
     pub fn to_blueprint(&self) -> Result<UiBlueprint, UiError> {
         let mut blueprint = UiBlueprint::new();
         for index in 0..self.count {
@@ -523,6 +528,27 @@ mod tests {
         let blueprint = document.to_blueprint().unwrap();
         assert_eq!(blueprint.len(), 2);
         assert_eq!(crate::UiTree::from_blueprint(&blueprint).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn document_resolves_named_nodes_with_bounded_lookup() {
+        let mut document = UiDocument::EMPTY;
+        document
+            .push_node(UiNodeTemplate {
+                key: UiName::from_bytes(b"login").unwrap(),
+                ..UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+        document
+            .push_node(UiNodeTemplate {
+                key: UiName::from_bytes(b"submit").unwrap(),
+                ..UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+
+        assert_eq!(document.node_index_by_name(b"login"), Some(0));
+        assert_eq!(document.node_index_by_name(b"submit"), Some(1));
+        assert_eq!(document.node_index_by_name(b"missing"), None);
     }
 
     #[test]

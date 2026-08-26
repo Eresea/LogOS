@@ -535,9 +535,7 @@ pub fn login_page_node_text(
 }
 
 pub fn named_node_index(build: &logos_ui_compiler::UiBuild, name: &[u8]) -> Option<u16> {
-    (0..build.document.node_count()).find_map(|index| {
-        (build.document.node(index)?.key.as_bytes() == name).then_some(index as u16)
-    })
+    build.document.node_index_by_name(name)
 }
 
 use logos_abi::{

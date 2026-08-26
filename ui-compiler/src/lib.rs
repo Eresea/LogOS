@@ -78,6 +78,7 @@ pub enum UiDiagnosticKind {
     InvalidInterpolation = 23,
     UnknownTextExpression = 24,
     TextExpressionTypeMismatch = 25,
+    DuplicateNodeName = 26,
 }
 
 impl UiDiagnosticKind {
@@ -108,6 +109,7 @@ impl UiDiagnosticKind {
             Self::InvalidInterpolation => "UI023",
             Self::UnknownTextExpression => "UI024",
             Self::TextExpressionTypeMismatch => "UI025",
+            Self::DuplicateNodeName => "UI026",
         }
     }
 
@@ -142,6 +144,7 @@ impl UiDiagnosticKind {
             Self::InvalidInterpolation => "text interpolation must be a bounded whole expression",
             Self::UnknownTextExpression => "text interpolation expression is not registered",
             Self::TextExpressionTypeMismatch => "text interpolation expression must be text",
+            Self::DuplicateNodeName => "node name is already used in this document",
         }
     }
 }
@@ -787,9 +790,7 @@ impl Parser<'_> {
             return;
         };
         if let Some(index) = node_index {
-            if let Some(node) = self.document.node_mut(index) {
-                node.key = value;
-            }
+            self.assign_node_name(index, value, offset);
         }
     }
 
@@ -802,9 +803,21 @@ impl Parser<'_> {
             return;
         };
         if let Some(index) = node_index {
-            if let Some(node) = self.document.node_mut(index) {
-                node.key = name;
-            }
+            self.assign_node_name(index, name, offset);
+        }
+    }
+
+    fn assign_node_name(&mut self, index: u16, name: UiName, offset: usize) {
+        let duplicate = (0..self.document.node_count()).any(|candidate| {
+            candidate != usize::from(index)
+                && self.document.node(candidate).is_some_and(|node| node.key == name)
+        });
+        if duplicate {
+            self.diagnostics.push(UiDiagnosticKind::DuplicateNodeName, offset);
+            return;
+        }
+        if let Some(node) = self.document.node_mut(index) {
+            node.key = name;
         }
     }
 
@@ -1676,6 +1689,17 @@ mod tests {
             legacy.diagnostics.get(0),
             Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownAttribute, .. })
         ));
+    }
+
+    #[test]
+    fn rejects_duplicate_hash_node_names() {
+        let build = compile(r#"<ui.column #root><ui.text #root>duplicate</ui.text></ui.column>"#);
+        assert!(!build.is_valid());
+        assert!(matches!(
+            build.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::DuplicateNodeName, .. })
+        ));
+        assert_eq!(build.diagnostics.get(0).unwrap().code(), "UI026");
     }
 
     #[test]
