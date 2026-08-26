@@ -68,3 +68,4 @@
 | [0065](0065-runtime-allocation-ownership.md) | Accepted | UEFI-reserved runtime allocation metadata, Core GlobalAlloc, and private quota-controlled service heaps |
 | [0066](0066-dynamic-ipc-topology.md) | Accepted | Versioned generation-safe runtime service, endpoint, capability, and event handles |
 | [0067](0067-event-driven-graphical-shell.md) | Accepted | Display-owned retained surfaces with typed invalidation hooks and event-driven graphical shell services |
+| [0068](0068-runtime-owned-lazy-service-stacks.md) | Accepted | Services begin with a small stack window and borrow additional stack pages from Core only on validated page faults |
