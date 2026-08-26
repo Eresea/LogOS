@@ -3,9 +3,16 @@
 #[cfg(test)]
 extern crate std;
 
+mod reactive;
 mod runtime;
 mod template;
 
+pub use reactive::{
+    MAX_UI_DEPENDENCIES, MAX_UI_DEPENDENCY_RECORDS, MAX_UI_INVALIDATIONS, UiBindingTarget,
+    UiComputed, UiDependencyGraph, UiDependencySet, UiInvalidation, UiInvalidationKind,
+    UiInvalidationQueue, UiReactiveError, UiReadable, UiSignal, UiSignalChange, UiSignalId,
+    UiWritable,
+};
 pub use runtime::{
     MAX_UI_NODES, TAB_INDEX_NONE, UiBlueprint, UiError, UiInteraction, UiInteractive, UiNode,
     UiNodeHandle, UiNodeKind, UiNodeSpec, UiRect, UiTree,

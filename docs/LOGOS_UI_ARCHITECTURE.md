@@ -1565,6 +1565,12 @@ The compiler's host integration test also consumes the result only through
 `logos-ui` types, proving that a Windows compatibility host can instantiate the
 same document and runtime tree without importing LogOS services.
 
+The portable runtime also provides bounded reactive primitives: writable
+`UiSignal<T>` values, read-only `UiComputed<T>` values, fixed dependency sets,
+and an explicit coalescing invalidation queue. A host or LogOS adapter decides
+when a changed signal is routed through the dependency graph; there is no
+global event bus or periodic change-detection loop.
+
 The lock screen should drive the first implementation.
 
 A reasonable first milestone is:
