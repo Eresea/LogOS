@@ -4,6 +4,14 @@
 
 mod common;
 
+mod generated_login_ui {
+    include!(concat!(env!("OUT_DIR"), "/login_ui.rs"));
+}
+
+mod generated_register_ui {
+    include!(concat!(env!("OUT_DIR"), "/register_ui.rs"));
+}
+
 use core::{mem, ptr};
 
 use logos_abi::{
@@ -418,11 +426,8 @@ pub extern "C" fn _start() -> ! {
     };
     let shell = unsafe { &mut *core::ptr::addr_of_mut!(SHELL) };
     unsafe {
-        ptr::write(core::ptr::addr_of_mut!(LOGIN_PAGE), Some(logos_shell::compile_login_page()));
-        ptr::write(
-            core::ptr::addr_of_mut!(REGISTER_PAGE),
-            Some(logos_shell::compile_register_page()),
-        );
+        ptr::write(core::ptr::addr_of_mut!(LOGIN_PAGE), Some(generated_login_ui::build()));
+        ptr::write(core::ptr::addr_of_mut!(REGISTER_PAGE), Some(generated_register_ui::build()));
     }
     let login_page = unsafe { (*core::ptr::addr_of!(LOGIN_PAGE)).as_ref() }.unwrap();
     let register_page = unsafe { (*core::ptr::addr_of!(REGISTER_PAGE)).as_ref() }.unwrap();

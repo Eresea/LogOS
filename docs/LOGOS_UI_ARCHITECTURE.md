@@ -1580,6 +1580,7 @@ silently disappear.
 The compiler also exposes a deterministic Rust code generator for build
 systems. Generated documents use only `logos-ui` constructors and are loaded
 as fixed descriptors; `.ui` markup is not parsed by the boot-time runtime.
+The built-in service image uses this path for the login and registration pages.
 
 The lock screen should drive the first implementation.
 
