@@ -438,6 +438,14 @@ pub struct UiDocument {
     count: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiDocumentError {
+    EmptyChild,
+    InvalidParent,
+    DuplicateNodeName,
+    Capacity,
+}
+
 impl UiDocument {
     pub const EMPTY: Self = Self { nodes: [UiNodeTemplate::EMPTY; MAX_UI_NODES], count: 0 };
 
@@ -450,8 +458,51 @@ impl UiDocument {
     }
 
     pub fn node_index_by_name(&self, name: &[u8]) -> Option<u16> {
+        if name.is_empty() {
+            return None;
+        }
         (0..self.count)
             .find_map(|index| (self.nodes[index].key.as_bytes() == name).then_some(index as u16))
+    }
+
+    pub fn append_child(
+        &mut self,
+        child: &UiDocument,
+        parent: u16,
+    ) -> Result<u16, UiDocumentError> {
+        if usize::from(parent) >= self.count {
+            return Err(UiDocumentError::InvalidParent);
+        }
+        if child.count == 0 {
+            return Err(UiDocumentError::EmptyChild);
+        }
+        if self.count > MAX_UI_NODES.saturating_sub(child.count) {
+            return Err(UiDocumentError::Capacity);
+        }
+        if child.nodes[0].parent != u16::MAX {
+            return Err(UiDocumentError::InvalidParent);
+        }
+        for index in 0..child.count {
+            let node = child.nodes[index];
+            if !node.key.is_empty()
+                && (self.node_index_by_name(node.key.as_bytes()).is_some()
+                    || child.nodes[..index].iter().any(|previous| previous.key == node.key))
+            {
+                return Err(UiDocumentError::DuplicateNodeName);
+            }
+            if index != 0 && (node.parent == u16::MAX || usize::from(node.parent) >= child.count) {
+                return Err(UiDocumentError::InvalidParent);
+            }
+        }
+
+        let offset = self.count as u16;
+        for index in 0..child.count {
+            let mut node = child.nodes[index];
+            node.parent = if index == 0 { parent } else { offset + node.parent };
+            self.nodes[self.count + index] = node;
+        }
+        self.count += child.count;
+        Ok(offset)
     }
 
     pub fn to_blueprint(&self) -> Result<UiBlueprint, UiError> {
@@ -549,6 +600,70 @@ mod tests {
         assert_eq!(document.node_index_by_name(b"login"), Some(0));
         assert_eq!(document.node_index_by_name(b"submit"), Some(1));
         assert_eq!(document.node_index_by_name(b"missing"), None);
+    }
+
+    #[test]
+    fn document_composition_remaps_parents_and_preserves_names() {
+        let mut parent = UiDocument::EMPTY;
+        let parent_root = parent
+            .push_node(UiNodeTemplate {
+                kind: UiNodeKind::Root,
+                key: UiName::from_bytes(b"app").unwrap(),
+                ..UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+        let mut child = UiDocument::EMPTY;
+        child
+            .push_node(UiNodeTemplate {
+                kind: UiNodeKind::Panel,
+                key: UiName::from_bytes(b"card").unwrap(),
+                ..UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+        child
+            .push_node(UiNodeTemplate {
+                kind: UiNodeKind::Label,
+                parent: 0,
+                key: UiName::from_bytes(b"caption").unwrap(),
+                ..UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+
+        assert_eq!(parent.append_child(&child, parent_root), Ok(1));
+        assert_eq!(parent.node_count(), 3);
+        assert_eq!(parent.node_index_by_name(b"card"), Some(1));
+        assert_eq!(parent.node_index_by_name(b"caption"), Some(2));
+        assert_eq!(parent.node(2).unwrap().parent, 1);
+        let blueprint = parent.to_blueprint().unwrap();
+        let tree = crate::UiTree::from_blueprint(&blueprint).unwrap();
+        let card = tree.handle_at(1).unwrap();
+        assert_eq!(tree.node(tree.handle_at(2).unwrap()).unwrap().parent, card);
+    }
+
+    #[test]
+    fn document_composition_rejects_empty_invalid_duplicate_and_overflow_children() {
+        let mut parent = UiDocument::EMPTY;
+        parent.push_node(UiNodeTemplate::EMPTY).unwrap();
+        assert_eq!(parent.append_child(&UiDocument::EMPTY, 0), Err(UiDocumentError::EmptyChild));
+        assert_eq!(parent.append_child(&UiDocument::EMPTY, 1), Err(UiDocumentError::InvalidParent));
+
+        let mut duplicate = UiDocument::EMPTY;
+        duplicate
+            .push_node(UiNodeTemplate {
+                key: UiName::from_bytes(b"duplicate").unwrap(),
+                ..UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+        parent.node_mut(0).unwrap().key = UiName::from_bytes(b"duplicate").unwrap();
+        assert_eq!(parent.append_child(&duplicate, 0), Err(UiDocumentError::DuplicateNodeName));
+
+        let mut full = UiDocument::EMPTY;
+        for _ in 0..MAX_UI_NODES {
+            full.push_node(UiNodeTemplate::EMPTY).unwrap();
+        }
+        let mut one = UiDocument::EMPTY;
+        one.push_node(UiNodeTemplate::EMPTY).unwrap();
+        assert_eq!(full.append_child(&one, 0), Err(UiDocumentError::Capacity));
     }
 
     #[test]
