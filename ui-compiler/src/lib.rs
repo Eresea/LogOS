@@ -63,6 +63,8 @@ pub enum UiDiagnosticKind {
     TextNotAllowed = 12,
     Capacity = 13,
     ReadOnlyBinding = 14,
+    InvalidEventHandler = 15,
+    EventPayloadMismatch = 16,
 }
 
 impl UiDiagnosticKind {
@@ -82,6 +84,8 @@ impl UiDiagnosticKind {
             Self::TextNotAllowed => "UI012",
             Self::Capacity => "UI013",
             Self::ReadOnlyBinding => "UI014",
+            Self::InvalidEventHandler => "UI015",
+            Self::EventPayloadMismatch => "UI016",
         }
     }
 
@@ -101,6 +105,10 @@ impl UiDiagnosticKind {
             Self::TextNotAllowed => "text is not allowed in this component",
             Self::Capacity => "UI document exceeds a bounded compiler limit",
             Self::ReadOnlyBinding => "two-way binding requires a writable component input",
+            Self::InvalidEventHandler => {
+                "event handler must be a bounded method or call expression"
+            }
+            Self::EventPayloadMismatch => "$event is only available on changed handlers",
         }
     }
 }
@@ -531,6 +539,10 @@ impl Parser<'_> {
                 return;
             }
         };
+        if let Err(diagnostic) = validate_event_handler(kind, handler.as_bytes()) {
+            self.diagnostics.push(diagnostic, offset);
+            return;
+        }
         if let Some(index) = node_index {
             if let Some(node) = self.document.node_mut(index) {
                 if node.event.is_present() {
@@ -670,6 +682,88 @@ impl Parser<'_> {
 
     fn peek(&self) -> Option<u8> {
         self.bytes.get(self.position).copied()
+    }
+}
+
+fn validate_event_handler(kind: UiEventKind, expression: &[u8]) -> Result<(), UiDiagnosticKind> {
+    if kind != UiEventKind::Changed && contains_event_placeholder(expression) {
+        return Err(UiDiagnosticKind::EventPayloadMismatch);
+    }
+
+    let mut parser = HandlerParser { expression, position: 0 };
+    parser.skip_space();
+    if !parser.read_identifier() {
+        return Err(UiDiagnosticKind::InvalidEventHandler);
+    }
+    while parser.consume(b'.') {
+        if !parser.read_identifier() {
+            return Err(UiDiagnosticKind::InvalidEventHandler);
+        }
+    }
+    parser.skip_space();
+    if parser.consume(b'(') {
+        parser.skip_space();
+        if parser.starts_with(b"$event") {
+            if kind != UiEventKind::Changed {
+                return Err(UiDiagnosticKind::EventPayloadMismatch);
+            }
+            parser.position += b"$event".len();
+            parser.skip_space();
+        }
+        if !parser.consume(b')') {
+            return Err(UiDiagnosticKind::InvalidEventHandler);
+        }
+        parser.skip_space();
+    }
+    if parser.position != expression.len() {
+        return Err(UiDiagnosticKind::InvalidEventHandler);
+    }
+    Ok(())
+}
+
+fn contains_event_placeholder(expression: &[u8]) -> bool {
+    expression.windows(b"$event".len()).any(|window| window == b"$event")
+}
+
+struct HandlerParser<'a> {
+    expression: &'a [u8],
+    position: usize,
+}
+
+impl HandlerParser<'_> {
+    fn read_identifier(&mut self) -> bool {
+        let Some(first) = self.expression.get(self.position).copied() else { return false };
+        if !first.is_ascii_alphabetic() && first != b'_' {
+            return false;
+        }
+        self.position += 1;
+        while self
+            .expression
+            .get(self.position)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            self.position += 1;
+        }
+        true
+    }
+
+    fn skip_space(&mut self) {
+        while self.expression.get(self.position).is_some_and(u8::is_ascii_whitespace) {
+            self.position += 1;
+        }
+    }
+
+    fn starts_with(&self, value: &[u8]) -> bool {
+        self.expression.get(self.position..).is_some_and(|tail| tail.starts_with(value))
+    }
+
+    fn consume(&mut self, value: u8) -> bool {
+        if self.expression.get(self.position).copied() == Some(value) {
+            self.position += 1;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -866,6 +960,33 @@ mod tests {
         assert!(matches!(
             build.diagnostics.get(2),
             Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownBinding, .. })
+        ));
+    }
+
+    #[test]
+    fn event_handlers_use_a_bounded_typed_shape() {
+        let valid = compile(r#"<ui.input (changed)="passwordChanged($event)"/>"#);
+        assert!(valid.is_valid(), "diagnostics: {:?}", valid.diagnostics);
+
+        let unit_payload = compile(r#"<ui.button (click)="unlock($event)"/>"#);
+        assert!(!unit_payload.is_valid());
+        assert!(matches!(
+            unit_payload.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::EventPayloadMismatch, .. })
+        ));
+
+        let arbitrary_argument = compile(r#"<ui.input (changed)="passwordChanged(value)"/>"#);
+        assert!(!arbitrary_argument.is_valid());
+        assert!(matches!(
+            arbitrary_argument.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::InvalidEventHandler, .. })
+        ));
+
+        let unbounded = compile(r#"<ui.button (click)="unlock + 1"/>"#);
+        assert!(!unbounded.is_valid());
+        assert!(matches!(
+            unbounded.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::InvalidEventHandler, .. })
         ));
     }
 
