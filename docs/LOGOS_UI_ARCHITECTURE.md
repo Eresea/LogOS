@@ -1554,6 +1554,17 @@ the same bounded `no_std` compiler library and reports stable diagnostic codes
 with source line and column locations, so editor or Windows compatibility
 integrations do not need a second parser.
 
+The host command is intentionally ordinary Cargo tooling and works on Windows
+without linking the kernel or compositor:
+
+```powershell
+cargo run -p logos-ui-compiler --bin logos-ui-lint -- ui-compiler/examples/login.ui
+```
+
+The compiler's host integration test also consumes the result only through
+`logos-ui` types, proving that a Windows compatibility host can instantiate the
+same document and runtime tree without importing LogOS services.
+
 The lock screen should drive the first implementation.
 
 A reasonable first milestone is:
