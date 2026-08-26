@@ -25,6 +25,10 @@ pub struct UiEdges {
 impl UiEdges {
     pub const ZERO: Self = Self { left: 0, right: 0, top: 0, bottom: 0 };
 
+    pub const fn new(left: u32, right: u32, top: u32, bottom: u32) -> Self {
+        Self { left, right, top, bottom }
+    }
+
     pub const fn all(value: u32) -> Self {
         Self { left: value, right: value, top: value, bottom: value }
     }

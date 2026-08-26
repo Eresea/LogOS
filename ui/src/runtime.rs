@@ -219,10 +219,23 @@ impl UiBlueprint {
         key: u16,
         interaction: UiInteraction,
     ) -> Result<u16, UiError> {
+        self.push_root_with_interaction_and_layout(kind, key, interaction, UiLayoutStyle::EMPTY)
+    }
+
+    pub fn push_root_with_interaction_and_layout(
+        &mut self,
+        kind: UiNodeKind,
+        key: u16,
+        interaction: UiInteraction,
+        layout: UiLayoutStyle,
+    ) -> Result<u16, UiError> {
         if self.count != 0 {
             return Err(UiError::RootExists);
         }
-        self.push(UiNodeSpec::root_with_interaction(kind, key, interaction))
+        self.push(UiNodeSpec {
+            layout,
+            ..UiNodeSpec::root_with_interaction(kind, key, interaction)
+        })
     }
 
     pub fn push_child(&mut self, kind: UiNodeKind, parent: u16, key: u16) -> Result<u16, UiError> {
@@ -236,10 +249,30 @@ impl UiBlueprint {
         key: u16,
         interaction: UiInteraction,
     ) -> Result<u16, UiError> {
+        self.push_child_with_interaction_and_layout(
+            kind,
+            parent,
+            key,
+            interaction,
+            UiLayoutStyle::EMPTY,
+        )
+    }
+
+    pub fn push_child_with_interaction_and_layout(
+        &mut self,
+        kind: UiNodeKind,
+        parent: u16,
+        key: u16,
+        interaction: UiInteraction,
+        layout: UiLayoutStyle,
+    ) -> Result<u16, UiError> {
         if usize::from(parent) >= self.count {
             return Err(UiError::InvalidParent);
         }
-        self.push(UiNodeSpec::child_with_interaction(kind, parent, key, interaction))
+        self.push(UiNodeSpec {
+            layout,
+            ..UiNodeSpec::child_with_interaction(kind, parent, key, interaction)
+        })
     }
 
     pub const fn len(&self) -> usize {
@@ -325,7 +358,14 @@ impl UiTree {
             } else {
                 tree.nodes[usize::from(spec.parent)].handle
             };
-            tree.insert_with_interaction(spec.kind, parent, spec.key, spec.interaction)?;
+            tree.insert_with_interaction_and_layout(
+                spec.kind,
+                parent,
+                spec.key,
+                spec.interaction,
+                spec.layout,
+                spec.intrinsic_size,
+            )?;
         }
         Ok(tree)
     }
@@ -345,6 +385,25 @@ impl UiTree {
         parent: UiNodeHandle,
         key: u16,
         interaction: UiInteraction,
+    ) -> Result<UiNodeHandle, UiError> {
+        self.insert_with_interaction_and_layout(
+            kind,
+            parent,
+            key,
+            interaction,
+            UiLayoutStyle::EMPTY,
+            UiSize::ZERO,
+        )
+    }
+
+    pub fn insert_with_interaction_and_layout(
+        &mut self,
+        kind: UiNodeKind,
+        parent: UiNodeHandle,
+        key: u16,
+        interaction: UiInteraction,
+        layout: UiLayoutStyle,
+        intrinsic_size: UiSize,
     ) -> Result<UiNodeHandle, UiError> {
         if parent.is_valid() && self.lookup(parent).is_err() {
             return Err(UiError::Stale);
@@ -368,8 +427,8 @@ impl UiTree {
             clip: UiRect::EMPTY,
             dirty: true,
             interaction,
-            layout: UiLayoutStyle::EMPTY,
-            intrinsic_size: UiSize::ZERO,
+            layout,
+            intrinsic_size,
         };
         self.count += 1;
         Ok(handle)

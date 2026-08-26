@@ -1,6 +1,7 @@
 use crate::runtime::{
     MAX_UI_NODES, TAB_INDEX_NONE, UiBlueprint, UiError, UiInteraction, UiNodeKind,
 };
+use crate::{UiLayoutAlignment, UiLayoutDirection, UiLayoutStyle};
 
 pub const MAX_UI_NAME_BYTES: usize = 24;
 pub const MAX_UI_TEXT_BYTES: usize = 64;
@@ -258,6 +259,35 @@ impl UiStyleList {
         self.len += 1;
         true
     }
+
+    pub fn to_layout_style(&self) -> UiLayoutStyle {
+        let mut layout = UiLayoutStyle::EMPTY;
+        for token in self.tokens[..self.len as usize].iter().copied() {
+            match token {
+                UiStyle::FlexX => layout.direction = UiLayoutDirection::Row,
+                UiStyle::FlexY => layout.direction = UiLayoutDirection::Column,
+                UiStyle::ItemsCenter => layout.align_items = UiLayoutAlignment::Center,
+                UiStyle::JustifyCenter => layout.justify_content = UiLayoutAlignment::Center,
+                UiStyle::Gap(value) => layout.gap = spacing_px(value),
+                UiStyle::GapX(value) => layout.gap_x = spacing_px(value),
+                UiStyle::GapY(value) => layout.gap_y = spacing_px(value),
+                UiStyle::PaddingX6 => {
+                    layout.padding.left = spacing_px(6);
+                    layout.padding.right = spacing_px(6);
+                }
+                UiStyle::PaddingY3 => {
+                    layout.padding.top = spacing_px(3);
+                    layout.padding.bottom = spacing_px(3);
+                }
+                _ => {}
+            }
+        }
+        layout
+    }
+}
+
+fn spacing_px(value: u8) -> u32 {
+    u32::from(value).saturating_mul(4)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -313,10 +343,22 @@ impl UiDocument {
             let key = node_key(index, &node.key);
             let mut interaction = UiInteraction::for_kind(node.kind);
             interaction.set_tab_index(node.tab_index);
+            let layout = node.styles.to_layout_style();
             if node.parent == u16::MAX {
-                blueprint.push_root_with_interaction(node.kind, key, interaction)?;
+                blueprint.push_root_with_interaction_and_layout(
+                    node.kind,
+                    key,
+                    interaction,
+                    layout,
+                )?;
             } else {
-                blueprint.push_child_with_interaction(node.kind, node.parent, key, interaction)?;
+                blueprint.push_child_with_interaction_and_layout(
+                    node.kind,
+                    node.parent,
+                    key,
+                    interaction,
+                    layout,
+                )?;
             }
         }
         Ok(blueprint)
@@ -366,5 +408,30 @@ mod tests {
         let blueprint = document.to_blueprint().unwrap();
         assert_eq!(blueprint.len(), 2);
         assert_eq!(crate::UiTree::from_blueprint(&blueprint).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn utility_layout_tokens_survive_blueprint_instantiation() {
+        let mut styles = UiStyleList::EMPTY;
+        assert!(styles.push(UiStyle::FlexX));
+        assert!(styles.push(UiStyle::ItemsCenter));
+        assert!(styles.push(UiStyle::JustifyCenter));
+        assert!(styles.push(UiStyle::GapX(3)));
+        assert!(styles.push(UiStyle::PaddingX6));
+        assert!(styles.push(UiStyle::PaddingY3));
+
+        let layout = styles.to_layout_style();
+        assert_eq!(layout.direction, crate::UiLayoutDirection::Row);
+        assert_eq!(layout.align_items, crate::UiLayoutAlignment::Center);
+        assert_eq!(layout.justify_content, crate::UiLayoutAlignment::Center);
+        assert_eq!(layout.gap_x, 12);
+        assert_eq!(layout.padding, crate::UiEdges::new(24, 24, 12, 12));
+
+        let mut document = UiDocument::EMPTY;
+        document.push_node(UiNodeTemplate { styles, ..UiNodeTemplate::EMPTY }).unwrap();
+        let blueprint = document.to_blueprint().unwrap();
+        let tree = crate::UiTree::from_blueprint(&blueprint).unwrap();
+        let root = tree.node(crate::UiNodeHandle { slot: 0, generation: 1 }).unwrap();
+        assert_eq!(root.layout, layout);
     }
 }
