@@ -17,7 +17,8 @@ pub use component::{
     UiComponentMethod, UiComponentOutput, UiEventDisposition, UiValueType,
 };
 pub use component_tree::{
-    MAX_UI_COMPONENTS, UiComponentEvent, UiComponentTree, UiComponentTreeError,
+    MAX_UI_BINDING_VALUES, MAX_UI_COMPONENTS, UiBindingStoreError, UiBindingValue,
+    UiBindingValueStore, UiComponentEvent, UiComponentTree, UiComponentTreeError,
 };
 pub use components::{
     UI_KEY_BACKSPACE, UI_KEY_ENTER, UiButton, UiButtonEvent, UiInput, UiInputEventOutput, UiPanel,

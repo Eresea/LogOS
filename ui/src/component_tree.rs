@@ -4,11 +4,95 @@ use crate::events::{
 };
 use crate::runtime::{UiError, UiNodeHandle, UiNodeKind, UiTree};
 use crate::{
-    UiButton, UiButtonEvent, UiComponent, UiEventDisposition, UiInput, UiInputEventOutput,
-    UiInteractive, UiPanel, UiStyleConditions, UiStyleList, UiText,
+    UiBinding, UiBindingProperty, UiButton, UiButtonEvent, UiComponent, UiEventDisposition,
+    UiExpression, UiInput, UiInputEventOutput, UiInteractive, UiPanel, UiStyleConditions,
+    UiStyleList, UiText,
 };
 
 pub const MAX_UI_COMPONENTS: usize = crate::MAX_UI_NODES;
+pub const MAX_UI_BINDING_VALUES: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiBindingValue {
+    Text(UiText),
+    Bool(bool),
+    Styles(UiStyleList),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiBindingStoreError {
+    InvalidExpression,
+    Capacity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UiBindingValueEntry {
+    expression: UiExpression,
+    value: UiBindingValue,
+}
+
+impl UiBindingValueEntry {
+    const EMPTY: Self =
+        Self { expression: UiExpression::EMPTY, value: UiBindingValue::Text(UiText::EMPTY) };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiBindingValueStore {
+    entries: [UiBindingValueEntry; MAX_UI_BINDING_VALUES],
+    count: usize,
+}
+
+impl UiBindingValueStore {
+    pub const fn new() -> Self {
+        Self { entries: [UiBindingValueEntry::EMPTY; MAX_UI_BINDING_VALUES], count: 0 }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn set(
+        &mut self,
+        expression: UiExpression,
+        value: UiBindingValue,
+    ) -> Result<bool, UiBindingStoreError> {
+        if expression.as_bytes().is_empty() {
+            return Err(UiBindingStoreError::InvalidExpression);
+        }
+        if let Some(entry) =
+            self.entries[..self.count].iter_mut().find(|entry| entry.expression == expression)
+        {
+            if entry.value == value {
+                return Ok(false);
+            }
+            entry.value = value;
+            return Ok(true);
+        }
+        if self.count == MAX_UI_BINDING_VALUES {
+            return Err(UiBindingStoreError::Capacity);
+        }
+        self.entries[self.count] = UiBindingValueEntry { expression, value };
+        self.count += 1;
+        Ok(true)
+    }
+
+    pub fn resolve(&self, expression: UiExpression) -> Option<UiBindingValue> {
+        self.entries[..self.count]
+            .iter()
+            .find(|entry| entry.expression == expression)
+            .map(|entry| entry.value)
+    }
+}
+
+impl Default for UiBindingValueStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiComponentEvent {
@@ -24,6 +108,8 @@ pub enum UiComponentTreeError {
     NotComponent,
     NotFocusable,
     OutputFull,
+    TypeMismatch,
+    UnsupportedBinding,
 }
 
 #[derive(Clone, Copy)]
@@ -325,6 +411,64 @@ impl UiComponentTree {
         self.set_styles(handle, styles)
     }
 
+    pub fn apply_binding(
+        &mut self,
+        handle: UiNodeHandle,
+        binding: UiBinding,
+        value: UiBindingValue,
+    ) -> Result<bool, UiComponentTreeError> {
+        match (binding.property, value) {
+            (UiBindingProperty::Text, UiBindingValue::Text(value)) => self.set_text(handle, value),
+            (UiBindingProperty::Styles, UiBindingValue::Styles(value)) => {
+                self.set_styles(handle, value)
+            }
+            (UiBindingProperty::Value, UiBindingValue::Text(value)) => {
+                self.set_value(handle, value)
+            }
+            (UiBindingProperty::Disabled, UiBindingValue::Bool(value)) => {
+                let changed =
+                    self.tree.node(handle).map_err(map_tree_error)?.interaction.is_disabled()
+                        != value;
+                self.set_disabled(handle, value)?;
+                Ok(changed)
+            }
+            (
+                UiBindingProperty::Form | UiBindingProperty::Control | UiBindingProperty::CanSubmit,
+                _,
+            ) => Err(UiComponentTreeError::UnsupportedBinding),
+            _ => Err(UiComponentTreeError::TypeMismatch),
+        }
+    }
+
+    pub fn apply_document_bindings(
+        &mut self,
+        document: &crate::UiDocument,
+        values: &UiBindingValueStore,
+    ) -> Result<usize, UiComponentTreeError> {
+        let mut changed = 0;
+        for index in 0..document.node_count() {
+            let node = document.node(index).ok_or(UiComponentTreeError::Stale)?;
+            let handle = self.tree.handle_at(index).map_err(map_tree_error)?;
+            if !node.text_binding.as_bytes().is_empty() {
+                if let Some(value) = values.resolve(node.text_binding) {
+                    changed += usize::from(self.apply_binding(
+                        handle,
+                        UiBinding {
+                            property: UiBindingProperty::Text,
+                            expression: node.text_binding,
+                        },
+                        value,
+                    )?);
+                }
+            }
+            for binding in node.bindings.entries.iter().take(usize::from(node.bindings.len)) {
+                let Some(value) = values.resolve(binding.expression) else { continue };
+                changed += usize::from(self.apply_binding(handle, *binding, value)?);
+            }
+        }
+        Ok(changed)
+    }
+
     pub fn dispatch(
         &mut self,
         handle: UiNodeHandle,
@@ -599,6 +743,111 @@ mod tests {
         assert!(!host.tree().has_style(handle, crate::UiStyle::Opacity50).unwrap());
         assert!(host.set_text(handle, UiText::from_bytes(b"Unlock").unwrap()).unwrap());
         assert_eq!(host.tree().node(handle).unwrap().text.as_bytes(), b"Unlock");
+    }
+
+    #[test]
+    fn host_applies_typed_document_bindings_and_suppresses_noops() {
+        let title = crate::UiExpression::from_bytes(b"title").unwrap();
+        let input_value = crate::UiExpression::from_bytes(b"username").unwrap();
+        let input_disabled = crate::UiExpression::from_bytes(b"usernameDisabled").unwrap();
+        let mut input_bindings = crate::UiBindingList::EMPTY;
+        assert!(input_bindings.push(crate::UiBinding {
+            property: crate::UiBindingProperty::Value,
+            expression: input_value,
+        }));
+        assert!(input_bindings.push(crate::UiBinding {
+            property: crate::UiBindingProperty::Disabled,
+            expression: input_disabled,
+        }));
+
+        let mut document = crate::UiDocument::EMPTY;
+        let root = document
+            .push_node(crate::UiNodeTemplate {
+                kind: UiNodeKind::Root,
+                ..crate::UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+        document
+            .push_node(crate::UiNodeTemplate {
+                kind: UiNodeKind::Label,
+                parent: root,
+                text_binding: title,
+                ..crate::UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+        document
+            .push_node(crate::UiNodeTemplate {
+                kind: UiNodeKind::TextInput,
+                parent: root,
+                tab_index: 0,
+                bindings: input_bindings,
+                ..crate::UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+
+        let mut values = UiBindingValueStore::new();
+        assert!(
+            values
+                .set(title, UiBindingValue::Text(UiText::from_bytes(b"Welcome").unwrap()))
+                .unwrap()
+        );
+        assert!(
+            values
+                .set(input_value, UiBindingValue::Text(UiText::from_bytes(b"admin").unwrap()))
+                .unwrap()
+        );
+        assert!(values.set(input_disabled, UiBindingValue::Bool(true)).unwrap());
+
+        let mut router = crate::UiEventRouter::new();
+        let mut host = UiComponentTree::from_document(&document, &mut router).unwrap();
+        assert_eq!(host.apply_document_bindings(&document, &values), Ok(3));
+        let label = host.tree().handle_at(1).unwrap();
+        let input = host.tree().handle_at(2).unwrap();
+        assert_eq!(host.tree().node(label).unwrap().text.as_bytes(), b"Welcome");
+        assert_eq!(host.value(input).unwrap().as_bytes(), b"admin");
+        assert!(host.tree().node(input).unwrap().interaction.is_disabled());
+        assert_eq!(host.apply_document_bindings(&document, &values), Ok(0));
+
+        assert_eq!(
+            host.apply_binding(
+                input,
+                crate::UiBinding {
+                    property: crate::UiBindingProperty::Value,
+                    expression: input_value
+                },
+                UiBindingValue::Bool(true),
+            ),
+            Err(UiComponentTreeError::TypeMismatch)
+        );
+        assert_eq!(
+            host.apply_binding(
+                input,
+                crate::UiBinding {
+                    property: crate::UiBindingProperty::Control,
+                    expression: input_value
+                },
+                UiBindingValue::Text(UiText::EMPTY),
+            ),
+            Err(UiComponentTreeError::UnsupportedBinding)
+        );
+    }
+
+    #[test]
+    fn binding_value_store_is_bounded_and_generation_independent() {
+        let mut values = UiBindingValueStore::new();
+        for index in 0..MAX_UI_BINDING_VALUES {
+            let expression = crate::UiExpression::from_bytes(&[b'x', index as u8]).unwrap();
+            assert_eq!(values.set(expression, UiBindingValue::Bool(index % 2 == 0)), Ok(true));
+        }
+        let extra = crate::UiExpression::from_bytes(b"overflow").unwrap();
+        assert_eq!(
+            values.set(extra, UiBindingValue::Bool(true)),
+            Err(UiBindingStoreError::Capacity)
+        );
+        assert_eq!(
+            values.set(crate::UiExpression::EMPTY, UiBindingValue::Bool(true)),
+            Err(UiBindingStoreError::InvalidExpression)
+        );
     }
 
     #[test]
