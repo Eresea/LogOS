@@ -102,6 +102,8 @@ fn write_node<W: fmt::Write>(
     write_name(output, node.key)?;
     write!(output, ", text: ").map_err(|_| UiCodegenError::Output)?;
     write_text(output, node.text.as_bytes())?;
+    write!(output, ", text_binding: ").map_err(|_| UiCodegenError::Output)?;
+    write_expression(output, node.text_binding)?;
     write!(
         output,
         ", bindings: node_{index}_bindings, event: node_{index}_event, styles: node_{index}_styles, state_styles: node_{index}_state_styles, conditional_styles: node_{index}_conditional_styles, tab_index: {}i16 }};",

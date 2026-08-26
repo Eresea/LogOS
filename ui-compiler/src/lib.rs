@@ -74,6 +74,9 @@ pub enum UiDiagnosticKind {
     BindingTypeMismatch = 20,
     StyleConditionTypeMismatch = 21,
     UnknownStyleExpression = 22,
+    InvalidInterpolation = 23,
+    UnknownTextExpression = 24,
+    TextExpressionTypeMismatch = 25,
 }
 
 impl UiDiagnosticKind {
@@ -101,6 +104,9 @@ impl UiDiagnosticKind {
             Self::BindingTypeMismatch => "UI020",
             Self::StyleConditionTypeMismatch => "UI021",
             Self::UnknownStyleExpression => "UI022",
+            Self::InvalidInterpolation => "UI023",
+            Self::UnknownTextExpression => "UI024",
+            Self::TextExpressionTypeMismatch => "UI025",
         }
     }
 
@@ -132,6 +138,9 @@ impl UiDiagnosticKind {
             Self::BindingTypeMismatch => "binding expression has the wrong value type",
             Self::StyleConditionTypeMismatch => "conditional style expression must be boolean",
             Self::UnknownStyleExpression => "conditional style expression is not registered",
+            Self::InvalidInterpolation => "text interpolation must be a bounded whole expression",
+            Self::UnknownTextExpression => "text interpolation expression is not registered",
+            Self::TextExpressionTypeMismatch => "text interpolation expression must be text",
         }
     }
 }
@@ -661,17 +670,50 @@ impl Parser<'_> {
             if text.is_empty() {
                 continue;
             }
-            if let Some(index) = node_index {
-                if let Some(node) = self.document.node_mut(index) {
-                    if let Some(value) = UiText::from_bytes(text) {
-                        node.text = value;
-                    } else {
-                        self.diagnostics.push(UiDiagnosticKind::InvalidValue, text_start);
-                    }
-                }
-            } else {
-                self.diagnostics.push(UiDiagnosticKind::TextNotAllowed, text_start);
+            self.apply_text(node_index, text, text_start);
+        }
+    }
+
+    fn apply_text(&mut self, node_index: Option<u16>, text: &[u8], offset: usize) {
+        if has_interpolation_marker(text) {
+            if !text.starts_with(b"{{") || !text.ends_with(b"}}") {
+                self.diagnostics.push(UiDiagnosticKind::InvalidInterpolation, offset);
+                return;
             }
+            let expression_bytes = trim_space(&text[2..text.len() - 2]);
+            let Some(expression) = UiExpression::from_bytes(expression_bytes) else {
+                self.diagnostics.push(UiDiagnosticKind::InvalidInterpolation, offset);
+                return;
+            };
+            if let Some(registry) = self.value_registry {
+                let Some(value) = registry.resolve(expression) else {
+                    self.diagnostics.push(UiDiagnosticKind::UnknownTextExpression, offset);
+                    return;
+                };
+                if value.value_type != UiValueType::Text {
+                    self.diagnostics.push(UiDiagnosticKind::TextExpressionTypeMismatch, offset);
+                    return;
+                }
+            }
+            let Some(index) = node_index else {
+                self.diagnostics.push(UiDiagnosticKind::TextNotAllowed, offset);
+                return;
+            };
+            if let Some(node) = self.document.node_mut(index) {
+                node.text_binding = expression;
+            }
+            return;
+        }
+        if let Some(index) = node_index {
+            if let Some(node) = self.document.node_mut(index) {
+                if let Some(value) = UiText::from_bytes(text) {
+                    node.text = value;
+                } else {
+                    self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                }
+            }
+        } else {
+            self.diagnostics.push(UiDiagnosticKind::TextNotAllowed, offset);
         }
     }
 
@@ -1229,6 +1271,10 @@ fn trim_space(mut value: &[u8]) -> &[u8] {
     value
 }
 
+fn has_interpolation_marker(value: &[u8]) -> bool {
+    value.windows(2).any(|window| window == b"{{" || window == b"}}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1499,6 +1545,44 @@ mod tests {
             values.register_bytes(b"name", UiValueType::Text, true),
             Err(UiValueRegistryError::DuplicateExpression)
         );
+    }
+
+    #[test]
+    fn text_interpolation_is_bounded_typed_and_codegen_safe() {
+        let mut values = UiValueRegistry::new();
+        values.register_bytes(b"displayName", UiValueType::Text, false).unwrap();
+        values.register_bytes(b"failure", UiValueType::Bool, false).unwrap();
+        let components = UiComponentRegistry::builtins();
+        let context = UiCompileContext::new(&components).with_values(&values);
+
+        let valid = compile_with_context(r#"<ui.text>{{ displayName }}</ui.text>"#, &context);
+        assert!(valid.is_valid(), "diagnostics: {:?}", valid.diagnostics);
+        let node = valid.document.node(0).unwrap();
+        assert!(node.text.as_bytes().is_empty());
+        assert_eq!(node.text_binding.as_bytes(), b"displayName");
+
+        let mut generated = String::new();
+        write_rust(&valid, &mut generated).unwrap();
+        assert!(generated.contains("text_binding: logos_ui::UiExpression::from_bytes"));
+        assert!(generated.contains("displayName"));
+
+        let unknown = compile_with_context(r#"<ui.text>{{ missing }}</ui.text>"#, &context);
+        assert!(matches!(
+            unknown.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownTextExpression, .. })
+        ));
+
+        let mismatch = compile_with_context(r#"<ui.text>{{ failure }}</ui.text>"#, &context);
+        assert!(matches!(
+            mismatch.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::TextExpressionTypeMismatch, .. })
+        ));
+
+        let mixed = compile(r#"<ui.text>Hello {{ displayName }}</ui.text>"#);
+        assert!(matches!(
+            mixed.diagnostics.get(0),
+            Some(UiDiagnostic { kind: UiDiagnosticKind::InvalidInterpolation, .. })
+        ));
     }
 
     #[test]
