@@ -82,13 +82,14 @@ if ($networkEnabled) {
 }
 
 $espPath = ((Resolve-Path $esp).Path).Replace('\', '/')
-$display = if ($interactiveMode) { 'gtk' } else { 'none' }
+$display = if ($interactiveMode) { 'gtk,zoom-to-fit=on' } else { 'none' }
 $qemuArgs = @(
     '-machine', 'q35', '-m', '256M', '-smp', $Cpus,
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
     '-drive', "format=raw,file=fat:rw:$espPath",
     '-drive', "if=none,id=storage-disk,format=raw,file=$disk,cache=writethrough",
     '-device', 'virtio-blk-pci,drive=storage-disk,disable-legacy=on',
+    '-vga', 'std',
     '-display', $display
 )
 if ($networkEnabled) {
