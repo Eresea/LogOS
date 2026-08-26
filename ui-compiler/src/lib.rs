@@ -20,6 +20,7 @@ pub use logos_ui::{
 pub const MAX_UI_SOURCE_BYTES: usize = 4096;
 pub const MAX_UI_DIAGNOSTICS: usize = 16;
 pub const MAX_UI_HANDLERS: usize = 32;
+pub const MAX_UI_COMPONENT_CONTRACTS: usize = 16;
 
 pub const UI_COMPONENT_NAMES: [&str; 5] =
     ["ui.button", "ui.column", "ui.form", "ui.input", "ui.text"];
@@ -205,6 +206,92 @@ impl Default for UiHandlerRegistry {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiComponentRegistryError {
+    InvalidName,
+    DuplicateName,
+    Capacity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiComponentRegistry {
+    entries: [UiComponentContract; MAX_UI_COMPONENT_CONTRACTS],
+    count: usize,
+}
+
+impl UiComponentRegistry {
+    pub const fn new() -> Self {
+        Self { entries: [UiComponentContract::EMPTY; MAX_UI_COMPONENT_CONTRACTS], count: 0 }
+    }
+
+    pub const fn builtins() -> Self {
+        let mut registry = Self::new();
+        registry.entries[0] = UiComponentContract::for_kind(UiNodeKind::Button);
+        registry.entries[1] = UiComponentContract::for_kind(UiNodeKind::TextInput);
+        registry.entries[2] = UiComponentContract::for_kind(UiNodeKind::Form);
+        registry.entries[3] = UiComponentContract::for_kind(UiNodeKind::Root);
+        registry.entries[4] = UiComponentContract::for_kind(UiNodeKind::Panel);
+        registry.entries[5] = UiComponentContract::for_kind(UiNodeKind::Label);
+        registry.entries[6] = UiComponentContract::new("ui.column", UiNodeKind::Panel, false);
+        registry.count = 7;
+        registry
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn register(
+        &mut self,
+        contract: UiComponentContract,
+    ) -> Result<(), UiComponentRegistryError> {
+        let name = contract.name.as_bytes();
+        if !valid_component_name(name) {
+            return Err(UiComponentRegistryError::InvalidName);
+        }
+        if self.entries[..self.count].iter().any(|entry| entry.name == contract.name) {
+            return Err(UiComponentRegistryError::DuplicateName);
+        }
+        if self.count == MAX_UI_COMPONENT_CONTRACTS {
+            return Err(UiComponentRegistryError::Capacity);
+        }
+        self.entries[self.count] = contract;
+        self.count += 1;
+        Ok(())
+    }
+
+    pub fn resolve(&self, name: &[u8]) -> Option<UiComponentContract> {
+        self.entries[..self.count].iter().copied().find(|contract| contract.name.as_bytes() == name)
+    }
+}
+
+impl Default for UiComponentRegistry {
+    fn default() -> Self {
+        Self::builtins()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct UiCompileContext<'a> {
+    component_registry: &'a UiComponentRegistry,
+    handler_registry: Option<&'a UiHandlerRegistry>,
+}
+
+impl<'a> UiCompileContext<'a> {
+    pub const fn new(component_registry: &'a UiComponentRegistry) -> Self {
+        Self { component_registry, handler_registry: None }
+    }
+
+    pub const fn with_handlers(mut self, handler_registry: &'a UiHandlerRegistry) -> Self {
+        self.handler_registry = Some(handler_registry);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiSourceSpan {
     pub start: u16,
     pub length: u16,
@@ -315,6 +402,10 @@ pub fn lint_with_handlers(source: &str, handlers: &UiHandlerRegistry) -> UiDiagn
     compile_with_handlers(source, handlers).diagnostics
 }
 
+pub fn lint_with_context(source: &str, context: &UiCompileContext<'_>) -> UiDiagnostics {
+    compile_with_context(source, context).diagnostics
+}
+
 pub const LOGIN_PAGE_SOURCE: &str = include_str!("../examples/login.ui");
 pub const REGISTER_PAGE_SOURCE: &str = include_str!("../examples/register.ui");
 
@@ -327,17 +418,23 @@ pub fn compile_register_page() -> UiBuild {
 }
 
 pub fn compile(source: &str) -> UiBuild {
-    compile_internal(source, None)
+    let components = UiComponentRegistry::builtins();
+    let context = UiCompileContext::new(&components);
+    compile_with_context(source, &context)
 }
 
 pub fn compile_with_handlers(source: &str, handlers: &UiHandlerRegistry) -> UiBuild {
-    compile_internal(source, Some(handlers))
+    let components = UiComponentRegistry::builtins();
+    let context = UiCompileContext::new(&components).with_handlers(handlers);
+    compile_with_context(source, &context)
 }
 
-fn compile_internal<'a>(
-    source: &'a str,
-    handler_registry: Option<&'a UiHandlerRegistry>,
-) -> UiBuild {
+pub fn compile_with_components(source: &str, components: &UiComponentRegistry) -> UiBuild {
+    let context = UiCompileContext::new(components);
+    compile_with_context(source, &context)
+}
+
+pub fn compile_with_context(source: &str, context: &UiCompileContext<'_>) -> UiBuild {
     if source.len() > MAX_UI_SOURCE_BYTES {
         let mut diagnostics = UiDiagnostics::EMPTY;
         diagnostics.push(UiDiagnosticKind::SourceTooLarge, MAX_UI_SOURCE_BYTES);
@@ -345,10 +442,11 @@ fn compile_internal<'a>(
     }
     let mut parser = Parser {
         bytes: source.as_bytes(),
+        component_registry: context.component_registry,
+        handler_registry: context.handler_registry,
         position: 0,
         document: UiDocument::EMPTY,
         diagnostics: UiDiagnostics::EMPTY,
-        handler_registry,
     };
     parser.parse_document();
     UiBuild { document: parser.document, diagnostics: parser.diagnostics }
@@ -356,6 +454,7 @@ fn compile_internal<'a>(
 
 struct Parser<'a> {
     bytes: &'a [u8],
+    component_registry: &'a UiComponentRegistry,
     handler_registry: Option<&'a UiHandlerRegistry>,
     position: usize,
     document: UiDocument,
@@ -391,11 +490,12 @@ impl Parser<'_> {
             self.diagnostics.push(UiDiagnosticKind::UnexpectedToken, start);
             return None;
         };
-        let kind = element_kind(name.as_bytes());
-        if kind.is_none() {
+        let contract = self.component_registry.resolve(name.as_bytes());
+        if contract.is_none() {
             self.diagnostics.push(UiDiagnosticKind::UnknownElement, start);
         }
-        let node_index = if let Some(kind) = kind {
+        let node_index = if let Some(contract) = contract {
+            let kind = contract.kind;
             let node = UiNodeTemplate {
                 kind,
                 parent,
@@ -411,7 +511,7 @@ impl Parser<'_> {
             None
         };
 
-        let self_closing = self.parse_attributes(node_index);
+        let self_closing = self.parse_attributes(node_index, contract);
         if self_closing {
             return node_index;
         }
@@ -456,7 +556,11 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_attributes(&mut self, node_index: Option<u16>) -> bool {
+    fn parse_attributes(
+        &mut self,
+        node_index: Option<u16>,
+        contract: Option<UiComponentContract>,
+    ) -> bool {
         loop {
             self.skip_space();
             if self.starts_with(b"/>") {
@@ -469,8 +573,8 @@ impl Parser<'_> {
             let offset = self.position;
             match self.peek() {
                 Some(b'{') => self.parse_styles(node_index),
-                Some(b'[') => self.parse_binding(node_index),
-                Some(b'(') => self.parse_event(node_index),
+                Some(b'[') => self.parse_binding(node_index, contract),
+                Some(b'(') => self.parse_event(node_index, contract),
                 Some(b'#') => self.parse_node_name(node_index),
                 Some(_) => self.parse_plain_attribute(node_index),
                 None => {
@@ -542,7 +646,7 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_binding(&mut self, node_index: Option<u16>) {
+    fn parse_binding(&mut self, node_index: Option<u16>, contract: Option<UiComponentContract>) {
         let offset = self.position;
         self.position += 1;
         let two_way = self.consume_byte(b'(');
@@ -570,7 +674,7 @@ impl Parser<'_> {
         };
         let Some(index) = node_index else { return };
         let Some(node) = self.document.node(usize::from(index)) else { return };
-        let contract = UiComponentContract::for_kind(node.kind);
+        let Some(contract) = contract else { return };
         let Some(input) = contract.input(name.as_bytes()) else {
             self.diagnostics.push(UiDiagnosticKind::UnknownBinding, offset);
             return;
@@ -608,7 +712,7 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_event(&mut self, node_index: Option<u16>) {
+    fn parse_event(&mut self, node_index: Option<u16>, contract: Option<UiComponentContract>) {
         let offset = self.position;
         self.position += 1;
         let Some(name) = self.read_name() else {
@@ -630,9 +734,6 @@ impl Parser<'_> {
             self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
             return;
         };
-        let contract = node_index
-            .and_then(|index| self.document.node(usize::from(index)))
-            .map(|node| UiComponentContract::for_kind(node.kind));
         let Some(contract) = contract else { return };
         if contract.output(name.as_bytes()).is_none() {
             self.diagnostics.push(UiDiagnosticKind::UnknownEvent, offset);
@@ -886,15 +987,12 @@ impl HandlerParser<'_> {
     }
 }
 
-fn element_kind(name: &[u8]) -> Option<UiNodeKind> {
-    match name {
-        b"ui.column" | b"ui.panel" => Some(UiNodeKind::Panel),
-        b"ui.form" => Some(UiNodeKind::Form),
-        b"ui.text" => Some(UiNodeKind::Label),
-        b"ui.button" => Some(UiNodeKind::Button),
-        b"ui.input" => Some(UiNodeKind::TextInput),
-        _ => None,
-    }
+fn valid_component_name(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_UI_NAME_BYTES
+        && name
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b'-' | b':'))
 }
 
 fn parse_tab_index(value: &[u8]) -> Option<i16> {
@@ -1131,6 +1229,66 @@ mod tests {
             mismatch.diagnostics.get(0),
             Some(UiDiagnostic { kind: UiDiagnosticKind::EventHandlerTypeMismatch, .. })
         ));
+    }
+
+    #[test]
+    fn component_registry_compiles_custom_native_aliases() {
+        let mut components = UiComponentRegistry::builtins();
+        components
+            .register(
+                UiComponentContract::new("controls.text-field", UiNodeKind::TextInput, true)
+                    .with_input(logos_ui::UiComponentInput::new(
+                        "value",
+                        logos_ui::UiValueType::Text,
+                        true,
+                    ))
+                    .with_output(logos_ui::UiComponentOutput::new(
+                        "changed",
+                        logos_ui::UiValueType::Text,
+                    )),
+            )
+            .unwrap();
+
+        let mut handlers = UiHandlerRegistry::new();
+        handlers.register_bytes(b"nameChanged($event)", UiEventKind::Changed).unwrap();
+        let context = UiCompileContext::new(&components).with_handlers(&handlers);
+        let build = compile_with_context(
+            r#"<controls.text-field [(value)]="name" (changed)="nameChanged($event)"/>"#,
+            &context,
+        );
+        assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
+        assert_eq!(build.document.node(0).unwrap().kind, UiNodeKind::TextInput);
+        assert_eq!(components.len(), 8);
+    }
+
+    #[test]
+    fn component_registry_rejects_invalid_duplicate_and_excess_contracts() {
+        let mut components = UiComponentRegistry::builtins();
+        assert_eq!(
+            components.register(UiComponentContract::new("", UiNodeKind::Panel, false)),
+            Err(UiComponentRegistryError::InvalidName)
+        );
+        assert_eq!(
+            components.register(UiComponentContract::new("ui.button", UiNodeKind::Button, true)),
+            Err(UiComponentRegistryError::DuplicateName)
+        );
+
+        let names = [
+            "custom.a", "custom.b", "custom.c", "custom.d", "custom.e", "custom.f", "custom.g",
+            "custom.h", "custom.i", "custom.j",
+        ];
+        for name in names.iter().take(MAX_UI_COMPONENT_CONTRACTS - components.len()) {
+            components.register(UiComponentContract::new(name, UiNodeKind::Panel, false)).unwrap();
+        }
+        assert_eq!(components.len(), MAX_UI_COMPONENT_CONTRACTS);
+        assert_eq!(
+            components.register(UiComponentContract::new(
+                "custom.overflow",
+                UiNodeKind::Panel,
+                false
+            )),
+            Err(UiComponentRegistryError::Capacity)
+        );
     }
 
     #[test]
