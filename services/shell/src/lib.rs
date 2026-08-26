@@ -7,6 +7,12 @@ pub use logos_ui::{
     MAX_UI_NODES, UiBlueprint, UiError, UiNode, UiNodeHandle, UiNodeKind, UiNodeSpec, UiTree,
 };
 
+use logos_ui::{
+    UiBindingProperty, UiBindingTarget, UiCommitCoordinator, UiCommitError, UiComputed,
+    UiDependencySet, UiInvalidationKind, UiReactiveError, UiSignal, UiSignalChange, UiSignalId,
+    UiText,
+};
+
 pub fn compile_login_page() -> logos_ui_compiler::UiBuild {
     logos_ui_compiler::compile_login_page()
 }
@@ -25,6 +31,182 @@ impl LoginUiState {
     pub const fn new(claim: bool, failure: bool) -> Self {
         Self { claim, failure }
     }
+}
+
+const LOGIN_SIGNAL_USERNAME: UiSignalId = UiSignalId::new(1);
+const LOGIN_SIGNAL_PASSWORD: UiSignalId = UiSignalId::new(2);
+const LOGIN_SIGNAL_CONFIRMATION: UiSignalId = UiSignalId::new(3);
+const LOGIN_SIGNAL_CLAIM: UiSignalId = UiSignalId::new(4);
+const LOGIN_SIGNAL_FAILURE: UiSignalId = UiSignalId::new(5);
+const LOGIN_SIGNAL_CAN_SUBMIT: UiSignalId = UiSignalId::new(6);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LoginUiTargets {
+    pub username: Option<UiBindingTarget>,
+    pub password: Option<UiBindingTarget>,
+    pub confirmation: Option<UiBindingTarget>,
+    pub submit: Option<UiBindingTarget>,
+    pub feedback: Option<UiBindingTarget>,
+    pub title: Option<UiBindingTarget>,
+}
+
+impl LoginUiTargets {
+    pub const EMPTY: Self = Self {
+        username: None,
+        password: None,
+        confirmation: None,
+        submit: None,
+        feedback: None,
+        title: None,
+    };
+}
+
+pub struct LoginUiReactive {
+    username: UiSignal<UiText>,
+    password: UiSignal<UiText>,
+    confirmation: UiSignal<UiText>,
+    claim: UiSignal<bool>,
+    failure: UiSignal<bool>,
+    can_submit: UiComputed<bool>,
+    coordinator: UiCommitCoordinator,
+}
+
+impl LoginUiReactive {
+    pub const fn new() -> Self {
+        Self {
+            username: UiSignal::new(LOGIN_SIGNAL_USERNAME, UiText::EMPTY),
+            password: UiSignal::new(LOGIN_SIGNAL_PASSWORD, UiText::EMPTY),
+            confirmation: UiSignal::new(LOGIN_SIGNAL_CONFIRMATION, UiText::EMPTY),
+            claim: UiSignal::new(LOGIN_SIGNAL_CLAIM, false),
+            failure: UiSignal::new(LOGIN_SIGNAL_FAILURE, false),
+            can_submit: UiComputed::new(LOGIN_SIGNAL_CAN_SUBMIT, false),
+            coordinator: UiCommitCoordinator::new(),
+        }
+    }
+
+    pub fn bind(&mut self, targets: LoginUiTargets) -> Result<(), UiReactiveError> {
+        watch_text(&mut self.coordinator, targets.username, LOGIN_SIGNAL_USERNAME)?;
+        watch_text(&mut self.coordinator, targets.password, LOGIN_SIGNAL_PASSWORD)?;
+        watch_text(&mut self.coordinator, targets.confirmation, LOGIN_SIGNAL_CONFIRMATION)?;
+        watch_bool(&mut self.coordinator, targets.submit, LOGIN_SIGNAL_CAN_SUBMIT)?;
+        watch_signal(
+            &mut self.coordinator,
+            targets.feedback,
+            LOGIN_SIGNAL_FAILURE,
+            UiBindingProperty::Value,
+        )?;
+        watch_signal(
+            &mut self.coordinator,
+            targets.title,
+            LOGIN_SIGNAL_CLAIM,
+            UiBindingProperty::Value,
+        )?;
+        Ok(())
+    }
+
+    pub fn set_username(&mut self, value: UiText) -> Result<bool, UiReactiveError> {
+        let change = self.username.set(value);
+        self.publish(change)
+    }
+
+    pub fn set_password(&mut self, value: UiText) -> Result<bool, UiReactiveError> {
+        let change = self.password.set(value);
+        self.publish(change)
+    }
+
+    pub fn set_confirmation(&mut self, value: UiText) -> Result<bool, UiReactiveError> {
+        let change = self.confirmation.set(value);
+        self.publish(change)
+    }
+
+    pub fn set_state(
+        &mut self,
+        state: LoginUiState,
+        can_submit: bool,
+    ) -> Result<usize, UiReactiveError> {
+        let mut routed = 0;
+        let claim_change = self.claim.set(state.claim);
+        routed += self.publish(claim_change)? as usize;
+        let failure_change = self.failure.set(state.failure);
+        routed += self.publish(failure_change)? as usize;
+        let can_submit_change = self.can_submit.update(can_submit);
+        routed += self.publish(can_submit_change)? as usize;
+        Ok(routed)
+    }
+
+    pub const fn username(&self) -> UiText {
+        self.username.value()
+    }
+
+    pub const fn password(&self) -> UiText {
+        self.password.value()
+    }
+
+    pub const fn confirmation(&self) -> UiText {
+        self.confirmation.value()
+    }
+
+    pub const fn can_submit(&self) -> bool {
+        self.can_submit.value()
+    }
+
+    pub fn pending_invalidations(&self) -> usize {
+        self.coordinator.pending_invalidations()
+    }
+
+    pub fn take_refresh(&mut self) -> Option<u64> {
+        self.coordinator.take_refresh()
+    }
+
+    pub fn commit<F>(&mut self, apply: F) -> Result<usize, UiCommitError>
+    where
+        F: FnMut(logos_ui::UiInvalidation) -> bool,
+    {
+        self.coordinator.commit(apply)
+    }
+
+    fn publish(&mut self, change: Option<UiSignalChange>) -> Result<bool, UiReactiveError> {
+        let Some(change) = change else { return Ok(false) };
+        Ok(self.coordinator.publish(change)? != 0)
+    }
+}
+
+impl Default for LoginUiReactive {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn watch_text(
+    coordinator: &mut UiCommitCoordinator,
+    target: Option<UiBindingTarget>,
+    signal: UiSignalId,
+) -> Result<(), UiReactiveError> {
+    watch_signal(coordinator, target, signal, UiBindingProperty::Value)
+}
+
+fn watch_bool(
+    coordinator: &mut UiCommitCoordinator,
+    target: Option<UiBindingTarget>,
+    signal: UiSignalId,
+) -> Result<(), UiReactiveError> {
+    watch_signal(coordinator, target, signal, UiBindingProperty::Disabled)
+}
+
+fn watch_signal(
+    coordinator: &mut UiCommitCoordinator,
+    target: Option<UiBindingTarget>,
+    signal: UiSignalId,
+    property: UiBindingProperty,
+) -> Result<(), UiReactiveError> {
+    let Some(target) = target else { return Ok(()) };
+    let mut dependencies = UiDependencySet::EMPTY;
+    let _ = dependencies.add(signal);
+    coordinator.watch(
+        UiBindingTarget { property, ..target },
+        dependencies,
+        UiInvalidationKind::Paint,
+    )
 }
 
 pub fn login_page_text(
@@ -702,5 +884,60 @@ mod tests {
         let length = login_input_text(b"abcdefgh", false, 64, &mut output);
         assert_eq!(&output[..length], b"...gh");
         assert_eq!(login_text_flags(&compile_login_page(), 3), logos_abi::GUI_TEXT_FLAG_LIGHT);
+    }
+
+    #[test]
+    fn reactive_login_values_coalesce_into_one_shot_paint_commits() {
+        let username = UiBindingTarget {
+            node: UiNodeHandle { slot: 1, generation: 1 },
+            property: UiBindingProperty::Value,
+        };
+        let submit = UiBindingTarget {
+            node: UiNodeHandle { slot: 2, generation: 1 },
+            property: UiBindingProperty::Disabled,
+        };
+        let mut reactive = LoginUiReactive::new();
+        reactive
+            .bind(LoginUiTargets {
+                username: Some(username),
+                submit: Some(submit),
+                ..LoginUiTargets::EMPTY
+            })
+            .unwrap();
+
+        let alice = logos_ui::UiText::from_bytes(b"alice").unwrap();
+        assert_eq!(reactive.set_username(alice), Ok(true));
+        assert_eq!(reactive.set_username(alice), Ok(false));
+        assert_eq!(reactive.pending_invalidations(), 1);
+        assert_eq!(reactive.take_refresh(), Some(0));
+        assert_eq!(reactive.commit(|invalidation| invalidation.target == username), Ok(1));
+        assert_eq!(reactive.pending_invalidations(), 0);
+    }
+
+    #[test]
+    fn reactive_login_state_routes_submit_and_feedback_targets() {
+        let mut reactive = LoginUiReactive::new();
+        reactive
+            .bind(LoginUiTargets {
+                submit: Some(UiBindingTarget {
+                    node: UiNodeHandle { slot: 1, generation: 1 },
+                    property: UiBindingProperty::Disabled,
+                }),
+                feedback: Some(UiBindingTarget {
+                    node: UiNodeHandle { slot: 2, generation: 1 },
+                    property: UiBindingProperty::Value,
+                }),
+                title: Some(UiBindingTarget {
+                    node: UiNodeHandle { slot: 3, generation: 1 },
+                    property: UiBindingProperty::Value,
+                }),
+                ..LoginUiTargets::EMPTY
+            })
+            .unwrap();
+        assert_eq!(reactive.set_state(LoginUiState::new(true, true), true), Ok(3));
+        assert_eq!(reactive.pending_invalidations(), 3);
+        assert_eq!(reactive.take_refresh(), Some(0));
+        assert_eq!(reactive.commit(|_| true), Ok(3));
+        assert!(reactive.can_submit());
     }
 }
