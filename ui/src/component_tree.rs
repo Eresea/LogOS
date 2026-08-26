@@ -269,6 +269,15 @@ impl UiComponentTree {
         &self.tree
     }
 
+    pub fn handle_for_name(
+        &self,
+        document: &crate::UiDocument,
+        name: &[u8],
+    ) -> Option<UiNodeHandle> {
+        let index = document.node_index_by_name(name)?;
+        self.tree.handle_at(usize::from(index)).ok()
+    }
+
     pub const fn focused(&self) -> UiNodeHandle {
         self.focused
     }
@@ -743,6 +752,39 @@ mod tests {
         assert!(!host.tree().has_style(handle, crate::UiStyle::Opacity50).unwrap());
         assert!(host.set_text(handle, UiText::from_bytes(b"Unlock").unwrap()).unwrap());
         assert_eq!(host.tree().node(handle).unwrap().text.as_bytes(), b"Unlock");
+    }
+
+    #[test]
+    fn named_handles_are_generation_safe_after_destroy_and_reuse() {
+        let mut document = crate::UiDocument::EMPTY;
+        let root = document
+            .push_node(crate::UiNodeTemplate {
+                kind: UiNodeKind::Root,
+                key: crate::UiName::from_bytes(b"root").unwrap(),
+                ..crate::UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+        document
+            .push_node(crate::UiNodeTemplate {
+                kind: UiNodeKind::TextInput,
+                parent: root,
+                key: crate::UiName::from_bytes(b"username").unwrap(),
+                tab_index: 0,
+                ..crate::UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+        let mut router = crate::UiEventRouter::new();
+        let mut host = UiComponentTree::from_document(&document, &mut router).unwrap();
+        let username = host.handle_for_name(&document, b"username").unwrap();
+        assert_eq!(host.handle_for_name(&document, b"missing"), None);
+
+        host.destroy(username).unwrap();
+        assert_eq!(host.tree().node(username), Err(UiError::Stale));
+        let replacement =
+            host.insert(UiNodeKind::TextInput, host.tree().handle_at(0).unwrap(), 9).unwrap();
+        assert_eq!(replacement.slot, username.slot);
+        assert_ne!(replacement.generation, username.generation);
+        assert_eq!(host.tree().node(username), Err(UiError::Stale));
     }
 
     #[test]
