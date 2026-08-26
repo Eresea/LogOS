@@ -14,10 +14,11 @@ but the runtime should own the backing frames and respond to demand.
 
 Every service starts with the common `USER_STACK_PAGES` window. Core retains a
 per-service stack ledger and a single global `MAX_SERVICE_STACK_PAGES` ceiling.
-When a running service faults on the next page immediately below its committed
-stack, Core allocates one owner-scoped frame, clears it, maps it into that
-service's address space, and retries the interrupted instruction. A fault
-outside that exact growth point remains a contained user fault.
+When a running service faults below its committed stack but within the reserved
+growth range, Core allocates the bounded missing span of owner-scoped frames,
+clears and maps them into that service's address space, and retries the
+interrupted instruction. A fault outside that range remains a contained user
+fault.
 
 The growth path is architecture-aware but service-agnostic. It uses the
 existing page-table builder and frame-pool ownership, invalidates the mapping
@@ -31,8 +32,8 @@ authority, or a per-service stack budget.
   constants.
 - Unused stack capacity consumes no physical frames beyond the common initial
   window.
-- Stack growth is bounded, one-page-at-a-time, and charged to the service's
-  generation-scoped owner.
+- Stack growth is bounded and charged to the service's generation-scoped owner;
+  large frame faults are admitted as a bounded contiguous virtual span.
 - The runtime must keep the page-fault retry path correct; exhaustion or an
   invalid fault is contained as a service fault rather than becoming a kernel
   allocation policy.

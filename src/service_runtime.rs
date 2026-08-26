@@ -5242,33 +5242,53 @@ impl ServiceRuntime {
             return Ok(false);
         }
         let extra_pages = self.service_stacks[index].frames.len();
-        let Some(target) = crate::loader::service_stack_growth_address(extra_pages) else {
+        let Some(next_page) = crate::loader::service_stack_growth_address(extra_pages) else {
             return Ok(false);
         };
-        if fault_address & !(crate::loader::PAGE_SIZE - 1) != target {
-            return Ok(false);
+        let fault_page = fault_address & !(crate::loader::PAGE_SIZE - 1);
+        if fault_page < crate::loader::USER_STACK_BASE
+            && fault_page <= next_page
+            && fault_page
+                >= crate::loader::USER_STACK_BASE
+                    - crate::process::MAX_SERVICE_STACK_PAGES * crate::loader::PAGE_SIZE
+        {
+            let missing_pages = (next_page - fault_page) / crate::loader::PAGE_SIZE + 1;
+            let max_missing = crate::process::MAX_SERVICE_STACK_PAGES
+                .saturating_sub(crate::process::USER_STACK_PAGES + extra_pages);
+            if missing_pages > max_missing {
+                return Ok(false);
+            }
+            self.service_stacks[index]
+                .frames
+                .try_reserve(missing_pages)
+                .map_err(|_| ProcessError::Capacity)?;
+            let owner =
+                OwnerId::service_handle(service_handle).ok_or(ProcessError::InvalidHandle)?;
+            let mut memory = IdentityPageTableMemory;
+            for page in 0..missing_pages {
+                let address = next_page - page * crate::loader::PAGE_SIZE;
+                let frame =
+                    self.frame_pool.allocate_for(owner).map_err(|_| ProcessError::Capacity)?;
+                if memory.clear(frame).is_err() {
+                    let _ = self.frame_pool.release(frame);
+                    return Err(ProcessError::AddressSpace);
+                }
+                let mapped = unsafe { self.tables[index].assume_init_mut() }.map_raw_page(
+                    address,
+                    frame,
+                    MappingFlags::DATA,
+                    &mut self.frame_pool,
+                    &mut memory,
+                );
+                if mapped.is_err() {
+                    let _ = self.frame_pool.release(frame);
+                    return Ok(false);
+                }
+                self.service_stacks[index].frames.push(frame);
+            }
+            return Ok(true);
         }
-        self.service_stacks[index].frames.try_reserve(1).map_err(|_| ProcessError::Capacity)?;
-        let owner = OwnerId::service_handle(service_handle).ok_or(ProcessError::InvalidHandle)?;
-        let frame = self.frame_pool.allocate_for(owner).map_err(|_| ProcessError::Capacity)?;
-        let mut memory = IdentityPageTableMemory;
-        if memory.clear(frame).is_err() {
-            let _ = self.frame_pool.release(frame);
-            return Err(ProcessError::AddressSpace);
-        }
-        let mapped = unsafe { self.tables[index].assume_init_mut() }.map_raw_page(
-            target,
-            frame,
-            MappingFlags::DATA,
-            &mut self.frame_pool,
-            &mut memory,
-        );
-        if mapped.is_err() {
-            let _ = self.frame_pool.release(frame);
-            return Ok(false);
-        }
-        self.service_stacks[index].frames.push(frame);
-        Ok(true)
+        Ok(false)
     }
 
     pub(crate) fn exit_process(
