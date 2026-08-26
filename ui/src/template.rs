@@ -263,6 +263,10 @@ pub struct UiStyleList {
 impl UiStyleList {
     pub const EMPTY: Self = Self { tokens: [UiStyle::FullHeight; MAX_UI_STYLE_TOKENS], len: 0 };
 
+    pub fn contains(&self, style: UiStyle) -> bool {
+        self.tokens[..self.len as usize].contains(&style)
+    }
+
     pub fn push(&mut self, token: UiStyle) -> bool {
         if usize::from(self.len) == MAX_UI_STYLE_TOKENS {
             return false;
@@ -375,6 +379,7 @@ impl UiDocument {
                 )?
             };
             blueprint.set_text(blueprint_index, node.text)?;
+            blueprint.set_styles(blueprint_index, node.styles)?;
         }
         Ok(blueprint)
     }
@@ -448,5 +453,6 @@ mod tests {
         let tree = crate::UiTree::from_blueprint(&blueprint).unwrap();
         let root = tree.node(crate::UiNodeHandle { slot: 0, generation: 1 }).unwrap();
         assert_eq!(root.layout, layout);
+        assert_eq!(root.styles, styles);
     }
 }

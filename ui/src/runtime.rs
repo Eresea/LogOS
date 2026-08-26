@@ -3,7 +3,7 @@ const NO_PARENT: u16 = u16::MAX;
 pub const TAB_INDEX_NONE: i16 = -1;
 
 use crate::layout::{UiLayoutStyle, UiSize};
-use crate::template::UiText;
+use crate::template::{UiStyle, UiStyleList, UiText};
 
 /// Framework-owned logical geometry. Rendering adapters convert this into
 /// their platform or compositor rectangle type at the boundary.
@@ -141,6 +141,7 @@ pub struct UiNodeSpec {
     pub parent: u16,
     pub key: u16,
     pub text: UiText,
+    pub styles: UiStyleList,
     pub interaction: UiInteraction,
     pub layout: UiLayoutStyle,
     pub intrinsic_size: UiSize,
@@ -153,6 +154,7 @@ impl UiNodeSpec {
             parent: NO_PARENT,
             key,
             text: UiText::EMPTY,
+            styles: UiStyleList::EMPTY,
             interaction: UiInteraction::for_kind(kind),
             layout: UiLayoutStyle::EMPTY,
             intrinsic_size: UiSize::ZERO,
@@ -165,6 +167,7 @@ impl UiNodeSpec {
             parent,
             key,
             text: UiText::EMPTY,
+            styles: UiStyleList::EMPTY,
             interaction: UiInteraction::for_kind(kind),
             layout: UiLayoutStyle::EMPTY,
             intrinsic_size: UiSize::ZERO,
@@ -181,6 +184,7 @@ impl UiNodeSpec {
             parent: NO_PARENT,
             key,
             text: UiText::EMPTY,
+            styles: UiStyleList::EMPTY,
             interaction,
             layout: UiLayoutStyle::EMPTY,
             intrinsic_size: UiSize::ZERO,
@@ -198,6 +202,7 @@ impl UiNodeSpec {
             parent,
             key,
             text: UiText::EMPTY,
+            styles: UiStyleList::EMPTY,
             interaction,
             layout: UiLayoutStyle::EMPTY,
             intrinsic_size: UiSize::ZERO,
@@ -298,6 +303,15 @@ impl UiBlueprint {
         Ok(())
     }
 
+    pub fn set_styles(&mut self, index: u16, styles: UiStyleList) -> Result<(), UiError> {
+        let index = usize::from(index);
+        if index >= self.count {
+            return Err(UiError::NotFound);
+        }
+        self.specs[index].styles = styles;
+        Ok(())
+    }
+
     pub const fn is_empty(&self) -> bool {
         self.count == 0
     }
@@ -335,6 +349,7 @@ pub struct UiNode {
     pub kind: UiNodeKind,
     pub key: u16,
     pub text: UiText,
+    pub styles: UiStyleList,
     pub bounds: UiRect,
     pub clip: UiRect,
     pub dirty: bool,
@@ -350,6 +365,7 @@ impl UiNode {
         kind: UiNodeKind::Panel,
         key: 0,
         text: UiText::EMPTY,
+        styles: UiStyleList::EMPTY,
         bounds: UiRect::EMPTY,
         clip: UiRect::EMPTY,
         dirty: false,
@@ -384,6 +400,7 @@ impl UiTree {
                 parent,
                 spec.key,
                 spec.text,
+                spec.styles,
                 spec.interaction,
                 spec.layout,
                 spec.intrinsic_size,
@@ -432,6 +449,7 @@ impl UiTree {
             parent,
             key,
             UiText::EMPTY,
+            UiStyleList::EMPTY,
             interaction,
             layout,
             intrinsic_size,
@@ -445,6 +463,7 @@ impl UiTree {
         parent: UiNodeHandle,
         key: u16,
         text: UiText,
+        styles: UiStyleList,
         interaction: UiInteraction,
         layout: UiLayoutStyle,
         intrinsic_size: UiSize,
@@ -468,6 +487,7 @@ impl UiTree {
             kind,
             key,
             text,
+            styles,
             bounds: UiRect::EMPTY,
             clip: UiRect::EMPTY,
             dirty: true,
@@ -538,6 +558,24 @@ impl UiTree {
         node.text = text;
         node.dirty = true;
         Ok(true)
+    }
+
+    pub fn set_styles(
+        &mut self,
+        handle: UiNodeHandle,
+        styles: UiStyleList,
+    ) -> Result<bool, UiError> {
+        let node = self.node_mut(handle)?;
+        if node.styles == styles {
+            return Ok(false);
+        }
+        node.styles = styles;
+        node.dirty = true;
+        Ok(true)
+    }
+
+    pub fn has_style(&self, handle: UiNodeHandle, style: UiStyle) -> Result<bool, UiError> {
+        Ok(self.node(handle)?.styles.contains(style))
     }
 
     pub fn set_clip(&mut self, handle: UiNodeHandle, clip: UiRect) -> Result<(), UiError> {
@@ -704,6 +742,26 @@ mod tests {
             tree.set_text(handle, UiText::from_bytes(b"stale").unwrap()),
             Err(UiError::Stale)
         );
+    }
+
+    #[test]
+    fn styles_are_retained_and_update_only_when_changed() {
+        let mut tree = UiTree::new();
+        let root = tree.insert(UiNodeKind::Panel, UiNodeHandle::EMPTY, 1).unwrap();
+        let mut styles = UiStyleList::EMPTY;
+        assert!(styles.push(UiStyle::BackgroundAccent));
+        tree.clear_dirty(root).unwrap();
+
+        assert_eq!(tree.set_styles(root, styles), Ok(true));
+        assert!(tree.has_style(root, UiStyle::BackgroundAccent).unwrap());
+        assert!(tree.node(root).unwrap().dirty);
+        tree.clear_dirty(root).unwrap();
+        assert_eq!(tree.set_styles(root, styles), Ok(false));
+        assert!(!tree.node(root).unwrap().dirty);
+
+        tree.destroy(root).unwrap();
+        assert_eq!(tree.set_styles(root, styles), Err(UiError::Stale));
+        assert_eq!(tree.has_style(root, UiStyle::BackgroundAccent), Err(UiError::Stale));
     }
 
     #[test]
