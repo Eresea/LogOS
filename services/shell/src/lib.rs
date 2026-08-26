@@ -59,6 +59,26 @@ impl LoginUiTargets {
         feedback: None,
         title: None,
     };
+
+    pub fn from_build(build: &logos_ui_compiler::UiBuild) -> Option<Self> {
+        if !build.is_valid() {
+            return None;
+        }
+        let blueprint = build.document.to_blueprint().ok()?;
+        let tree = UiTree::from_blueprint(&blueprint).ok()?;
+        let target = |name: &[u8], property| {
+            let index = named_node_index(build, name)?;
+            Some(UiBindingTarget { node: tree.handle_at(usize::from(index)).ok()?, property })
+        };
+        Some(Self {
+            username: target(b"username", UiBindingProperty::Value),
+            password: target(b"password", UiBindingProperty::Value),
+            confirmation: target(b"confirmPassword", UiBindingProperty::Value),
+            submit: target(b"submit", UiBindingProperty::Disabled),
+            feedback: target(b"notice", UiBindingProperty::Value),
+            title: target(b"title", UiBindingProperty::Value),
+        })
+    }
 }
 
 pub struct LoginUiReactive {
@@ -939,5 +959,18 @@ mod tests {
         assert_eq!(reactive.take_refresh(), Some(0));
         assert_eq!(reactive.commit(|_| true), Ok(3));
         assert!(reactive.can_submit());
+    }
+
+    #[test]
+    fn compiled_pages_provide_generation_safe_reactive_targets() {
+        let login = LoginUiTargets::from_build(&compile_login_page()).unwrap();
+        assert!(login.username.unwrap().node.is_valid());
+        assert!(login.password.unwrap().node.is_valid());
+        assert!(login.confirmation.is_none());
+        assert!(login.submit.unwrap().node.is_valid());
+
+        let register = LoginUiTargets::from_build(&compile_register_page()).unwrap();
+        assert!(register.confirmation.unwrap().node.is_valid());
+        assert_ne!(login.username.unwrap().node, register.confirmation.unwrap().node);
     }
 }

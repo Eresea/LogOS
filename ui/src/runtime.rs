@@ -468,6 +468,14 @@ impl UiTree {
         Ok(&mut self.nodes[index])
     }
 
+    pub fn handle_at(&self, index: usize) -> Result<UiNodeHandle, UiError> {
+        self.nodes
+            .get(index)
+            .filter(|node| node.handle.is_valid())
+            .map(|node| node.handle)
+            .ok_or(UiError::NotFound)
+    }
+
     pub fn set_bounds(&mut self, handle: UiNodeHandle, bounds: UiRect) -> Result<(), UiError> {
         let node = self.node_mut(handle)?;
         if node.bounds != bounds {
