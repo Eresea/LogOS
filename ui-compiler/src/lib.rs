@@ -343,26 +343,100 @@ impl UiDocument {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub enum UiDiagnosticKind {
-    SourceTooLarge,
-    UnexpectedToken,
-    UnexpectedEnd,
-    UnknownElement,
-    UnknownAttribute,
-    UnknownBinding,
-    UnknownEvent,
-    UnknownStyle,
-    MissingValue,
-    InvalidValue,
-    MismatchedClose,
-    TextNotAllowed,
-    Capacity,
+    SourceTooLarge = 1,
+    UnexpectedToken = 2,
+    UnexpectedEnd = 3,
+    UnknownElement = 4,
+    UnknownAttribute = 5,
+    UnknownBinding = 6,
+    UnknownEvent = 7,
+    UnknownStyle = 8,
+    MissingValue = 9,
+    InvalidValue = 10,
+    MismatchedClose = 11,
+    TextNotAllowed = 12,
+    Capacity = 13,
+}
+
+impl UiDiagnosticKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::SourceTooLarge => "UI001",
+            Self::UnexpectedToken => "UI002",
+            Self::UnexpectedEnd => "UI003",
+            Self::UnknownElement => "UI004",
+            Self::UnknownAttribute => "UI005",
+            Self::UnknownBinding => "UI006",
+            Self::UnknownEvent => "UI007",
+            Self::UnknownStyle => "UI008",
+            Self::MissingValue => "UI009",
+            Self::InvalidValue => "UI010",
+            Self::MismatchedClose => "UI011",
+            Self::TextNotAllowed => "UI012",
+            Self::Capacity => "UI013",
+        }
+    }
+
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::SourceTooLarge => "UI source exceeds the bounded source limit",
+            Self::UnexpectedToken => "unexpected token",
+            Self::UnexpectedEnd => "unexpected end of UI source",
+            Self::UnknownElement => "element is not in scope",
+            Self::UnknownAttribute => "attribute is not supported",
+            Self::UnknownBinding => "binding is not supported for this component",
+            Self::UnknownEvent => "event is not supported for this component",
+            Self::UnknownStyle => "style utility is not recognized",
+            Self::MissingValue => "attribute or binding requires a value",
+            Self::InvalidValue => "value is invalid for this component",
+            Self::MismatchedClose => "closing element does not match the open element",
+            Self::TextNotAllowed => "text is not allowed in this component",
+            Self::Capacity => "UI document exceeds a bounded compiler limit",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiSourceSpan {
+    pub start: u16,
+    pub length: u16,
+}
+
+impl UiSourceSpan {
+    pub const fn point(start: usize) -> Self {
+        let start = if start > u16::MAX as usize { u16::MAX } else { start as u16 };
+        Self { start, length: 1 }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiDiagnostic {
     pub kind: UiDiagnosticKind,
-    pub offset: u16,
+    pub span: UiSourceSpan,
+}
+
+impl UiDiagnostic {
+    pub const fn code(self) -> &'static str {
+        self.kind.code()
+    }
+
+    pub const fn message(self) -> &'static str {
+        self.kind.message()
+    }
+
+    pub const fn offset(self) -> usize {
+        self.span.start as usize
+    }
+
+    pub fn line_column(self, source: &str) -> (usize, usize) {
+        let offset = self.offset().min(source.len());
+        let prefix = &source.as_bytes()[..offset];
+        let line = prefix.iter().filter(|byte| **byte == b'\n').count() + 1;
+        let column = prefix.iter().rev().take_while(|byte| **byte != b'\n').count() + 1;
+        (line, column)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -373,8 +447,10 @@ pub struct UiDiagnostics {
 
 impl UiDiagnostics {
     const EMPTY: Self = Self {
-        entries: [UiDiagnostic { kind: UiDiagnosticKind::UnexpectedToken, offset: 0 };
-            MAX_UI_DIAGNOSTICS],
+        entries: [UiDiagnostic {
+            kind: UiDiagnosticKind::UnexpectedToken,
+            span: UiSourceSpan::point(0),
+        }; MAX_UI_DIAGNOSTICS],
         count: 0,
     };
 
@@ -394,8 +470,7 @@ impl UiDiagnostics {
         if self.count == MAX_UI_DIAGNOSTICS {
             return;
         }
-        self.entries[self.count] =
-            UiDiagnostic { kind, offset: offset.min(usize::from(u16::MAX)) as u16 };
+        self.entries[self.count] = UiDiagnostic { kind, span: UiSourceSpan::point(offset) };
         self.count += 1;
     }
 }
@@ -1028,6 +1103,18 @@ mod tests {
         assert_eq!(build.document.node(7).unwrap().event.kind, UiEventKind::Submit);
         assert_eq!(lint(REGISTER_PAGE_SOURCE).len(), 0);
         assert_eq!(build.document.to_blueprint().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn diagnostics_expose_stable_codes_and_source_locations() {
+        let source = "<ui.column>\n  <ui.unknown />\n</ui.column>";
+        let diagnostics = lint(source);
+        let diagnostic = diagnostics.get(0).unwrap();
+        assert_eq!(diagnostic.kind, UiDiagnosticKind::UnknownElement);
+        assert_eq!(diagnostic.code(), "UI004");
+        assert_eq!(diagnostic.message(), "element is not in scope");
+        assert_eq!(diagnostic.span, UiSourceSpan { start: 14, length: 1 });
+        assert_eq!(diagnostic.line_column(source), (2, 3));
     }
 
     #[test]

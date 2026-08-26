@@ -1548,6 +1548,11 @@ LogOS ABI or an operating-system renderer. `logos-ui-compiler` produces the
 bounded typed representation from `.ui` source. LogOS-specific compositor and
 input adapters convert that representation at the shell boundary.
 
+The compiler package also provides `logos-ui-lint` for host tooling. It uses
+the same bounded `no_std` compiler library and reports stable diagnostic codes
+with source line and column locations, so editor or Windows compatibility
+integrations do not need a second parser.
+
 The lock screen should drive the first implementation.
 
 A reasonable first milestone is:
