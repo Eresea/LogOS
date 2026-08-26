@@ -3,11 +3,13 @@
 #[cfg(test)]
 extern crate std;
 
+mod component;
 mod events;
 mod reactive;
 mod runtime;
 mod template;
 
+pub use component::{UiComponent, UiEventDisposition};
 pub use events::{
     MAX_UI_EVENT_ROUTES, MAX_UI_OUTPUT_EVENTS, UiEventError, UiEventRouter, UiEventType,
     UiHandlerId, UiInputEvent, UiOutput, UiOutputError, UiRoutedEvent,

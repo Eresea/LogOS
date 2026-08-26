@@ -1577,6 +1577,11 @@ node handle and event type to a handler ID, and `UiOutput<T>` provides a typed
 FIFO for component outputs. Full queues report backpressure; events do not
 silently disappear.
 
+Rust components implement `UiComponent` with a concrete output type and
+handle semantic `UiInputEvent` values directly. The framework does not need
+dynamic reflection or trait-object dispatch: the host owns the static
+component wiring, while `UiOutput<T>` carries typed child-to-parent results.
+
 The compiler also exposes a deterministic Rust code generator for build
 systems. Generated documents use only `logos-ui` constructors and are loaded
 as fixed descriptors; `.ui` markup is not parsed by the boot-time runtime.
