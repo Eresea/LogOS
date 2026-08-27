@@ -275,6 +275,7 @@ function Send-QmpText {
             0x2c { 'm'; break }       # AZERTY: unshifted m key is comma.
             0x2e { 'shift-comma'; break } # AZERTY: shifted ; key is period.
             0x2f { 'shift-dot'; break }
+            0x6d { ';'; break }       # AZERTY: QMP ; is the physical M key.
             0x3a { 'dot'; break }     # AZERTY: unshifted . key is colon.
             0x30..0x39 { "$character"; break } # AZERTY: digits are unshifted.
             0x61 { 'q'; break }
@@ -316,6 +317,12 @@ try {
         Add-Content -LiteralPath $log -Value 'LogOS vNext: fetch proof PASS'
         Write-Host 'Fetch persistence proof PASS'
         return
+    }
+    if (-not (Wait-ProofMarker 'LogOS vNext: Atrium IPC topology ready' $TimeoutSeconds)) {
+        throw 'Atrium IPC topology was not admitted.'
+    }
+    if (-not (Wait-ProofMarker 'LogOS vNext: Atrium and LockScreen tasks admitted' $TimeoutSeconds)) {
+        throw 'Atrium/LockScreen task startup was not admitted.'
     }
     if ($interactiveMode) {
         Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofBefore } } | Out-Null

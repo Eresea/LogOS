@@ -15,9 +15,10 @@ mod generated_register_ui {
 use core::{mem, ptr};
 
 use logos_abi::{
-    GUI_DRAW_FLAG_MORE, GuiDrawBatch, GuiDrawCommand, GuiRect, GuiSessionContext, InputMessage,
-    IpcBytes, IpcStatus, MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_TEXT_BYTES, MessageKind, SurfaceHandle,
-    UserRequest, UserResponse,
+    AtriumControl, AtriumControlOperation, GUI_DRAW_FLAG_MORE, GuiDrawBatch, GuiDrawCommand,
+    GuiRect, GuiSessionContext, InputMessage, IpcBytes, IpcStatus, MAX_GUI_BATCH_FRAGMENTS,
+    MAX_GUI_TEXT_BYTES, MessageKind, SurfaceHandle, UserOperation, UserRequest, UserResponse,
+    UserStatus,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -25,12 +26,6 @@ const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_nam
     b"input",
     core::mem::size_of::<InputMessage>(),
     logos_abi::IpcRights::Receive,
-);
-const TERMINAL_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
-    logos_abi::IPC_CONTRACT_GUI_INPUT,
-    b"terminal",
-    core::mem::size_of::<InputMessage>(),
-    logos_abi::IpcRights::Send,
 );
 const DISPLAY_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_DRAW,
@@ -56,6 +51,30 @@ const USER_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contr
     mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
+const ATRIUM_CONTROL_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_ATRIUM_CONTROL,
+    b"atrium",
+    mem::size_of::<AtriumControl>(),
+    logos_abi::IpcRights::Receive,
+);
+const ATRIUM_CONTEXT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_GUI_SESSION,
+    b"atrium",
+    mem::size_of::<GuiSessionContext>(),
+    logos_abi::IpcRights::Send,
+);
+const LOCKSCREEN_REQUEST_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_GUI_USER_REQUEST,
+    b"lockscreen",
+    mem::size_of::<UserRequest>(),
+    logos_abi::IpcRights::Receive,
+);
+const LOCKSCREEN_RESPONSE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_GUI_USER_RESPONSE,
+    b"lockscreen",
+    mem::size_of::<UserResponse>(),
+    logos_abi::IpcRights::Send,
+);
 
 static mut SHELL: logos_shell::Shell = logos_shell::Shell::new();
 static mut LOCKSCREEN: logos_lockscreen::LockScreen = logos_lockscreen::LockScreen::new();
@@ -63,37 +82,10 @@ static mut LOGIN_PAGE: Option<logos_ui_compiler::UiBuild> = None;
 static mut REGISTER_PAGE: Option<logos_ui_compiler::UiBuild> = None;
 static mut LOGIN_LAYOUT: Option<logos_shell::LoginLayout> = None;
 static mut REGISTER_LAYOUT: Option<logos_shell::LoginLayout> = None;
-static mut LOGIN_REACTIVE: logos_shell::LoginUiReactive = logos_shell::LoginUiReactive::new();
-static mut REGISTER_REACTIVE: logos_shell::LoginUiReactive = logos_shell::LoginUiReactive::new();
 
 struct ShellPages<'a> {
     login: (&'a logos_ui_compiler::UiBuild, &'a logos_shell::LoginLayout),
     register: (&'a logos_ui_compiler::UiBuild, &'a logos_shell::LoginLayout),
-}
-
-fn sync_login_reactive(
-    reactive: &mut logos_shell::LoginUiReactive,
-    lockscreen: &logos_lockscreen::LockScreen,
-) -> bool {
-    let (username, password) = lockscreen.credentials();
-    let Some(username) = logos_ui::UiText::from_bytes(username) else { return false };
-    let Some(password) = logos_ui::UiText::from_bytes(password) else { return false };
-    let Some(confirmation) = logos_ui::UiText::from_bytes(lockscreen.confirmation()) else {
-        return false;
-    };
-    let _ = reactive.set_username(username);
-    let _ = reactive.set_password(password);
-    let _ = reactive.set_confirmation(confirmation);
-    let _ = reactive.set_state(
-        logos_shell::LoginUiState::new(
-            lockscreen.mode() == logos_lockscreen::LockScreenMode::Claim,
-            lockscreen.failure(),
-        ),
-        lockscreen.form().can_submit(),
-    );
-    let committed = reactive.commit(|_| true).unwrap_or(0);
-    let _ = reactive.take_refresh();
-    committed != 0
 }
 
 fn send_current_surface(
@@ -431,10 +423,6 @@ pub extern "C" fn _start() -> ! {
         Ok(value) => value,
         Err(_) => common::idle(),
     };
-    let terminal = match common::capability_handle(TERMINAL_CAPABILITY) {
-        Ok(value) => value,
-        Err(_) => common::idle(),
-    };
     let display = match common::capability_handle(DISPLAY_CAPABILITY) {
         Ok(value) => value,
         Err(_) => common::idle(),
@@ -448,6 +436,22 @@ pub extern "C" fn _start() -> ! {
         Err(_) => common::idle(),
     };
     let user_receive = match common::capability_handle(USER_RECEIVE_CAPABILITY) {
+        Ok(value) => value,
+        Err(_) => common::idle(),
+    };
+    let atrium_control = match common::capability_handle(ATRIUM_CONTROL_CAPABILITY) {
+        Ok(value) => value,
+        Err(_) => common::idle(),
+    };
+    let atrium_context = match common::capability_handle(ATRIUM_CONTEXT_CAPABILITY) {
+        Ok(value) => value,
+        Err(_) => common::idle(),
+    };
+    let lockscreen_request = match common::capability_handle(LOCKSCREEN_REQUEST_CAPABILITY) {
+        Ok(value) => value,
+        Err(_) => common::idle(),
+    };
+    let lockscreen_response = match common::capability_handle(LOCKSCREEN_RESPONSE_CAPABILITY) {
         Ok(value) => value,
         Err(_) => common::idle(),
     };
@@ -474,16 +478,6 @@ pub extern "C" fn _start() -> ! {
     unsafe {
         ptr::write(core::ptr::addr_of_mut!(LOGIN_LAYOUT), Some(login_layout));
         ptr::write(core::ptr::addr_of_mut!(REGISTER_LAYOUT), Some(register_layout));
-        ptr::write(core::ptr::addr_of_mut!(LOGIN_REACTIVE), logos_shell::LoginUiReactive::new());
-        ptr::write(core::ptr::addr_of_mut!(REGISTER_REACTIVE), logos_shell::LoginUiReactive::new());
-        let _ = (*core::ptr::addr_of_mut!(LOGIN_REACTIVE)).bind(
-            logos_shell::LoginUiTargets::from_build(login_page)
-                .unwrap_or(logos_shell::LoginUiTargets::EMPTY),
-        );
-        let _ = (*core::ptr::addr_of_mut!(REGISTER_REACTIVE)).bind(
-            logos_shell::LoginUiTargets::from_build(register_page)
-                .unwrap_or(logos_shell::LoginUiTargets::EMPTY),
-        );
     }
     let login_layout = unsafe { (*core::ptr::addr_of!(LOGIN_LAYOUT)).as_ref() }.unwrap();
     let register_layout = unsafe { (*core::ptr::addr_of!(REGISTER_LAYOUT)).as_ref() }.unwrap();
@@ -501,23 +495,22 @@ pub extern "C" fn _start() -> ! {
     );
     let context = GuiSessionContext::EMPTY;
     let _ = common::ipc_send_handle(flow, &context);
+    let _ = common::ipc_send_handle(atrium_context, &context);
     let mut pending_user: Option<IpcBytes> = None;
+    let mut pending_lock_request: Option<UserRequest> = None;
     let mut response = IpcBytes::empty(MessageKind::UserResponse);
+    let mut lock_request = UserRequest::new(UserOperation::Login, 1);
+    let mut atrium_command = AtriumControl::new(AtriumControlOperation::Reset, 1);
     let mut message =
         InputMessage::key(logos_abi::KeyCode::Unknown, logos_abi::KeyState::Released, 0);
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
-        while common::ipc_receive_handle(input, &mut message) == IpcStatus::Ok {
-            if shell.focus() == logos_shell::ShellFocus::Terminal {
-                let _ = common::ipc_send_handle(terminal, &message);
-                continue;
-            }
-            let lockscreen = unsafe { &mut *core::ptr::addr_of_mut!(LOCKSCREEN) };
-            let action = lockscreen.input(message);
-            if let logos_lockscreen::LockScreenAction::Submit(operation) = action {
-                let (name, password) = lockscreen.credentials();
-                if let Ok(mut request) = shell.begin_user_request(operation, name, password) {
+        while common::ipc_receive_handle(atrium_control, &mut atrium_command) == IpcStatus::Ok {
+            if atrium_command.operation == AtriumControlOperation::Logout && pending_user.is_none()
+            {
+                if let Ok(mut request) = shell.logout() {
+                    let _ = common::ipc_send_handle(atrium_context, &GuiSessionContext::EMPTY);
                     let bytes = unsafe {
                         core::slice::from_raw_parts(
                             (&request as *const UserRequest).cast::<u8>(),
@@ -526,33 +519,35 @@ pub extern "C" fn _start() -> ! {
                     };
                     pending_user = IpcBytes::from_bytes(MessageKind::UserRequest, bytes);
                     logos_shell::Shell::acknowledge_sent(&mut request);
-                    lockscreen.clear_password();
-                } else {
-                    lockscreen.cancel_submission();
                 }
             }
-            let reactive_changed = unsafe {
-                if lockscreen.mode() == logos_lockscreen::LockScreenMode::Claim {
-                    sync_login_reactive(
-                        &mut *core::ptr::addr_of_mut!(REGISTER_REACTIVE),
-                        lockscreen,
+        }
+        while common::ipc_receive_handle(lockscreen_request, &mut lock_request) == IpcStatus::Ok {
+            if pending_user.is_some()
+                || pending_lock_request.is_some()
+                || !lock_request.is_valid()
+                || !matches!(lock_request.operation, UserOperation::Claim | UserOperation::Login)
+            {
+                continue;
+            }
+            let name = &lock_request.name[..lock_request.name_len as usize];
+            let password = &lock_request.password[..lock_request.password_len as usize];
+            if let Ok(mut request) =
+                shell.begin_user_request(lock_request.operation, name, password)
+            {
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        (&request as *const UserRequest).cast::<u8>(),
+                        mem::size_of::<UserRequest>(),
                     )
-                } else {
-                    sync_login_reactive(&mut *core::ptr::addr_of_mut!(LOGIN_REACTIVE), lockscreen)
-                }
-            };
-            if action != logos_lockscreen::LockScreenAction::Ignored || reactive_changed {
-                send_current_surface(
-                    display,
-                    ShellPages {
-                        login: (login_page, login_layout),
-                        register: (register_page, register_layout),
-                    },
-                    lockscreen,
-                    &mut surface_sequence,
-                    true,
-                );
+                };
+                pending_user = IpcBytes::from_bytes(MessageKind::UserRequest, bytes);
+                pending_lock_request = Some(lock_request);
+                logos_shell::Shell::acknowledge_sent(&mut request);
             }
+        }
+        while common::ipc_receive_handle(input, &mut message) == IpcStatus::Ok {
+            // Atrium routes locked input to the standalone LockScreen image.
         }
         if let Some(request) = pending_user {
             match common::ipc_send_handle(user_send, &request) {
@@ -566,34 +561,36 @@ pub extern "C" fn _start() -> ! {
                 response.as_bytes().filter(|bytes| bytes.len() == mem::size_of::<UserResponse>())
             {
                 let result: UserResponse = unsafe { ptr::read_unaligned(bytes.as_ptr().cast()) };
-                if shell.apply_user_response(result).is_ok() {
+                let applied = shell.apply_user_response(result);
+                if let Some(request) = pending_lock_request.take() {
+                    let status = if applied.is_ok() { result.status } else { UserStatus::Stale };
+                    let mut lock_response = UserResponse::new(request, status);
+                    if status == UserStatus::Ok {
+                        lock_response.user = result.user;
+                        lock_response.role = result.role;
+                        lock_response.session = result.session;
+                        lock_response.capability = result.capability;
+                        lock_response.root = result.root;
+                        lock_response.rights = result.rights;
+                    }
+                    let _ = common::ipc_send_handle(lockscreen_response, &lock_response);
+                }
+                if applied.is_ok() {
                     let context = shell.context();
                     let _ = common::ipc_send_handle(flow, &context);
-                    let lockscreen = unsafe { &mut *core::ptr::addr_of_mut!(LOCKSCREEN) };
-                    lockscreen.apply_status(result.status);
-                    unsafe {
-                        let reactive =
-                            if lockscreen.mode() == logos_lockscreen::LockScreenMode::Claim {
-                                &mut *core::ptr::addr_of_mut!(REGISTER_REACTIVE)
-                            } else {
-                                &mut *core::ptr::addr_of_mut!(LOGIN_REACTIVE)
-                            };
-                        let _ = sync_login_reactive(reactive, lockscreen);
-                    }
-                    send_current_surface(
-                        display,
-                        ShellPages {
-                            login: (login_page, login_layout),
-                            register: (register_page, register_layout),
-                        },
-                        lockscreen,
-                        &mut surface_sequence,
-                        shell.focus() == logos_shell::ShellFocus::LockScreen,
-                    );
+                    let _ = common::ipc_send_handle(atrium_context, &context);
                 }
             }
         }
-        common::wait_on_capabilities(&[input, user_send, user_receive]);
+        common::wait_on_capabilities(&[
+            input,
+            user_send,
+            user_receive,
+            atrium_control,
+            atrium_context,
+            lockscreen_request,
+            lockscreen_response,
+        ]);
     }
 }
 

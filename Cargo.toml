@@ -22,6 +22,7 @@ members = [
     "services/fetch",
     "services/shell",
     "services/lockscreen",
+    "services/atrium",
     "services/images",
     "ui",
     "ui-forms",

@@ -882,6 +882,8 @@ impl ServiceRuntime {
         self.dynamic_events = Some(events);
         self.package_capability = package_capability;
         #[cfg(feature = "qemu-proof")]
+        crate::arch_proof_line(b"LogOS vNext: Atrium IPC topology ready");
+        #[cfg(feature = "qemu-proof")]
         crate::proof::dynamic_ipc_ready();
         Ok(())
     }
@@ -985,6 +987,7 @@ impl ServiceRuntime {
                 ServiceId::Fetch => b"LogOS vNext: load Fetch",
                 ServiceId::Shell => b"LogOS vNext: load Shell",
                 ServiceId::LockScreen => b"LogOS vNext: load LockScreen",
+                ServiceId::Atrium => b"LogOS vNext: load Atrium",
             });
             let service_handle = self.runtime_service_handle(service)?;
             let uses_prepared = self.prepared_packages[index]
@@ -1646,6 +1649,12 @@ impl ServiceRuntime {
                 continue;
             }
             self.start_service_task(service)?;
+        }
+        #[cfg(feature = "qemu-proof")]
+        if self.tasks.get(ServiceId::Atrium.index()).and_then(Option::as_ref).is_some()
+            && self.tasks.get(ServiceId::LockScreen.index()).and_then(Option::as_ref).is_some()
+        {
+            crate::arch_proof_line(b"LogOS vNext: Atrium and LockScreen tasks admitted");
         }
         self.supervisor.clear_startup_grace();
         Ok(())

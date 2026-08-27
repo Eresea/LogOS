@@ -201,6 +201,22 @@ impl GuiSurfaceRegistry {
         self.add_damage(self.slots[index].bounds)
     }
 
+    pub fn set_bounds(
+        &mut self,
+        owner: u32,
+        handle: SurfaceHandle,
+        bounds: GuiRect,
+    ) -> Result<(), GuiRegistryError> {
+        if bounds.is_empty() {
+            return Err(GuiRegistryError::InvalidRequest);
+        }
+        let index = self.authorized_index(owner, handle)?;
+        let old = self.slots[index].bounds;
+        self.slots[index].bounds = bounds;
+        self.add_damage(old)?;
+        self.add_damage(bounds)
+    }
+
     pub fn destroy(&mut self, owner: u32, handle: SurfaceHandle) -> Result<(), GuiRegistryError> {
         let index = self.authorized_index(owner, handle)?;
         let bounds = self.slots[index].bounds;
@@ -658,6 +674,21 @@ mod tests {
         assert_eq!(registry.destroy(8, root), Err(GuiRegistryError::Unauthorized));
         let stale = SurfaceHandle { generation: root.generation.wrapping_add(1), ..root };
         assert_eq!(registry.destroy(7, stale), Err(GuiRegistryError::Stale));
+    }
+
+    #[test]
+    fn bounds_updates_damage_old_and_new_geometry() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 10, 10)))
+            .unwrap()
+            .surface;
+        registry.take_damage();
+        registry.set_bounds(7, root, GuiRect::new(10, 10, 20, 20)).unwrap();
+        let (damage, count) = registry.take_damage();
+        assert_eq!(count, 1);
+        assert!(damage[0].contains(1, 1));
+        assert!(damage[0].contains(20, 20));
     }
 
     #[test]

@@ -29,6 +29,7 @@ logos-shell = { path = "../shell" }
 logos-ui-compiler = { path = "../../ui-compiler" }
 logos-ui = { path = "../../ui" }
 logos-lockscreen = { path = "../lockscreen" }
+logos-atrium = { path = "../atrium" }
 
 [build-dependencies]
 logos-ui-compiler = { path = "../../ui-compiler" }
@@ -102,5 +103,11 @@ bench = false
 [[bin]]
 name = "logos-lockscreen"
 path = "src/lockscreen.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "logos-atrium"
+path = "src/atrium.rs"
 test = false
 bench = false

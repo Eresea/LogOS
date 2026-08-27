@@ -578,6 +578,7 @@ pub struct Shell {
     focus: ShellFocus,
     context: GuiSessionContext,
     pending_request: u32,
+    pending_logout: bool,
     next_request: u32,
     retries: u8,
     restart_generation: u16,
@@ -590,6 +591,7 @@ impl Shell {
             focus: ShellFocus::LockScreen,
             context: GuiSessionContext::EMPTY,
             pending_request: 0,
+            pending_logout: false,
             next_request: 1,
             retries: 0,
             restart_generation: 1,
@@ -641,6 +643,7 @@ impl Shell {
             return Err(ShellError::InvalidRequest);
         }
         self.pending_request = request_id;
+        self.pending_logout = false;
         self.phase = if operation == UserOperation::Claim {
             ShellPhase::ClaimPending
         } else {
@@ -658,6 +661,14 @@ impl Shell {
         if response.request_id != self.pending_request || self.pending_request == 0 {
             self.clear_context();
             return Err(ShellError::Stale);
+        }
+        if self.pending_logout {
+            self.pending_request = 0;
+            self.pending_logout = false;
+            self.clear_context();
+            self.phase = ShellPhase::Locked;
+            self.focus = ShellFocus::LockScreen;
+            return Ok(());
         }
         self.pending_request = 0;
         match response.status {
@@ -713,6 +724,7 @@ impl Shell {
         let mut request = UserRequest::new(UserOperation::Logout, request_id);
         request.session = context.session;
         self.pending_request = request_id;
+        self.pending_logout = true;
         self.clear_context();
         self.phase = ShellPhase::Locked;
         self.focus = ShellFocus::LockScreen;
@@ -722,6 +734,7 @@ impl Shell {
     pub fn restart(&mut self) {
         self.restart_generation = self.restart_generation.wrapping_add(1).max(1);
         self.pending_request = 0;
+        self.pending_logout = false;
         self.clear_context();
         self.phase = ShellPhase::Locked;
         self.focus = ShellFocus::LockScreen;
@@ -783,7 +796,10 @@ mod tests {
         shell.apply_user_response(response(request, UserStatus::Ok)).unwrap();
         let logout = shell.logout().unwrap();
         assert!(shell.context().is_clear());
-        shell.apply_user_response(response(logout, UserStatus::Stale)).unwrap();
+        shell.apply_user_response(response(logout, UserStatus::Ok)).unwrap();
+        assert_eq!(shell.phase(), ShellPhase::Locked);
+        assert_eq!(shell.focus(), ShellFocus::LockScreen);
+        shell.apply_user_response(response(logout, UserStatus::Stale)).unwrap_err();
         shell.restart();
         assert_eq!(shell.phase(), ShellPhase::Locked);
         assert!(shell.context().is_clear());

@@ -51,7 +51,7 @@ pub enum ServiceImageError {
     InvalidElf(ProcessError),
 }
 
-pub const SERVICE_IMAGES: [ServiceImageSpec; 12] = [
+pub const SERVICE_IMAGES: [ServiceImageSpec; 13] = [
     ServiceImageSpec::new(ServiceId::Input, b"input", b"\\EFI\\LOGOS\\INPUT.ELF", &[]),
     ServiceImageSpec::new(ServiceId::Display, b"display", b"\\EFI\\LOGOS\\DISPLAY.ELF", &[]),
     ServiceImageSpec::new(
@@ -105,9 +105,21 @@ pub const SERVICE_IMAGES: [ServiceImageSpec; 12] = [
         b"\\EFI\\LOGOS\\LOCKSCREEN.ELF",
         &[ServiceId::Shell, ServiceId::Display],
     ),
+    ServiceImageSpec::new(
+        ServiceId::Atrium,
+        b"atrium",
+        b"\\EFI\\LOGOS\\ATRIUM.ELF",
+        &[
+            ServiceId::Input,
+            ServiceId::Display,
+            ServiceId::Shell,
+            ServiceId::LockScreen,
+            ServiceId::Terminal,
+        ],
+    ),
 ];
 
-pub const SERVICE_START_ORDER: [ServiceId; 12] = [
+pub const SERVICE_START_ORDER: [ServiceId; 13] = [
     ServiceId::Input,
     ServiceId::Display,
     ServiceId::Terminal,
@@ -120,6 +132,7 @@ pub const SERVICE_START_ORDER: [ServiceId; 12] = [
     ServiceId::Fetch,
     ServiceId::Shell,
     ServiceId::LockScreen,
+    ServiceId::Atrium,
 ];
 
 pub const fn service_image(service: ServiceId) -> ServiceImageSpec {
@@ -178,7 +191,7 @@ mod tests {
 
     #[test]
     fn manifest_is_fixed_and_dependencies_are_explicit() {
-        assert_eq!(SERVICE_IMAGES.len(), 12);
+        assert_eq!(SERVICE_IMAGES.len(), 13);
         assert_eq!(SERVICE_IMAGES[0].service(), ServiceId::Input);
         assert_eq!(SERVICE_IMAGES[1].service(), ServiceId::Display);
         assert_eq!(SERVICE_IMAGES[2].service(), ServiceId::Terminal);
@@ -199,6 +212,7 @@ mod tests {
         assert_eq!(SERVICE_IMAGES[9].dependencies(), &[ServiceId::Storage]);
         assert_eq!(SERVICE_IMAGES[10].service(), ServiceId::Shell);
         assert_eq!(SERVICE_IMAGES[11].service(), ServiceId::LockScreen);
+        assert_eq!(SERVICE_IMAGES[12].service(), ServiceId::Atrium);
         assert_eq!(service_image(ServiceId::Display).path(), b"\\EFI\\LOGOS\\DISPLAY.ELF");
     }
 

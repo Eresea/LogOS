@@ -11,6 +11,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
 };
 
+mod atrium;
 mod device_api;
 mod graphics;
 mod package_ipc;
@@ -19,6 +20,9 @@ mod service_manager;
 mod storage_api;
 mod user_api;
 
+pub use atrium::{
+    AtriumApp, AtriumControl, AtriumControlOperation, AtriumControlResponse, AtriumSection,
+};
 pub use device_api::{
     DEVICE_ABI_VERSION, DeviceKind, DeviceOperation, DeviceRecord, DeviceRequest, DeviceResponse,
     DeviceState, DeviceStatus, MAX_DEVICES,
@@ -141,7 +145,7 @@ pub const PROGRAM_EXIT_SYSCALL: usize = 14;
 pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
-pub const IPC_ENDPOINT_COUNT: usize = 41;
+pub const IPC_ENDPOINT_COUNT: usize = 56;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -187,6 +191,7 @@ pub enum ServiceId {
     User = 10,
     Shell = 11,
     LockScreen = 12,
+    Atrium = 13,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -727,6 +732,7 @@ impl ServiceId {
             Self::User => 9,
             Self::Shell => 10,
             Self::LockScreen => 11,
+            Self::Atrium => 12,
         }
     }
 
@@ -744,6 +750,7 @@ impl ServiceId {
             9 => Some(Self::User),
             10 => Some(Self::Shell),
             11 => Some(Self::LockScreen),
+            12 => Some(Self::Atrium),
             _ => None,
         }
     }
@@ -794,6 +801,21 @@ pub enum IpcEndpointId {
     UserToShell = 38,
     ShellToFlow = 39,
     FlowToShell = 40,
+    InputToAtrium = 41,
+    AtriumToTerminal = 42,
+    AtriumToLockScreen = 43,
+    LockScreenToAtrium = 44,
+    AtriumToShell = 45,
+    ShellToAtrium = 46,
+    AtriumToDisplay = 47,
+    AtriumToDisplayControl = 48,
+    DisplayToAtrium = 49,
+    LockScreenToDisplay = 50,
+    LockScreenToDisplayControl = 51,
+    DisplayToLockScreen = 52,
+    AtriumToLockScreenControl = 53,
+    LockScreenToShellAuth = 54,
+    ShellToLockScreenAuth = 55,
 }
 
 impl IpcEndpointId {
@@ -846,6 +868,21 @@ impl IpcEndpointId {
             38 => Some(Self::UserToShell),
             39 => Some(Self::ShellToFlow),
             40 => Some(Self::FlowToShell),
+            41 => Some(Self::InputToAtrium),
+            42 => Some(Self::AtriumToTerminal),
+            43 => Some(Self::AtriumToLockScreen),
+            44 => Some(Self::LockScreenToAtrium),
+            45 => Some(Self::AtriumToShell),
+            46 => Some(Self::ShellToAtrium),
+            47 => Some(Self::AtriumToDisplay),
+            48 => Some(Self::AtriumToDisplayControl),
+            49 => Some(Self::DisplayToAtrium),
+            50 => Some(Self::LockScreenToDisplay),
+            51 => Some(Self::LockScreenToDisplayControl),
+            52 => Some(Self::DisplayToLockScreen),
+            53 => Some(Self::AtriumToLockScreenControl),
+            54 => Some(Self::LockScreenToShellAuth),
+            55 => Some(Self::ShellToLockScreenAuth),
             _ => None,
         }
     }
@@ -882,6 +919,20 @@ impl IpcEndpointId {
             Self::LockScreenToShell => ServiceId::LockScreen,
             Self::UserToShell => ServiceId::User,
             Self::FlowToShell => ServiceId::Flow,
+            Self::InputToAtrium => ServiceId::Input,
+            Self::AtriumToTerminal
+            | Self::AtriumToLockScreen
+            | Self::AtriumToShell
+            | Self::AtriumToDisplay
+            | Self::AtriumToDisplayControl => ServiceId::Atrium,
+            Self::LockScreenToAtrium => ServiceId::LockScreen,
+            Self::ShellToAtrium => ServiceId::Shell,
+            Self::DisplayToAtrium => ServiceId::Display,
+            Self::LockScreenToDisplay | Self::LockScreenToDisplayControl => ServiceId::LockScreen,
+            Self::DisplayToLockScreen => ServiceId::Display,
+            Self::AtriumToLockScreenControl => ServiceId::Atrium,
+            Self::LockScreenToShellAuth => ServiceId::LockScreen,
+            Self::ShellToLockScreenAuth => ServiceId::Shell,
         }
     }
 
@@ -917,6 +968,19 @@ impl IpcEndpointId {
             Self::ShellToLockScreen => ServiceId::LockScreen,
             Self::ShellToUser => ServiceId::User,
             Self::ShellToFlow => ServiceId::Flow,
+            Self::InputToAtrium => ServiceId::Atrium,
+            Self::AtriumToTerminal => ServiceId::Terminal,
+            Self::AtriumToLockScreen => ServiceId::LockScreen,
+            Self::LockScreenToAtrium => ServiceId::Atrium,
+            Self::AtriumToShell => ServiceId::Shell,
+            Self::ShellToAtrium => ServiceId::Atrium,
+            Self::AtriumToDisplay | Self::AtriumToDisplayControl => ServiceId::Display,
+            Self::DisplayToAtrium => ServiceId::Atrium,
+            Self::LockScreenToDisplay | Self::LockScreenToDisplayControl => ServiceId::Display,
+            Self::DisplayToLockScreen => ServiceId::LockScreen,
+            Self::AtriumToLockScreenControl => ServiceId::LockScreen,
+            Self::LockScreenToShellAuth => ServiceId::Shell,
+            Self::ShellToLockScreenAuth => ServiceId::LockScreen,
         }
     }
 }
@@ -1217,6 +1281,7 @@ pub const IPC_CONTRACT_GUI_SESSION: u16 = 16;
 pub const IPC_CONTRACT_GUI_INPUT: u16 = 17;
 pub const IPC_CONTRACT_GUI_USER_REQUEST: u16 = 18;
 pub const IPC_CONTRACT_GUI_USER_RESPONSE: u16 = 19;
+pub const IPC_CONTRACT_ATRIUM_CONTROL: u16 = 20;
 
 /// Stable typed contract identifier for an endpoint's wire payload.
 ///
@@ -1276,6 +1341,46 @@ pub const fn ipc_contract_id(endpoint: usize) -> Option<u16> {
     if endpoint == IpcEndpointId::UserToShell as usize {
         return Some(IPC_CONTRACT_GUI_USER_RESPONSE);
     }
+    if endpoint == IpcEndpointId::InputToAtrium as usize
+        || endpoint == IpcEndpointId::AtriumToTerminal as usize
+        || endpoint == IpcEndpointId::AtriumToLockScreen as usize
+    {
+        return Some(IPC_CONTRACT_GUI_INPUT);
+    }
+    if endpoint == IpcEndpointId::LockScreenToAtrium as usize {
+        return Some(IPC_CONTRACT_GUI_HOOK);
+    }
+    if endpoint == IpcEndpointId::AtriumToShell as usize {
+        return Some(IPC_CONTRACT_ATRIUM_CONTROL);
+    }
+    if endpoint == IpcEndpointId::ShellToAtrium as usize {
+        return Some(IPC_CONTRACT_GUI_SESSION);
+    }
+    if endpoint == IpcEndpointId::AtriumToDisplay as usize {
+        return Some(IPC_CONTRACT_GUI_DRAW);
+    }
+    if endpoint == IpcEndpointId::AtriumToDisplayControl as usize
+        || endpoint == IpcEndpointId::DisplayToAtrium as usize
+    {
+        return Some(IPC_CONTRACT_GUI_SURFACE);
+    }
+    if endpoint == IpcEndpointId::LockScreenToDisplay as usize {
+        return Some(IPC_CONTRACT_GUI_DRAW);
+    }
+    if endpoint == IpcEndpointId::LockScreenToDisplayControl as usize
+        || endpoint == IpcEndpointId::DisplayToLockScreen as usize
+    {
+        return Some(IPC_CONTRACT_GUI_SURFACE);
+    }
+    if endpoint == IpcEndpointId::AtriumToLockScreenControl as usize {
+        return Some(IPC_CONTRACT_GUI_HOOK);
+    }
+    if endpoint == IpcEndpointId::LockScreenToShellAuth as usize {
+        return Some(IPC_CONTRACT_GUI_USER_REQUEST);
+    }
+    if endpoint == IpcEndpointId::ShellToLockScreenAuth as usize {
+        return Some(IPC_CONTRACT_GUI_USER_RESPONSE);
+    }
     match ipc_message_type(endpoint) {
         Some(IpcMessageType::Input) => Some(IPC_CONTRACT_INPUT),
         Some(IpcMessageType::Render) => Some(IPC_CONTRACT_RENDER),
@@ -1289,6 +1394,13 @@ pub const fn ipc_contract_id(endpoint: usize) -> Option<u16> {
 
 pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
     match endpoint {
+        50 => Some(IpcMessageType::Gui),
+        51..=55 => Some(IpcMessageType::Bytes),
+        41..=43 => Some(IpcMessageType::Input),
+        44 | 45 => Some(IpcMessageType::Bytes),
+        46 => Some(IpcMessageType::SessionContext),
+        47 => Some(IpcMessageType::Gui),
+        48 | 49 => Some(IpcMessageType::Bytes),
         0 => Some(IpcMessageType::Input),
         1 => Some(IpcMessageType::Render),
         2..=5 | 8..=9 | 12..=19 | 24..=25 => Some(IpcMessageType::Bytes),
@@ -1303,6 +1415,48 @@ pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
 }
 
 pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
+    if endpoint == IpcEndpointId::InputToAtrium as usize
+        || endpoint == IpcEndpointId::AtriumToTerminal as usize
+        || endpoint == IpcEndpointId::AtriumToLockScreen as usize
+    {
+        return Some(core::mem::size_of::<InputMessage>());
+    }
+    if endpoint == IpcEndpointId::LockScreenToAtrium as usize {
+        return Some(core::mem::size_of::<GuiHook>());
+    }
+    if endpoint == IpcEndpointId::AtriumToShell as usize {
+        return Some(core::mem::size_of::<AtriumControl>());
+    }
+    if endpoint == IpcEndpointId::ShellToAtrium as usize {
+        return Some(core::mem::size_of::<GuiSessionContext>());
+    }
+    if endpoint == IpcEndpointId::AtriumToDisplay as usize {
+        return Some(core::mem::size_of::<GuiDrawBatch>());
+    }
+    if endpoint == IpcEndpointId::AtriumToDisplayControl as usize {
+        return Some(core::mem::size_of::<GuiSurfaceRequest>());
+    }
+    if endpoint == IpcEndpointId::DisplayToAtrium as usize {
+        return Some(core::mem::size_of::<GuiSurfaceResponse>());
+    }
+    if endpoint == IpcEndpointId::LockScreenToDisplay as usize {
+        return Some(core::mem::size_of::<GuiDrawBatch>());
+    }
+    if endpoint == IpcEndpointId::LockScreenToDisplayControl as usize {
+        return Some(core::mem::size_of::<GuiSurfaceRequest>());
+    }
+    if endpoint == IpcEndpointId::DisplayToLockScreen as usize {
+        return Some(core::mem::size_of::<GuiSurfaceResponse>());
+    }
+    if endpoint == IpcEndpointId::AtriumToLockScreenControl as usize {
+        return Some(core::mem::size_of::<GuiHook>());
+    }
+    if endpoint == IpcEndpointId::LockScreenToShellAuth as usize {
+        return Some(core::mem::size_of::<UserRequest>());
+    }
+    if endpoint == IpcEndpointId::ShellToLockScreenAuth as usize {
+        return Some(core::mem::size_of::<UserResponse>());
+    }
     if endpoint == IpcEndpointId::StorageToCore as usize {
         return Some(core::mem::size_of::<StorageRequest>());
     }
@@ -2050,6 +2204,31 @@ mod tests {
     }
 
     #[test]
+    fn lockscreen_auth_and_display_endpoints_are_typed_and_directional() {
+        assert_eq!(IPC_ENDPOINT_COUNT, 56);
+        assert_eq!(IpcEndpointId::LockScreenToShellAuth.producer(), ServiceId::LockScreen);
+        assert_eq!(IpcEndpointId::LockScreenToShellAuth.consumer(), ServiceId::Shell);
+        assert_eq!(IpcEndpointId::ShellToLockScreenAuth.producer(), ServiceId::Shell);
+        assert_eq!(IpcEndpointId::ShellToLockScreenAuth.consumer(), ServiceId::LockScreen);
+        assert_eq!(
+            ipc_message_size(IpcEndpointId::LockScreenToShellAuth as usize),
+            Some(core::mem::size_of::<UserRequest>())
+        );
+        assert_eq!(
+            ipc_message_size(IpcEndpointId::ShellToLockScreenAuth as usize),
+            Some(core::mem::size_of::<UserResponse>())
+        );
+        assert_eq!(
+            ipc_contract_id(IpcEndpointId::AtriumToLockScreenControl as usize),
+            Some(IPC_CONTRACT_GUI_HOOK)
+        );
+        assert_eq!(
+            ipc_contract_id(IpcEndpointId::LockScreenToDisplay as usize),
+            Some(IPC_CONTRACT_GUI_DRAW)
+        );
+    }
+
+    #[test]
     fn flow_fetch_body_chunks_are_bounded_and_correlated() {
         let chunk = FetchBodyChunk::new(7, 240, &[b'x'; FETCH_BODY_CHUNK_BYTES]).unwrap();
         assert!(chunk.is_valid());
@@ -2134,7 +2313,10 @@ mod tests {
         assert_eq!(ipc_message_type(34), Some(IpcMessageType::Gui));
         assert_eq!(ipc_contract_id(32), Some(IPC_CONTRACT_GUI_INPUT));
         assert_eq!(ipc_contract_id(34), Some(IPC_CONTRACT_GUI_DRAW));
-        assert_eq!(ipc_contract_id(41), None);
+        assert_eq!(ipc_message_type(41), Some(IpcMessageType::Input));
+        assert_eq!(ipc_contract_id(41), Some(IPC_CONTRACT_GUI_INPUT));
+        assert_eq!(ipc_contract_id(45), Some(IPC_CONTRACT_ATRIUM_CONTROL));
+        assert_eq!(ipc_message_size(45), Some(core::mem::size_of::<AtriumControl>()));
     }
 
     #[test]

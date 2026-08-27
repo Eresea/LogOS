@@ -8,13 +8,23 @@ use logos_abi::{
     INPUT_KEYBOARD_RING_BASE, IPC_CONTRACT_GUI_INPUT, InputMessage, IpcStatus, KeyboardByteRing,
 };
 
-static mut PENDING: [Option<InputMessage>; 2] = [None, None];
+static mut PENDING: Option<InputMessage> = None;
+static mut SENT_MASK: u8 = 0;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
-    let output_capability = match common::discover_capability_contract_named(
+    let shell_output = match common::discover_capability_contract_named(
         b"shell",
+        logos_abi::IpcRights::Send,
+        IPC_CONTRACT_GUI_INPUT,
+        core::mem::size_of::<InputMessage>(),
+    ) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let atrium_output = match common::discover_capability_contract_named(
+        b"atrium",
         logos_abi::IpcRights::Send,
         IPC_CONTRACT_GUI_INPUT,
         core::mem::size_of::<InputMessage>(),
@@ -24,28 +34,33 @@ pub extern "C" fn _start() -> ! {
     };
     let keyboard = unsafe { &*(INPUT_KEYBOARD_RING_BASE as *const KeyboardByteRing) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
+    let sent_mask = unsafe { &mut *core::ptr::addr_of_mut!(SENT_MASK) };
     let mut decoder = logos_input::InputDecoder::new();
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
-        if let Some(message) = pending[0] {
-            match common::ipc_send_handle(output_capability, &message) {
-                IpcStatus::Ok => {
-                    pending[0] = pending[1];
-                    pending[1] = None;
-                }
-                IpcStatus::Full => {
-                    common::wait_on_capability(output_capability);
+        if let Some(message) = *pending {
+            for (index, capability) in [shell_output, atrium_output].into_iter().enumerate() {
+                let bit = 1 << index;
+                if *sent_mask & bit != 0 {
                     continue;
                 }
-                IpcStatus::Stale
-                | IpcStatus::Disconnected
-                | IpcStatus::Unauthorized
-                | IpcStatus::Malformed
-                | IpcStatus::Empty => {
-                    pending[0] = None;
-                    pending[1] = None;
+                match common::ipc_send_handle(capability, &message) {
+                    IpcStatus::Ok => *sent_mask |= bit,
+                    IpcStatus::Full => {
+                        common::wait_on_capability(capability);
+                        continue;
+                    }
+                    IpcStatus::Stale
+                    | IpcStatus::Disconnected
+                    | IpcStatus::Unauthorized
+                    | IpcStatus::Malformed
+                    | IpcStatus::Empty => *sent_mask |= bit,
                 }
+            }
+            if *sent_mask == 0b11 {
+                *pending = None;
+                *sent_mask = 0;
             }
             continue;
         }
@@ -56,8 +71,8 @@ pub extern "C" fn _start() -> ! {
         let Some(event) = decoder.feed(byte) else {
             continue;
         };
-        pending[0] = Some(event.terminal_message());
-        pending[1] = None;
+        *pending = Some(event.terminal_message());
+        *sent_mask = 0;
     }
 }
 

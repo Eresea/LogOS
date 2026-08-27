@@ -1,0 +1,15 @@
+[package]
+name = "logos-atrium"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[dependencies]
+logos-abi = { path = "../../abi" }
+
+[lib]
+name = "logos_atrium"
+path = "src/lib.rs"
+test = true
+bench = false

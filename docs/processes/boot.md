@@ -18,6 +18,12 @@ Boot has three owners in one direction: **UEFI → Core → Runtime**. Ownership
    firmware and does not bypass the scheduler.
 8. **The bootstrap CPU enters the scheduler.** From here, timer interrupts and explicit task actions
    drive execution.
+9. **Atrium establishes the GUI shell.** After Shell and LockScreen are available, Atrium publishes
+   the bounded Boot/Locked/Home route, creates its delegated Display surface, and starts in the
+   locked or first-boot claim section.
+10. **Authentication enters Home.** LockScreen sends a bounded User request through Shell. A valid
+    session context moves Atrium to Home and hides LockScreen; logout, restart, stale responses, and
+    reboot discard all Atrium windows and return to the locked section.
 
 ## Structural checks
 

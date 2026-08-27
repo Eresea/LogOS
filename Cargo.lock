@@ -144,6 +144,13 @@ name = "logos-abi"
 version = "0.1.0"
 
 [[package]]
+name = "logos-atrium"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
 name = "logos-device"
 version = "0.1.0"
 dependencies = [
@@ -210,6 +217,7 @@ name = "logos-service-images"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
+ "logos-atrium",
  "logos-device",
  "logos-display",
  "logos-fetch",
