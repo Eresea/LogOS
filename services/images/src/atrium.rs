@@ -6,7 +6,7 @@ mod common;
 
 use logos_abi::{
     AtriumApp, AtriumControl, AtriumControlOperation, AtriumSurfaceInput, AtriumSurfaceRequest,
-    AtriumSurfaceResponse, GuiDrawBatch, GuiDrawCommand, GuiHook, GuiHookKind, GuiRect,
+    AtriumSurfaceResponse, GuiDrawBatch, GuiDrawCommand, GuiHook, GuiHookKind, GuiRect, GuiSceneOp,
     GuiSessionContext, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, InputMessage,
     IpcStatus, KeyCode, KeyState, MessageKind, PointerState, RenderMessage, SurfaceHandle,
 };
@@ -20,7 +20,7 @@ const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_nam
 const DISPLAY_DRAW_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_DRAW,
     b"display",
-    core::mem::size_of::<GuiDrawBatch>(),
+    core::mem::size_of::<logos_abi::GuiSceneOp>(),
     logos_abi::IpcRights::Send,
 );
 const TERMINAL_RENDER_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -89,7 +89,7 @@ const SYSTEM_SURFACE_INPUT_CAPABILITY: common::CapabilitySpec = common::capabili
 const SYSTEM_SURFACE_DRAW_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_DRAW,
     b"system",
-    core::mem::size_of::<GuiDrawBatch>(),
+    core::mem::size_of::<logos_abi::GuiSceneOp>(),
     logos_abi::IpcRights::Receive,
 );
 const SHELL_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -117,6 +117,9 @@ const LOCKSCREEN_CONTROL_CAPABILITY: common::CapabilitySpec = common::capability
     logos_abi::IpcRights::Send,
 );
 const MAX_PENDING_SURFACE_COMMANDS: usize = logos_atrium::MAX_ATRIUM_SURFACES * 2;
+const CURSOR_BOUNDS: GuiRect = GuiRect::new(0, 0, 640, 400);
+const CURSOR_WIDTH: u32 = 12;
+const CURSOR_HEIGHT: u32 = 18;
 
 #[derive(Clone, Copy)]
 struct ProgramSurfaceCapabilities {
@@ -157,7 +160,7 @@ fn draw_home(
     let _ = batch.push(GuiDrawCommand::fill_surface(0x101820));
     let _ = batch.push(GuiDrawCommand::fill_rect(GuiRect::new(0, 0, 180, 400), 0x182535));
     push_text(&mut batch, 24, 24, 0xffffff, b"LogOS Atrium");
-    let _ = common::ipc_send_handle(display, &batch);
+    let _ = common::ipc_send_scene_batch(display, &batch, 1);
 
     let mut navigation = GuiDrawBatch::new(surface, sequence, GuiRect::new(0, 48, 180, 112));
     navigation.flags = logos_abi::GUI_DRAW_FLAG_MORE;
@@ -182,18 +185,18 @@ fn draw_home(
         if launcher_index == 2 { 0x7ee787 } else { 0xd9e5f5 },
         b"Terminal",
     );
-    let _ = common::ipc_send_handle(display, &navigation);
+    let _ = common::ipc_send_scene_batch(display, &navigation, 4);
 
     let mut detail = GuiDrawBatch::new(surface, sequence, GuiRect::new(180, 0, 460, 400));
     detail.flags = logos_abi::GUI_DRAW_FLAG_MORE;
     push_text(&mut detail, 220, 48, 0xffffff, b"Welcome to Atrium");
     push_text(&mut detail, 220, 88, 0xb8c7da, b"Ctrl+1 Calculator  Ctrl+2 Files");
-    let _ = common::ipc_send_handle(display, &detail);
+    let _ = common::ipc_send_scene_batch(display, &detail, 7);
 
     let mut detail_tail = GuiDrawBatch::new(surface, sequence, GuiRect::new(180, 0, 460, 400));
     push_text(&mut detail_tail, 220, 112, 0xb8c7da, b"Ctrl+3 Terminal");
     push_text(&mut detail_tail, 220, 128, 0xb8c7da, b"Tab focuses; Ctrl+Arrow moves apps");
-    let _ = common::ipc_send_handle(display, &detail_tail);
+    let _ = common::ipc_send_scene_batch(display, &detail_tail, 10);
 }
 
 fn draw_app(
@@ -223,7 +226,7 @@ fn draw_app(
                 0x263548,
             ));
             batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-            let _ = common::ipc_send_handle(display, &batch);
+            let _ = common::ipc_send_scene_batch(display, &batch, 1);
             let mut detail = GuiDrawBatch::new(
                 surface.reference,
                 sequence,
@@ -243,12 +246,12 @@ fn draw_app(
                 0xb8c7da,
                 b"0-9  +  -  *  /  Enter",
             );
-            let _ = common::ipc_send_handle(display, &detail);
+            let _ = common::ipc_send_scene_batch(display, &detail, 4);
         }
         logos_atrium::AppId::Files => {
             batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
             push_surface_text(&mut batch, surface.bounds, 24, 76, 0xb8c7da, b"Files placeholder");
-            let _ = common::ipc_send_handle(display, &batch);
+            let _ = common::ipc_send_scene_batch(display, &batch, 1);
             let mut detail = GuiDrawBatch::new(
                 surface.reference,
                 sequence,
@@ -268,13 +271,13 @@ fn draw_app(
                 b"Filesystem UI is planned",
             );
             push_surface_text(&mut detail, surface.bounds, 24, 132, 0x7890aa, b"separately.");
-            let _ = common::ipc_send_handle(display, &detail);
+            let _ = common::ipc_send_scene_batch(display, &detail, 4);
         }
         logos_atrium::AppId::Terminal => {
-            let _ = common::ipc_send_handle(display, &batch);
+            let _ = common::ipc_send_scene_batch(display, &batch, 1);
         }
         logos_atrium::AppId::System => {
-            let _ = common::ipc_send_handle(display, &batch);
+            let _ = common::ipc_send_scene_batch(display, &batch, 1);
         }
     }
 }
@@ -495,6 +498,59 @@ fn queue_home_surface(
     }
 }
 
+fn queue_cursor_surface(
+    display_control: logos_abi::CapabilityHandle,
+    next: &mut u32,
+) -> Option<GuiSurfaceRequest> {
+    let mut request =
+        GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, next_request_id(next));
+    request.bounds = CURSOR_BOUNDS;
+    request.z_order = 3;
+    let sent = common::ipc_send_handle(display_control, &request) == IpcStatus::Ok;
+    sent.then_some(request)
+}
+
+fn cursor_batch(
+    display: logos_abi::CapabilityHandle,
+    surface: SurfaceHandle,
+    x: i16,
+    y: i16,
+    old: Option<(i16, i16)>,
+    sequence: &mut u32,
+) -> Option<GuiDrawBatch> {
+    let x = i32::from(x);
+    let y = i32::from(y);
+    let current = GuiRect::new(x, y, CURSOR_WIDTH, CURSOR_HEIGHT);
+    let damage = old.map_or(current, |(old_x, old_y)| {
+        let old = GuiRect::new(i32::from(old_x), i32::from(old_y), CURSOR_WIDTH, CURSOR_HEIGHT);
+        let right = old
+            .x
+            .saturating_add(old.width as i32)
+            .max(current.x.saturating_add(current.width as i32));
+        let bottom = old
+            .y
+            .saturating_add(old.height as i32)
+            .max(current.y.saturating_add(current.height as i32));
+        GuiRect::new(
+            old.x.min(current.x),
+            old.y.min(current.y),
+            right.saturating_sub(old.x.min(current.x)) as u32,
+            bottom.saturating_sub(old.y.min(current.y)) as u32,
+        )
+    });
+    let mut batch = GuiDrawBatch::new(surface, next_request_id(sequence), damage);
+    let _ = batch.push(GuiDrawCommand::fill_rect(
+        GuiRect::new(x.saturating_add(2), y.saturating_add(2), 4, 16),
+        0x101820,
+    ));
+    let _ = batch.push(GuiDrawCommand::fill_rect(GuiRect::new(x, y, 3, 14), 0xffffff));
+    let _ = batch.push(GuiDrawCommand::fill_rect(
+        GuiRect::new(x.saturating_add(2), y.saturating_add(10), 8, 3),
+        0xffffff,
+    ));
+    (common::ipc_send_scene_batch(display, &batch, 1) != IpcStatus::Ok).then_some(batch)
+}
+
 fn discover_program_capability(
     client: logos_abi::ServiceHandle,
     rights: logos_abi::IpcRights,
@@ -592,7 +648,13 @@ pub extern "C" fn _start() -> ! {
     let mut deferred_terminal_revoke: Option<SurfaceHandle> = None;
     let mut deferred_system_revoke: Option<SurfaceHandle> = None;
     let mut pending_render: Option<RenderMessage> = None;
-    let mut pending_draw: Option<GuiDrawBatch> = None;
+    let mut pending_draw: Option<GuiSceneOp> = None;
+    let mut cursor_surface = SurfaceHandle::EMPTY;
+    let mut pending_cursor_surface = queue_cursor_surface(display_control, &mut next_request);
+    let mut cursor_x = 320i16;
+    let mut cursor_y = 200i16;
+    let mut cursor_sequence = 1u32;
+    let mut pending_cursor_draw: Option<GuiDrawBatch> = None;
     let mut surface_commands = SurfaceCommandQueue::new();
     let mut authenticated = false;
     let mut heartbeat_ticks = 0u16;
@@ -606,6 +668,19 @@ pub extern "C" fn _start() -> ! {
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
         surface_commands.flush(display_control);
+        if !cursor_surface.is_valid() && pending_cursor_surface.is_none() {
+            pending_cursor_surface = queue_cursor_surface(display_control, &mut next_request);
+        }
+        if let Some(batch) = pending_cursor_draw {
+            match common::ipc_send_scene_batch(display, &batch, 1) {
+                IpcStatus::Ok => pending_cursor_draw = None,
+                IpcStatus::Full => {}
+                _ => {
+                    pending_cursor_draw = None;
+                    cursor_surface = SurfaceHandle::EMPTY;
+                }
+            }
+        }
         if pending_client_response.is_none() {
             if let Some(surface) = deferred_terminal_revoke.take() {
                 pending_client_response = Some(AtriumSurfaceResponse::revoke(
@@ -854,7 +929,7 @@ pub extern "C" fn _start() -> ! {
                     client,
                     logos_abi::IpcRights::Receive,
                     logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_DRAW,
-                    core::mem::size_of::<GuiDrawBatch>(),
+                    core::mem::size_of::<logos_abi::GuiSceneOp>(),
                 ) else {
                     continue;
                 };
@@ -1001,6 +1076,21 @@ pub extern "C" fn _start() -> ! {
         }
 
         while common::ipc_receive_handle(display_response, &mut response) == IpcStatus::Ok {
+            if pending_cursor_surface.is_some_and(|request| response.is_valid_for(request)) {
+                pending_cursor_surface = None;
+                if response.status == logos_abi::GuiStatus::Ok && response.surface.is_valid() {
+                    cursor_surface = response.surface;
+                    pending_cursor_draw = cursor_batch(
+                        display,
+                        cursor_surface,
+                        cursor_x,
+                        cursor_y,
+                        None,
+                        &mut cursor_sequence,
+                    );
+                }
+                continue;
+            }
             let Some((request, app)) = pending_surface.take() else { continue };
             let for_client = pending_surface_for_client;
             if !response.is_valid_for(request) || response.request_id != request.request_id {
@@ -1101,32 +1191,33 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if pending_draw.is_none() {
-            let mut batch = GuiDrawBatch::new(SurfaceHandle::EMPTY, 1, GuiRect::new(1, 1, 1, 1));
-            while common::ipc_receive_handle(system_surface_draw, &mut batch) == IpcStatus::Ok {
-                let live = batch.is_valid()
-                    && atrium.surface_by_reference(batch.surface).is_some_and(|surface| {
+            let mut op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
+            while common::ipc_receive_handle(system_surface_draw, &mut op) == IpcStatus::Ok {
+                let live = op.is_valid()
+                    && atrium.surface_by_reference(op.surface).is_some_and(|surface| {
                         surface.app == logos_atrium::AppId::System
                             && surface.client == system_client
                     });
                 if live {
-                    pending_draw = Some(batch);
+                    pending_draw = Some(op);
                     break;
                 }
+                op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
             }
         }
         if pending_draw.is_none() {
             for caps in program_surface_capabilities.iter().flatten().copied() {
-                let mut batch =
-                    GuiDrawBatch::new(SurfaceHandle::EMPTY, 1, GuiRect::new(1, 1, 1, 1));
-                while common::ipc_receive_handle(caps.draw, &mut batch) == IpcStatus::Ok {
-                    let live = batch.is_valid()
+                let mut op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
+                while common::ipc_receive_handle(caps.draw, &mut op) == IpcStatus::Ok {
+                    let live = op.is_valid()
                         && atrium
-                            .surface_by_reference(batch.surface)
+                            .surface_by_reference(op.surface)
                             .is_some_and(|surface| surface.client == caps.client);
                     if live {
-                        pending_draw = Some(batch);
+                        pending_draw = Some(op);
                         break;
                     }
+                    op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
                 }
                 if pending_draw.is_some() {
                     break;
@@ -1154,6 +1245,21 @@ pub extern "C" fn _start() -> ! {
         }
 
         while common::ipc_receive_handle(input, &mut event) == IpcStatus::Ok {
+            if let Some(pointer) = event.pointer_event() {
+                let old = (cursor_x, cursor_y);
+                cursor_x = pointer.x.clamp(0, 639);
+                cursor_y = pointer.y.clamp(0, 399);
+                if cursor_surface.is_valid() {
+                    pending_cursor_draw = cursor_batch(
+                        display,
+                        cursor_surface,
+                        cursor_x,
+                        cursor_y,
+                        Some(old),
+                        &mut cursor_sequence,
+                    );
+                }
+            }
             if !authenticated || atrium.phase() != logos_atrium::AtriumPhase::Home {
                 let _ = common::ipc_send_handle(lockscreen_input, &event);
                 continue;

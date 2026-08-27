@@ -1,11 +1,15 @@
 #![no_std]
 
+extern crate alloc;
+
 #[cfg(test)]
 extern crate std;
 
+use alloc::vec::Vec;
 use logos_abi::{
     CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, GuiRect, MAX_COLUMNS,
-    MAX_GUI_DAMAGE_RECTS, MAX_RENDER_CELLS, MAX_ROWS, MessageKind, RENDER_FLAG_MORE, RenderMessage,
+    MAX_FRAMEBUFFER_BYTES, MAX_GUI_DAMAGE_RECTS, MAX_RENDER_CELLS, MAX_ROWS, MessageKind,
+    RENDER_FLAG_MORE, RenderMessage,
 };
 
 mod gui;
@@ -255,6 +259,7 @@ pub struct Display {
     gui_damage: [GuiRect; MAX_GUI_DAMAGE_RECTS],
     gui_damage_count: usize,
     gui_render_row: usize,
+    backbuffer: Option<Vec<u8>>,
 }
 
 impl Display {
@@ -277,11 +282,60 @@ impl Display {
             gui_damage: [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS],
             gui_damage_count: 0,
             gui_render_row: 0,
+            backbuffer: None,
         }
     }
 
     pub const fn generation(&self) -> u16 {
         self.generation
+    }
+
+    fn ensure_backbuffer(&mut self, bytes: usize) -> Result<(), DisplayError> {
+        if bytes > MAX_FRAMEBUFFER_BYTES {
+            return Err(DisplayError::InvalidFramebuffer);
+        }
+        if self.backbuffer.as_ref().is_none_or(|buffer| buffer.len() != bytes) {
+            let mut buffer = Vec::new();
+            buffer.try_reserve_exact(bytes).map_err(|_| DisplayError::InvalidFramebuffer)?;
+            buffer.resize(bytes, 0);
+            self.backbuffer = Some(buffer);
+        }
+        Ok(())
+    }
+
+    fn present_all(&self, framebuffer: &mut [u8], width: usize, height: usize, stride: usize) {
+        let Some(backbuffer) = self.backbuffer.as_ref() else { return };
+        let row_bytes = width * 4;
+        for row in 0..height {
+            let start = row * stride;
+            framebuffer[start..start + row_bytes]
+                .copy_from_slice(&backbuffer[start..start + row_bytes]);
+        }
+    }
+
+    fn present_damage(
+        &self,
+        framebuffer: &mut [u8],
+        width: usize,
+        height: usize,
+        stride: usize,
+        damage: &[GuiRect],
+    ) {
+        let Some(backbuffer) = self.backbuffer.as_ref() else { return };
+        let screen = GuiRect::new(0, 0, width as u32, height as u32);
+        for rect in damage.iter().copied() {
+            let rect = intersect(rect, screen);
+            if rect.is_empty() {
+                continue;
+            }
+            let left = rect.x as usize;
+            let right = left + rect.width as usize;
+            for row in rect.y as usize..rect.y as usize + rect.height as usize {
+                let start = row * stride + left * 4;
+                let end = row * stride + right * 4;
+                framebuffer[start..end].copy_from_slice(&backbuffer[start..end]);
+            }
+        }
     }
 
     /// Rebind the renderer to a replacement producer and invalidate the old
@@ -390,6 +444,8 @@ impl Display {
         {
             return Err(DisplayError::InvalidFramebuffer);
         }
+        self.ensure_backbuffer(required)?;
+        let backbuffer = self.backbuffer.as_mut().unwrap();
         let mut rendered = 0;
         let first_render = !self.surface_initialized;
         if first_render {
@@ -398,7 +454,7 @@ impl Display {
             let row_bytes = width * 4;
             for row in 0..height {
                 let start = row * stride;
-                fill_row(&mut framebuffer[start..start + row_bytes], pixel);
+                fill_row(&mut backbuffer[start..start + row_bytes], pixel);
             }
             self.surface_initialized = true;
         }
@@ -456,7 +512,7 @@ impl Display {
                             + glyph_row * stride
                             + (column * GLYPH_WIDTH + glyph_column) * 4;
                         let bytes = pixel_bytes(color, format);
-                        framebuffer[pixel..pixel + 4].copy_from_slice(&bytes);
+                        backbuffer[pixel..pixel + 4].copy_from_slice(&bytes);
                     }
                 }
                 if is_cursor && self.cursor_visible {
@@ -466,7 +522,7 @@ impl Display {
                             let pixel = row * GLYPH_HEIGHT * stride
                                 + glyph_row * stride
                                 + (column * GLYPH_WIDTH + glyph_column) * 4;
-                            framebuffer[pixel..pixel + 4].copy_from_slice(&bytes);
+                            backbuffer[pixel..pixel + 4].copy_from_slice(&bytes);
                         }
                     }
                 }
@@ -477,7 +533,11 @@ impl Display {
         if rendered != 0 {
             let (damage, damage_count) = self.gui.take_damage();
             rendered +=
-                self.gui.render(framebuffer, width, height, stride, format, &damage, damage_count);
+                self.gui.render(backbuffer, width, height, stride, format, &damage, damage_count);
+        }
+        let present = first_render || rendered != 0;
+        if present {
+            self.present_all(framebuffer, width, height, stride);
         }
         Ok(rendered)
     }
@@ -497,7 +557,12 @@ impl Display {
 
     #[allow(clippy::too_many_arguments)]
     fn render_terminal_surface(
-        &self,
+        cells: &[Cell; MAX_COLUMNS * MAX_ROWS],
+        cell_columns: usize,
+        cell_rows: usize,
+        cursor_column: usize,
+        cursor_row: usize,
+        cursor_visible: bool,
         framebuffer: &mut [u8],
         width: usize,
         height: usize,
@@ -508,14 +573,14 @@ impl Display {
         damage_count: usize,
     ) -> usize {
         let screen = GuiRect::new(0, 0, width as u32, height as u32);
-        let columns = self.columns.min(surface.width as usize / GLYPH_WIDTH);
-        let rows = self.rows.min(surface.height as usize / GLYPH_HEIGHT);
+        let columns = cell_columns.min(surface.width as usize / GLYPH_WIDTH);
+        let rows = cell_rows.min(surface.height as usize / GLYPH_HEIGHT);
         let mut rendered = 0;
         for row in 0..rows {
             for column in 0..columns {
-                let cell = self.cells[row * MAX_COLUMNS + column];
+                let cell = cells[row * MAX_COLUMNS + column];
                 let cell_rect = terminal_cell_rect(surface, row, column);
-                let is_cursor = row == self.cursor_row && column == self.cursor_column;
+                let is_cursor = row == cursor_row && column == cursor_column;
                 let glyph = embedded_glyph(cell.codepoint);
                 let foreground = styled_foreground(cell);
                 for damage_rect in damage[..damage_count].iter().copied() {
@@ -536,7 +601,7 @@ impl Display {
                             rendered += 1;
                         }
                     }
-                    if is_cursor && self.cursor_visible {
+                    if is_cursor && cursor_visible {
                         let cursor_clip = intersect(
                             clip,
                             GuiRect::new(cell_rect.x, cell_rect.y + 1, CURSOR_WIDTH as u32, 14),
@@ -571,6 +636,7 @@ impl Display {
         if stride < width * 4 || framebuffer.len() < required {
             return Err(DisplayError::InvalidFramebuffer);
         }
+        self.ensure_backbuffer(required)?;
         let background = self.gui.background_color();
         if background != self.gui_background {
             let restoring_terminal = background.is_none();
@@ -591,13 +657,23 @@ impl Display {
                 self.gui_background_row.saturating_add(GUI_BACKGROUND_ROWS_PER_STEP).min(height);
             let pixel = pixel_bytes(self.surface_background, format);
             let row_bytes = width * 4;
-            for row in self.gui_background_row..end {
-                let start = row * stride;
-                fill_row(&mut framebuffer[start..start + row_bytes], pixel);
+            {
+                let backbuffer = self.backbuffer.as_mut().unwrap();
+                for row in self.gui_background_row..end {
+                    let start = row * stride;
+                    fill_row(&mut backbuffer[start..start + row_bytes], pixel);
+                }
             }
             let rendered_rows = end - self.gui_background_row;
             self.gui_background_row = end;
             if end < height {
+                let progress = GuiRect::new(
+                    0,
+                    (end - rendered_rows) as i32,
+                    width as u32,
+                    rendered_rows as u32,
+                );
+                self.present_damage(framebuffer, width, height, stride, &[progress]);
                 return Ok(rendered_rows * width);
             }
             self.gui_background_pending = false;
@@ -618,6 +694,7 @@ impl Display {
             self.gui_damage_count = count;
             self.gui_render_row = 0;
         }
+        let backbuffer = self.backbuffer.as_mut().unwrap();
         let row_end = self.gui_render_row.saturating_add(GUI_RENDER_ROWS_PER_STEP).min(height);
         let row_damage = GuiRect::new(
             0,
@@ -638,8 +715,14 @@ impl Display {
             .gui
             .terminal_bounds()
             .map(|surface| {
-                self.render_terminal_surface(
-                    framebuffer,
+                Self::render_terminal_surface(
+                    &self.cells,
+                    self.columns,
+                    self.rows,
+                    self.cursor_column,
+                    self.cursor_row,
+                    self.cursor_visible,
+                    backbuffer,
                     width,
                     height,
                     stride,
@@ -651,7 +734,7 @@ impl Display {
             })
             .unwrap_or(0);
         let rendered =
-            terminal + self.gui.render(framebuffer, width, height, stride, format, &damage, count);
+            terminal + self.gui.render(backbuffer, width, height, stride, format, &damage, count);
         self.gui_render_row = row_end;
         if row_end == height {
             let (next_damage, next_count) = self.gui.take_damage();
@@ -659,6 +742,7 @@ impl Display {
             self.gui_damage_count = next_count;
             self.gui_render_row = 0;
         }
+        self.present_damage(framebuffer, width, height, stride, &damage[..count]);
         Ok(rendered)
     }
 

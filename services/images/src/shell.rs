@@ -30,7 +30,7 @@ const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_nam
 const DISPLAY_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_DRAW,
     b"display",
-    core::mem::size_of::<GuiDrawBatch>(),
+    core::mem::size_of::<logos_abi::GuiSceneOp>(),
     logos_abi::IpcRights::Send,
 );
 const FLOW_CONTEXT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -266,8 +266,8 @@ fn send_register_surface(
     ) {
         let _ = batches[4].push(text);
     }
-    for batch in &batches {
-        let _ = common::ipc_send_handle(display, batch);
+    for (index, batch) in batches.iter().enumerate() {
+        let _ = common::ipc_send_scene_batch(display, batch, 1 + index as u32 * 3);
     }
 }
 
@@ -283,7 +283,7 @@ fn send_shell_surface(
     let surface = SurfaceHandle::new(0, 1, 11).unwrap();
     if !visible {
         let batch = GuiDrawBatch::new(surface, *sequence, GuiRect::SURFACE);
-        let _ = common::ipc_send_handle(display, &batch);
+        let _ = common::ipc_send_scene_batch(display, &batch, 1);
         return;
     }
     if logos_shell::named_node_index(login_page, b"confirmPassword").is_some() {
@@ -420,8 +420,8 @@ fn send_shell_surface(
     ) {
         let _ = batches[4].push(text);
     }
-    for batch in &batches {
-        let _ = common::ipc_send_handle(display, batch);
+    for (index, batch) in batches.iter().enumerate() {
+        let _ = common::ipc_send_scene_batch(display, batch, 1 + index as u32 * 3);
     }
 }
 

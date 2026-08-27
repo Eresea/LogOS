@@ -19,7 +19,7 @@ const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_nam
 const DISPLAY_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_DRAW,
     b"display",
-    core::mem::size_of::<GuiDrawBatch>(),
+    core::mem::size_of::<logos_abi::GuiSceneOp>(),
     logos_abi::IpcRights::Send,
 );
 const DISPLAY_CONTROL_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -73,7 +73,7 @@ fn draw(
     let panel = GuiRect::new(150, 48, 340, 304);
     let _ = background.push(GuiDrawCommand::shadow(panel, 0x55000000, 16, 4, 0, 6));
     let _ = background.push(GuiDrawCommand::fill_rounded_rect(panel, 0x182535, 16));
-    let _ = common::ipc_send_handle(display, &background);
+    let _ = common::ipc_send_scene_batch(display, &background, 1);
 
     let mut labels = GuiDrawBatch::new(surface, sequence, panel);
     labels.flags = logos_abi::GUI_DRAW_FLAG_MORE;
@@ -90,12 +90,16 @@ fn draw(
         },
     );
     push_text(&mut labels, 176, 116, 0xb8c7da, b"Username");
-    let _ = common::ipc_send_handle(display, &labels);
+    let _ = common::ipc_send_scene_batch(display, &labels, 4);
 
     let (username, password) = lock.credentials();
+    let confirmation = lock.confirmation();
     let mut masked = [0u8; logos_abi::MAX_GUI_TEXT_BYTES];
     let password_len = password.len().min(masked.len());
     masked[..password_len].fill(b'*');
+    let mut masked_confirmation = [0u8; logos_abi::MAX_GUI_TEXT_BYTES];
+    let confirmation_len = confirmation.len().min(masked_confirmation.len());
+    masked_confirmation[..confirmation_len].fill(b'*');
     let mut fields = GuiDrawBatch::new(surface, sequence, GuiRect::new(170, 100, 300, 220));
     fields.flags = logos_abi::GUI_DRAW_FLAG_MORE;
     let _ = fields.push(GuiDrawCommand::fill_rounded_rect(
@@ -105,17 +109,55 @@ fn draw(
     ));
     push_text(&mut fields, 184, 156, 0xffffff, username);
     push_text(&mut fields, 176, 176, 0xb8c7da, b"Password");
-    let _ = common::ipc_send_handle(display, &fields);
+    let _ = common::ipc_send_scene_batch(display, &fields, 7);
 
     let mut password_field = GuiDrawBatch::new(surface, sequence, GuiRect::new(170, 192, 300, 120));
+    password_field.flags = logos_abi::GUI_DRAW_FLAG_MORE;
     let _ = password_field.push(GuiDrawCommand::fill_rounded_rect(
         GuiRect::new(170, 192, 300, 36),
         0x263548,
         8,
     ));
     push_text(&mut password_field, 184, 216, 0xffffff, &masked[..password_len]);
-    push_text(&mut password_field, 184, 276, 0x7890aa, b"Tab fields  Enter submit");
-    let _ = common::ipc_send_handle(display, &password_field);
+    if lock.mode() == logos_lockscreen::LockScreenMode::Claim {
+        let _ = password_field.push(GuiDrawCommand::fill_rounded_rect(
+            logos_lockscreen::CONFIRM_PASSWORD_BOUNDS,
+            0x263548,
+            8,
+        ));
+    } else {
+        push_text(&mut password_field, 184, 276, 0x7890aa, b"Tab fields  Enter submit");
+    }
+    let _ = common::ipc_send_scene_batch(display, &password_field, 10);
+
+    let mut action = GuiDrawBatch::new(surface, sequence, GuiRect::new(220, 240, 200, 104));
+    let submit_bounds = if lock.mode() == logos_lockscreen::LockScreenMode::Claim {
+        logos_lockscreen::CLAIM_SUBMIT_BOUNDS
+    } else {
+        logos_lockscreen::SUBMIT_BOUNDS
+    };
+    if lock.mode() == logos_lockscreen::LockScreenMode::Claim {
+        push_text(
+            &mut action,
+            184,
+            276,
+            0xffffff,
+            if confirmation_len == 0 {
+                b"Confirm password"
+            } else {
+                &masked_confirmation[..confirmation_len]
+            },
+        );
+    }
+    let _ = action.push(GuiDrawCommand::fill_rounded_rect(submit_bounds, 0x356bd8, 8));
+    push_text(
+        &mut action,
+        submit_bounds.x.saturating_add(24),
+        submit_bounds.y.saturating_add(24),
+        0xffffff,
+        if lock.mode() == logos_lockscreen::LockScreenMode::Claim { b"Create" } else { b"Unlock" },
+    );
+    let _ = common::ipc_send_scene_batch(display, &action, 13);
 }
 
 fn next_id(next: &mut u32) -> u32 {
@@ -219,7 +261,11 @@ pub extern "C" fn _start() -> ! {
         }
         if visible && pending_auth.is_none() {
             while common::ipc_receive_handle(input, &mut event) == IpcStatus::Ok {
-                let action = lock.input(event);
+                let action = if event.pointer_event().is_some() {
+                    lock.pointer_input(event)
+                } else {
+                    lock.input(event)
+                };
                 if let logos_lockscreen::LockScreenAction::Submit(operation) = action {
                     let (name, password) = lock.credentials();
                     let mut request = UserRequest::new(operation, next_id(&mut next_request));

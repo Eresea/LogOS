@@ -5,9 +5,9 @@
 mod common;
 
 use logos_abi::{
-    DISPLAY_CONFIG_BASE, DISPLAY_FRAMEBUFFER_BASE, FramebufferConfig, FramebufferFormat,
-    GuiDrawBatch, GuiRect, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse,
-    IpcStatus, MessageKind, RENDER_FLAG_MORE, RenderMessage,
+    DISPLAY_CONFIG_BASE, DISPLAY_FRAMEBUFFER_BASE, FramebufferConfig, FramebufferFormat, GuiRect,
+    GuiSceneOp, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, IpcStatus,
+    MessageKind, RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
 };
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_RENDER,
@@ -24,19 +24,19 @@ const ATRIUM_RENDER_CAPABILITY: common::CapabilitySpec = common::capability_cont
 const GUI_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_DRAW,
     b"shell",
-    core::mem::size_of::<GuiDrawBatch>(),
+    core::mem::size_of::<GuiSceneOp>(),
     logos_abi::IpcRights::Receive,
 );
 const ATRIUM_GUI_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_DRAW,
     b"atrium",
-    core::mem::size_of::<GuiDrawBatch>(),
+    core::mem::size_of::<GuiSceneOp>(),
     logos_abi::IpcRights::Receive,
 );
 const LOCKSCREEN_GUI_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_DRAW,
     b"lockscreen",
-    core::mem::size_of::<GuiDrawBatch>(),
+    core::mem::size_of::<GuiSceneOp>(),
     logos_abi::IpcRights::Receive,
 );
 const SURFACE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -252,38 +252,28 @@ pub extern "C" fn _start() -> ! {
                 render_complete = !more;
             }
         }
-        let mut gui_batch = GuiDrawBatch::new(
-            logos_abi::SurfaceHandle::new(0, 1, 11).unwrap(),
-            1,
-            GuiRect::new(0, 0, config.width, config.height),
-        );
-        while common::ipc_receive_handle(gui_capability, &mut gui_batch) == IpcStatus::Ok {
+        let mut gui_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 11).unwrap(), 1);
+        while common::ipc_receive_handle(gui_capability, &mut gui_op) == IpcStatus::Ok {
             progressed = true;
-            let _ = display.gui_mut().update(11, gui_batch);
+            let _ = display.gui_mut().apply_scene_op(11, gui_op);
             gui_dirty = true;
+            gui_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 11).unwrap(), 1);
         }
-        let mut atrium_batch = GuiDrawBatch::new(
-            logos_abi::SurfaceHandle::new(0, 1, 13).unwrap(),
-            1,
-            GuiRect::new(0, 0, config.width, config.height),
-        );
-        while common::ipc_receive_handle(atrium_gui_capability, &mut atrium_batch) == IpcStatus::Ok
-        {
+        let mut atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
+        while common::ipc_receive_handle(atrium_gui_capability, &mut atrium_op) == IpcStatus::Ok {
             progressed = true;
-            let _ = display.gui_mut().update(13, atrium_batch);
+            let _ = display.gui_mut().apply_scene_op(13, atrium_op);
             gui_dirty = true;
+            atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
         }
-        let mut lockscreen_batch = GuiDrawBatch::new(
-            logos_abi::SurfaceHandle::new(0, 1, 12).unwrap(),
-            1,
-            GuiRect::new(0, 0, config.width, config.height),
-        );
-        while common::ipc_receive_handle(lockscreen_gui_capability, &mut lockscreen_batch)
+        let mut lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
+        while common::ipc_receive_handle(lockscreen_gui_capability, &mut lockscreen_op)
             == IpcStatus::Ok
         {
             progressed = true;
-            let _ = display.gui_mut().update(12, lockscreen_batch);
+            let _ = display.gui_mut().apply_scene_op(12, lockscreen_op);
             gui_dirty = true;
+            lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
         }
         if render_pending && render_complete && !gui_render_pending {
             render(display, framebuffer, config);

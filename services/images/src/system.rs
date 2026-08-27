@@ -33,7 +33,7 @@ const ATRIUM_INPUT: common::CapabilitySpec = common::capability_contract_named(
 const ATRIUM_DRAW: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_DRAW,
     b"atrium",
-    mem::size_of::<GuiDrawBatch>(),
+    mem::size_of::<logos_abi::GuiSceneOp>(),
     logos_abi::IpcRights::Send,
 );
 
@@ -96,7 +96,7 @@ fn draw_status(draw: logos_abi::CapabilityHandle, surface: SurfaceHandle, sequen
         }
         cursor = response.cursor;
     }
-    let _ = common::ipc_send_handle(draw, &batch);
+    let _ = common::ipc_send_scene_batch(draw, &batch, 1);
 }
 
 #[unsafe(no_mangle)]

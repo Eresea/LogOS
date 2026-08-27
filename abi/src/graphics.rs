@@ -470,6 +470,8 @@ impl GuiDrawBatch {
 pub enum GuiNodeOperation {
     Upsert = 1,
     Remove = 2,
+    Clear = 3,
+    Commit = 4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -514,6 +516,30 @@ impl GuiSceneOp {
         }
     }
 
+    pub const fn clear(surface: SurfaceHandle, frame: u32) -> Self {
+        Self {
+            surface,
+            frame,
+            node_id: 1,
+            operation: GuiNodeOperation::Clear,
+            flags: 0,
+            reserved: 0,
+            command: GuiDrawCommand::empty(GuiDrawKind::FillRect),
+        }
+    }
+
+    pub const fn commit(surface: SurfaceHandle, frame: u32) -> Self {
+        Self {
+            surface,
+            frame,
+            node_id: 1,
+            operation: GuiNodeOperation::Commit,
+            flags: 0,
+            reserved: 0,
+            command: GuiDrawCommand::empty(GuiDrawKind::FillRect),
+        }
+    }
+
     pub const fn is_valid(self) -> bool {
         self.surface.is_valid()
             && self.frame != 0
@@ -522,21 +548,25 @@ impl GuiSceneOp {
             && self.reserved == 0
             && match self.operation {
                 GuiNodeOperation::Upsert => self.command.is_valid(),
-                GuiNodeOperation::Remove => {
-                    matches!(self.command.kind, GuiDrawKind::FillRect)
-                        && self.command.flags == 0
-                        && self.command.text_len == 0
-                        && self.command.reserved == 0
-                        && self.command.x == 0
-                        && self.command.y == 0
-                        && self.command.width == 0
-                        && self.command.height == 0
-                        && self.command.color == 0
-                        && self.command.auxiliary == 0
-                        && zero_text(self.command.text)
+                GuiNodeOperation::Remove | GuiNodeOperation::Clear | GuiNodeOperation::Commit => {
+                    is_zero_command(self.command)
                 }
             }
     }
+}
+
+const fn is_zero_command(command: GuiDrawCommand) -> bool {
+    matches!(command.kind, GuiDrawKind::FillRect)
+        && command.flags == 0
+        && command.text_len == 0
+        && command.reserved == 0
+        && command.x == 0
+        && command.y == 0
+        && command.width == 0
+        && command.height == 0
+        && command.color == 0
+        && command.auxiliary == 0
+        && zero_text(command.text)
 }
 
 const fn zero_text(text: [u8; MAX_GUI_TEXT_BYTES]) -> bool {
@@ -670,6 +700,8 @@ mod tests {
         op.node_id = 0;
         assert!(!op.is_valid());
         assert!(GuiSceneOp::remove(surface, 7, 42).is_valid());
+        assert!(GuiSceneOp::clear(surface, 7).is_valid());
+        assert!(GuiSceneOp::commit(surface, 7).is_valid());
     }
 
     #[test]

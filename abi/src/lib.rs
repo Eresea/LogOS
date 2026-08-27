@@ -1568,7 +1568,7 @@ pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
         return Some(core::mem::size_of::<AtriumSurfaceInput>());
     }
     if endpoint == IpcEndpointId::SystemToAtriumSurfaceDraw as usize {
-        return Some(core::mem::size_of::<GuiDrawBatch>());
+        return Some(core::mem::size_of::<GuiSceneOp>());
     }
     if endpoint == IpcEndpointId::InputToAtrium as usize
         || endpoint == IpcEndpointId::AtriumToTerminal as usize
@@ -1600,7 +1600,7 @@ pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
         return Some(core::mem::size_of::<GuiSessionContext>());
     }
     if endpoint == IpcEndpointId::AtriumToDisplay as usize {
-        return Some(core::mem::size_of::<GuiDrawBatch>());
+        return Some(core::mem::size_of::<GuiSceneOp>());
     }
     if endpoint == IpcEndpointId::AtriumToDisplayControl as usize {
         return Some(core::mem::size_of::<GuiSurfaceRequest>());
@@ -1609,7 +1609,7 @@ pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
         return Some(core::mem::size_of::<GuiSurfaceResponse>());
     }
     if endpoint == IpcEndpointId::LockScreenToDisplay as usize {
-        return Some(core::mem::size_of::<GuiDrawBatch>());
+        return Some(core::mem::size_of::<GuiSceneOp>());
     }
     if endpoint == IpcEndpointId::LockScreenToDisplayControl as usize {
         return Some(core::mem::size_of::<GuiSurfaceRequest>());
@@ -1657,7 +1657,7 @@ pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
     match ipc_message_type(endpoint) {
         Some(IpcMessageType::Input) => Some(core::mem::size_of::<InputMessage>()),
         Some(IpcMessageType::Render) => Some(core::mem::size_of::<RenderMessage>()),
-        Some(IpcMessageType::Gui) => Some(core::mem::size_of::<GuiDrawBatch>()),
+        Some(IpcMessageType::Gui) => Some(core::mem::size_of::<GuiSceneOp>()),
         Some(IpcMessageType::SessionContext) => Some(core::mem::size_of::<GuiSessionContext>()),
         Some(IpcMessageType::Bytes) => Some(core::mem::size_of::<IpcBytes>()),
         Some(IpcMessageType::Packet) => Some(core::mem::size_of::<NetworkPacketDescriptor>()),

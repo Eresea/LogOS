@@ -1330,6 +1330,57 @@ pub fn ipc_send_handle<T: Copy>(capability: logos_abi::CapabilityHandle, message
     ipc_send_raw(capability, message)
 }
 
+/// Translate one legacy builder batch into stable retained-scene operations.
+/// The first fragment clears the frame; only the final operation publishes it.
+#[inline(always)]
+#[allow(dead_code)]
+pub fn ipc_send_scene_batch(
+    capability: logos_abi::CapabilityHandle,
+    batch: &logos_abi::GuiDrawBatch,
+    node_base: u32,
+) -> IpcStatus {
+    if !batch.is_valid() || node_base == 0 {
+        return IpcStatus::Malformed;
+    }
+    if node_base == 1 {
+        let mut clear = logos_abi::GuiSceneOp::clear(batch.surface, batch.sequence);
+        clear.flags =
+            if batch.command_count == 0 { batch.flags } else { logos_abi::GUI_DRAW_FLAG_MORE };
+        let status = ipc_send_raw(capability, &clear);
+        if status != IpcStatus::Ok {
+            return status;
+        }
+        if batch.command_count == 0 {
+            return IpcStatus::Ok;
+        }
+    }
+    for index in 0..usize::from(batch.command_count) {
+        let Some(node_id) = node_base.checked_add(index as u32) else {
+            return IpcStatus::Malformed;
+        };
+        let mut op = logos_abi::GuiSceneOp::upsert(
+            batch.surface,
+            batch.sequence,
+            node_id,
+            batch.commands[index],
+        );
+        if batch.flags & logos_abi::GUI_DRAW_FLAG_MORE != 0
+            || index + 1 < usize::from(batch.command_count)
+        {
+            op.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        }
+        let status = ipc_send_raw(capability, &op);
+        if status != IpcStatus::Ok {
+            return status;
+        }
+    }
+    if batch.command_count == 0 && batch.flags & logos_abi::GUI_DRAW_FLAG_MORE == 0 {
+        let commit = logos_abi::GuiSceneOp::commit(batch.surface, batch.sequence);
+        return ipc_send_raw(capability, &commit);
+    }
+    IpcStatus::Ok
+}
+
 #[inline(always)]
 #[allow(dead_code)]
 pub fn ipc_receive_handle<T: Copy>(

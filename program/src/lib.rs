@@ -4,7 +4,7 @@ use core::{mem, ptr};
 
 use logos_abi::{
     AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, GUI_DRAW_FLAG_MORE,
-    GuiDrawBatch, GuiStatus, IPC_PAGE_BYTES, IPC_STAGING_BASE, IPC_SYSCALL_RECEIVE,
+    GuiDrawBatch, GuiSceneOp, GuiStatus, IPC_PAGE_BYTES, IPC_STAGING_BASE, IPC_SYSCALL_RECEIVE,
     IPC_SYSCALL_SEND, IpcStatus, MAX_RENDER_CELLS, MessageKind, PROGRAM_BOOTSTRAP_BASE,
     ProgramBootstrapPage, RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
 };
@@ -39,6 +39,7 @@ pub struct ProgramClient {
     pending_request: Option<AtriumSurfaceRequest>,
     request_sent: bool,
     surface: SurfaceHandle,
+    draw_frame: u32,
 }
 
 impl ProgramClient {
@@ -57,6 +58,7 @@ impl ProgramClient {
             pending_request: None,
             request_sent: false,
             surface: SurfaceHandle::EMPTY,
+            draw_frame: 0,
         })
     }
 
@@ -119,6 +121,7 @@ impl ProgramClient {
             }
             self.surface = SurfaceHandle::EMPTY;
             self.request_sent = false;
+            self.draw_frame = 0;
             return Ok(SurfaceEvent::Revoked(response.surface));
         }
         let Some(request) = self.pending_request else {
@@ -136,6 +139,7 @@ impl ProgramClient {
             return Err(ProgramClientError::Protocol);
         }
         self.surface = response.surface;
+        self.draw_frame = 0;
         Ok(SurfaceEvent::Created(response.surface))
     }
 
@@ -162,12 +166,34 @@ impl ProgramClient {
         Ok(())
     }
 
-    pub fn send_draw(&self, batch: GuiDrawBatch) -> Result<(), ProgramClientError> {
+    pub fn send_draw(&mut self, batch: GuiDrawBatch) -> Result<(), ProgramClientError> {
         self.require_surface(batch.surface)?;
         if !batch.is_valid() || batch.flags & !GUI_DRAW_FLAG_MORE != 0 {
             return Err(ProgramClientError::InvalidPayload);
         }
-        send(self.surface_draw, &batch)
+        if batch.sequence != self.draw_frame {
+            let mut clear = GuiSceneOp::clear(batch.surface, batch.sequence);
+            clear.flags = if batch.command_count == 0 { batch.flags } else { GUI_DRAW_FLAG_MORE };
+            send(self.surface_draw, &clear)?;
+            self.draw_frame = batch.sequence;
+        }
+        for index in 0..usize::from(batch.command_count) {
+            let mut op = GuiSceneOp::upsert(
+                batch.surface,
+                batch.sequence,
+                1 + index as u32,
+                batch.commands[index],
+            );
+            if batch.flags & GUI_DRAW_FLAG_MORE != 0 || index + 1 < usize::from(batch.command_count)
+            {
+                op.flags = GUI_DRAW_FLAG_MORE;
+            }
+            send(self.surface_draw, &op)?;
+        }
+        if batch.command_count == 0 && batch.flags & GUI_DRAW_FLAG_MORE == 0 {
+            send(self.surface_draw, &GuiSceneOp::commit(batch.surface, batch.sequence))?;
+        }
+        Ok(())
     }
 
     pub fn send_render(&self, message: RenderMessage) -> Result<(), ProgramClientError> {
@@ -307,7 +333,7 @@ mod tests {
 
     #[test]
     fn surface_operations_require_the_admitted_reference() {
-        let client = ProgramClient::from_bootstrap(bootstrap()).unwrap();
+        let mut client = ProgramClient::from_bootstrap(bootstrap()).unwrap();
         let batch = GuiDrawBatch::new(SurfaceHandle::EMPTY, 1, logos_abi::GuiRect::SURFACE);
         assert_eq!(client.send_draw(batch), Err(ProgramClientError::NoSurface));
     }
