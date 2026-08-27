@@ -9,7 +9,6 @@ use logos_abi::{
 struct RenderNode {
     id: u32,
     command: GuiDrawCommand,
-    bounds: GuiRect,
 }
 
 impl RenderNode {
@@ -197,11 +196,7 @@ impl GuiSurfaceRegistry {
         }
         match op.operation {
             GuiNodeOperation::Upsert => {
-                let node = RenderNode {
-                    id: op.node_id,
-                    command: op.command,
-                    bounds: command_rect(op.command),
-                };
+                let node = RenderNode { id: op.node_id, command: op.command };
                 if let Some(existing) = self.slots[index].staged_nodes[..MAX_GUI_NODES]
                     .iter_mut()
                     .flatten()
@@ -232,6 +227,11 @@ impl GuiSurfaceRegistry {
                 self.slots[index].staged_nodes[MAX_GUI_NODES - 1] = None;
                 self.slots[index].staged_node_count -= 1;
             }
+            GuiNodeOperation::Clear => {
+                self.slots[index].staged_nodes = [RenderNode::EMPTY; MAX_GUI_NODES];
+                self.slots[index].staged_node_count = 0;
+            }
+            GuiNodeOperation::Commit => {}
         }
         if op.flags & logos_abi::GUI_DRAW_FLAG_MORE == 0 {
             self.publish_scene(index)
@@ -246,23 +246,27 @@ impl GuiSurfaceRegistry {
         let new_nodes = self.slots[index].staged_nodes;
         let new_count = usize::from(self.slots[index].staged_node_count);
         for old in old_nodes[..old_count].iter().flatten() {
-            let changed = new_nodes[..new_count]
-                .iter()
-                .flatten()
-                .find(|new| new.id == old.id)
-                .is_none_or(|new| new.bounds != old.bounds || new.command != old.command);
+            let changed =
+                new_nodes[..new_count].iter().flatten().find(|new| new.id == old.id).is_none_or(
+                    |new| {
+                        command_rect(new.command) != command_rect(old.command)
+                            || new.command != old.command
+                    },
+                );
             if changed {
-                self.add_damage(old.bounds)?;
+                self.add_damage(command_rect(old.command))?;
             }
         }
         for new in new_nodes[..new_count].iter().flatten() {
-            let changed = old_nodes[..old_count]
-                .iter()
-                .flatten()
-                .find(|old| old.id == new.id)
-                .is_none_or(|old| old.bounds != new.bounds || old.command != new.command);
+            let changed =
+                old_nodes[..old_count].iter().flatten().find(|old| old.id == new.id).is_none_or(
+                    |old| {
+                        command_rect(old.command) != command_rect(new.command)
+                            || old.command != new.command
+                    },
+                );
             if changed {
-                self.add_damage(new.bounds)?;
+                self.add_damage(command_rect(new.command))?;
             }
         }
         self.slots[index].active_nodes = new_nodes;
@@ -281,7 +285,9 @@ impl GuiSurfaceRegistry {
             return;
         }
         for index in 0..MAX_GUI_SURFACES {
-            if !self.slots[index].occupied() || self.slots[index].batch_count == 0 {
+            if !self.slots[index].occupied()
+                || (self.slots[index].batch_count == 0 && self.slots[index].active_frame == 0)
+            {
                 continue;
             }
             let overlap = intersect(rect, self.slots[index].bounds);
@@ -293,37 +299,55 @@ impl GuiSurfaceRegistry {
         let mut selected = usize::MAX;
         for index in 0..MAX_GUI_SURFACES {
             let slot = self.slots[index];
-            for batch in slot.batches[..slot.batch_count as usize].iter().flatten() {
-                let Some(command) = batch.commands[..batch.command_count as usize].first() else {
-                    continue;
-                };
-                if is_surface_fill(*command)
-                    && (selected == usize::MAX
-                        || (slot.z_order, slot.order)
-                            > (self.slots[selected].z_order, self.slots[selected].order))
-                {
-                    selected = index;
-                }
+            let command = if slot.active_frame != 0 {
+                slot.active_nodes[..slot.active_node_count as usize]
+                    .iter()
+                    .flatten()
+                    .map(|node| node.command)
+                    .find(|command| is_surface_fill(*command))
+            } else {
+                slot.batches[..slot.batch_count as usize]
+                    .iter()
+                    .flatten()
+                    .filter_map(|batch| batch.commands[..batch.command_count as usize].first())
+                    .copied()
+                    .find(|command| is_surface_fill(*command))
+            };
+            if command.is_some()
+                && (selected == usize::MAX
+                    || (slot.z_order, slot.order)
+                        > (self.slots[selected].z_order, self.slots[selected].order))
+            {
+                selected = index;
             }
         }
         if selected == usize::MAX {
             None
         } else {
-            self.slots[selected]
-                .batches
-                .iter()
-                .flatten()
-                .find(|batch| {
+            let slot = self.slots[selected];
+            if slot.active_frame != 0 {
+                slot.active_nodes[..slot.active_node_count as usize]
+                    .iter()
+                    .flatten()
+                    .map(|node| node.command)
+                    .find(|command| is_surface_fill(*command))
+                    .map(|command| command.color)
+            } else {
+                slot.batches.iter().flatten().find_map(|batch| {
                     batch.commands[..batch.command_count as usize]
                         .first()
-                        .is_some_and(|command| is_surface_fill(*command))
+                        .filter(|command| is_surface_fill(**command))
+                        .map(|command| command.color)
                 })
-                .map(|batch| batch.commands[0].color)
+            }
         }
     }
 
     pub fn focus(&mut self, owner: u32, handle: SurfaceHandle) -> Result<(), GuiRegistryError> {
         let index = self.authorized_index(owner, handle)?;
+        if self.focused == handle {
+            return Ok(());
+        }
         let old = self.focused;
         self.order = self.order.wrapping_add(1).max(1);
         self.slots[index].order = self.order;
@@ -346,6 +370,9 @@ impl GuiSurfaceRegistry {
         }
         let index = self.authorized_index(owner, handle)?;
         let old = self.slots[index].bounds;
+        if old == bounds {
+            return Ok(());
+        }
         self.slots[index].bounds = bounds;
         self.add_damage(old)?;
         self.add_damage(bounds)
@@ -430,7 +457,7 @@ impl GuiSurfaceRegistry {
         let mut rendered = 0;
         for index in order[..count].iter().copied() {
             let mut clip = self.slots[index].bounds;
-            if self.slots[index].active_node_count != 0 {
+            if self.slots[index].active_frame != 0 {
                 for node in self.slots[index].active_nodes
                     [..self.slots[index].active_node_count as usize]
                     .iter()
@@ -1526,6 +1553,22 @@ mod tests {
         assert_eq!(count, 1);
         assert!(damage[0].contains(1, 1));
         assert!(damage[0].contains(20, 20));
+    }
+
+    #[test]
+    fn no_op_surface_changes_do_not_add_damage() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 10, 10)))
+            .unwrap()
+            .surface;
+        registry.take_damage();
+        registry.set_bounds(7, root, GuiRect::new(0, 0, 10, 10)).unwrap();
+        assert_eq!(registry.take_damage().1, 0);
+        registry.focus(7, root).unwrap();
+        registry.take_damage();
+        registry.focus(7, root).unwrap();
+        assert_eq!(registry.take_damage().1, 0);
     }
 
     #[test]

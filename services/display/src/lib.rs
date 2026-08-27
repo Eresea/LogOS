@@ -22,10 +22,8 @@ pub const GLYPH_WIDTH: usize = 8;
 pub const GLYPH_HEIGHT: usize = 16;
 pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
 const CURSOR_WIDTH: usize = 2;
-const GUI_BACKGROUND_ROWS_PER_STEP: usize = 32;
-// Keep one GUI pass below the service heartbeat window; large damage is resumed
-// on the next loop instead of monopolizing the Display task.
-const GUI_RENDER_ROWS_PER_STEP: usize = 64;
+const GUI_TILE_SIZE: u32 = 32;
+const GUI_TILES_PER_STEP: usize = 8;
 const ASCII_FIRST: u32 = 0x20;
 const ASCII_LAST: u32 = 0x7e;
 const ASCII_GLYPH_COUNT: usize = (ASCII_LAST - ASCII_FIRST + 1) as usize;
@@ -254,11 +252,12 @@ pub struct Display {
     cursor_visible: bool,
     gui: GuiSurfaceRegistry,
     gui_background: Option<u32>,
-    gui_background_row: usize,
     gui_background_pending: bool,
     gui_damage: [GuiRect; MAX_GUI_DAMAGE_RECTS],
     gui_damage_count: usize,
-    gui_render_row: usize,
+    gui_tile_index: usize,
+    gui_tile_x: i32,
+    gui_tile_y: i32,
     backbuffer: Option<Vec<u8>>,
 }
 
@@ -277,11 +276,12 @@ impl Display {
             cursor_visible: true,
             gui: GuiSurfaceRegistry::new(),
             gui_background: None,
-            gui_background_row: 0,
             gui_background_pending: false,
             gui_damage: [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS],
             gui_damage_count: 0,
-            gui_render_row: 0,
+            gui_tile_index: 0,
+            gui_tile_x: 0,
+            gui_tile_y: 0,
             backbuffer: None,
         }
     }
@@ -353,11 +353,12 @@ impl Display {
         self.cursor_visible = true;
         self.gui = GuiSurfaceRegistry::new();
         self.gui_background = None;
-        self.gui_background_row = 0;
         self.gui_background_pending = false;
         self.gui_damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
         self.gui_damage_count = 0;
-        self.gui_render_row = 0;
+        self.gui_tile_index = 0;
+        self.gui_tile_x = 0;
+        self.gui_tile_y = 0;
     }
 
     pub fn toggle_cursor(&mut self) -> bool {
@@ -642,40 +643,23 @@ impl Display {
             let restoring_terminal = background.is_none();
             self.gui_background = background;
             self.invalidate_terminal();
-            self.gui_background_row = 0;
-            self.gui_background_pending = background.is_some();
+            self.gui_background_pending = true;
             self.gui_damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
             self.gui_damage_count = 0;
-            self.gui_render_row = 0;
             if restoring_terminal {
                 return self.render(framebuffer, width, height, stride, format);
             }
         }
         if self.gui_background_pending {
             self.surface_background = self.gui_background.unwrap_or(self.cells[0].background);
-            let end =
-                self.gui_background_row.saturating_add(GUI_BACKGROUND_ROWS_PER_STEP).min(height);
             let pixel = pixel_bytes(self.surface_background, format);
             let row_bytes = width * 4;
-            {
-                let backbuffer = self.backbuffer.as_mut().unwrap();
-                for row in self.gui_background_row..end {
-                    let start = row * stride;
-                    fill_row(&mut backbuffer[start..start + row_bytes], pixel);
-                }
+            let backbuffer = self.backbuffer.as_mut().unwrap();
+            for row in 0..height {
+                let start = row * stride;
+                fill_row(&mut backbuffer[start..start + row_bytes], pixel);
             }
-            let rendered_rows = end - self.gui_background_row;
-            self.gui_background_row = end;
-            if end < height {
-                let progress = GuiRect::new(
-                    0,
-                    (end - rendered_rows) as i32,
-                    width as u32,
-                    rendered_rows as u32,
-                );
-                self.present_damage(framebuffer, width, height, stride, &[progress]);
-                return Ok(rendered_rows * width);
-            }
+            self.present_all(framebuffer, width, height, stride);
             self.gui_background_pending = false;
             self.surface_initialized = true;
             if let Some(surface) = self.gui.terminal_bounds() {
@@ -687,63 +671,114 @@ impl Display {
         }
         if self.gui_damage_count == 0 {
             let (damage, count) = self.gui.take_damage();
-            if count == 0 {
+            self.load_gui_damage(damage, count, width, height);
+            if self.gui_damage_count == 0 {
                 return Ok(0);
             }
-            self.gui_damage = damage;
-            self.gui_damage_count = count;
-            self.gui_render_row = 0;
+            self.gui_tile_index = 0;
+            self.gui_tile_x = self.gui_damage[0].x;
+            self.gui_tile_y = self.gui_damage[0].y;
         }
-        let backbuffer = self.backbuffer.as_mut().unwrap();
-        let row_end = self.gui_render_row.saturating_add(GUI_RENDER_ROWS_PER_STEP).min(height);
-        let row_damage = GuiRect::new(
-            0,
-            self.gui_render_row as i32,
-            width as u32,
-            row_end.saturating_sub(self.gui_render_row) as u32,
-        );
-        let mut damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
-        let mut count = 0;
-        for rect in self.gui_damage[..self.gui_damage_count].iter().copied() {
-            let clipped = intersect(rect, row_damage);
-            if !clipped.is_empty() {
-                damage[count] = clipped;
-                count += 1;
+        let mut rendered = 0;
+        let screen = GuiRect::new(0, 0, width as u32, height as u32);
+        for _ in 0..GUI_TILES_PER_STEP {
+            if self.gui_tile_index >= self.gui_damage_count {
+                break;
+            }
+            let rect = self.gui_damage[self.gui_tile_index];
+            let right = rect.x.saturating_add(rect.width as i32);
+            let bottom = rect.y.saturating_add(rect.height as i32);
+            let tile = intersect(
+                GuiRect::new(self.gui_tile_x, self.gui_tile_y, GUI_TILE_SIZE, GUI_TILE_SIZE),
+                screen,
+            );
+            if tile.is_empty() {
+                self.advance_gui_tile(rect, right, bottom);
+                continue;
+            }
+            let pixel = pixel_bytes(self.surface_background, format);
+            let row_bytes = tile.width as usize * 4;
+            let backbuffer = self.backbuffer.as_mut().unwrap();
+            for row in tile.y as usize..tile.y as usize + tile.height as usize {
+                let start = row * stride + tile.x as usize * 4;
+                fill_row(&mut backbuffer[start..start + row_bytes], pixel);
+            }
+            let mut damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+            damage[0] = tile;
+            let terminal = self
+                .gui
+                .terminal_bounds()
+                .map(|surface| {
+                    Self::render_terminal_surface(
+                        &self.cells,
+                        self.columns,
+                        self.rows,
+                        self.cursor_column,
+                        self.cursor_row,
+                        self.cursor_visible,
+                        backbuffer,
+                        width,
+                        height,
+                        stride,
+                        format,
+                        surface,
+                        &damage,
+                        1,
+                    )
+                })
+                .unwrap_or(0);
+            rendered +=
+                terminal + self.gui.render(backbuffer, width, height, stride, format, &damage, 1);
+            self.present_damage(framebuffer, width, height, stride, &[tile]);
+            self.advance_gui_tile(rect, right, bottom);
+        }
+        if self.gui_tile_index >= self.gui_damage_count {
+            let (next_damage, next_count) = self.gui.take_damage();
+            self.load_gui_damage(next_damage, next_count, width, height);
+            self.gui_tile_index = 0;
+            if self.gui_damage_count != 0 {
+                self.gui_tile_x = self.gui_damage[0].x;
+                self.gui_tile_y = self.gui_damage[0].y;
             }
         }
-        let terminal = self
-            .gui
-            .terminal_bounds()
-            .map(|surface| {
-                Self::render_terminal_surface(
-                    &self.cells,
-                    self.columns,
-                    self.rows,
-                    self.cursor_column,
-                    self.cursor_row,
-                    self.cursor_visible,
-                    backbuffer,
-                    width,
-                    height,
-                    stride,
-                    format,
-                    surface,
-                    &damage,
-                    count,
-                )
-            })
-            .unwrap_or(0);
-        let rendered =
-            terminal + self.gui.render(backbuffer, width, height, stride, format, &damage, count);
-        self.gui_render_row = row_end;
-        if row_end == height {
-            let (next_damage, next_count) = self.gui.take_damage();
-            self.gui_damage = next_damage;
-            self.gui_damage_count = next_count;
-            self.gui_render_row = 0;
-        }
-        self.present_damage(framebuffer, width, height, stride, &damage[..count]);
         Ok(rendered)
+    }
+
+    fn load_gui_damage(
+        &mut self,
+        damage: [GuiRect; MAX_GUI_DAMAGE_RECTS],
+        count: usize,
+        width: usize,
+        height: usize,
+    ) {
+        let screen = GuiRect::new(0, 0, width as u32, height as u32);
+        let mut clipped = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+        let mut clipped_count = 0;
+        for rect in damage[..count].iter().copied() {
+            let rect = intersect(rect, screen);
+            if !rect.is_empty() {
+                clipped[clipped_count] = rect;
+                clipped_count += 1;
+            }
+        }
+        self.gui_damage = clipped;
+        self.gui_damage_count = clipped_count;
+    }
+
+    fn advance_gui_tile(&mut self, rect: GuiRect, right: i32, bottom: i32) {
+        self.gui_tile_x = self.gui_tile_x.saturating_add(GUI_TILE_SIZE as i32);
+        if self.gui_tile_x >= right {
+            self.gui_tile_x = rect.x;
+            self.gui_tile_y = self.gui_tile_y.saturating_add(GUI_TILE_SIZE as i32);
+            if self.gui_tile_y >= bottom {
+                self.gui_tile_index += 1;
+                if self.gui_tile_index < self.gui_damage_count {
+                    let next = self.gui_damage[self.gui_tile_index];
+                    self.gui_tile_x = next.x;
+                    self.gui_tile_y = next.y;
+                }
+            }
+        }
     }
 
     pub const fn render_pending(&self) -> bool {
@@ -862,9 +897,9 @@ mod tests {
             0xff0000,
         )));
         display.gui_mut().update(11, batch).unwrap();
-        assert!(
-            display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap() > 0
-        );
+        while display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap() == 0
+        {
+        }
         display.apply(1, &terminal).unwrap();
         assert!(display.render(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap() > 0);
         let pixel = (8 * 64 + 8) * 4;
