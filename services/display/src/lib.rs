@@ -24,6 +24,8 @@ pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
 const CURSOR_WIDTH: usize = 2;
 const GUI_TILE_SIZE: u32 = 32;
 const GUI_TILES_PER_STEP: usize = 8;
+const GLYPH_CACHE_ENTRIES: usize = 32;
+const DIRTY_WORDS: usize = (MAX_COLUMNS * MAX_ROWS).div_ceil(usize::BITS as usize);
 const ASCII_FIRST: u32 = 0x20;
 const ASCII_LAST: u32 = 0x7e;
 const ASCII_GLYPH_COUNT: usize = (ASCII_LAST - ASCII_FIRST + 1) as usize;
@@ -36,6 +38,40 @@ const _: () = assert!(FONT_DATA.len() == (ASCII_GLYPH_COUNT + 1) * GLYPH_HEIGHT 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Glyph {
     pub rows: [[u8; GLYPH_WIDTH]; GLYPH_HEIGHT],
+}
+
+#[derive(Clone, Copy)]
+struct GlyphCacheEntry {
+    scalar: u32,
+    glyph: Glyph,
+    valid: bool,
+}
+
+impl GlyphCacheEntry {
+    const EMPTY: Self =
+        Self { scalar: 0, glyph: Glyph { rows: [[0; GLYPH_WIDTH]; GLYPH_HEIGHT] }, valid: false };
+}
+
+struct GlyphCache {
+    entries: [GlyphCacheEntry; GLYPH_CACHE_ENTRIES],
+    next: usize,
+}
+
+impl GlyphCache {
+    const fn new() -> Self {
+        Self { entries: [GlyphCacheEntry::EMPTY; GLYPH_CACHE_ENTRIES], next: 0 }
+    }
+
+    fn get(&mut self, scalar: u32) -> Glyph {
+        if let Some(entry) = self.entries.iter().find(|entry| entry.valid && entry.scalar == scalar)
+        {
+            return entry.glyph;
+        }
+        let glyph = embedded_glyph(scalar);
+        self.entries[self.next] = GlyphCacheEntry { scalar, glyph, valid: true };
+        self.next = (self.next + 1) % GLYPH_CACHE_ENTRIES;
+        glyph
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -246,7 +282,8 @@ pub struct Display {
     cursor_column: usize,
     cursor_row: usize,
     cells: [Cell; MAX_COLUMNS * MAX_ROWS],
-    dirty: [bool; MAX_COLUMNS * MAX_ROWS],
+    dirty: [u64; DIRTY_WORDS],
+    glyph_cache: GlyphCache,
     surface_initialized: bool,
     surface_background: u32,
     cursor_visible: bool,
@@ -270,7 +307,8 @@ impl Display {
             cursor_column: 0,
             cursor_row: 0,
             cells: [Cell::EMPTY; MAX_COLUMNS * MAX_ROWS],
-            dirty: [false; MAX_COLUMNS * MAX_ROWS],
+            dirty: [0; DIRTY_WORDS],
+            glyph_cache: GlyphCache::new(),
             surface_initialized: false,
             surface_background: 0,
             cursor_visible: true,
@@ -288,6 +326,18 @@ impl Display {
 
     pub const fn generation(&self) -> u16 {
         self.generation
+    }
+
+    fn mark_dirty(&mut self, index: usize) {
+        self.dirty[index / 64] |= 1u64 << (index % 64);
+    }
+
+    fn clear_dirty(&mut self, index: usize) {
+        self.dirty[index / 64] &= !(1u64 << (index % 64));
+    }
+
+    fn set_all_dirty(&mut self, dirty: bool) {
+        self.dirty.fill(if dirty { u64::MAX } else { 0 });
     }
 
     fn ensure_backbuffer(&mut self, bytes: usize) -> Result<(), DisplayError> {
@@ -347,7 +397,8 @@ impl Display {
         self.cursor_column = 0;
         self.cursor_row = 0;
         self.cells.fill(Cell::EMPTY);
-        self.dirty.fill(true);
+        self.set_all_dirty(true);
+        self.glyph_cache = GlyphCache::new();
         self.surface_initialized = false;
         self.surface_background = 0;
         self.cursor_visible = true;
@@ -366,7 +417,7 @@ impl Display {
             return false;
         }
         self.cursor_visible = !self.cursor_visible;
-        self.dirty[self.cursor_row * MAX_COLUMNS + self.cursor_column] = true;
+        self.mark_dirty(self.cursor_row * MAX_COLUMNS + self.cursor_column);
         true
     }
 
@@ -403,7 +454,7 @@ impl Display {
         }
         if message.kind == MessageKind::FullRedraw {
             self.cells.fill(Cell::EMPTY);
-            self.dirty.fill(true);
+            self.set_all_dirty(true);
             self.surface_initialized = false;
             self.surface_background = 0;
         }
@@ -412,9 +463,14 @@ impl Display {
             let cell = message.cells[index];
             let was_unrendered = self.cells[position] == Cell::EMPTY;
             self.cells[position] = cell;
-            self.dirty[position] = !(self.surface_initialized
+            if !(self.surface_initialized
                 && was_unrendered
-                && is_background_only(cell, self.surface_background));
+                && is_background_only(cell, self.surface_background))
+            {
+                self.mark_dirty(position);
+            } else {
+                self.clear_dirty(position);
+            }
         }
         let old_cursor = self.cursor_row * MAX_COLUMNS + self.cursor_column;
         self.columns = columns;
@@ -422,8 +478,8 @@ impl Display {
         self.cursor_column = usize::from(message.cursor_column).min(columns - 1);
         self.cursor_row = usize::from(message.cursor_row).min(rows - 1);
         self.cursor_visible = true;
-        self.dirty[old_cursor] = true;
-        self.dirty[self.cursor_row * MAX_COLUMNS + self.cursor_column] = true;
+        self.mark_dirty(old_cursor);
+        self.mark_dirty(self.cursor_row * MAX_COLUMNS + self.cursor_column);
         Ok(())
     }
 
@@ -446,6 +502,7 @@ impl Display {
             return Err(DisplayError::InvalidFramebuffer);
         }
         self.ensure_backbuffer(required)?;
+        let dirty = &mut self.dirty;
         let backbuffer = self.backbuffer.as_mut().unwrap();
         let mut rendered = 0;
         let first_render = !self.surface_initialized;
@@ -463,11 +520,11 @@ impl Display {
             for row in 0..self.rows {
                 for column in 0..self.columns {
                     let index = row * MAX_COLUMNS + column;
-                    if !self.dirty[index] {
+                    if dirty[index / 64] & (1u64 << (index % 64)) == 0 {
                         continue;
                     }
                     self.gui.invalidate_rect(terminal_cell_rect(surface, row, column));
-                    self.dirty[index] = false;
+                    dirty[index / 64] &= !(1u64 << (index % 64));
                     rendered += 1;
                 }
             }
@@ -476,11 +533,11 @@ impl Display {
         for row in 0..self.rows {
             for column in 0..self.columns {
                 let index = row * MAX_COLUMNS + column;
-                if !self.dirty[index] {
+                if dirty[index / 64] & (1u64 << (index % 64)) == 0 {
                     continue;
                 }
                 if self.gui_background.is_some() {
-                    self.dirty[index] = false;
+                    dirty[index / 64] &= !(1u64 << (index % 64));
                     rendered += 1;
                     continue;
                 }
@@ -496,11 +553,11 @@ impl Display {
                     && (is_uninitialized(cell) || is_background_only(cell, self.surface_background))
                     && !(is_cursor && self.cursor_visible)
                 {
-                    self.dirty[index] = false;
+                    dirty[index / 64] &= !(1u64 << (index % 64));
                     rendered += 1;
                     continue;
                 }
-                let glyph = embedded_glyph(cell.codepoint);
+                let glyph = self.glyph_cache.get(cell.codepoint);
                 let foreground = styled_foreground(cell);
                 for glyph_row in 0..GLYPH_HEIGHT {
                     for glyph_column in 0..GLYPH_WIDTH {
@@ -527,7 +584,7 @@ impl Display {
                         }
                     }
                 }
-                self.dirty[index] = false;
+                dirty[index / 64] &= !(1u64 << (index % 64));
                 rendered += 1;
             }
         }
@@ -544,7 +601,7 @@ impl Display {
     }
 
     pub fn invalidate_terminal(&mut self) {
-        self.dirty.fill(true);
+        self.set_all_dirty(true);
         self.surface_initialized = false;
     }
 
@@ -564,6 +621,7 @@ impl Display {
         cursor_column: usize,
         cursor_row: usize,
         cursor_visible: bool,
+        glyph_cache: &mut GlyphCache,
         framebuffer: &mut [u8],
         width: usize,
         height: usize,
@@ -582,7 +640,7 @@ impl Display {
                 let cell = cells[row * MAX_COLUMNS + column];
                 let cell_rect = terminal_cell_rect(surface, row, column);
                 let is_cursor = row == cursor_row && column == cursor_column;
-                let glyph = embedded_glyph(cell.codepoint);
+                let glyph = glyph_cache.get(cell.codepoint);
                 let foreground = styled_foreground(cell);
                 for damage_rect in damage[..damage_count].iter().copied() {
                     let clip = intersect(intersect(cell_rect, damage_rect), screen);
@@ -663,10 +721,10 @@ impl Display {
             self.gui_background_pending = false;
             self.surface_initialized = true;
             if let Some(surface) = self.gui.terminal_bounds() {
-                self.dirty.fill(true);
+                self.set_all_dirty(true);
                 self.gui.invalidate_rect(surface);
             } else {
-                self.dirty.fill(false);
+                self.set_all_dirty(false);
             }
         }
         if self.gui_damage_count == 0 {
@@ -716,6 +774,7 @@ impl Display {
                         self.cursor_column,
                         self.cursor_row,
                         self.cursor_visible,
+                        &mut self.glyph_cache,
                         backbuffer,
                         width,
                         height,
@@ -801,6 +860,17 @@ mod tests {
     #[test]
     fn invalid_scalars_use_the_replacement_glyph() {
         assert_eq!(embedded_glyph(0xd800), embedded_glyph(REPLACEMENT_SCALAR));
+    }
+
+    #[test]
+    fn glyph_cache_reuses_fixed_atlas_entries() {
+        let mut cache = GlyphCache::new();
+        let first = cache.get('A' as u32);
+        let next = cache.next;
+        let second = cache.get('A' as u32);
+        assert_eq!(first, second);
+        assert_eq!(cache.next, next);
+        assert!(cache.entries.iter().any(|entry| entry.valid && entry.scalar == 'A' as u32));
     }
 
     #[test]
