@@ -6,6 +6,7 @@ pub const MAX_GUI_COMMANDS: usize = 3;
 pub const MAX_GUI_BATCH_FRAGMENTS: usize = 4;
 pub const MAX_GUI_TEXT_BYTES: usize = 32;
 pub const GUI_DRAW_FLAG_MORE: u8 = 1 << 0;
+pub const GUI_SURFACE_FLAG_TERMINAL: u8 = 1 << 0;
 pub const GUI_TEXT_FLAG_LIGHT: u32 = 1 << 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,6 +84,21 @@ pub enum GuiStatus {
     NotFound = 6,
 }
 
+impl GuiStatus {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Ok),
+            1 => Some(Self::Stale),
+            2 => Some(Self::Malformed),
+            3 => Some(Self::Capacity),
+            4 => Some(Self::Unauthorized),
+            5 => Some(Self::Backpressure),
+            6 => Some(Self::NotFound),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct GuiSurfaceRequest {
@@ -111,7 +127,10 @@ impl GuiSurfaceRequest {
     }
 
     pub const fn is_valid(self) -> bool {
-        self.request_id != 0 && self.flags == 0 && self.reserved == 0 && self.reserved_tail == 0
+        self.request_id != 0
+            && self.flags & !GUI_SURFACE_FLAG_TERMINAL == 0
+            && self.reserved == 0
+            && self.reserved_tail == 0
     }
 }
 
@@ -435,6 +454,15 @@ mod tests {
         assert_eq!(light.auxiliary, GUI_TEXT_FLAG_LIGHT);
         assert!(light.is_valid());
         assert!(GuiDrawCommand::glyph_run_styled(0, 0, 0xffffff, 2, b"A").is_none());
+    }
+
+    #[test]
+    fn terminal_surface_flag_is_explicitly_bounded() {
+        let mut request = GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, 1);
+        request.flags = GUI_SURFACE_FLAG_TERMINAL;
+        assert!(request.is_valid());
+        request.flags = u8::MAX;
+        assert!(!request.is_valid());
     }
 
     #[test]

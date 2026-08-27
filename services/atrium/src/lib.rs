@@ -5,11 +5,13 @@ extern crate std;
 
 use core::fmt::Write;
 
-use logos_abi::{GuiRect, InputMessage, KeyCode, KeyState, MOD_CTRL, SurfaceHandle};
+use logos_abi::{
+    GuiRect, InputMessage, KeyCode, KeyState, MOD_CTRL, PointerState, ServiceHandle, SurfaceHandle,
+};
 
-pub const MAX_ATRIUM_WINDOWS: usize = 4;
+pub const MAX_ATRIUM_SURFACES: usize = 4;
 pub const MAX_CALCULATOR_TEXT: usize = 32;
-pub const WINDOW_MOVE_STEP: i32 = 32;
+pub const SURFACE_MOVE_STEP: i32 = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtriumPhase {
@@ -24,22 +26,51 @@ pub enum AppId {
     Calculator = 1,
     Files = 2,
     Terminal = 3,
+    System = 4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WindowMode {
+pub enum SurfaceMode {
     Tiled,
     Floating,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Window {
+pub struct Surface {
     pub id: u16,
     pub app: AppId,
-    pub surface: SurfaceHandle,
+    pub client: ServiceHandle,
+    pub reference: SurfaceHandle,
     pub bounds: GuiRect,
-    pub mode: WindowMode,
+    pub mode: SurfaceMode,
     pub focused: bool,
+    focus_order: u32,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct SurfaceRequest {
+    app: AppId,
+    client: ServiceHandle,
+    bounds: GuiRect,
+    mode: SurfaceMode,
+}
+
+impl SurfaceRequest {
+    pub const fn app(&self) -> AppId {
+        self.app
+    }
+
+    pub const fn client(&self) -> ServiceHandle {
+        self.client
+    }
+
+    pub const fn bounds(&self) -> GuiRect {
+        self.bounds
+    }
+
+    pub const fn mode(&self) -> SurfaceMode {
+        self.mode
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,11 +79,13 @@ pub enum AtriumError {
     Capacity,
     NotFound,
     InvalidSurface,
+    AlreadyRegistered,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtriumAction {
     None,
+    LauncherChanged,
     Launch(AppId),
     FocusNext,
     FocusPrevious,
@@ -61,12 +94,20 @@ pub enum AtriumAction {
     Logout,
 }
 
+impl AtriumAction {
+    pub const fn routes_to_surface(self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 pub struct Atrium {
     phase: AtriumPhase,
-    windows: [Option<Window>; MAX_ATRIUM_WINDOWS],
+    surfaces: [Option<Surface>; MAX_ATRIUM_SURFACES],
     focused: Option<usize>,
+    pointer_capture: Option<SurfaceHandle>,
     launcher_index: usize,
-    next_window_id: u16,
+    next_surface_id: u16,
+    next_focus_order: u32,
     home_surface: SurfaceHandle,
     lock_surface: SurfaceHandle,
 }
@@ -75,10 +116,12 @@ impl Atrium {
     pub const fn new() -> Self {
         Self {
             phase: AtriumPhase::Boot,
-            windows: [None; MAX_ATRIUM_WINDOWS],
+            surfaces: [None; MAX_ATRIUM_SURFACES],
             focused: None,
+            pointer_capture: None,
             launcher_index: 0,
-            next_window_id: 1,
+            next_surface_id: 1,
+            next_focus_order: 1,
             home_surface: SurfaceHandle::EMPTY,
             lock_surface: SurfaceHandle::EMPTY,
         }
@@ -100,15 +143,27 @@ impl Atrium {
         self.lock_surface
     }
 
-    pub fn focused_window(&self) -> Option<Window> {
+    pub fn focused_surface(&self) -> Option<Surface> {
         match self.focused {
-            Some(index) => self.windows[index],
+            Some(index) => self.surfaces[index],
             None => None,
         }
     }
 
+    pub const fn initial_surface_bounds(app: AppId) -> GuiRect {
+        match app {
+            AppId::Calculator => GuiRect::new(220, 72, 320, 220),
+            AppId::Files => GuiRect::new(248, 88, 340, 190),
+            AppId::Terminal => GuiRect::new(200, 48, 420, 300),
+            AppId::System => GuiRect::new(176, 40, 448, 320),
+        }
+    }
+
     pub fn set_home_surface(&mut self, surface: SurfaceHandle) -> Result<(), AtriumError> {
-        if !surface.is_valid() {
+        if self.phase != AtriumPhase::Home {
+            return Err(AtriumError::Locked);
+        }
+        if !surface.is_valid() || surface == self.lock_surface {
             return Err(AtriumError::InvalidSurface);
         }
         self.home_surface = surface;
@@ -125,7 +180,7 @@ impl Atrium {
         home: SurfaceHandle,
         lock: SurfaceHandle,
     ) -> Result<(), AtriumError> {
-        if !home.is_valid() || !lock.is_valid() {
+        if !home.is_valid() || !lock.is_valid() || home == lock {
             return Err(AtriumError::InvalidSurface);
         }
         self.home_surface = home;
@@ -135,12 +190,17 @@ impl Atrium {
 
     pub fn lock(&mut self) {
         self.phase = AtriumPhase::Locked;
-        self.clear_windows();
+        self.clear_surface_records();
+        self.home_surface = SurfaceHandle::EMPTY;
+        self.lock_surface = SurfaceHandle::EMPTY;
     }
 
     pub fn authenticate(&mut self) {
+        if self.phase == AtriumPhase::Home {
+            return;
+        }
         self.phase = AtriumPhase::Home;
-        self.clear_windows();
+        self.clear_surface_records();
     }
 
     pub fn logout(&mut self) {
@@ -149,80 +209,188 @@ impl Atrium {
 
     pub fn restart(&mut self) {
         self.phase = AtriumPhase::Boot;
-        self.clear_windows();
+        self.clear_surface_records();
         self.home_surface = SurfaceHandle::EMPTY;
         self.lock_surface = SurfaceHandle::EMPTY;
     }
 
-    pub fn window(&self, id: u16) -> Option<Window> {
-        self.windows.iter().flatten().copied().find(|window| window.id == id)
+    pub fn surface(&self, id: u16) -> Option<Surface> {
+        self.surfaces.iter().flatten().copied().find(|surface| surface.id == id)
     }
 
-    pub fn windows(&self) -> impl Iterator<Item = Window> + '_ {
-        self.windows.iter().flatten().copied()
+    pub fn surfaces(&self) -> impl Iterator<Item = Surface> + '_ {
+        self.surfaces.iter().flatten().copied()
     }
 
-    pub fn launch(
-        &mut self,
+    pub fn surface_for_app(&self, app: AppId) -> Option<Surface> {
+        self.surfaces.iter().flatten().copied().find(|surface| surface.app == app)
+    }
+
+    pub fn surface_for_client(&self, client: ServiceHandle, app: AppId) -> Option<Surface> {
+        self.surfaces
+            .iter()
+            .flatten()
+            .copied()
+            .find(|surface| surface.client == client && surface.app == app)
+    }
+
+    pub fn surface_by_reference(&self, reference: SurfaceHandle) -> Option<Surface> {
+        self.surfaces.iter().flatten().copied().find(|surface| surface.reference == reference)
+    }
+
+    pub fn surface_at(&self, x: i32, y: i32) -> Option<Surface> {
+        self.surfaces
+            .iter()
+            .flatten()
+            .filter(|surface| surface.bounds.contains(x, y))
+            .max_by_key(|surface| surface.focus_order)
+            .copied()
+    }
+
+    pub fn pointer_target(&mut self, input: &InputMessage) -> Option<Surface> {
+        let pointer = input.pointer_event()?;
+        if self.phase != AtriumPhase::Home {
+            return None;
+        }
+        let hit = || self.surface_at(i32::from(pointer.x), i32::from(pointer.y));
+        let target = match pointer.state {
+            PointerState::Down => hit(),
+            PointerState::Move | PointerState::Up => self
+                .pointer_capture
+                .and_then(|reference| self.surface_by_reference(reference))
+                .or_else(hit),
+        }?;
+        if pointer.state == PointerState::Down {
+            self.focus(target.id).ok()?;
+            self.pointer_capture = Some(target.reference);
+        } else if pointer.state == PointerState::Up {
+            self.pointer_capture = None;
+        }
+        self.surface(target.id)
+    }
+
+    pub fn focus_at(&mut self, x: i32, y: i32) -> Result<Surface, AtriumError> {
+        let surface = self.surface_at(x, y).ok_or(AtriumError::NotFound)?;
+        self.focus(surface.id)?;
+        self.surface(surface.id).ok_or(AtriumError::NotFound)
+    }
+
+    pub fn request_surface(
+        &self,
         app: AppId,
-        surface: SurfaceHandle,
-        bounds: GuiRect,
-    ) -> Result<u16, AtriumError> {
+        client: ServiceHandle,
+    ) -> Result<SurfaceRequest, AtriumError> {
         if self.phase != AtriumPhase::Home {
             return Err(AtriumError::Locked);
         }
-        if !surface.is_valid() {
+        if !client.is_valid() {
             return Err(AtriumError::InvalidSurface);
         }
-        let Some(index) = self.windows.iter().position(Option::is_none) else {
+        if !self.surfaces.iter().any(Option::is_none) {
+            return Err(AtriumError::Capacity);
+        }
+        Ok(SurfaceRequest {
+            app,
+            client,
+            bounds: Self::initial_surface_bounds(app),
+            mode: if app == AppId::Terminal { SurfaceMode::Tiled } else { SurfaceMode::Floating },
+        })
+    }
+
+    pub fn spawn_surface(
+        &mut self,
+        request: SurfaceRequest,
+        reference: SurfaceHandle,
+    ) -> Result<Surface, AtriumError> {
+        if self.phase != AtriumPhase::Home {
+            return Err(AtriumError::Locked);
+        }
+        if !reference.is_valid() || reference == self.home_surface || reference == self.lock_surface
+        {
+            return Err(AtriumError::InvalidSurface);
+        }
+        if self.surfaces.iter().flatten().any(|surface| surface.reference == reference) {
+            return Err(AtriumError::AlreadyRegistered);
+        }
+        let Some(index) = self.surfaces.iter().position(Option::is_none) else {
             return Err(AtriumError::Capacity);
         };
-        let id = self.next_window_id;
-        self.next_window_id = self.next_window_id.wrapping_add(1).max(1);
-        let window = Window {
+        let id = self.next_surface_id;
+        self.next_surface_id = self.next_surface_id.wrapping_add(1).max(1);
+        let surface = Surface {
             id,
-            app,
-            surface,
-            bounds,
-            mode: if app == AppId::Terminal { WindowMode::Tiled } else { WindowMode::Floating },
+            app: request.app,
+            client: request.client,
+            reference,
+            bounds: request.bounds,
+            mode: request.mode,
             focused: true,
+            focus_order: self.next_focus_order,
         };
+        self.advance_focus_order();
         self.clear_focus();
-        self.windows[index] = Some(window);
+        self.surfaces[index] = Some(surface);
         self.focused = Some(index);
-        Ok(id)
+        Ok(surface)
     }
 
     pub fn focus(&mut self, id: u16) -> Result<(), AtriumError> {
-        let Some(index) = self.windows.iter().position(|window| window.is_some_and(|w| w.id == id))
+        let Some(index) =
+            self.surfaces.iter().position(|surface| surface.is_some_and(|s| s.id == id))
         else {
             return Err(AtriumError::NotFound);
         };
         self.clear_focus();
-        if let Some(window) = &mut self.windows[index] {
-            window.focused = true;
+        if let Some(surface) = &mut self.surfaces[index] {
+            surface.focused = true;
+            surface.focus_order = self.next_focus_order;
         }
+        self.advance_focus_order();
         self.focused = Some(index);
         Ok(())
     }
 
+    pub fn focus_reference(&mut self, reference: SurfaceHandle) -> Result<(), AtriumError> {
+        let Some(surface) = self.surface_by_reference(reference) else {
+            return Err(AtriumError::NotFound);
+        };
+        self.focus(surface.id)
+    }
+
     pub fn move_focused(&mut self, dx: i32, dy: i32) -> Result<(), AtriumError> {
         let Some(index) = self.focused else { return Err(AtriumError::NotFound) };
-        let Some(window) = &mut self.windows[index] else { return Err(AtriumError::NotFound) };
-        if window.mode == WindowMode::Tiled {
+        let Some(surface) = &mut self.surfaces[index] else { return Err(AtriumError::NotFound) };
+        if surface.mode == SurfaceMode::Tiled {
             return Ok(());
         }
-        window.bounds.x = window.bounds.x.saturating_add(dx);
-        window.bounds.y = window.bounds.y.saturating_add(dy);
+        surface.bounds.x = surface.bounds.x.saturating_add(dx);
+        surface.bounds.y = surface.bounds.y.saturating_add(dy);
         Ok(())
     }
 
-    pub fn close_focused(&mut self) -> Result<Window, AtriumError> {
+    pub fn close_focused(&mut self) -> Result<Surface, AtriumError> {
         let Some(index) = self.focused else { return Err(AtriumError::NotFound) };
-        let Some(window) = self.windows[index].take() else { return Err(AtriumError::NotFound) };
+        let Some(surface) = self.surfaces[index] else { return Err(AtriumError::NotFound) };
+        self.surfaces[index] = None;
         self.focused = None;
         self.focus_next(1);
-        Ok(window)
+        Ok(surface)
+    }
+
+    pub fn close_reference(&mut self, reference: SurfaceHandle) -> Result<Surface, AtriumError> {
+        let Some(index) = self
+            .surfaces
+            .iter()
+            .position(|surface| surface.is_some_and(|surface| surface.reference == reference))
+        else {
+            return Err(AtriumError::NotFound);
+        };
+        let Some(surface) = self.surfaces[index].take() else { return Err(AtriumError::NotFound) };
+        if self.focused == Some(index) {
+            self.focused = None;
+            self.focus_next(1);
+        }
+        Ok(surface)
     }
 
     pub fn input(&mut self, input: &InputMessage) -> AtriumAction {
@@ -237,10 +405,10 @@ impl Atrium {
             (true, KeyCode::TAB) => AtriumAction::FocusNext,
             (true, KeyCode::BackTab) => AtriumAction::FocusPrevious,
             (true, KeyCode::ESCAPE) => AtriumAction::CloseFocused,
-            (true, KeyCode::LEFT) => AtriumAction::MoveFocused(-WINDOW_MOVE_STEP, 0),
-            (true, KeyCode::RIGHT) => AtriumAction::MoveFocused(WINDOW_MOVE_STEP, 0),
-            (true, KeyCode::UP) => AtriumAction::MoveFocused(0, -WINDOW_MOVE_STEP),
-            (true, KeyCode::DOWN) => AtriumAction::MoveFocused(0, WINDOW_MOVE_STEP),
+            (true, KeyCode::LEFT) => AtriumAction::MoveFocused(-SURFACE_MOVE_STEP, 0),
+            (true, KeyCode::RIGHT) => AtriumAction::MoveFocused(SURFACE_MOVE_STEP, 0),
+            (true, KeyCode::UP) => AtriumAction::MoveFocused(0, -SURFACE_MOVE_STEP),
+            (true, KeyCode::DOWN) => AtriumAction::MoveFocused(0, SURFACE_MOVE_STEP),
             (false, KeyCode::TAB) => AtriumAction::FocusNext,
             (false, KeyCode::BackTab) => AtriumAction::FocusPrevious,
             (false, KeyCode::ESCAPE) => AtriumAction::CloseFocused,
@@ -251,11 +419,11 @@ impl Atrium {
             },
             (false, KeyCode::LEFT) => {
                 self.launcher_index = self.launcher_index.saturating_sub(1);
-                AtriumAction::None
+                AtriumAction::LauncherChanged
             }
             (false, KeyCode::RIGHT) => {
                 self.launcher_index = (self.launcher_index + 1).min(2);
-                AtriumAction::None
+                AtriumAction::LauncherChanged
             }
             (true, _) => match code.character_byte() {
                 Some(b'l') => AtriumAction::Logout,
@@ -265,6 +433,7 @@ impl Atrium {
                 Some(b'1' | b'&') => AtriumAction::Launch(AppId::Calculator),
                 Some(b'2' | b'e') => AtriumAction::Launch(AppId::Files),
                 Some(b'3' | b'"') => AtriumAction::Launch(AppId::Terminal),
+                Some(b'4' | b'\'') => AtriumAction::Launch(AppId::System),
                 _ => AtriumAction::None,
             },
             _ => AtriumAction::None,
@@ -287,41 +456,52 @@ impl Atrium {
                 self.logout();
                 Ok(())
             }
-            AtriumAction::None | AtriumAction::Launch(_) => Ok(()),
+            AtriumAction::None | AtriumAction::LauncherChanged | AtriumAction::Launch(_) => Ok(()),
         }
     }
 
-    fn clear_windows(&mut self) {
-        self.windows = [None; MAX_ATRIUM_WINDOWS];
+    fn clear_surface_records(&mut self) {
+        self.surfaces = [None; MAX_ATRIUM_SURFACES];
         self.focused = None;
+        self.pointer_capture = None;
+        self.launcher_index = 0;
+        self.next_focus_order = 1;
     }
 
     fn clear_focus(&mut self) {
-        for window in self.windows.iter_mut().flatten() {
-            window.focused = false;
+        for surface in self.surfaces.iter_mut().flatten() {
+            surface.focused = false;
         }
+    }
+
+    fn advance_focus_order(&mut self) {
+        self.next_focus_order = self.next_focus_order.wrapping_add(1).max(1);
     }
 
     fn focus_next(&mut self, direction: isize) {
         let Some(current) = self.focused else {
-            self.focused = self.windows.iter().position(Option::is_some);
+            self.focused = self.surfaces.iter().position(Option::is_some);
             if let Some(index) = self.focused {
                 self.clear_focus();
-                if let Some(window) = &mut self.windows[index] {
-                    window.focused = true;
+                if let Some(surface) = &mut self.surfaces[index] {
+                    surface.focused = true;
+                    surface.focus_order = self.next_focus_order;
                 }
+                self.advance_focus_order();
             }
             return;
         };
         let mut index = current as isize;
-        for _ in 0..MAX_ATRIUM_WINDOWS {
-            index = (index + direction).rem_euclid(MAX_ATRIUM_WINDOWS as isize);
-            if self.windows[index as usize].is_some() {
+        for _ in 0..MAX_ATRIUM_SURFACES {
+            index = (index + direction).rem_euclid(MAX_ATRIUM_SURFACES as isize);
+            if self.surfaces[index as usize].is_some() {
                 self.clear_focus();
                 let index = index as usize;
-                if let Some(window) = &mut self.windows[index] {
-                    window.focused = true;
+                if let Some(surface) = &mut self.surfaces[index] {
+                    surface.focused = true;
+                    surface.focus_order = self.next_focus_order;
                 }
+                self.advance_focus_order();
                 self.focused = Some(index);
                 return;
             }
@@ -567,6 +747,10 @@ mod tests {
         SurfaceHandle::new(slot, 1, 13).unwrap()
     }
 
+    fn client(slot: u32) -> ServiceHandle {
+        ServiceHandle::new(slot, 1).unwrap()
+    }
+
     fn key(byte: u8) -> InputMessage {
         InputMessage::key(KeyCode::character(byte), KeyState::Pressed, 0)
     }
@@ -576,24 +760,19 @@ mod tests {
     }
 
     #[test]
-    fn phase_and_window_lifecycle_is_bounded() {
+    fn phase_and_surface_lifecycle_is_bounded() {
         let mut atrium = Atrium::new();
         assert_eq!(atrium.phase(), AtriumPhase::Boot);
         atrium.authenticate();
-        for slot in 0..MAX_ATRIUM_WINDOWS {
-            assert!(
-                atrium
-                    .launch(AppId::Calculator, surface(slot as u16), GuiRect::new(10, 10, 20, 20))
-                    .is_ok()
-            );
+        for slot in 0..MAX_ATRIUM_SURFACES {
+            let request = atrium.request_surface(AppId::Calculator, client(1)).unwrap();
+            assert!(atrium.spawn_surface(request, surface(slot as u16)).is_ok());
         }
-        assert_eq!(
-            atrium.launch(AppId::Files, surface(9), GuiRect::new(0, 0, 20, 20)),
-            Err(AtriumError::Capacity)
-        );
+        let request = atrium.request_surface(AppId::Files, client(1)).unwrap_err();
+        assert_eq!(request, AtriumError::Capacity);
         atrium.logout();
         assert_eq!(atrium.phase(), AtriumPhase::Locked);
-        assert_eq!(atrium.windows().count(), 0);
+        assert_eq!(atrium.surfaces().count(), 0);
     }
 
     #[test]
@@ -604,29 +783,182 @@ mod tests {
         assert_eq!(atrium.input(&ctrl(b'&')), AtriumAction::Launch(AppId::Calculator));
         assert_eq!(atrium.input(&ctrl(b'e')), AtriumAction::Launch(AppId::Files));
         assert_eq!(atrium.input(&ctrl(b'"')), AtriumAction::Launch(AppId::Terminal));
-        atrium.launch(AppId::Calculator, surface(1), GuiRect::new(10, 10, 20, 20)).unwrap();
+        assert_eq!(atrium.input(&ctrl(b'4')), AtriumAction::Launch(AppId::System));
+        let request = atrium.request_surface(AppId::Calculator, client(1)).unwrap();
+        atrium.spawn_surface(request, surface(1)).unwrap();
         assert_eq!(atrium.input(&ctrl(b'j')), AtriumAction::None);
         assert_eq!(atrium.input(&ctrl(b'1')), AtriumAction::Launch(AppId::Calculator));
         assert_eq!(atrium.input(&ctrl(b'l')), AtriumAction::Logout);
+        assert_eq!(
+            atrium.input(&InputMessage::key(KeyCode::RIGHT, KeyState::Pressed, 0)),
+            AtriumAction::LauncherChanged
+        );
+        assert!(!AtriumAction::LauncherChanged.routes_to_surface());
         atrium.apply_action(AtriumAction::Logout).unwrap();
         assert_eq!(atrium.phase(), AtriumPhase::Locked);
+        assert!(AtriumAction::None.routes_to_surface());
+        assert!(!AtriumAction::FocusNext.routes_to_surface());
+        assert!(!AtriumAction::Launch(AppId::Terminal).routes_to_surface());
     }
 
     #[test]
     fn floating_focus_move_close_and_restart_are_generation_safe() {
         let mut atrium = Atrium::new();
         atrium.authenticate();
-        let id =
-            atrium.launch(AppId::Calculator, surface(1), GuiRect::new(10, 20, 80, 60)).unwrap();
-        assert_eq!(atrium.focused_window().unwrap().id, id);
-        atrium.move_focused(WINDOW_MOVE_STEP, -WINDOW_MOVE_STEP).unwrap();
-        assert_eq!(atrium.window(id).unwrap().bounds, GuiRect::new(42, -12, 80, 60));
+        let request = atrium.request_surface(AppId::Calculator, client(1)).unwrap();
+        let admitted = atrium.spawn_surface(request, surface(1)).unwrap();
+        assert_eq!(atrium.focused_surface().unwrap().id, admitted.id);
+        atrium.move_focused(SURFACE_MOVE_STEP, -SURFACE_MOVE_STEP).unwrap();
+        assert_eq!(atrium.surface(admitted.id).unwrap().bounds, GuiRect::new(252, 40, 320, 220));
         let closed = atrium.close_focused().unwrap();
-        assert_eq!(closed.id, id);
+        assert_eq!(closed.id, admitted.id);
         atrium.restart();
         assert_eq!(atrium.phase(), AtriumPhase::Boot);
         assert!(!atrium.home_surface().is_valid());
-        assert_eq!(atrium.windows().count(), 0);
+        assert_eq!(atrium.surfaces().count(), 0);
+    }
+
+    #[test]
+    fn surface_requests_reject_duplicate_and_reserved_references() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let home = surface(10);
+        let lock = surface(11);
+        atrium.set_surfaces(home, lock).unwrap();
+        let request = atrium.request_surface(AppId::Files, client(1)).unwrap();
+        assert_eq!(atrium.spawn_surface(request, home), Err(AtriumError::InvalidSurface));
+
+        let reference = surface(12);
+        let request = atrium.request_surface(AppId::Files, client(1)).unwrap();
+        atrium.spawn_surface(request, reference).unwrap();
+        let request = atrium.request_surface(AppId::Terminal, client(1)).unwrap();
+        assert_eq!(atrium.spawn_surface(request, reference), Err(AtriumError::AlreadyRegistered));
+    }
+
+    #[test]
+    fn surface_reference_lookup_is_exact_and_generation_safe() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let request = atrium.request_surface(AppId::Calculator, client(1)).unwrap();
+        let reference = surface(2);
+        let created = atrium.spawn_surface(request, reference).unwrap();
+        assert_eq!(created.client, client(1));
+        assert_eq!(atrium.surface_by_reference(reference), Some(created));
+        assert_eq!(atrium.surface_for_client(client(1), AppId::Calculator), Some(created));
+        assert_eq!(atrium.surface_for_client(client(2), AppId::Calculator), None);
+        let stale = SurfaceHandle { generation: reference.generation + 1, ..reference };
+        assert_eq!(atrium.surface_by_reference(stale), None);
+    }
+
+    #[test]
+    fn surface_requests_require_a_live_client_identity() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        assert_eq!(
+            atrium.request_surface(AppId::Terminal, ServiceHandle::EMPTY),
+            Err(AtriumError::InvalidSurface)
+        );
+    }
+
+    #[test]
+    fn stale_client_surface_can_be_retired_by_exact_reference() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let request = atrium.request_surface(AppId::Terminal, client(1)).unwrap();
+        let created = atrium.spawn_surface(request, surface(9)).unwrap();
+        assert_eq!(atrium.close_reference(created.reference), Ok(created));
+        assert_eq!(atrium.surface_by_reference(created.reference), None);
+        assert_eq!(atrium.close_reference(created.reference), Err(AtriumError::NotFound));
+    }
+
+    #[test]
+    fn repeated_authentication_preserves_live_surfaces() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let request = atrium.request_surface(AppId::Files, client(1)).unwrap();
+        let created = atrium.spawn_surface(request, surface(5)).unwrap();
+
+        atrium.authenticate();
+
+        assert_eq!(atrium.surface(created.id), Some(created));
+        assert_eq!(atrium.focused_surface(), Some(created));
+    }
+
+    #[test]
+    fn home_surface_admission_is_session_bound() {
+        let mut atrium = Atrium::new();
+        let home = surface(6);
+        assert_eq!(atrium.set_home_surface(home), Err(AtriumError::Locked));
+
+        atrium.authenticate();
+        atrium.set_surfaces(home, surface(7)).unwrap();
+        atrium.set_home_surface(home).unwrap();
+        assert_eq!(
+            atrium.input(&InputMessage::key(KeyCode::RIGHT, KeyState::Pressed, 0)),
+            AtriumAction::LauncherChanged
+        );
+        atrium.logout();
+        assert_eq!(atrium.set_home_surface(surface(7)), Err(AtriumError::Locked));
+        assert!(!atrium.home_surface().is_valid());
+        assert!(!atrium.lock_surface().is_valid());
+        assert_eq!(atrium.launcher_index(), 0);
+    }
+
+    #[test]
+    fn surface_hit_testing_follows_focus_order() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+
+        let calculator_request = atrium.request_surface(AppId::Calculator, client(1)).unwrap();
+        let calculator = atrium.spawn_surface(calculator_request, surface(3)).unwrap();
+        let files_request = atrium.request_surface(AppId::Files, client(1)).unwrap();
+        let files = atrium.spawn_surface(files_request, surface(4)).unwrap();
+        let overlap = (260, 100);
+
+        assert_eq!(atrium.surface_at(overlap.0, overlap.1).unwrap().id, files.id);
+        atrium.focus(calculator.id).unwrap();
+        assert_eq!(atrium.surface_at(overlap.0, overlap.1).unwrap().id, calculator.id);
+        assert_eq!(atrium.surface_at(0, 0), None);
+        let stale = SurfaceHandle {
+            generation: calculator.reference.generation + 1,
+            ..calculator.reference
+        };
+        assert_eq!(atrium.focus_reference(stale), Err(AtriumError::NotFound));
+        atrium.focus_reference(files.reference).unwrap();
+        assert_eq!(atrium.focused_surface().unwrap().reference, files.reference);
+        let focused = atrium.focus_at(overlap.0, overlap.1).unwrap();
+        assert_eq!(focused.reference, files.reference);
+        assert_eq!(atrium.focus_at(0, 0), Err(AtriumError::NotFound));
+    }
+
+    #[test]
+    fn pointer_focuses_and_captures_surface_until_release() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let request = atrium.request_surface(AppId::Files, client(1)).unwrap();
+        let files = atrium.spawn_surface(request, surface(8)).unwrap();
+
+        let down = InputMessage::pointer(260, 100, 1, PointerState::Down).unwrap();
+        assert_eq!(
+            atrium.pointer_target(&down).map(|surface| surface.reference),
+            Some(files.reference)
+        );
+        assert_eq!(
+            atrium.focused_surface().map(|surface| surface.reference),
+            Some(files.reference)
+        );
+
+        let move_event = InputMessage::pointer(0, 0, 1, PointerState::Move).unwrap();
+        assert_eq!(
+            atrium.pointer_target(&move_event).map(|surface| surface.reference),
+            Some(files.reference)
+        );
+        let up = InputMessage::pointer(0, 0, 0, PointerState::Up).unwrap();
+        assert_eq!(
+            atrium.pointer_target(&up).map(|surface| surface.reference),
+            Some(files.reference)
+        );
+        assert_eq!(atrium.pointer_target(&move_event), None);
     }
 
     #[test]

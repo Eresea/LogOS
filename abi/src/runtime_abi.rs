@@ -68,6 +68,22 @@ pub struct ServiceBootstrapPage {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C, align(16))]
+pub struct ProgramBootstrapPage {
+    pub abi_version: u16,
+    pub flags: u16,
+    pub ipc_generation: u16,
+    pub reserved: u16,
+    pub program_generation: u32,
+    pub client: ServiceHandle,
+    pub surface_request: CapabilityHandle,
+    pub surface_response: CapabilityHandle,
+    pub surface_input: CapabilityHandle,
+    pub surface_render: CapabilityHandle,
+    pub surface_draw: CapabilityHandle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum EventOperation {
     Create = 1,
@@ -240,6 +256,38 @@ impl ServiceBootstrapPage {
             && (self.heap_pages as usize) <= SERVICE_HEAP_MAX_PAGES
             && self.heap_quota_pages >= self.heap_pages
             && (self.heap_quota_pages as usize) <= SERVICE_HEAP_MAX_PAGES
+    }
+}
+
+impl ProgramBootstrapPage {
+    pub const fn empty() -> Self {
+        Self {
+            abi_version: RUNTIME_ABI_VERSION,
+            flags: 0,
+            ipc_generation: 0,
+            reserved: 0,
+            program_generation: 0,
+            client: ServiceHandle::EMPTY,
+            surface_request: CapabilityHandle::EMPTY,
+            surface_response: CapabilityHandle::EMPTY,
+            surface_input: CapabilityHandle::EMPTY,
+            surface_render: CapabilityHandle::EMPTY,
+            surface_draw: CapabilityHandle::EMPTY,
+        }
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.abi_version == RUNTIME_ABI_VERSION
+            && self.flags == 0
+            && self.ipc_generation != 0
+            && self.reserved == 0
+            && self.program_generation != 0
+            && self.client.is_valid()
+            && self.surface_request.is_valid()
+            && self.surface_response.is_valid()
+            && self.surface_input.is_valid()
+            && self.surface_render.is_valid()
+            && self.surface_draw.is_valid()
     }
 }
 
@@ -492,6 +540,7 @@ impl DirectoryResponse {
 }
 
 const _: () = assert!(core::mem::size_of::<ServiceBootstrapPage>() <= IPC_PAGE_BYTES);
+const _: () = assert!(core::mem::size_of::<ProgramBootstrapPage>() <= IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::size_of::<DirectoryRequest>() <= IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::size_of::<DirectoryResponse>() <= IPC_PAGE_BYTES);
 const _: () = assert!(core::mem::size_of::<EventRequest>() <= IPC_PAGE_BYTES);
@@ -528,6 +577,28 @@ mod tests {
         page.heap_quota_pages = SERVICE_HEAP_MAX_PAGES as u32;
         assert!(page.is_valid());
         page.flags = 1;
+        assert!(!page.is_valid());
+    }
+
+    #[test]
+    fn program_bootstrap_requires_only_surface_grants() {
+        let client = ServiceHandle::new(0x8000_0000, 3).unwrap();
+        let capability = |index| CapabilityHandle::new(index, 4).unwrap();
+        let mut page = ProgramBootstrapPage {
+            abi_version: RUNTIME_ABI_VERSION,
+            flags: 0,
+            ipc_generation: 2,
+            reserved: 0,
+            program_generation: 3,
+            client,
+            surface_request: capability(1),
+            surface_response: capability(2),
+            surface_input: capability(3),
+            surface_render: capability(4),
+            surface_draw: capability(5),
+        };
+        assert!(page.is_valid());
+        page.surface_render = CapabilityHandle::EMPTY;
         assert!(!page.is_valid());
     }
 

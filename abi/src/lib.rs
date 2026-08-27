@@ -22,16 +22,17 @@ mod user_api;
 
 pub use atrium::{
     AtriumApp, AtriumControl, AtriumControlOperation, AtriumControlResponse, AtriumSection,
+    AtriumSurfaceInput, AtriumSurfaceOperation, AtriumSurfaceRequest, AtriumSurfaceResponse,
 };
 pub use device_api::{
     DEVICE_ABI_VERSION, DeviceKind, DeviceOperation, DeviceRecord, DeviceRequest, DeviceResponse,
     DeviceState, DeviceStatus, MAX_DEVICES,
 };
 pub use graphics::{
-    GUI_DRAW_FLAG_MORE, GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook,
-    GuiHookKind, GuiRect, GuiSessionContext, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest,
-    GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS,
-    MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, SurfaceHandle,
+    GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_LIGHT, GuiDrawBatch,
+    GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind, GuiRect, GuiSessionContext, GuiStatus,
+    GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS,
+    MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, SurfaceHandle,
 };
 
 pub use package_ipc::{
@@ -42,8 +43,8 @@ pub use runtime_abi::{
     CapabilityHandle, DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD, DIRECTORY_FLAG_MORE,
     DIRECTORY_RECORDS_PER_PAGE, DirectoryOperation, DirectoryRecord, DirectoryRecordKind,
     DirectoryRequest, DirectoryResponse, DirectoryStatus, EndpointHandle, EventHandle,
-    EventOperation, EventRequest, EventResponse, EventSetHandle, EventStatus, RUNTIME_ABI_VERSION,
-    ServiceBootstrapPage, ServiceHandle,
+    EventOperation, EventRequest, EventResponse, EventSetHandle, EventStatus, ProgramBootstrapPage,
+    RUNTIME_ABI_VERSION, ServiceBootstrapPage, ServiceHandle,
 };
 pub use service_manager::{
     MANAGER_ABI_VERSION, ManagerOperation, ManagerRequest, ManagerResponse, ManagerRights,
@@ -88,6 +89,8 @@ pub const DISPLAY_FRAMEBUFFER_BASE: usize = 0x0000_0100_1000_0000;
 pub const DISPLAY_CONFIG_BASE: usize = 0x0000_0100_1200_0000;
 pub const INPUT_KEYBOARD_RING_BASE: usize = 0x0000_0100_1100_0000;
 pub const KEYBOARD_RING_CAPACITY: usize = 256;
+pub const INPUT_POINTER_RING_BASE: usize = 0x0000_0100_1101_0000;
+pub const POINTER_RING_CAPACITY: usize = KEYBOARD_RING_CAPACITY;
 pub const IPC_PAGE_BYTES: usize = 4096;
 pub const MAX_IPC_BYTES: usize = 256;
 pub const MAX_DEVICE_NAME_BYTES: usize = 16;
@@ -99,6 +102,7 @@ pub const IPC_FLAG_MORE: u8 = 1 << 0;
 pub const RENDER_FLAG_MORE: u8 = IPC_FLAG_MORE;
 pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
 pub const SERVICE_BOOTSTRAP_BASE: usize = 0x0000_0100_2000_0000;
+pub const PROGRAM_BOOTSTRAP_BASE: usize = 0x0000_0100_2100_0000;
 pub const SERVICE_HEAP_BASE: usize = 0x0000_0300_0000_0000;
 pub const SERVICE_HEAP_INITIAL_PAGES: usize = 4;
 pub const SERVICE_HEAP_MAX_PAGES: usize = 16 * 1024;
@@ -145,7 +149,7 @@ pub const PROGRAM_EXIT_SYSCALL: usize = 14;
 pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
-pub const IPC_ENDPOINT_COUNT: usize = 56;
+pub const IPC_ENDPOINT_COUNT: usize = 65;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -192,6 +196,7 @@ pub enum ServiceId {
     Shell = 11,
     LockScreen = 12,
     Atrium = 13,
+    System = 14,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -733,6 +738,7 @@ impl ServiceId {
             Self::Shell => 10,
             Self::LockScreen => 11,
             Self::Atrium => 12,
+            Self::System => 13,
         }
     }
 
@@ -751,6 +757,7 @@ impl ServiceId {
             10 => Some(Self::Shell),
             11 => Some(Self::LockScreen),
             12 => Some(Self::Atrium),
+            13 => Some(Self::System),
             _ => None,
         }
     }
@@ -816,6 +823,15 @@ pub enum IpcEndpointId {
     AtriumToLockScreenControl = 53,
     LockScreenToShellAuth = 54,
     ShellToLockScreenAuth = 55,
+    TerminalToAtriumSurface = 56,
+    AtriumToTerminalSurface = 57,
+    AtriumToTerminalSurfaceInput = 58,
+    TerminalToAtriumSurfaceRender = 59,
+    AtriumToDisplaySurfaceRender = 60,
+    SystemToAtriumSurface = 61,
+    AtriumToSystemSurface = 62,
+    AtriumToSystemSurfaceInput = 63,
+    SystemToAtriumSurfaceDraw = 64,
 }
 
 impl IpcEndpointId {
@@ -883,6 +899,15 @@ impl IpcEndpointId {
             53 => Some(Self::AtriumToLockScreenControl),
             54 => Some(Self::LockScreenToShellAuth),
             55 => Some(Self::ShellToLockScreenAuth),
+            56 => Some(Self::TerminalToAtriumSurface),
+            57 => Some(Self::AtriumToTerminalSurface),
+            58 => Some(Self::AtriumToTerminalSurfaceInput),
+            59 => Some(Self::TerminalToAtriumSurfaceRender),
+            60 => Some(Self::AtriumToDisplaySurfaceRender),
+            61 => Some(Self::SystemToAtriumSurface),
+            62 => Some(Self::AtriumToSystemSurface),
+            63 => Some(Self::AtriumToSystemSurfaceInput),
+            64 => Some(Self::SystemToAtriumSurfaceDraw),
             _ => None,
         }
     }
@@ -933,6 +958,14 @@ impl IpcEndpointId {
             Self::AtriumToLockScreenControl => ServiceId::Atrium,
             Self::LockScreenToShellAuth => ServiceId::LockScreen,
             Self::ShellToLockScreenAuth => ServiceId::Shell,
+            Self::TerminalToAtriumSurface => ServiceId::Terminal,
+            Self::AtriumToTerminalSurface => ServiceId::Atrium,
+            Self::AtriumToTerminalSurfaceInput => ServiceId::Atrium,
+            Self::TerminalToAtriumSurfaceRender => ServiceId::Terminal,
+            Self::AtriumToDisplaySurfaceRender => ServiceId::Atrium,
+            Self::SystemToAtriumSurface => ServiceId::System,
+            Self::AtriumToSystemSurface | Self::AtriumToSystemSurfaceInput => ServiceId::Atrium,
+            Self::SystemToAtriumSurfaceDraw => ServiceId::System,
         }
     }
 
@@ -981,6 +1014,14 @@ impl IpcEndpointId {
             Self::AtriumToLockScreenControl => ServiceId::LockScreen,
             Self::LockScreenToShellAuth => ServiceId::Shell,
             Self::ShellToLockScreenAuth => ServiceId::LockScreen,
+            Self::TerminalToAtriumSurface => ServiceId::Atrium,
+            Self::AtriumToTerminalSurface => ServiceId::Terminal,
+            Self::AtriumToTerminalSurfaceInput => ServiceId::Terminal,
+            Self::TerminalToAtriumSurfaceRender => ServiceId::Atrium,
+            Self::AtriumToDisplaySurfaceRender => ServiceId::Display,
+            Self::SystemToAtriumSurface => ServiceId::Atrium,
+            Self::AtriumToSystemSurface | Self::AtriumToSystemSurfaceInput => ServiceId::System,
+            Self::SystemToAtriumSurfaceDraw => ServiceId::Atrium,
         }
     }
 }
@@ -1019,11 +1060,12 @@ pub enum MessageKind {
     GuiDraw = 27,
     GuiHook = 28,
     GuiSession = 29,
+    Pointer = 30,
 }
 
 impl MessageKind {
     pub const fn raw_is_valid(raw: u8) -> bool {
-        raw >= Self::Key as u8 && raw <= Self::GuiSession as u8
+        raw >= Self::Key as u8 && raw <= Self::Pointer as u8
     }
 }
 
@@ -1034,6 +1076,35 @@ pub enum KeyState {
     Released = 2,
     Repeat = 3,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PointerState {
+    Down = 1,
+    Up = 2,
+    Move = 3,
+}
+
+impl PointerState {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Down),
+            2 => Some(Self::Up),
+            3 => Some(Self::Move),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PointerEvent {
+    pub x: i16,
+    pub y: i16,
+    pub buttons: u8,
+    pub state: PointerState,
+}
+
+pub const POINTER_BUTTONS_MASK: u8 = 0x07;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyCode(pub u16);
@@ -1159,6 +1230,41 @@ impl InputMessage {
         Self::text_kind(MessageKind::Paste, bytes)
     }
 
+    pub const fn pointer(x: i16, y: i16, buttons: u8, state: PointerState) -> Option<Self> {
+        if buttons & !POINTER_BUTTONS_MASK != 0 {
+            return None;
+        }
+        Some(Self {
+            kind: MessageKind::Pointer,
+            state: match state {
+                PointerState::Down => KeyState::Pressed,
+                PointerState::Up => KeyState::Released,
+                PointerState::Move => KeyState::Repeat,
+            },
+            code: x as u16,
+            modifiers: y as u16,
+            len: buttons as u16,
+            text: [0; MAX_TEXT_BYTES],
+        })
+    }
+
+    pub const fn pointer_event(self) -> Option<PointerEvent> {
+        if self.kind as u8 != MessageKind::Pointer as u8 || self.len > POINTER_BUTTONS_MASK as u16 {
+            return None;
+        }
+        let state = match self.state {
+            KeyState::Pressed => PointerState::Down,
+            KeyState::Released => PointerState::Up,
+            KeyState::Repeat => PointerState::Move,
+        };
+        Some(PointerEvent {
+            x: self.code as i16,
+            y: self.modifiers as i16,
+            buttons: self.len as u8,
+            state,
+        })
+    }
+
     fn text_kind(kind: MessageKind, bytes: &[u8]) -> Option<Self> {
         if bytes.is_empty() || bytes.len() > MAX_TEXT_BYTES {
             return None;
@@ -1209,6 +1315,7 @@ impl Cell {
 pub struct RenderMessage {
     pub kind: MessageKind,
     pub flags: u8,
+    pub surface: SurfaceHandle,
     pub columns: u16,
     pub rows: u16,
     pub cursor_column: u16,
@@ -1223,6 +1330,7 @@ impl RenderMessage {
         Self {
             kind,
             flags: 0,
+            surface: SurfaceHandle::EMPTY,
             columns: 0,
             rows: 0,
             cursor_column: 0,
@@ -1282,6 +1390,10 @@ pub const IPC_CONTRACT_GUI_INPUT: u16 = 17;
 pub const IPC_CONTRACT_GUI_USER_REQUEST: u16 = 18;
 pub const IPC_CONTRACT_GUI_USER_RESPONSE: u16 = 19;
 pub const IPC_CONTRACT_ATRIUM_CONTROL: u16 = 20;
+pub const IPC_CONTRACT_ATRIUM_SURFACE_REQUEST: u16 = 21;
+pub const IPC_CONTRACT_ATRIUM_SURFACE_RESPONSE: u16 = 22;
+pub const IPC_CONTRACT_ATRIUM_SURFACE_INPUT: u16 = 23;
+pub const IPC_CONTRACT_ATRIUM_SURFACE_DRAW: u16 = 24;
 
 /// Stable typed contract identifier for an endpoint's wire payload.
 ///
@@ -1353,6 +1465,20 @@ pub const fn ipc_contract_id(endpoint: usize) -> Option<u16> {
     if endpoint == IpcEndpointId::AtriumToShell as usize {
         return Some(IPC_CONTRACT_ATRIUM_CONTROL);
     }
+    if endpoint == IpcEndpointId::TerminalToAtriumSurface as usize {
+        return Some(IPC_CONTRACT_ATRIUM_SURFACE_REQUEST);
+    }
+    if endpoint == IpcEndpointId::AtriumToTerminalSurface as usize {
+        return Some(IPC_CONTRACT_ATRIUM_SURFACE_RESPONSE);
+    }
+    if endpoint == IpcEndpointId::AtriumToTerminalSurfaceInput as usize {
+        return Some(IPC_CONTRACT_ATRIUM_SURFACE_INPUT);
+    }
+    if endpoint == IpcEndpointId::TerminalToAtriumSurfaceRender as usize
+        || endpoint == IpcEndpointId::AtriumToDisplaySurfaceRender as usize
+    {
+        return Some(IPC_CONTRACT_RENDER);
+    }
     if endpoint == IpcEndpointId::ShellToAtrium as usize {
         return Some(IPC_CONTRACT_GUI_SESSION);
     }
@@ -1381,6 +1507,18 @@ pub const fn ipc_contract_id(endpoint: usize) -> Option<u16> {
     if endpoint == IpcEndpointId::ShellToLockScreenAuth as usize {
         return Some(IPC_CONTRACT_GUI_USER_RESPONSE);
     }
+    if endpoint == IpcEndpointId::SystemToAtriumSurface as usize {
+        return Some(IPC_CONTRACT_ATRIUM_SURFACE_REQUEST);
+    }
+    if endpoint == IpcEndpointId::AtriumToSystemSurface as usize {
+        return Some(IPC_CONTRACT_ATRIUM_SURFACE_RESPONSE);
+    }
+    if endpoint == IpcEndpointId::AtriumToSystemSurfaceInput as usize {
+        return Some(IPC_CONTRACT_ATRIUM_SURFACE_INPUT);
+    }
+    if endpoint == IpcEndpointId::SystemToAtriumSurfaceDraw as usize {
+        return Some(IPC_CONTRACT_ATRIUM_SURFACE_DRAW);
+    }
     match ipc_message_type(endpoint) {
         Some(IpcMessageType::Input) => Some(IPC_CONTRACT_INPUT),
         Some(IpcMessageType::Render) => Some(IPC_CONTRACT_RENDER),
@@ -1394,8 +1532,11 @@ pub const fn ipc_contract_id(endpoint: usize) -> Option<u16> {
 
 pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
     match endpoint {
+        64 => Some(IpcMessageType::Gui),
+        61..=63 => Some(IpcMessageType::Bytes),
         50 => Some(IpcMessageType::Gui),
-        51..=55 => Some(IpcMessageType::Bytes),
+        51..=58 => Some(IpcMessageType::Bytes),
+        59..=60 => Some(IpcMessageType::Render),
         41..=43 => Some(IpcMessageType::Input),
         44 | 45 => Some(IpcMessageType::Bytes),
         46 => Some(IpcMessageType::SessionContext),
@@ -1415,6 +1556,18 @@ pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
 }
 
 pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
+    if endpoint == IpcEndpointId::SystemToAtriumSurface as usize {
+        return Some(core::mem::size_of::<AtriumSurfaceRequest>());
+    }
+    if endpoint == IpcEndpointId::AtriumToSystemSurface as usize {
+        return Some(core::mem::size_of::<AtriumSurfaceResponse>());
+    }
+    if endpoint == IpcEndpointId::AtriumToSystemSurfaceInput as usize {
+        return Some(core::mem::size_of::<AtriumSurfaceInput>());
+    }
+    if endpoint == IpcEndpointId::SystemToAtriumSurfaceDraw as usize {
+        return Some(core::mem::size_of::<GuiDrawBatch>());
+    }
     if endpoint == IpcEndpointId::InputToAtrium as usize
         || endpoint == IpcEndpointId::AtriumToTerminal as usize
         || endpoint == IpcEndpointId::AtriumToLockScreen as usize
@@ -1426,6 +1579,20 @@ pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
     }
     if endpoint == IpcEndpointId::AtriumToShell as usize {
         return Some(core::mem::size_of::<AtriumControl>());
+    }
+    if endpoint == IpcEndpointId::TerminalToAtriumSurface as usize {
+        return Some(core::mem::size_of::<AtriumSurfaceRequest>());
+    }
+    if endpoint == IpcEndpointId::AtriumToTerminalSurface as usize {
+        return Some(core::mem::size_of::<AtriumSurfaceResponse>());
+    }
+    if endpoint == IpcEndpointId::AtriumToTerminalSurfaceInput as usize {
+        return Some(core::mem::size_of::<AtriumSurfaceInput>());
+    }
+    if endpoint == IpcEndpointId::TerminalToAtriumSurfaceRender as usize
+        || endpoint == IpcEndpointId::AtriumToDisplaySurfaceRender as usize
+    {
+        return Some(core::mem::size_of::<RenderMessage>());
     }
     if endpoint == IpcEndpointId::ShellToAtrium as usize {
         return Some(core::mem::size_of::<GuiSessionContext>());
@@ -2179,6 +2346,7 @@ impl<T: Copy, const N: usize> SharedIpc<T, N> {
 pub type InputIpc = SharedIpc<InputMessage, 32>;
 pub type RenderIpc = SharedIpc<RenderMessage, 1>;
 pub type StreamIpc = SharedIpc<IpcBytes, 8>;
+pub type PointerByteRing = KeyboardByteRing;
 
 const _: () = assert!(core::mem::size_of::<FramebufferConfig>() <= IPC_PAGE_BYTES);
 #[cfg(test)]
@@ -2204,8 +2372,18 @@ mod tests {
     }
 
     #[test]
+    fn pointer_messages_round_trip_with_bounded_buttons() {
+        let pointer = InputMessage::pointer(-12, 34, 0b101, PointerState::Move).unwrap();
+        assert_eq!(
+            pointer.pointer_event(),
+            Some(PointerEvent { x: -12, y: 34, buttons: 0b101, state: PointerState::Move })
+        );
+        assert!(InputMessage::pointer(0, 0, 0b1000, PointerState::Down).is_none());
+    }
+
+    #[test]
     fn lockscreen_auth_and_display_endpoints_are_typed_and_directional() {
-        assert_eq!(IPC_ENDPOINT_COUNT, 56);
+        assert_eq!(IPC_ENDPOINT_COUNT, 65);
         assert_eq!(IpcEndpointId::LockScreenToShellAuth.producer(), ServiceId::LockScreen);
         assert_eq!(IpcEndpointId::LockScreenToShellAuth.consumer(), ServiceId::Shell);
         assert_eq!(IpcEndpointId::ShellToLockScreenAuth.producer(), ServiceId::Shell);
@@ -2226,6 +2404,62 @@ mod tests {
             ipc_contract_id(IpcEndpointId::LockScreenToDisplay as usize),
             Some(IPC_CONTRACT_GUI_DRAW)
         );
+        assert_eq!(IpcEndpointId::TerminalToAtriumSurface.producer(), ServiceId::Terminal);
+        assert_eq!(IpcEndpointId::TerminalToAtriumSurface.consumer(), ServiceId::Atrium);
+        assert_eq!(IpcEndpointId::AtriumToTerminalSurface.producer(), ServiceId::Atrium);
+        assert_eq!(IpcEndpointId::AtriumToTerminalSurface.consumer(), ServiceId::Terminal);
+        assert_eq!(
+            ipc_contract_id(IpcEndpointId::TerminalToAtriumSurface as usize),
+            Some(IPC_CONTRACT_ATRIUM_SURFACE_REQUEST)
+        );
+        assert_eq!(
+            ipc_message_size(IpcEndpointId::AtriumToTerminalSurface as usize),
+            Some(core::mem::size_of::<AtriumSurfaceResponse>())
+        );
+        assert_eq!(IpcEndpointId::AtriumToTerminalSurfaceInput.producer(), ServiceId::Atrium);
+        assert_eq!(IpcEndpointId::AtriumToTerminalSurfaceInput.consumer(), ServiceId::Terminal);
+        assert_eq!(
+            ipc_contract_id(IpcEndpointId::AtriumToTerminalSurfaceInput as usize),
+            Some(IPC_CONTRACT_ATRIUM_SURFACE_INPUT)
+        );
+        assert_eq!(
+            ipc_message_size(IpcEndpointId::AtriumToTerminalSurfaceInput as usize),
+            Some(core::mem::size_of::<AtriumSurfaceInput>())
+        );
+        assert_eq!(IpcEndpointId::TerminalToAtriumSurfaceRender.producer(), ServiceId::Terminal);
+        assert_eq!(IpcEndpointId::TerminalToAtriumSurfaceRender.consumer(), ServiceId::Atrium);
+        assert_eq!(IpcEndpointId::AtriumToDisplaySurfaceRender.producer(), ServiceId::Atrium);
+        assert_eq!(IpcEndpointId::AtriumToDisplaySurfaceRender.consumer(), ServiceId::Display);
+        assert_eq!(
+            ipc_contract_id(IpcEndpointId::TerminalToAtriumSurfaceRender as usize),
+            Some(IPC_CONTRACT_RENDER)
+        );
+        assert_eq!(
+            ipc_message_type(IpcEndpointId::TerminalToAtriumSurfaceRender as usize),
+            Some(IpcMessageType::Render)
+        );
+        assert_eq!(
+            ipc_message_type(IpcEndpointId::AtriumToDisplaySurfaceRender as usize),
+            Some(IpcMessageType::Render)
+        );
+        assert_eq!(
+            ipc_message_size(IpcEndpointId::AtriumToDisplaySurfaceRender as usize),
+            Some(core::mem::size_of::<RenderMessage>())
+        );
+        assert_eq!(IpcEndpointId::SystemToAtriumSurface.producer(), ServiceId::System);
+        assert_eq!(IpcEndpointId::SystemToAtriumSurface.consumer(), ServiceId::Atrium);
+        assert_eq!(IpcEndpointId::AtriumToSystemSurface.producer(), ServiceId::Atrium);
+        assert_eq!(IpcEndpointId::AtriumToSystemSurface.consumer(), ServiceId::System);
+        assert_eq!(
+            ipc_contract_id(IpcEndpointId::SystemToAtriumSurfaceDraw as usize),
+            Some(IPC_CONTRACT_ATRIUM_SURFACE_DRAW)
+        );
+        assert_eq!(
+            ipc_message_type(IpcEndpointId::AtriumToSystemSurfaceInput as usize),
+            Some(IpcMessageType::Bytes)
+        );
+        assert_eq!(IPC_CONTRACT_ATRIUM_SURFACE_DRAW, 24);
+        assert!(core::mem::size_of::<GuiDrawBatch>() <= IPC_PAGE_BYTES);
     }
 
     #[test]
