@@ -15,6 +15,32 @@ impl RenderNode {
     const EMPTY: Option<Self> = None;
 }
 
+pub trait GuiRenderBackend {
+    fn draw(&mut self, command: GuiDrawCommand, clip: GuiRect) -> usize;
+}
+
+struct SoftwareRenderBackend<'a> {
+    framebuffer: &'a mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+}
+
+impl GuiRenderBackend for SoftwareRenderBackend<'_> {
+    fn draw(&mut self, command: GuiDrawCommand, clip: GuiRect) -> usize {
+        render_command(
+            self.framebuffer,
+            self.width,
+            self.height,
+            self.stride,
+            self.format,
+            command,
+            clip,
+        )
+    }
+}
+
 #[derive(Clone, Copy)]
 struct SurfaceSlot {
     handle: SurfaceHandle,
@@ -426,6 +452,16 @@ impl GuiSurfaceRegistry {
         damage: &[GuiRect; MAX_GUI_DAMAGE_RECTS],
         damage_count: usize,
     ) -> usize {
+        let mut backend = SoftwareRenderBackend { framebuffer, width, height, stride, format };
+        self.compose(&mut backend, damage, damage_count)
+    }
+
+    pub fn compose<B: GuiRenderBackend>(
+        &self,
+        backend: &mut B,
+        damage: &[GuiRect; MAX_GUI_DAMAGE_RECTS],
+        damage_count: usize,
+    ) -> usize {
         if damage_count == 0 {
             return 0;
         }
@@ -467,11 +503,7 @@ impl GuiSurfaceRegistry {
                     let (occluders, occluder_count) =
                         self.occluders_after(&order[..count], surface_position, node_position);
                     rendered += render_one(
-                        framebuffer,
-                        width,
-                        height,
-                        stride,
-                        format,
+                        backend,
                         node.command,
                         &mut clip,
                         damage,
@@ -493,11 +525,7 @@ impl GuiSurfaceRegistry {
                             command_position,
                         );
                         rendered += render_one(
-                            framebuffer,
-                            width,
-                            height,
-                            stride,
-                            format,
+                            backend,
                             command,
                             &mut clip,
                             damage,
@@ -605,13 +633,8 @@ impl GuiSurfaceRegistry {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_one(
-    framebuffer: &mut [u8],
-    width: usize,
-    height: usize,
-    stride: usize,
-    format: super::PixelFormat,
+fn render_one<B: GuiRenderBackend>(
+    backend: &mut B,
     command: GuiDrawCommand,
     clip: &mut GuiRect,
     damage: &[GuiRect; MAX_GUI_DAMAGE_RECTS],
@@ -661,8 +684,7 @@ fn render_one(
             }
         }
         for damage_clip in visible[..visible_count].iter().copied() {
-            rendered +=
-                render_command(framebuffer, width, height, stride, format, command, damage_clip);
+            rendered += backend.draw(command, damage_clip);
         }
     }
     rendered
@@ -1535,6 +1557,17 @@ mod tests {
     use logos_abi::GuiDrawCommand;
     use std::vec;
 
+    struct CountingBackend {
+        draws: usize,
+    }
+
+    impl GuiRenderBackend for CountingBackend {
+        fn draw(&mut self, _command: GuiDrawCommand, _clip: GuiRect) -> usize {
+            self.draws += 1;
+            1
+        }
+    }
+
     fn request(operation: GuiSurfaceOperation, id: u32, bounds: GuiRect) -> GuiSurfaceRequest {
         let mut request = GuiSurfaceRequest::new(operation, id);
         request.bounds = bounds;
@@ -1643,22 +1676,14 @@ mod tests {
         damage[0] = clip;
         let mut occluders = [GuiRect::EMPTY; MAX_GUI_SURFACES * MAX_GUI_NODES];
         occluders[0] = clip;
-        assert_eq!(
-            render_one(
-                &mut framebuffer,
-                48,
-                32,
-                48 * 4,
-                PixelFormat::Bgr8,
-                shadow,
-                &mut clip,
-                &damage,
-                1,
-                &occluders,
-                1,
-            ),
-            0
-        );
+        let mut backend = SoftwareRenderBackend {
+            framebuffer: &mut framebuffer,
+            width: 48,
+            height: 32,
+            stride: 48 * 4,
+            format: PixelFormat::Bgr8,
+        };
+        assert_eq!(render_one(&mut backend, shadow, &mut clip, &damage, 1, &occluders, 1,), 0);
     }
 
     #[test]
@@ -1792,6 +1817,65 @@ mod tests {
         let (damage, count) = registry.take_damage();
         assert_eq!(count, 1);
         assert!(damage[0].contains(24, 2));
+    }
+
+    #[test]
+    fn retained_scene_keeps_static_nodes_across_dynamic_frames() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 40, 20)))
+            .unwrap()
+            .surface;
+        registry.take_damage();
+
+        let mut static_node = GuiSceneOp::upsert(
+            root,
+            1,
+            1,
+            GuiDrawCommand::glyph_run(2, 2, 0xffffff, b"Static").unwrap(),
+        );
+        static_node.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        registry.apply_scene_op(7, static_node).unwrap();
+        static_node.flags = 0;
+        registry.apply_scene_op(7, static_node).unwrap();
+        registry.take_damage();
+
+        let mut dynamic_node = GuiSceneOp::upsert(
+            root,
+            2,
+            2,
+            GuiDrawCommand::fill_rect(GuiRect::new(24, 18, 4, 2), 0xffffff),
+        );
+        dynamic_node.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        registry.apply_scene_op(7, dynamic_node).unwrap();
+        assert_eq!(registry.active_frame(root), Some(1));
+        dynamic_node.flags = 0;
+        registry.apply_scene_op(7, dynamic_node).unwrap();
+        assert_eq!(registry.active_frame(root), Some(2));
+
+        registry.take_damage();
+        let mut damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+        damage[0] = GuiRect::new(0, 0, 40, 20);
+        let mut backend = CountingBackend { draws: 0 };
+        assert_eq!(registry.compose(&mut backend, &damage, 1), 2);
+        assert_eq!(backend.draws, 2);
+    }
+
+    #[test]
+    fn composition_is_backend_neutral() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 16, 16)))
+            .unwrap()
+            .surface;
+        registry.take_damage();
+        let mut batch = GuiDrawBatch::new(root, 1, GuiRect::new(2, 2, 4, 4));
+        assert!(batch.push(GuiDrawCommand::fill_rect(GuiRect::new(2, 2, 4, 4), 0xffffff)));
+        registry.update(7, batch).unwrap();
+        let (damage, count) = registry.take_damage();
+        let mut backend = CountingBackend { draws: 0 };
+        assert_eq!(registry.compose(&mut backend, &damage, count), 1);
+        assert_eq!(backend.draws, 1);
     }
 
     #[test]

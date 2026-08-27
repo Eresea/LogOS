@@ -16,9 +16,9 @@ RAM backbuffer, and presents changed regions to GOP only after composition.
 Static scene groups remain published while lockscreen field nodes update by
 stable ID; retained glyph-run nodes therefore act as the glyph cache and the
 fixed font atlas is never regenerated. Opaque retained nodes provide occlusion
-to lower nodes. The scene protocol and software
-composition boundary are backend-neutral so a later GPU backend can replace
-only the present/composition implementation.
+to lower nodes. `GuiSurfaceRegistry::compose` consumes that retained scene
+through a backend trait; the current backend rasterizes into RAM, while a
+future GPU backend can replace only the command execution/presentation layer.
 
 The first commit scope is per-surface: a surface revision is atomic, while
 independent surfaces may publish independently. The terminal cell protocol
