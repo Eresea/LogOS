@@ -70,3 +70,5 @@
 | [0067](0067-event-driven-graphical-shell.md) | Accepted | Display-owned retained surfaces with typed invalidation hooks and event-driven graphical shell services |
 | [0068](0068-runtime-owned-lazy-service-stacks.md) | Accepted | Services begin with a small stack window and borrow additional stack pages from Core only on validated page faults |
 | [0069](0069-atrium-shell-orchestration.md) | Accepted | Atrium owns GUI shell orchestration while Shell brokers authentication, LockScreen owns credentials, and Display owns pixels |
+| [0070](0070-program-atrium-surface-contract.md) | Accepted | Running programs receive only bounded Atrium surface channels and a read-only program bootstrap page |
+| [0071](0071-atrium-system-management-surface.md) | Accepted | System is an inspect-only service-manager client rendered through one Atrium-owned surface |

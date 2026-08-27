@@ -14,17 +14,20 @@ Program packages use the v2 package manifest with kind=Program and no service ta
 persists service and program records in one fixed catalog. Core extends the existing manager ABI with
 a bounded program-name target and keeps one fixed program table in ServiceRuntime. program.start,
 program.status, and program.stop use generation-safe records. A program receives only its ELF
-mappings and fixed stack; the only program syscall is Exit(code).
+mappings, fixed stack, and the bounded Atrium bootstrap/channels defined by ADR-0070; it receives no
+ambient service capabilities.
 
-Forced stop first requests scheduler termination. Process frames, page-table frames, and loaded-image
-frames are reclaimed only after the scheduler publishes task completion. Unknown ABI versions and
-malformed targets fail closed; legacy service packages and storage snapshots remain readable.
+Forced stop first requests scheduler termination. Process frames, page-table frames, loaded-image
+frames, program IPC channels, queue frames, and bootstrap pages are reclaimed only after the
+scheduler publishes task completion. Unknown ABI versions and malformed targets fail closed; legacy
+service packages and storage snapshots remain readable.
 
 ## Consequences
 
 Programs can remain running after the initiating Flow command returns, and reboot persistence is
-provided by Storage. Terminal attachment, IPC, filesystem/network access, capabilities, signatures,
-repository resolution, automatic boot, and cooperative cancellation remain deferred.
+provided by Storage. Filesystem/network access, capabilities, signatures, repository resolution,
+automatic boot, and cooperative cancellation remain deferred; Atrium surface IPC is defined by
+ADR-0070.
 
 ## Proof obligations
 
