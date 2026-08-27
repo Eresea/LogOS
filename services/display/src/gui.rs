@@ -185,7 +185,6 @@ impl GuiSurfaceRegistry {
             return Err(GuiRegistryError::Malformed);
         }
         let index = self.authorized_index(owner, batch.surface)?;
-        let old_bounds = self.slots[index].bounds;
         if self.slots[index].sequence == batch.sequence
             && self.slots[index].batches[..self.slots[index].batch_count as usize]
                 .iter()
@@ -195,6 +194,7 @@ impl GuiSurfaceRegistry {
             return Ok(());
         }
         if self.slots[index].sequence != batch.sequence {
+            self.damage_legacy_nodes(index)?;
             self.slots[index].batches = [None; MAX_GUI_BATCH_FRAGMENTS];
             self.slots[index].batch_count = 0;
             self.slots[index].sequence = batch.sequence;
@@ -205,8 +205,18 @@ impl GuiSurfaceRegistry {
         let slot = &mut self.slots[index];
         slot.batches[usize::from(slot.batch_count)] = Some(batch);
         slot.batch_count += 1;
-        self.add_damage(old_bounds)?;
         self.add_damage(batch.damage)?;
+        Ok(())
+    }
+
+    fn damage_legacy_nodes(&mut self, index: usize) -> Result<(), GuiRegistryError> {
+        let batches = self.slots[index].batches;
+        let batch_count = self.slots[index].batch_count as usize;
+        for batch in batches[..batch_count].iter().flatten() {
+            for command in batch.commands[..batch.command_count as usize].iter().copied() {
+                self.add_damage(command_rect(command))?;
+            }
+        }
         Ok(())
     }
 
@@ -1912,6 +1922,23 @@ mod tests {
         let mut backend = CountingBackend { draws: 0 };
         assert_eq!(registry.compose(&mut backend, &damage, count), 1);
         assert_eq!(backend.draws, 1);
+    }
+
+    #[test]
+    fn legacy_updates_damage_primitive_bounds_only() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 100, 100)))
+            .unwrap()
+            .surface;
+        registry.take_damage();
+        let bounds = GuiRect::new(2, 3, 4, 5);
+        let mut batch = GuiDrawBatch::new(root, 1, bounds);
+        assert!(batch.push(GuiDrawCommand::fill_rect(bounds, 0xffffff)));
+        registry.update(7, batch).unwrap();
+        let (damage, count) = registry.take_damage();
+        assert_eq!(count, 1);
+        assert_eq!(damage[0], bounds);
     }
 
     #[test]
