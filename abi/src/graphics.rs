@@ -4,6 +4,7 @@ pub const MAX_GUI_SURFACES: usize = 8;
 pub const MAX_GUI_DAMAGE_RECTS: usize = 8;
 pub const MAX_GUI_COMMANDS: usize = 3;
 pub const MAX_GUI_BATCH_FRAGMENTS: usize = 5;
+pub const MAX_GUI_NODES: usize = MAX_GUI_COMMANDS * MAX_GUI_BATCH_FRAGMENTS;
 pub const MAX_GUI_TEXT_BYTES: usize = 32;
 pub const GUI_DRAW_FLAG_MORE: u8 = 1 << 0;
 pub const GUI_SURFACE_FLAG_TERMINAL: u8 = 1 << 0;
@@ -462,6 +463,70 @@ impl GuiDrawBatch {
     }
 }
 
+/// One retained-scene mutation. A frame is staged while `GUI_DRAW_FLAG_MORE`
+/// is set and becomes visible when the final operation clears it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum GuiNodeOperation {
+    Upsert = 1,
+    Remove = 2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct GuiSceneOp {
+    pub surface: SurfaceHandle,
+    pub frame: u32,
+    pub node_id: u32,
+    pub operation: GuiNodeOperation,
+    pub flags: u8,
+    pub reserved: u16,
+    pub command: GuiDrawCommand,
+}
+
+impl GuiSceneOp {
+    pub const fn upsert(
+        surface: SurfaceHandle,
+        frame: u32,
+        node_id: u32,
+        command: GuiDrawCommand,
+    ) -> Self {
+        Self {
+            surface,
+            frame,
+            node_id,
+            operation: GuiNodeOperation::Upsert,
+            flags: 0,
+            reserved: 0,
+            command,
+        }
+    }
+
+    pub const fn remove(surface: SurfaceHandle, frame: u32, node_id: u32) -> Self {
+        Self {
+            surface,
+            frame,
+            node_id,
+            operation: GuiNodeOperation::Remove,
+            flags: 0,
+            reserved: 0,
+            command: GuiDrawCommand::empty(GuiDrawKind::FillRect),
+        }
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.surface.is_valid()
+            && self.frame != 0
+            && self.node_id != 0
+            && self.flags & !GUI_DRAW_FLAG_MORE == 0
+            && self.reserved == 0
+            && match self.operation {
+                GuiNodeOperation::Upsert => self.command.is_valid(),
+                GuiNodeOperation::Remove => self.command.text_len == 0,
+            }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum GuiHookKind {
@@ -545,6 +610,7 @@ impl GuiSessionContext {
 const _: () = assert!(core::mem::size_of::<GuiSurfaceRequest>() <= super::MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<GuiSurfaceResponse>() <= super::MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<GuiDrawBatch>() <= super::MAX_IPC_BYTES);
+const _: () = assert!(core::mem::size_of::<GuiSceneOp>() <= super::MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<GuiHook>() <= super::MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<GuiSessionContext>() <= super::MAX_IPC_BYTES);
 
@@ -564,6 +630,23 @@ mod tests {
         assert!(batch.is_valid());
         batch.flags = u8::MAX;
         assert!(!batch.is_valid());
+    }
+
+    #[test]
+    fn retained_scene_operations_are_stable_and_commit_aware() {
+        let surface = SurfaceHandle::new(0, 1, 1).unwrap();
+        let mut op = GuiSceneOp::upsert(
+            surface,
+            7,
+            42,
+            GuiDrawCommand::fill_rect(GuiRect::new(0, 0, 10, 10), 0x112233),
+        );
+        assert!(op.is_valid());
+        op.flags = GUI_DRAW_FLAG_MORE;
+        assert!(op.is_valid());
+        op.node_id = 0;
+        assert!(!op.is_valid());
+        assert!(GuiSceneOp::remove(surface, 7, 42).is_valid());
     }
 
     #[test]
