@@ -144,7 +144,8 @@ fn send_register_surface(
         batch.flags = GUI_DRAW_FLAG_MORE;
     }
     let _ = batches[0].push(GuiDrawCommand::fill_surface(0x101820));
-    let _ = batches[0].push(GuiDrawCommand::fill_rect(panel, 0x182535));
+    let _ = batches[0].push(GuiDrawCommand::shadow(panel, 0x55000000, 16, 4, 0, 6));
+    let _ = batches[0].push(GuiDrawCommand::fill_rounded_rect(panel, 0x182535, 16));
 
     let mut text = [0; MAX_GUI_TEXT_BYTES];
     let length = logos_shell::login_page_node_text(page, title_index, state, &mut text);
@@ -155,8 +156,10 @@ fn send_register_surface(
         logos_shell::login_text_flags(page, title_index),
         &text[..length],
     ) {
-        let _ = batches[0].push(text);
+        let _ = batches[1].push(text);
     }
+
+    let _ = batches[1].push(GuiDrawCommand::stroke_rounded_rect(panel, 0x4b89dc, 16, 2));
 
     let length = logos_shell::login_page_node_text(page, notice_index, state, &mut text);
     if let Some(text) = GuiDrawCommand::glyph_run_styled(
@@ -193,9 +196,10 @@ fn send_register_surface(
         && !lockscreen.form().controls.password.valid();
     let confirm_invalid = lockscreen.form().controls.confirm_password.touched()
         && !lockscreen.form().controls.confirm_password.valid();
-    let _ = batches[1].push(GuiDrawCommand::fill_rect(
+    let _ = batches[2].push(GuiDrawCommand::fill_rounded_rect(
         username,
         if username_invalid { 0xb84a4a } else { username_color },
+        8,
     ));
     let length = if username_value.is_empty() {
         logos_shell::login_page_node_text(page, username_index, state, &mut text)
@@ -209,11 +213,12 @@ fn send_register_surface(
         logos_shell::login_text_flags(page, username_index),
         &text[..length],
     ) {
-        let _ = batches[1].push(text);
+        let _ = batches[2].push(text);
     }
-    let _ = batches[2].push(GuiDrawCommand::fill_rect(
+    let _ = batches[2].push(GuiDrawCommand::fill_rounded_rect(
         password,
         if password_invalid { 0xb84a4a } else { password_color },
+        8,
     ));
     let length = if password_value.is_empty() {
         logos_shell::login_page_node_text(page, password_index, state, &mut text)
@@ -227,11 +232,12 @@ fn send_register_surface(
         logos_shell::login_text_flags(page, password_index),
         &text[..length],
     ) {
-        let _ = batches[2].push(text);
+        let _ = batches[3].push(text);
     }
-    let _ = batches[2].push(GuiDrawCommand::fill_rect(
+    let _ = batches[3].push(GuiDrawCommand::fill_rounded_rect(
         confirm,
         if confirm_invalid { 0xb84a4a } else { confirm_color },
+        8,
     ));
     let length = if confirm_value.is_empty() {
         logos_shell::login_page_node_text(page, confirm_index, state, &mut text)
@@ -249,7 +255,7 @@ fn send_register_surface(
     }
     let submit_disabled = !lockscreen.form().can_submit();
     let submit_color = if submit_disabled { 0x1b356b } else { 0x356bd8 };
-    let _ = batches[3].push(GuiDrawCommand::fill_rect(submit, submit_color));
+    let _ = batches[4].push(GuiDrawCommand::fill_rounded_rect(submit, submit_color, 8));
     let length = logos_shell::login_page_node_text(page, submit_index, state, &mut text);
     if let Some(text) = GuiDrawCommand::glyph_run_styled(
         submit.x.saturating_add(12),
@@ -258,7 +264,7 @@ fn send_register_surface(
         logos_shell::login_text_flags(page, submit_index),
         &text[..length],
     ) {
-        let _ = batches[3].push(text);
+        let _ = batches[4].push(text);
     }
     for batch in &batches {
         let _ = common::ipc_send_handle(display, batch);
@@ -302,8 +308,8 @@ fn send_shell_surface(
         batch.flags = GUI_DRAW_FLAG_MORE;
     }
     let _ = batches[0].push(GuiDrawCommand::fill_surface(0x101820));
-    let _ = batches[0].push(GuiDrawCommand::fill_rect(panel, 0x182535));
-    let _ = batches[0].push(GuiDrawCommand::stroke_rect(panel, 0x4b89dc, 2));
+    let _ = batches[0].push(GuiDrawCommand::shadow(panel, 0x55000000, 16, 4, 0, 6));
+    let _ = batches[0].push(GuiDrawCommand::fill_rounded_rect(panel, 0x182535, 16));
 
     let mut text = [0; MAX_GUI_TEXT_BYTES];
     let length = logos_shell::login_page_node_text(login_page, 2, state, &mut text);
@@ -316,6 +322,7 @@ fn send_shell_surface(
     ) {
         let _ = batches[1].push(text);
     }
+    let _ = batches[1].push(GuiDrawCommand::stroke_rounded_rect(panel, 0x4b89dc, 16, 2));
     let active = 0x315e91;
     let idle = 0x263548;
     let username_color = if logos_shell::login_style_active(
@@ -344,10 +351,11 @@ fn send_shell_surface(
         && !lockscreen.form().controls.username.valid();
     let password_invalid = lockscreen.form().controls.password.touched()
         && !lockscreen.form().controls.password.valid();
-    let _ = batches[1].push(GuiDrawCommand::fill_rect(username, username_color));
-    let _ = batches[1].push(GuiDrawCommand::stroke_rect(
+    let _ = batches[1].push(GuiDrawCommand::fill_rounded_rect(username, username_color, 8));
+    let _ = batches[2].push(GuiDrawCommand::stroke_rounded_rect(
         username,
         if username_invalid { 0xb84a4a } else { 0x6d8fc4 },
+        8,
         1,
     ));
 
@@ -366,10 +374,11 @@ fn send_shell_surface(
     ) {
         let _ = batches[2].push(text);
     }
-    let _ = batches[2].push(GuiDrawCommand::fill_rect(password, password_color));
-    let _ = batches[2].push(GuiDrawCommand::stroke_rect(
+    let _ = batches[2].push(GuiDrawCommand::fill_rounded_rect(password, password_color, 8));
+    let _ = batches[3].push(GuiDrawCommand::stroke_rounded_rect(
         password,
         if password_invalid { 0xb84a4a } else { 0x6d8fc4 },
+        8,
         1,
     ));
 
@@ -400,7 +409,7 @@ fn send_shell_surface(
     } else {
         0x356bd8
     };
-    let _ = batches[3].push(GuiDrawCommand::fill_rect(submit, submit_color));
+    let _ = batches[3].push(GuiDrawCommand::fill_rounded_rect(submit, submit_color, 8));
     let length = logos_shell::login_page_node_text(login_page, 5, state, &mut text);
     if let Some(text) = GuiDrawCommand::glyph_run_styled(
         submit.x.saturating_add(12),
@@ -409,7 +418,7 @@ fn send_shell_surface(
         logos_shell::login_text_flags(login_page, 5),
         &text[..length],
     ) {
-        let _ = batches[3].push(text);
+        let _ = batches[4].push(text);
     }
     for batch in &batches {
         let _ = common::ipc_send_handle(display, batch);

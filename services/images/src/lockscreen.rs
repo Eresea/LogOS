@@ -71,12 +71,13 @@ fn draw(
     background.flags = logos_abi::GUI_DRAW_FLAG_MORE;
     let _ = background.push(GuiDrawCommand::fill_surface(0x101820));
     let panel = GuiRect::new(150, 48, 340, 304);
-    let _ = background.push(GuiDrawCommand::fill_rect(panel, 0x182535));
-    let _ = background.push(GuiDrawCommand::stroke_rect(panel, 0x4b89dc, 2));
+    let _ = background.push(GuiDrawCommand::shadow(panel, 0x55000000, 16, 4, 0, 6));
+    let _ = background.push(GuiDrawCommand::fill_rounded_rect(panel, 0x182535, 16));
     let _ = common::ipc_send_handle(display, &background);
 
     let mut labels = GuiDrawBatch::new(surface, sequence, panel);
     labels.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+    let _ = labels.push(GuiDrawCommand::stroke_rounded_rect(panel, 0x4b89dc, 16, 2));
     push_text(
         &mut labels,
         176,
@@ -88,8 +89,7 @@ fn draw(
             b"Unlock LogOS"
         },
     );
-    push_text(&mut labels, 176, 124, 0xb8c7da, b"Username");
-    push_text(&mut labels, 176, 184, 0xb8c7da, b"Password");
+    push_text(&mut labels, 176, 116, 0xb8c7da, b"Username");
     let _ = common::ipc_send_handle(display, &labels);
 
     let (username, password) = lock.credentials();
@@ -98,13 +98,21 @@ fn draw(
     masked[..password_len].fill(b'*');
     let mut fields = GuiDrawBatch::new(surface, sequence, GuiRect::new(170, 100, 300, 220));
     fields.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    let _ = fields.push(GuiDrawCommand::fill_rect(GuiRect::new(170, 132, 300, 36), 0x263548));
+    let _ = fields.push(GuiDrawCommand::fill_rounded_rect(
+        GuiRect::new(170, 132, 300, 36),
+        0x263548,
+        8,
+    ));
     push_text(&mut fields, 184, 156, 0xffffff, username);
+    push_text(&mut fields, 176, 176, 0xb8c7da, b"Password");
     let _ = common::ipc_send_handle(display, &fields);
 
     let mut password_field = GuiDrawBatch::new(surface, sequence, GuiRect::new(170, 192, 300, 120));
-    let _ =
-        password_field.push(GuiDrawCommand::fill_rect(GuiRect::new(170, 192, 300, 36), 0x263548));
+    let _ = password_field.push(GuiDrawCommand::fill_rounded_rect(
+        GuiRect::new(170, 192, 300, 36),
+        0x263548,
+        8,
+    ));
     push_text(&mut password_field, 184, 216, 0xffffff, &masked[..password_len]);
     push_text(&mut password_field, 184, 276, 0x7890aa, b"Tab fields  Enter submit");
     let _ = common::ipc_send_handle(display, &password_field);
