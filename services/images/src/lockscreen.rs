@@ -258,10 +258,18 @@ pub extern "C" fn _start() -> ! {
         while common::ipc_receive_handle(shell_response, &mut response) == IpcStatus::Ok {
             let request = UserRequest::new(response.operation, response.request_id);
             if response.is_valid_for(request) {
+                let old_mode = lock.mode();
                 lock.apply_status(response.status);
                 if surface.is_valid() {
                     sequence = sequence.wrapping_add(1).max(1);
-                    draw(display, surface, lock, sequence, false);
+                    draw(
+                        display,
+                        surface,
+                        lock,
+                        sequence,
+                        !static_cached || old_mode != lock.mode(),
+                    );
+                    static_cached = true;
                 }
             }
         }
