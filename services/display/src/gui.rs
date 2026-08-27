@@ -1,8 +1,20 @@
 use logos_abi::{
     GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind,
-    GuiRect, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse,
-    MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_SURFACES, SurfaceHandle,
+    GuiNodeOperation, GuiRect, GuiSceneOp, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest,
+    GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES,
+    MAX_GUI_SURFACES, SurfaceHandle,
 };
+
+#[derive(Clone, Copy)]
+struct RenderNode {
+    id: u32,
+    command: GuiDrawCommand,
+    bounds: GuiRect,
+}
+
+impl RenderNode {
+    const EMPTY: Option<Self> = None;
+}
 
 #[derive(Clone, Copy)]
 struct SurfaceSlot {
@@ -14,6 +26,12 @@ struct SurfaceSlot {
     z_order: i16,
     order: u32,
     terminal: bool,
+    active_nodes: [Option<RenderNode>; MAX_GUI_NODES],
+    staged_nodes: [Option<RenderNode>; MAX_GUI_NODES],
+    active_node_count: u8,
+    staged_node_count: u8,
+    active_frame: u32,
+    staged_frame: u32,
 }
 
 impl SurfaceSlot {
@@ -26,6 +44,12 @@ impl SurfaceSlot {
         z_order: 0,
         order: 0,
         terminal: false,
+        active_nodes: [RenderNode::EMPTY; MAX_GUI_NODES],
+        staged_nodes: [RenderNode::EMPTY; MAX_GUI_NODES],
+        active_node_count: 0,
+        staged_node_count: 0,
+        active_frame: 0,
+        staged_frame: 0,
     };
 
     const fn occupied(self) -> bool {
@@ -118,6 +142,12 @@ impl GuiSurfaceRegistry {
             },
             order: self.order,
             terminal: request.flags & GUI_SURFACE_FLAG_TERMINAL != 0,
+            active_nodes: [RenderNode::EMPTY; MAX_GUI_NODES],
+            staged_nodes: [RenderNode::EMPTY; MAX_GUI_NODES],
+            active_node_count: 0,
+            staged_node_count: 0,
+            active_frame: 0,
+            staged_frame: 0,
         };
         self.add_damage(request.bounds)?;
         let mut response = GuiSurfaceResponse::new(request, GuiStatus::Ok);
@@ -153,6 +183,97 @@ impl GuiSurfaceRegistry {
         self.add_damage(old_bounds)?;
         self.add_damage(batch.damage)?;
         Ok(())
+    }
+
+    pub fn apply_scene_op(&mut self, owner: u32, op: GuiSceneOp) -> Result<(), GuiRegistryError> {
+        if !op.is_valid() {
+            return Err(GuiRegistryError::Malformed);
+        }
+        let index = self.authorized_index(owner, op.surface)?;
+        if self.slots[index].staged_frame != op.frame {
+            self.slots[index].staged_nodes = self.slots[index].active_nodes;
+            self.slots[index].staged_node_count = self.slots[index].active_node_count;
+            self.slots[index].staged_frame = op.frame;
+        }
+        match op.operation {
+            GuiNodeOperation::Upsert => {
+                let node = RenderNode {
+                    id: op.node_id,
+                    command: op.command,
+                    bounds: command_rect(op.command),
+                };
+                if let Some(existing) = self.slots[index].staged_nodes[..MAX_GUI_NODES]
+                    .iter_mut()
+                    .flatten()
+                    .find(|existing| existing.id == op.node_id)
+                {
+                    *existing = node;
+                } else {
+                    let count = usize::from(self.slots[index].staged_node_count);
+                    if count == MAX_GUI_NODES {
+                        return Err(GuiRegistryError::Backpressure);
+                    }
+                    self.slots[index].staged_nodes[count] = Some(node);
+                    self.slots[index].staged_node_count += 1;
+                }
+            }
+            GuiNodeOperation::Remove => {
+                let Some(node_index) = self.slots[index].staged_nodes[..MAX_GUI_NODES]
+                    .iter()
+                    .position(|node| node.is_some_and(|node| node.id == op.node_id))
+                else {
+                    return if op.flags & logos_abi::GUI_DRAW_FLAG_MORE == 0 {
+                        self.publish_scene(index)
+                    } else {
+                        Ok(())
+                    };
+                };
+                self.slots[index].staged_nodes[node_index..MAX_GUI_NODES].rotate_left(1);
+                self.slots[index].staged_nodes[MAX_GUI_NODES - 1] = None;
+                self.slots[index].staged_node_count -= 1;
+            }
+        }
+        if op.flags & logos_abi::GUI_DRAW_FLAG_MORE == 0 {
+            self.publish_scene(index)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn publish_scene(&mut self, index: usize) -> Result<(), GuiRegistryError> {
+        let old_nodes = self.slots[index].active_nodes;
+        let old_count = usize::from(self.slots[index].active_node_count);
+        let new_nodes = self.slots[index].staged_nodes;
+        let new_count = usize::from(self.slots[index].staged_node_count);
+        for old in old_nodes[..old_count].iter().flatten() {
+            let changed = new_nodes[..new_count]
+                .iter()
+                .flatten()
+                .find(|new| new.id == old.id)
+                .is_none_or(|new| new.bounds != old.bounds || new.command != old.command);
+            if changed {
+                self.add_damage(old.bounds)?;
+            }
+        }
+        for new in new_nodes[..new_count].iter().flatten() {
+            let changed = old_nodes[..old_count]
+                .iter()
+                .flatten()
+                .find(|old| old.id == new.id)
+                .is_none_or(|old| old.bounds != new.bounds || old.command != new.command);
+            if changed {
+                self.add_damage(new.bounds)?;
+            }
+        }
+        self.slots[index].active_nodes = new_nodes;
+        self.slots[index].active_node_count = self.slots[index].staged_node_count;
+        self.slots[index].active_frame = self.slots[index].staged_frame;
+        self.slots[index].staged_frame = 0;
+        Ok(())
+    }
+
+    pub fn active_frame(&self, handle: SurfaceHandle) -> Option<u32> {
+        self.lookup(handle).ok().map(|slot| slot.active_frame)
     }
 
     pub fn invalidate_rect(&mut self, rect: GuiRect) {
@@ -309,35 +430,40 @@ impl GuiSurfaceRegistry {
         let mut rendered = 0;
         for index in order[..count].iter().copied() {
             let mut clip = self.slots[index].bounds;
-            for batch in
-                self.slots[index].batches[..self.slots[index].batch_count as usize].iter().flatten()
-            {
-                for command in batch.commands[..batch.command_count as usize].iter().copied() {
-                    if is_surface_fill(command) {
-                        continue;
-                    }
-                    if command.kind == GuiDrawKind::ClipRect {
-                        clip = intersect(clip, command_rect(command));
-                        continue;
-                    }
-                    let bounds = command_rect(command);
-                    if !damage[..damage_count].iter().any(|rect| touches(*rect, bounds)) {
-                        continue;
-                    }
-                    let command_clip = intersect(clip, bounds);
-                    for damage_rect in damage[..damage_count].iter().copied() {
-                        let damage_clip = intersect(command_clip, damage_rect);
-                        if damage_clip.is_empty() {
-                            continue;
-                        }
-                        rendered += render_command(
+            if self.slots[index].active_node_count != 0 {
+                for node in self.slots[index].active_nodes
+                    [..self.slots[index].active_node_count as usize]
+                    .iter()
+                    .flatten()
+                {
+                    rendered += render_one(
+                        framebuffer,
+                        width,
+                        height,
+                        stride,
+                        format,
+                        node.command,
+                        &mut clip,
+                        damage,
+                        damage_count,
+                    );
+                }
+            } else {
+                for batch in self.slots[index].batches[..self.slots[index].batch_count as usize]
+                    .iter()
+                    .flatten()
+                {
+                    for command in batch.commands[..batch.command_count as usize].iter().copied() {
+                        rendered += render_one(
                             framebuffer,
                             width,
                             height,
                             stride,
                             format,
                             command,
-                            damage_clip,
+                            &mut clip,
+                            damage,
+                            damage_count,
                         );
                     }
                 }
@@ -389,6 +515,41 @@ impl GuiSurfaceRegistry {
         self.damage_count += 1;
         Ok(())
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_one(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    command: GuiDrawCommand,
+    clip: &mut GuiRect,
+    damage: &[GuiRect; MAX_GUI_DAMAGE_RECTS],
+    damage_count: usize,
+) -> usize {
+    if is_surface_fill(command) {
+        return 0;
+    }
+    if command.kind == GuiDrawKind::ClipRect {
+        *clip = intersect(*clip, command_rect(command));
+        return 0;
+    }
+    let bounds = command_rect(command);
+    if !damage[..damage_count].iter().any(|rect| touches(*rect, bounds)) {
+        return 0;
+    }
+    let command_clip = intersect(*clip, bounds);
+    let mut rendered = 0;
+    for damage_rect in damage[..damage_count].iter().copied() {
+        let damage_clip = intersect(command_clip, damage_rect);
+        if !damage_clip.is_empty() {
+            rendered +=
+                render_command(framebuffer, width, height, stride, format, command, damage_clip);
+        }
+    }
+    rendered
 }
 
 impl Default for GuiSurfaceRegistry {
@@ -1381,6 +1542,55 @@ mod tests {
         registry.update(7, batch).unwrap();
         let (_, count) = registry.take_damage();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn retained_scene_commits_are_atomic_and_damage_node_deltas() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 40, 20)))
+            .unwrap()
+            .surface;
+        registry.take_damage();
+
+        let mut first = GuiSceneOp::upsert(
+            root,
+            1,
+            9,
+            GuiDrawCommand::fill_rect(GuiRect::new(2, 2, 4, 4), 0xffffff),
+        );
+        first.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        registry.apply_scene_op(7, first).unwrap();
+        assert_eq!(registry.active_frame(root), Some(0));
+        assert_eq!(registry.take_damage().1, 0);
+
+        first.flags = 0;
+        registry.apply_scene_op(7, first).unwrap();
+        assert_eq!(registry.active_frame(root), Some(1));
+        let (damage, count) = registry.take_damage();
+        assert_eq!(count, 1);
+        assert!(damage[0].contains(2, 2));
+
+        let mut moved = GuiSceneOp::upsert(
+            root,
+            2,
+            9,
+            GuiDrawCommand::fill_rect(GuiRect::new(24, 2, 4, 4), 0xffffff),
+        );
+        moved.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        registry.apply_scene_op(7, moved).unwrap();
+        assert_eq!(registry.take_damage().1, 0);
+        moved.flags = 0;
+        registry.apply_scene_op(7, moved).unwrap();
+        let (damage, count) = registry.take_damage();
+        assert_eq!(count, 2);
+        assert!(damage[..count].iter().any(|rect| rect.contains(2, 2)));
+        assert!(damage[..count].iter().any(|rect| rect.contains(24, 2)));
+
+        registry.apply_scene_op(7, GuiSceneOp::remove(root, 3, 9)).unwrap();
+        let (damage, count) = registry.take_damage();
+        assert_eq!(count, 1);
+        assert!(damage[0].contains(24, 2));
     }
 
     #[test]

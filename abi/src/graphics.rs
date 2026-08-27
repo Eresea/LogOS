@@ -522,9 +522,32 @@ impl GuiSceneOp {
             && self.reserved == 0
             && match self.operation {
                 GuiNodeOperation::Upsert => self.command.is_valid(),
-                GuiNodeOperation::Remove => self.command.text_len == 0,
+                GuiNodeOperation::Remove => {
+                    matches!(self.command.kind, GuiDrawKind::FillRect)
+                        && self.command.flags == 0
+                        && self.command.text_len == 0
+                        && self.command.reserved == 0
+                        && self.command.x == 0
+                        && self.command.y == 0
+                        && self.command.width == 0
+                        && self.command.height == 0
+                        && self.command.color == 0
+                        && self.command.auxiliary == 0
+                        && zero_text(self.command.text)
+                }
             }
     }
+}
+
+const fn zero_text(text: [u8; MAX_GUI_TEXT_BYTES]) -> bool {
+    let mut index = 0;
+    while index < MAX_GUI_TEXT_BYTES {
+        if text[index] != 0 {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
