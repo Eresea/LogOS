@@ -14,7 +14,7 @@ use logos_abi::{
 
 mod gui;
 
-pub use gui::{GuiRegistryError, GuiSurfaceRegistry};
+pub use gui::{GuiRegistryError, GuiRenderBackend, GuiSurfaceRegistry};
 
 pub use logos_abi::FramebufferFormat as PixelFormat;
 

@@ -8,8 +8,9 @@
 Graphics v2 replaces sequence-wide GUI batches with a fixed retained scene. Each
 scene operation names a stable node ID and frame revision. Operations with
 `GUI_DRAW_FLAG_MORE` update a private staging scene; the operation that clears
-the flag atomically publishes that revision. Display damages only old and new
-node bounds, including removed nodes.
+the flag atomically publishes that revision. Older frame revisions are
+rejected. Display damages only old and new node bounds, including removed
+nodes.
 
 Composition consumes a bounded dirty-tile queue, renders into a Display-owned
 RAM backbuffer, and presents changed regions to GOP only after composition.
