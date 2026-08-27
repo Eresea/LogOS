@@ -286,6 +286,9 @@ impl Atrium {
         if !client.is_valid() {
             return Err(AtriumError::InvalidSurface);
         }
+        if self.surface_for_client(client, app).is_some() {
+            return Err(AtriumError::AlreadyRegistered);
+        }
         if !self.surfaces.iter().any(Option::is_none) {
             return Err(AtriumError::Capacity);
         }
@@ -765,7 +768,8 @@ mod tests {
         assert_eq!(atrium.phase(), AtriumPhase::Boot);
         atrium.authenticate();
         for slot in 0..MAX_ATRIUM_SURFACES {
-            let request = atrium.request_surface(AppId::Calculator, client(1)).unwrap();
+            let request =
+                atrium.request_surface(AppId::Calculator, client(slot as u32 + 1)).unwrap();
             assert!(atrium.spawn_surface(request, surface(slot as u16)).is_ok());
         }
         let request = atrium.request_surface(AppId::Files, client(1)).unwrap_err();
@@ -833,6 +837,20 @@ mod tests {
         atrium.spawn_surface(request, reference).unwrap();
         let request = atrium.request_surface(AppId::Terminal, client(1)).unwrap();
         assert_eq!(atrium.spawn_surface(request, reference), Err(AtriumError::AlreadyRegistered));
+    }
+
+    #[test]
+    fn surface_requests_allow_one_surface_per_client_and_app() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let request = atrium.request_surface(AppId::Files, client(1)).unwrap();
+        atrium.spawn_surface(request, surface(12)).unwrap();
+        assert_eq!(
+            atrium.request_surface(AppId::Files, client(1)),
+            Err(AtriumError::AlreadyRegistered)
+        );
+        assert!(atrium.request_surface(AppId::Terminal, client(1)).is_ok());
+        assert!(atrium.request_surface(AppId::Files, client(2)).is_ok());
     }
 
     #[test]
