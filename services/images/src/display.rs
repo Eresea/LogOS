@@ -155,6 +155,7 @@ pub extern "C" fn _start() -> ! {
     let mut render_pending = false;
     let mut render_complete = false;
     let mut gui_render_pending = false;
+    let mut gui_dirty = false;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
         let generation = common::bootstrap_page().service.generation() as u16;
@@ -166,6 +167,7 @@ pub extern "C" fn _start() -> ! {
             render_pending = false;
             render_complete = false;
             gui_render_pending = false;
+            gui_dirty = true;
         }
         let mut progressed = false;
         let mut surface_request = GuiSurfaceRequest::new(GuiSurfaceOperation::Update, 1);
@@ -194,7 +196,7 @@ pub extern "C" fn _start() -> ! {
                 Err(error) => gui_status(error),
             };
             let _ = common::ipc_send_handle(surface_response_capability, &response);
-            gui_render_pending = display.render_pending();
+            gui_dirty = true;
         }
         let mut lockscreen_surface_request = GuiSurfaceRequest::new(GuiSurfaceOperation::Update, 1);
         while common::ipc_receive_handle(
@@ -228,7 +230,7 @@ pub extern "C" fn _start() -> ! {
                 Err(error) => gui_status(error),
             };
             let _ = common::ipc_send_handle(lockscreen_response_capability, &response);
-            gui_render_pending = display.render_pending();
+            gui_dirty = true;
         }
         let mut message = RenderMessage::empty(MessageKind::RenderCells);
         while common::ipc_receive_handle(input_capability, &mut message) == IpcStatus::Ok {
@@ -258,14 +260,7 @@ pub extern "C" fn _start() -> ! {
         while common::ipc_receive_handle(gui_capability, &mut gui_batch) == IpcStatus::Ok {
             progressed = true;
             let _ = display.gui_mut().update(11, gui_batch);
-            let _ = display.render_gui(
-                framebuffer,
-                config.width as usize,
-                config.height as usize,
-                config.stride as usize * 4,
-                format,
-            );
-            gui_render_pending = display.render_pending();
+            gui_dirty = true;
         }
         let mut atrium_batch = GuiDrawBatch::new(
             logos_abi::SurfaceHandle::new(0, 1, 13).unwrap(),
@@ -276,14 +271,7 @@ pub extern "C" fn _start() -> ! {
         {
             progressed = true;
             let _ = display.gui_mut().update(13, atrium_batch);
-            let _ = display.render_gui(
-                framebuffer,
-                config.width as usize,
-                config.height as usize,
-                config.stride as usize * 4,
-                format,
-            );
-            gui_render_pending = display.render_pending();
+            gui_dirty = true;
         }
         let mut lockscreen_batch = GuiDrawBatch::new(
             logos_abi::SurfaceHandle::new(0, 1, 12).unwrap(),
@@ -295,29 +283,16 @@ pub extern "C" fn _start() -> ! {
         {
             progressed = true;
             let _ = display.gui_mut().update(12, lockscreen_batch);
-            let _ = display.render_gui(
-                framebuffer,
-                config.width as usize,
-                config.height as usize,
-                config.stride as usize * 4,
-                format,
-            );
-            gui_render_pending = display.render_pending();
+            gui_dirty = true;
         }
         if render_pending && render_complete && !gui_render_pending {
             render(display, framebuffer, config);
             if display.gui().terminal_bounds().is_some() {
-                let _ = display.render_gui(
-                    framebuffer,
-                    config.width as usize,
-                    config.height as usize,
-                    config.stride as usize * 4,
-                    format,
-                );
+                gui_dirty = true;
             }
             render_pending = false;
         }
-        if gui_render_pending {
+        if gui_dirty || gui_render_pending {
             let _ = display.render_gui(
                 framebuffer,
                 config.width as usize,
@@ -326,6 +301,7 @@ pub extern "C" fn _start() -> ! {
                 format,
             );
             gui_render_pending = display.render_pending();
+            gui_dirty = false;
             progressed = true;
         }
         if !progressed {

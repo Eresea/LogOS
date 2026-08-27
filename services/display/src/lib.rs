@@ -5,7 +5,7 @@ extern crate std;
 
 use logos_abi::{
     CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, GuiRect, MAX_COLUMNS,
-    MAX_RENDER_CELLS, MAX_ROWS, MessageKind, RENDER_FLAG_MORE, RenderMessage,
+    MAX_GUI_DAMAGE_RECTS, MAX_RENDER_CELLS, MAX_ROWS, MessageKind, RENDER_FLAG_MORE, RenderMessage,
 };
 
 mod gui;
@@ -19,6 +19,9 @@ pub const GLYPH_HEIGHT: usize = 16;
 pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
 const CURSOR_WIDTH: usize = 2;
 const GUI_BACKGROUND_ROWS_PER_STEP: usize = 32;
+// Keep one GUI pass below the service heartbeat window; large damage is resumed
+// on the next loop instead of monopolizing the Display task.
+const GUI_RENDER_ROWS_PER_STEP: usize = 64;
 const ASCII_FIRST: u32 = 0x20;
 const ASCII_LAST: u32 = 0x7e;
 const ASCII_GLYPH_COUNT: usize = (ASCII_LAST - ASCII_FIRST + 1) as usize;
@@ -249,6 +252,9 @@ pub struct Display {
     gui_background: Option<u32>,
     gui_background_row: usize,
     gui_background_pending: bool,
+    gui_damage: [GuiRect; MAX_GUI_DAMAGE_RECTS],
+    gui_damage_count: usize,
+    gui_render_row: usize,
 }
 
 impl Display {
@@ -268,6 +274,9 @@ impl Display {
             gui_background: None,
             gui_background_row: 0,
             gui_background_pending: false,
+            gui_damage: [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS],
+            gui_damage_count: 0,
+            gui_render_row: 0,
         }
     }
 
@@ -292,6 +301,9 @@ impl Display {
         self.gui_background = None;
         self.gui_background_row = 0;
         self.gui_background_pending = false;
+        self.gui_damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+        self.gui_damage_count = 0;
+        self.gui_render_row = 0;
     }
 
     pub fn toggle_cursor(&mut self) -> bool {
@@ -566,6 +578,9 @@ impl Display {
             self.invalidate_terminal();
             self.gui_background_row = 0;
             self.gui_background_pending = background.is_some();
+            self.gui_damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+            self.gui_damage_count = 0;
+            self.gui_render_row = 0;
             if restoring_terminal {
                 return self.render(framebuffer, width, height, stride, format);
             }
@@ -594,7 +609,31 @@ impl Display {
                 self.dirty.fill(false);
             }
         }
-        let (damage, count) = self.gui.take_damage();
+        if self.gui_damage_count == 0 {
+            let (damage, count) = self.gui.take_damage();
+            if count == 0 {
+                return Ok(0);
+            }
+            self.gui_damage = damage;
+            self.gui_damage_count = count;
+            self.gui_render_row = 0;
+        }
+        let row_end = self.gui_render_row.saturating_add(GUI_RENDER_ROWS_PER_STEP).min(height);
+        let row_damage = GuiRect::new(
+            0,
+            self.gui_render_row as i32,
+            width as u32,
+            row_end.saturating_sub(self.gui_render_row) as u32,
+        );
+        let mut damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+        let mut count = 0;
+        for rect in self.gui_damage[..self.gui_damage_count].iter().copied() {
+            let clipped = intersect(rect, row_damage);
+            if !clipped.is_empty() {
+                damage[count] = clipped;
+                count += 1;
+            }
+        }
         let terminal = self
             .gui
             .terminal_bounds()
@@ -611,11 +650,20 @@ impl Display {
                 )
             })
             .unwrap_or(0);
-        Ok(terminal + self.gui.render(framebuffer, width, height, stride, format, &damage, count))
+        let rendered =
+            terminal + self.gui.render(framebuffer, width, height, stride, format, &damage, count);
+        self.gui_render_row = row_end;
+        if row_end == height {
+            let (next_damage, next_count) = self.gui.take_damage();
+            self.gui_damage = next_damage;
+            self.gui_damage_count = next_count;
+            self.gui_render_row = 0;
+        }
+        Ok(rendered)
     }
 
     pub const fn render_pending(&self) -> bool {
-        self.gui_background_pending
+        self.gui_background_pending || self.gui_damage_count != 0
     }
 }
 
@@ -743,6 +791,43 @@ mod tests {
         display.render(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
         assert_eq!(&framebuffer[pixel..pixel + 4], &[0x30, 0x20, 0x10, 0]);
         assert_eq!(display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8), Ok(0));
+    }
+
+    #[test]
+    fn gui_composition_is_bounded_to_row_sized_passes() {
+        let mut display = Display::new(1);
+        let mut root =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root.bounds = logos_abi::GuiRect::new(0, 0, 640, 400);
+        let handle = display.gui_mut().create(11, root).unwrap().surface;
+        let mut batch = logos_abi::GuiDrawBatch::new(handle, 1, logos_abi::GuiRect::SURFACE);
+        assert!(batch.push(logos_abi::GuiDrawCommand::fill_rounded_rect(
+            logos_abi::GuiRect::new(0, 0, 640, 400),
+            0x203040,
+            16,
+        )));
+        display.gui_mut().update(11, batch).unwrap();
+        let mut framebuffer = std::vec![0; 640 * 400 * 4];
+        display.render_gui(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8).unwrap();
+        assert!(display.render_pending());
+        let mut replacement =
+            logos_abi::GuiDrawBatch::new(handle, 2, logos_abi::GuiRect::new(24, 24, 16, 16));
+        assert!(replacement.push(logos_abi::GuiDrawCommand::fill_rect(
+            logos_abi::GuiRect::new(24, 24, 16, 16),
+            0xff0000,
+        )));
+        display.gui_mut().update(11, replacement).unwrap();
+        let mut passes = 1;
+        loop {
+            passes += 1;
+            display.render_gui(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8).unwrap();
+            if !display.render_pending() {
+                break;
+            }
+        }
+        assert!(passes > 1);
+        let pixel = (24 * 640 + 24) * 4;
+        assert_eq!(&framebuffer[pixel..pixel + 4], &[0, 0, 255, 0]);
     }
 
     #[test]
