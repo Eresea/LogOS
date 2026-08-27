@@ -455,14 +455,17 @@ impl GuiSurfaceRegistry {
         }
 
         let mut rendered = 0;
-        for index in order[..count].iter().copied() {
+        for (surface_position, index) in order[..count].iter().copied().enumerate() {
             let mut clip = self.slots[index].bounds;
             if self.slots[index].active_frame != 0 {
-                for node in self.slots[index].active_nodes
+                for (node_position, node) in self.slots[index].active_nodes
                     [..self.slots[index].active_node_count as usize]
                     .iter()
                     .flatten()
+                    .enumerate()
                 {
+                    let (occluders, occluder_count) =
+                        self.occluders_after(&order[..count], surface_position, node_position);
                     rendered += render_one(
                         framebuffer,
                         width,
@@ -473,14 +476,22 @@ impl GuiSurfaceRegistry {
                         &mut clip,
                         damage,
                         damage_count,
+                        &occluders,
+                        occluder_count,
                     );
                 }
             } else {
+                let mut command_position = 0;
                 for batch in self.slots[index].batches[..self.slots[index].batch_count as usize]
                     .iter()
                     .flatten()
                 {
                     for command in batch.commands[..batch.command_count as usize].iter().copied() {
+                        let (occluders, occluder_count) = self.occluders_after(
+                            &order[..count],
+                            surface_position,
+                            command_position,
+                        );
                         rendered += render_one(
                             framebuffer,
                             width,
@@ -491,12 +502,62 @@ impl GuiSurfaceRegistry {
                             &mut clip,
                             damage,
                             damage_count,
+                            &occluders,
+                            occluder_count,
                         );
+                        command_position += 1;
                     }
                 }
             }
         }
         rendered
+    }
+
+    fn occluders_after(
+        &self,
+        order: &[usize],
+        surface_position: usize,
+        command_position: usize,
+    ) -> ([GuiRect; MAX_GUI_SURFACES * MAX_GUI_NODES], usize) {
+        let mut occluders = [GuiRect::EMPTY; MAX_GUI_SURFACES * MAX_GUI_NODES];
+        let mut count = 0;
+        for (position, index) in order.iter().copied().enumerate() {
+            if position < surface_position {
+                continue;
+            }
+            let slot = self.slots[index];
+            if slot.active_frame != 0 {
+                for (node_index, node) in slot.active_nodes[..slot.active_node_count as usize]
+                    .iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    if position == surface_position && node_index <= command_position {
+                        continue;
+                    }
+                    if is_opaque_occluder(node.command) && count < occluders.len() {
+                        occluders[count] = command_rect(node.command);
+                        count += 1;
+                    }
+                }
+            } else {
+                let mut node_index = 0;
+                for batch in slot.batches[..slot.batch_count as usize].iter().flatten() {
+                    for command in batch.commands[..batch.command_count as usize].iter().copied() {
+                        if position == surface_position && node_index <= command_position {
+                            node_index += 1;
+                            continue;
+                        }
+                        if is_opaque_occluder(command) && count < occluders.len() {
+                            occluders[count] = command_rect(command);
+                            count += 1;
+                        }
+                        node_index += 1;
+                    }
+                }
+            }
+        }
+        (occluders, count)
     }
 
     fn lookup(&self, handle: SurfaceHandle) -> Result<&SurfaceSlot, GuiRegistryError> {
@@ -555,6 +616,8 @@ fn render_one(
     clip: &mut GuiRect,
     damage: &[GuiRect; MAX_GUI_DAMAGE_RECTS],
     damage_count: usize,
+    occluders: &[GuiRect; MAX_GUI_SURFACES * MAX_GUI_NODES],
+    occluder_count: usize,
 ) -> usize {
     if is_surface_fill(command) {
         return 0;
@@ -571,7 +634,33 @@ fn render_one(
     let mut rendered = 0;
     for damage_rect in damage[..damage_count].iter().copied() {
         let damage_clip = intersect(command_clip, damage_rect);
-        if !damage_clip.is_empty() {
+        if damage_clip.is_empty() {
+            continue;
+        }
+        let mut visible = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS * 4];
+        visible[0] = damage_clip;
+        let mut visible_count = 1;
+        for occluder in occluders[..occluder_count].iter().copied() {
+            let mut next = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS * 4];
+            let mut next_count = 0;
+            for rect in visible[..visible_count].iter().copied() {
+                let mut pieces = [GuiRect::EMPTY; 4];
+                let piece_count = subtract_rect(rect, occluder, &mut pieces);
+                for piece in pieces[..piece_count].iter().copied() {
+                    if next_count == next.len() {
+                        break;
+                    }
+                    next[next_count] = piece;
+                    next_count += 1;
+                }
+            }
+            visible = next;
+            visible_count = next_count;
+            if visible_count == 0 {
+                break;
+            }
+        }
+        for damage_clip in visible[..visible_count].iter().copied() {
             rendered +=
                 render_command(framebuffer, width, height, stride, format, command, damage_clip);
         }
@@ -660,6 +749,11 @@ fn is_surface_fill(command: GuiDrawCommand) -> bool {
         && GuiRect::new(command.x, command.y, command.width, command.height) == GuiRect::SURFACE
 }
 
+fn is_opaque_occluder(command: GuiDrawCommand) -> bool {
+    matches!(command.kind, GuiDrawKind::FillRect | GuiDrawKind::FillRoundedRect)
+        && color_alpha(command.color) == u8::MAX
+}
+
 fn intersect(left: GuiRect, right: GuiRect) -> GuiRect {
     let x = left.x.max(right.x);
     let y = left.y.max(right.y);
@@ -672,6 +766,43 @@ fn intersect(left: GuiRect, right: GuiRect) -> GuiRect {
     } else {
         GuiRect::new(x, y, (right_edge - x) as u32, (bottom - y) as u32)
     }
+}
+
+fn subtract_rect(rect: GuiRect, cut: GuiRect, pieces: &mut [GuiRect; 4]) -> usize {
+    let overlap = intersect(rect, cut);
+    if overlap.is_empty() {
+        pieces[0] = rect;
+        return 1;
+    }
+    let rect_right = rect.x.saturating_add(rect.width as i32);
+    let rect_bottom = rect.y.saturating_add(rect.height as i32);
+    let overlap_right = overlap.x.saturating_add(overlap.width as i32);
+    let overlap_bottom = overlap.y.saturating_add(overlap.height as i32);
+    let mut count = 0;
+    if rect.y < overlap.y {
+        pieces[count] = GuiRect::new(rect.x, rect.y, rect.width, (overlap.y - rect.y) as u32);
+        count += 1;
+    }
+    if overlap_bottom < rect_bottom {
+        pieces[count] =
+            GuiRect::new(rect.x, overlap_bottom, rect.width, (rect_bottom - overlap_bottom) as u32);
+        count += 1;
+    }
+    if rect.x < overlap.x {
+        pieces[count] =
+            GuiRect::new(rect.x, overlap.y, (overlap.x - rect.x) as u32, overlap.height);
+        count += 1;
+    }
+    if overlap_right < rect_right {
+        pieces[count] = GuiRect::new(
+            overlap_right,
+            overlap.y,
+            (rect_right - overlap_right) as u32,
+            overlap.height,
+        );
+        count += 1;
+    }
+    count
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1501,6 +1632,33 @@ mod tests {
         );
         assert!(pixel(&shadow, 48, 20, 20)[0] < 255);
         assert_eq!(pixel(&shadow, 48, 2, 2), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn opaque_panel_occludes_shadow_work() {
+        let mut framebuffer = vec![0xff; 48 * 32 * 4];
+        let shadow = GuiDrawCommand::shadow(GuiRect::new(12, 8, 16, 8), 0x55000000, 4, 2, 0, 4);
+        let mut clip = GuiRect::new(12, 8, 16, 8);
+        let mut damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+        damage[0] = clip;
+        let mut occluders = [GuiRect::EMPTY; MAX_GUI_SURFACES * MAX_GUI_NODES];
+        occluders[0] = clip;
+        assert_eq!(
+            render_one(
+                &mut framebuffer,
+                48,
+                32,
+                48 * 4,
+                PixelFormat::Bgr8,
+                shadow,
+                &mut clip,
+                &damage,
+                1,
+                &occluders,
+                1,
+            ),
+            0
+        );
     }
 
     #[test]

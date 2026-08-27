@@ -13,8 +13,10 @@ node bounds, including removed nodes.
 
 Composition consumes a bounded dirty-tile queue, renders into a Display-owned
 RAM backbuffer, and presents changed regions to GOP only after composition.
-Static scene groups and glyph/glyph-run data use fixed caches. Opaque retained
-nodes provide occlusion to lower nodes. The scene protocol and software
+Static scene groups remain published while lockscreen field nodes update by
+stable ID; retained glyph-run nodes therefore act as the glyph cache and the
+fixed font atlas is never regenerated. Opaque retained nodes provide occlusion
+to lower nodes. The scene protocol and software
 composition boundary are backend-neutral so a later GPU backend can replace
 only the present/composition implementation.
 

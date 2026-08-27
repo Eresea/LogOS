@@ -66,31 +66,34 @@ fn draw(
     surface: SurfaceHandle,
     lock: &logos_lockscreen::LockScreen,
     sequence: u32,
+    include_static: bool,
 ) {
-    let mut background = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
-    background.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    let _ = background.push(GuiDrawCommand::fill_surface(0x101820));
     let panel = GuiRect::new(150, 48, 340, 304);
-    let _ = background.push(GuiDrawCommand::shadow(panel, 0x55000000, 16, 4, 0, 6));
-    let _ = background.push(GuiDrawCommand::fill_rounded_rect(panel, 0x182535, 16));
-    let _ = common::ipc_send_scene_batch(display, &background, 1);
+    if include_static {
+        let mut background = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
+        background.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        let _ = background.push(GuiDrawCommand::fill_surface(0x101820));
+        let _ = background.push(GuiDrawCommand::shadow(panel, 0x55000000, 16, 4, 0, 6));
+        let _ = background.push(GuiDrawCommand::fill_rounded_rect(panel, 0x182535, 16));
+        let _ = common::ipc_send_scene_batch(display, &background, 1);
 
-    let mut labels = GuiDrawBatch::new(surface, sequence, panel);
-    labels.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    let _ = labels.push(GuiDrawCommand::stroke_rounded_rect(panel, 0x4b89dc, 16, 2));
-    push_text(
-        &mut labels,
-        176,
-        84,
-        0xffffff,
-        if lock.mode() == logos_lockscreen::LockScreenMode::Claim {
-            b"Create admin"
-        } else {
-            b"Unlock LogOS"
-        },
-    );
-    push_text(&mut labels, 176, 116, 0xb8c7da, b"Username");
-    let _ = common::ipc_send_scene_batch(display, &labels, 4);
+        let mut labels = GuiDrawBatch::new(surface, sequence, panel);
+        labels.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        let _ = labels.push(GuiDrawCommand::stroke_rounded_rect(panel, 0x4b89dc, 16, 2));
+        push_text(
+            &mut labels,
+            176,
+            84,
+            0xffffff,
+            if lock.mode() == logos_lockscreen::LockScreenMode::Claim {
+                b"Create admin"
+            } else {
+                b"Unlock LogOS"
+            },
+        );
+        push_text(&mut labels, 176, 116, 0xb8c7da, b"Username");
+        let _ = common::ipc_send_scene_batch(display, &labels, 4);
+    }
 
     let (username, password) = lock.credentials();
     let confirmation = lock.confirmation();
@@ -199,6 +202,7 @@ pub extern "C" fn _start() -> ! {
     let mut sequence = 0u32;
     let mut surface = SurfaceHandle::EMPTY;
     let mut visible = true;
+    let mut static_cached = false;
     let mut pending_surface = Some(request_surface(display_control, &mut next_request));
     let mut pending_auth: Option<UserRequest> = None;
     let mut response =
@@ -224,6 +228,7 @@ pub extern "C" fn _start() -> ! {
                 visible = false;
                 pending_surface = None;
                 pending_auth = None;
+                static_cached = false;
                 if surface.is_valid() {
                     destroy_surface(display_control, surface, &mut next_request);
                     surface = SurfaceHandle::EMPTY;
@@ -239,7 +244,8 @@ pub extern "C" fn _start() -> ! {
             if surface_response.status == logos_abi::GuiStatus::Ok {
                 surface = surface_response.surface;
                 sequence = sequence.wrapping_add(1).max(1);
-                draw(display, surface, lock, sequence);
+                draw(display, surface, lock, sequence, true);
+                static_cached = true;
             }
         }
         if let Some(request) = pending_auth {
@@ -255,7 +261,7 @@ pub extern "C" fn _start() -> ! {
                 lock.apply_status(response.status);
                 if surface.is_valid() {
                     sequence = sequence.wrapping_add(1).max(1);
-                    draw(display, surface, lock, sequence);
+                    draw(display, surface, lock, sequence, false);
                 }
             }
         }
@@ -278,7 +284,8 @@ pub extern "C" fn _start() -> ! {
                 }
                 if action != logos_lockscreen::LockScreenAction::Ignored && surface.is_valid() {
                     sequence = sequence.wrapping_add(1).max(1);
-                    draw(display, surface, lock, sequence);
+                    draw(display, surface, lock, sequence, !static_cached);
+                    static_cached = true;
                 }
             }
         }
