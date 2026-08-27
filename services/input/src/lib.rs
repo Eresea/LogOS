@@ -6,7 +6,7 @@
 #[cfg(test)]
 extern crate std;
 
-use logos_abi::{InputMessage, KeyCode, KeyState};
+use logos_abi::{InputMessage, KeyCode, KeyState, PointerState};
 
 pub const MOD_SHIFT: u16 = logos_abi::MOD_SHIFT;
 pub const MOD_CTRL: u16 = logos_abi::MOD_CTRL;
@@ -170,6 +170,64 @@ impl InputDecoder {
             byte
         };
         InputMessage::text(&[byte])
+    }
+}
+
+/// Bounded PS/2 three-byte mouse packet decoder. Coordinates are clamped to
+/// the signed 16-bit surface coordinate range and never expose raw device bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PointerDecoder {
+    packet: [u8; 3],
+    packet_len: u8,
+    x: i16,
+    y: i16,
+    buttons: u8,
+}
+
+impl PointerDecoder {
+    pub const fn new() -> Self {
+        Self { packet: [0; 3], packet_len: 0, x: 0, y: 0, buttons: 0 }
+    }
+
+    pub const fn position(&self) -> (i16, i16) {
+        (self.x, self.y)
+    }
+
+    pub fn feed(&mut self, byte: u8) -> Option<InputMessage> {
+        if self.packet_len == 0 && byte & 0x08 == 0 {
+            return None;
+        }
+        let index = self.packet_len as usize;
+        self.packet[index] = byte;
+        self.packet_len += 1;
+        if self.packet_len != 3 {
+            return None;
+        }
+        self.packet_len = 0;
+        let status = self.packet[0];
+        if status & 0xc0 != 0 {
+            return None;
+        }
+        let dx = self.packet[1] as i8 as i16;
+        let dy = self.packet[2] as i8 as i16;
+        self.x = self.x.saturating_add(dx);
+        self.y = self.y.saturating_sub(dy);
+        let buttons = status & logos_abi::POINTER_BUTTONS_MASK;
+        let state = if buttons != self.buttons {
+            if buttons & !self.buttons != 0 { PointerState::Down } else { PointerState::Up }
+        } else if dx != 0 || dy != 0 {
+            PointerState::Move
+        } else {
+            return None;
+        };
+        self.buttons = buttons;
+        InputMessage::pointer(self.x, self.y, buttons, state)
+    }
+}
+
+impl Default for PointerDecoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -480,6 +538,33 @@ mod tests {
         assert_eq!(event.text.unwrap().text_bytes(), Some(&b"a"[..]));
         assert_eq!(decoder.feed(0xf0), None);
         assert_eq!(decoder.feed(0x1c).unwrap().key.state, KeyState::Released);
+    }
+
+    #[test]
+    fn pointer_packets_decode_to_semantic_events() {
+        let mut decoder = PointerDecoder::new();
+        assert_eq!(decoder.feed(0x08), None);
+        assert_eq!(decoder.feed(4), None);
+        let event = decoder.feed(2).unwrap();
+        assert_eq!(event.pointer_event().unwrap().x, 4);
+        assert_eq!(event.pointer_event().unwrap().y, -2);
+
+        let _ = decoder.feed(0x09);
+        let _ = decoder.feed(0);
+        assert_eq!(decoder.feed(0).unwrap().pointer_event().unwrap().state, PointerState::Down);
+        let _ = decoder.feed(0x08);
+        let _ = decoder.feed(0);
+        assert_eq!(decoder.feed(0).unwrap().pointer_event().unwrap().state, PointerState::Up);
+    }
+
+    #[test]
+    fn pointer_decoder_discards_overflow_and_bad_packet_starts() {
+        let mut decoder = PointerDecoder::new();
+        assert_eq!(decoder.feed(0), None);
+        assert_eq!(decoder.feed(0x48), None);
+        assert_eq!(decoder.feed(0), None);
+        assert_eq!(decoder.feed(0), None);
+        assert_eq!(decoder.position(), (0, 0));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use logos_abi::{
-    GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiRect, GuiStatus,
-    GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS,
-    MAX_GUI_DAMAGE_RECTS, MAX_GUI_SURFACES, SurfaceHandle,
+    GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind,
+    GuiRect, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse,
+    MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_SURFACES, SurfaceHandle,
 };
 
 #[derive(Clone, Copy)]
@@ -13,6 +13,7 @@ struct SurfaceSlot {
     sequence: u32,
     z_order: i16,
     order: u32,
+    terminal: bool,
 }
 
 impl SurfaceSlot {
@@ -24,6 +25,7 @@ impl SurfaceSlot {
         sequence: 0,
         z_order: 0,
         order: 0,
+        terminal: false,
     };
 
     const fn occupied(self) -> bool {
@@ -81,6 +83,16 @@ impl GuiSurfaceRegistry {
         ) {
             return Err(GuiRegistryError::InvalidRequest);
         }
+        if request.flags & GUI_SURFACE_FLAG_TERMINAL != 0
+            && !matches!(request.operation, GuiSurfaceOperation::CreateModal)
+        {
+            return Err(GuiRegistryError::InvalidRequest);
+        }
+        if request.flags & GUI_SURFACE_FLAG_TERMINAL != 0
+            && self.slots.iter().any(|slot| slot.occupied() && slot.terminal)
+        {
+            return Err(GuiRegistryError::Capacity);
+        }
         if matches!(request.operation, GuiSurfaceOperation::CreateModal) && !root_exists {
             return Err(GuiRegistryError::NotFound);
         }
@@ -105,6 +117,7 @@ impl GuiSurfaceRegistry {
                 request.z_order.max(1)
             },
             order: self.order,
+            terminal: request.flags & GUI_SURFACE_FLAG_TERMINAL != 0,
         };
         self.add_damage(request.bounds)?;
         let mut response = GuiSurfaceResponse::new(request, GuiStatus::Ok);
@@ -241,6 +254,17 @@ impl GuiSurfaceRegistry {
 
     pub fn contains(&self, handle: SurfaceHandle) -> bool {
         self.lookup(handle).is_ok()
+    }
+
+    pub fn terminal_bounds(&self) -> Option<GuiRect> {
+        self.terminal_surface().map(|(_, bounds)| bounds)
+    }
+
+    pub fn terminal_surface(&self) -> Option<(SurfaceHandle, GuiRect)> {
+        self.slots
+            .iter()
+            .find(|slot| slot.occupied() && slot.terminal)
+            .map(|slot| (slot.handle, slot.bounds))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -761,5 +785,24 @@ mod tests {
                 .create(7, request(GuiSurfaceOperation::CreateModal, 99, GuiRect::new(0, 0, 1, 1))),
             Err(GuiRegistryError::Capacity)
         );
+    }
+
+    #[test]
+    fn terminal_marker_is_modal_and_singleton() {
+        let mut registry = GuiSurfaceRegistry::new();
+        registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 10, 10)))
+            .unwrap();
+        let mut terminal = request(GuiSurfaceOperation::CreateModal, 2, GuiRect::new(0, 0, 10, 10));
+        terminal.flags = GUI_SURFACE_FLAG_TERMINAL;
+        assert!(registry.create(7, terminal).is_ok());
+        terminal.request_id = 3;
+        assert_eq!(registry.create(7, terminal), Err(GuiRegistryError::Capacity));
+
+        let mut root_terminal =
+            request(GuiSurfaceOperation::CreateRoot, 4, GuiRect::new(0, 0, 10, 10));
+        root_terminal.flags = GUI_SURFACE_FLAG_TERMINAL;
+        let mut fresh = GuiSurfaceRegistry::new();
+        assert_eq!(fresh.create(7, root_terminal), Err(GuiRegistryError::InvalidRequest));
     }
 }

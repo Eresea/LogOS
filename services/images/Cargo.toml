@@ -111,3 +111,9 @@ name = "logos-atrium"
 path = "src/atrium.rs"
 test = false
 bench = false
+
+[[bin]]
+name = "logos-system"
+path = "src/system.rs"
+test = false
+bench = false

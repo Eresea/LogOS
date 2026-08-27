@@ -5,7 +5,8 @@
 mod common;
 
 use logos_abi::{
-    INPUT_KEYBOARD_RING_BASE, IPC_CONTRACT_GUI_INPUT, InputMessage, IpcStatus, KeyboardByteRing,
+    INPUT_KEYBOARD_RING_BASE, INPUT_POINTER_RING_BASE, IPC_CONTRACT_GUI_INPUT, InputMessage,
+    IpcStatus, KeyboardByteRing, PointerByteRing,
 };
 
 static mut PENDING: Option<InputMessage> = None;
@@ -33,9 +34,11 @@ pub extern "C" fn _start() -> ! {
         Err(_) => common::idle(),
     };
     let keyboard = unsafe { &*(INPUT_KEYBOARD_RING_BASE as *const KeyboardByteRing) };
+    let pointer = unsafe { &*(INPUT_POINTER_RING_BASE as *const PointerByteRing) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let sent_mask = unsafe { &mut *core::ptr::addr_of_mut!(SENT_MASK) };
     let mut decoder = logos_input::InputDecoder::new();
+    let mut pointer_decoder = logos_input::PointerDecoder::new();
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
@@ -64,15 +67,21 @@ pub extern "C" fn _start() -> ! {
             }
             continue;
         }
+        if let Some(byte) = pointer.pop() {
+            if let Some(event) = pointer_decoder.feed(byte) {
+                *pending = Some(event);
+                *sent_mask = 0;
+            }
+            continue;
+        }
         let Some(byte) = keyboard.pop() else {
             common::sleep_on_keyboard();
             continue;
         };
-        let Some(event) = decoder.feed(byte) else {
-            continue;
-        };
-        *pending = Some(event.terminal_message());
-        *sent_mask = 0;
+        if let Some(event) = decoder.feed(byte) {
+            *pending = Some(event.terminal_message());
+            *sent_mask = 0;
+        }
     }
 }
 

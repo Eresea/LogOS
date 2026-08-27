@@ -4,20 +4,36 @@
 
 mod common;
 
-use logos_abi::{InputMessage, IpcBytes, IpcStatus, KeyCode, KeyState, MessageKind};
+use logos_abi::{
+    AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, InputMessage,
+    IpcBytes, IpcStatus, KeyCode, KeyState, MessageKind, SurfaceHandle,
+};
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
-    logos_abi::IPC_CONTRACT_GUI_INPUT,
+    logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_INPUT,
     b"atrium",
-    core::mem::size_of::<InputMessage>(),
+    core::mem::size_of::<AtriumSurfaceInput>(),
     logos_abi::IpcRights::Receive,
 );
-const DISPLAY_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+const ATRIUM_RENDER_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_RENDER,
-    b"display",
+    b"atrium",
     core::mem::size_of::<logos_abi::RenderMessage>(),
     logos_abi::IpcRights::Send,
 );
+const ATRIUM_SURFACE_REQUEST_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
+    b"atrium",
+    core::mem::size_of::<AtriumSurfaceRequest>(),
+    logos_abi::IpcRights::Send,
+);
+const ATRIUM_SURFACE_RESPONSE_CAPABILITY: common::CapabilitySpec =
+    common::capability_contract_named(
+        logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_RESPONSE,
+        b"atrium",
+        core::mem::size_of::<AtriumSurfaceResponse>(),
+        logos_abi::IpcRights::Receive,
+    );
 const SESSION_INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
     b"session",
@@ -45,10 +61,20 @@ pub extern "C" fn _start() -> ! {
         Ok(capability) => capability,
         Err(_) => common::idle(),
     };
-    let display_capability = match common::capability_handle(DISPLAY_CAPABILITY) {
+    let atrium_render_capability = match common::capability_handle(ATRIUM_RENDER_CAPABILITY) {
         Ok(capability) => capability,
         Err(_) => common::idle(),
     };
+    let atrium_surface_request_capability =
+        match common::capability_handle(ATRIUM_SURFACE_REQUEST_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        };
+    let atrium_surface_response_capability =
+        match common::capability_handle(ATRIUM_SURFACE_RESPONSE_CAPABILITY) {
+            Ok(capability) => capability,
+            Err(_) => common::idle(),
+        };
     let session_input_capability = match common::capability_handle(SESSION_INPUT_CAPABILITY) {
         Ok(capability) => capability,
         Err(_) => common::idle(),
@@ -59,8 +85,39 @@ pub extern "C" fn _start() -> ! {
     };
     let mut heartbeat_ticks = 0u16;
     let mut render_more = false;
+    let client = common::bootstrap_page().service;
+    let surface_request = AtriumSurfaceRequest::new(AtriumApp::Terminal, client, 1);
+    let mut surface_request_sent = false;
+    let mut terminal_surface = SurfaceHandle::EMPTY;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
+        if !surface_request_sent && !terminal_surface.is_valid() {
+            match common::ipc_send_handle(atrium_surface_request_capability, &surface_request) {
+                IpcStatus::Ok => surface_request_sent = true,
+                IpcStatus::Full => {}
+                IpcStatus::Stale
+                | IpcStatus::Disconnected
+                | IpcStatus::Unauthorized
+                | IpcStatus::Malformed
+                | IpcStatus::Empty => {}
+            }
+        }
+        let mut surface_response =
+            AtriumSurfaceResponse::new(surface_request, logos_abi::GuiStatus::Malformed);
+        while common::ipc_receive_handle(atrium_surface_response_capability, &mut surface_response)
+            == IpcStatus::Ok
+        {
+            if surface_response.is_valid_for(surface_request)
+                && surface_response.status == logos_abi::GuiStatus::Ok
+                && surface_response.surface.is_valid()
+            {
+                terminal_surface = surface_response.surface;
+            } else if surface_response.is_revoke() && surface_response.surface == terminal_surface {
+                terminal_surface = SurfaceHandle::EMPTY;
+                *pending_render = None;
+                render_more = false;
+            }
+        }
         if let Some(message) = *pending_session_input {
             match common::ipc_send_handle(session_input_capability, &message) {
                 IpcStatus::Ok => {
@@ -75,9 +132,15 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if pending_session_input.is_none() {
-            let mut event = InputMessage::key(KeyCode::Unknown, KeyState::Released, 0);
+            let mut event = AtriumSurfaceInput::new(
+                SurfaceHandle::EMPTY,
+                InputMessage::key(KeyCode::Unknown, KeyState::Released, 0),
+            );
             while common::ipc_receive_handle(input_capability, &mut event) == IpcStatus::Ok {
-                if let Some(message) = terminal.input(&event) {
+                if !event.is_valid() || event.surface != terminal_surface {
+                    continue;
+                }
+                if let Some(message) = terminal.input(&event.input) {
                     match common::ipc_send_handle(session_input_capability, &message) {
                         IpcStatus::Ok => {}
                         IpcStatus::Full => {
@@ -103,13 +166,25 @@ pub extern "C" fn _start() -> ! {
         if pending_render.is_none() {
             *pending_render = terminal.next_render();
         }
-        if let Some(render) = *pending_render {
-            match common::ipc_send_handle(display_capability, &render) {
+        if let Some(mut render) = *pending_render {
+            if !terminal_surface.is_valid() {
+                common::wait_on_capabilities(&[
+                    input_capability,
+                    session_input_capability,
+                    session_output_capability,
+                    atrium_render_capability,
+                    atrium_surface_request_capability,
+                    atrium_surface_response_capability,
+                ]);
+                continue;
+            }
+            render.surface = terminal_surface;
+            match common::ipc_send_handle(atrium_render_capability, &render) {
                 IpcStatus::Ok => {
                     *pending_render = None;
                     render_more = render.flags & logos_abi::RENDER_FLAG_MORE != 0;
                 }
-                IpcStatus::Full => {}
+                IpcStatus::Full => *pending_render = Some(render),
                 IpcStatus::Stale
                 | IpcStatus::Disconnected
                 | IpcStatus::Unauthorized
@@ -127,7 +202,9 @@ pub extern "C" fn _start() -> ! {
             input_capability,
             session_input_capability,
             session_output_capability,
-            display_capability,
+            atrium_render_capability,
+            atrium_surface_request_capability,
+            atrium_surface_response_capability,
         ]);
     }
 }

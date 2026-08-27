@@ -15,6 +15,12 @@ const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_nam
     core::mem::size_of::<RenderMessage>(),
     logos_abi::IpcRights::Receive,
 );
+const ATRIUM_RENDER_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_RENDER,
+    b"atrium",
+    core::mem::size_of::<RenderMessage>(),
+    logos_abi::IpcRights::Receive,
+);
 const GUI_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_DRAW,
     b"shell",
@@ -103,6 +109,10 @@ pub extern "C" fn _start() -> ! {
         FramebufferFormat::Rgb8 => logos_display::PixelFormat::Rgb8,
     };
     let input_capability = match common::capability_handle(INPUT_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let atrium_render_capability = match common::capability_handle(ATRIUM_RENDER_CAPABILITY) {
         Ok(capability) => capability,
         Err(_) => common::idle(),
     };
@@ -229,6 +239,17 @@ pub extern "C" fn _start() -> ! {
                 render_complete = !more;
             }
         }
+        let mut atrium_render = RenderMessage::empty(MessageKind::RenderCells);
+        while common::ipc_receive_handle(atrium_render_capability, &mut atrium_render)
+            == IpcStatus::Ok
+        {
+            progressed = true;
+            if display.apply(generation, &atrium_render).is_ok() {
+                let more = atrium_render.flags & RENDER_FLAG_MORE != 0;
+                render_pending = true;
+                render_complete = !more;
+            }
+        }
         let mut gui_batch = GuiDrawBatch::new(
             logos_abi::SurfaceHandle::new(0, 1, 11).unwrap(),
             1,
@@ -285,6 +306,15 @@ pub extern "C" fn _start() -> ! {
         }
         if render_pending && render_complete && !gui_render_pending {
             render(display, framebuffer, config);
+            if display.gui().terminal_bounds().is_some() {
+                let _ = display.render_gui(
+                    framebuffer,
+                    config.width as usize,
+                    config.height as usize,
+                    config.stride as usize * 4,
+                    format,
+                );
+            }
             render_pending = false;
         }
         if gui_render_pending {
@@ -301,6 +331,7 @@ pub extern "C" fn _start() -> ! {
         if !progressed {
             common::wait_on_capabilities(&[
                 input_capability,
+                atrium_render_capability,
                 gui_capability,
                 atrium_gui_capability,
                 surface_capability,

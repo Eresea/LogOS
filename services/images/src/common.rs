@@ -722,6 +722,71 @@ pub fn discover_capability_contract_named(
     )
 }
 
+/// Discover all live grants for a contract. Unlike the cached lookup helpers,
+/// this is used for runtime-created program channels and always refreshes.
+#[allow(dead_code)]
+pub fn discover_capabilities_contract(
+    rights: logos_abi::IpcRights,
+    contract_id: u16,
+    message_bytes: usize,
+) -> Result<Vec<(logos_abi::ServiceHandle, logos_abi::CapabilityHandle)>, logos_abi::DirectoryStatus>
+{
+    const MAX_RESULTS: usize = 16;
+    #[cfg(target_os = "none")]
+    {
+        let bootstrap = bootstrap_page();
+        if !bootstrap.is_valid() || contract_id == 0 || message_bytes == 0 {
+            return Err(logos_abi::DirectoryStatus::Malformed);
+        }
+        let mut found = Vec::new();
+        found.try_reserve(MAX_RESULTS).map_err(|_| logos_abi::DirectoryStatus::Capacity)?;
+        let mut request = logos_abi::DirectoryRequest::new(
+            logos_abi::DirectoryOperation::Capabilities,
+            next_event_request_id(),
+        );
+        request.subject = bootstrap.service;
+        loop {
+            let mut response = logos_abi::DirectoryResponse::empty(
+                request.operation,
+                logos_abi::DirectoryStatus::Malformed,
+                request.request_id,
+            );
+            let status = directory_call(bootstrap.directory, &request, &mut response);
+            if status != logos_abi::DirectoryStatus::Ok {
+                return Err(status);
+            }
+            if !response.is_valid_for(request) {
+                return Err(logos_abi::DirectoryStatus::Malformed);
+            }
+            for record in &response.records[..response.count as usize] {
+                if !capability_record_contract_matches(*record, rights, contract_id, message_bytes)
+                {
+                    continue;
+                }
+                if found.len() == MAX_RESULTS {
+                    return Err(logos_abi::DirectoryStatus::Capacity);
+                }
+                let capability = logos_abi::CapabilityHandle::from_raw(record.handle)
+                    .ok_or(logos_abi::DirectoryStatus::Malformed)?;
+                found.push((record.peer, capability));
+            }
+            if response.flags & logos_abi::DIRECTORY_FLAG_MORE == 0 {
+                break;
+            }
+            if response.cursor <= request.cursor {
+                return Err(logos_abi::DirectoryStatus::Malformed);
+            }
+            request.cursor = response.cursor;
+        }
+        Ok(found)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (rights, contract_id, message_bytes);
+        Ok(Vec::new())
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum PeerSelector {

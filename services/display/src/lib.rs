@@ -4,8 +4,8 @@
 extern crate std;
 
 use logos_abi::{
-    CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, MAX_COLUMNS, MAX_RENDER_CELLS,
-    MAX_ROWS, MessageKind, RENDER_FLAG_MORE, RenderMessage,
+    CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, GuiRect, MAX_COLUMNS,
+    MAX_RENDER_CELLS, MAX_ROWS, MessageKind, RENDER_FLAG_MORE, RenderMessage,
 };
 
 mod gui;
@@ -204,6 +204,29 @@ fn fill_row(row: &mut [u8], pixel: [u8; 4]) {
     }
 }
 
+fn terminal_cell_rect(surface: GuiRect, row: usize, column: usize) -> GuiRect {
+    GuiRect::new(
+        surface.x.saturating_add((column * GLYPH_WIDTH) as i32),
+        surface.y.saturating_add((row * GLYPH_HEIGHT) as i32),
+        GLYPH_WIDTH as u32,
+        GLYPH_HEIGHT as u32,
+    )
+}
+
+fn intersect(left: GuiRect, right: GuiRect) -> GuiRect {
+    let x = left.x.max(right.x);
+    let y = left.y.max(right.y);
+    let right_edge =
+        left.x.saturating_add(left.width as i32).min(right.x.saturating_add(right.width as i32));
+    let bottom =
+        left.y.saturating_add(left.height as i32).min(right.y.saturating_add(right.height as i32));
+    if right_edge <= x || bottom <= y {
+        GuiRect::EMPTY
+    } else {
+        GuiRect::new(x, y, (right_edge - x) as u32, (bottom - y) as u32)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DisplayError {
     InvalidMessage,
@@ -284,6 +307,13 @@ impl Display {
         if generation != self.generation {
             return Err(DisplayError::StaleGeneration);
         }
+        if let Some((surface, _)) = self.gui.terminal_surface() {
+            if message.surface != surface {
+                return Err(DisplayError::InvalidMessage);
+            }
+        } else if message.surface.is_valid() {
+            return Err(DisplayError::InvalidMessage);
+        }
         if !matches!(message.kind, MessageKind::RenderCells | MessageKind::FullRedraw) {
             return Err(DisplayError::InvalidMessage);
         }
@@ -359,6 +389,20 @@ impl Display {
                 fill_row(&mut framebuffer[start..start + row_bytes], pixel);
             }
             self.surface_initialized = true;
+        }
+        if let Some(surface) = self.gui.terminal_bounds() {
+            for row in 0..self.rows {
+                for column in 0..self.columns {
+                    let index = row * MAX_COLUMNS + column;
+                    if !self.dirty[index] {
+                        continue;
+                    }
+                    self.gui.invalidate_rect(terminal_cell_rect(surface, row, column));
+                    self.dirty[index] = false;
+                    rendered += 1;
+                }
+            }
+            return Ok(rendered);
         }
         for row in 0..self.rows {
             for column in 0..self.columns {
@@ -439,6 +483,70 @@ impl Display {
         &mut self.gui
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn render_terminal_surface(
+        &self,
+        framebuffer: &mut [u8],
+        width: usize,
+        height: usize,
+        stride: usize,
+        format: PixelFormat,
+        surface: GuiRect,
+        damage: &[GuiRect; logos_abi::MAX_GUI_DAMAGE_RECTS],
+        damage_count: usize,
+    ) -> usize {
+        let screen = GuiRect::new(0, 0, width as u32, height as u32);
+        let columns = self.columns.min(surface.width as usize / GLYPH_WIDTH);
+        let rows = self.rows.min(surface.height as usize / GLYPH_HEIGHT);
+        let mut rendered = 0;
+        for row in 0..rows {
+            for column in 0..columns {
+                let cell = self.cells[row * MAX_COLUMNS + column];
+                let cell_rect = terminal_cell_rect(surface, row, column);
+                let is_cursor = row == self.cursor_row && column == self.cursor_column;
+                let glyph = embedded_glyph(cell.codepoint);
+                let foreground = styled_foreground(cell);
+                for damage_rect in damage[..damage_count].iter().copied() {
+                    let clip = intersect(intersect(cell_rect, damage_rect), screen);
+                    if clip.is_empty() {
+                        continue;
+                    }
+                    for y in clip.y..clip.y.saturating_add(clip.height as i32) {
+                        for x in clip.x..clip.x.saturating_add(clip.width as i32) {
+                            let glyph_row = (y - cell_rect.y) as usize;
+                            let glyph_column = (x - cell_rect.x) as usize;
+                            let coverage =
+                                styled_coverage(&glyph, glyph_row, glyph_column, cell.attributes);
+                            let color = blend_color(cell.background, foreground, coverage);
+                            let offset = y as usize * stride + x as usize * 4;
+                            framebuffer[offset..offset + 4]
+                                .copy_from_slice(&pixel_bytes(color, format));
+                            rendered += 1;
+                        }
+                    }
+                    if is_cursor && self.cursor_visible {
+                        let cursor_clip = intersect(
+                            clip,
+                            GuiRect::new(cell_rect.x, cell_rect.y + 1, CURSOR_WIDTH as u32, 14),
+                        );
+                        let bytes = pixel_bytes(foreground, format);
+                        for y in
+                            cursor_clip.y..cursor_clip.y.saturating_add(cursor_clip.height as i32)
+                        {
+                            for x in cursor_clip.x
+                                ..cursor_clip.x.saturating_add(cursor_clip.width as i32)
+                            {
+                                let offset = y as usize * stride + x as usize * 4;
+                                framebuffer[offset..offset + 4].copy_from_slice(&bytes);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        rendered
+    }
+
     pub fn render_gui(
         &mut self,
         framebuffer: &mut [u8],
@@ -479,10 +587,31 @@ impl Display {
             }
             self.gui_background_pending = false;
             self.surface_initialized = true;
-            self.dirty.fill(false);
+            if let Some(surface) = self.gui.terminal_bounds() {
+                self.dirty.fill(true);
+                self.gui.invalidate_rect(surface);
+            } else {
+                self.dirty.fill(false);
+            }
         }
         let (damage, count) = self.gui.take_damage();
-        Ok(self.gui.render(framebuffer, width, height, stride, format, &damage, count))
+        let terminal = self
+            .gui
+            .terminal_bounds()
+            .map(|surface| {
+                self.render_terminal_surface(
+                    framebuffer,
+                    width,
+                    height,
+                    stride,
+                    format,
+                    surface,
+                    &damage,
+                    count,
+                )
+            })
+            .unwrap_or(0);
+        Ok(terminal + self.gui.render(framebuffer, width, height, stride, format, &damage, count))
     }
 
     pub const fn render_pending(&self) -> bool {
@@ -614,6 +743,60 @@ mod tests {
         display.render(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
         assert_eq!(&framebuffer[pixel..pixel + 4], &[0x30, 0x20, 0x10, 0]);
         assert_eq!(display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8), Ok(0));
+    }
+
+    #[test]
+    fn terminal_cells_render_inside_the_atrium_surface() {
+        let mut display = Display::new(1);
+        let mut terminal = RenderMessage::empty(MessageKind::FullRedraw);
+        terminal.columns = 2;
+        terminal.rows = 1;
+        terminal.count = 1;
+        terminal.cells[0] = Cell {
+            codepoint: b'T' as u32,
+            background: 0x102030,
+            foreground: 0xffffff,
+            ..Cell::EMPTY
+        };
+        display.apply(1, &terminal).unwrap();
+
+        let mut root =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root.bounds = logos_abi::GuiRect::new(0, 0, 64, 32);
+        let root_handle = display.gui_mut().create(11, root).unwrap().surface;
+        let mut root_batch =
+            logos_abi::GuiDrawBatch::new(root_handle, 1, logos_abi::GuiRect::new(0, 0, 64, 32));
+        assert!(root_batch.push(logos_abi::GuiDrawCommand::fill_surface(0x203040)));
+        display.gui_mut().update(11, root_batch).unwrap();
+
+        let mut terminal_surface =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
+        terminal_surface.flags = logos_abi::GUI_SURFACE_FLAG_TERMINAL;
+        terminal_surface.bounds = logos_abi::GuiRect::new(16, 8, 16, 16);
+        terminal_surface.z_order = 2;
+        let handle = display.gui_mut().create(11, terminal_surface).unwrap().surface;
+        assert_eq!(display.gui().terminal_bounds(), Some(terminal_surface.bounds));
+        terminal.surface = logos_abi::SurfaceHandle::new(0, 1, 99).unwrap();
+        assert_eq!(display.apply(1, &terminal), Err(DisplayError::InvalidMessage));
+        terminal.surface = handle;
+        display.apply(1, &terminal).unwrap();
+
+        let mut framebuffer = std::vec![0; 64 * 32 * 4];
+        loop {
+            display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
+            if !display.render_pending() {
+                break;
+            }
+        }
+
+        let background = (8 * 64 + 16) * 4;
+        assert_eq!(&framebuffer[background..background + 4], &[0x30, 0x20, 0x10, 0]);
+        assert!(
+            framebuffer[(8 * 64 + 16) * 4..(24 * 64 + 32) * 4]
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] == [0xff, 0xff, 0xff])
+        );
+        assert!(display.gui().contains(handle));
     }
 
     #[test]

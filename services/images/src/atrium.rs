@@ -5,9 +5,10 @@
 mod common;
 
 use logos_abi::{
-    AtriumControl, AtriumControlOperation, GuiDrawBatch, GuiDrawCommand, GuiHook, GuiHookKind,
-    GuiRect, GuiSessionContext, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse,
-    InputMessage, IpcStatus, KeyCode, KeyState, SurfaceHandle,
+    AtriumApp, AtriumControl, AtriumControlOperation, AtriumSurfaceInput, AtriumSurfaceRequest,
+    AtriumSurfaceResponse, GuiDrawBatch, GuiDrawCommand, GuiHook, GuiHookKind, GuiRect,
+    GuiSessionContext, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, InputMessage,
+    IpcStatus, KeyCode, KeyState, MessageKind, PointerState, RenderMessage, SurfaceHandle,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -22,6 +23,18 @@ const DISPLAY_DRAW_CAPABILITY: common::CapabilitySpec = common::capability_contr
     core::mem::size_of::<GuiDrawBatch>(),
     logos_abi::IpcRights::Send,
 );
+const TERMINAL_RENDER_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_RENDER,
+    b"terminal",
+    core::mem::size_of::<RenderMessage>(),
+    logos_abi::IpcRights::Receive,
+);
+const DISPLAY_RENDER_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_RENDER,
+    b"display",
+    core::mem::size_of::<RenderMessage>(),
+    logos_abi::IpcRights::Send,
+);
 const DISPLAY_CONTROL_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_SURFACE,
     b"display",
@@ -34,11 +47,50 @@ const DISPLAY_RESPONSE_CAPABILITY: common::CapabilitySpec = common::capability_c
     core::mem::size_of::<GuiSurfaceResponse>(),
     logos_abi::IpcRights::Receive,
 );
-const TERMINAL_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
-    logos_abi::IPC_CONTRACT_GUI_INPUT,
+const TERMINAL_SURFACE_REQUEST_CAPABILITY: common::CapabilitySpec =
+    common::capability_contract_named(
+        logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
+        b"terminal",
+        core::mem::size_of::<AtriumSurfaceRequest>(),
+        logos_abi::IpcRights::Receive,
+    );
+const TERMINAL_SURFACE_RESPONSE_CAPABILITY: common::CapabilitySpec =
+    common::capability_contract_named(
+        logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_RESPONSE,
+        b"terminal",
+        core::mem::size_of::<AtriumSurfaceResponse>(),
+        logos_abi::IpcRights::Send,
+    );
+const TERMINAL_SURFACE_INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_INPUT,
     b"terminal",
-    core::mem::size_of::<InputMessage>(),
+    core::mem::size_of::<AtriumSurfaceInput>(),
     logos_abi::IpcRights::Send,
+);
+const SYSTEM_SURFACE_REQUEST_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
+    b"system",
+    core::mem::size_of::<AtriumSurfaceRequest>(),
+    logos_abi::IpcRights::Receive,
+);
+const SYSTEM_SURFACE_RESPONSE_CAPABILITY: common::CapabilitySpec =
+    common::capability_contract_named(
+        logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_RESPONSE,
+        b"system",
+        core::mem::size_of::<AtriumSurfaceResponse>(),
+        logos_abi::IpcRights::Send,
+    );
+const SYSTEM_SURFACE_INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_INPUT,
+    b"system",
+    core::mem::size_of::<AtriumSurfaceInput>(),
+    logos_abi::IpcRights::Send,
+);
+const SYSTEM_SURFACE_DRAW_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_DRAW,
+    b"system",
+    core::mem::size_of::<GuiDrawBatch>(),
+    logos_abi::IpcRights::Receive,
 );
 const SHELL_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_ATRIUM_CONTROL,
@@ -64,6 +116,15 @@ const LOCKSCREEN_CONTROL_CAPABILITY: common::CapabilitySpec = common::capability
     core::mem::size_of::<GuiHook>(),
     logos_abi::IpcRights::Send,
 );
+const MAX_PENDING_SURFACE_COMMANDS: usize = logos_atrium::MAX_ATRIUM_SURFACES * 2;
+
+#[derive(Clone, Copy)]
+struct ProgramSurfaceCapabilities {
+    client: logos_abi::ServiceHandle,
+    input: logos_abi::CapabilityHandle,
+    render: logos_abi::CapabilityHandle,
+    draw: logos_abi::CapabilityHandle,
+}
 
 static mut ATRIUM: logos_atrium::Atrium = logos_atrium::Atrium::new();
 static mut CALCULATOR: logos_atrium::Calculator = logos_atrium::Calculator::new();
@@ -74,56 +135,148 @@ fn push_text(batch: &mut GuiDrawBatch, x: i32, y: i32, color: u32, text: &[u8]) 
     }
 }
 
-fn draw_home(display: logos_abi::CapabilityHandle, surface: SurfaceHandle, sequence: u32) {
+fn push_surface_text(
+    batch: &mut GuiDrawBatch,
+    bounds: GuiRect,
+    x: i32,
+    y: i32,
+    color: u32,
+    text: &[u8],
+) {
+    push_text(batch, bounds.x.saturating_add(x), bounds.y.saturating_add(y), color, text);
+}
+
+fn draw_home(
+    display: logos_abi::CapabilityHandle,
+    surface: SurfaceHandle,
+    launcher_index: usize,
+    sequence: u32,
+) {
     let mut batch = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
+    batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
     let _ = batch.push(GuiDrawCommand::fill_surface(0x101820));
     let _ = batch.push(GuiDrawCommand::fill_rect(GuiRect::new(0, 0, 180, 400), 0x182535));
     push_text(&mut batch, 24, 24, 0xffffff, b"LogOS Atrium");
-    push_text(&mut batch, 24, 72, 0xd9e5f5, b"Calculator");
-    push_text(&mut batch, 24, 104, 0xd9e5f5, b"Files");
-    push_text(&mut batch, 24, 136, 0xd9e5f5, b"Terminal");
     let _ = common::ipc_send_handle(display, &batch);
+
+    let mut navigation = GuiDrawBatch::new(surface, sequence, GuiRect::new(0, 48, 180, 112));
+    navigation.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+    push_text(
+        &mut navigation,
+        24,
+        72,
+        if launcher_index == 0 { 0x7ee787 } else { 0xd9e5f5 },
+        b"Calculator",
+    );
+    push_text(
+        &mut navigation,
+        24,
+        104,
+        if launcher_index == 1 { 0x7ee787 } else { 0xd9e5f5 },
+        b"Files",
+    );
+    push_text(
+        &mut navigation,
+        24,
+        136,
+        if launcher_index == 2 { 0x7ee787 } else { 0xd9e5f5 },
+        b"Terminal",
+    );
+    let _ = common::ipc_send_handle(display, &navigation);
 
     let mut detail = GuiDrawBatch::new(surface, sequence, GuiRect::new(180, 0, 460, 400));
     detail.flags = logos_abi::GUI_DRAW_FLAG_MORE;
     push_text(&mut detail, 220, 48, 0xffffff, b"Welcome to Atrium");
     push_text(&mut detail, 220, 88, 0xb8c7da, b"Ctrl+1 Calculator  Ctrl+2 Files");
-    push_text(&mut detail, 220, 112, 0xb8c7da, b"Ctrl+3 Terminal");
-    push_text(&mut detail, 220, 128, 0xb8c7da, b"Tab focuses; Ctrl+Arrow moves apps");
     let _ = common::ipc_send_handle(display, &detail);
+
+    let mut detail_tail = GuiDrawBatch::new(surface, sequence, GuiRect::new(180, 0, 460, 400));
+    push_text(&mut detail_tail, 220, 112, 0xb8c7da, b"Ctrl+3 Terminal");
+    push_text(&mut detail_tail, 220, 128, 0xb8c7da, b"Tab focuses; Ctrl+Arrow moves apps");
+    let _ = common::ipc_send_handle(display, &detail_tail);
 }
 
 fn draw_app(
     display: logos_abi::CapabilityHandle,
-    window: logos_atrium::Window,
+    surface: logos_atrium::Surface,
     calculator: &logos_atrium::Calculator,
     sequence: u32,
 ) {
-    let mut batch = GuiDrawBatch::new(window.surface, sequence, GuiRect::SURFACE);
+    let mut batch = GuiDrawBatch::new(surface.reference, sequence, GuiRect::SURFACE);
     let _ = batch.push(GuiDrawCommand::fill_surface(0x151c26));
-    let title: &[u8] = match window.app {
+    let title: &[u8] = match surface.app {
         logos_atrium::AppId::Calculator => b"Calculator",
         logos_atrium::AppId::Files => b"Files",
         logos_atrium::AppId::Terminal => b"Terminal",
+        logos_atrium::AppId::System => b"System",
     };
-    push_text(&mut batch, 20, 24, 0xffffff, title);
-    match window.app {
+    push_surface_text(&mut batch, surface.bounds, 20, 24, 0xffffff, title);
+    match surface.app {
         logos_atrium::AppId::Calculator => {
-            let _ = batch.push(GuiDrawCommand::fill_rect(GuiRect::new(20, 52, 260, 48), 0x263548));
-            push_text(&mut batch, 32, 82, 0xffffff, calculator.display());
-            push_text(&mut batch, 24, 132, 0xb8c7da, b"0-9  +  -  *  /  Enter");
+            let _ = batch.push(GuiDrawCommand::fill_rect(
+                GuiRect::new(
+                    surface.bounds.x.saturating_add(20),
+                    surface.bounds.y.saturating_add(52),
+                    260,
+                    48,
+                ),
+                0x263548,
+            ));
+            batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+            let _ = common::ipc_send_handle(display, &batch);
+            let mut detail = GuiDrawBatch::new(
+                surface.reference,
+                sequence,
+                GuiRect::new(
+                    surface.bounds.x,
+                    surface.bounds.y,
+                    surface.bounds.width,
+                    surface.bounds.height,
+                ),
+            );
+            push_surface_text(&mut detail, surface.bounds, 32, 82, 0xffffff, calculator.display());
+            push_surface_text(
+                &mut detail,
+                surface.bounds,
+                24,
+                132,
+                0xb8c7da,
+                b"0-9  +  -  *  /  Enter",
+            );
+            let _ = common::ipc_send_handle(display, &detail);
         }
         logos_atrium::AppId::Files => {
-            push_text(&mut batch, 24, 76, 0xb8c7da, b"Files placeholder");
-            push_text(&mut batch, 24, 108, 0x7890aa, b"Filesystem UI is planned");
-            push_text(&mut batch, 24, 132, 0x7890aa, b"separately.");
+            batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+            push_surface_text(&mut batch, surface.bounds, 24, 76, 0xb8c7da, b"Files placeholder");
+            let _ = common::ipc_send_handle(display, &batch);
+            let mut detail = GuiDrawBatch::new(
+                surface.reference,
+                sequence,
+                GuiRect::new(
+                    surface.bounds.x,
+                    surface.bounds.y,
+                    surface.bounds.width,
+                    surface.bounds.height,
+                ),
+            );
+            push_surface_text(
+                &mut detail,
+                surface.bounds,
+                24,
+                108,
+                0x7890aa,
+                b"Filesystem UI is planned",
+            );
+            push_surface_text(&mut detail, surface.bounds, 24, 132, 0x7890aa, b"separately.");
+            let _ = common::ipc_send_handle(display, &detail);
         }
         logos_atrium::AppId::Terminal => {
-            push_text(&mut batch, 24, 76, 0xb8c7da, b"Terminal surface managed");
-            push_text(&mut batch, 24, 100, 0xb8c7da, b"by Atrium");
+            let _ = common::ipc_send_handle(display, &batch);
+        }
+        logos_atrium::AppId::System => {
+            let _ = common::ipc_send_handle(display, &batch);
         }
     }
-    let _ = common::ipc_send_handle(display, &batch);
 }
 
 fn next_request_id(next: &mut u32) -> u32 {
@@ -132,8 +285,66 @@ fn next_request_id(next: &mut u32) -> u32 {
     value
 }
 
+struct SurfaceCommandQueue {
+    requests: [Option<GuiSurfaceRequest>; MAX_PENDING_SURFACE_COMMANDS],
+    head: usize,
+    len: usize,
+}
+
+impl SurfaceCommandQueue {
+    const fn new() -> Self {
+        Self { requests: [None; MAX_PENDING_SURFACE_COMMANDS], head: 0, len: 0 }
+    }
+
+    fn push(&mut self, request: GuiSurfaceRequest) -> bool {
+        for offset in 0..self.len {
+            let index = (self.head + offset) % self.requests.len();
+            let Some(queued) = self.requests[index] else { continue };
+            if queued.surface == request.surface
+                && (queued.operation == request.operation
+                    || request.operation == GuiSurfaceOperation::Destroy)
+            {
+                self.requests[index] = Some(request);
+                return true;
+            }
+        }
+        if self.len == self.requests.len() {
+            return false;
+        }
+        let index = (self.head + self.len) % self.requests.len();
+        self.requests[index] = Some(request);
+        self.len += 1;
+        true
+    }
+
+    fn flush(&mut self, display: logos_abi::CapabilityHandle) {
+        while self.len != 0 {
+            let Some(request) = self.requests[self.head] else {
+                self.len = 0;
+                break;
+            };
+            match common::ipc_send_handle(display, &request) {
+                IpcStatus::Ok => self.pop(),
+                IpcStatus::Full => break,
+                IpcStatus::Stale
+                | IpcStatus::Disconnected
+                | IpcStatus::Unauthorized
+                | IpcStatus::Malformed
+                | IpcStatus::Empty => self.pop(),
+            }
+        }
+    }
+
+    fn pop(&mut self) {
+        self.requests[self.head] = None;
+        self.head = (self.head + 1) % self.requests.len();
+        self.len -= 1;
+    }
+}
+
 fn send_surface_command(
     display: logos_abi::CapabilityHandle,
+    queue: &mut SurfaceCommandQueue,
     operation: GuiSurfaceOperation,
     surface: SurfaceHandle,
     bounds: GuiRect,
@@ -142,7 +353,9 @@ fn send_surface_command(
     let mut request = GuiSurfaceRequest::new(operation, next_request_id(next));
     request.surface = surface;
     request.bounds = bounds;
-    let _ = common::ipc_send_handle(display, &request);
+    if queue.push(request) {
+        queue.flush(display);
+    }
 }
 
 fn send_lockscreen_section(lockscreen: logos_abi::CapabilityHandle, visible: bool, next: &mut u32) {
@@ -151,23 +364,92 @@ fn send_lockscreen_section(lockscreen: logos_abi::CapabilityHandle, visible: boo
     let _ = common::ipc_send_handle(lockscreen, &hook);
 }
 
+fn queue_terminal_response(
+    pending: &mut Option<AtriumSurfaceResponse>,
+    request: AtriumSurfaceRequest,
+    status: logos_abi::GuiStatus,
+    surface: SurfaceHandle,
+) {
+    if pending.is_some() {
+        return;
+    }
+    let mut response = AtriumSurfaceResponse::new(request, status);
+    response.surface = surface;
+    *pending = Some(response);
+}
+
+fn queue_terminal_revoke(
+    pending: &mut Option<AtriumSurfaceResponse>,
+    deferred: &mut Option<SurfaceHandle>,
+    next: &mut u32,
+    surface: SurfaceHandle,
+) {
+    if !surface.is_valid() {
+        return;
+    }
+    if pending.is_none() {
+        *pending = Some(AtriumSurfaceResponse::revoke(next_request_id(next), surface));
+    } else {
+        *deferred = Some(surface);
+    }
+}
+
+fn queue_system_revoke(
+    pending: &mut Option<AtriumSurfaceResponse>,
+    deferred: &mut Option<SurfaceHandle>,
+    response_capability: logos_abi::CapabilityHandle,
+    pending_capability: &mut logos_abi::CapabilityHandle,
+    next: &mut u32,
+    surface: SurfaceHandle,
+) {
+    if !surface.is_valid() {
+        return;
+    }
+    if pending.is_none() {
+        *pending = Some(AtriumSurfaceResponse::revoke(next_request_id(next), surface));
+        *pending_capability = response_capability;
+    } else {
+        *deferred = Some(surface);
+    }
+}
+
+fn atrium_status(error: logos_atrium::AtriumError) -> logos_abi::GuiStatus {
+    match error {
+        logos_atrium::AtriumError::Capacity => logos_abi::GuiStatus::Capacity,
+        logos_atrium::AtriumError::AlreadyRegistered | logos_atrium::AtriumError::NotFound => {
+            logos_abi::GuiStatus::NotFound
+        }
+        logos_atrium::AtriumError::Locked => logos_abi::GuiStatus::Unauthorized,
+        logos_atrium::AtriumError::InvalidSurface => logos_abi::GuiStatus::Malformed,
+    }
+}
+
 fn hide_surfaces(
     display: logos_abi::CapabilityHandle,
+    commands: &mut SurfaceCommandQueue,
     atrium: &mut logos_atrium::Atrium,
     next: &mut u32,
 ) {
-    let mut handles = [SurfaceHandle::EMPTY; logos_atrium::MAX_ATRIUM_WINDOWS];
+    let mut handles = [SurfaceHandle::EMPTY; logos_atrium::MAX_ATRIUM_SURFACES];
     let mut count = 0;
-    for window in atrium.windows() {
-        handles[count] = window.surface;
+    for surface in atrium.surfaces() {
+        handles[count] = surface.reference;
         count += 1;
     }
     for surface in handles[..count].iter().copied() {
-        send_surface_command(display, GuiSurfaceOperation::Destroy, surface, GuiRect::EMPTY, next);
+        send_surface_command(
+            display,
+            commands,
+            GuiSurfaceOperation::Destroy,
+            surface,
+            GuiRect::EMPTY,
+            next,
+        );
     }
     if atrium.home_surface().is_valid() {
         send_surface_command(
             display,
+            commands,
             GuiSurfaceOperation::Destroy,
             atrium.home_surface(),
             GuiRect::EMPTY,
@@ -188,10 +470,59 @@ fn render(
         return;
     };
     *sequence = sequence.wrapping_add(1).max(1);
-    draw_home(display, home, *sequence);
-    if let Some(window) = atrium.focused_window() {
-        draw_app(display, window, calculator, *sequence);
+    draw_home(display, home, atrium.launcher_index(), *sequence);
+    if let Some(surface) = atrium.focused_surface() {
+        draw_app(display, surface, calculator, *sequence);
     }
+}
+
+fn queue_home_surface(
+    display_control: logos_abi::CapabilityHandle,
+    pending_surface: &mut Option<(GuiSurfaceRequest, Option<logos_atrium::SurfaceRequest>)>,
+    pending_surface_for_client: &mut bool,
+    next: &mut u32,
+) {
+    if pending_surface.is_some() {
+        return;
+    }
+    let mut request =
+        GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, next_request_id(next));
+    request.bounds = GuiRect::new(0, 0, 640, 400);
+    request.z_order = 1;
+    if common::ipc_send_handle(display_control, &request) == IpcStatus::Ok {
+        *pending_surface = Some((request, None));
+        *pending_surface_for_client = false;
+    }
+}
+
+fn discover_program_capability(
+    client: logos_abi::ServiceHandle,
+    rights: logos_abi::IpcRights,
+    contract_id: u16,
+    message_bytes: usize,
+) -> Option<logos_abi::CapabilityHandle> {
+    common::discover_capabilities_contract(rights, contract_id, message_bytes)
+        .ok()?
+        .into_iter()
+        .find_map(|(peer, capability)| (peer == client).then_some(capability))
+}
+
+fn app_id(app: AtriumApp) -> logos_atrium::AppId {
+    match app {
+        AtriumApp::Calculator => logos_atrium::AppId::Calculator,
+        AtriumApp::Files => logos_atrium::AppId::Files,
+        AtriumApp::Terminal => logos_atrium::AppId::Terminal,
+        AtriumApp::System => logos_atrium::AppId::System,
+    }
+}
+
+fn program_client_live(client: logos_abi::ServiceHandle) -> bool {
+    common::discover_capabilities_contract(
+        logos_abi::IpcRights::Receive,
+        logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
+        core::mem::size_of::<AtriumSurfaceRequest>(),
+    )
+    .is_ok_and(|clients| clients.into_iter().any(|(peer, _)| peer == client))
 }
 
 #[unsafe(no_mangle)]
@@ -200,12 +531,28 @@ pub extern "C" fn _start() -> ! {
     let input = common::capability_handle(INPUT_CAPABILITY).unwrap_or_else(|_| common::idle());
     let display =
         common::capability_handle(DISPLAY_DRAW_CAPABILITY).unwrap_or_else(|_| common::idle());
+    let terminal_render =
+        common::capability_handle(TERMINAL_RENDER_CAPABILITY).unwrap_or_else(|_| common::idle());
+    let display_render =
+        common::capability_handle(DISPLAY_RENDER_CAPABILITY).unwrap_or_else(|_| common::idle());
     let display_control =
         common::capability_handle(DISPLAY_CONTROL_CAPABILITY).unwrap_or_else(|_| common::idle());
     let display_response =
         common::capability_handle(DISPLAY_RESPONSE_CAPABILITY).unwrap_or_else(|_| common::idle());
-    let terminal =
-        common::capability_handle(TERMINAL_CAPABILITY).unwrap_or_else(|_| common::idle());
+    let terminal_surface_request = common::capability_handle(TERMINAL_SURFACE_REQUEST_CAPABILITY)
+        .unwrap_or_else(|_| common::idle());
+    let terminal_surface_response = common::capability_handle(TERMINAL_SURFACE_RESPONSE_CAPABILITY)
+        .unwrap_or_else(|_| common::idle());
+    let terminal = common::capability_handle(TERMINAL_SURFACE_INPUT_CAPABILITY)
+        .unwrap_or_else(|_| common::idle());
+    let system_surface_request = common::capability_handle(SYSTEM_SURFACE_REQUEST_CAPABILITY)
+        .unwrap_or_else(|_| common::idle());
+    let system_surface_response = common::capability_handle(SYSTEM_SURFACE_RESPONSE_CAPABILITY)
+        .unwrap_or_else(|_| common::idle());
+    let system_surface_input = common::capability_handle(SYSTEM_SURFACE_INPUT_CAPABILITY)
+        .unwrap_or_else(|_| common::idle());
+    let system_surface_draw = common::capability_handle(SYSTEM_SURFACE_DRAW_CAPABILITY)
+        .unwrap_or_else(|_| common::idle());
     let shell = common::capability_handle(SHELL_CAPABILITY).unwrap_or_else(|_| common::idle());
     let shell_context =
         common::capability_handle(SHELL_CONTEXT_CAPABILITY).unwrap_or_else(|_| common::idle());
@@ -216,9 +563,37 @@ pub extern "C" fn _start() -> ! {
 
     let atrium = unsafe { &mut *core::ptr::addr_of_mut!(ATRIUM) };
     let calculator = unsafe { &mut *core::ptr::addr_of_mut!(CALCULATOR) };
+    let atrium_client = common::bootstrap_page().service;
     let mut next_request = 1u32;
     let mut sequence = 0u32;
-    let mut pending_surface: Option<(GuiSurfaceRequest, Option<logos_atrium::AppId>)> = None;
+    let mut pending_surface: Option<(GuiSurfaceRequest, Option<logos_atrium::SurfaceRequest>)> =
+        None;
+    let mut pending_surface_for_client = false;
+    let mut pending_client_request: Option<AtriumSurfaceRequest> = None;
+    let mut pending_client_response_capability = logos_abi::CapabilityHandle::EMPTY;
+    let mut program_surface_capabilities: [Option<ProgramSurfaceCapabilities>;
+        logos_atrium::MAX_ATRIUM_SURFACES] = [None; logos_atrium::MAX_ATRIUM_SURFACES];
+    let mut last_terminal_request: Option<AtriumSurfaceRequest> = None;
+    let mut terminal_client = logos_abi::ServiceHandle::EMPTY;
+    let mut system_client = common::discover_capabilities_contract(
+        logos_abi::IpcRights::Receive,
+        logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
+        core::mem::size_of::<AtriumSurfaceRequest>(),
+    )
+    .ok()
+    .and_then(|records| {
+        records
+            .into_iter()
+            .find(|(_, capability)| *capability == system_surface_request)
+            .map(|(client, _)| client)
+    })
+    .unwrap_or(logos_abi::ServiceHandle::EMPTY);
+    let mut pending_client_response: Option<AtriumSurfaceResponse> = None;
+    let mut deferred_terminal_revoke: Option<SurfaceHandle> = None;
+    let mut deferred_system_revoke: Option<SurfaceHandle> = None;
+    let mut pending_render: Option<RenderMessage> = None;
+    let mut pending_draw: Option<GuiDrawBatch> = None;
+    let mut surface_commands = SurfaceCommandQueue::new();
     let mut authenticated = false;
     let mut heartbeat_ticks = 0u16;
     let mut event = InputMessage::key(KeyCode::Unknown, KeyState::Released, 0);
@@ -230,6 +605,294 @@ pub extern "C" fn _start() -> ! {
 
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
+        surface_commands.flush(display_control);
+        if pending_client_response.is_none() {
+            if let Some(surface) = deferred_terminal_revoke.take() {
+                pending_client_response = Some(AtriumSurfaceResponse::revoke(
+                    next_request_id(&mut next_request),
+                    surface,
+                ));
+            } else if let Some(surface) = deferred_system_revoke.take() {
+                pending_client_response = Some(AtriumSurfaceResponse::revoke(
+                    next_request_id(&mut next_request),
+                    surface,
+                ));
+                pending_client_response_capability = system_surface_response;
+            }
+        }
+        if let Some(response) = pending_client_response {
+            let response_capability = if pending_client_response_capability.is_valid() {
+                pending_client_response_capability
+            } else {
+                terminal_surface_response
+            };
+            match common::ipc_send_handle(response_capability, &response) {
+                IpcStatus::Ok => {
+                    pending_client_response = None;
+                    pending_client_response_capability = logos_abi::CapabilityHandle::EMPTY;
+                }
+                IpcStatus::Full => {}
+                IpcStatus::Stale
+                | IpcStatus::Disconnected
+                | IpcStatus::Unauthorized
+                | IpcStatus::Malformed
+                | IpcStatus::Empty => {
+                    pending_client_response = None;
+                    pending_client_response_capability = logos_abi::CapabilityHandle::EMPTY;
+                }
+            }
+        }
+        if let Some(batch) = pending_draw {
+            let live = atrium.surface_by_reference(batch.surface).is_some_and(|surface| {
+                (surface.app == logos_atrium::AppId::System && surface.client == system_client)
+                    || program_surface_capabilities
+                        .iter()
+                        .flatten()
+                        .any(|caps| caps.client == surface.client)
+            });
+            if !live {
+                pending_draw = None;
+            } else {
+                match common::ipc_send_handle(display, &batch) {
+                    IpcStatus::Ok => pending_draw = None,
+                    IpcStatus::Full => {}
+                    IpcStatus::Stale
+                    | IpcStatus::Disconnected
+                    | IpcStatus::Unauthorized
+                    | IpcStatus::Malformed
+                    | IpcStatus::Empty => pending_draw = None,
+                }
+            }
+        }
+        if let Some(message) = pending_render {
+            let live = atrium.surface_by_reference(message.surface).is_some_and(|surface| {
+                surface.app == logos_atrium::AppId::Terminal
+                    || program_surface_capabilities
+                        .iter()
+                        .flatten()
+                        .any(|caps| caps.client == surface.client)
+            });
+            if !live {
+                pending_render = None;
+            } else {
+                match common::ipc_send_handle(display_render, &message) {
+                    IpcStatus::Ok => pending_render = None,
+                    IpcStatus::Full => {}
+                    IpcStatus::Stale
+                    | IpcStatus::Disconnected
+                    | IpcStatus::Unauthorized
+                    | IpcStatus::Malformed
+                    | IpcStatus::Empty => pending_render = None,
+                }
+            }
+        }
+        let mut terminal_request = AtriumSurfaceRequest::new(AtriumApp::Terminal, atrium_client, 1);
+        while common::ipc_receive_handle(terminal_surface_request, &mut terminal_request)
+            == IpcStatus::Ok
+        {
+            if !terminal_request.is_valid() || terminal_request.app() != Some(AtriumApp::Terminal) {
+                queue_terminal_response(
+                    &mut pending_client_response,
+                    terminal_request,
+                    logos_abi::GuiStatus::Malformed,
+                    SurfaceHandle::EMPTY,
+                );
+            } else {
+                terminal_client = terminal_request.client();
+                last_terminal_request = Some(terminal_request);
+                if let Some(surface) = atrium
+                    .surface_for_client(terminal_request.client(), logos_atrium::AppId::Terminal)
+                {
+                    queue_terminal_response(
+                        &mut pending_client_response,
+                        terminal_request,
+                        logos_abi::GuiStatus::Ok,
+                        surface.reference,
+                    );
+                } else if let Some(surface) = atrium.surface_for_app(logos_atrium::AppId::Terminal)
+                {
+                    let _ = atrium.close_reference(surface.reference);
+                    send_surface_command(
+                        display_control,
+                        &mut surface_commands,
+                        GuiSurfaceOperation::Destroy,
+                        surface.reference,
+                        GuiRect::EMPTY,
+                        &mut next_request,
+                    );
+                    if pending_client_request.is_none() {
+                        pending_client_request = Some(terminal_request);
+                    } else {
+                        queue_terminal_response(
+                            &mut pending_client_response,
+                            terminal_request,
+                            logos_abi::GuiStatus::Backpressure,
+                            SurfaceHandle::EMPTY,
+                        );
+                    }
+                } else if pending_client_request.is_none() {
+                    pending_client_request = Some(terminal_request);
+                } else {
+                    queue_terminal_response(
+                        &mut pending_client_response,
+                        terminal_request,
+                        logos_abi::GuiStatus::Backpressure,
+                        SurfaceHandle::EMPTY,
+                    );
+                }
+            }
+        }
+        let mut system_request = AtriumSurfaceRequest::new(AtriumApp::System, system_client, 1);
+        while common::ipc_receive_handle(system_surface_request, &mut system_request)
+            == IpcStatus::Ok
+        {
+            if !system_request.is_valid()
+                || system_request.app() != Some(AtriumApp::System)
+                || system_request.client() != system_client
+            {
+                let response_was_empty = pending_client_response.is_none();
+                queue_terminal_response(
+                    &mut pending_client_response,
+                    system_request,
+                    logos_abi::GuiStatus::Malformed,
+                    SurfaceHandle::EMPTY,
+                );
+                if response_was_empty {
+                    pending_client_response_capability = system_surface_response;
+                }
+            } else {
+                system_client = system_request.client();
+                if let Some(surface) =
+                    atrium.surface_for_client(system_client, logos_atrium::AppId::System)
+                {
+                    let response_was_empty = pending_client_response.is_none();
+                    queue_terminal_response(
+                        &mut pending_client_response,
+                        system_request,
+                        logos_abi::GuiStatus::Ok,
+                        surface.reference,
+                    );
+                    if response_was_empty {
+                        pending_client_response_capability = system_surface_response;
+                    }
+                } else if pending_client_request.is_none() {
+                    pending_client_request = Some(system_request);
+                    pending_client_response_capability = system_surface_response;
+                } else {
+                    let response_was_empty = pending_client_response.is_none();
+                    queue_terminal_response(
+                        &mut pending_client_response,
+                        system_request,
+                        logos_abi::GuiStatus::Backpressure,
+                        SurfaceHandle::EMPTY,
+                    );
+                    if response_was_empty {
+                        pending_client_response_capability = system_surface_response;
+                    }
+                }
+            }
+        }
+        if pending_surface.is_none()
+            && pending_client_request.is_none()
+            && pending_client_response.is_none()
+        {
+            let requests = common::discover_capabilities_contract(
+                logos_abi::IpcRights::Receive,
+                logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
+                core::mem::size_of::<AtriumSurfaceRequest>(),
+            )
+            .unwrap_or_default();
+            for (client, request_capability) in requests {
+                if client == atrium_client || client == terminal_client {
+                    continue;
+                }
+                let mut request = AtriumSurfaceRequest::new(AtriumApp::Calculator, client, 1);
+                if common::ipc_receive_handle(request_capability, &mut request) != IpcStatus::Ok {
+                    continue;
+                }
+                if !request.is_valid() || request.client() != client {
+                    queue_terminal_response(
+                        &mut pending_client_response,
+                        request,
+                        logos_abi::GuiStatus::Malformed,
+                        SurfaceHandle::EMPTY,
+                    );
+                    pending_client_response_capability = discover_program_capability(
+                        client,
+                        logos_abi::IpcRights::Send,
+                        logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_RESPONSE,
+                        core::mem::size_of::<AtriumSurfaceResponse>(),
+                    )
+                    .unwrap_or(logos_abi::CapabilityHandle::EMPTY);
+                    break;
+                }
+                let Some(response_capability) = discover_program_capability(
+                    client,
+                    logos_abi::IpcRights::Send,
+                    logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_RESPONSE,
+                    core::mem::size_of::<AtriumSurfaceResponse>(),
+                ) else {
+                    continue;
+                };
+                let Some(input_capability) = discover_program_capability(
+                    client,
+                    logos_abi::IpcRights::Send,
+                    logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_INPUT,
+                    core::mem::size_of::<AtriumSurfaceInput>(),
+                ) else {
+                    continue;
+                };
+                let Some(render_capability) = discover_program_capability(
+                    client,
+                    logos_abi::IpcRights::Receive,
+                    logos_abi::IPC_CONTRACT_RENDER,
+                    core::mem::size_of::<RenderMessage>(),
+                ) else {
+                    continue;
+                };
+                let Some(draw_capability) = discover_program_capability(
+                    client,
+                    logos_abi::IpcRights::Receive,
+                    logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_DRAW,
+                    core::mem::size_of::<GuiDrawBatch>(),
+                ) else {
+                    continue;
+                };
+                let app = request.app().unwrap_or(AtriumApp::Calculator);
+                let Ok(surface_request) = atrium.request_surface(app_id(app), client) else {
+                    let response =
+                        AtriumSurfaceResponse::new(request, logos_abi::GuiStatus::Capacity);
+                    pending_client_response = Some(response);
+                    pending_client_response_capability = response_capability;
+                    break;
+                };
+                let mut display_request = GuiSurfaceRequest::new(
+                    GuiSurfaceOperation::CreateModal,
+                    next_request_id(&mut next_request),
+                );
+                display_request.bounds = surface_request.bounds();
+                display_request.z_order = 2;
+                if common::ipc_send_handle(display_control, &display_request) == IpcStatus::Ok {
+                    pending_surface = Some((display_request, Some(surface_request)));
+                    pending_surface_for_client = true;
+                    pending_client_request = Some(request);
+                    pending_client_response_capability = response_capability;
+                    let caps = ProgramSurfaceCapabilities {
+                        client,
+                        input: input_capability,
+                        render: render_capability,
+                        draw: draw_capability,
+                    };
+                    if let Some(slot) = program_surface_capabilities
+                        .iter()
+                        .position(|entry| entry.is_none_or(|entry| entry.client == client))
+                    {
+                        program_surface_capabilities[slot] = Some(caps);
+                    }
+                    break;
+                }
+            }
+        }
         let mut context = GuiSessionContext::EMPTY;
         while common::ipc_receive_handle(shell_context, &mut context) == IpcStatus::Ok {
             if context.is_authenticated() {
@@ -237,46 +900,257 @@ pub extern "C" fn _start() -> ! {
                 send_lockscreen_section(lockscreen_control, false, &mut next_request);
                 atrium.authenticate();
                 if !atrium.home_surface().is_valid() && pending_surface.is_none() {
-                    let mut request = GuiSurfaceRequest::new(
-                        GuiSurfaceOperation::CreateModal,
-                        next_request_id(&mut next_request),
+                    queue_home_surface(
+                        display_control,
+                        &mut pending_surface,
+                        &mut pending_surface_for_client,
+                        &mut next_request,
                     );
-                    request.bounds = GuiRect::new(0, 0, 640, 400);
-                    request.z_order = 1;
-                    let _ = common::ipc_send_handle(display_control, &request);
-                    pending_surface = Some((request, None));
                 }
             } else if authenticated {
                 authenticated = false;
-                pending_surface = None;
-                hide_surfaces(display_control, atrium, &mut next_request);
+                pending_surface_for_client = false;
+                let terminal_surface =
+                    atrium.surface_for_app(logos_atrium::AppId::Terminal).map(|s| s.reference);
+                let system_surface =
+                    atrium.surface_for_app(logos_atrium::AppId::System).map(|s| s.reference);
+                hide_surfaces(display_control, &mut surface_commands, atrium, &mut next_request);
+                if let Some(surface) = terminal_surface {
+                    queue_terminal_revoke(
+                        &mut pending_client_response,
+                        &mut deferred_terminal_revoke,
+                        &mut next_request,
+                        surface,
+                    );
+                }
+                if let Some(surface) = system_surface {
+                    queue_system_revoke(
+                        &mut pending_client_response,
+                        &mut deferred_system_revoke,
+                        system_surface_response,
+                        &mut pending_client_response_capability,
+                        &mut next_request,
+                        surface,
+                    );
+                }
                 send_lockscreen_section(lockscreen_control, true, &mut next_request);
             }
         }
 
-        while common::ipc_receive_handle(display_response, &mut response) == IpcStatus::Ok {
-            let Some((request, app)) = pending_surface else { continue };
-            if !response.is_valid_for(request) || response.request_id != request.request_id {
+        let mut stale_program_surfaces = [SurfaceHandle::EMPTY; logos_atrium::MAX_ATRIUM_SURFACES];
+        let mut stale_count = 0;
+        for surface in atrium.surfaces() {
+            if surface.client == atrium_client
+                || surface.client == terminal_client
+                || (surface.client == system_client && surface.app == logos_atrium::AppId::System)
+            {
                 continue;
             }
-            pending_surface = None;
-            if response.status != logos_abi::GuiStatus::Ok || !response.surface.is_valid() {
-                continue;
+            if !program_client_live(surface.client) {
+                stale_program_surfaces[stale_count] = surface.reference;
+                stale_count += 1;
             }
-            if let Some(app) = app {
-                if atrium.launch(app, response.surface, request.bounds).is_err() {
-                    send_surface_command(
-                        display_control,
-                        GuiSurfaceOperation::Destroy,
-                        response.surface,
-                        GuiRect::EMPTY,
-                        &mut next_request,
-                    );
+        }
+        for surface in stale_program_surfaces[..stale_count].iter().copied() {
+            if let Ok(closed) = atrium.close_reference(surface) {
+                send_surface_command(
+                    display_control,
+                    &mut surface_commands,
+                    GuiSurfaceOperation::Destroy,
+                    closed.reference,
+                    GuiRect::EMPTY,
+                    &mut next_request,
+                );
+                if let Some(caps) = program_surface_capabilities
+                    .iter_mut()
+                    .flatten()
+                    .find(|caps| caps.client == closed.client)
+                {
+                    *caps = ProgramSurfaceCapabilities {
+                        client: logos_abi::ServiceHandle::EMPTY,
+                        input: logos_abi::CapabilityHandle::EMPTY,
+                        render: logos_abi::CapabilityHandle::EMPTY,
+                        draw: logos_abi::CapabilityHandle::EMPTY,
+                    };
                 }
-            } else {
-                let _ = atrium.set_home_surface(response.surface);
             }
-            render(display, atrium, calculator, &mut sequence);
+        }
+
+        if pending_surface.is_none()
+            && pending_client_request.is_some()
+            && atrium.home_surface().is_valid()
+        {
+            if let Some(client_request) = pending_client_request {
+                let app = client_request.app().map(app_id).unwrap_or(logos_atrium::AppId::Terminal);
+                if let Ok(surface_request) = atrium.request_surface(app, client_request.client()) {
+                    let mut request = GuiSurfaceRequest::new(
+                        GuiSurfaceOperation::CreateModal,
+                        next_request_id(&mut next_request),
+                    );
+                    request.bounds = surface_request.bounds();
+                    request.z_order = 2;
+                    if app == logos_atrium::AppId::Terminal {
+                        request.flags = logos_abi::GUI_SURFACE_FLAG_TERMINAL;
+                    }
+                    if common::ipc_send_handle(display_control, &request) == IpcStatus::Ok {
+                        pending_surface = Some((request, Some(surface_request)));
+                        pending_surface_for_client = true;
+                    }
+                }
+            }
+        }
+
+        while common::ipc_receive_handle(display_response, &mut response) == IpcStatus::Ok {
+            let Some((request, app)) = pending_surface.take() else { continue };
+            let for_client = pending_surface_for_client;
+            if !response.is_valid_for(request) || response.request_id != request.request_id {
+                pending_surface = Some((request, app));
+                continue;
+            }
+            pending_surface_for_client = false;
+            if response.status != logos_abi::GuiStatus::Ok || !response.surface.is_valid() {
+                if for_client {
+                    if let Some(client_request) = pending_client_request.take() {
+                        queue_terminal_response(
+                            &mut pending_client_response,
+                            client_request,
+                            response.status,
+                            SurfaceHandle::EMPTY,
+                        );
+                    }
+                }
+                continue;
+            }
+            let admitted = if let Some(request) = app {
+                match atrium.spawn_surface(request, response.surface) {
+                    Ok(surface) if for_client => {
+                        if let Some(client_request) = pending_client_request.take() {
+                            queue_terminal_response(
+                                &mut pending_client_response,
+                                client_request,
+                                logos_abi::GuiStatus::Ok,
+                                surface.reference,
+                            );
+                        }
+                        true
+                    }
+                    Ok(_) => true,
+                    Err(error) => {
+                        send_surface_command(
+                            display_control,
+                            &mut surface_commands,
+                            GuiSurfaceOperation::Destroy,
+                            response.surface,
+                            GuiRect::EMPTY,
+                            &mut next_request,
+                        );
+                        if for_client {
+                            if let Some(client_request) = pending_client_request.take() {
+                                queue_terminal_response(
+                                    &mut pending_client_response,
+                                    client_request,
+                                    atrium_status(error),
+                                    SurfaceHandle::EMPTY,
+                                );
+                            }
+                        }
+                        false
+                    }
+                }
+            } else if atrium.set_home_surface(response.surface).is_ok() {
+                true
+            } else {
+                send_surface_command(
+                    display_control,
+                    &mut surface_commands,
+                    GuiSurfaceOperation::Destroy,
+                    response.surface,
+                    GuiRect::EMPTY,
+                    &mut next_request,
+                );
+                false
+            };
+            if admitted {
+                render(display, atrium, calculator, &mut sequence);
+            }
+            if authenticated
+                && atrium.phase() == logos_atrium::AtriumPhase::Home
+                && !atrium.home_surface().is_valid()
+            {
+                queue_home_surface(
+                    display_control,
+                    &mut pending_surface,
+                    &mut pending_surface_for_client,
+                    &mut next_request,
+                );
+            }
+        }
+
+        if pending_render.is_none() {
+            let mut render = RenderMessage::empty(MessageKind::RenderCells);
+            while common::ipc_receive_handle(terminal_render, &mut render) == IpcStatus::Ok {
+                let terminal_surface_is_live = render.surface.is_valid()
+                    && matches!(render.kind, MessageKind::RenderCells | MessageKind::FullRedraw)
+                    && atrium
+                        .surface_by_reference(render.surface)
+                        .is_some_and(|surface| surface.app == logos_atrium::AppId::Terminal);
+                if terminal_surface_is_live {
+                    pending_render = Some(render);
+                    break;
+                }
+            }
+        }
+        if pending_draw.is_none() {
+            let mut batch = GuiDrawBatch::new(SurfaceHandle::EMPTY, 1, GuiRect::new(1, 1, 1, 1));
+            while common::ipc_receive_handle(system_surface_draw, &mut batch) == IpcStatus::Ok {
+                let live = batch.is_valid()
+                    && atrium.surface_by_reference(batch.surface).is_some_and(|surface| {
+                        surface.app == logos_atrium::AppId::System
+                            && surface.client == system_client
+                    });
+                if live {
+                    pending_draw = Some(batch);
+                    break;
+                }
+            }
+        }
+        if pending_draw.is_none() {
+            for caps in program_surface_capabilities.iter().flatten().copied() {
+                let mut batch =
+                    GuiDrawBatch::new(SurfaceHandle::EMPTY, 1, GuiRect::new(1, 1, 1, 1));
+                while common::ipc_receive_handle(caps.draw, &mut batch) == IpcStatus::Ok {
+                    let live = batch.is_valid()
+                        && atrium
+                            .surface_by_reference(batch.surface)
+                            .is_some_and(|surface| surface.client == caps.client);
+                    if live {
+                        pending_draw = Some(batch);
+                        break;
+                    }
+                }
+                if pending_draw.is_some() {
+                    break;
+                }
+            }
+        }
+        if pending_render.is_none() {
+            for caps in program_surface_capabilities.iter().flatten().copied() {
+                let mut render = RenderMessage::empty(MessageKind::RenderCells);
+                while common::ipc_receive_handle(caps.render, &mut render) == IpcStatus::Ok {
+                    let live =
+                        matches!(render.kind, MessageKind::RenderCells | MessageKind::FullRedraw)
+                            && atrium
+                                .surface_by_reference(render.surface)
+                                .is_some_and(|surface| surface.client == caps.client);
+                    if live {
+                        pending_render = Some(render);
+                        break;
+                    }
+                }
+                if pending_render.is_some() {
+                    break;
+                }
+            }
         }
 
         while common::ipc_receive_handle(input, &mut event) == IpcStatus::Ok {
@@ -284,37 +1158,155 @@ pub extern "C" fn _start() -> ! {
                 let _ = common::ipc_send_handle(lockscreen_input, &event);
                 continue;
             }
+            if let Some(pointer) = event.pointer_event() {
+                if let Some(surface) = atrium.pointer_target(&event) {
+                    if pointer.state == PointerState::Down {
+                        send_surface_command(
+                            display_control,
+                            &mut surface_commands,
+                            GuiSurfaceOperation::Focus,
+                            surface.reference,
+                            GuiRect::EMPTY,
+                            &mut next_request,
+                        );
+                    }
+                    let local = InputMessage::pointer(
+                        i32::from(pointer.x)
+                            .saturating_sub(surface.bounds.x)
+                            .clamp(i32::from(i16::MIN), i32::from(i16::MAX))
+                            as i16,
+                        i32::from(pointer.y)
+                            .saturating_sub(surface.bounds.y)
+                            .clamp(i32::from(i16::MIN), i32::from(i16::MAX))
+                            as i16,
+                        pointer.buttons,
+                        pointer.state,
+                    )
+                    .unwrap_or(event);
+                    let routed = AtriumSurfaceInput::new(surface.reference, local);
+                    if routed.is_valid() {
+                        if surface.app == logos_atrium::AppId::Terminal {
+                            let _ = common::ipc_send_handle(terminal, &routed);
+                        } else if surface.app == logos_atrium::AppId::System {
+                            let _ = common::ipc_send_handle(system_surface_input, &routed);
+                        } else if let Some(caps) = program_surface_capabilities
+                            .iter()
+                            .flatten()
+                            .copied()
+                            .find(|caps| caps.client == surface.client)
+                        {
+                            let _ = common::ipc_send_handle(caps.input, &routed);
+                        }
+                    }
+                }
+                continue;
+            }
             let action = atrium.input(&event);
             match action {
                 logos_atrium::AtriumAction::Launch(app) if pending_surface.is_none() => {
-                    let bounds = match app {
-                        logos_atrium::AppId::Calculator => GuiRect::new(220, 72, 320, 220),
-                        logos_atrium::AppId::Files => GuiRect::new(248, 88, 340, 190),
-                        logos_atrium::AppId::Terminal => GuiRect::new(200, 48, 420, 300),
+                    if let Some(surface) = atrium.surface_for_app(app) {
+                        if atrium.focus(surface.id).is_ok() {
+                            send_surface_command(
+                                display_control,
+                                &mut surface_commands,
+                                GuiSurfaceOperation::Focus,
+                                surface.reference,
+                                GuiRect::EMPTY,
+                                &mut next_request,
+                            );
+                            render(display, atrium, calculator, &mut sequence);
+                        }
+                        continue;
+                    }
+                    if app == logos_atrium::AppId::Terminal {
+                        let Some(client_request) = last_terminal_request else { continue };
+                        if pending_client_request.is_none() {
+                            pending_client_request = Some(client_request);
+                        }
+                    }
+                    let client = if app == logos_atrium::AppId::Terminal {
+                        terminal_client
+                    } else {
+                        atrium_client
                     };
+                    let Ok(surface_request) = atrium.request_surface(app, client) else { continue };
                     let mut request = GuiSurfaceRequest::new(
                         GuiSurfaceOperation::CreateModal,
                         next_request_id(&mut next_request),
                     );
-                    request.bounds = bounds;
+                    request.bounds = surface_request.bounds();
                     request.z_order = 2;
-                    let _ = common::ipc_send_handle(display_control, &request);
-                    pending_surface = Some((request, Some(app)));
+                    if app == logos_atrium::AppId::Terminal {
+                        request.flags = logos_abi::GUI_SURFACE_FLAG_TERMINAL;
+                    }
+                    if common::ipc_send_handle(display_control, &request) == IpcStatus::Ok {
+                        pending_surface = Some((request, Some(surface_request)));
+                        pending_surface_for_client = app == logos_atrium::AppId::Terminal;
+                    }
                 }
                 logos_atrium::AtriumAction::Logout => {
+                    let terminal_surface =
+                        atrium.surface_for_app(logos_atrium::AppId::Terminal).map(|s| s.reference);
+                    let system_surface =
+                        atrium.surface_for_app(logos_atrium::AppId::System).map(|s| s.reference);
                     let _ = atrium.apply_action(action);
-                    hide_surfaces(display_control, atrium, &mut next_request);
+                    pending_surface_for_client = false;
+                    hide_surfaces(
+                        display_control,
+                        &mut surface_commands,
+                        atrium,
+                        &mut next_request,
+                    );
+                    if let Some(surface) = terminal_surface {
+                        queue_terminal_revoke(
+                            &mut pending_client_response,
+                            &mut deferred_terminal_revoke,
+                            &mut next_request,
+                            surface,
+                        );
+                    }
+                    if let Some(surface) = system_surface {
+                        queue_system_revoke(
+                            &mut pending_client_response,
+                            &mut deferred_system_revoke,
+                            system_surface_response,
+                            &mut pending_client_response_capability,
+                            &mut next_request,
+                            surface,
+                        );
+                    }
                     let command = AtriumControl::new(AtriumControlOperation::Logout, 1);
                     let _ = common::ipc_send_handle(shell, &command);
                 }
+                logos_atrium::AtriumAction::LauncherChanged => {
+                    render(display, atrium, calculator, &mut sequence);
+                }
                 logos_atrium::AtriumAction::CloseFocused => {
-                    let old = atrium.focused_window();
+                    let old = atrium.focused_surface();
                     if atrium.apply_action(action).is_ok() {
-                        if let Some(window) = old {
+                        if let Some(surface) = old {
+                            if surface.app == logos_atrium::AppId::Terminal {
+                                queue_terminal_revoke(
+                                    &mut pending_client_response,
+                                    &mut deferred_terminal_revoke,
+                                    &mut next_request,
+                                    surface.reference,
+                                );
+                            } else if surface.app == logos_atrium::AppId::System {
+                                queue_system_revoke(
+                                    &mut pending_client_response,
+                                    &mut deferred_system_revoke,
+                                    system_surface_response,
+                                    &mut pending_client_response_capability,
+                                    &mut next_request,
+                                    surface.reference,
+                                );
+                            }
                             send_surface_command(
                                 display_control,
+                                &mut surface_commands,
                                 GuiSurfaceOperation::Destroy,
-                                window.surface,
+                                surface.reference,
                                 GuiRect::EMPTY,
                                 &mut next_request,
                             );
@@ -326,20 +1318,22 @@ pub extern "C" fn _start() -> ! {
                 | logos_atrium::AtriumAction::FocusPrevious
                 | logos_atrium::AtriumAction::MoveFocused(_, _) => {
                     if atrium.apply_action(action).is_ok() {
-                        if let Some(window) = atrium.focused_window() {
+                        if let Some(surface) = atrium.focused_surface() {
                             if matches!(action, logos_atrium::AtriumAction::MoveFocused(_, _)) {
                                 send_surface_command(
                                     display_control,
+                                    &mut surface_commands,
                                     GuiSurfaceOperation::Update,
-                                    window.surface,
-                                    window.bounds,
+                                    surface.reference,
+                                    surface.bounds,
                                     &mut next_request,
                                 );
                             } else {
                                 send_surface_command(
                                     display_control,
+                                    &mut surface_commands,
                                     GuiSurfaceOperation::Focus,
-                                    window.surface,
+                                    surface.reference,
                                     GuiRect::EMPTY,
                                     &mut next_request,
                                 );
@@ -350,16 +1344,78 @@ pub extern "C" fn _start() -> ! {
                 }
                 _ => {}
             }
-            if let Some(window) = atrium.focused_window() {
-                if window.app == logos_atrium::AppId::Terminal {
-                    let _ = common::ipc_send_handle(terminal, &event);
-                } else if window.app == logos_atrium::AppId::Calculator && calculator.input(&event)
-                {
-                    render(display, atrium, calculator, &mut sequence);
+            if action.routes_to_surface() {
+                if let Some(surface) = atrium.focused_surface() {
+                    if surface.app == logos_atrium::AppId::Terminal {
+                        let routed = AtriumSurfaceInput::new(surface.reference, event);
+                        if routed.is_valid() {
+                            let _ = common::ipc_send_handle(terminal, &routed);
+                        }
+                    } else if surface.app == logos_atrium::AppId::System {
+                        let routed = AtriumSurfaceInput::new(surface.reference, event);
+                        if routed.is_valid() {
+                            let _ = common::ipc_send_handle(system_surface_input, &routed);
+                        }
+                    } else if surface.app == logos_atrium::AppId::Calculator
+                        && calculator.input(&event)
+                    {
+                        render(display, atrium, calculator, &mut sequence);
+                    } else if let Some(caps) = program_surface_capabilities
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .find(|caps| caps.client == surface.client)
+                    {
+                        let routed = AtriumSurfaceInput::new(surface.reference, event);
+                        if routed.is_valid() {
+                            let _ = common::ipc_send_handle(caps.input, &routed);
+                        }
+                    }
                 }
             }
         }
-        common::wait_on_capabilities(&[input, display_response, shell_context]);
+        let mut wait_capabilities = [logos_abi::CapabilityHandle::EMPTY; 24];
+        let mut wait_count = 0;
+        for capability in [
+            input,
+            display_response,
+            shell_context,
+            terminal_surface_request,
+            terminal_surface_response,
+            system_surface_request,
+            system_surface_draw,
+            terminal_render,
+            display_render,
+        ] {
+            wait_capabilities[wait_count] = capability;
+            wait_count += 1;
+        }
+        if let Ok(requests) = common::discover_capabilities_contract(
+            logos_abi::IpcRights::Receive,
+            logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
+            core::mem::size_of::<AtriumSurfaceRequest>(),
+        ) {
+            for (client, capability) in requests {
+                if client == atrium_client || client == terminal_client {
+                    continue;
+                }
+                if wait_count < wait_capabilities.len() {
+                    wait_capabilities[wait_count] = capability;
+                    wait_count += 1;
+                }
+            }
+        }
+        for caps in program_surface_capabilities.iter().flatten().copied() {
+            if wait_count < wait_capabilities.len() {
+                wait_capabilities[wait_count] = caps.render;
+                wait_count += 1;
+            }
+            if wait_count < wait_capabilities.len() {
+                wait_capabilities[wait_count] = caps.draw;
+                wait_count += 1;
+            }
+        }
+        common::wait_on_capabilities(&wait_capabilities[..wait_count]);
     }
 }
 
