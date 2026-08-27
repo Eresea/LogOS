@@ -338,8 +338,6 @@ impl GuiSurfaceRegistry {
                             format,
                             command,
                             damage_clip,
-                            damage,
-                            damage_count,
                         );
                     }
                 }
@@ -433,8 +431,40 @@ fn command_rect(command: GuiDrawCommand) -> GuiRect {
             u32::from(command.text_len).saturating_mul(super::GLYPH_WIDTH as u32),
             super::GLYPH_HEIGHT as u32,
         ),
+        GuiDrawKind::Line => expand_rect(
+            GuiRect::new(command.x, command.y, command.width, command.height),
+            i32::from(command.line_width()),
+        ),
+        GuiDrawKind::Shadow => shadow_bounds(command),
         _ => GuiRect::new(command.x, command.y, command.width, command.height),
     }
+}
+
+fn expand_rect(rect: GuiRect, padding: i32) -> GuiRect {
+    if padding <= 0 {
+        return rect;
+    }
+    let padding = padding as u32;
+    GuiRect::new(
+        rect.x.saturating_sub(padding as i32),
+        rect.y.saturating_sub(padding as i32),
+        rect.width.saturating_add(padding.saturating_mul(2)),
+        rect.height.saturating_add(padding.saturating_mul(2)),
+    )
+}
+
+fn shadow_bounds(command: GuiDrawCommand) -> GuiRect {
+    let blur = u32::from(command.shadow_blur());
+    let x =
+        command.x.saturating_add(i32::from(command.shadow_offset_x())).saturating_sub(blur as i32);
+    let y =
+        command.y.saturating_add(i32::from(command.shadow_offset_y())).saturating_sub(blur as i32);
+    GuiRect::new(
+        x,
+        y,
+        command.width.saturating_add(blur.saturating_mul(2)),
+        command.height.saturating_add(blur.saturating_mul(2)),
+    )
 }
 
 fn is_surface_fill(command: GuiDrawCommand) -> bool {
@@ -457,6 +487,7 @@ fn intersect(left: GuiRect, right: GuiRect) -> GuiRect {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[inline(never)]
 fn render_command(
     framebuffer: &mut [u8],
     width: usize,
@@ -465,8 +496,6 @@ fn render_command(
     format: super::PixelFormat,
     command: GuiDrawCommand,
     clip: GuiRect,
-    damage: &[GuiRect; MAX_GUI_DAMAGE_RECTS],
-    damage_count: usize,
 ) -> usize {
     if clip.is_empty() {
         return 0;
@@ -480,6 +509,25 @@ fn render_command(
                 clip.y.saturating_add(clip.height as i32).max(0).min(height as i32) as usize;
             if left >= right || top >= bottom {
                 return 0;
+            }
+            if command.color_alpha() != u8::MAX {
+                let mut rendered = 0;
+                for y in top..bottom {
+                    for x in left..right {
+                        rendered += plot(
+                            framebuffer,
+                            width,
+                            height,
+                            stride,
+                            format,
+                            x as i32,
+                            y as i32,
+                            command.color,
+                            u8::MAX,
+                        ) as usize;
+                    }
+                }
+                return rendered;
             }
             let pixel = super::pixel_bytes(command.color, format);
             for y in top..bottom {
@@ -513,55 +561,17 @@ fn render_command(
                             y,
                             command.color,
                             255,
-                            damage,
-                            damage_count,
                         ) as usize;
                     }
                 }
             }
             rendered
         }
-        GuiDrawKind::Line => {
-            let mut rendered = 0;
-            let mut x0 = command.x;
-            let mut y0 = command.y;
-            let x1 = command.x.saturating_add(command.width as i32);
-            let y1 = command.y.saturating_add(command.height as i32);
-            let dx = (x1 - x0).abs();
-            let sx = if x0 < x1 { 1 } else { -1 };
-            let dy = -(y1 - y0).abs();
-            let sy = if y0 < y1 { 1 } else { -1 };
-            let mut error = dx + dy;
-            loop {
-                if clip.contains(x0, y0) {
-                    rendered += plot(
-                        framebuffer,
-                        width,
-                        height,
-                        stride,
-                        format,
-                        x0,
-                        y0,
-                        command.color,
-                        255,
-                        damage,
-                        damage_count,
-                    ) as usize;
-                }
-                if x0 == x1 && y0 == y1 {
-                    break;
-                }
-                let doubled = error * 2;
-                if doubled >= dy {
-                    error += dy;
-                    x0 += sx;
-                }
-                if doubled <= dx {
-                    error += dx;
-                    y0 += sy;
-                }
-            }
-            rendered
+        GuiDrawKind::Line
+        | GuiDrawKind::FillRoundedRect
+        | GuiDrawKind::StrokeRoundedRect
+        | GuiDrawKind::Shadow => {
+            render_modern(framebuffer, width, height, stride, format, command, clip)
         }
         GuiDrawKind::ClipRect => 0,
         GuiDrawKind::GlyphRun => {
@@ -593,8 +603,6 @@ fn render_command(
                                     y,
                                     command.color,
                                     coverage,
-                                    damage,
-                                    damage_count,
                                 ) as usize;
                             }
                         }
@@ -603,6 +611,548 @@ fn render_command(
             }
             rendered
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn render_modern(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    command: GuiDrawCommand,
+    clip: GuiRect,
+) -> usize {
+    let bounds = GuiRect::new(command.x, command.y, command.width, command.height);
+    let inner = rounded_stroke_inner(command, bounds);
+    let blur = command.shadow_blur();
+    let offset_x = i32::from(command.shadow_offset_x());
+    let offset_y = i32::from(command.shadow_offset_y());
+    let shifted_shadow = GuiRect::new(
+        bounds.x.saturating_add(offset_x),
+        bounds.y.saturating_add(offset_y),
+        bounds.width,
+        bounds.height,
+    );
+    let mut shadow_shapes = [GuiRect::EMPTY; 5];
+    let mut distance = 0;
+    while distance <= blur {
+        shadow_shapes[distance as usize] = expand_rect(shifted_shadow, i32::from(distance));
+        distance += 1;
+    }
+    let clip = intersect(clip, GuiRect::new(0, 0, width as u32, height as u32));
+    match command.kind {
+        GuiDrawKind::FillRoundedRect => render_rounded_fill(
+            framebuffer,
+            width,
+            height,
+            stride,
+            format,
+            bounds,
+            command.corner_radius(),
+            command.color,
+            clip,
+        ),
+        GuiDrawKind::StrokeRoundedRect => render_rounded_stroke(
+            framebuffer,
+            width,
+            height,
+            stride,
+            format,
+            bounds,
+            command.corner_radius(),
+            command.stroke_width(),
+            command.color,
+            clip,
+            inner,
+        ),
+        GuiDrawKind::Line => render_line(framebuffer, width, height, stride, format, command, clip),
+        GuiDrawKind::Shadow => render_shadow(
+            framebuffer,
+            width,
+            height,
+            stride,
+            format,
+            command,
+            clip,
+            &shadow_shapes,
+            blur,
+        ),
+        _ => 0,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_rounded_fill(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    bounds: GuiRect,
+    radius: u8,
+    color: u32,
+    clip: GuiRect,
+) -> usize {
+    if clip.is_empty() {
+        return 0;
+    }
+    let left = bounds.x;
+    let right = bounds.x.saturating_add(bounds.width as i32);
+    let top = bounds.y;
+    let radius = i32::from(radius);
+    let clip_right = clip.x.saturating_add(clip.width as i32);
+    let mut rendered = 0;
+    for y in clip.y..clip.y.saturating_add(clip.height as i32) {
+        let local_y = y.saturating_sub(top);
+        if radius == 0 || (local_y >= radius && local_y < bounds.height as i32 - radius) {
+            rendered += fill_span(
+                framebuffer,
+                width,
+                height,
+                stride,
+                format,
+                clip.x,
+                clip_right,
+                y,
+                color,
+                u8::MAX,
+            );
+            continue;
+        }
+        let left_edge = clip_right.min(left.saturating_add(radius));
+        rendered += render_rounded_edge(
+            framebuffer,
+            width,
+            height,
+            stride,
+            format,
+            bounds,
+            radius as u8,
+            color,
+            clip.x,
+            left_edge,
+            y,
+        );
+        rendered += fill_span(
+            framebuffer,
+            width,
+            height,
+            stride,
+            format,
+            clip.x.max(left.saturating_add(radius)),
+            clip_right.min(right.saturating_sub(radius)),
+            y,
+            color,
+            u8::MAX,
+        );
+        rendered += render_rounded_edge(
+            framebuffer,
+            width,
+            height,
+            stride,
+            format,
+            bounds,
+            radius as u8,
+            color,
+            clip.x.max(right.saturating_sub(radius)),
+            clip_right,
+            y,
+        );
+    }
+    rendered
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_rounded_stroke(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    bounds: GuiRect,
+    radius: u8,
+    stroke_width: u8,
+    color: u32,
+    clip: GuiRect,
+    inner: Option<(GuiRect, u8)>,
+) -> usize {
+    if clip.is_empty() {
+        return 0;
+    }
+    let left = bounds.x;
+    let right = bounds.x.saturating_add(bounds.width as i32);
+    let top = bounds.y;
+    let band = i32::from(radius).max(i32::from(stroke_width));
+    let clip_right = clip.x.saturating_add(clip.width as i32);
+    let mut rendered = 0;
+    for y in clip.y..clip.y.saturating_add(clip.height as i32) {
+        let local_y = y.saturating_sub(top);
+        if local_y < band || local_y >= bounds.height as i32 - band {
+            rendered += render_stroke_edge(
+                framebuffer,
+                width,
+                height,
+                stride,
+                format,
+                bounds,
+                radius,
+                color,
+                inner,
+                clip.x,
+                clip_right,
+                y,
+            );
+        } else {
+            rendered += render_stroke_edge(
+                framebuffer,
+                width,
+                height,
+                stride,
+                format,
+                bounds,
+                radius,
+                color,
+                inner,
+                clip.x,
+                clip_right.min(left.saturating_add(band)),
+                y,
+            );
+            rendered += render_stroke_edge(
+                framebuffer,
+                width,
+                height,
+                stride,
+                format,
+                bounds,
+                radius,
+                color,
+                inner,
+                clip.x.max(right.saturating_sub(band)),
+                clip_right,
+                y,
+            );
+        }
+    }
+    rendered
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_rounded_edge(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    bounds: GuiRect,
+    radius: u8,
+    color: u32,
+    left: i32,
+    right: i32,
+    y: i32,
+) -> usize {
+    let mut rendered = 0;
+    for x in left..right {
+        let coverage = rounded_coverage(bounds, radius, x, y);
+        if coverage != 0 {
+            rendered +=
+                plot(framebuffer, width, height, stride, format, x, y, color, coverage) as usize;
+        }
+    }
+    rendered
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_stroke_edge(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    bounds: GuiRect,
+    radius: u8,
+    color: u32,
+    inner: Option<(GuiRect, u8)>,
+    left: i32,
+    right: i32,
+    y: i32,
+) -> usize {
+    let mut rendered = 0;
+    for x in left..right {
+        let outer = rounded_coverage(bounds, radius, x, y);
+        let inner =
+            inner.map(|(bounds, radius)| rounded_coverage(bounds, radius, x, y)).unwrap_or(0);
+        let coverage = outer.saturating_sub(inner);
+        if coverage != 0 {
+            rendered +=
+                plot(framebuffer, width, height, stride, format, x, y, color, coverage) as usize;
+        }
+    }
+    rendered
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_line(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    command: GuiDrawCommand,
+    clip: GuiRect,
+) -> usize {
+    let x0 = i64::from(command.x) * 4;
+    let y0 = i64::from(command.y) * 4;
+    let x1 = x0 + i64::from(command.width) * 4;
+    let y1 = y0 + i64::from(command.height) * 4;
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let length_squared = dx * dx + dy * dy;
+    let radius = i64::from(command.line_width()) * 2;
+    let radius_squared = radius * radius;
+    let mut rendered = 0;
+    for y in clip.y..clip.y.saturating_add(clip.height as i32) {
+        for x in clip.x..clip.x.saturating_add(clip.width as i32) {
+            let mut samples = 0;
+            for sample_y in [1_i64, 3] {
+                for sample_x in [1_i64, 3] {
+                    if point_near_segment(
+                        i64::from(x) * 4 + sample_x,
+                        i64::from(y) * 4 + sample_y,
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        dx,
+                        dy,
+                        length_squared,
+                        radius_squared,
+                    ) {
+                        samples += 1;
+                    }
+                }
+            }
+            let coverage = coverage_from_samples(samples);
+            if coverage != 0 {
+                rendered +=
+                    plot(framebuffer, width, height, stride, format, x, y, command.color, coverage)
+                        as usize;
+            }
+        }
+    }
+    rendered
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_shadow(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    command: GuiDrawCommand,
+    clip: GuiRect,
+    shadow_shapes: &[GuiRect; 5],
+    blur: u8,
+) -> usize {
+    let mut rendered = 0;
+    for y in clip.y..clip.y.saturating_add(clip.height as i32) {
+        for x in clip.x..clip.x.saturating_add(clip.width as i32) {
+            let coverage = shadow_coverage(shadow_shapes, command.corner_radius(), x, y, blur);
+            if coverage != 0 {
+                rendered +=
+                    plot(framebuffer, width, height, stride, format, x, y, command.color, coverage)
+                        as usize;
+            }
+        }
+    }
+    rendered
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fill_span(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    left: i32,
+    right: i32,
+    y: i32,
+    color: u32,
+    coverage: u8,
+) -> usize {
+    let left = left.max(0).min(width as i32) as usize;
+    let right = right.max(0).min(width as i32) as usize;
+    if left >= right || y < 0 || y as usize >= height {
+        return 0;
+    }
+    if coverage == u8::MAX && color_alpha(color) == u8::MAX {
+        let pixel = super::pixel_bytes(color, format);
+        let start = y as usize * stride + left * 4;
+        let end = y as usize * stride + right * 4;
+        for chunk in framebuffer[start..end].chunks_exact_mut(4) {
+            chunk.copy_from_slice(&pixel);
+        }
+        return right - left;
+    }
+    let mut rendered = 0;
+    for x in left..right {
+        rendered +=
+            plot(framebuffer, width, height, stride, format, x as i32, y, color, coverage) as usize;
+    }
+    rendered
+}
+
+fn rounded_stroke_inner(command: GuiDrawCommand, bounds: GuiRect) -> Option<(GuiRect, u8)> {
+    let edge = u32::from(command.stroke_width());
+    if edge.saturating_mul(2) < bounds.width.min(bounds.height) {
+        Some((
+            GuiRect::new(
+                bounds.x.saturating_add(edge as i32),
+                bounds.y.saturating_add(edge as i32),
+                bounds.width.saturating_sub(edge.saturating_mul(2)),
+                bounds.height.saturating_sub(edge.saturating_mul(2)),
+            ),
+            command.corner_radius().saturating_sub(command.stroke_width()),
+        ))
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shadow_coverage(shadow_shapes: &[GuiRect; 5], radius: u8, x: i32, y: i32, blur: u8) -> u8 {
+    let weights = SHADOW_RING_WEIGHTS[blur as usize];
+    let base = rounded_coverage(shadow_shapes[0], radius, x, y);
+    if blur == 0 || base == u8::MAX {
+        return base;
+    }
+    let mut weighted = u32::from(base) * u32::from(weights[0]);
+    for distance in 1..=blur {
+        let weight = u32::from(weights[distance as usize]);
+        if weight == 0 {
+            continue;
+        }
+        let mask = u32::from(rounded_coverage(
+            shadow_shapes[distance as usize],
+            radius.saturating_add(distance),
+            x,
+            y,
+        ));
+        weighted += mask * weight;
+    }
+    ((weighted + 127) / 255) as u8
+}
+
+const SHADOW_RING_WEIGHTS: [[u8; 5]; 5] = [
+    [255, 0, 0, 0, 0],
+    [160, 80, 15, 0, 0],
+    [128, 80, 40, 7, 0],
+    [96, 72, 56, 24, 7],
+    [64, 64, 64, 48, 15],
+];
+
+#[allow(clippy::too_many_arguments)]
+fn point_near_segment(
+    px: i64,
+    py: i64,
+    x0: i64,
+    y0: i64,
+    x1: i64,
+    y1: i64,
+    dx: i64,
+    dy: i64,
+    length_squared: i64,
+    radius_squared: i64,
+) -> bool {
+    let projection = (px - x0) * dx + (py - y0) * dy;
+    if projection <= 0 {
+        let difference_x = px - x0;
+        let difference_y = py - y0;
+        difference_x * difference_x + difference_y * difference_y <= radius_squared
+    } else if projection >= length_squared {
+        let difference_x = px - x1;
+        let difference_y = py - y1;
+        difference_x * difference_x + difference_y * difference_y <= radius_squared
+    } else {
+        let cross = (px - x0) * dy - (py - y0) * dx;
+        cross * cross <= radius_squared * length_squared
+    }
+}
+
+fn rounded_coverage(bounds: GuiRect, radius: u8, x: i32, y: i32) -> u8 {
+    if radius == 0 {
+        return if bounds.contains(x, y) { u8::MAX } else { 0 };
+    }
+    let left = i64::from(bounds.x) * 4;
+    let top = i64::from(bounds.y) * 4;
+    let right = (i64::from(bounds.x) + i64::from(bounds.width)) * 4;
+    let bottom = (i64::from(bounds.y) + i64::from(bounds.height)) * 4;
+    let radius = i64::from(radius) * 4;
+    let pixel_x = i64::from(x);
+    let pixel_y = i64::from(y);
+    let bounds_left = i64::from(bounds.x);
+    let bounds_top = i64::from(bounds.y);
+    let bounds_right = i64::from(bounds.x) + i64::from(bounds.width);
+    let bounds_bottom = i64::from(bounds.y) + i64::from(bounds.height);
+    if pixel_x < bounds_left
+        || pixel_x >= bounds_right
+        || pixel_y < bounds_top
+        || pixel_y >= bounds_bottom
+    {
+        return 0;
+    }
+    if (pixel_x * 4 >= left + radius && pixel_x * 4 + 3 < right - radius)
+        || (pixel_y * 4 >= top + radius && pixel_y * 4 + 3 < bottom - radius)
+    {
+        return u8::MAX;
+    }
+    let mut samples = 0;
+    for sample_y in [1_i64, 3] {
+        for sample_x in [1_i64, 3] {
+            let px = i64::from(x) * 4 + sample_x;
+            let py = i64::from(y) * 4 + sample_y;
+            if rounded_sample_inside(left, top, right, bottom, radius, px, py) {
+                samples += 1;
+            }
+        }
+    }
+    coverage_from_samples(samples)
+}
+
+fn rounded_sample_inside(
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+    radius: i64,
+    px: i64,
+    py: i64,
+) -> bool {
+    if px < left || py < top || px >= right || py >= bottom {
+        return false;
+    }
+    if (px >= left + radius && px < right - radius) || (py >= top + radius && py < bottom - radius)
+    {
+        return true;
+    }
+    let center_x = if px < left + radius { left + radius } else { right - radius };
+    let center_y = if py < top + radius { top + radius } else { bottom - radius };
+    let dx = px - center_x;
+    let dy = py - center_y;
+    dx * dx + dy * dy <= radius * radius
+}
+
+fn coverage_from_samples(samples: u8) -> u8 {
+    match samples {
+        0 => 0,
+        1 => 64,
+        2 => 128,
+        3 => 192,
+        _ => u8::MAX,
     }
 }
 
@@ -617,20 +1167,23 @@ fn plot(
     y: i32,
     color: u32,
     coverage: u8,
-    damage: &[GuiRect; MAX_GUI_DAMAGE_RECTS],
-    damage_count: usize,
 ) -> bool {
-    if x < 0
-        || y < 0
-        || x as usize >= width
-        || y as usize >= height
-        || !damage[..damage_count].iter().any(|rect| rect.contains(x, y))
-    {
+    if x < 0 || y < 0 || x as usize >= width || y as usize >= height {
         return false;
     }
+    let alpha = color_alpha(color);
+    let coverage = ((u16::from(coverage) * u16::from(alpha) + 127) / 255) as u8;
+    if coverage == 0 {
+        return false;
+    }
+    let color = color & 0x00ff_ffff;
     let offset = y as usize * stride + x as usize * 4;
     if offset + 4 > framebuffer.len() {
         return false;
+    }
+    if coverage == u8::MAX {
+        framebuffer[offset..offset + 4].copy_from_slice(&super::pixel_bytes(color, format));
+        return true;
     }
     let background = match format {
         super::PixelFormat::Rgb8 => {
@@ -651,16 +1204,115 @@ fn plot(
     true
 }
 
+fn color_alpha(color: u32) -> u8 {
+    let alpha = (color >> 24) as u8;
+    if alpha == 0 { u8::MAX } else { alpha }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PixelFormat;
     use logos_abi::GuiDrawCommand;
+    use std::vec;
 
     fn request(operation: GuiSurfaceOperation, id: u32, bounds: GuiRect) -> GuiSurfaceRequest {
         let mut request = GuiSurfaceRequest::new(operation, id);
         request.bounds = bounds;
         request.z_order = 1;
         request
+    }
+
+    fn render_single(
+        command: GuiDrawCommand,
+        damage: GuiRect,
+        width: usize,
+        height: usize,
+        background: [u8; 4],
+    ) -> std::vec::Vec<u8> {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root = registry
+            .create(
+                7,
+                request(
+                    GuiSurfaceOperation::CreateRoot,
+                    1,
+                    GuiRect::new(0, 0, width as u32, height as u32),
+                ),
+            )
+            .unwrap()
+            .surface;
+        registry.take_damage();
+        let mut batch = GuiDrawBatch::new(root, 1, damage);
+        assert!(batch.push(command));
+        registry.update(7, batch).unwrap();
+        let (damage, damage_count) = registry.take_damage();
+        let mut framebuffer = vec![0; width * height * 4];
+        for pixel in framebuffer.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&background);
+        }
+        registry.render(
+            &mut framebuffer,
+            width,
+            height,
+            width * 4,
+            PixelFormat::Bgr8,
+            &damage,
+            damage_count,
+        );
+        framebuffer
+    }
+
+    fn pixel(framebuffer: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
+        let offset = (y * width + x) * 4;
+        framebuffer[offset..offset + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn rounded_fill_and_stroke_have_anti_aliased_corners() {
+        let bounds = GuiRect::new(2, 2, 28, 20);
+        let fill = render_single(
+            GuiDrawCommand::fill_rounded_rect(bounds, 0xffffff, 8),
+            bounds,
+            32,
+            24,
+            [0; 4],
+        );
+        assert_eq!(pixel(&fill, 32, 2, 2), [0, 0, 0, 0]);
+        assert_eq!(pixel(&fill, 32, 16, 12), [255, 255, 255, 0]);
+
+        let stroke = render_single(
+            GuiDrawCommand::stroke_rounded_rect(bounds, 0xffffff, 8, 2),
+            bounds,
+            32,
+            24,
+            [0; 4],
+        );
+        assert_eq!(pixel(&stroke, 32, 16, 2), [255, 255, 255, 0]);
+        assert_eq!(pixel(&stroke, 32, 16, 12), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn thick_lines_and_alpha_shadows_blend_without_allocations() {
+        let line = render_single(
+            GuiDrawCommand::line_with_width(4, 4, 20, 0, 0xff0000, 3),
+            GuiRect::new(0, 0, 32, 12),
+            32,
+            12,
+            [0; 4],
+        );
+        assert_eq!(pixel(&line, 32, 12, 4), [0, 0, 255, 0]);
+        assert_ne!(pixel(&line, 32, 12, 3), [0, 0, 0, 0]);
+
+        let shadow = render_single(
+            GuiDrawCommand::shadow(GuiRect::new(12, 8, 16, 8), 0x55000000, 4, 2, 0, 4),
+            GuiRect::new(0, 0, 48, 32),
+            48,
+            32,
+            [255; 4],
+        );
+        assert!(pixel(&shadow, 48, 20, 20)[0] < 255);
+        assert_eq!(pixel(&shadow, 48, 2, 2), [255, 255, 255, 255]);
     }
 
     #[test]

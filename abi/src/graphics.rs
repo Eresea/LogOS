@@ -3,11 +3,16 @@ use super::{NamespaceCapabilityHandle, NamespaceRights, NamespaceRoot, SessionHa
 pub const MAX_GUI_SURFACES: usize = 8;
 pub const MAX_GUI_DAMAGE_RECTS: usize = 8;
 pub const MAX_GUI_COMMANDS: usize = 3;
-pub const MAX_GUI_BATCH_FRAGMENTS: usize = 4;
+pub const MAX_GUI_BATCH_FRAGMENTS: usize = 5;
 pub const MAX_GUI_TEXT_BYTES: usize = 32;
 pub const GUI_DRAW_FLAG_MORE: u8 = 1 << 0;
 pub const GUI_SURFACE_FLAG_TERMINAL: u8 = 1 << 0;
 pub const GUI_TEXT_FLAG_LIGHT: u32 = 1 << 0;
+pub const MAX_GUI_CORNER_RADIUS: u8 = 32;
+pub const MAX_GUI_STROKE_WIDTH: u8 = 8;
+pub const MAX_GUI_LINE_WIDTH: u8 = 8;
+pub const MAX_GUI_BLUR_RADIUS: u8 = 4;
+pub const MAX_GUI_SHADOW_OFFSET: i8 = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -170,6 +175,9 @@ pub enum GuiDrawKind {
     Line = 3,
     ClipRect = 4,
     GlyphRun = 5,
+    FillRoundedRect = 6,
+    StrokeRoundedRect = 7,
+    Shadow = 8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,6 +244,50 @@ impl GuiDrawCommand {
         command
     }
 
+    pub const fn line_with_width(
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        color: u32,
+        line_width: u8,
+    ) -> Self {
+        let mut command = Self::line(x, y, width, height, color);
+        command.auxiliary = line_width as u32;
+        command
+    }
+
+    pub const fn fill_rounded_rect(bounds: GuiRect, color: u32, radius: u8) -> Self {
+        let mut command = Self::fill_rect(bounds, color);
+        command.kind = GuiDrawKind::FillRoundedRect;
+        command.auxiliary = radius as u32;
+        command
+    }
+
+    pub const fn stroke_rounded_rect(bounds: GuiRect, color: u32, radius: u8, width: u8) -> Self {
+        let mut command = Self::fill_rect(bounds, color);
+        command.kind = GuiDrawKind::StrokeRoundedRect;
+        command.auxiliary = radius as u32 | ((width as u32) << 8);
+        command
+    }
+
+    pub const fn shadow(
+        bounds: GuiRect,
+        color: u32,
+        radius: u8,
+        blur: u8,
+        offset_x: i8,
+        offset_y: i8,
+    ) -> Self {
+        let mut command = Self::fill_rect(bounds, color);
+        command.kind = GuiDrawKind::Shadow;
+        command.auxiliary = radius as u32
+            | ((blur as u32) << 8)
+            | ((offset_x as u8 as u32) << 16)
+            | ((offset_y as u8 as u32) << 24);
+        command
+    }
+
     pub const fn clip(bounds: GuiRect) -> Self {
         let mut command = Self::fill_rect(bounds, 0);
         command.kind = GuiDrawKind::ClipRect;
@@ -269,20 +321,89 @@ impl GuiDrawCommand {
         Some(command)
     }
 
+    pub const fn color_rgb(self) -> u32 {
+        self.color & 0x00ff_ffff
+    }
+
+    pub const fn color_alpha(self) -> u8 {
+        let alpha = (self.color >> 24) as u8;
+        if alpha == 0 { u8::MAX } else { alpha }
+    }
+
+    pub const fn corner_radius(self) -> u8 {
+        self.auxiliary as u8
+    }
+
+    pub const fn stroke_width(self) -> u8 {
+        (self.auxiliary >> 8) as u8
+    }
+
+    pub const fn line_width(self) -> u8 {
+        let width = self.auxiliary as u8;
+        if width == 0 { 1 } else { width }
+    }
+
+    pub const fn shadow_blur(self) -> u8 {
+        (self.auxiliary >> 8) as u8
+    }
+
+    pub const fn shadow_offset_x(self) -> i8 {
+        ((self.auxiliary >> 16) as u8) as i8
+    }
+
+    pub const fn shadow_offset_y(self) -> i8 {
+        ((self.auxiliary >> 24) as u8) as i8
+    }
+
     pub const fn is_valid(self) -> bool {
         self.flags == 0
             && self.reserved == 0
             && self.text_len as usize <= MAX_GUI_TEXT_BYTES
             && match self.kind {
                 GuiDrawKind::FillRect | GuiDrawKind::StrokeRect | GuiDrawKind::ClipRect => {
-                    self.width != 0 && self.height != 0
+                    self.text_len == 0 && self.width != 0 && self.height != 0
                 }
-                GuiDrawKind::Line => self.width != 0 || self.height != 0,
+                GuiDrawKind::Line => {
+                    self.text_len == 0
+                        && (self.width != 0 || self.height != 0)
+                        && self.auxiliary <= MAX_GUI_LINE_WIDTH as u32
+                }
                 GuiDrawKind::GlyphRun => {
                     self.text_len != 0 && self.auxiliary & !GUI_TEXT_FLAG_LIGHT == 0
                 }
+                GuiDrawKind::FillRoundedRect => {
+                    self.text_len == 0
+                        && self.auxiliary >> 8 == 0
+                        && valid_corner_radius(self.width, self.height, self.corner_radius())
+                }
+                GuiDrawKind::StrokeRoundedRect => {
+                    self.text_len == 0
+                        && self.auxiliary >> 16 == 0
+                        && self.stroke_width() != 0
+                        && self.stroke_width() <= MAX_GUI_STROKE_WIDTH
+                        && self.stroke_width() as u32 <= min_u32(self.width, self.height)
+                        && valid_corner_radius(self.width, self.height, self.corner_radius())
+                }
+                GuiDrawKind::Shadow => {
+                    self.text_len == 0
+                        && self.shadow_blur() <= MAX_GUI_BLUR_RADIUS
+                        && valid_corner_radius(self.width, self.height, self.corner_radius())
+                        && self.shadow_offset_x().unsigned_abs() <= MAX_GUI_SHADOW_OFFSET as u8
+                        && self.shadow_offset_y().unsigned_abs() <= MAX_GUI_SHADOW_OFFSET as u8
+                }
             }
     }
+}
+
+const fn valid_corner_radius(width: u32, height: u32, radius: u8) -> bool {
+    radius <= MAX_GUI_CORNER_RADIUS
+        && radius as u32 <= min_u32(width, height) / 2
+        && width != 0
+        && height != 0
+}
+
+const fn min_u32(left: u32, right: u32) -> u32 {
+    if left < right { left } else { right }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -443,6 +564,58 @@ mod tests {
         assert!(batch.is_valid());
         batch.flags = u8::MAX;
         assert!(!batch.is_valid());
+    }
+
+    #[test]
+    fn modern_commands_pack_bounded_geometry_and_legacy_colors_stay_opaque() {
+        let rounded = GuiDrawCommand::fill_rounded_rect(GuiRect::new(0, 0, 40, 20), 0x112233, 8);
+        assert!(rounded.is_valid());
+        assert_eq!(rounded.corner_radius(), 8);
+        assert_eq!(rounded.color_rgb(), 0x112233);
+        assert_eq!(rounded.color_alpha(), u8::MAX);
+
+        let stroke =
+            GuiDrawCommand::stroke_rounded_rect(GuiRect::new(0, 0, 40, 20), 0x445566, 8, 2);
+        assert!(stroke.is_valid());
+        assert_eq!(stroke.stroke_width(), 2);
+
+        let shadow = GuiDrawCommand::shadow(GuiRect::new(10, 12, 40, 20), 0x55000000, 8, 4, -3, 5);
+        assert!(shadow.is_valid());
+        assert_eq!(shadow.color_alpha(), 0x55);
+        assert_eq!(shadow.shadow_offset_x(), -3);
+        assert_eq!(shadow.shadow_offset_y(), 5);
+    }
+
+    #[test]
+    fn modern_commands_reject_overflowing_geometry() {
+        assert!(
+            !GuiDrawCommand::fill_rounded_rect(
+                GuiRect::new(0, 0, 40, 20),
+                0xffffff,
+                MAX_GUI_CORNER_RADIUS + 1,
+            )
+            .is_valid()
+        );
+        assert!(
+            !GuiDrawCommand::stroke_rounded_rect(
+                GuiRect::new(0, 0, 40, 20),
+                0xffffff,
+                8,
+                MAX_GUI_STROKE_WIDTH + 1,
+            )
+            .is_valid()
+        );
+        assert!(
+            !GuiDrawCommand::shadow(
+                GuiRect::new(0, 0, 40, 20),
+                0xffffff,
+                8,
+                MAX_GUI_BLUR_RADIUS + 1,
+                0,
+                0,
+            )
+            .is_valid()
+        );
     }
 
     #[test]
