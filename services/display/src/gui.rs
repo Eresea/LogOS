@@ -215,6 +215,12 @@ impl GuiSurfaceRegistry {
             return Err(GuiRegistryError::Malformed);
         }
         let index = self.authorized_index(owner, op.surface)?;
+        if is_older_frame(op.frame, self.slots[index].active_frame)
+            || (self.slots[index].staged_frame != 0
+                && is_older_frame(op.frame, self.slots[index].staged_frame))
+        {
+            return Err(GuiRegistryError::Stale);
+        }
         if self.slots[index].staged_frame != op.frame {
             self.slots[index].staged_nodes = self.slots[index].active_nodes;
             self.slots[index].staged_node_count = self.slots[index].active_node_count;
@@ -699,6 +705,10 @@ impl Default for GuiSurfaceRegistry {
 fn next_generation(generation: &mut u16) -> u16 {
     *generation = generation.wrapping_add(1).max(1);
     *generation
+}
+
+fn is_older_frame(frame: u32, current: u32) -> bool {
+    frame != current && current.wrapping_sub(frame) < (1 << 31)
 }
 
 fn touches(left: GuiRect, right: GuiRect) -> bool {
@@ -1859,6 +1869,32 @@ mod tests {
         let mut backend = CountingBackend { draws: 0 };
         assert_eq!(registry.compose(&mut backend, &damage, 1), 2);
         assert_eq!(backend.draws, 2);
+    }
+
+    #[test]
+    fn retained_scene_rejects_older_frames() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 16, 16)))
+            .unwrap()
+            .surface;
+        registry.take_damage();
+        let node = GuiSceneOp::upsert(
+            root,
+            2,
+            1,
+            GuiDrawCommand::fill_rect(GuiRect::new(2, 2, 4, 4), 0xffffff),
+        );
+        registry.apply_scene_op(7, node).unwrap();
+        assert_eq!(registry.active_frame(root), Some(2));
+        let stale = GuiSceneOp::upsert(
+            root,
+            1,
+            1,
+            GuiDrawCommand::fill_rect(GuiRect::new(8, 8, 4, 4), 0xffffff),
+        );
+        assert_eq!(registry.apply_scene_op(7, stale), Err(GuiRegistryError::Stale));
+        assert_eq!(registry.active_frame(root), Some(2));
     }
 
     #[test]
