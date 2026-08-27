@@ -65,6 +65,9 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
     if vector == usize::from(KEYBOARD_VECTOR) {
         handle_keyboard_interrupt();
     }
+    if vector == usize::from(POINTER_VECTOR) {
+        handle_pointer_interrupt();
+    }
     if vector == usize::from(STORAGE_VECTOR) {
         handle_storage_interrupt();
     }
@@ -337,6 +340,10 @@ global_asm!(
     ".global keyboard_interrupt",
     "keyboard_interrupt:",
     "push 33",
+    "jmp context_common",
+    ".global pointer_interrupt",
+    "pointer_interrupt:",
+    "push 44",
     "jmp context_common",
     ".global storage_interrupt",
     "storage_interrupt:",

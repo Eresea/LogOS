@@ -1049,7 +1049,7 @@ mod tests {
                     &mut events,
                 )
                 .unwrap();
-            for raw_service in 0..10 {
+            for raw_service in 0..14 {
                 let owner = ServiceHandle::new(raw_service as u32, 1).unwrap();
                 for rights in [IpcRights::Send, IpcRights::Receive] {
                     let owns_endpoint = match rights {

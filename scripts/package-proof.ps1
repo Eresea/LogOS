@@ -12,6 +12,7 @@ $target = Join-Path $repoRoot 'target'
 $profile = if ($Release) { 'release' } else { 'debug' }
 $efi = Join-Path $target "x86_64-unknown-uefi\$profile\logos-vnext.efi"
 $packageElf = Join-Path $repoRoot 'build\esp\EFI\LOGOS\INPUT.ELF'
+$programElf = Join-Path $target 'x86_64-unknown-none\release\logos-program-demo'
 $esp = Join-Path $target 'package-proof-esp'
 $disk = Join-Path $target 'package-proof.raw'
 $log = Join-Path $target 'package-proof.log'
@@ -26,14 +27,18 @@ if ($Release) { $buildArgs += '--release' }
 cargo @buildArgs
 & (Join-Path $PSScriptRoot 'build-services.ps1') -Release -Proof -PackageProof
 
+cargo build -p logos-program-demo --target x86_64-unknown-none --release
+if ($LASTEXITCODE -ne 0) { throw "Demo program build failed with exit code $LASTEXITCODE." }
+
 if (-not (Test-Path $packageElf)) { throw 'Input ELF was not built.' }
+if (-not (Test-Path $programElf)) { throw 'Demo program ELF was not built.' }
 New-Item -ItemType Directory -Force $esp | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\BOOT') | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\LOGOS') | Out-Null
 Copy-Item $efi (Join-Path $esp 'EFI\BOOT\BOOTX64.EFI') -Force
 Copy-Item (Join-Path $repoRoot 'build\esp\EFI\LOGOS\*.ELF') (Join-Path $esp 'EFI\LOGOS') -Force
 
-cargo run -p logos-storage-service --bin package-seed -- $disk $packageElf
+cargo run -p logos-storage-service --bin package-seed -- $disk $packageElf $programElf
 if (-not (Test-Path $disk)) { throw 'Package seed did not create a disk.' }
 
 $espPath = ((Resolve-Path $esp).Path).Replace('\', '/')

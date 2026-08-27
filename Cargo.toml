@@ -24,6 +24,8 @@ members = [
     "services/lockscreen",
     "services/atrium",
     "services/images",
+    "program",
+    "programs/demo",
     "ui",
     "ui-forms",
     "ui-compiler",

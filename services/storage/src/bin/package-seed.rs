@@ -144,14 +144,16 @@ fn corrupt(filesystem: &mut DurableNamespaceV5<FileBlockStore>, info: PackageInf
 fn main() {
     let mut arguments = env::args().skip(1);
     let disk = arguments.next().unwrap_or_else(|| {
-        eprintln!("usage: package-seed <disk> <service-elf>");
+        eprintln!("usage: package-seed <disk> <service-elf> [program-elf]");
         process::exit(2);
     });
     let elf = arguments.next().unwrap_or_else(|| {
-        eprintln!("usage: package-seed <disk> <service-elf>");
+        eprintln!("usage: package-seed <disk> <service-elf> [program-elf]");
         process::exit(2);
     });
+    let program_elf = arguments.next().unwrap_or_else(|| elf.clone());
     let payload = std::fs::read(&elf).expect("read service ELF");
+    let program_payload = std::fs::read(&program_elf).expect("read program ELF");
     if payload.len() <= 8 * 1024 {
         eprintln!("service ELF must exceed the ordinary-file limit");
         process::exit(1);
@@ -164,7 +166,7 @@ fn main() {
     let input_info = install(&mut filesystem, ServiceId::Input, &input);
     let session = package(ServiceId::Session, &payload);
     install(&mut filesystem, ServiceId::Session, &session);
-    let demo = program(&payload);
+    let demo = program(&program_payload);
     let _ = install_program(&mut filesystem, &demo);
     let mut round_trip = vec![0; input.len()];
     let bytes_read = filesystem

@@ -213,6 +213,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos-program"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+]
+
+[[package]]
+name = "logos-program-demo"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+ "logos-program",
+]
+
+[[package]]
 name = "logos-service-images"
 version = "0.1.0"
 dependencies = [

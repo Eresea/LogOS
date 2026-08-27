@@ -1,0 +1,16 @@
+[package]
+name = "logos-program-demo"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[dependencies]
+logos-abi = { path = "../../abi" }
+logos-program = { path = "../../program" }
+
+[[bin]]
+name = "logos-program-demo"
+path = "src/main.rs"
+test = false
+bench = false

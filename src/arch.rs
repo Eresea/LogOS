@@ -139,10 +139,15 @@ const KEYBOARD_WRITE_CONFIG: u8 = 0x60;
 const KEYBOARD_INPUT_FULL: u8 = 1 << 1;
 const KEYBOARD_OUTPUT_FULL: u8 = 1;
 const KEYBOARD_DATA_PORT: u16 = 0x60;
+const POINTER_COMMAND: u8 = 0xd4;
+const POINTER_ENABLE_AUX: u8 = 0xa8;
+const POINTER_ENABLE_STREAM: u8 = 0xf4;
+const POINTER_ACK: u8 = 0xfa;
 const ACPI_SHUTDOWN_PORT: u16 = 0x604;
 const RESET_CONTROL_PORT: u16 = 0xcf9;
 const TIMER_VECTOR: u8 = 32;
 const KEYBOARD_VECTOR: u8 = 33;
+const POINTER_VECTOR: u8 = 44;
 const SWITCH_VECTOR: u8 = 49;
 const RESCHEDULE_VECTOR: u8 = 50;
 pub(crate) const STORAGE_VECTOR: u8 = 0x52;
@@ -187,6 +192,10 @@ static KERNEL_CR3: AtomicUsize = AtomicUsize::new(0);
 static KEYBOARD_RING: AtomicUsize = AtomicUsize::new(0);
 static KEYBOARD_IRQ_ENABLED: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_IRQ_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static POINTER_RING: AtomicUsize = AtomicUsize::new(0);
+static POINTER_IRQ_AVAILABLE: AtomicBool = AtomicBool::new(false);
+static POINTER_IRQ_ENABLED: AtomicBool = AtomicBool::new(false);
+static POINTER_IRQ_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) struct ServiceRuntimeGuard {
     held: bool,
@@ -580,6 +589,12 @@ fn boot_impl() -> ! {
                 }
                 crate::service_runtime::ServiceRuntimeError::KeyboardProcess(_) => {
                     fatal(b"LogOS vNext: keyboard process mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::Pointer(_) => {
+                    fatal(b"LogOS vNext: pointer mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::PointerProcess(_) => {
+                    fatal(b"LogOS vNext: pointer process mapping")
                 }
                 crate::service_runtime::ServiceRuntimeError::TaskCapacity => {
                     fatal(b"LogOS vNext: service task capacity")
@@ -1077,7 +1092,11 @@ pub(crate) fn start_services() {
         let ring =
             runtime.keyboard_ring_address().unwrap_or_else(|| fatal(b"LogOS vNext: keyboard ring"));
         publish_keyboard_ring(ring);
+        let pointer_ring =
+            runtime.pointer_ring_address().unwrap_or_else(|| fatal(b"LogOS vNext: pointer ring"));
+        publish_pointer_ring(pointer_ring);
         enable_keyboard_irq();
+        enable_pointer_irq();
         finish_service_runtime_transition();
     });
     proof_line(b"LogOS vNext: service tasks started");
@@ -1085,6 +1104,10 @@ pub(crate) fn start_services() {
 
 pub(crate) fn publish_keyboard_ring(address: usize) {
     KEYBOARD_RING.store(address, Ordering::Release);
+}
+
+pub(crate) fn publish_pointer_ring(address: usize) {
+    POINTER_RING.store(address, Ordering::Release);
 }
 
 pub(crate) fn disable_keyboard_irq() {
@@ -1097,6 +1120,18 @@ pub(crate) fn disable_keyboard_irq() {
         core::hint::spin_loop();
     }
     KEYBOARD_RING.store(0, Ordering::Release);
+}
+
+pub(crate) fn disable_pointer_irq() {
+    POINTER_IRQ_ENABLED.store(false, Ordering::Release);
+    unsafe {
+        let mask = in_port(PIC_SLAVE_DATA);
+        out_port(PIC_SLAVE_DATA, mask | (1 << 4));
+    }
+    while POINTER_IRQ_IN_FLIGHT.load(Ordering::Acquire) != 0 {
+        core::hint::spin_loop();
+    }
+    POINTER_RING.store(0, Ordering::Release);
 }
 
 pub(crate) fn supervise_services() -> bool {
@@ -1406,6 +1441,7 @@ fn initialize_post_uefi(cpu_count: usize) {
     if !configure_keyboard() {
         fatal(b"LogOS vNext: keyboard controller");
     }
+    POINTER_IRQ_AVAILABLE.store(configure_pointer(), Ordering::Release);
     calibrate_timer();
     crate::user_mode::initialize_kernel_cr3(current_cr3());
     start_aps(cpu_count);
@@ -1603,6 +1639,8 @@ fn install_idt(cpu: usize) {
         );
         idt[KEYBOARD_VECTOR as usize] =
             IdtEntry::new(keyboard_interrupt as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
+        idt[POINTER_VECTOR as usize] =
+            IdtEntry::new(pointer_interrupt as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
         idt[STORAGE_VECTOR as usize] =
             IdtEntry::new(storage_interrupt as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
         idt[NETWORK_VECTOR as usize] =
@@ -1705,7 +1743,7 @@ fn configure_keyboard() -> bool {
         if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_OUTPUT_FULL == 0 {
             return false;
         }
-        let config = in_port(KEYBOARD_DATA_PORT) & !0x40;
+        let config = (in_port(KEYBOARD_DATA_PORT) & !0x60) | 0x03;
         ready = false;
         for _ in 0..1_000_000 {
             if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
@@ -1727,11 +1765,68 @@ fn configure_keyboard() -> bool {
     false
 }
 
+fn configure_pointer() -> bool {
+    unsafe {
+        let mut ready = false;
+        for _ in 0..1_000_000 {
+            if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
+                out_port(KEYBOARD_COMMAND_PORT, POINTER_ENABLE_AUX);
+                ready = true;
+                break;
+            }
+        }
+        if !ready {
+            return false;
+        }
+        ready = false;
+        for _ in 0..1_000_000 {
+            if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
+                out_port(KEYBOARD_COMMAND_PORT, POINTER_COMMAND);
+                ready = true;
+                break;
+            }
+        }
+        if !ready {
+            return false;
+        }
+        ready = false;
+        for _ in 0..1_000_000 {
+            if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
+                out_port(KEYBOARD_DATA_PORT, POINTER_ENABLE_STREAM);
+                ready = true;
+                break;
+            }
+        }
+        if !ready {
+            return false;
+        }
+        for _ in 0..1_000_000 {
+            if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_OUTPUT_FULL != 0 {
+                return in_port(KEYBOARD_DATA_PORT) == POINTER_ACK;
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn enable_keyboard_irq() {
     KEYBOARD_IRQ_ENABLED.store(true, Ordering::Release);
     unsafe {
         let mask = in_port(PIC_MASTER_DATA);
         out_port(PIC_MASTER_DATA, mask & !(1 << 1));
+    }
+}
+
+pub(crate) fn enable_pointer_irq() {
+    if !POINTER_IRQ_AVAILABLE.load(Ordering::Acquire) {
+        return;
+    }
+    POINTER_IRQ_ENABLED.store(true, Ordering::Release);
+    unsafe {
+        let slave_mask = in_port(PIC_SLAVE_DATA);
+        out_port(PIC_SLAVE_DATA, slave_mask & !(1 << 4));
+        let master_mask = in_port(PIC_MASTER_DATA);
+        out_port(PIC_MASTER_DATA, master_mask & !(1 << 2));
     }
 }
 
@@ -1758,6 +1853,30 @@ pub(super) fn handle_keyboard_interrupt() {
     }
     KEYBOARD_IRQ_IN_FLIGHT.fetch_sub(1, Ordering::Release);
     unsafe {
+        out_port(PIC_MASTER_COMMAND, PIC_EOI);
+    }
+}
+
+pub(super) fn handle_pointer_interrupt() {
+    POINTER_IRQ_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+    let byte = unsafe { in_port(KEYBOARD_DATA_PORT) };
+    if POINTER_IRQ_ENABLED.load(Ordering::Acquire) {
+        let ring = POINTER_RING.load(Ordering::Acquire);
+        if ring != 0 {
+            if let Ok(notification) =
+                unsafe { (&*(ring as *const logos_abi::PointerByteRing)).push(byte) }
+            {
+                if notification == logos_abi::Notify::Notified {
+                    crate::runtime_events::signal_hardware_event(
+                        crate::runtime_events::HardwareEventSource::Keyboard,
+                    );
+                }
+            }
+        }
+    }
+    POINTER_IRQ_IN_FLIGHT.fetch_sub(1, Ordering::Release);
+    unsafe {
+        out_port(PIC_SLAVE_COMMAND, PIC_EOI);
         out_port(PIC_MASTER_COMMAND, PIC_EOI);
     }
 }
@@ -1852,6 +1971,7 @@ unsafe extern "C" {
     fn default_interrupt();
     fn context_timer_interrupt();
     fn keyboard_interrupt();
+    fn pointer_interrupt();
     fn storage_interrupt();
     fn network_interrupt();
     fn context_switch_interrupt();
