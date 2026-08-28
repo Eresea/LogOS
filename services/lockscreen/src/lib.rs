@@ -445,6 +445,10 @@ impl LockScreen {
             self.restore_component_value();
             return false;
         }
+        if self.field == LockScreenField::Username && !valid_username(bytes) {
+            self.restore_component_value();
+            return false;
+        }
         let Some(value) = LoginText::from_bytes(bytes) else { return false };
         let accepted = match self.field {
             LockScreenField::Username => self.form.controls.username.set_user(value),
@@ -514,6 +518,15 @@ impl LockScreen {
         self.field = LockScreenField::Username;
         self.components.focus(self.field);
     }
+}
+
+fn valid_username(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(*byte, b'-' | b'_' | b'.')
+        })
 }
 
 impl LockScreenMode {
@@ -673,5 +686,14 @@ mod tests {
             LockScreenAction::Changed
         );
         assert_eq!(lock.field(), LockScreenField::ConfirmPassword);
+    }
+
+    #[test]
+    fn username_input_matches_user_catalog_policy() {
+        let mut lock = LockScreen::new();
+        assert_eq!(lock.input(InputMessage::text(b"A").unwrap()), LockScreenAction::Ignored);
+        assert!(lock.credentials().0.is_empty());
+        assert_eq!(lock.input(InputMessage::text(b"admin-1").unwrap()), LockScreenAction::Changed);
+        assert_eq!(lock.credentials().0, b"admin-1");
     }
 }
