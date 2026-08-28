@@ -32,7 +32,12 @@ files also fail closed to Disabled:
 .\scripts\run.ps1 -NoNetwork -Interactive -Cpus 1
 .\scripts\run.ps1 -Proof -Cpus 1
 .\scripts\run.ps1 -Proof -NetworkProof -Cpus 1
+.\scripts\run.ps1 -Proof -VirtioGpu -Cpus 1 -QmpPort 4450
 ```
+
+`-VirtioGpu` replaces the proof VGA device with QEMU's VirtIO-GPU device and
+exercises the Core-owned scanout path; without it, the existing VGA proof path
+remains unchanged.
 
 Network v1 host tests cover the fixed ABI, configuration fallback, socket generations, packet-page
 copying, checksums, DHCP fallback, PCI capability parsing, and the bounded VirtIO queue model. The

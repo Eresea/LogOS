@@ -6,6 +6,7 @@ param(
     [switch]$FetchProof,
     [switch]$NoNetwork,
     [switch]$NetworkProof,
+    [switch]$VirtioGpu,
     # Retained as a compatibility alias; networking is enabled by default.
     [switch]$Network,
     [ValidateRange(1, 8)]
@@ -91,7 +92,9 @@ $qemuArgs = @(
     '-device', 'virtio-blk-pci,drive=storage-disk,disable-legacy=on',
     '-display', $display
 )
-if ($Proof) {
+if ($VirtioGpu) {
+    $qemuArgs += @('-device', 'virtio-gpu-pci,id=video0')
+} elseif ($Proof) {
     $qemuArgs += @('-device', 'VGA,id=video0')
 } else {
     $qemuArgs += @('-vga', 'std')
