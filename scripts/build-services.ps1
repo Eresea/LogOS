@@ -25,7 +25,7 @@ if ($FetchProof) { $features += 'fetch-proof' }
 if ($features.Count -gt 0) { $buildArgs += @('--features', ($features -join ',')) }
 if ($Release) { $buildArgs += '--release' }
 
-$env:CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS = '-C relocation-model=static -C code-model=large -C link-arg=--image-base=0x10000000000 -C link-arg=--no-pie'
+$env:CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS = '-C opt-level=z -C relocation-model=static -C code-model=large -C link-arg=--image-base=0x10000000000 -C link-arg=--no-pie'
 cargo @buildArgs
 if ($LASTEXITCODE -ne 0) { throw "Service image build failed with exit code $LASTEXITCODE." }
 $userBuildArgs = @(
