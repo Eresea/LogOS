@@ -46,6 +46,16 @@ foreach ($name in $names) {
     $destination = Join-Path $output "$name.ELF"
     Copy-Item -LiteralPath $source -Destination $destination -Force
     $file = Get-Item -LiteralPath $destination
+    if ($file.Length -gt 512KB) {
+        $objcopy = Get-Command objcopy -ErrorAction SilentlyContinue
+        if ($objcopy) {
+            & $objcopy.Source --strip-all --strip-section-headers $destination
+            if ($LASTEXITCODE -ne 0) {
+                throw "$name service image stripping failed with exit code $LASTEXITCODE"
+            }
+            $file = Get-Item -LiteralPath $destination
+        }
+    }
     if ($file.Length -eq 0 -or $file.Length -gt 512KB) {
         throw "$name service image exceeds the fixed 512 KiB bound"
     }

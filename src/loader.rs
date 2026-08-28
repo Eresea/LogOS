@@ -4,8 +4,9 @@ use crate::frame_pool::{FrameAddress, FramePool, FramePoolError};
 use crate::process::{AddressSpaceRoot, ElfLoadPlan, ImageReader, MappingFlags, UserLaunch};
 
 pub const PAGE_SIZE: usize = 4096;
-pub const MAX_LOAD_PAGES: usize =
-    crate::process::MAX_IMAGE_BYTES / PAGE_SIZE + crate::process::USER_STACK_PAGES + 2;
+pub const MAX_LOAD_PAGES: usize = crate::process::MAX_IMAGE_BYTES / PAGE_SIZE
+    + crate::process::USER_STACK_PAGES
+    + crate::process::MAX_PROGRAM_HEADERS;
 pub const USER_STACK_BASE: usize = 0x0000_0100_0100_0000;
 
 /// Return the next downward stack page that the runtime may commit.
