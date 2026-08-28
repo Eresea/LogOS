@@ -90,7 +90,11 @@ pub extern "C" fn _start() -> ! {
     let mut surface_request_sent = false;
     let mut terminal_surface = SurfaceHandle::EMPTY;
     loop {
-        common::heartbeat_tick(&mut heartbeat_ticks);
+        if render_more || pending_render.is_some() {
+            common::heartbeat();
+        } else {
+            common::heartbeat_tick(&mut heartbeat_ticks);
+        }
         if !surface_request_sent && !terminal_surface.is_valid() {
             match common::ipc_send_handle(atrium_surface_request_capability, &surface_request) {
                 IpcStatus::Ok => surface_request_sent = true,

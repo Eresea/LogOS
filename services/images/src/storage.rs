@@ -775,7 +775,11 @@ fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
     let mut pending_map: Option<PendingMap> = None;
     let mut heartbeat_ticks = 0u16;
     loop {
-        common::heartbeat_tick(&mut heartbeat_ticks);
+        if pending_response.is_some() || pending_package.is_some() || pending_map.is_some() {
+            common::heartbeat();
+        } else {
+            common::heartbeat_tick(&mut heartbeat_ticks);
+        }
         let mut progressed = false;
         if send_package_response(&mut pending_package) {
             progressed = true;

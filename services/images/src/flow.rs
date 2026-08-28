@@ -2727,7 +2727,18 @@ pub extern "C" fn _start() -> ! {
     let mut proof = StorageProof::new();
     let mut heartbeat_ticks = 0u16;
     loop {
-        common::heartbeat_tick(&mut heartbeat_ticks);
+        if pending.pending
+            || pending_completion.is_some()
+            || storage.active()
+            || package.active()
+            || device.active()
+            || user.active()
+            || fetch.active()
+        {
+            common::heartbeat();
+        } else {
+            common::heartbeat_tick(&mut heartbeat_ticks);
+        }
         let mut progressed = pending.flush(ipc_capabilities().output);
         while common::ipc_receive_handle(ipc_capabilities().shell_context, &mut shell_context)
             == IpcStatus::Ok

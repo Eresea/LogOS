@@ -1317,7 +1317,8 @@ pub fn heartbeat() {
 
 pub fn heartbeat_tick(ticks: &mut u16) {
     *ticks = ticks.wrapping_add(1);
-    if *ticks == 1024 {
+    // Keep the loop-count fallback well below the supervisor's watchdog window.
+    if *ticks == 8 {
         *ticks = 0;
         heartbeat();
     }

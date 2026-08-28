@@ -157,7 +157,13 @@ pub extern "C" fn _start() -> ! {
     let mut gui_render_pending = false;
     let mut gui_dirty = false;
     loop {
-        common::heartbeat_tick(&mut heartbeat_ticks);
+        if render_pending && render_complete || gui_dirty || gui_render_pending {
+            // Rendering is intentionally resumed across loop iterations, but it
+            // still keeps the Display task busy and must report health directly.
+            common::heartbeat();
+        } else {
+            common::heartbeat_tick(&mut heartbeat_ticks);
+        }
         let generation = common::bootstrap_page().service.generation() as u16;
         if display.generation() != generation {
             display.replace_generation(generation);
