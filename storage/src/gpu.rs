@@ -100,8 +100,8 @@ impl VirtioGpuCommand {
                 }
                 put_u32(buffer, 24, resource_id);
                 put_u32(buffer, 28, 1);
-                put_u64(buffer, 40, address);
-                put_u32(buffer, 48, length);
+                put_u64(buffer, 32, address);
+                put_u32(buffer, 40, length);
                 VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING
             }
             Self::SetScanout { scanout_id, resource_id, rect } => {
@@ -207,6 +207,14 @@ mod tests {
             length: VIRTIO_GPU_MAX_BACKING_BYTES as u32 + 1,
         };
         assert_eq!(command.encode(1, &mut buffer), Err(VirtioGpuEncodeError::InvalidBacking));
+        let command = VirtioGpuCommand::ResourceAttachBacking {
+            resource_id: 1,
+            address: 0x2000,
+            length: 4096,
+        };
+        command.encode(1, &mut buffer).unwrap();
+        assert_eq!(u64::from_le_bytes(buffer[32..40].try_into().unwrap()), 0x2000);
+        assert_eq!(u32::from_le_bytes(buffer[40..44].try_into().unwrap()), 4096);
     }
 
     #[test]

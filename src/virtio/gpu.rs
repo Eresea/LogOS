@@ -28,6 +28,7 @@ const COMMON_DEVICE_STATUS: usize = 0x14;
 const COMMON_QUEUE_SELECT: usize = 0x16;
 const COMMON_QUEUE_SIZE: usize = 0x18;
 const COMMON_QUEUE_ENABLE: usize = 0x1c;
+const COMMON_QUEUE_NOTIFY_OFF: usize = 0x1e;
 const COMMON_QUEUE_DESC: usize = 0x20;
 const COMMON_QUEUE_DRIVER: usize = 0x28;
 const COMMON_QUEUE_DEVICE: usize = 0x30;
@@ -42,6 +43,7 @@ struct QueueMemory {
     available_index: u16,
     available_ring: [u16; QUEUE_SIZE],
     available_used_event: u16,
+    available_padding: u16,
     used_flags: u16,
     used_index: u16,
     used_ring: [UsedElement; QUEUE_SIZE],
@@ -61,6 +63,7 @@ impl QueueMemory {
             available_index: 0,
             available_ring: [0; QUEUE_SIZE],
             available_used_event: 0,
+            available_padding: 0,
             used_flags: 0,
             used_index: 0,
             used_ring: [Self::EMPTY_USED; QUEUE_SIZE],
@@ -88,6 +91,7 @@ struct UsedElement {
 }
 
 const _: () = assert!(core::mem::align_of::<QueueMemory>() == 4096);
+const _: () = assert!(core::mem::offset_of!(QueueMemory, used_flags) % 4 == 0);
 
 #[unsafe(link_section = ".dma")]
 static mut QUEUE_MEMORY: QueueMemory = QueueMemory::new();
@@ -200,6 +204,8 @@ pub(crate) fn present() -> bool {
         let Ok(device) = VirtioGpuDevice::initialize(framebuffer) else { return false };
         unsafe { core::ptr::addr_of_mut!(DEVICE).write(MaybeUninit::new(device)) };
         DEVICE_READY.store(true, Ordering::Release);
+        #[cfg(feature = "qemu-proof")]
+        crate::arch_proof_line(b"LogOS vNext: VirtIO GPU scanout ready");
     }
     with_device_mut(|device| device.present()).is_ok()
 }
@@ -338,6 +344,7 @@ impl VirtioGpuDevice {
             if self.common.read_u16(COMMON_QUEUE_SIZE)? < QUEUE_SIZE as u16 {
                 return Err(GpuError::QueueUnavailable);
             }
+            self.common.write_u16(COMMON_QUEUE_SIZE, QUEUE_SIZE as u16)?;
             self.common.write_u64(COMMON_QUEUE_DESC, self.queue.descriptors.as_ptr() as u64)?;
             self.common.write_u64(
                 COMMON_QUEUE_DRIVER,
@@ -374,8 +381,12 @@ impl VirtioGpuDevice {
         self.queue.available_ring[usize::from(available) % QUEUE_SIZE] = 0;
         fence(Ordering::Release);
         unsafe { write_volatile(&mut self.queue.available_index, available.wrapping_add(1)) };
-        let notify_offset = self.notify_multiplier.checked_mul(0).ok_or(GpuError::InvalidBar)?;
-        unsafe { self.notify.write_u16(notify_offset as usize, 0)? };
+        let notify_offset = u64::from(unsafe { self.common.read_u16(COMMON_QUEUE_NOTIFY_OFF)? });
+        let notify_delta = notify_offset
+            .checked_mul(u64::from(self.notify_multiplier))
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or(GpuError::InvalidBar)?;
+        unsafe { self.notify.write_u16(notify_delta, 0)? };
         for _ in 0..COMPLETION_SPIN_LIMIT {
             let used = unsafe { read_volatile(&self.queue.used_index) };
             if used != available.wrapping_add(1) {
