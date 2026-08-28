@@ -527,27 +527,39 @@ impl Display {
             self.surface_initialized = true;
         }
         if let Some(surface) = self.gui.terminal_bounds() {
-            for row in 0..self.rows {
-                for column in 0..self.columns {
-                    let index = row * MAX_COLUMNS + column;
-                    if dirty[index / 64] & (1u64 << (index % 64)) == 0 {
+            let cell_count = self.rows * MAX_COLUMNS;
+            for (word_index, word) in dirty.iter_mut().enumerate() {
+                let mut bits = *word;
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let index = word_index * 64 + bit;
+                    if index >= cell_count || index % MAX_COLUMNS >= self.columns {
                         continue;
                     }
+                    let row = index / MAX_COLUMNS;
+                    let column = index % MAX_COLUMNS;
                     self.gui.invalidate_rect(terminal_cell_rect(surface, row, column));
-                    dirty[index / 64] &= !(1u64 << (index % 64));
+                    *word &= !(1u64 << bit);
                     rendered += 1;
                 }
             }
             return Ok(rendered);
         }
-        for row in 0..self.rows {
-            for column in 0..self.columns {
-                let index = row * MAX_COLUMNS + column;
-                if dirty[index / 64] & (1u64 << (index % 64)) == 0 {
+        let cell_count = self.rows * MAX_COLUMNS;
+        for (word_index, word) in dirty.iter_mut().enumerate() {
+            let mut bits = *word;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let index = word_index * 64 + bit;
+                if index >= cell_count || index % MAX_COLUMNS >= self.columns {
                     continue;
                 }
+                let row = index / MAX_COLUMNS;
+                let column = index % MAX_COLUMNS;
                 if self.gui_background.is_some() {
-                    dirty[index / 64] &= !(1u64 << (index % 64));
+                    *word &= !(1u64 << bit);
                     rendered += 1;
                     continue;
                 }
@@ -563,7 +575,7 @@ impl Display {
                     && (is_uninitialized(cell) || is_background_only(cell, self.surface_background))
                     && !(is_cursor && self.cursor_visible)
                 {
-                    dirty[index / 64] &= !(1u64 << (index % 64));
+                    *word &= !(1u64 << bit);
                     rendered += 1;
                     continue;
                 }
@@ -594,7 +606,7 @@ impl Display {
                         }
                     }
                 }
-                dirty[index / 64] &= !(1u64 << (index % 64));
+                *word &= !(1u64 << bit);
                 rendered += 1;
             }
         }
