@@ -1020,6 +1020,7 @@ fn render_command(
         GuiDrawKind::ClipRect => 0,
         GuiDrawKind::GlyphRun => {
             let mut rendered = 0;
+            let packed = super::pixel_bytes(command.color, format);
             for (index, byte) in
                 command.text[..command.text_len as usize].iter().copied().enumerate()
             {
@@ -1037,7 +1038,7 @@ fn render_command(
                             let x = base_x + glyph_x as i32;
                             let y = command.y + glyph_y as i32;
                             if clip.contains(x, y) {
-                                rendered += plot(
+                                rendered += plot_packed(
                                     framebuffer,
                                     width,
                                     height,
@@ -1046,6 +1047,7 @@ fn render_command(
                                     x,
                                     y,
                                     command.color,
+                                    packed,
                                     coverage,
                                 ) as usize;
                             }
@@ -1610,6 +1612,33 @@ fn plot(
     color: u32,
     coverage: u8,
 ) -> bool {
+    plot_packed(
+        framebuffer,
+        width,
+        height,
+        stride,
+        format,
+        x,
+        y,
+        color,
+        super::pixel_bytes(color, format),
+        coverage,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plot_packed(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    x: i32,
+    y: i32,
+    color: u32,
+    packed: [u8; 4],
+    coverage: u8,
+) -> bool {
     if x < 0 || y < 0 || x as usize >= width || y as usize >= height {
         return false;
     }
@@ -1624,7 +1653,7 @@ fn plot(
         return false;
     }
     if coverage == u8::MAX {
-        framebuffer[offset..offset + 4].copy_from_slice(&super::pixel_bytes(color, format));
+        framebuffer[offset..offset + 4].copy_from_slice(&packed);
         return true;
     }
     let background = match format {
