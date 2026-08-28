@@ -15,6 +15,37 @@ impl RenderNode {
     const EMPTY: Option<Self> = None;
 }
 
+const MAX_GUI_PLAN_COMMANDS: usize = MAX_GUI_SURFACES * MAX_GUI_NODES;
+const MAX_GUI_PLAN_OCCLUDERS: usize = MAX_GUI_PLAN_COMMANDS * (MAX_GUI_PLAN_COMMANDS - 1) / 2;
+
+#[derive(Clone, Copy)]
+struct RenderPlanEntry {
+    command: GuiDrawCommand,
+    clip: GuiRect,
+    occluder_start: u16,
+    occluder_count: u16,
+}
+
+struct RenderPlan {
+    entries: [Option<RenderPlanEntry>; MAX_GUI_PLAN_COMMANDS],
+    entry_count: usize,
+    occluders: [GuiRect; MAX_GUI_PLAN_OCCLUDERS],
+    occluder_count: usize,
+    valid: bool,
+}
+
+impl RenderPlan {
+    const fn new() -> Self {
+        Self {
+            entries: [None; MAX_GUI_PLAN_COMMANDS],
+            entry_count: 0,
+            occluders: [GuiRect::EMPTY; MAX_GUI_PLAN_OCCLUDERS],
+            occluder_count: 0,
+            valid: false,
+        }
+    }
+}
+
 pub trait GuiRenderBackend {
     fn draw(&mut self, command: GuiDrawCommand, clip: GuiRect) -> usize;
 }
@@ -100,6 +131,7 @@ pub struct GuiSurfaceRegistry {
     damage_count: usize,
     focused: SurfaceHandle,
     order: u32,
+    plan: RenderPlan,
 }
 
 impl GuiSurfaceRegistry {
@@ -111,6 +143,7 @@ impl GuiSurfaceRegistry {
             damage_count: 0,
             focused: SurfaceHandle::EMPTY,
             order: 0,
+            plan: RenderPlan::new(),
         }
     }
 
@@ -174,6 +207,7 @@ impl GuiSurfaceRegistry {
             active_frame: 0,
             staged_frame: 0,
         };
+        self.plan.valid = false;
         self.add_damage(request.bounds)?;
         let mut response = GuiSurfaceResponse::new(request, GuiStatus::Ok);
         response.surface = handle;
@@ -205,6 +239,7 @@ impl GuiSurfaceRegistry {
         let slot = &mut self.slots[index];
         slot.batches[usize::from(slot.batch_count)] = Some(batch);
         slot.batch_count += 1;
+        self.plan.valid = false;
         self.add_damage(batch.damage)?;
         Ok(())
     }
@@ -315,6 +350,7 @@ impl GuiSurfaceRegistry {
         self.slots[index].active_node_count = self.slots[index].staged_node_count;
         self.slots[index].active_frame = self.slots[index].staged_frame;
         self.slots[index].staged_frame = 0;
+        self.plan.valid = false;
         Ok(())
     }
 
@@ -394,6 +430,7 @@ impl GuiSurfaceRegistry {
         self.order = self.order.wrapping_add(1).max(1);
         self.slots[index].order = self.order;
         self.focused = handle;
+        self.plan.valid = false;
         if old != handle && old.is_valid() {
             let old_bounds = self.lookup(old)?.bounds;
             self.add_damage(old_bounds)?;
@@ -416,6 +453,7 @@ impl GuiSurfaceRegistry {
             return Ok(());
         }
         self.slots[index].bounds = bounds;
+        self.plan.valid = false;
         self.add_damage(old)?;
         self.add_damage(bounds)
     }
@@ -427,6 +465,7 @@ impl GuiSurfaceRegistry {
             self.focused = SurfaceHandle::EMPTY;
         }
         self.slots[index] = SurfaceSlot::EMPTY;
+        self.plan.valid = false;
         self.add_damage(bounds)
     }
 
@@ -459,7 +498,7 @@ impl GuiSurfaceRegistry {
 
     #[allow(clippy::too_many_arguments)]
     pub fn render(
-        &self,
+        &mut self,
         framebuffer: &mut [u8],
         width: usize,
         height: usize,
@@ -473,7 +512,7 @@ impl GuiSurfaceRegistry {
     }
 
     pub fn compose<B: GuiRenderBackend>(
-        &self,
+        &mut self,
         backend: &mut B,
         damage: &[GuiRect; MAX_GUI_DAMAGE_RECTS],
         damage_count: usize,
@@ -481,6 +520,30 @@ impl GuiSurfaceRegistry {
         if damage_count == 0 {
             return 0;
         }
+        self.ensure_plan();
+        let mut rendered = 0;
+        for entry in self.plan.entries[..self.plan.entry_count].iter().flatten() {
+            let start = usize::from(entry.occluder_start);
+            let end = start + usize::from(entry.occluder_count);
+            let mut clip = entry.clip;
+            rendered += render_one(
+                backend,
+                entry.command,
+                &mut clip,
+                damage,
+                damage_count,
+                &self.plan.occluders[start..end],
+                usize::from(entry.occluder_count),
+            );
+        }
+        rendered
+    }
+
+    fn ensure_plan(&mut self) {
+        if self.plan.valid {
+            return;
+        }
+        self.plan = RenderPlan::new();
         let mut order = [usize::MAX; MAX_GUI_SURFACES];
         let mut count = 0;
         while count < MAX_GUI_SURFACES {
@@ -506,55 +569,72 @@ impl GuiSurfaceRegistry {
             count += 1;
         }
 
-        let mut rendered = 0;
         for (surface_position, index) in order[..count].iter().copied().enumerate() {
             let mut clip = self.slots[index].bounds;
             if self.slots[index].active_frame != 0 {
-                for (node_position, node) in self.slots[index].active_nodes
-                    [..self.slots[index].active_node_count as usize]
-                    .iter()
-                    .flatten()
-                    .enumerate()
-                {
-                    let (occluders, occluder_count) =
-                        self.occluders_after(&order[..count], surface_position, node_position);
-                    rendered += render_one(
-                        backend,
-                        node.command,
+                let node_count = self.slots[index].active_node_count as usize;
+                for node_position in 0..node_count {
+                    let command = self.slots[index].active_nodes[node_position]
+                        .expect("active node count must match active nodes")
+                        .command;
+                    self.append_plan_entry(
+                        command,
                         &mut clip,
-                        damage,
-                        damage_count,
-                        &occluders,
-                        occluder_count,
+                        &order[..count],
+                        surface_position,
+                        node_position,
                     );
                 }
             } else {
                 let mut command_position = 0;
-                for batch in self.slots[index].batches[..self.slots[index].batch_count as usize]
-                    .iter()
-                    .flatten()
-                {
+                let batch_count = self.slots[index].batch_count as usize;
+                let batches = self.slots[index].batches;
+                for batch in batches[..batch_count].iter().flatten() {
                     for command in batch.commands[..batch.command_count as usize].iter().copied() {
-                        let (occluders, occluder_count) = self.occluders_after(
+                        self.append_plan_entry(
+                            command,
+                            &mut clip,
                             &order[..count],
                             surface_position,
                             command_position,
-                        );
-                        rendered += render_one(
-                            backend,
-                            command,
-                            &mut clip,
-                            damage,
-                            damage_count,
-                            &occluders,
-                            occluder_count,
                         );
                         command_position += 1;
                     }
                 }
             }
         }
-        rendered
+        self.plan.valid = true;
+    }
+
+    fn append_plan_entry(
+        &mut self,
+        command: GuiDrawCommand,
+        clip: &mut GuiRect,
+        order: &[usize],
+        surface_position: usize,
+        command_position: usize,
+    ) {
+        if command.kind == GuiDrawKind::ClipRect {
+            *clip = intersect(*clip, command_rect(command));
+            return;
+        }
+        if self.plan.entry_count == MAX_GUI_PLAN_COMMANDS {
+            return;
+        }
+        let (occluders, occluder_count) =
+            self.occluders_after(order, surface_position, command_position);
+        let available = MAX_GUI_PLAN_OCCLUDERS - self.plan.occluder_count;
+        let copied = occluder_count.min(available);
+        let start = self.plan.occluder_count;
+        self.plan.occluders[start..start + copied].copy_from_slice(&occluders[..copied]);
+        self.plan.occluder_count += copied;
+        self.plan.entries[self.plan.entry_count] = Some(RenderPlanEntry {
+            command,
+            clip: *clip,
+            occluder_start: start as u16,
+            occluder_count: copied as u16,
+        });
+        self.plan.entry_count += 1;
     }
 
     fn occluders_after(
@@ -655,7 +735,7 @@ fn render_one<B: GuiRenderBackend>(
     clip: &mut GuiRect,
     damage: &[GuiRect; MAX_GUI_DAMAGE_RECTS],
     damage_count: usize,
-    occluders: &[GuiRect; MAX_GUI_SURFACES * MAX_GUI_NODES],
+    occluders: &[GuiRect],
     occluder_count: usize,
 ) -> usize {
     if is_surface_fill(command) {
@@ -1922,6 +2002,32 @@ mod tests {
         let mut backend = CountingBackend { draws: 0 };
         assert_eq!(registry.compose(&mut backend, &damage, count), 1);
         assert_eq!(backend.draws, 1);
+    }
+
+    #[test]
+    fn retained_composition_plan_is_reused_until_scene_changes() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 32, 32)))
+            .unwrap()
+            .surface;
+        registry.take_damage();
+        let mut batch = GuiDrawBatch::new(root, 1, GuiRect::new(2, 2, 8, 8));
+        assert!(batch.push(GuiDrawCommand::fill_rect(GuiRect::new(2, 2, 8, 8), 0xffffff)));
+        registry.update(7, batch).unwrap();
+        let (damage, count) = registry.take_damage();
+        let mut backend = CountingBackend { draws: 0 };
+
+        registry.compose(&mut backend, &damage, count);
+        assert!(registry.plan.valid);
+        let entry_count = registry.plan.entry_count;
+        registry.compose(&mut backend, &damage, count);
+        assert_eq!(registry.plan.entry_count, entry_count);
+
+        let mut replacement = GuiDrawBatch::new(root, 2, GuiRect::new(4, 4, 8, 8));
+        assert!(replacement.push(GuiDrawCommand::fill_rect(GuiRect::new(4, 4, 8, 8), 0xffffff,)));
+        registry.update(7, replacement).unwrap();
+        assert!(!registry.plan.valid);
     }
 
     #[test]
