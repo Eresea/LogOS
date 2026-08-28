@@ -3,6 +3,9 @@ use logos_storage::{
     MAX_VIRTIO_QUEUE_DEPTH, TransportError, TransportRequestId, VirtioBlkChain, VirtioTransport,
 };
 
+#[cfg(target_os = "uefi")]
+pub(crate) mod gpu;
+
 pub const CORE_VIRTIO_DMA_PAGES: usize = 32;
 
 #[derive(Debug)]

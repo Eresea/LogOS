@@ -79,7 +79,10 @@ pub(crate) fn start_services() {
 
 #[cfg(target_os = "uefi")]
 pub(crate) fn supervise_services() -> bool {
-    arch::supervise_services()
+    let restarted = arch::supervise_services();
+    #[cfg(target_os = "uefi")]
+    virtio::gpu::present();
+    restarted
 }
 
 #[cfg(target_os = "uefi")]

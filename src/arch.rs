@@ -969,6 +969,7 @@ pub(crate) fn reserve_kernel_frames(pool: &mut crate::frame_pool::FramePool) {
     );
     virtio_device::reserve_frames(pool);
     virtio_net::reserve_frames(pool);
+    crate::virtio::gpu::reserve_frames(pool);
     #[cfg(feature = "qemu-proof")]
     {
         crate::user_mode::reserve_frames(pool);
