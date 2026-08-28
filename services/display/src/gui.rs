@@ -979,9 +979,7 @@ fn render_command(
             for y in top..bottom {
                 let start = y * stride + left * 4;
                 let end = y * stride + right * 4;
-                for chunk in framebuffer[start..end].chunks_exact_mut(4) {
-                    chunk.copy_from_slice(&pixel);
-                }
+                super::fill_row(&mut framebuffer[start..end], pixel);
             }
             (right - left) * (bottom - top)
         }
@@ -1439,9 +1437,7 @@ fn fill_span(
         let pixel = super::pixel_bytes(color, format);
         let start = y as usize * stride + left * 4;
         let end = y as usize * stride + right * 4;
-        for chunk in framebuffer[start..end].chunks_exact_mut(4) {
-            chunk.copy_from_slice(&pixel);
-        }
+        super::fill_row(&mut framebuffer[start..end], pixel);
         return right - left;
     }
     let mut rendered = 0;
